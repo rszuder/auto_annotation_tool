@@ -15,6 +15,7 @@ from .tab_training import TrainingTab
 from .tab_ranking import RankingTab
 from .tab_validation import ValidationTab
 from .tab_help import HelpTab
+from .tab_rectification import RectificationTab
 
 
 class AutoAnnotationApp:
@@ -77,6 +78,9 @@ class AutoAnnotationApp:
         self.tabs['validation'] = ValidationTab(self.notebook, self)
         self.notebook.add(self.tabs['validation'].frame, text=f"{self.icon_manager.get('check')} Walidacja")
         
+        self.tabs['rectification'] = RectificationTab(self.notebook, self)
+        self.notebook.add(self.tabs['rectification'].frame, text=f"{self.icon_manager.get('plate')} Prostowanie tablic")
+
         self.tabs['help'] = HelpTab(self.notebook, self)
         self.notebook.add(self.tabs['help'].frame, text=f"{self.icon_manager.get('help')} Pomoc")
         

@@ -10,8 +10,9 @@ from .tab_training import TrainingTab
 from .tab_ranking import RankingTab
 from .tab_validation import ValidationTab
 from .tab_help import HelpTab
-
+from .tab_rectification import RectificationTab
 __all__ = [
+    'RectificationTab'
     'AutoAnnotationApp',
     'AnnotationTab',
     'TrainingTab',
