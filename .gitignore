@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.vscode/
+.venv/
+venv/
+Thumbs.db
+.DS_Store
+
+# wyniki i dane robocze
+output/
+training_runs/
+rankings/
+datasets/
+models/
+runs/
+wandb/
+
+# wagi / modele
+*.pt
+*.onnx
+*.engine
+
+*.log
