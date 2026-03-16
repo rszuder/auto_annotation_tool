@@ -111,12 +111,13 @@ class YOLOPosePlate4Exporter:
                 if src.exists():
                     shutil.copy2(src, images_out / ann.filename)
 
-        # data.yaml (pomocniczy – do dalszego splitu w zakładce Dataset)
+        # ========================================================
+        # POPRAWKA PORTABILITY: Usunięto linijkę 'path: C:\...'
+        # ========================================================
         data_yaml = output_dir / "data.yaml"
         if not data_yaml.exists():
             data_yaml.write_text(
-                f"""# YOLO Pose dataset (plate4) - exported by AutoAnnotationTool
-path: {output_dir.absolute()}
+                """# YOLO Pose dataset (plate4) - Portable version
 train: images
 val: images
 
@@ -130,5 +131,5 @@ flip_idx: [1, 0, 3, 2]
                 encoding="utf-8"
             )
 
-        logger.info(f"YOLO Pose export zapisany do: {output_dir}")
+        logger.info(f"YOLO Pose export zapisany do (wersja przenośna!): {output_dir}")
         return output_dir

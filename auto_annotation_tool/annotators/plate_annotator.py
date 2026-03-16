@@ -1,41 +1,67 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Annotator tablic (Tryb B).
+Annotator tablic (Tryb B) - z OCR dla rozpoznawania znaków.
 """
 
 from pathlib import Path
 from typing import List, Tuple, Optional
+import numpy as np
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO
+from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO, CV2_AVAILABLE, cv2
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
 from ..utils import get_image_size, cleanup_gpu_memory
+from ..rectification import PlateRectifier
+from ..ocr import PlateOCR
 from .base import BaseAnnotator
 
 
 class PlateAnnotator(BaseAnnotator):
     """
-    Annotator wykrywający tylko tablice rejestracyjne.
+    Annotator wykrywający tablice rejestracyjne + OCR.
     
-    Tryb B: Używa modelu YOLO Pose z 4 keypointami.
+    Tryb B: 
+    - Używa modelu YOLO Pose z 4 keypointami
+    - Prostuje tablice (PlateRectifier)
+    - Rozpoznaje znaki (PlateOCR)
+    
     Wyjście: <polygon label="plate" points="x1,y1;x2,y2;x3,y3;x4,y4">
+                 <text>ABC 1234</text>
+                 <attributes>
+                     <attribute name="format">PL</attribute>
+                     <attribute name="confidence">0.85</attribute>
+                 </attributes>
+             </polygon>
     """
     
     def __init__(self,
                  model_path: Path,
                  confidence: float = 0.25,
-                 device: str = "auto"):
+                 device: str = "auto",
+                 enable_ocr: bool = True,
+                 ocr_confidence_threshold: float = 0.3,
+                 enable_rectification: bool = True):
         super().__init__(confidence, device)
         self.model_path = Path(model_path)
         self.model: Optional[YOLO] = None
         self.is_pose_model = False
+        
+        # OCR
+        self.enable_ocr = enable_ocr
+        self.ocr_engine: Optional[PlateOCR] = None
+        self.ocr_confidence_threshold = ocr_confidence_threshold
+        
+        # Rektyfikacja
+        self.enable_rectification = enable_rectification
+        self.rectifier = PlateRectifier
     
     def load_models(self) -> Tuple[bool, str]:
-        """Ładuje model tablic."""
+        """Ładuje modele: YOLO + OCR."""
         if not YOLO_AVAILABLE:
             return False, "YOLO niedostępny"
         
         try:
+            # Załaduj YOLO
             logger.info(f"Ładowanie modelu tablic: {self.model_path}")
             self.model = YOLO(str(self.model_path))
             
@@ -43,24 +69,148 @@ class PlateAnnotator(BaseAnnotator):
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'kpt_shape'):
                 self.is_pose_model = True
                 kpt_shape = self.model.model.kpt_shape
-                logger.info(f"Model POSE (keypoints: {kpt_shape})")
+                logger.info(f"✅ Model POSE (keypoints: {kpt_shape})")
             else:
-                logger.warning("Model nie jest typu POSE - użyję bbox jako polygon")
+                logger.warning("⚠️ Model nie jest typu POSE - użyję bbox jako polygon")
             
-            return True, "Model załadowany"
+            # Załaduj OCR
+            if self.enable_ocr:
+                try:
+                    logger.info("Ładowanie engine OCR...")
+                    self.ocr_engine = PlateOCR(
+                        device=self.device,
+                        confidence_threshold=self.ocr_confidence_threshold
+                    )
+                    if self.ocr_engine.is_loaded:
+                        logger.info("✅ OCR engine załadowany")
+                    else:
+                        logger.warning("⚠️ OCR engine nie załadował się - będzie pominięty")
+                        self.enable_ocr = False
+                except Exception as e:
+                    logger.warning(f"⚠️ Błąd ładowania OCR: {e} - będzie pominięty")
+                    self.enable_ocr = False
+            
+            return True, "Modele załadowane"
             
         except Exception as e:
             return False, f"Błąd: {e}"
     
     def unload_models(self):
-        """Zwalnia model."""
+        """Zwalnia modele."""
         if self.model:
             del self.model
             self.model = None
+        
+        if self.ocr_engine:
+            self.ocr_engine.unload()
+            self.ocr_engine = None
+        
         cleanup_gpu_memory()
     
+    def _extract_plate_region(self, 
+                              image: np.ndarray,
+                              polygon: List[Tuple[float, float]]
+                              ) -> Optional[np.ndarray]:
+        """
+        Ekstraktuje region tablicy z obrazu.
+        
+        Args:
+            image: Obraz (BGR)
+            polygon: 4 rogi tablicy
+            
+        Returns:
+            Obraz wyciętej tablicy lub None
+        """
+        if not CV2_AVAILABLE or len(polygon) < 4:
+            return None
+        
+        try:
+            pts = np.array(polygon[:4], dtype=np.float32)
+            
+            # Wylicz rozmiar wyjściowy
+            width, height = self.rectifier.polygon_wh_px(polygon)
+            width, height = max(int(width), 50), max(int(height), 20)
+            
+            # Rektyfikuj tablicę
+            rectified = self.rectifier.rectify(
+                image,
+                polygon[:4],
+                out_w_px=width,
+                out_h_px=height,
+                interpolation="lanczos4",
+                enhance_contrast=True,
+                do_deskew=True
+            )
+            
+            return rectified
+        
+        except Exception as e:
+            logger.debug(f"Błąd ekstrakcji: {e}")
+            return None
+    
+    def _recognize_plate_text(self, 
+                              plate_image: np.ndarray
+                              ) -> Tuple[Optional[str], float, dict]:
+        """
+        Rozpoznaje tekst na tablicy.
+        
+        Args:
+            plate_image: Obraz tablicy
+            
+        Returns:
+            Tuple[tekst, pewność, atrybuty]
+        """
+        if not self.enable_ocr or self.ocr_engine is None:
+            return None, 0.0, {}
+        
+        try:
+            # Preprocess
+            processed = self.ocr_engine.preprocess_plate(
+                plate_image,
+                enhance_contrast=True,
+                enhance_sharpness=True
+            )
+            
+            # OCR z detalami
+            result = self.ocr_engine.recognize(processed, return_details=True)
+            
+            if result is None:
+                return None, 0.0, {}
+            
+            text, ocr_conf, validation = result
+            
+            # Przygotuj atrybuty
+            attributes = {
+                'format': validation.format.value,
+                'ocr_confidence': f"{ocr_conf:.2f}",
+                'is_valid': str(validation.is_valid),
+            }
+            
+            # Jeśli valid, zwróć znormalizowany tekst
+            if validation.is_valid:
+                return validation.text, ocr_conf, attributes
+            else:
+                # Jeśli invalid, zwróć oryginał z ostrzeżeniem
+                logger.warning(f"⚠️ Tablica ma nieznany format: {text}")
+                return text, ocr_conf * 0.7, attributes  # Obniż confidence
+        
+        except Exception as e:
+            logger.debug(f"Błąd OCR: {e}")
+            return None, 0.0, {}
+    
     def process_image(self, image_path: Path) -> ImageAnnotation:
-        """Wykrywa tablice na obrazie."""
+        """Wykrywa tablice + rozpoznaje znaki."""
+        
+        # ✅ SPRAWDZENIE FLAGI ZATRZYMANIA
+        if self.is_stopped():
+            return ImageAnnotation(
+                filename=image_path.name,
+                width=0,
+                height=0,
+                status=AnnotationStatus.SKIPPED,
+                status_message="Przetwarzanie przerwane"
+            )
+        
         width, height = get_image_size(image_path)
         
         annotation = ImageAnnotation(
@@ -70,6 +220,19 @@ class PlateAnnotator(BaseAnnotator):
         )
         
         try:
+            # Załaduj obraz
+            if not CV2_AVAILABLE:
+                annotation.status = AnnotationStatus.ERROR
+                annotation.status_message = "OpenCV niedostępny"
+                return annotation
+            
+            image = cv2.imread(str(image_path))
+            if image is None:
+                annotation.status = AnnotationStatus.ERROR
+                annotation.status_message = "Nie można załadować obrazu"
+                return annotation
+            
+            # Detekcja YOLO
             results = self.model(
                 str(image_path),
                 conf=self.confidence,
@@ -91,11 +254,15 @@ class PlateAnnotator(BaseAnnotator):
             if self.is_pose_model and hasattr(result, 'keypoints') and result.keypoints is not None:
                 keypoints = result.keypoints.data.cpu().numpy()
             
+            # Przetwórz każdą tablicę
             for i, (box, conf) in enumerate(zip(boxes, confs)):
                 x1, y1, x2, y2 = map(float, box)
                 
                 polygon = None
                 kpts_list = None
+                ocr_text = None
+                ocr_conf = 0.0
+                ocr_attrs = {}
                 
                 # Pobierz keypoints jako polygon
                 if keypoints is not None and i < len(keypoints):
@@ -117,13 +284,29 @@ class PlateAnnotator(BaseAnnotator):
                         (x1, y1), (x2, y1), (x2, y2), (x1, y2)
                     ]
                 
-                annotation.detections.append(Detection(
+                # ✅ OCR - ekstraktuj i rozpoznaj
+                if self.enable_ocr and self.ocr_engine and self.ocr_engine.is_loaded:
+                    plate_region = self._extract_plate_region(image, polygon)
+                    
+                    if plate_region is not None:
+                        ocr_text, ocr_conf, ocr_attrs = self._recognize_plate_text(plate_region)
+                        
+                        if ocr_text:
+                            logger.debug(f"🔤 OCR: {ocr_text} (conf: {ocr_conf:.2f})")
+                
+                # Dodaj detection
+                detection = Detection(
                     label="plate",
                     confidence=float(conf),
                     bbox=(x1, y1, x2, y2),
                     keypoints=kpts_list,
-                    polygon=polygon
-                ))
+                    polygon=polygon,
+                    text=ocr_text,  # ✅ TEKST Z OCR
+                    text_confidence=ocr_conf,
+                    attributes=ocr_attrs  # ✅ ATRYBUTY (format, itp)
+                )
+                
+                annotation.detections.append(detection)
             
             if annotation.detections:
                 annotation.status = AnnotationStatus.SUCCESS
@@ -134,6 +317,7 @@ class PlateAnnotator(BaseAnnotator):
             return annotation
             
         except Exception as e:
+            logger.exception(f"Błąd przetwarzania: {e}")
             annotation.status = AnnotationStatus.ERROR
             annotation.status_message = str(e)
             return annotation
@@ -152,7 +336,7 @@ class PlateAnnotator(BaseAnnotator):
         if len(top) != 2 or len(bottom) != 2:
             sorted_by_y = sorted(corners, key=lambda p: p[1])
             top = sorted(sorted_by_y[:2], key=lambda p: p[0])
-            bottom = sorted(sorted_by_y[2:], key=lambda p: p[0])
+            bottom = sorted(sorted_by_y[2:], key=lambda p: p[0], reverse=True)
         else:
             top = sorted(top, key=lambda p: p[0])
             bottom = sorted(bottom, key=lambda p: p[0], reverse=True)

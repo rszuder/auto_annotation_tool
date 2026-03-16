@@ -293,11 +293,12 @@ class DatasetCreator:
         return True, f"Utworzono dataset: {stats['total']} obrazów", stats
     
     def _create_data_yaml(self, output_dir: Path):
-        """Tworzy data.yaml."""
+        """Tworzy przenośny plik data.yaml (bez ścieżek absolutnych)."""
         content = f"""# YOLO Pose Dataset - License Plates
 # Wygenerowano przez {CONFIG.APP_NAME} v{CONFIG.VERSION}
+# Brak zmiennej 'path' gwarantuje, że dataset jest w 100% przenośny!
+# Ścieżki train/val są relatywne do lokalizacji tego pliku.
 
-path: {output_dir.absolute()}
 train: images/train
 val: images/val
 
@@ -316,4 +317,4 @@ flip_idx: [1, 0, 3, 2]
         with open(output_dir / "data.yaml", 'w', encoding='utf-8') as f:
             f.write(content)
         
-        logger.info(f"Utworzono: {output_dir / 'data.yaml'}")
+        logger.info(f"Utworzono przenośny plik: {output_dir / 'data.yaml'}")
