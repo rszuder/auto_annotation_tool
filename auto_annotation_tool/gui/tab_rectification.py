@@ -12,13 +12,16 @@ from typing import Dict, List, Tuple, Optional
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from ..config import CONFIG, CV2_AVAILABLE, cv2, PIL_AVAILABLE, np
+from ..config import CONFIG, CV2_AVAILABLE, cv2, PIL_AVAILABLE, np, SESSION
 from ..icons import IconManager
 from ..rectification import PlateRectifier
+from .zoomable_canvas import ZoomableCanvas
 
 if PIL_AVAILABLE:
     from PIL import Image, ImageTk
 
+from ..rectification.character_segmentation import CharacterSegmenter
+from ..rectification.polygon_validator import PolygonValidator
 
 class ScrollableFrame(ttk.Frame):
     """Pomocnicza klasa dla scrollowanego panelu bocznego."""
@@ -55,11 +58,22 @@ class RectificationTab:
         self.app = app
         self.icon = IconManager
         self.frame = ttk.Frame(parent)
+        self.current_segments = []  # Przechowuj segmenty
+        self.current_bboxes = []    # Przechowuj współrzędne
 
+        # ==================== ZAPAMIĘTYWANIE ŚCIEŻEK ====================
+        # Wczytaj ostatnio używane ścieżki z sesji (jeśli dostępna)
+        if SESSION:
+            rectif_session = SESSION.get_rectification()
+            default_output = str(Path.home() / "Auto-Annotation-Tool-Output" / "rectified_plates")
+        else:
+            rectif_session = {"images_dir": "", "xml_path": "", "output_dir": str(Path(CONFIG.DEFAULT_OUTPUT_DIR) / "rectified_plates")}
+            default_output = str(Path(CONFIG.DEFAULT_OUTPUT_DIR) / "rectified_plates")
+        
         # Zmienne ścieżek
-        self.images_dir = tk.StringVar()
-        self.xml_path = tk.StringVar()
-        self.output_dir = tk.StringVar(value=str(Path(CONFIG.DEFAULT_OUTPUT_DIR) / "rectified_plates"))
+        self.images_dir = tk.StringVar(value=rectif_session.get("images_dir", ""))
+        self.xml_path = tk.StringVar(value=rectif_session.get("xml_path", ""))
+        self.output_dir = tk.StringVar(value=rectif_session.get("output_dir", default_output))
 
         # Zmienne parametrów (bezpieczne)
         self.px_per_mm = tk.DoubleVar(value=2.0)
@@ -82,6 +96,9 @@ class RectificationTab:
         self._last_rectified_bgr = None
 
         self._build_ui()
+        
+        # Zarejestruj callback do zapisania sesji przy zamknięciu
+        self.frame.bind("<Destroy>", self._on_closing)
 
     def _get_safe_int(self, var: tk.IntVar, default: int = 0) -> int:
         try: return var.get()
@@ -181,17 +198,66 @@ class RectificationTab:
         ttk.Button(left, text="Zapisz bieżącą", command=self._save_current).pack(fill=tk.X, pady=2)
         ttk.Button(left, text="Zapisz wszystkie", command=self._save_all_thread).pack(fill=tk.X, pady=2)
 
+        ttk.Separator(left).pack(fill=tk.X, pady=10)
+        ttk.Label(left, text="Segmentacja znaków:").pack(anchor=tk.W)
+        
+        seg_row = ttk.Frame(left); seg_row.pack(fill=tk.X, pady=5)
+        ttk.Label(seg_row, text="Liczba znaków:").pack(side=tk.LEFT)
+        self.num_segments_var = tk.IntVar(value=8)
+        ttk.Spinbox(seg_row, from_=4, to=12, textvariable=self.num_segments_var, width=5).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(left, text="📊 Segmentuj znaki", command=self._segment_characters).pack(fill=tk.X, pady=2)
+        ttk.Button(left, text="💾 Zapisz segmenty", command=self._save_segments).pack(fill=tk.X, pady=2)
+        
+        self.segments_status = ttk.Label(left, text="Brak segmentów", wraplength=250)
+        self.segments_status.pack(anchor=tk.W, pady=5)
+
         self.progress_var = tk.DoubleVar(value=0.0)
         ttk.Progressbar(left, variable=self.progress_var, maximum=100).pack(fill=tk.X, pady=5)
         self.status = ttk.Label(left, text="Gotowy", wraplength=250); self.status.pack(anchor=tk.W)
 
-        # Panele podglądu
+        # ==================== SEKCJA PODGLĄDU Z ZOOMEM ====================
         vpane = ttk.PanedWindow(right, orient=tk.VERTICAL)
         vpane.pack(fill=tk.BOTH, expand=True)
-        self.lbl_left = ttk.Label(vpane, text="Oryginał", anchor="center")
-        self.lbl_right = ttk.Label(vpane, text="Wynik", anchor="center")
-        vpane.add(self.lbl_left, weight=1)
-        vpane.add(self.lbl_right, weight=1)
+
+        canvas_left_frame = ttk.LabelFrame(vpane, text="Oryginał", padding=5)
+        self.canvas_left = ZoomableCanvas(canvas_left_frame, bg="gray20", highlightthickness=0)
+        self.canvas_left.pack(fill=tk.BOTH, expand=True)
+
+        canvas_right_frame = ttk.LabelFrame(vpane, text="Wynik", padding=5)
+        self.canvas_right = ZoomableCanvas(canvas_right_frame, bg="gray20", highlightthickness=0)
+        self.canvas_right.pack(fill=tk.BOTH, expand=True)
+
+        vpane.add(canvas_left_frame, weight=1)
+        vpane.add(canvas_right_frame, weight=1)
+
+    def _pick_images_dir(self):
+        p = filedialog.askdirectory(initialdir=self.images_dir.get() or str(Path.home()))
+        if p:
+            self.images_dir.set(p)
+            if SESSION:
+                SESSION.set("rectification", "images_dir", p)
+                SESSION.save_session()
+
+    def _pick_xml(self):
+        initial_dir = str(Path(self.xml_path.get()).parent) if self.xml_path.get() else str(Path.home())
+        p = filedialog.askopenfilename(
+            filetypes=[("XML", "*.xml")],
+            initialdir=initial_dir
+        )
+        if p:
+            self.xml_path.set(p)
+            if SESSION:
+                SESSION.set("rectification", "xml_path", p)
+                SESSION.save_session()
+
+    def _pick_output_dir(self):
+        p = filedialog.askdirectory(initialdir=self.output_dir.get() or str(Path.home()))
+        if p:
+            self.output_dir.set(p)
+            if SESSION:
+                SESSION.set("rectification", "output_dir", p)
+                SESSION.save_session()
 
     def _update_preview(self):
         if self.current_img_bgr is None or self.current_img_name not in self.ann: return
@@ -200,6 +266,10 @@ class RectificationTab:
         if idx >= len(plates): return
 
         pts = plates[idx]
+        
+        # ✅ NOWE: Napraw poligon (kokarda)
+        pts = PolygonValidator.fix_polygon(pts)
+        
         try:
             w_px, h_px = PlateRectifier.polygon_wh_px(pts)
             h_mm = self._get_safe_float(self.plate_h_mm, 110.0)
@@ -219,7 +289,6 @@ class RectificationTab:
             self._last_rectified_bgr = rect
 
             if PIL_AVAILABLE:
-                # Lewo: Cienka linia 1px + punkty w rogach
                 tmp_vis = self.current_img_bgr.copy()
                 pts_arr = np.array(pts, np.int32)
                 cv2.polylines(tmp_vis, [pts_arr], True, (0, 255, 0), 1)
@@ -227,26 +296,21 @@ class RectificationTab:
                     cv2.circle(tmp_vis, (int(pt[0]), int(pt[1])), 3, (0, 0, 255), -1)
                 
                 img_l = Image.fromarray(cv2.cvtColor(tmp_vis, cv2.COLOR_BGR2RGB))
-                img_l.thumbnail((800, 400)); self._p1 = ImageTk.PhotoImage(img_l)
-                self.lbl_left.config(image=self._p1, text="")
                 
-                # Prawo
+                if self.canvas_left.original_image is None:
+                    self.canvas_left.set_image(img_l)
+                else:
+                    self.canvas_left.update_image_preserve_zoom(img_l)
+                
                 img_r = Image.fromarray(cv2.cvtColor(rect, cv2.COLOR_BGR2RGB))
-                img_r.thumbnail((800, 400)); self._p2 = ImageTk.PhotoImage(img_r)
-                self.lbl_right.config(image=self._p2, text="")
-        except Exception as e: self.status.config(text=f"Aktualizacja...")
-
-    def _pick_images_dir(self):
-        p = filedialog.askdirectory(); 
-        if p: self.images_dir.set(p)
-
-    def _pick_xml(self):
-        p = filedialog.askopenfilename(filetypes=[("XML", "*.xml")]); 
-        if p: self.xml_path.set(p)
-
-    def _pick_output_dir(self):
-        p = filedialog.askdirectory(); 
-        if p: self.output_dir.set(p)
+                
+                if self.canvas_right.original_image is None:
+                    self.canvas_right.set_image(img_r)
+                else:
+                    self.canvas_right.update_image_preserve_zoom(img_r)
+                    
+        except Exception as e: 
+            self.status.config(text=f"Błąd: {str(e)}")
 
     def _load_annotations(self):
         xml_path_str = self.xml_path.get().strip()
@@ -261,7 +325,6 @@ class RectificationTab:
             root = tree.getroot()
             ann = {}
             
-            # Słownik etykiet, które uznajemy za tablice
             valid_labels = set(CONFIG.PLATE_LABELS) 
             valid_labels.update(['plate', 'license-plate', 'rejestracja', 'tablica', 'lp'])
 
@@ -269,25 +332,26 @@ class RectificationTab:
                 name = image.get("name", "")
                 plates = []
                 
-                # Szukaj poligonów
                 for poly in image.findall("polygon"):
                     label = (poly.get("label") or "").lower().strip()
                     if label in valid_labels:
-                        # Oczyszczanie punktów (usuwanie spacji, nowych linii)
                         pts_raw = poly.get("points", "").replace('\n', '').replace(' ', '')
                         pts = [tuple(map(float, p.split(","))) for p in pts_raw.split(";") if "," in p]
                         if len(pts) >= 4:
-                            plates.append(pts[:4])
+                            # ✅ NOWE: Napraw poligon podczas wczytywania
+                            pts = PolygonValidator.fix_polygon(pts[:4])
+                            plates.append(pts)
                 
-                # Opcjonalnie szukaj boxów, jeśli nie ma poligonów (traktuj je jako 4 punkty)
                 if not plates:
                     for box in image.findall("box"):
                         label = (box.get("label") or "").lower().strip()
                         if label in valid_labels:
                             xtl, ytl = float(box.get("xtl")), float(box.get("ytl"))
                             xbr, ybr = float(box.get("xbr")), float(box.get("ybr"))
-                            # Zamień box na 4 punkty polygonu (zgodnie z ruchem wskazówek zegara)
-                            plates.append([(xtl, ytl), (xbr, ytl), (xbr, ybr), (xtl, ybr)])
+                            pts = [(xtl, ytl), (xbr, ytl), (xbr, ybr), (xtl, ybr)]
+                            # ✅ NOWE: Napraw tutaj też
+                            pts = PolygonValidator.fix_polygon(pts)
+                            plates.append(pts)
 
                 if plates:
                     ann[name] = plates
@@ -303,7 +367,6 @@ class RectificationTab:
                 
         except Exception as e:
             messagebox.showerror("Błąd parsowania XML", f"Szczegóły: {e}")
-
     def _on_select_image(self, event=None):
         sel = self.listbox.curselection()
         if not sel: return
@@ -313,6 +376,67 @@ class RectificationTab:
         self.current_img_name = img_name
         self.current_plate_index.set(0)
         self._update_preview()
+        
+    def _segment_characters(self):
+        """Segmentuj znaki na bieżącym obrazie tablicy."""
+        if self._last_rectified_bgr is None:
+            messagebox.showwarning("Błąd", "Brak wyrównanego obrazu tablicy do segmentacji.")
+            return
+        
+        try:
+            num_segs = self.num_segments_var.get()
+            self.current_segments, self.current_bboxes = CharacterSegmenter.segment_characters(
+                self._last_rectified_bgr,
+                num_segments=num_segs
+            )
+            
+            if not self.current_segments:
+                messagebox.showwarning("Błąd", "Nie udało się segmentować znaków.")
+                return
+            
+            # Pokaż segmentację na canvas'ie
+            vis_image = CharacterSegmenter.visualize_segments(
+                self._last_rectified_bgr,
+                self.current_bboxes
+            )
+            
+            if PIL_AVAILABLE:
+                img_vis = Image.fromarray(cv2.cvtColor(vis_image, cv2.COLOR_BGR2RGB))
+                self.canvas_right.set_image(img_vis)
+            
+            self.segments_status.config(
+                text=f"✅ Znaleziono {len(self.current_segments)} segmentów"
+            )
+            self.status.config(text=f"Segmentacja: {len(self.current_segments)} znaków")
+            
+        except Exception as e:
+            messagebox.showerror("Błąd segmentacji", f"Szczegóły: {e}")
+            self.status.config(text=f"Błąd: {str(e)}")
+    
+    def _save_segments(self):
+        """Zapisz każdy segment jako osobny plik."""
+        if not self.current_segments:
+            messagebox.showwarning("Błąd", "Brak segmentów do zapisania. Najpierw segmentuj znaki.")
+            return
+        
+        try:
+            out_p = Path(self.output_dir.get()); out_p.mkdir(parents=True, exist_ok=True)
+            segments_dir = out_p / "segments"
+            segments_dir.mkdir(parents=True, exist_ok=True)
+            
+            base_name = f"{Path(self.current_img_name).stem}_p{self.current_plate_index.get()}"
+            
+            for i, segment in enumerate(self.current_segments):
+                filename = f"{base_name}_seg_{i+1:02d}.png"
+                cv2.imwrite(str(segments_dir / filename), segment)
+            
+            self.status.config(
+                text=f"✅ Zapisano {len(self.current_segments)} segmentów do {segments_dir}"
+            )
+            messagebox.showinfo("Sukces", f"Segmenty zapisane do:\n{segments_dir}")
+            
+        except Exception as e:
+            messagebox.showerror("Błąd zapisu", f"Szczegóły: {e}")
 
     def _save_current(self):
         if self._last_rectified_bgr is None: return
@@ -346,3 +470,13 @@ class RectificationTab:
                 cv2.imwrite(str(out_p / f"{Path(name).stem}_p{p_idx}.png"), rect)
             self.frame.after(0, lambda p=((i+1)/total*100): self.progress_var.set(p))
         self.frame.after(0, lambda: messagebox.showinfo("Sukces", "Zapisano wszystko."))
+    
+    def _on_closing(self, event=None):
+        """Callback przy zamknięciu zakładki - zapisz ostatnie ścieżki."""
+        if SESSION:
+            SESSION.set_rectification(
+                images_dir=self.images_dir.get(),
+                xml_path=self.xml_path.get(),
+                output_dir=self.output_dir.get()
+            )
+            SESSION.save_session()

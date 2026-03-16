@@ -20,6 +20,9 @@ class ModelRankingEntry:
     model_path: str
     date_evaluated: str
     
+    # DODANE POLE KATEGORII
+    task_type: str = "Tablice (Pose)" 
+    
     total_images: int = 0
     total_auto_plates: int = 0
     total_corrected_plates: int = 0
@@ -49,7 +52,6 @@ class ModelRankingEntry:
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'ModelRankingEntry':
-        # Usuń f1_score (property)
         data = {k: v for k, v in data.items() if k != "f1_score"}
         return cls(**data)
 
@@ -68,7 +70,6 @@ class ModelRanking:
         self._load()
     
     def _load(self):
-        """Ładuje ranking."""
         if self.ranking_file.exists():
             try:
                 with open(self.ranking_file, 'r', encoding='utf-8') as f:
@@ -87,7 +88,6 @@ class ModelRanking:
                 self.entries = []
     
     def _save(self):
-        """Zapisuje ranking."""
         data = {
             "version": "1.0",
             "updated_at": datetime.now().isoformat(),
@@ -98,18 +98,19 @@ class ModelRanking:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
     def _sort(self):
-        """Sortuje po F1."""
         self.entries.sort(key=lambda e: e.f1_score, reverse=True)
     
     def add_entry(self, 
                   model_name: str,
                   model_path: str,
-                  comparison_stats: Dict) -> ModelRankingEntry:
-        """Dodaje wpis."""
+                  comparison_stats: Dict,
+                  task_type: str = "Tablice (Pose)") -> ModelRankingEntry:
+        """Dodaje wpis do bazy, obsługując kategorie zadań."""
         entry = ModelRankingEntry(
             model_name=model_name,
             model_path=model_path,
             date_evaluated=datetime.now().isoformat(),
+            task_type=task_type,  # ZAPISUJE ZADANIE
             total_images=comparison_stats.get("total_images", 0),
             total_auto_plates=comparison_stats.get("total_auto_plates", 0),
             total_corrected_plates=comparison_stats.get("total_corrected_plates", 0),
@@ -138,13 +139,11 @@ class ModelRanking:
         return self.entries[0]
     
     def delete_entry(self, index: int):
-        """Usuwa wpis."""
         if 0 <= index < len(self.entries):
             del self.entries[index]
             self._save()
     
     def generate_report(self) -> str:
-        """Generuje raport."""
         report = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                              RANKING MODELI                                 ║
@@ -154,12 +153,13 @@ class ModelRanking:
         if not self.entries:
             report += "║  Brak danych                                                                ║\n"
         else:
-            report += "║  #   Model                    Dokładność  Precyzja  Czułość   F1 Score     ║\n"
-            report += "║  ────────────────────────────────────────────────────────────────────────  ║\n"
+            report += "║  #   Model                Kategoria             Precyzja  Czułość   F1 Score     ║\n"
+            report += "║  ──────────────────────────────────────────────────────────────────────────────  ║\n"
             
             for i, e in enumerate(self.entries[:10], 1):
-                name = e.model_name[:25].ljust(25)
-                report += f"║  {i:2d}. {name} {e.accuracy:6.1f}%    {e.precision:6.1f}%   {e.recall:6.1f}%   {e.f1_score:6.1f}%    ║\n"
+                name = e.model_name[:20].ljust(20)
+                cat = e.task_type[:18].ljust(18)
+                report += f"║  {i:2d}. {name} {cat} {e.precision:6.1f}%   {e.recall:6.1f}%   {e.f1_score:6.1f}%    ║\n"
         
         report += "╚══════════════════════════════════════════════════════════════════════════════╝\n"
         

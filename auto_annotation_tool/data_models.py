@@ -17,6 +17,7 @@ class AnnotationStatus(Enum):
     PARTIAL_PLATE = "partial_plate"
     MULTIPLE_VEHICLES = "multiple_vehicles"
     ERROR = "error"
+    SKIPPED = "skipped"  # ✅ DODANE - dla przerwanych przetwarzań
 
 
 @dataclass
@@ -27,6 +28,11 @@ class Detection:
     bbox: Tuple[float, float, float, float]  # x1, y1, x2, y2
     keypoints: Optional[List[Tuple[float, float, float]]] = None
     polygon: Optional[List[Tuple[float, float]]] = None
+    
+    # ✅ DODANE - OCR data
+    text: Optional[str] = None  # Rozpoznany tekst (ABC 1234)
+    text_confidence: float = 0.0  # Pewność OCR (0.0-1.0)
+    attributes: Dict[str, str] = field(default_factory=dict)  # format, is_valid, itp
     
     def is_inside(self, other_bbox: Tuple[float, float, float, float], 
                   threshold: float = 0.95) -> bool:
@@ -54,6 +60,15 @@ class Detection:
     def get_area(self) -> float:
         """Oblicza powierzchnię bbox."""
         return (self.bbox[2] - self.bbox[0]) * (self.bbox[3] - self.bbox[1])
+    
+    # ✅ DODANE - helper dla OCR
+    def has_ocr_text(self) -> bool:
+        """Sprawdza czy detekcja ma rozpoznany tekst."""
+        return self.text is not None and len(self.text) > 0
+    
+    def get_plate_format(self) -> Optional[str]:
+        """Zwraca format tablicy (PL, EU, UNKNOWN)."""
+        return self.attributes.get('format', None)
 
 
 @dataclass
@@ -82,6 +97,23 @@ class ImageAnnotation:
     def num_plates(self) -> int:
         return len(self.plates)
     
+    # ✅ DODANE - OCR stats
+    @property
+    def plates_with_ocr(self) -> List[Detection]:
+        """Zwraca tablice, które mają rozpoznany tekst."""
+        return [p for p in self.plates if p.has_ocr_text()]
+    
+    @property
+    def num_plates_with_ocr(self) -> int:
+        return len(self.plates_with_ocr)
+    
+    @property
+    def ocr_success_rate(self) -> float:
+        """Procent tablic z pomyślnym OCR."""
+        if self.num_plates == 0:
+            return 0.0
+        return (self.num_plates_with_ocr / self.num_plates) * 100
+    
     @property
     def is_successful(self) -> bool:
         return self.status == AnnotationStatus.SUCCESS
@@ -96,10 +128,15 @@ class AnnotationReport:
     no_plate: int = 0
     partial_plate: int = 0
     errors: int = 0
+    skipped: int = 0  # ✅ DODANE
     
     # Liczniki detekcji
     total_vehicles: int = 0
     total_plates: int = 0
+    
+    # ✅ DODANE - OCR stats
+    total_plates_with_ocr: int = 0
+    plates_with_valid_format: int = 0
     
     # Listy obrazów
     successful_images: List[str] = field(default_factory=list)
@@ -107,6 +144,7 @@ class AnnotationReport:
     no_plate_images: List[str] = field(default_factory=list)
     partial_plate_images: List[str] = field(default_factory=list)
     error_images: List[str] = field(default_factory=list)
+    skipped_images: List[str] = field(default_factory=list)  # ✅ DODANE
     
     # Szczegóły błędów
     error_details: Dict[str, str] = field(default_factory=dict)
@@ -116,6 +154,14 @@ class AnnotationReport:
         self.total_images += 1
         self.total_vehicles += annotation.num_vehicles
         self.total_plates += annotation.num_plates
+        
+        # ✅ DODANE - OCR stats
+        self.total_plates_with_ocr += annotation.num_plates_with_ocr
+        
+        # Policz tablice z poprawnym formatem
+        for plate in annotation.plates_with_ocr:
+            if plate.attributes.get('is_valid') == 'True':
+                self.plates_with_valid_format += 1
         
         status = annotation.status
         filename = annotation.filename
@@ -132,6 +178,9 @@ class AnnotationReport:
         elif status == AnnotationStatus.PARTIAL_PLATE:
             self.partial_plate += 1
             self.partial_plate_images.append(filename)
+        elif status == AnnotationStatus.SKIPPED:  # ✅ DODANE
+            self.skipped += 1
+            self.skipped_images.append(filename)
         else:
             self.errors += 1
             self.error_images.append(filename)
@@ -144,6 +193,21 @@ class AnnotationReport:
             return 0.0
         return (self.successful / self.total_images) * 100
     
+    # ✅ DODANE - OCR metrics
+    @property
+    def ocr_success_rate(self) -> float:
+        """Procent tablic z rozpoznanym tekstem."""
+        if self.total_plates == 0:
+            return 0.0
+        return (self.total_plates_with_ocr / self.total_plates) * 100
+    
+    @property
+    def ocr_format_validity_rate(self) -> float:
+        """Procent tablic ze zwalidowanym formatem."""
+        if self.total_plates_with_ocr == 0:
+            return 0.0
+        return (self.plates_with_valid_format / self.total_plates_with_ocr) * 100
+    
     def to_text(self) -> str:
         """Generuje tekstowy raport."""
         report = f"""
@@ -151,19 +215,25 @@ class AnnotationReport:
 ║                           RAPORT AUTO-ANOTACJI                              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 
-  📊 PODSUMOWANIE
-  ────────────────
+  📊 PODSUMOWANIE OBRAZÓW
+  ─────────────────────────
   Obrazów ogółem:              {self.total_images:5d}
   ✅ Udane anotacje:            {self.successful:5d}  ({self.success_rate:.1f}%)
-  ⚠️  Brak pojazdu:              {self.no_vehicle:5d}
-  ⚠️  Brak tablicy:              {self.no_plate:5d}
-  ⚠️  Tablica częściowa:         {self.partial_plate:5d}
-  ❌ Błędy:                      {self.errors:5d}
+  ⏹️  Przerwane:                {self.skipped:5d}
+  ⚠️  Brak pojazdu:             {self.no_vehicle:5d}
+  ⚠️  Brak tablicy:             {self.no_plate:5d}
+  ⚠️  Tablica częściowa:        {self.partial_plate:5d}
+  ❌ Błędy:                     {self.errors:5d}
 
-  📈 DETEKCJE
-  ────────────
+  📈 STATYSTYKA DETEKCJI
+  ─────────────────────────
   Pojazdów wykrytych:          {self.total_vehicles:5d}
   Tablic wykrytych:            {self.total_plates:5d}
+
+  🔤 STATYSTYKA OCR
+  ─────────────────────────
+  Tablic z tekstem (OCR):      {self.total_plates_with_ocr:5d}  ({self.ocr_success_rate:.1f}%)
+  Tablic ze zwal. formatem:    {self.plates_with_valid_format:5d}  ({self.ocr_format_validity_rate:.1f}%)
 
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
@@ -191,6 +261,14 @@ class AnnotationReport:
                 report += f"  • {img}\n"
             if len(self.partial_plate_images) > 20:
                 report += f"  ... i {len(self.partial_plate_images) - 20} więcej\n"
+        
+        if self.skipped_images:  # ✅ DODANE
+            report += "\n⏹️  OBRAZY PRZERWANE:\n"
+            report += "─" * 50 + "\n"
+            for img in self.skipped_images[:10]:
+                report += f"  • {img}\n"
+            if len(self.skipped_images) > 10:
+                report += f"  ... i {len(self.skipped_images) - 10} więcej\n"
         
         if self.error_images:
             report += "\n❌ OBRAZY Z BŁĘDAMI:\n"

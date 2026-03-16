@@ -7,6 +7,7 @@ Konfiguracja i stałe aplikacji.
 import logging
 from dataclasses import dataclass, field
 from typing import FrozenSet
+from pathlib import Path
 
 # ============================================================================
 # LOGOWANIE
@@ -73,7 +74,7 @@ except ImportError:
 
 
 # ============================================================================
-# KONFIGURACJA GŁÓWNA
+# KONFIGURACJA GŁÓWNA I STRUKTURA KATALOGÓW
 # ============================================================================
 
 @dataclass
@@ -81,7 +82,7 @@ class Config:
     """Centralna konfiguracja aplikacji."""
     
     # Wersja
-    VERSION: str = "3.0.0"
+    VERSION: str = "3.1.0"
     APP_NAME: str = "Auto-Annotation Tool dla CVAT"
     
     # Rozszerzenia plików
@@ -112,16 +113,66 @@ class Config:
     # Próg dla sprawdzania czy tablica jest wewnątrz pojazdu
     PLATE_INSIDE_THRESHOLD: float = 0.95
     
-    # Ścieżki domyślne
-    DEFAULT_OUTPUT_DIR: str = "./output"
-    DEFAULT_MODELS_DIR: str = "./models"
-    DEFAULT_DATASETS_DIR: str = "./datasets"
-    DEFAULT_TRAINING_DIR: str = "./training_runs"
-    DEFAULT_RANKING_DIR: str = "./rankings"
+    # ==========================================
+    # LOGICZNA STRUKTURA KATALOGÓW (WORKSPACE)
+    # ==========================================
+    # Główny folder roboczy utworzy się obok pliku main.py
+    WORKSPACE_DIR: Path = Path("Workspace").resolve()
+    
+    # Numerowane podkatalogi dla zachowania chronologii procesu
+    DIR_1_RAW: Path         = WORKSPACE_DIR / "1_raw_images"
+    DIR_2_AUTO_ANN: Path    = WORKSPACE_DIR / "2_auto_annotations"
+    DIR_3_CHARS: Path       = WORKSPACE_DIR / "3_cropped_characters"
+    DIR_4_DATASETS: Path    = WORKSPACE_DIR / "4_training_datasets"
+    DIR_5_RUNS: Path        = WORKSPACE_DIR / "5_training_runs"
+    DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
+    DIR_7_RANKINGS: Path    = WORKSPACE_DIR / "7_rankings"
+
+    # Właściwości zachowujące wsteczną kompatybilność ze starym kodem GUI
+    @property
+    def DEFAULT_OUTPUT_DIR(self) -> str: return str(self.DIR_2_AUTO_ANN)
+    
+    @property
+    def DEFAULT_MODELS_DIR(self) -> str: return str(self.DIR_6_MODELS)
+    
+    @property
+    def DEFAULT_DATASETS_DIR(self) -> str: return str(self.DIR_4_DATASETS)
+    
+    @property
+    def DEFAULT_TRAINING_DIR(self) -> str: return str(self.DIR_5_RUNS)
+    
+    @property
+    def DEFAULT_RANKING_DIR(self) -> str: return str(self.DIR_7_RANKINGS)
+
+    def init_workspace(self):
+        """Automatycznie buduje strukturę katalogów przy starcie aplikacji."""
+        directories = [
+            self.DIR_1_RAW, self.DIR_2_AUTO_ANN, self.DIR_3_CHARS,
+            self.DIR_4_DATASETS, self.DIR_5_RUNS, self.DIR_6_MODELS, self.DIR_7_RANKINGS
+        ]
+        
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+            
+        # Generowanie pliku README z instrukcją dla użytkownika
+        readme_path = self.WORKSPACE_DIR / "STRUKTURA_PROJEKTU.txt"
+        if not readme_path.exists():
+            readme_text = (
+                "=== PRZEWODNIK PO PRZESTRZENI ROBOCZEJ (WORKSPACE) ===\n\n"
+                "1_raw_images         : Wrzuć tutaj swoje surowe, nieopisane zdjęcia pojazdów.\n"
+                "2_auto_annotations   : Tu trafiają wyniki z Zakładki nr 1 (Detekcja pojazdów i tablic).\n"
+                "3_cropped_characters : Tu lądują wycięte tablice i wyniki OCR z Zakładki nr 2.\n"
+                "4_training_datasets  : Wygenerowane, gotowe datasety YOLO (train/val/test) przed treningiem.\n"
+                "5_training_runs      : Logi, wykresy z uczenia i wagi zapisywane w trakcie treningu modelu.\n"
+                "6_models             : Skopiuj tutaj najlepsze wytrenowane pliki .pt, aby używać ich w programie.\n"
+                "7_rankings           : Zapisane raporty z testów i walidacji.\n"
+            )
+            readme_path.write_text(readme_text, encoding="utf-8")
 
 
 # Singleton konfiguracji
 CONFIG = Config()
+CONFIG.init_workspace()
 
 
 # ============================================================================
@@ -213,7 +264,7 @@ AVAILABLE_POSE_MODELS = {
         "description": "Najwyższa dokładność v11"
     },
     
-    # YOLOv26 - Najnowsza wersja
+    # YOLOv26
     "yolo26n-pose": {
         "name": "YOLOv26 Nano Pose",
         "file": "yolo26n-pose.pt",
@@ -261,7 +312,7 @@ AVAILABLE_POSE_MODELS = {
 # ============================================================================
 
 AVAILABLE_DETECT_MODELS = {
-    # YOLOv8 (COCO - pojazdy: car=2, motorcycle=3, bus=5, truck=7)
+    # YOLOv8
     "yolov8n": {
         "name": "YOLOv8 Nano (COCO)",
         "file": "yolov8n.pt",
@@ -326,7 +377,6 @@ AVAILABLE_DETECT_MODELS = {
     },
 }
 
-
 # ============================================================================
 # INFORMACJE O FORMACIE CVAT
 # ============================================================================
@@ -369,3 +419,14 @@ CVAT_IMPORT_INFO = """
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
+
+# ============================================================================
+# SESJA - Zapamiętywanie ostatnich ścieżek
+# ============================================================================
+
+try:
+    from .session import SessionManager
+    SESSION = SessionManager()
+except ImportError as e:
+    logger.warning(f"SessionManager niedostępny: {e}")
+    SESSION = None

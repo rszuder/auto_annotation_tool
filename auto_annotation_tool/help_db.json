@@ -1,0 +1,54 @@
+{
+    "btn_wycinanie_start": {
+        "tooltip": "Wycina i prostuje tablice ze zdjęć.",
+        "f1_help": "Ten przycisk uruchamia klasę PlateGenerator. Szuka polygonów w pliku annotations.xml, następnie wycina je z dużych zdjęć, prostuje algorytmem perspektywicznym i zapisuje w nowym, unikalnym folderze roboczym (run_XXX)."
+    },
+    "btn_fast_test": {
+        "tooltip": "Błyskawicznie testuje paczkę bez ponownego wycinania tablic.",
+        "f1_help": "Odczytuje aktualne zdjęcia z folderu roboczego i przypuszcza na nie atak silnika OCR lub YOLO. Następnie porównuje wyniki z Nazwą Pliku (Ground Truth) w celu obliczenia wskaźnika True Accuracy."
+    },
+    "btn_rank_presets": {
+        "tooltip": "Uruchamia Turniej zapisanych presetów OCR.",
+        "f1_help": "Program testuje wszystkie zapisane pliki .json z folderu '8_ocr_presets' na wczytanej paczce tablic. Oblicza skuteczność dla każdego z nich i generuje ranking, oszczędzając Twój czas."
+    },
+    "lab_angle": {
+        "tooltip": "Ręczne obracanie tablicy (Deskew).",
+        "f1_help": "Czasami automatyczna perspektywa zawodzi. Tutaj możesz twardo wymusić obrót zdjęcia, by litery stały idealnie pionowo. Ułatwia to pracę algorytmom rozpoznającym krawędzie."
+    },
+    "lab_height": {
+        "tooltip": "Powiększanie/Pomniejszanie obrazu przed OCR.",
+        "f1_help": "EasyOCR najlepiej czyta tekst o wysokości 60-80 pikseli. Jeśli oryginalna tablica była mała, ten suwak powiększy ją przy użyciu algorytmu interpolacji przed nałożeniem filtrów."
+    },
+    "lab_clip": {
+        "tooltip": "Usuwanie odblasków światła (Highlight Clipping).",
+        "f1_help": "Zmusza wszystkie jasne piksele (powyżej ustalonego progu) do przyjęcia wartości 255 (czysta biel). Skutecznie usuwa słońce odbijające się w folii odblaskowej tablicy."
+    },
+    "lab_denoise": {
+        "tooltip": "Wygładzanie szumu matrycy aparatu.",
+        "f1_help": "Używa funkcji cv2.fastNlMeansDenoising. Wygładza 'ziarno' na zdjęciach nocnych, zachowując ostre krawędzie liter. Zbyt wysoka wartość zmyje cienkie linie w znakach!"
+    },
+    "lab_clahe": {
+        "tooltip": "Adaptacyjny kontrast (Wydobywanie z cienia).",
+        "f1_help": "Contrast Limited Adaptive Histogram Equalization. Zamiast rozjaśniać całe zdjęcie, dzieli je na siatkę (8x8) i wyrównuje kontrast lokalnie. Wyciągnie czarne litery z głębokiego cienia zderzaka."
+    },
+    "lab_block": {
+        "tooltip": "Rozmiar bloku decyzyjnego przy binaryzacji (Musi być nieparzyste!).",
+        "f1_help": "Rozmiar okna (w pikselach), w którym algorytm Adaptive Threshold szuka różnicy między czernią a bielą. Im mniejsza tablica, tym mniejszy powinien być ten blok."
+    },
+    "lab_c": {
+        "tooltip": "Stała odcięcia od cienia (Adaptive C).",
+        "f1_help": "Wartość odejmowana od średniej podczas binaryzacji. Manipulowanie nią decyduje, jak bardzo szare piksele mają zostać uznane za 'czarne' litery, a jak bardzo za 'białe' tło."
+    },
+    "lab_erode": {
+        "tooltip": "Pogrubianie liter.",
+        "f1_help": "Używa morfologii matematycznej (Erode). Ponieważ litery na tablicy są czarne, a tło białe, erozja 'ściska' biel, co w efekcie powoduje 'puchnięcie' czarnych liter i klejenie przerw w zniekształconym tekście."
+    },
+    "btn_export_cvat": {
+        "tooltip": "Pakuje dane do pliku ZIP gotowego na wgranie do platformy CVAT.",
+        "f1_help": "Jeśli masz włączoną opcję Smart Export, funkcja ta spakuje tylko te tablice, których OCR nie odczytał bezbłędnie (z czerwoną kropką). Wypakuj ten ZIP do nowego zadania w CVAT, by poprawić błędy ręcznie."
+    },
+    "btn_export_yolo": {
+        "tooltip": "Tworzy gotowy Dataset YOLO z perfekcyjnych odczytów.",
+        "f1_help": "Genialne narzędzie do Active Learningu. Zbiera ze wszystkich folderów run_XXX tablice odczytane przez OCR bezbłędnie (100% True Accuracy) i tworzy przenośny zbiór treningowy dla modelu YOLO."
+    }
+}
