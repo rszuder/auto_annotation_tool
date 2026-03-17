@@ -1,54 +1,168 @@
 {
-    "btn_wycinanie_start": {
-        "tooltip": "Wycina i prostuje tablice ze zdjęć.",
-        "f1_help": "Ten przycisk uruchamia klasę PlateGenerator. Szuka polygonów w pliku annotations.xml, następnie wycina je z dużych zdjęć, prostuje algorytmem perspektywicznym i zapisuje w nowym, unikalnym folderze roboczym (run_XXX)."
+    "tab1_input": {
+        "full_help": "Źródło: Wskaż folder zawierający surowe, nieopisane zdjęcia pojazdów z kamer."
     },
-    "btn_fast_test": {
-        "tooltip": "Błyskawicznie testuje paczkę bez ponownego wycinania tablic.",
-        "f1_help": "Odczytuje aktualne zdjęcia z folderu roboczego i przypuszcza na nie atak silnika OCR lub YOLO. Następnie porównuje wyniki z Nazwą Pliku (Ground Truth) w celu obliczenia wskaźnika True Accuracy."
+    "tab1_output": {
+        "full_help": "Cel: Program automatycznie utworzy tu folder Workspace/2_auto_annotations i zapisze w nim wyniki XML."
     },
-    "btn_rank_presets": {
-        "tooltip": "Uruchamia Turniej zapisanych presetów OCR.",
-        "f1_help": "Program testuje wszystkie zapisane pliki .json z folderu '8_ocr_presets' na wczytanej paczce tablic. Oblicza skuteczność dla każdego z nich i generuje ranking, oszczędzając Twój czas."
+    "tab1_start": {
+        "full_help": "START: Uruchamia modele AI (YOLO). Przeskanuje zdjęcia, znajdzie pojazdy i tablice, generując plik annotations.xml."
+    },
+    "tab1_stop": {
+        "full_help": "STOP: Bezpiecznie zatrzymuje proces przetwarzania po ukończeniu obecnego zdjęcia."
+    },
+    "tab1_logs": {
+        "full_help": "Konsola: Wyświetla na żywo co wykryto na danym zdjęciu, czasy inferencji oraz ewentualne błędy silnika YOLO."
+    },
+    "tab1_mode": {
+        "full_help": "Tryb C (Zalecany): Szuka pojazdów, a potem tablic. Odrzuca 'fałszywe' tablice (np. znaki drogowe), jeśli nie są na aucie."
+    },
+    "tab1_model_veh": {
+        "full_help": "Model Pojazdów (Detect): Wybierz wielkość sieci. Wersje 'n' i 's' są błyskawiczne, 'm' i 'l' wolniejsze, ale precyzyjniejsze."
+    },
+    "tab1_model_pla": {
+        "full_help": "Model Tablic (Pose): Modele '-pose' szukają 4 rogów tablicy (Polygon), co pozwala na późniejsze prostowanie perspektywy w Zakładce 2."
+    },
+    "tab1_conf": {
+        "full_help": "Pewność (Confidence): Ustawienie >0.50 zignoruje rozmazane obiekty. Ustawienie <0.30 wykryje wszystko, ale złapie też śmieci."
+    },
+    "tab1_device": {
+        "full_help": "Akceleracja (Device): 'cuda:0' włącza potężną akcelerację karty graficznej NVIDIA. 'cpu' wymusza powolne obliczenia na procesorze."
+    },
+    "t2_xml": {
+        "full_help": "Anotacje: Wskaż plik annotations.xml wygenerowany w Zakładce 1 (lub poprawiony w CVAT)."
+    },
+    "t2_img": {
+        "full_help": "Obrazy: Wskaż oryginalny folder ze zdjęciami aut. Program musi wiedzieć, skąd ma wycinać tablice."
+    },
+    "t2_cut_start": {
+        "full_help": "Wycinanie: OpenCV wytnie tablice, położy je na płasko (prostowanie perspektywy) i zapisze jako małe obrazki w folderze run_XXX."
+    },
+    "t2_cut_logs": {
+        "full_help": "Logi Wycinarki: Zobaczysz tu, z jakiego pliku wycięto tablicę i czy udało się ją wyprostować."
+    },
+    "t2_history": {
+        "full_help": "Historia: Pozwala załadować poprzednie eksperymenty (foldery run_XXX) z Workspace/3_cropped_characters."
+    },
+    "t2_listbox": {
+        "full_help": "Lista Tablic: 🟢 (Złote) - OCR przeczytał je bezbłędnie (zgodnie z nazwą pliku). 🔴 (Błędy) - AI się pomyliło, wyślij je do CVAT!"
+    },
+    "t2_canvas": {
+        "full_help": "Podgląd: Interaktywne płótno. Płynnie powiększa tablicę i precyzyjnie nakłada zielone ramki (Bounding Boxy) na każdą znalezioną literę."
+    },
+    "t2_tree": {
+        "full_help": "Tabela Znaków: Pokazuje każdy znak z osobna oraz to, jak bardzo sztuczna inteligencja (AI) była pewna swojej decyzji (0-100%)."
+    },
+    "t2_fast_test": {
+        "full_help": "Szybki Test OCR: Przepuszcza obecną paczkę tablic przez ustawione filtry i ocenia skuteczność AI względem nazw plików zdjęć."
+    },
+    "t2_rank": {
+        "full_help": "Turniej Presetów: Testuje w tle wszystkie filtry (pliki JSON z Laboratorium). Szuka konfiguracji, która da najwyższą celność (True Accuracy)."
+    },
+    "t2_method": {
+        "full_help": "Metoda: 'OCR' (EasyOCR, powolny, podatny na hologramy). Zmień na 'YOLO', gdy zbudujesz Mega-Dataset i wytrenujesz własny model!"
+    },
+    "t2_lab_btn": {
+        "full_help": "Laboratorium OCR: Otwiera zaawansowane studio. Ustawisz tu m.in. kontrast, binaryzację i białą ramkę, aby zmaksymalizować celność Szybkiego Testu."
     },
     "lab_angle": {
-        "tooltip": "Ręczne obracanie tablicy (Deskew).",
-        "f1_help": "Czasami automatyczna perspektywa zawodzi. Tutaj możesz twardo wymusić obrót zdjęcia, by litery stały idealnie pionowo. Ułatwia to pracę algorytmom rozpoznającym krawędzie."
+        "full_help": "Ręczna korekta kąta: Jeśli wycięta tablica jest krzywa, wymuś obrót. Poziomy tekst drastycznie ułatwia pracę silnikom OCR."
     },
     "lab_height": {
-        "tooltip": "Powiększanie/Pomniejszanie obrazu przed OCR.",
-        "f1_help": "EasyOCR najlepiej czyta tekst o wysokości 60-80 pikseli. Jeśli oryginalna tablica była mała, ten suwak powiększy ją przy użyciu algorytmu interpolacji przed nałożeniem filtrów."
+        "full_help": "Wysokość (px): Skalowanie. Zbyt mały obrazek gubi piksele, zbyt duży spowalnia program i wywołuje halucynacje AI (Zalecane: 60-80px)."
     },
     "lab_clip": {
-        "tooltip": "Usuwanie odblasków światła (Highlight Clipping).",
-        "f1_help": "Zmusza wszystkie jasne piksele (powyżej ustalonego progu) do przyjęcia wartości 255 (czysta biel). Skutecznie usuwa słońce odbijające się w folii odblaskowej tablicy."
+        "full_help": "Odcinanie odblasków: Wycina najjaśniejsze punkty obrazu. Idealne do usuwania refleksów świetlnych i mocnych przepaleń."
     },
     "lab_denoise": {
-        "tooltip": "Wygładzanie szumu matrycy aparatu.",
-        "f1_help": "Używa funkcji cv2.fastNlMeansDenoising. Wygładza 'ziarno' na zdjęciach nocnych, zachowując ostre krawędzie liter. Zbyt wysoka wartość zmyje cienkie linie w znakach!"
+        "full_help": "Usuwanie szumu (Denoise): Wygładza cyfrowe ziarno z nocnych zdjęć. Uważaj: zbyt wysoka wartość 'rozmyje' cienkie litery!"
     },
     "lab_clahe": {
-        "tooltip": "Adaptacyjny kontrast (Wydobywanie z cienia).",
-        "f1_help": "Contrast Limited Adaptive Histogram Equalization. Zamiast rozjaśniać całe zdjęcie, dzieli je na siatkę (8x8) i wyrównuje kontrast lokalnie. Wyciągnie czarne litery z głębokiego cienia zderzaka."
+        "full_help": "Adaptacyjny Kontrast (CLAHE): Wyciąga detale z cienia. Niezastąpione dla tablic schowanych pod zderzakiem albo źle oświetlonych."
     },
     "lab_block": {
-        "tooltip": "Rozmiar bloku decyzyjnego przy binaryzacji (Musi być nieparzyste!).",
-        "f1_help": "Rozmiar okna (w pikselach), w którym algorytm Adaptive Threshold szuka różnicy między czernią a bielą. Im mniejsza tablica, tym mniejszy powinien być ten blok."
+        "full_help": "Rozmiar bloku: Parametr binaryzacji (czarno-białe cięcie). Mniejsze wartości łapią cienkie rysy, większe radzą sobie z padającym cieniem."
     },
     "lab_c": {
-        "tooltip": "Stała odcięcia od cienia (Adaptive C).",
-        "f1_help": "Wartość odejmowana od średniej podczas binaryzacji. Manipulowanie nią decyduje, jak bardzo szare piksele mają zostać uznane za 'czarne' litery, a jak bardzo za 'białe' tło."
+        "full_help": "Stała odcięcia (C): Potężne narzędzie! Dostrój ten suwak tak, aby 'rozpuścić' brud i hologramy w białym tle, zostawiając same czarne litery."
     },
     "lab_erode": {
-        "tooltip": "Pogrubianie liter.",
-        "f1_help": "Używa morfologii matematycznej (Erode). Ponieważ litery na tablicy są czarne, a tło białe, erozja 'ściska' biel, co w efekcie powoduje 'puchnięcie' czarnych liter i klejenie przerw w zniekształconym tekście."
+        "full_help": "Erozja (Pogrubianie): Jeśli litery są przerywane (jak z drukarki igłowej), to je połączy. Przesada zamieni litery w czarne kwadraty."
+    },
+    "lab_pad": {
+        "full_help": "Biała ramka (Padding): Daje 'oddech' na krawędziach. Zapobiega czytaniu czarnych, ochronnych ramek tablicy jako liter I, L lub cyfry 1."
+    },
+    "lab_conf": {
+        "full_help": "Próg pewności (OCR Confidence): Jeśli ustawisz np. 0.85, wszystkie niepewne odczyty AI (nawet poprawne) polecą jako Błędy (🔴) do sprawdzenia przez człowieka."
+    },
+    "cvat_smart_exp": {
+        "full_help": "SMART Export: Zaznacz to! Zamiast pakować tysiące tablic, program wrzuci do CVAT-a tylko te, których AI nie potrafiło przeczytać."
     },
     "btn_export_cvat": {
-        "tooltip": "Pakuje dane do pliku ZIP gotowego na wgranie do platformy CVAT.",
-        "f1_help": "Jeśli masz włączoną opcję Smart Export, funkcja ta spakuje tylko te tablice, których OCR nie odczytał bezbłędnie (z czerwoną kropką). Wypakuj ten ZIP do nowego zadania w CVAT, by poprawić błędy ręcznie."
+        "full_help": "Eksport Błędów: Generuje plik ZIP. Wgraj go do CVAT, popraw pomylone literki na stronie, wyeksportuj XML i zaimportuj go z powrotem niżej."
     },
     "btn_export_yolo": {
-        "tooltip": "Tworzy gotowy Dataset YOLO z perfekcyjnych odczytów.",
-        "f1_help": "Genialne narzędzie do Active Learningu. Zbiera ze wszystkich folderów run_XXX tablice odczytane przez OCR bezbłędnie (100% True Accuracy) i tworzy przenośny zbiór treningowy dla modelu YOLO."
-    }
+        "full_help": "Fabryka YOLO: Pobiera WSZYSTKIE idealne tablice 🟢 (z całego programu), usuwa duplikaty i buduje perfekcyjny, gotowy folder treningowy."
+    },
+    "btn_import_cvat": {
+        "full_help": "Aktualizacja Bazy: Wgrywa poprawiony plik z CVAT. Tablice, które przed chwilą naprawiłeś ręcznie, zapalają się na 🟢 i zasilają bazę dla YOLO!"
+    },
+    "tr_split_src": {
+        "full_help": "Źródło: Wskaż folder wygenerowany przez 'Fabrykę YOLO' z poprzedniej zakładki (np. YOLO_MegaDataset_Chars_...)."
+    },
+    "tr_split_ratios": {
+        "full_help": "Proporcje: Podział na 'Train' (zdjęcia z których AI się uczy) i 'Val' (zdjęcia, na których zdaje egzamin, żeby sprawdzić czy nie wkuło na pamięć)."
+    },
+    "tr_split_btn": {
+        "full_help": "Splitter: Fizycznie rozdziela zdjęcia i pliki .txt do odpowiednich folderów (images/train, images/val), przygotowując grunt pod trening."
+    },
+    "tr_train_ds": {
+        "full_help": "Dataset: Wskaż folder, który przed chwilą podzieliłeś Splitterem (musi zawierać w środku plik data.yaml)."
+    },
+    "tr_train_base": {
+        "full_help": "Wiedza początkowa: Wybierz model z dopiskiem '-pose' by uczyć szukania tablic. Wybierz czysty model (np. yolo11n.pt), by uczyć czytania liter."
+    },
+    "tr_train_ep": {
+        "full_help": "Epoki: Ile razy AI ma przerobić cały materiał. Dla małych datasetów (100 zdjęć) daj 100-200. Program i tak sam przerwie, jeśli AI przestanie się uczyć."
+    },
+    "tr_train_bs": {
+        "full_help": "Batch Size: Ile zdjęć wrzucić naraz do karty graficznej. Zwiększaj (16, 32, 64) aby przyspieszyć, ale jeśli wyskoczy błąd OOM (Brak Pamięci), zmniejsz do 8."
+    },
+    "tr_train_imgsz": {
+        "full_help": "Rozdzielczość: Jeśli uczysz czytać małe litery, zmniejsz to z 640 na 128 lub 256. Trening będzie 10x szybszy, a jakość wzrośnie!"
+    },
+    "tr_train_btn": {
+        "full_help": "Start Treningu: Uruchamia wielogodzinny proces uczenia. Po wszystkim program wygeneruje raport HTML i wagi najlepszego modelu (best.pt)."
+    },
+    "tr_train_tree": {
+        "full_help": "Historia Treningów: Kliknij dowolny wiersz, aby zobaczyć szczegóły po prawej. mAP50 to ogólna ocena modelu (im bliżej 1.0, tym lepiej!)."
+    },
+    "tr_train_plot": {
+        "full_help": "Wykresy i Analiza: Kliknij plik z listy po lewej, aby obejrzeć m.in. Confusion Matrix (macierz pomyłek - zobaczysz tam, że np. AI nadal myli 0 z literą O)."
+    },
+    "tr_val_model": {
+        "full_help": "Model: Wskaż swój wytrenowany plik .pt (np. z folderu Workspace/5_training_runs/run_XXX/weights/best.pt)."
+    },
+    "tr_val_btn": {
+        "full_help": "Walidacja: Zmusza model do zdania twardego egzaminu na zbiorze Val lub Test. W konsoli poniżej zobaczysz czystą, matematyczną ocenę jego umiejętności."
+    },
+    "tr_rank_cat": {
+        "full_help": "Kategoria: System dba o porządek, oddzielając zawody modeli szukających aut od tych czytających maleńkie znaki na tablicach."
+    },
+    "tr_rank_btn": {
+        "full_help": "Ranking: Uruchamia wszystkie modele na wskazanym katalogu. Następnie porównuje wyniki z pracą człowieka (XML Ground Truth) i wylicza ostateczny wskaźnik F1-Score."
+    },
+    "tr_train_lr0": {
+        "full_help": "Learning Rate (lr0): Prędkość przyswajania wiedzy przez sztuczną inteligencję. Standard to 0.01. Jeśli na wykresach skuteczność nie rośnie, tylko chaotycznie skacze, zmniejsz tę wartość (np. do 0.001)."
+    },
+    "tr_cvat_xml": {
+        "full_help": "Plik XML (CVAT 1.1): Zawiera koordynaty wyciętych tablic."
+    },
+    "tr_cvat_img": {
+        "full_help": "Obrazy: Katalog ze zdjęciami, z których będą wycinane tablice dla datasetu YOLO."
+    },
+    "tr_cvat_btn": {
+        "full_help": "Stwórz Dataset: Przelicza wszystkie obiekty, wycina je i układa w gotowej strukturze YOLO (Train/Val)."
+    }      
+    
 }

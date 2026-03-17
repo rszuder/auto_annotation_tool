@@ -18,9 +18,8 @@ from ..config import CONFIG, YOLO_AVAILABLE, AVAILABLE_POSE_MODELS, AVAILABLE_DE
 from ..icons import IconManager
 from ..validators import validate_yolo_dataset, validate_model_file
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
-
-# Autentyczny import Rankingu!
 from ..ranking import ModelRanking, ModelRankingEntry
+from .help_manager import HELP
 
 if PIL_AVAILABLE:
     from PIL import Image, ImageTk
@@ -38,7 +37,6 @@ class TrainingTab:
 
         self.frame = ttk.Frame(parent)
 
-        # Backend
         self.trainer = YOLOPoseTrainer()
         self.history: TrainingHistory = self.trainer.history
         self.creator = DatasetCreator()
@@ -46,8 +44,6 @@ class TrainingTab:
         self.ranking_engine = ModelRanking()
 
         self.current_run_id = None
-
-        # Plot preview state
         self._plots_paths = []
         self._plot_photo = None
         self._plot_img_id = None
@@ -62,9 +58,6 @@ class TrainingTab:
         self._load_ranking()
         self._on_base_model_change()
 
-    # ============================================================
-    # Helpers
-    # ============================================================
     def _ui(self, fn):
         self.frame.after(0, fn)
 
@@ -73,9 +66,7 @@ class TrainingTab:
         try:
             import torch
             if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()):
-                    name = torch.cuda.get_device_name(i)
-                    devices.append(f"cuda:{i} ({name})")
+                for i in range(torch.cuda.device_count()): devices.append(f"cuda:{i}")
         except Exception: pass
         return devices
 
@@ -89,10 +80,8 @@ class TrainingTab:
 
     def _open_path(self, path: Path):
         try:
-            if os.name == "nt":
-                os.startfile(str(path))
-            else:
-                webbrowser.open(path.as_uri())
+            if os.name == "nt": os.startfile(str(path))
+            else: webbrowser.open(path.as_uri())
         except Exception as e:
             messagebox.showinfo("Info", f"Nie mogę otworzyć: {path}\n\n{e}")
 
@@ -100,16 +89,19 @@ class TrainingTab:
         sel = self.tree.selection()
         if not sel: return None
         item = self.tree.item(sel[0])
-        short_id = str(item["values"][0])
-        full_run_id = next((r.id for r in self.history.get_all_runs() if r.id.endswith(short_id)), None)
-        return self.history.get_run(full_run_id) if full_run_id else None
+        
+        # Odbieramy pełne, zaktualizowane ID z pierwszej kolumny
+        run_id = str(item["values"][0])
+        
+        # Pobieramy twardo obiekt z bazy
+        return self.history.get_run(run_id)
 
-    # ============================================================
-    # MAIN UI
-    # ============================================================
     def _build_ui(self):
+
+
+        # Główny notatnik powyżej paska pomocy
         self.main_nb = ttk.Notebook(self.frame)
-        self.main_nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self.tab_dataset = ttk.Frame(self.main_nb)
         self.tab_train = ttk.Frame(self.main_nb)
@@ -126,24 +118,12 @@ class TrainingTab:
         self._build_validation_tab()
         self._build_ranking_tab()
 
-    # ------------------------------------------------------------
-    # 1. DATASET TAB
-    # ------------------------------------------------------------
     def _build_dataset_tab(self):
-        info = ttk.LabelFrame(self.tab_dataset, text="Wskazówka", padding=8)
-        info.pack(fill=tk.X, padx=5, pady=(5, 0))
-        ttk.Label(info, text=(
-            "Aby stworzyć dataset do treningu YOLO:\n"
-            "• Eksportuj zaznaczone dane z CVAT jako plik XML\n"
-            "• Wskaż folder ze zdjęciami\n"
-            "Ustaw proporcje i kliknij 'Stwórz dataset'."
-        ), justify=tk.LEFT).pack(fill=tk.X, expand=True)
-
         self.ds_pane = ttk.PanedWindow(self.tab_dataset, orient=tk.VERTICAL)
         self.ds_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.ds_creator_frame = ttk.LabelFrame(self.ds_pane, text=" Generator Datasetu z CVAT ", padding=10)
-        self.ds_split_frame = ttk.LabelFrame(self.ds_pane, text=" Splitter Istniejącego Datasetu ", padding=10)
+        self.ds_creator_frame = ttk.LabelFrame(self.ds_pane, text=" Opcja A: Budowa Datasetu Tablic (Z XML CVAT) ", padding=10)
+        self.ds_split_frame = ttk.LabelFrame(self.ds_pane, text=" Opcja B: Podział Gotowego Datasetu (np. Mega-Dataset Znaków) ", padding=10)
         self.ds_pane.add(self.ds_creator_frame, weight=1)
         self.ds_pane.add(self.ds_split_frame, weight=1)
 
@@ -152,6 +132,7 @@ class TrainingTab:
 
     def _build_creator_ui(self):
         f = self.ds_creator_frame
+        ttk.Label(f, text="Tworzy strukturę YOLO Pose z wyeksportowanego pliku annotations.xml", font=("Arial", 9, "italic")).pack(anchor=tk.W, pady=(0, 10))
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="CVAT XML:").pack(side=tk.LEFT)
         self.cvat_xml_var = tk.StringVar()
@@ -165,12 +146,44 @@ class TrainingTab:
         ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.cvat_images_var)).pack(side=tk.LEFT)
 
         row3 = ttk.Frame(f); row3.pack(fill=tk.X, pady=2)
-        ttk.Label(row3, text="Wyjście (dataset):").pack(side=tk.LEFT)
-        self.ds_out_var = tk.StringVar(value=str(Path(CONFIG.DEFAULT_DATASETS_DIR) / "yolo_dataset"))
-        ttk.Entry(row3, textvariable=self.ds_out_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row3, text="Wybierz", command=lambda: self._pick_dir(self.ds_out_var)).pack(side=tk.LEFT)
+        ttk.Label(row3, text="Zapisze się do:").pack(side=tk.LEFT)
+        # ✅ ZMIANA: Twardo zablokowana ścieżka z automatycznym, unikalnym dopiskiem (Plates_CVAT)
+        self.ds_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        ratios = ttk.Frame(f); ratios.pack(fill=tk.X, pady=6)
+        # ✅ ZMIANA: Przycisk zyskał nazwę (btn_create), by można go było podpiąć pod pomoc
+        btn_create = ttk.Button(f, text="Stwórz Dataset", command=self._create_dataset_thread)
+        btn_create.pack(anchor=tk.W, pady=(10, 5))
+        
+        self.ds_progress_var = tk.DoubleVar(value=0.0)
+        self.ds_progress = ttk.Progressbar(f, variable=self.ds_progress_var, maximum=100)
+        self.ds_progress.pack(fill=tk.X, pady=2)
+        
+        self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
+        self.ds_status.pack(anchor=tk.W)
+
+        # ✅ PODPIĘCIE POMOCY DO OPCJI A (BUDOWA Z CVAT)
+        HELP.bind_help(row1, "tr_cvat_xml")
+        HELP.bind_help(row2, "tr_cvat_img")
+        HELP.bind_help(btn_create, "tr_cvat_btn") # Teraz HELP wie, pod jaki przycisk się podpiąć!
+
+    def _build_splitter_ui(self):
+        f = self.ds_split_frame
+        ttk.Label(f, text="Dzieli zbiór (np. wygenerowany w Zakładce Znaków) na foldery train/val potrzebne dla maszyny.", font=("Arial", 9, "italic")).pack(anchor=tk.W, pady=(0, 10))
+        
+        row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
+        ttk.Label(row1, text="Źródło (np. Mega-Dataset):").pack(side=tk.LEFT)
+        self.split_src_var = tk.StringVar()
+        ttk.Entry(row1, textvariable=self.split_src_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var)).pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
+        ttk.Label(row2, text="Wynik Podziału:").pack(side=tk.LEFT)
+        # ✅ ZMIANA: Twardo zablokowana ścieżka z automatycznym, unikalnym dopiskiem (Split)
+        self.split_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        ttk.Entry(row2, textvariable=self.split_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        ratios = ttk.Frame(f); ratios.pack(fill=tk.X, pady=10)
         ttk.Label(ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
         self.train_pct = tk.DoubleVar(value=80.0)
         ttk.Scale(ratios, from_=50, to=95, variable=self.train_pct, command=lambda e: self._update_ratio_labels()).grid(row=0, column=1, sticky=tk.EW, padx=5)
@@ -182,38 +195,24 @@ class TrainingTab:
         self.val_lbl = ttk.Label(ratios, text="20%"); self.val_lbl.grid(row=1, column=2, sticky=tk.W)
 
         self.use_test = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ratios, text="Test (resztka %)", variable=self.use_test, command=self._update_ratio_labels).grid(row=2, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(ratios, text="Wydziel też zbiór Testowy", variable=self.use_test, command=self._update_ratio_labels).grid(row=2, column=0, columnspan=2, sticky=tk.W)
         self.test_lbl = ttk.Label(ratios, text="Test: 0%"); self.test_lbl.grid(row=2, column=2, sticky=tk.W)
         ratios.columnconfigure(1, weight=1)
 
-        ttk.Button(f, text="Stwórz Dataset", command=self._create_dataset_thread, style="Accent.TButton").pack(anchor=tk.W, pady=5)
-        self.ds_progress_var = tk.DoubleVar(value=0.0)
-        self.ds_progress = ttk.Progressbar(f, variable=self.ds_progress_var, maximum=100)
-        self.ds_progress.pack(fill=tk.X, pady=2)
-        self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
-        self.ds_status.pack(anchor=tk.W)
-
-    def _build_splitter_ui(self):
-        f = self.ds_split_frame
-        row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="Źródło (Dataset):").pack(side=tk.LEFT)
-        self.split_src_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.split_src_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var)).pack(side=tk.LEFT)
-
-        row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="Wynik (Nowy Podział):").pack(side=tk.LEFT)
-        self.split_out_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.split_out_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.split_out_var)).pack(side=tk.LEFT)
+        btn_split = ttk.Button(f, text="Rozpocznij Podział (Split)", command=self._split_dataset_thread, style="Accent.TButton")
+        btn_split.pack(anchor=tk.W, pady=10)
         
-        ttk.Button(f, text="Rozpocznij Podział", command=self._split_dataset_thread).pack(anchor=tk.W, pady=10)
+        self.split_progress_var = tk.DoubleVar(value=0.0)
+        self.split_progress = ttk.Progressbar(f, variable=self.split_progress_var, maximum=100)
+        self.split_progress.pack(fill=tk.X, pady=2)
         self.split_status = ttk.Label(f, text="Gotowy")
         self.split_status.pack(anchor=tk.W)
 
-    # ------------------------------------------------------------
-    # 2. TRAIN TAB
-    # ------------------------------------------------------------
+        # ✅ PODPIĘCIE POMOCY:
+        HELP.bind_help(row1, "tr_split_src")
+        HELP.bind_help(ratios, "tr_split_ratios")
+        HELP.bind_help(btn_split, "tr_split_btn")
+
     def _build_train_tab(self):
         self.train_pane = ttk.PanedWindow(self.tab_train, orient=tk.HORIZONTAL)
         self.train_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -223,30 +222,42 @@ class TrainingTab:
         self.train_pane.add(self.left, weight=0)
         self.train_pane.add(self.right, weight=1)
 
-        ttk.Label(self.left, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
-        self.name_var = tk.StringVar(value="YOLO_Training_Run")
-        ttk.Entry(self.left, textvariable=self.name_var).pack(fill=tk.X, pady=2)
+        # =======================================================
+        # NOWY UKŁAD: Dwie kolumny wewnątrz "Konfiguracji"
+        # =======================================================
+        settings_col = ttk.Frame(self.left)
+        settings_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        
+        console_col = ttk.Frame(self.left)
+        console_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        ttk.Label(self.left, text="Dataset (Katalog zawierający data.yaml):").pack(anchor=tk.W, pady=(8, 0))
+        # --- KOLUMNA LEWA: Ustawienia ---
+        ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
+        self.name_var = tk.StringVar(value="YOLO_Training_Run")
+        ttk.Entry(settings_col, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
+
+        ttk.Label(settings_col, text="Gotowy Dataset (Katalog z data.yaml):").pack(anchor=tk.W, pady=(8, 0))
         self.dataset_var = tk.StringVar()
-        ds_row = ttk.Frame(self.left)
+        ds_row = ttk.Frame(settings_col)
         ds_row.pack(fill=tk.X, pady=2)
         ttk.Entry(ds_row, textvariable=self.dataset_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(ds_row, text="Wybierz", command=lambda: self._pick_dir(self.dataset_var)).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(self.left, text="Architektura (Model Bazowy):").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Label(settings_col, text="Architektura (Model Bazowy):").pack(anchor=tk.W, pady=(8, 0))
         self.base_model_var = tk.StringVar()
-        base_values = ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11n-pose.pt", "yolo11s-pose.pt", "Custom"]
-        self.base_combo = ttk.Combobox(self.left, textvariable=self.base_model_var, values=base_values, state="readonly")
+        
+        base_values = list(AVAILABLE_DETECT_MODELS.keys()) + list(AVAILABLE_POSE_MODELS.keys()) + ["Custom"]
+        
+        self.base_combo = ttk.Combobox(settings_col, textvariable=self.base_model_var, values=base_values, state="readonly")
         self.base_combo.pack(fill=tk.X, pady=2)
-        self.base_model_var.set(base_values[4])
+        self.base_model_var.set("yolo11n.pt") 
         self.base_combo.bind("<<ComboboxSelected>>", lambda e: self._on_base_model_change())
 
         self.base_custom_var = tk.StringVar()
-        self.base_custom_entry = ttk.Entry(self.left, textvariable=self.base_custom_var, state=tk.DISABLED)
+        self.base_custom_entry = ttk.Entry(settings_col, textvariable=self.base_custom_var, state=tk.DISABLED)
         self.base_custom_entry.pack(fill=tk.X, pady=2)
         
-        grid = ttk.Frame(self.left)
+        grid = ttk.Frame(settings_col)
         grid.pack(fill=tk.X, pady=10)
         ttk.Label(grid, text="Epoki:").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.epochs_var = tk.IntVar(value=100)
@@ -256,22 +267,45 @@ class TrainingTab:
         self.batch_var = tk.IntVar(value=16)
         ttk.Spinbox(grid, from_=1, to=256, textvariable=self.batch_var, width=8).grid(row=1, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(grid, text="Device:").grid(row=2, column=0, sticky=tk.W, pady=2)
-        self.device_var = tk.StringVar(value="auto")
-        ttk.Combobox(grid, textvariable=self.device_var, values=self._get_available_devices(), state="readonly", width=15).grid(row=2, column=1, sticky=tk.W, padx=5)
+        ttk.Label(grid, text="Rozdzielczość (px):").grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.imgsz_var = tk.IntVar(value=640)
+        imgsz_spin = ttk.Spinbox(grid, from_=32, to=2048, increment=32, textvariable=self.imgsz_var, width=8)
+        imgsz_spin.grid(row=2, column=1, sticky=tk.W, padx=5)
 
-        self.btn_start_train = ttk.Button(self.left, text="▶ ROZPOCZNIJ TRENING", command=self._start_training, style="Accent.TButton")
-        self.btn_start_train.pack(fill=tk.X, pady=10, ipady=4)
-        self.btn_stop_train = ttk.Button(self.left, text="ZATRZYMAJ", command=self._stop_training, state=tk.DISABLED)
+        ttk.Label(grid, text="Learning Rate (lr0):").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.lr0_var = tk.DoubleVar(value=0.01)
+        lr0_spin = ttk.Spinbox(grid, from_=0.0001, to=0.1, increment=0.001, format="%.4f", textvariable=self.lr0_var, width=8)
+        lr0_spin.grid(row=3, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(grid, text="Device:").grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.device_var = tk.StringVar(value="auto")
+        ttk.Combobox(grid, textvariable=self.device_var, values=self._get_available_devices(), state="readonly", width=15).grid(row=4, column=1, sticky=tk.W, padx=5)
+
+        self.btn_start_train = ttk.Button(settings_col, text="▶ ROZPOCZNIJ TRENING", command=self._start_training, style="Accent.TButton")
+        self.btn_start_train.pack(fill=tk.X, pady=(15, 5), ipady=6)
+        
+        self.btn_stop_train = ttk.Button(settings_col, text="ZATRZYMAJ", command=self._stop_training, state=tk.DISABLED)
         self.btn_stop_train.pack(fill=tk.X, pady=2)
 
         self.train_progress_var = tk.DoubleVar(value=0.0)
-        self.train_progress = ttk.Progressbar(self.left, variable=self.train_progress_var, maximum=100)
+        self.train_progress = ttk.Progressbar(settings_col, variable=self.train_progress_var, maximum=100)
         self.train_progress.pack(fill=tk.X, pady=(15, 2))
-        self.train_progress_label = ttk.Label(self.left, text="Czekam na start...")
+        
+        self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 8, "italic"))
         self.train_progress_label.pack(anchor=tk.W)
 
-        # RIGHT: notebook historii
+        # --- KOLUMNA PRAWA: Terminal na żywo ---
+        ttk.Label(console_col, text="Terminal Treningu (Live):", font=("Segoe UI", 9, "bold"), foreground="#2980b9").pack(anchor=tk.W, pady=(0, 2))
+        
+        self.train_log_console = scrolledtext.ScrolledText(
+            console_col, width=50, height=18, font=("Consolas", 10), 
+            bg="#1e1e1e", fg="#ecf0f1", bd=2, relief="sunken"
+        )
+        self.train_log_console.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self.train_log_console.insert(tk.END, "Oczekuje na rozpoczęcie treningu...\nGotowy na dane z Ultralytics.\n")
+        self.train_log_console.config(state=tk.DISABLED)
+
+        # RIGHT: notebook historii (Prawa, wielka kolumna główna)
         self.right_nb = ttk.Notebook(self.right)
         self.right_nb.pack(fill=tk.BOTH, expand=True)
 
@@ -285,7 +319,7 @@ class TrainingTab:
         columns = ("ID", "Nazwa", "Status", "Epoki", "mAP50", "Czas")
         self.tree = ttk.Treeview(hist_top, columns=columns, show="headings")
         for c in columns: self.tree.heading(c, text=c)
-        self.tree.column("ID", width=80, stretch=False)
+        self.tree.column("ID", width=130, stretch=False)
         self.tree.column("Nazwa", width=180, stretch=True)
         self.tree.column("Status", width=100, stretch=False)
         self.tree.column("Epoki", width=80, stretch=False)
@@ -304,6 +338,23 @@ class TrainingTab:
         ttk.Button(hist_btns, text="Otwórz Folder", command=self._open_run_folder).pack(side=tk.RIGHT)
 
         self._build_plots_ui()
+
+        # ✅ PRZYWRÓCONE, ZABEZPIECZONE PODPIĘCIE POMOCY
+        HELP.bind_help(ds_row, "tr_train_ds")
+        HELP.bind_help(self.base_combo, "tr_train_base")
+        
+        # Ochrona na wypadek błędów siatki (Tkinter Grid)
+        try:
+            HELP.bind_help(grid.grid_slaves(row=0, column=1)[0], "tr_train_ep") 
+            HELP.bind_help(grid.grid_slaves(row=1, column=1)[0], "tr_train_bs") 
+            HELP.bind_help(imgsz_spin, "tr_train_imgsz")
+            HELP.bind_help(lr0_spin, "tr_train_lr0") 
+        except Exception as e: 
+            logger.debug(f"Błąd podpinania pomocy do siatki: {e}")
+        
+        HELP.bind_help(self.btn_start_train, "tr_train_btn")
+        HELP.bind_help(self.tree, "tr_train_tree")
+        HELP.bind_help(self.plots_tab, "tr_train_plot")
 
     def _build_plots_ui(self):
         self.plots_pane = ttk.PanedWindow(self.plots_tab, orient=tk.HORIZONTAL)
@@ -330,9 +381,6 @@ class TrainingTab:
         self.plot_canvas = tk.Canvas(canvas_frame, background="#ecf0f1")
         self.plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    # ------------------------------------------------------------
-    # 3. WALIDACJA MODELI (Ewaluacja) TAB
-    # ------------------------------------------------------------
     def _build_validation_tab(self):
         main_f = ttk.Frame(self.tab_val, padding=10)
         main_f.pack(fill=tk.BOTH, expand=True)
@@ -367,9 +415,10 @@ class TrainingTab:
         self.val_log_text = scrolledtext.ScrolledText(log_f, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa")
         self.val_log_text.pack(fill=tk.BOTH, expand=True)
 
-    # ------------------------------------------------------------
-    # 4. RANKING TAB (Z PODZIAŁEM NA KATEGORIE)
-    # ------------------------------------------------------------
+        # ✅ PODPIĘCIE POMOCY:
+        HELP.bind_help(row1, "tr_val_model")
+        HELP.bind_help(self.btn_run_val, "tr_val_btn")
+
     def _build_ranking_tab(self):
         pane = ttk.PanedWindow(self.tab_ranking, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -421,7 +470,6 @@ class TrainingTab:
         self.rank_status = ttk.Label(left_f, text="Gotowy", foreground="gray")
         self.rank_status.pack(anchor=tk.W)
 
-        # Tabela w prawej kolumnie
         cols = ("Miejsce", "Model", "Zadanie", "F1-Score", "Precision", "Recall")
         self.rank_tree = ttk.Treeview(right_f, columns=cols, show="headings")
         for c in cols: self.rank_tree.heading(c, text=c)
@@ -437,9 +485,10 @@ class TrainingTab:
         self.rank_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ============================================================
-    # Logika Metod Współdzielonych
-    # ============================================================
+        # ✅ PODPIĘCIE POMOCY:
+        HELP.bind_help(cat_combo, "tr_rank_cat")
+        HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
+
     def _pick_file(self, var, ext):
         p = filedialog.askopenfilename(filetypes=[("File", ext)])
         if p: var.set(p)
@@ -466,16 +515,17 @@ class TrainingTab:
         else:
             self.base_custom_entry.configure(state=tk.DISABLED)
 
-    # ============================================================
-    # LOGIKA - BUDOWA DATASETU
-    # ============================================================
     def _create_dataset_thread(self):
         xml = Path(self.cvat_xml_var.get().strip())
         images_dir = Path(self.cvat_images_var.get().strip())
-        out_dir = Path(self.ds_out_var.get().strip())
 
         if not xml.exists(): return messagebox.showerror("Błąd", "XML nie istnieje.")
         if not images_dir.exists(): return messagebox.showerror("Błąd", "Folder images nie istnieje.")
+
+        # ✅ ZMIANA: System sam decyduje gdzie i jak zapisać (Pełna kwarantanna danych)
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(CONFIG.DEFAULT_DATASETS_DIR) / f"Plates_CVAT_{timestamp}"
 
         if not self.creator.annotations:
             ok, msg, _ = self.creator.parse_cvat_xml(xml)
@@ -496,11 +546,44 @@ class TrainingTab:
         threading.Thread(target=worker, daemon=True).start()
 
     def _split_dataset_thread(self):
-        messagebox.showinfo("Splitter", "Podłącz swoją klasę DatasetSplitter w tej funkcji.")
+        src = Path(self.split_src_var.get().strip())
 
-    # ============================================================
-    # LOGIKA - TRENING
-    # ============================================================
+        if not src.exists() or not (src / "images").exists(): 
+            return messagebox.showerror("Błąd", "Brak folderu wejściowego (lub brakuje w nim folderu 'images').")
+
+        # ✅ ZMIANA: System dziedziczy nazwę ze źródła i dopisuje _Split_ z datą. 
+        # Dzięki temu Dataset "MegaDataset_Chars_2023..." po podziale będzie nazywał się "MegaDataset_Chars_2023..._Split_2024..."
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = Path(CONFIG.DEFAULT_DATASETS_DIR) / f"{src.name}_Split_{timestamp}"
+
+        train = float(self.train_pct.get()) / 100.0
+        val = float(self.val_pct.get()) / 100.0
+        ratios = {"train": train, "val": val, "test": max(0, 1.0 - train - val)} if self.use_test.get() else {"train": train / max(0.0001, train + val), "val": val / max(0.0001, train + val)}
+
+        self.split_progress_var.set(0)
+        self.split_status.config(text="Rozpoczynam podział...")
+
+        def worker():
+            try:
+                def prog(c, t, n):
+                    self._ui(lambda: self.split_progress_var.set((c/t)*100))
+                    self._ui(lambda: self.split_status.configure(text=f"Kopiowanie {c}/{t}..."))
+                
+                ok, msg, _ = self.splitter.split_dataset(src, out, ratios, prog)
+                
+                if ok:
+                    self._ui(lambda: messagebox.showinfo("Sukces", msg))
+                    self._ui(lambda: self.split_status.configure(text="Podział zakończony!", foreground="green"))
+                else:
+                    self._ui(lambda: messagebox.showerror("Błąd", msg))
+                    self._ui(lambda: self.split_status.configure(text="Błąd podziału", foreground="red"))
+            except Exception as e:
+                self._ui(lambda: messagebox.showerror("Krytyczny Błąd", str(e)))
+                self._ui(lambda: self.split_status.configure(text="Krytyczny błąd podziału", foreground="red"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_training(self):
         if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak ultralytics.")
         ds = self.dataset_var.get().strip()
@@ -514,6 +597,7 @@ class TrainingTab:
             name=self.name_var.get(), dataset_path=ds, base_model=base_model,
             epochs=int(self.epochs_var.get()), batch_size=int(self.batch_var.get()),
             img_size=int(self.imgsz_var.get()), device=device,
+            lr0=float(self.lr0_var.get()) # ✅ DODANE POBIERANIE Z GUI            
         )
         if run_id:
             self.current_run_id = run_id
@@ -530,8 +614,28 @@ class TrainingTab:
             run = self.trainer.current_run
             if not run: return
             pct = (epoch / max(1, run.epochs)) * 100.0
-            self._ui(lambda: self.train_progress_var.set(pct))
-            self._ui(lambda: self.train_progress_label.configure(text=f"Epoka {epoch}/{run.epochs} | mAP={metrics.get('map50',0):.3f}"))
+            
+            # Pobieranie wyników mAP
+            map50 = metrics.get('map50', 0)
+            map50_95 = metrics.get('map50_95', 0)
+            loss = metrics.get('loss', 0)
+            
+            # Formatowanie logu na żywo
+            log_line = f"Epoka {epoch}/{run.epochs} | Strata(Loss): {loss:.3f} | mAP50: {map50:.3f} | mAP50-95: {map50_95:.3f}\n"
+            
+            # Aktualizacja UI w głównym wątku
+            def update_ui():
+                self.train_progress_var.set(pct)
+                self.train_progress_label.configure(text=f"Trwa trening: Epoka {epoch}/{run.epochs}")
+                
+                # Bezpieczne wpisywanie do konsoli
+                self.train_log_console.config(state=tk.NORMAL)
+                self.train_log_console.insert(tk.END, log_line)
+                self.train_log_console.see(tk.END)
+                self.train_log_console.config(state=tk.DISABLED)
+                
+            self._ui(update_ui)
+
         def on_end(success, msg):
             self._ui(lambda: self.btn_start_train.configure(state=tk.NORMAL))
             self._ui(lambda: self.btn_stop_train.configure(state=tk.DISABLED))
@@ -542,8 +646,16 @@ class TrainingTab:
     def _load_history(self):
         self.tree.delete(*self.tree.get_children())
         for run in self.history.get_all_runs():
+            # ✅ ZMIANA: Twardo wstawiamy pełne run.id. Zabezpiecza to klikanie i wyszukiwanie folderów.
+            best_map = getattr(run, 'best_map50', 0.0) or 0.0
+            
             self.tree.insert("", tk.END, values=(
-                run.id[-8:], run.name[:30], run.status, f"{run.current_epoch}/{run.epochs}", f"{run.best_map50:.3f}", run.duration_str
+                str(run.id), 
+                str(run.name)[:30], 
+                str(run.status), 
+                f"{run.current_epoch}/{run.epochs}", 
+                f"{float(best_map):.3f}", 
+                str(run.duration_str)
             ))
 
     def _delete_selected(self):
@@ -557,7 +669,6 @@ class TrainingTab:
         if run and Path(run.output_dir).exists():
             self._open_path(Path(run.output_dir))
 
-    # Wykresy i Plots
     def _on_run_selected(self, event=None):
         run = self._selected_run()
         if not run: return
@@ -588,9 +699,6 @@ class TrainingTab:
             self.plot_canvas.create_image(0, 0, anchor=tk.NW, image=self._plot_photo)
         except: pass
 
-        # ============================================================
-    # LOGIKA - WALIDACJA
-    # ============================================================
     def _run_validation(self):
         if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak modułu YOLO!")
         if self.val_is_running: return
@@ -612,37 +720,31 @@ class TrainingTab:
         def worker():
             try:
                 model = YOLO(model_path)
-                # Uruchomienie oficjalnej walidacji YOLO na testowym/walidacyjnym zbiorze (YOLO samo znajdzie pliki yaml i etykiety)
                 metrics = model.val(data=data_path, split=self.val_split_var.get())
                 
                 res = "\n=== OFICJALNE WYNIKI WALIDACJI YOLO ===\n"
                 
-                # YOLO Metrics object różni się w zależności od wersji (v8 vs v11)
-                # Sprawdzamy czy ma wbudowany słownik z wynikami:
                 if hasattr(metrics, 'results_dict'):
                     for k, v in metrics.results_dict.items(): 
                         res += f"• {k}: {v:.4f}\n"
                 else:
-                    # Alternatywne bezpieczne wyciąganie popularnych metryk, jeśli properties istnieją
                     if hasattr(metrics, 'box'):
                         res += f"• mAP50:     {metrics.box.map50:.4f}\n"
                         res += f"• mAP50-95:  {metrics.box.map:.4f}\n"
                         res += f"• Precision: {metrics.box.mp:.4f} (Mean Precision)\n"
                         res += f"• Recall:    {metrics.box.mr:.4f} (Mean Recall)\n"
-                    elif hasattr(metrics, 'pose'): # Dla modeli Pose
+                    elif hasattr(metrics, 'pose'):
                         res += f"• Pose mAP50: {metrics.pose.map50:.4f}\n"
                         res += f"• Pose mAP:   {metrics.pose.map:.4f}\n"
                         if hasattr(metrics, 'box'):
                             res += f"• Box mAP50:  {metrics.box.map50:.4f}\n"
                     else:
-                        # Fallback jeśli API YOLO jest inne
                         res += str(metrics)
                         
                 self._ui(lambda r=res: self.val_log_text.insert(tk.END, r))
                 self._ui(lambda: messagebox.showinfo("Sukces", "Walidacja zakończona pomyślnie!"))
                 
             except Exception as e:
-                # Tutaj była ta pułapka z Lambdą! Przekazujemy 'e' twardo jako argument 'err=e'
                 self._ui(lambda err=e: self.val_log_text.insert(tk.END, f"\nBŁĄD WALIDACJI:\n{err}"))
                 logger.error(f"Validation error: {e}")
                 
@@ -651,15 +753,13 @@ class TrainingTab:
                 self._ui(lambda: self.btn_run_val.config(state=tk.NORMAL, text="🚀 PRZEPROWADŹ WALIDACJĘ"))
                 
         threading.Thread(target=worker, daemon=True).start()
-    # ============================================================
-    # LOGIKA - RANKING
-    # ============================================================
+
     def _load_ranking(self):
         entries = getattr(self.ranking_engine, 'entries', [])
         self.rank_tree.delete(*self.rank_tree.get_children())
         
         category = self.rank_category_var.get()
-        task_filter = "Tablice (Pose)" # default
+        task_filter = "Tablice (Pose)"
         if "Pojazdy" in category: task_filter = "Pojazdy (Detect)"
         elif "Znaki" in category: task_filter = "Znaki/Litery (Detect)"
         
@@ -690,11 +790,10 @@ class TrainingTab:
             return messagebox.showerror("Błąd", f"W folderze testowym brakuje pliku annotations.xml (Ground Truth):\n{gt_xml}")
 
         category = self.rank_category_var.get()
-        target_task = "Tablice (Pose)" # default
+        target_task = "Tablice (Pose)"
         if "Pojazdy" in category: target_task = "Pojazdy (Detect)"
         elif "Znaki" in category: target_task = "Znaki/Litery (Detect)"
         
-        # Odrzucamy modele które z nazwy ewidentnie nie pasują do zadania (prosta heurystyka)
         is_pose_task = ("Pose" in target_task)
 
         self.rank_is_running = True
@@ -707,16 +806,12 @@ class TrainingTab:
             from ..data_models import ImageAnnotation, Detection
             
             try:
-                # 1. Zebranie modeli do przetestowania
                 model_files = list(models_dir.glob("*.pt"))
                 models_to_test = []
                 for mf in model_files:
-                    # Filtrujemy na podstawie nazwy - pose do tablic, reszta do pojazdów/znaków
                     is_pose_model = "pose" in mf.name.lower()
-                    if is_pose_task and not is_pose_model:
-                        continue
-                    if not is_pose_task and is_pose_model:
-                        continue
+                    if is_pose_task and not is_pose_model: continue
+                    if not is_pose_task and is_pose_model: continue
                     models_to_test.append(mf)
                 
                 if not models_to_test:
@@ -728,71 +823,45 @@ class TrainingTab:
                 device = self._device_to_ultralytics(self.device_var.get())
                 conf_thresh = self.rank_conf.get()
 
-                # Folder roboczy na tymczasowe wyniki eksportu
                 temp_xml_path = data_dir / "temp_ranking_auto.xml"
                 
                 for idx, model_path in enumerate(models_to_test):
                     if not self.rank_is_running: break
-                    
                     self._ui(lambda m=model_path.name: self.rank_status.config(text=f"Testowanie {m} ({idx+1}/{total_models})"))
                     
-                    # 2. Utworzenie odpowiedniego Annotatora
-                    if is_pose_task:
-                        annotator = PlateAnnotator(model_path, conf_thresh, device)
-                    else:
-                        annotator = VehicleAnnotator(model_path, conf_thresh, device)
+                    if is_pose_task: annotator = PlateAnnotator(model_path, conf_thresh, device)
+                    else: annotator = VehicleAnnotator(model_path, conf_thresh, device)
                         
                     success, msg = annotator.load_models()
-                    if not success:
-                        logger.warning(f"Nie udało się załadować modelu {model_path.name}: {msg}")
-                        continue
+                    if not success: continue
                         
-                    # 3. Przepuszczenie modelu przez obrazy w folderze (bez zapisywania wizualizacji by było szybko)
                     images = list(data_dir.glob("*.jpg")) + list(data_dir.glob("*.png"))
                     auto_annotations = []
                     
                     for img_idx, img_path in enumerate(images):
                         if not self.rank_is_running: break
-                        
                         ann = annotator.process_image(img_path)
                         auto_annotations.append(ann)
-                        
-                        # Pasek postępu
                         sub_pct = ((idx + (img_idx / len(images))) / total_models) * 100
                         self._ui(lambda p=sub_pct: self.rank_progress_var.set(p))
                         
                     annotator.unload_models()
                     
-                    # 4. Eksport do tymczasowego XML
                     from ..exporters.cvat_exporter import CVATExporter
                     exporter = CVATExporter()
                     exporter.export(auto_annotations, temp_xml_path, include_confidence=True)
                     
-                    # 5. Porównanie z Ground Truth (annotations.xml od użytkownika)
-                    stats = comparator.compare(
-                        auto_xml_path=temp_xml_path,
-                        corrected_xml_path=gt_xml
-                    )
+                    stats = comparator.compare(auto_xml_path=temp_xml_path, corrected_xml_path=gt_xml)
+                    self.ranking_engine.add_entry(model_name=model_path.name, model_path=str(model_path), comparison_stats=stats, task_type=target_task)
                     
-                    # 6. Dodanie do bazy ModelRanking
-                    self.ranking_engine.add_entry(
-                        model_name=model_path.name,
-                        model_path=str(model_path),
-                        comparison_stats=stats,
-                        task_type=target_task
-                    )
-                    
-                    # Czystka tymczasowego pliku
-                    if temp_xml_path.exists():
-                        temp_xml_path.unlink()
+                    if temp_xml_path.exists(): temp_xml_path.unlink()
                 
                 self._ui(lambda: self.rank_progress_var.set(100))
                 self._ui(lambda: self._load_ranking())
                 self._ui(lambda: self.rank_status.config(text="Ranking zakończony.", foreground="green"))
-                self._ui(lambda: messagebox.showinfo("Sukces", "Testowanie zakończone, ranking zaktualizowany!"))
                 
             except Exception as e:
-                self._ui(lambda: messagebox.showerror("Błąd", f"Błąd w trakcie rankingu:\n{e}"))
+                self._ui(lambda err=e: messagebox.showerror("Błąd", f"Błąd w trakcie rankingu:\n{err}"))
                 self._ui(lambda: self.rank_status.config(text="Błąd rankingu", foreground="red"))
             finally:
                 self.rank_is_running = False
