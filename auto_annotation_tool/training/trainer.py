@@ -159,7 +159,9 @@ class YOLOPoseTrainer:
     def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, resume_from):
         run = self.current_run
         try:
-            if resume_from and Path(resume_from).exists():
+            is_resuming = bool(resume_from and Path(resume_from).exists())
+            
+            if is_resuming:
                 logger.info(f"Wznawiam z: {resume_from}")
                 self.model = YOLO(resume_from)
             else:
@@ -213,9 +215,12 @@ class YOLOPoseTrainer:
                     self.on_progress((epoch / epochs) * 100, f"Epoka {epoch}/{epochs}")
 
             self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
-
             logger.info("Rozpoczynam trening...")
-            self.model.train(**train_args)
+            # ✅ ZMIANA: Wznawianie treningu wymaga flagi resume=True bez innych parametrów
+            if is_resuming:
+                self.model.train(resume=True)
+            else:
+                self.model.train(**train_args)
 
             train_dir = Path(run.output_dir) / "train"
             best_weights = train_dir / "weights" / "best.pt"

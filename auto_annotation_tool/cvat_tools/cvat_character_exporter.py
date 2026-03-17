@@ -38,10 +38,20 @@ class CVATCharacterExporter:
                 image_el.set("id", str(idx))
                 image_el.set("name", f"{plate_id}.jpg")
                 
-                # Zabezpieczenie szerokości/wysokości
-                is_square = data.get("is_square", False)
-                w = 256
-                h = 128 if is_square else 64
+                # ✅ ZMIANA: Pobieramy PRAWDZIWE wymiary wyciętej tablicy z dysku
+                w, h = 256, 64 # Wartości domyślne w razie awarii
+                
+                # metadata_path to np. Workspace/3_cropped_characters/run_XXX/metadata.json
+                # więc zdjęcia są w folderze obok:
+                img_path = metadata_path.parent / "images" / f"{plate_id}.jpg"
+                
+                if img_path.exists():
+                    try:
+                        from PIL import Image
+                        with Image.open(img_path) as img:
+                            w, h = img.size
+                    except Exception:
+                        pass
                 
                 image_el.set("width", str(w))
                 image_el.set("height", str(h))

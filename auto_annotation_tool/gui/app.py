@@ -65,6 +65,8 @@ class AutoAnnotationApp:
         status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
+        from .help_manager import HELP
+        HELP.status_updater = lambda msg: self.update_status(msg, "info")        
         logger.info("GUI zainicjalizowane pomyślnie")
     
     def _setup_style(self):
@@ -99,7 +101,12 @@ class AutoAnnotationApp:
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki TRENING: {e}")
                 messagebox.showerror("Błąd Zakładki", f"Błąd w zakładce Trening:\n{e}")
+            # ZAKŁADKA POMOCY / PRZEWODNIK
+            if HelpTab:
+                self.tabs['help'] = HelpTab(self.notebook, self)
+                self.notebook.add(self.tabs['help'].frame, text=f"📖 Instrukcja & Architektura")
 
+            self.notebook.select(0)
             self.notebook.select(0)
             
         except Exception as e:
@@ -123,8 +130,11 @@ class AutoAnnotationApp:
         help_menu.add_command(label=f"{self.icon_manager.get('info')} O programie", command=self._show_about)
     
     def update_status(self, message: str, icon: str = "info"):
-        self.status_var.set(f"{self.icon_manager.get(icon)} {message}")
-        self.root.update_idletasks()
+        """Aktualizuje główny, dolny pasek aplikacji (zapobiega migotaniu)."""
+        new_text = f"{self.icon_manager.get(icon)} {message}"
+        if self.status_var.get() != new_text:
+            self.status_var.set(new_text)
+            self.root.update_idletasks()
     
     def set_processing(self, processing: bool):
         self.is_processing = processing

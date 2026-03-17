@@ -1,190 +1,109 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Kontekstowy System Pomocy - Smooth Hover Edition
-Aktualizuje pasek informacyjny na dole aplikacji podczas najeżdżania na kontrolki
-oraz obsługuje F1 / prawy klik dla dłuższej pomocy.
+Kontekstowy System Pomocy - Non-intrusive Edition
+Aktualizuje wyłącznie pasek informacyjny na dole aplikacji.
 """
 
-import tkinter as tk
-from tkinter import messagebox
-from ..config import logger
-
-
 HELP_DATABASE = {
+    # --- ZAKŁADKA 1: AUTOANOTACJA ---
+    "tab1_mode": {
+        "full_help": "Tryb C (Pojazdy + tablice) jest najbezpieczniejszy: program zignoruje 'fałszywe' tablice (np. znaki drogowe), jeśli nie znajdują się wewnątrz wykrytego pojazdu."
+    },
+    "tab1_conf": {
+        "full_help": "Próg pewności (Confidence): Wyższa wartość (np. 0.50) zignoruje niewyraźne obiekty. Niższa (0.20) wykryje więcej, ale może złapać śmieci."
+    },
+    "tab1_device": {
+        "full_help": "Urządzenie obliczeniowe: 'cuda:0' używa karty graficznej (NVIDIA), co przyspiesza proces kilkukrotnie. 'cpu' używa procesora (wolniej)."
+    },
+    "tab1_start": {
+        "full_help": "Uruchamia sztuczną inteligencję (YOLO). Przeskanuje zdjęcia, znajdzie pojazdy oraz tablice, i wygeneruje plik annotations.xml."
+    },
+    
+    # --- ZAKŁADKA 2: WYCINANIE I ANALIZA ---
     "btn_wycinanie_start": {
-        "tooltip": "Wycina i prostuje tablice ze zdjęć.",
-        "full_help": "Ten przycisk uruchamia generator wyciętych tablic. Program odczytuje annotations.xml, znajduje polygony tablic, wycina je z dużych zdjęć pojazdów, prostuje perspektywę i zapisuje do nowego folderu run_XXX."
+        "full_help": "Wycina tablice ze zdjęć na podstawie annotations.xml. Jeśli tablica jest krzywa lub pionowa, algorytm położy ją na płasko do folderu run_XXX."
     },
     "btn_fast_test": {
-        "tooltip": "Uruchamia szybki test obecnych ustawień OCR/YOLO.",
-        "full_help": "Program uruchamia wybraną metodę rozpoznawania (OCR, YOLO lub BOTH) na całej bieżącej paczce wyciętych tablic, porównuje wyniki z nazwami plików źródłowych i oblicza True Accuracy."
+        "full_help": "Szybki Test: Uruchamia OCR na obecnej paczce tablic. Jeśli odczyt zgadza się z nazwą pliku, tablica staje się 'Perfekcyjna' (🟢)."
     },
     "btn_rank_presets": {
-        "tooltip": "Testuje wszystkie zapisane presety OCR i tworzy ranking.",
-        "full_help": "Każdy zapisany preset z folderu 8_ocr_presets zostaje uruchomiony na obecnej paczce tablic. Program mierzy ich skuteczność i zapisuje wyniki do ranking_cache.json."
+        "full_help": "Turniej Presetów: Testuje w tle wszystkie zapisane filtry z Laboratorium. Zwycięzca (najwyższe True Accuracy) pojawi się w panelu Lidera."
     },
+    "btn_lab": {
+        "full_help": "Laboratorium Filtrów: Otwiera studio pre-processingu. Ustawisz tu m.in. kontrast, binaryzację i białą ramkę, co drastycznie poprawia skuteczność OCR."
+    },
+    "tab2_method": {
+        "full_help": "Metoda odczytu: Na start używaj 'OCR'. Gdy wygenerujesz Mega-Dataset i wytrenujesz własny model w Zakładce 3, zmień na 'YOLO'."
+    },
+    
+    # --- ZAKŁADKA 2: LABORATORIUM (Suwaki) ---
     "lab_angle": {
-        "tooltip": "Ręczna korekta kąta obrotu tablicy.",
-        "full_help": "Jeśli tablica po wycięciu jest lekko przekrzywiona, tym suwakiem możesz wymusić obrót o kilka stopni. To często bardzo pomaga OCR-owi."
+        "full_help": "Ręczna korekta kąta: Jeśli tablica po wycięciu jest lekko przekrzywiona, wymuś obrót o kilka stopni. To bardzo pomaga OCR-owi."
     },
     "lab_height": {
-        "tooltip": "Wysokość obrazu wejściowego dla OCR.",
-        "full_help": "OCR działa najlepiej na tekście o określonej wielkości. Zbyt mały obraz powoduje utratę detali, zbyt duży spowalnia działanie i może generować artefakty."
+        "full_help": "Wysokość (px): Skaluje obraz przed OCR. Zbyt mały obraz traci detale, zbyt duży spowalnia działanie i generuje artefakty (Zalecane: 60-80px)."
     },
     "lab_clip": {
-        "tooltip": "Odcinanie prześwietleń i odblasków.",
-        "full_help": "Piksele jaśniejsze od ustawionego progu są zamieniane na białe. Pomaga to usuwać refleksy, odblaski i przepalenia z tablic."
+        "full_help": "Odcinanie odblasków: Piksele jaśniejsze od progu są zamieniane na białe. Pomaga usunąć refleksy świetlne i przepalenia z tablic."
     },
     "lab_denoise": {
-        "tooltip": "Siła usuwania szumu.",
-        "full_help": "Redukuje cyfrowe ziarno i szum matrycy aparatu. Uważaj: zbyt duża wartość może rozmywać cienkie linie liter."
+        "full_help": "Usuwanie szumu: Redukuje cyfrowe ziarno matrycy. Uważaj: zbyt duża wartość może zbytnio rozmyć cienkie linie liter."
     },
     "lab_clahe": {
-        "tooltip": "Lokalne wzmacnianie kontrastu (CLAHE).",
-        "full_help": "Bardzo przydatne w przypadku tablic częściowo zacienionych albo słabo oświetlonych. Wyrównuje kontrast lokalny i wydobywa litery z tła."
+        "full_help": "Wzmacnianie kontrastu (CLAHE): Przydatne dla tablic w cieniu. Wyrównuje kontrast lokalny i potężnie wydobywa czarne litery z tła."
     },
     "lab_block": {
-        "tooltip": "Rozmiar bloku dla adaptive threshold.",
-        "full_help": "To parametr binaryzacji adaptacyjnej. Musi być liczbą nieparzystą. Mniejsze wartości lepiej działają na małych detalach, większe na nierównym oświetleniu."
+        "full_help": "Rozmiar bloku: Parametr binaryzacji. Mniejsze wartości łapią drobne detale, większe lepiej radzą sobie z nierównym oświetleniem tablicy."
     },
     "lab_c": {
-        "tooltip": "Stała C dla adaptive threshold.",
-        "full_help": "Reguluje, jak agresywnie binaryzacja uznaje piksele za czarne lub białe. To jeden z najważniejszych parametrów strojenia OCR."
+        "full_help": "Stała odcięcia (C): Reguluje agresywność binaryzacji. To najważniejszy suwak do 'rozpuszczania' brudu i hologramów w białym tle!"
     },
     "lab_erode": {
-        "tooltip": "Pogrubianie liter przez morfologię.",
-        "full_help": "Działa jak lekkie 'domknięcie' cienkich lub popękanych znaków. Może pomóc na słabo kontrastowych tablicach, ale przesada zniszczy kształt liter."
+        "full_help": "Erozja (Pogrubianie): Lekko 'domyka' i pogrubia popękane znaki. Przesada zniszczy i zleje litery w czarne plamy."
     },
+    "lab_pad": {
+        "full_help": "Biała ramka (Padding): Dodaje czysty margines. 'Oślepia' OCR na krawędziach tablicy, zapobiegając czytaniu śrubek i ramek jako liter."
+    },
+    "lab_conf": {
+        "full_help": "Próg pewności (Confidence): Ustaw np. 0.85. Słabsze odczyty wpadną jako błędy (🔴) do ręcznej weryfikacji w CVAT, gwarantując jakość datasetu."
+    },
+    
+    # --- ZAKŁADKA 3: INTEGRACJE (Active Learning) ---
     "btn_export_cvat": {
-        "tooltip": "Tworzy paczkę ZIP do poprawy w CVAT.",
-        "full_help": "Program wyeksportuje wyłącznie błędne tablice (jeśli Smart Export jest włączony), przygotuje XML oraz obrazy i spakuje całość do ZIP gotowego do zaimportowania w CVAT."
+        "full_help": "Eksport Błędów: Pakuje do ZIP-a tylko czerwone (🔴) tablice. Wgraj je do platformy CVAT, popraw ręcznie tekst lub ramki i zaimportuj z powrotem."
     },
     "btn_export_yolo": {
-        "tooltip": "Buduje mega-dataset YOLO z perfekcyjnych odczytów.",
-        "full_help": "Program skanuje wszystkie run_XXX i zbiera tylko tablice oznaczone jako perfect. Z nich tworzy gotowy dataset YOLO Detect do treningu modelu rozpoznawania znaków."
+        "full_help": "Mega-Dataset YOLO: Skanuje CAŁY system. Zbiera wyłącznie perfekcyjne odczyty (🟢) i buduje gotowy folder treningowy dla modelu YOLO."
+    },
+    "btn_import_cvat": {
+        "full_help": "Aktualizacja Bazy: Wgrywa poprawiony plik XML z CVAT. Tablice, które poprawiłeś ręcznie, stają się perfekcyjne (🟢) i zasilają Mega-Dataset!"
     }
 }
 
 
-class ToolTip:
-    """Rysuje małą chmurkę po najechaniu myszką."""
-    def __init__(self, widget, text, delay=300):
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.tipwindow = None
-        self.after_id = None
-
-    def schedule_show(self):
-        self.cancel()
-        self.after_id = self.widget.after(self.delay, self.show_tip)
-
-    def cancel(self):
-        if self.after_id:
-            self.widget.after_cancel(self.after_id)
-            self.after_id = None
-
-    def show_tip(self):
-        if self.tipwindow or not self.text:
-            return
-
-        try:
-            x = self.widget.winfo_rootx() + 20
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
-
-            self.tipwindow = tw = tk.Toplevel(self.widget)
-            tw.wm_overrideredirect(True)
-            tw.wm_geometry(f"+{x}+{y}")
-            tw.attributes("-topmost", True)
-
-            label = tk.Label(
-                tw,
-                text=self.text,
-                justify=tk.LEFT,
-                background="#fff8c6",
-                relief=tk.SOLID,
-                borderwidth=1,
-                font=("Segoe UI", 9)
-            )
-            label.pack(ipadx=6, ipady=3)
-        except Exception:
-            pass
-
-    def hide_tip(self):
-        self.cancel()
-        if self.tipwindow:
-            self.tipwindow.destroy()
-            self.tipwindow = None
-
-
 class HelpSystem:
-    """
-    Zarządza kontekstową pomocą:
-    - hover -> pasek pomocy + tooltip
-    - F1 -> dłuższa pomoc
-    - prawy klik -> dłuższa pomoc
-    """
     def __init__(self):
         self.db = HELP_DATABASE
         self.status_updater = None
-        self.current_hover_key = None
-        self.is_f1_bound = False
-
-    def _bind_global_f1(self, widget):
-        """Podpina F1 do głównego okna aplikacji tylko raz."""
-        if self.is_f1_bound:
-            return
-        try:
-            root = widget.winfo_toplevel()
-            root.bind("<F1>", self._trigger_f1_help)
-            self.is_f1_bound = True
-        except Exception as e:
-            logger.debug(f"Nie udało się podpiąć F1: {e}")
-
-    def _trigger_f1_help(self, event=None):
-        """Pokazuje pełną pomoc dla aktualnie najechanego elementu."""
-        if self.current_hover_key and self.current_hover_key in self.db:
-            entry = self.db[self.current_hover_key]
-            full_text = entry.get("full_help", "")
-            if full_text:
-                messagebox.showinfo(f"Pomoc: {self.current_hover_key}", full_text)
-                return "break"
 
     def bind_help(self, widget, index_key: str):
-        """Podpina pomoc do konkretnego widgetu."""
         if index_key not in self.db:
             return
 
         entry = self.db[index_key]
-        tooltip_text = entry.get("tooltip", "")
         full_text = entry.get("full_help", "")
 
-        tooltip = ToolTip(widget, tooltip_text)
-
         def on_enter(event=None):
-            self.current_hover_key = index_key
             if self.status_updater and full_text:
                 self.status_updater(f"💡 {full_text}")
-            tooltip.schedule_show()
 
         def on_leave(event=None):
-            if self.current_hover_key == index_key:
-                self.current_hover_key = None
             if self.status_updater:
                 self.status_updater("Gotowy")
-            tooltip.hide_tip()
 
         widget.bind("<Enter>", on_enter, add="+")
         widget.bind("<Leave>", on_leave, add="+")
-        widget.bind("<ButtonPress>", lambda e: tooltip.hide_tip(), add="+")
-
-        # Prawy klik pokazuje pełny opis
-        if full_text:
-            widget.bind("<Button-3>", lambda e: messagebox.showinfo(f"Pomoc: {index_key}", full_text), add="+")
-
-        # Globalne F1
-        self._bind_global_f1(widget)
 
 
 HELP = HelpSystem()
