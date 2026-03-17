@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zakładka pomocy.
+Zakładka: Pomoc, Architektura i Przewodnik po systemie.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 
-from ..config import CONFIG, CVAT_IMPORT_INFO
+from ..config import CONFIG
 from ..icons import IconManager
-from ..training.dataset_creator import DatasetCreator
-from ..exporters.cvat_exporter import CVATExporter
-
 
 class HelpTab:
-    """Zakładka pomocy i instrukcji."""
+    """Zakładka pomocy, instrukcji i architektury systemu."""
     
     def __init__(self, parent, app):
         self.parent = parent
@@ -25,149 +22,156 @@ class HelpTab:
         self._create_widgets()
     
     def _create_widgets(self):
-        """Tworzy responsywny interfejs z notebookiem wewnątrz."""
+        """Tworzy responsywny interfejs z dwoma zakładkami."""
         notebook = ttk.Notebook(self.frame)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # ==========================================
-        # 1. INSTRUKCJE OGÓLNE (Oryginał)
+        # ZAKŁADKA 1: INSTRUKCJE KROK PO KROKU
         # ==========================================
-        general_frame = ttk.Frame(notebook)
-        notebook.add(general_frame, text=f"{self.icon_manager.get('info')} O programie")
+        instr_frame = ttk.Frame(notebook)
+        notebook.add(instr_frame, text=f"{self.icon_manager.get('question')} Instrukcje")
         
-        general_text = scrolledtext.ScrolledText(general_frame, wrap=tk.WORD)
-        general_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        general_content = f"""
-{CONFIG.APP_NAME} v{CONFIG.VERSION}
-======================================================
-Narzędzie do automatycznej anotacji pojazdów i tablic rejestracyjnych.
-
-GŁÓWNE FUNKCJE:
-• Anotacja: Wykrywanie pojazdów i tablic (tryby A/B/C)
-• Obsługa Modeli: Od YOLOv8 po najnowsze YOLOv11 oraz najnowocześniejsze YOLOv26! 
-  Zapewnione jest także wsparcie dla własnych plików .pt (Custom Models).
-• Trening: Tworzenie i trenowanie modeli YOLO Pose dla tablic.
-• Eksport: Do formatu CVAT for Images 1.1 (XML).
-• Ranking: Obliczanie mAP / F1-score pomiędzy AI a człowiekiem.
-• Walidacja: Błyskawiczne sprawdzanie plików (XML, Datasets, .pt).
-
-ZALEŻNOŚCI (Wymagania):
-• Python 3.8+ (Zalecany 3.10 - 3.12)
-• ultralytics (Pakiet pobierze niezbędne architektury YOLO)
-• Pillow (PIL)
-• OpenCV, PyYAML (Opcjonalne, ale wysoce zalecane do wydajności)
-
-PRZYDATNE INFORMACJE:
-W przypadku wyboru modelu, którego fizycznie brakuje w folderze `./models`, pakiet ultralytics
-spróbuje automatycznie pobrać go z internetu w momencie uruchomienia predykcji/treningu.
-Dotyczy to w pełni wspieranych architektur (np. yolo11s-pose.pt, yolo26m-pose.pt).
-Dla modeli Custom, musisz jawnie wskazać ścieżkę do pliku.
-        """
-        general_text.insert(tk.END, general_content.strip())
-        general_text.config(state=tk.DISABLED)
+        t1 = scrolledtext.ScrolledText(instr_frame, wrap=tk.WORD, bg="#fcfcfc", font=("Segoe UI", 10), padx=20, pady=20)
+        t1.pack(fill=tk.BOTH, expand=True)
+        self._setup_tags(t1)
+        self._fill_instructions(t1)
         
         # ==========================================
-        # 2. INSTRUKCJE CVAT (Oryginał)
+        # ZAKŁADKA 2: ARCHITEKTURA I WORKSPACE
         # ==========================================
-        cvat_frame = ttk.Frame(notebook)
-        notebook.add(cvat_frame, text=f"{self.icon_manager.get('robot')} Format CVAT")
+        arch_frame = ttk.Frame(notebook)
+        notebook.add(arch_frame, text=f"{self.icon_manager.get('robot')} Architektura i Workspace")
         
-        cvat_text = scrolledtext.ScrolledText(cvat_frame, wrap=tk.WORD)
-        cvat_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        t2 = scrolledtext.ScrolledText(arch_frame, wrap=tk.WORD, bg="#fcfcfc", font=("Segoe UI", 10), padx=20, pady=20)
+        t2.pack(fill=tk.BOTH, expand=True)
+        self._setup_tags(t2)
+        self._fill_architecture(t2)
+
+    def _setup_tags(self, widget):
+        """Ustawia style formatowania tekstu."""
+        widget.tag_configure("H1", font=("Segoe UI", 16, "bold"), foreground="#2c3e50", spacing1=10, spacing3=15)
+        widget.tag_configure("H2", font=("Segoe UI", 12, "bold"), foreground="#2980b9", spacing1=20, spacing3=5)
+        widget.tag_configure("BOLD", font=("Segoe UI", 10, "bold"))
+        widget.tag_configure("HIGHLIGHT", foreground="#e67e22", font=("Segoe UI", 10, "bold"))
+        widget.tag_configure("CODE", font=("Consolas", 10), background="#ecf0f1", foreground="#c0392b")
+        widget.tag_configure("GREEN", foreground="#27ae60", font=("Segoe UI", 10, "bold"))
+        widget.tag_configure("RED", foreground="#c0392b", font=("Segoe UI", 10, "bold"))
+        widget.tag_configure("LIST", lmargin1=20, lmargin2=35, spacing1=3)
+
+    def _fill_instructions(self, t):
+        t.config(state=tk.NORMAL)
         
-        cvat_content = CVATExporter.get_import_instructions() + "\n\n" + DatasetCreator.get_required_format()
-        cvat_text.insert(tk.END, cvat_content.strip())
-        cvat_text.config(state=tk.DISABLED)
+        t.insert(tk.END, "🚀 Od surowych zdjęć do własnego modelu ALPR\n", "H1")
+        t.insert(tk.END, "Poniżej znajduje się kompletny przepływ pracy (Workflow), który pozwoli Ci zbudować niezawodny system rozpoznawania tablic.\n")
+
+        t.insert(tk.END, "\n⚠️ KROK 0: Prawidłowe nazewnictwo plików!\n", "H2")
+        t.insert(tk.END, "Zanim zaczniesz, upewnij się, że Twoje zdjęcia źródłowe w folderze ", "")
+        t.insert(tk.END, "1_raw_images ", "BOLD")
+        t.insert(tk.END, "mają nazwy odzwierciedlające tablice na nich widoczne. Program wykorzysta to do automatycznego oceniania AI.\n")
+        t.insert(tk.END, "Format: ", "")
+        t.insert(tk.END, "rej1_rej2_identyfikator.jpg\n", "CODE")
+        t.insert(tk.END, "Przykład: ", "")
+        t.insert(tk.END, "WLS19936_KRA123_Zdjecie1.jpg\n", "CODE")
+
+        t.insert(tk.END, "\n🎯 KROK 1: Detekcja pojazdów i tablic (Autoanotacja)\n", "H2")
+        t.insert(tk.END, "• Przejdź do zakładki ", "LIST")
+        t.insert(tk.END, "Autoanotacja", "BOLD")
+        t.insert(tk.END, ".\n", "")
+        t.insert(tk.END, "• Wybierz modele AI (zalecany Tryb C: Pojazdy + Tablice).\n", "LIST")
+        t.insert(tk.END, "• Wskaż folder ze swoimi zdjęciami i kliknij START. Program znajdzie obiekty i wygeneruje główny plik ", "LIST")
+        t.insert(tk.END, "annotations.xml", "CODE")
+        t.insert(tk.END, ".\n", "")
+
+        t.insert(tk.END, "\n✂️ KROK 2: Wycinanie i Pierwszy Odczyt (OCR)\n", "H2")
+        t.insert(tk.END, "• Przejdź do zakładki ", "LIST")
+        t.insert(tk.END, "Znaki na tablicach", "BOLD")
+        t.insert(tk.END, " -> ", "")
+        t.insert(tk.END, "1. Wycinanie Tablic", "BOLD")
+        t.insert(tk.END, ".\n", "")
+        t.insert(tk.END, "• Kliknij START. Algorytm wytnie tablice, a te przekrzywione lub pionowe położy na płasko.\n", "LIST")
+        t.insert(tk.END, "• Przejdź do pod-zakładki ", "LIST")
+        t.insert(tk.END, "2. Wykrywanie Znaków", "BOLD")
+        t.insert(tk.END, ". Odwiedź ", "")
+        t.insert(tk.END, "Laboratorium Filtrów", "HIGHLIGHT")
+        t.insert(tk.END, ", aby ustawić kontrast i białą ramkę. Zapisz preset.\n", "")
+        t.insert(tk.END, "• Odpal ", "LIST")
+        t.insert(tk.END, "Szybki Test", "BOLD")
+        t.insert(tk.END, ". Jeśli AI odczyta tekst poprawnie, tablica ląduje na liście jako ", "")
+        t.insert(tk.END, "🟢 ZIELONA", "GREEN")
+        t.insert(tk.END, ". Błędy zaświecą się na ", "")
+        t.insert(tk.END, "🔴 CZERWONO", "RED")
+        t.insert(tk.END, ".\n", "")
+
+        t.insert(tk.END, "\n🛠️ KROK 3: Naprawa błędów w CVAT\n", "H2")
+        t.insert(tk.END, "• Przejdź do pod-zakładki ", "LIST")
+        t.insert(tk.END, "3. Integracje", "BOLD")
+        t.insert(tk.END, ".\n", "")
+        t.insert(tk.END, "• Użyj OPCJI 1, aby wyeksportować do formatu .ZIP tylko błędne tablice.\n", "LIST")
+        t.insert(tk.END, "• Wgraj ZIP do programu CVAT, popraw ręcznie pomylone ramki/litery i wyeksportuj XML.\n", "LIST")
+        t.insert(tk.END, "• Wgraj poprawiony XML w sekcji IMPORT. Program magicznie zamieni błędy na status ", "LIST")
+        t.insert(tk.END, "🟢 Perfekcyjny!", "GREEN")
+        t.insert(tk.END, "\n", "")
+
+        t.insert(tk.END, "\n🔥 KROK 4: Mega-Dataset i Trenowanie Własnego AI\n", "H2")
+        t.insert(tk.END, "• Mając dużo zielonych tablic, kliknij ", "LIST")
+        t.insert(tk.END, "WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", "GREEN")
+        t.insert(tk.END, " (Opcja 2 w Integracjach).\n", "")
+        t.insert(tk.END, "• Program przeskanuje historię, usunie duplikaty i zbuduje gotowy, potężny zbiór uczący!\n", "LIST")
+        t.insert(tk.END, "• Przejdź do głównej zakładki ", "LIST")
+        t.insert(tk.END, "Trening i Analiza", "BOLD")
+        t.insert(tk.END, ". Podziel zbiór (Train/Val) i wytrenuj swój własny model rozpoznawania znaków, pozbywając się powolnego OCR-a na zawsze!\n", "")
         
-        # ==========================================
-        # 3. WORKFLOW: POJAZDY I TABLICE (Oryginał)
-        # ==========================================
-        help_frame = ttk.Frame(notebook)
-        notebook.add(help_frame, text=f"{self.icon_manager.get('question')} Detekcja: Auta i Tablice")
+        t.config(state=tk.DISABLED)
+
+    def _fill_architecture(self, t):
+        t.config(state=tk.NORMAL)
         
-        help_text = scrolledtext.ScrolledText(help_frame, wrap=tk.WORD)
-        help_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        t.insert(tk.END, "🏛 Architektura MLOps i Wymuszony Porządek\n", "H1")
+        t.insert(tk.END, f"{CONFIG.APP_NAME} to nie jest zwykły skrypt. To środowisko zaprojektowane według najlepszych inżynieryjnych wzorców uczenia maszynowego.\n")
+
+        t.insert(tk.END, "\n♻️ Filozofia Active Learning (Uczenie Aktywne)\n", "H2")
+        t.insert(tk.END, "Nie marnuj życia na ręczne rysowanie tysięcy ramek wokół liter. System został zbudowany tak, aby zautomatyzować 90% pracy:\n")
+        t.insert(tk.END, "1. Pozwól sztucznej inteligencji czytać tablice samej.\n")
+        t.insert(tk.END, "2. Jeśli AI zrobi to bezbłędnie - tablica automatycznie trafia do bazy treningowej.\n")
+        t.insert(tk.END, "3. Jeśli AI się pomyli - system 'wypluwa' błąd, a Ty korygujesz go w CVAT.\n")
+        t.insert(tk.END, "4. Skorygowane błędy zasilają bazę treningową. Im dłużej używasz programu, tym inteligentniejszy się on staje!\n")
+
+        t.insert(tk.END, "\n🗂 Drzewo Katalogów Workspace\n", "H2")
+        t.insert(tk.END, "Aby chronić Cię przed zgubieniem danych, program przy pierwszym uruchomieniu tworzy uporządkowane środowisko pracy. Oprzyj na nim swoją pracę:\n\n")
         
-        help_content = """
-WORKFLOW: OD SUROWYCH ZDJĘĆ DO WYTRENOWANEGO MODELU (YOLO POSE)
-
-1. ANOTACJA AUTOMATYCZNA (AI-Assisted)
-   - Przejdź do zakładki "Anotacja".
-   - Wybierz Tryb C (Pojazdy + tablice). Ograniczy to fałszywe tablice na tle.
-   - Wskaż folder ze swoimi zdjęciami z kamer.
-   - Z listy modeli wybierz np. najnowszy YOLOv26m-pose (lub yolo11s-pose dla szybkości).
-   - Kliknij "Rozpocznij". Narzędzie wygeneruje w folderze Output plik 'annotations.xml'.
-
-2. POPRAWIANIE (Human-in-the-loop)
-   - Otwórz platformę CVAT (lokalnie lub w chmurze).
-   - Utwórz Task wg instrukcji w zakładce "Format CVAT" (utwórz odpowiednie Labels!).
-   - Zaimportuj wygenerowany wyżej plik XML (CVAT 1.1).
-   - Przejrzyj klatki: usuń fałszywe poligony, popraw niedokładne rogi, dodaj brakujące.
-   - Wyeksportuj Task ponownie do pliku XML. Masz teraz "Ground Truth".
-
-3. RANKING (Opcjonalny krok oceny)
-   - Przejdź do zakładki "Ranking".
-   - Wskaż model, surowy XML z pkt. 1 oraz poprawiony XML z pkt. 2.
-   - Zobaczysz jak bardzo model AI mylił się względem Twoich ręcznych poprawek (F1-score).
-
-4. TRENOWANIE NOWEGO MODELU
-   - Mając poprawiony XML z CVAT, zbuduj Dataset struktury YOLO (używając DatasetCreator w skryptach).
-   - W zakładce "Trening" wskaż folder z Datasetem.
-   - Wybierz model startowy (Base Model), z którego wiedzy transferujesz (np. yolo26s-pose.pt).
-   - Ustaw epoki (np. 150) i rozpocznij trening. Gotowe wagi zapiszą się w folderze /training_runs!
-        """
-        help_text.insert(tk.END, help_content.strip())
-        help_text.config(state=tk.DISABLED)
-
-        # ==========================================
-        # 4. NOWOŚĆ! WORKFLOW: OCR & ZNAKI 
-        # ==========================================
-        ocr_frame = ttk.Frame(notebook)
-        notebook.add(ocr_frame, text=f"{self.icon_manager.get('cut')} Rozpoznawanie Znaków (ALPR)")
+        t.insert(tk.END, "📁 Workspace/\n", "BOLD")
         
-        ocr_text = scrolledtext.ScrolledText(ocr_frame, wrap=tk.WORD, bg="#fcfcfc", font=("Segoe UI", 10))
-        ocr_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "1_raw_images\n", "BOLD")
+        t.insert(tk.END, " │    └─ Wrzuć tutaj surowe, nienaruszone zdjęcia.\n", "")
         
-        # Style
-        ocr_text.tag_configure("H1", font=("Segoe UI", 12, "bold"), foreground="#2c3e50", spacing1=10, spacing3=5)
-        ocr_text.tag_configure("H2", font=("Segoe UI", 10, "bold"), foreground="#2980b9", spacing1=15, spacing3=2)
-        ocr_text.tag_configure("BOLD", font=("Segoe UI", 10, "bold"))
-        ocr_text.tag_configure("CODE", font=("Consolas", 10), background="#ecf0f1", foreground="#c0392b")
-        ocr_text.tag_configure("GREEN", foreground="#27ae60", font=("Segoe UI", 10, "bold"))
-        ocr_text.tag_configure("RED", foreground="#c0392b", font=("Segoe UI", 10, "bold"))
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "2_auto_annotations\n", "BOLD")
+        t.insert(tk.END, " │    └─ Tu lądują główne pliki XML po wykryciu aut.\n", "")
         
-        ocr_text.insert(tk.END, "OSTATECZNY CEL: Wytrenowanie własnego modelu YOLO do czytania znaków\n", "H1")
-        ocr_text.insert(tk.END, "Domyślny silnik OCR ma problem z hologramami i śrubkami. System oparty na Active Learningu pozwala pół-automatycznie zbudować idealny zestaw uczący (Dataset) dla YOLO.\n")
-
-        ocr_text.insert(tk.END, "\n🎯 KROK 1: Prawidłowe nazwy plików wejściowych\n", "H2")
-        ocr_text.insert(tk.END, "Zanim zaczniesz wycinać tablice, upewnij się, że Twoje duże zdjęcia mają nazwy odzwierciedlające tablice na nich widoczne. Format to:\n")
-        ocr_text.insert(tk.END, "rej1_rej2_identyfikator.jpg  (np. WLS19936_KRA123_moj_test.jpg)\n", "CODE")
-        ocr_text.insert(tk.END, "Program odczytuje to i na tej podstawie ocenia skuteczność algorytmów.\n")
-
-        ocr_text.insert(tk.END, "\n🔬 KROK 2: Laboratorium i Szybki Test\n", "H2")
-        ocr_text.insert(tk.END, "• Wytnij tablice w zakładce 1. Przejdź do zakładki 2 (Wykrywanie Znaków).\n")
-        ocr_text.insert(tk.END, "• Otwórz ", "")
-        ocr_text.insert(tk.END, "Laboratorium Filtrów", "BOLD")
-        ocr_text.insert(tk.END, " i pobaw się suwakami (np. dodaj białą ramkę). Zapisz Preset.\n")
-        ocr_text.insert(tk.END, "• Odpal ", "")
-        ocr_text.insert(tk.END, "Szybki Test", "BOLD")
-        ocr_text.insert(tk.END, ". Jeśli AI odczyta tekst poprawnie, tablica ląduje na liście jako ")
-        ocr_text.insert(tk.END, "🟢 ZIELONA (Perfekcyjna)", "GREEN")
-        ocr_text.insert(tk.END, ".\nJeśli popełni błąd – świeci się jako ")
-        ocr_text.insert(tk.END, "🔴 CZERWONA (Do poprawy)", "RED")
-        ocr_text.insert(tk.END, ".\n")
-
-        ocr_text.insert(tk.END, "\n🤖 KROK 3: Pętla Active Learning (Zamykanie luki)\n", "H2")
-        ocr_text.insert(tk.END, "W trzeciej pod-zakładce (Integracje) masz dwie ścieżki:\n")
-        ocr_text.insert(tk.END, "1. Ręczna poprawa: ", "BOLD")
-        ocr_text.insert(tk.END, "Eksportujesz do formatu CVAT tylko błędy (🔴). Poprawiasz je na stronie, pobierasz XML i wgrywasz do bazy. Program magicznie zamienia je na 🟢!\n")
-        ocr_text.insert(tk.END, "2. Fabryka Datasetów: ", "BOLD")
-        ocr_text.insert(tk.END, "Kiedy masz już w systemie setki tablic 🟢 (część zrobiło AI, część poprawiłeś Ty), klikasz ")
-        ocr_text.insert(tk.END, "WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", "GREEN")
-        ocr_text.insert(tk.END, ". Program przeszukuje dysk, zbiera wszystkie pewniaki, tworzy dla nich precyzyjne pliki .txt i buduje gotowy folder szkoleniowy!\n")
-
-        ocr_text.insert(tk.END, "\n🔥 KROK 4: Trenowanie YOLO i ostateczny sukces\n", "H2")
-        ocr_text.insert(tk.END, "Z wygenerowanym folderem idziesz do Głównej Zakładki 'Trening'. Dzielisz zbiór w Splitterze, odpalasz uczenie... i gotowe! Możesz teraz podpiąć ten mały, szybki model YOLO w zakładce Znaków, wyłączając wolny OCR na stałe.\n")
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "3_cropped_characters\n", "BOLD")
+        t.insert(tk.END, " │    └─ Tu tworzą się foldery run_XXX. Każdy run zawiera wycięte tablice\n", "")
+        t.insert(tk.END, " │       i najważniejszy plik w całym systemie: ", "")
+        t.insert(tk.END, "metadata.json", "HIGHLIGHT")
+        t.insert(tk.END, "!\n", "")
         
-        ocr_text.config(state=tk.DISABLED)
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "4_training_datasets\n", "BOLD")
+        t.insert(tk.END, " │    └─ Gotowe wygenerowane zbiory (Train/Val) dla Ultralytics.\n", "")
+        
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "5_training_runs\n", "BOLD")
+        t.insert(tk.END, " │    └─ Kiedy trenujesz model, tu lądują wykresy skuteczności i wagi (.pt).\n", "")
+        
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "6_models\n", "BOLD")
+        t.insert(tk.END, " │    └─ Skopiuj tu swoje najlepsze, wytrenowane sieci neuronowe.\n", "")
+        
+        t.insert(tk.END, " ├── ", "CODE"); t.insert(tk.END, "7_rankings\n", "BOLD")
+        t.insert(tk.END, " │    └─ Raporty i testy porównawcze modeli (F1-Score).\n", "")
+        
+        t.insert(tk.END, " └── ", "CODE"); t.insert(tk.END, "8_ocr_presets\n", "BOLD")
+        t.insert(tk.END, "      └─ Zapisane przez Ciebie konfiguracje filtrów obrazu z Laboratorium.\n", "")
+
+        t.insert(tk.END, "\n💎 Single Source of Truth (Pojedyncze Źródło Prawdy)\n", "H2")
+        t.insert(tk.END, "Wewnątrz każdego folderu z wyciętymi tablicami program utrzymuje plik ", "")
+        t.insert(tk.END, "metadata.json", "CODE")
+        t.insert(tk.END, ". To prawdziwy mózg operacji.\n\nZawiera on precyzyjne koordynaty X/Y dla każdej pojedynczej litery oraz jej aktualny status (Perfect/Błąd). To właśnie ten plik steruje rysowaniem zielonych ramek na ekranie w podglądzie, to on służy do eksportowania paczek do CVAT, i to z niego budowany jest przenośny zbiór YOLO. Dzięki niemu nic nigdy się nie rozjedzie!\n")
+
+        t.config(state=tk.DISABLED)
