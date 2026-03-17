@@ -134,10 +134,10 @@ class ZoomableCanvas(tk.Canvas):
         if new_width <= 0 or new_height <= 0:
             return
         
-        # Zmień rozmiar - używaj LANCZOS dla lepszej jakości
+        # ✅ ZMIANA: Zmiana z LANCZOS na BILINEAR przyspiesza zoom kilkudziesięciokrotnie, likwidując zacinanie UI.
         scaled = self.original_image.resize(
             (new_width, new_height),
-            Image.Resampling.LANCZOS
+            Image.Resampling.BILINEAR
         )
         
         # Konwertuj do PhotoImage

@@ -196,7 +196,12 @@ class AnnotationTab:
         ttk.Combobox(exp_frame, textvariable=self.export_format_var, state="readonly",
                      values=["CVAT XML 1.1", "YOLO Pose (plate4)", "CVAT + YOLO Pose (plate4)"]).pack(fill=tk.X, pady=2)
         ttk.Checkbutton(exp_frame, text="Kopiuj obrazy do zestawu YOLO", variable=self.copy_images_yolo_var).pack(anchor=tk.W, pady=(5,0))
-
+        # ✅ PODPIĘCIE SYSTEMU POMOCY DO ZAKŁADKI 1
+        from .help_manager import HELP
+        HELP.bind_help(self.mode_combo, "tab1_mode")
+        HELP.bind_help(row, "tab1_conf") # Podpinamy pod cały rządek suwaka pewności
+        HELP.bind_help(self.device_combo, "tab1_device")
+        HELP.bind_help(self.start_btn, "tab1_start")
 
     # ==========================================================
     # LOGIKA INTERFEJSU
@@ -265,10 +270,19 @@ class AnnotationTab:
             def __init__(self, widget):
                 super().__init__()
                 self.widget = widget
+                
             def emit(self, record):
                 try:
                     if self.widget.winfo_exists():
                         msg = self.format(record)
+                        # ✅ ZMIANA: Zlecamy wpisanie tekstu głównemu wątkowi (after)
+                        self.widget.after(0, self._safe_insert, msg)
+                except: pass
+                
+            def _safe_insert(self, msg):
+                # Ta metoda wykona się bezpiecznie w wątku UI
+                try:
+                    if self.widget.winfo_exists():
                         self.widget.insert(tk.END, msg + "\n")
                         self.widget.see(tk.END)
                 except: pass
@@ -327,6 +341,13 @@ class AnnotationTab:
             
             v_p = self._get_model_path("vehicle") if ("A:" in mode_text or "C:" in mode_text) else None
             p_p = self._get_model_path("plate") if ("B:" in mode_text or "C:" in mode_text) else None
+
+            # ✅ ZMIANA: Zwalniamy stary model z VRAM zanim załadujemy nowy
+            if self.annotator is not None:
+                try:
+                    self.annotator.unload_models()
+                except:
+                    pass
 
             if "A:" in mode_text:
                 self.annotator = VehicleAnnotator(v_p, conf, dev)

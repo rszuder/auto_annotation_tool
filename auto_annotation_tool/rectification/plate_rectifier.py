@@ -83,16 +83,24 @@ class PlateRectifier:
     ):
         if not CV2_AVAILABLE: return image_bgr
         
-        # 1. Sortowanie punktów
+        # 1. Sortowanie punktów (Algorytm odporny na mocną perspektywę)
         p = np.array(pts, dtype="float32")
-        s = p.sum(axis=1)
-        diff = np.diff(p, axis=1)
-        rect_pts = np.zeros((4, 2), dtype="float32")
-        rect_pts[0] = p[np.argmin(s)]    # TL
-        rect_pts[2] = p[np.argmax(s)]    # BR
-        rect_pts[1] = p[np.argmin(diff)] # TR
-        rect_pts[3] = p[np.argmax(diff)] # BL
-
+        cy = np.mean(p[:, 1])
+        
+        # Podział na górę i dół na podstawie środka ciężkości
+        top = p[p[:, 1] < cy]
+        bottom = p[p[:, 1] >= cy]
+        
+        if len(top) != 2 or len(bottom) != 2:
+            # Fallback - sortowanie po osi Y
+            p_sorted = p[np.argsort(p[:, 1])]
+            top, bottom = p_sorted[:2], p_sorted[2:]
+            
+        # Sortowanie lewo-prawo
+        top = top[np.argsort(top[:, 0])]
+        bottom = bottom[np.argsort(bottom[:, 0])[::-1]] # Dół sortujemy odwrotnie: prawy, potem lewy
+        
+        rect_pts = np.array([top[0], top[1], bottom[0], bottom[1]], dtype="float32")
         # 2. Perspective Warp
         dst = np.array([[0, 0], [out_w_px-1, 0], [out_w_px-1, out_h_px-1], [0, out_h_px-1]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect_pts, dst)
@@ -118,5 +126,11 @@ class PlateRectifier:
         if sharpen > 0:
             blur = cv2.GaussianBlur(warped, (0, 0), 3)
             warped = cv2.addWeighted(warped, 1.0 + sharpen, blur, -sharpen, 0)
+
+        # ✅ ZMIANA: Wymuszenie poziomej orientacji tablicy (zabezpieczenie przed pionowymi zdjęciami)
+        h_out, w_out = warped.shape[:2]
+        if h_out > w_out * 1.1:  # Jeśli tablica jest ewidentnie pionowa (wysokość większa od szerokości)
+            # Kładziemy tablicę na płasko
+            warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
 
         return warped

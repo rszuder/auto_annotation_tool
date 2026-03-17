@@ -9,6 +9,7 @@ from typing import Optional, List, Tuple
 import numpy as np
 
 from ..config import logger, CV2_AVAILABLE, cv2
+from .validators import LicensePlateValidator
 
 try:
     import easyocr
@@ -25,17 +26,18 @@ class PlateOCR:
     """
     
     def __init__(self, 
-                 languages: List[str] = ['en'],  # Zostawiamy tylko EN, bo małe PL znaki diakrytyczne na tablicach nie występują!
+                 languages: List[str] = ['en'],  
                  device: str = 'auto',
-                 confidence_threshold: float = 0.15): # Obniżony próg, żeby łapać wszystko
+                 confidence_threshold: float = 0.15): 
         
         self.languages = languages
         self.confidence_threshold = confidence_threshold
         self.device = device
         self.reader = None
         self.is_loaded = False
+        self.custom_prep_params = {}
         
-        # Wymuszamy tylko te znaki! Koniec z czytaniem śrubek jako przecinków.
+        # Wymuszamy tylko te znaki!
         self.allowlist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         
         if EASYOCR_AVAILABLE:
@@ -68,7 +70,7 @@ class PlateOCR:
                          thresh_block: int = 15,
                          thresh_c: int = 5,
                          erode_iter: int = 0,
-                         interpolation: str = "lanczos4") -> np.ndarray: # <-- DODANE
+                         interpolation: str = "lanczos4") -> np.ndarray: 
         """
         Ultimate Preprocessing przyjmujący parametry z GUI.
         """
@@ -82,7 +84,6 @@ class PlateOCR:
         else:
             gray = rotated.copy()
             
-        # Mapowanie wyboru na stałe OpenCV
         interp_map = {
             "nearest": cv2.INTER_NEAREST,
             "linear": cv2.INTER_LINEAR,
@@ -91,7 +92,6 @@ class PlateOCR:
         }
         cv2_interp = interp_map.get(interpolation.lower(), cv2.INTER_LANCZOS4)
             
-        # Skalowanie z wybraną metodą interpolacji!
         h, w = gray.shape
         if h > 0 and h != target_height:
             scale = float(target_height) / h
@@ -142,9 +142,6 @@ class PlateOCR:
         """
         if not self.is_loaded: return []
         
-        # mag_ratio - wewnętrzne powiększenie EasyOCR
-        # text_threshold - niższy próg znalezienia tekstu
-        # link_threshold - wyższy próg żeby nie łączył oddzielnych liter w bloki
         return self.reader.readtext(
             image, 
             allowlist=self.allowlist,
@@ -152,8 +149,9 @@ class PlateOCR:
             text_threshold=0.3,
             link_threshold=0.6,
             width_ths=0.8,
-            decoder='beamsearch' # Dokładniejszy dekoder niż domyślny 'greedy'
+            decoder='beamsearch' 
         )
+        
     def _rotate_image(self, image: np.ndarray, angle: float) -> np.ndarray:
         """Obraca obraz o podany kąt (z zachowaniem wypełnienia krawędzi)."""
         if abs(angle) < 0.1:
@@ -162,3 +160,33 @@ class PlateOCR:
         center = (w // 2, h // 2)
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
         return cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    def recognize(self, image: np.ndarray, return_details: bool = False):
+        """
+        Rozpoznaje tekst wprost z obrazka. Odłącza twardą walidację, 
+        by nie przekłamywać testów True Accuracy.
+        """
+        if not self.is_loaded:
+            return (None, 0.0, None) if return_details else None
+
+        results = self.read_text_aggressive(image)
+        
+        if not results:
+            return (None, 0.0, None) if return_details else None
+            
+        # Z wyników OCR wybieramy ciąg znaków o najwyższej pewności
+        best_result = max(results, key=lambda x: x[2])
+        text = best_result[1]
+        confidence = float(best_result[2])
+        
+        # Oczyszczamy tekst ze zbędnych spacji i myślników (ale nie zmieniamy liter!)
+        clean_text = "".join([c for c in text if c.isalnum()]).upper()
+        
+        # Walidator przekazujemy tylko jako atrybut dla szczegółów (CVAT), 
+        # ale nie pozwalamy mu modyfikować rozpoznanego tekstu (clean_text)
+        validation = LicensePlateValidator.validate(clean_text)
+        
+        if return_details:
+            return clean_text, confidence, validation
+            
+        return clean_text

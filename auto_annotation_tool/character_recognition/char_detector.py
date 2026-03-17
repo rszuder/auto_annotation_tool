@@ -14,7 +14,6 @@ from ..config import logger, CV2_AVAILABLE, cv2
 
 
 class DetectionMethod(Enum):
-    """Metoda detekcji znaków."""
     OCR = "ocr"
     YOLO = "yolo"
     BOTH = "both"
@@ -22,9 +21,8 @@ class DetectionMethod(Enum):
 
 @dataclass
 class CharacterDetection:
-    """Detekcja pojedynczego znaku."""
     character: str
-    bbox: Tuple[float, float, float, float]  # x1, y1, x2, y2
+    bbox: Tuple[float, float, float, float]
     confidence: float
     method: str = "ocr"
     
@@ -43,58 +41,35 @@ class CharacterDetection:
     
     @property
     def polygon(self) -> List[Tuple[float, float]]:
-        """Konwertuj bbox do polygonu (4 rogi)."""
         x1, y1, x2, y2 = self.bbox
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
     
     def to_dict(self) -> dict:
         return {
             'character': str(self.character),
-            'bbox': [float(x) for x in self.bbox],  # Wymusza czystego float'a Pythona!
+            'bbox': [float(x) for x in self.bbox],
             'confidence': float(self.confidence),
             'method': str(self.method),
         }
 
 
 class CharacterDetector:
-    """
-    Detekcja znaków na tablicy.
-    Obsługuje OCR (EasyOCR) i YOLO (gdy będzie model).
-    """
-    
-    def __init__(self,
-                 method: DetectionMethod = DetectionMethod.OCR,
-                 ocr_engine = None,
-                 yolo_model = None):
-        """
-        Args:
-            method: DetectionMethod.OCR / YOLO / BOTH
-            ocr_engine: PlateOCR instance
-            yolo_model: YOLO model instance
-        """
+    def __init__(self, method: DetectionMethod = DetectionMethod.OCR, ocr_engine = None, yolo_model = None):
         self.method = method
         self.ocr_engine = ocr_engine
         self.yolo_model = yolo_model
     
     def detect(self, plate_image: np.ndarray) -> List[CharacterDetection]:
-        """
-        Wykrywa znaki na tablicy.
-        """
         detections = []
-        
         if self.method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
             detections.extend(self._detect_with_ocr(plate_image))
-        
         if self.method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
             detections.extend(self._detect_with_yolo(plate_image))
-        
-        # Sortuj po X (od lewej do prawej)
+            
         detections.sort(key=lambda d: d.bbox[0])
-        
         return detections
     
     def _detect_with_ocr(self, plate_image: np.ndarray) -> List[CharacterDetection]:
-        """Detekcja OCR z dynamicznym PADDINGIEM (oddechem) i inteligentnym skalowaniem."""
         if self.ocr_engine is None or not getattr(self.ocr_engine, 'is_loaded', False):
             return []
         
@@ -102,12 +77,11 @@ class CharacterDetector:
             orig_h, orig_w = plate_image.shape[:2]
             
             # 1. PREPROCESSING
+            prep_kwargs = getattr(self.ocr_engine, 'custom_prep_params', {})
             if hasattr(self.ocr_engine, 'preprocess_plate'):
-                prep_kwargs = getattr(self.ocr_engine, 'custom_prep_params', {})
-                if prep_kwargs:
-                    processed_img = self.ocr_engine.preprocess_plate(plate_image, **prep_kwargs)
-                else:
-                    processed_img = self.ocr_engine.preprocess_plate(plate_image)
+                # Wysyłamy bez padding_pct, bo padding robimy tutaj przed samym OCR
+                clean_kwargs = {k: v for k, v in prep_kwargs.items() if k != "padding_pct"}
+                processed_img = self.ocr_engine.preprocess_plate(plate_image, **clean_kwargs)
             else:
                 processed_img = plate_image
                 
@@ -115,26 +89,20 @@ class CharacterDetector:
             scale_x = orig_w / float(proc_w) if proc_w > 0 else 1.0
             scale_y = orig_h / float(proc_h) if proc_h > 0 else 1.0
 
-            # =========================================================
-            # 2. PADDING (Oddech dla OCR) - KLUCZOWE!
-            # Dodajemy szarą/białą ramkę dookoła obrazka (20% wysokości)
-            # =========================================================
-            pad_y = int(proc_h * 0.25)
-            pad_x = int(proc_w * 0.10)
+            # 2. PADDING - Dodajemy czysto białą ramkę wokół przefiltrowanego obrazu
+            padding_pct = prep_kwargs.get("padding_pct", 20)
+            pad_y = int(proc_h * (padding_pct / 100.0))
+            pad_x = int(proc_w * (padding_pct / 100.0))
             
-            # Jeśli obraz jest czarno-biały, dajemy białą ramkę, jeśli szary, dajemy szarą (medianę)
             if len(processed_img.shape) == 2:
-                bg_val = int(np.median(processed_img))
-                if bg_val < 50: bg_val = 255 # Jeśli tło wyszło czarne, wymuś białe
-                padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=bg_val)
+                padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=255)
             else:
-                padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=[128,128,128])
+                padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=[255, 255, 255])
             
-            # 3. CZYTANIE TEKSTU (na obrazie z ramką!)
+            # 3. OCR READING (Na obrazku powiększonym o ramkę)
             if hasattr(self.ocr_engine, 'read_text_aggressive'):
                 results = self.ocr_engine.read_text_aggressive(padded_img)
             else:
-                # Wymuszamy agresywniejsze czytanie jeśli nie ma dedykowanej metody
                 results = self.ocr_engine.reader.readtext(
                     padded_img, 
                     allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
@@ -143,6 +111,7 @@ class CharacterDetector:
             
             detections = []
             
+            # 4. PRZELICZANIE WYNIKÓW
             for (bbox_ocr, text, conf) in results:
                 threshold = getattr(self.ocr_engine, 'confidence_threshold', 0.15)
                 if conf < threshold:
@@ -152,43 +121,37 @@ class CharacterDetector:
                 if not text_clean:
                     continue
                 
-                xs = [p[0] for p in bbox_ocr]
-                ys = [p[1] for p in bbox_ocr]
+                # Surowe współrzędne z OCR, odjęcie białego paddingu
+                x_coords = [p[0] - pad_x for p in bbox_ocr]
+                y_coords = [p[1] - pad_y for p in bbox_ocr]
                 
-                # Zdejmujemy padding z koordynatów!
-                x1_proc = min(xs) - pad_x
-                x2_proc = max(xs) - pad_x
-                y1_proc = min(ys) - pad_y
-                y2_proc = max(ys) - pad_y
+                # Skalowanie do oryginalnego rozmiaru wyciętej tablicy na dysku
+                x1_orig = int(min(x_coords) * scale_x)
+                x2_orig = int(max(x_coords) * scale_x)
+                y1_orig = int(min(y_coords) * scale_y)
+                y2_orig = int(max(y_coords) * scale_y)
                 
-                # Zabezpieczamy przed wyjściem poza obraz
-                x1_proc = max(0, min(proc_w, x1_proc))
-                x2_proc = max(0, min(proc_w, x2_proc))
-                y1_proc = max(0, min(proc_h, y1_proc))
-                y2_proc = max(0, min(proc_h, y2_proc))
+                # Twarde przycięcie do granic oryginalnego obrazka
+                x1 = max(0, min(orig_w, x1_orig))
+                x2 = max(0, min(orig_w, x2_orig))
+                y1 = max(0, min(orig_h, y1_orig))
+                y2 = max(0, min(orig_h, y2_orig))
                 
-                if x2_proc <= x1_proc or y2_proc <= y1_proc:
+                # Jeśli po odcięciu marginesu ramka zniknęła to był szum - ignorujemy.
+                if x2 - x1 < 2 or y2 - y1 < 2:
                     continue
-                    
-                # Przeskalowanie do oryginału
-                x1 = int(x1_proc * scale_x)
-                x2 = int(x2_proc * scale_x)
-                y1 = int(y1_proc * scale_y)
-                y2 = int(y2_proc * scale_y)
                 
+                # Dzielimy szerokość na pojedyncze litery ("Równe krojenie")
                 char_width = (x2 - x1) / len(text_clean)
                 
                 for i, char in enumerate(text_clean):
-                    if char not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789':
-                        continue
-                        
                     char_x1 = x1 + (i * char_width)
                     char_x2 = char_x1 + char_width
                     
                     det = CharacterDetection(
-                        character=char,
-                        bbox=(char_x1, y1, char_x2, y2),
-                        confidence=float(conf),
+                        character=char, 
+                        bbox=(char_x1, y1, char_x2, y2), 
+                        confidence=float(conf), 
                         method="ocr"
                     )
                     detections.append(det)
@@ -198,50 +161,26 @@ class CharacterDetector:
         except Exception as e:
             logger.error(f"Błąd OCR detection: {e}")
             return []
-    
     def _detect_with_yolo(self, plate_image: np.ndarray) -> List[CharacterDetection]:
-        """Detekcja za pomocą wytrenowanego modelu YOLO."""
         if self.yolo_model is None:
             return []
-        
         try:
-            # Uruchom YOLO z niskim progiem ufności (potem można to wyciągnąć do ustawień)
             results = self.yolo_model(plate_image, conf=0.25, verbose=False)
-            
-            if not results or len(results) == 0:
-                return []
-            
+            if not results or len(results) == 0: return []
             result = results[0]
-            
-            if not hasattr(result, 'boxes') or result.boxes is None:
-                return []
+            if not hasattr(result, 'boxes') or result.boxes is None: return []
             
             boxes = result.boxes.xyxy.cpu().numpy()
             confs = result.boxes.conf.cpu().numpy()
             classes = result.boxes.cls.cpu().numpy().astype(int)
             
             detections = []
-            
             for box, conf, cls_id in zip(boxes, confs, classes):
                 x1, y1, x2, y2 = map(float, box)
-                
-                # Pobierz nazwę klasy (np. "A", "B", "1")
-                class_name = "?"
-                if hasattr(self.yolo_model, 'names'):
-                    class_name = self.yolo_model.names.get(int(cls_id), str(cls_id))
-                else:
-                    class_name = str(cls_id)
-                
-                det = CharacterDetection(
-                    character=class_name.upper(),
-                    bbox=(x1, y1, x2, y2),
-                    confidence=float(conf),
-                    method="yolo"
-                )
+                class_name = self.yolo_model.names.get(int(cls_id), str(cls_id)) if hasattr(self.yolo_model, 'names') else str(cls_id)
+                det = CharacterDetection(character=class_name.upper(), bbox=(x1, y1, x2, y2), confidence=float(conf), method="yolo")
                 detections.append(det)
-            
             return detections
-        
         except Exception as e:
             logger.error(f"Błąd YOLO detection na znakach: {e}")
             return []
