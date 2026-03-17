@@ -49,6 +49,7 @@ class CharacterAnnotationTab:
         self.parent = parent
         self.app = app
         self.icon_manager = IconManager
+        
         self.frame = ttk.Frame(parent)
         
         self.is_processing = False
@@ -192,17 +193,12 @@ class CharacterAnnotationTab:
             txt_widget.see(tk.END)
         self.frame.after(0, do_log)
 
-    def _update_status(self, text: str, color: str = "#2ecc71"):
-        self.frame.after(0, lambda: self.ext_status.config(text=text, foreground=color))
-
     def _get_true_texts_from_filename(self, filename: str) -> list:
         stem = Path(filename).stem.upper()
         import re
         parts = re.findall(r'[A-Z0-9]{4,}', stem)
-        if not parts: 
-            return []
-        if len(parts) > 1:
-            return parts[:-1]
+        if not parts: return []
+        if len(parts) > 1: return parts[:-1]
         return parts
 
     def _get_current_prep_params(self):
@@ -232,7 +228,7 @@ class CharacterAnnotationTab:
 
     def _create_widgets(self):
         self.main_nb = ttk.Notebook(self.frame)
-        self.main_nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         tab1 = ttk.Frame(self.main_nb)
         self.main_nb.add(tab1, text=f"{self.icon_manager.get('cut')} 1. Wycinanie Tablic")
@@ -246,6 +242,9 @@ class CharacterAnnotationTab:
         self.main_nb.add(tab3, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
         self._build_cvat_tab(tab3)
 
+    # =========================================================
+    # ZAKŁADKA 1: WYCINANIE
+    # =========================================================
     def _build_extraction_tab(self, parent):
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -258,23 +257,22 @@ class CharacterAnnotationTab:
         lf_paths.pack(fill=tk.X, pady=(0, 15))
 
         ttk.Label(lf_paths, text="annotations.xml (z Zakładki Autoanotacja):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        row = ttk.Frame(lf_paths)
-        row.pack(fill=tk.X, pady=(0, 10))
-        ttk.Entry(row, textvariable=self.xml_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text="Wybierz", command=self._pick_xml_file).pack(side=tk.RIGHT, padx=(5,0))
+        row_xml = ttk.Frame(lf_paths)
+        row_xml.pack(fill=tk.X, pady=(0, 10))
+        ttk.Entry(row_xml, textvariable=self.xml_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row_xml, text="Wybierz", command=self._pick_xml_file).pack(side=tk.RIGHT, padx=(5,0))
 
         ttk.Label(lf_paths, text="Folder ze zdjęciami aut (źródło):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        row = ttk.Frame(lf_paths)
-        row.pack(fill=tk.X, pady=(0, 10))
-        ttk.Entry(row, textvariable=self.images_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text="Wybierz", command=self._pick_images_dir).pack(side=tk.RIGHT, padx=(5,0))
+        row_img = ttk.Frame(lf_paths)
+        row_img.pack(fill=tk.X, pady=(0, 10))
+        ttk.Entry(row_img, textvariable=self.images_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row_img, text="Wybierz", command=self._pick_images_dir).pack(side=tk.RIGHT, padx=(5,0))
 
         lf_run = ttk.LabelFrame(left, text=" Wycinanie Tablic ", padding=15)
         lf_run.pack(fill=tk.X)
         
         self.btn_extract = ttk.Button(lf_run, text="START (Wytnij tablice z paczki)", command=self._run_extraction, style="Accent.TButton")
         self.btn_extract.pack(fill=tk.X, ipady=5)
-        HELP.bind_help(self.btn_extract, "btn_wycinanie_start")
 
         self.btn_ext_stop = ttk.Button(lf_run, text="ZATRZYMAJ", command=lambda: setattr(self, 'is_processing', False), state=tk.DISABLED)
         self.btn_ext_stop.pack(fill=tk.X, pady=5)
@@ -287,6 +285,11 @@ class CharacterAnnotationTab:
         lf_logs.pack(fill=tk.BOTH, expand=True)
         self.ext_log = scrolledtext.ScrolledText(lf_logs, wrap=tk.WORD, font=("Consolas", 10), bg="#fdfdfd")
         self.ext_log.pack(fill=tk.BOTH, expand=True)
+
+        HELP.bind_help(row_xml, "t2_xml")
+        HELP.bind_help(row_img, "t2_img")
+        HELP.bind_help(self.btn_extract, "t2_cut_start")
+        HELP.bind_help(lf_logs, "t2_cut_logs")
 
     def _run_extraction(self):
         self._force_save_all()
@@ -359,6 +362,9 @@ class CharacterAnnotationTab:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # =========================================================
+    # ZAKŁADKA 2: ANALIZA ZNAKÓW I LABORATORIUM
+    # =========================================================
     def _build_detection_tab(self, parent):
         top_frame = ttk.Frame(parent)
         top_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -368,81 +374,60 @@ class CharacterAnnotationTab:
         self.preview_info_lbl = ttk.Label(top_frame, text="Wczytano tablic: 0", font=("Segoe UI", 9, "bold"), foreground="#2980b9")
         self.preview_info_lbl.pack(side=tk.RIGHT, padx=10)
 
-        pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        main_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        top_split = ttk.Frame(main_pane, height=450)
+        bottom_split = ttk.Frame(main_pane, height=200)
+        main_pane.add(top_split, weight=5) 
+        main_pane.add(bottom_split, weight=0)
 
-        left_frame = ttk.Frame(pane)
-        center_frame = ttk.Frame(pane)
-        right_frame = ttk.Frame(pane)
-        pane.add(left_frame, weight=1)
-        pane.add(center_frame, weight=2)
-        pane.add(right_frame, weight=1)
+        viewer_pane = ttk.PanedWindow(top_split, orient=tk.HORIZONTAL)
+        viewer_pane.pack(fill=tk.BOTH, expand=True)
 
-        list_lf = ttk.LabelFrame(left_frame, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ")
-        list_lf.pack(fill=tk.BOTH, expand=True)
-        self.plates_listbox = tk.Listbox(list_lf, font=("Consolas", 11), selectbackground="#3498db")
+        list_lf = ttk.LabelFrame(viewer_pane, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ")
+        preview_lf = ttk.LabelFrame(viewer_pane, text=" Podgląd OCR ")
+        viewer_pane.add(list_lf, weight=2)
+        viewer_pane.add(preview_lf, weight=3)
+
+        self.plates_listbox = tk.Listbox(list_lf, font=("Consolas", 10), selectbackground="#3498db")
         self.plates_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5,0), pady=5)
         scroll = ttk.Scrollbar(list_lf, command=self.plates_listbox.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0,5), pady=5)
         self.plates_listbox.config(yscrollcommand=scroll.set)
         self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
 
-        preview_lf = ttk.LabelFrame(center_frame, text=" Podgląd OCR ")
-        preview_lf.pack(fill=tk.X, expand=False, pady=(0, 10))
-        self.preview_canvas = tk.Canvas(preview_lf, bg="#1e1e1e", height=180, bd=3, relief="sunken", highlightthickness=0)
-        self.preview_canvas.pack(fill=tk.BOTH, expand=False, pady=8, padx=8)
+        self.preview_canvas = tk.Canvas(preview_lf, bg="#1e1e1e", bd=3, relief="sunken", highlightthickness=0)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=8, padx=8)
         self.preview_canvas.bind("<Configure>", lambda e: self._on_preview_select(None))
 
-        cols = ("znak", "metoda", "pewnosc")
-        self.chars_tree = ttk.Treeview(center_frame, columns=cols, show="headings", height=5)
-        self.chars_tree.heading("znak", text="Znak")
-        self.chars_tree.heading("metoda", text="Metoda")
-        self.chars_tree.heading("pewnosc", text="Pewność (%)")
-        self.chars_tree.column("znak", width=80, anchor=tk.CENTER)
-        self.chars_tree.column("metoda", width=100, anchor=tk.CENTER)
-        self.chars_tree.column("pewnosc", width=80, anchor=tk.CENTER)
-        self.chars_tree.pack(fill=tk.X, padx=5, pady=(0, 10))
+        bottom_cols = ttk.Frame(bottom_split)
+        bottom_cols.pack(fill=tk.BOTH, expand=True)
+        col_left = ttk.Frame(bottom_cols)
+        col_mid = ttk.Frame(bottom_cols)
+        col_right = ttk.Frame(bottom_cols)
+        col_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        col_mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        col_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
 
-        logs_test_lf = ttk.LabelFrame(center_frame, text=" Logi z Analizy i Testów ")
-        logs_test_lf.pack(fill=tk.BOTH, expand=True)
-        self.test_log_text = scrolledtext.ScrolledText(logs_test_lf, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc")
-        self.test_log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        self.winner_lf = ttk.LabelFrame(right_frame, text=" Aktualny Lider ", padding=10)
-        self.winner_lf.pack(fill=tk.X, pady=(0, 10))
-        self.winner_name_lbl = ttk.Label(self.winner_lf, text="BRAK DANYCH", font=("Segoe UI", 12, "bold"), foreground="gray")
-        self.winner_name_lbl.pack(anchor=tk.CENTER)
-        self.winner_acc_lbl = ttk.Label(self.winner_lf, text="Skuteczność: 0.0%", font=("Segoe UI", 10))
-        self.winner_acc_lbl.pack(anchor=tk.CENTER)
-
-        actions_lf = ttk.LabelFrame(right_frame, text=" Uruchom Przetwarzanie ", padding=15)
-        actions_lf.pack(fill=tk.X, pady=(0, 15))
-        self.btn_fast_ocr = ttk.Button(actions_lf, text="1. Szybki Test (Obecne Filtry)", command=self._run_fast_ocr_test, style="Accent.TButton")
-        self.btn_fast_ocr.pack(fill=tk.X, ipady=6, pady=(0, 10))
-        self.btn_rank_presets = ttk.Button(actions_lf, text="2. Turniej (Zbadaj paczkę Presetami)", command=self._run_preset_ranking)
-        self.btn_rank_presets.pack(fill=tk.X, ipady=5)
-
-        self.test_progress = ttk.Progressbar(actions_lf, maximum=100)
-        self.test_progress.pack(fill=tk.X, pady=(15, 5))
-        self.test_status_lbl = ttk.Label(actions_lf, text="Gotowy do testów", foreground="#2ecc71", font=("Segoe UI", 9, "bold"))
-        self.test_status_lbl.pack(anchor=tk.W)
-
-        set_lf = ttk.LabelFrame(right_frame, text=" Konfiguracja Rozpoznawania ", padding=15)
+        set_lf = ttk.LabelFrame(col_left, text=" Konfiguracja Rozpoznawania ", padding=10)
         set_lf.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(set_lf, text="Metoda odczytu:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 5))
-        combo = ttk.Combobox(set_lf, textvariable=self.detection_method_var, values=["OCR", "YOLO", "BOTH"], state="readonly")
-        combo.pack(fill=tk.X, pady=(2, 10))
+        row_meth = ttk.Frame(set_lf)
+        row_meth.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(row_meth, text="Metoda:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+        combo = ttk.Combobox(row_meth, textvariable=self.detection_method_var, values=["OCR", "YOLO", "BOTH"], state="readonly", width=12)
+        combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5,0))
         combo.bind("<<ComboboxSelected>>", self._on_method_change)
 
         dev_row = ttk.Frame(set_lf)
         dev_row.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(dev_row, text="Urządzenie:").pack(side=tk.LEFT)
-        dev_combo = ttk.Combobox(dev_row, textvariable=self.yolo_device_var, values=self._get_available_devices(), state="readonly", width=15)
+        ttk.Label(dev_row, text="Karta (Device):").pack(side=tk.LEFT)
+        dev_combo = ttk.Combobox(dev_row, textvariable=self.yolo_device_var, values=self._get_available_devices(), state="readonly", width=12)
         dev_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5,0))
 
         self.yolo_panel = ttk.Frame(set_lf)
-        ttk.Label(self.yolo_panel, text="Ścieżka do YOLO .pt:").pack(anchor=tk.W, pady=(5,0))
+        ttk.Label(self.yolo_panel, text="Model YOLO .pt:").pack(anchor=tk.W, pady=(5,0))
         r_y = ttk.Frame(self.yolo_panel)
         r_y.pack(fill=tk.X)
         ttk.Entry(r_y, textvariable=self.yolo_model_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -451,327 +436,43 @@ class CharacterAnnotationTab:
         if self.detection_method_var.get() not in ["YOLO", "BOTH"]: self.yolo_panel.pack_forget()
         else: self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
         
-        ttk.Separator(set_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(15, 10))
+        ttk.Separator(set_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(20, 15))
+        lab_frame = ttk.Frame(set_lf)
+        lab_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(lab_frame, text="Zbyt dużo błędów OCR?", foreground="gray", font=("Segoe UI", 9, "italic")).pack(anchor=tk.W, pady=(0, 5))
+        btn_lab = ttk.Button(lab_frame, text="🔬 LABORATORIUM OCR (FILTRY)", command=self._open_filter_lab, style="Accent.TButton")
+        btn_lab.pack(fill=tk.X, ipady=8)
+
+        logs_test_lf = ttk.LabelFrame(col_mid, text=" Logi z Analizy i Testów ")
+        logs_test_lf.pack(fill=tk.BOTH, expand=True)
+        logs_test_lf.pack_propagate(False) 
+        self.test_log_text = scrolledtext.ScrolledText(logs_test_lf, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc", height=8)
+        self.test_log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        actions_lf = ttk.LabelFrame(col_right, text=" Uruchom Przetwarzanie ", padding=10)
+        actions_lf.pack(fill=tk.BOTH, expand=True)
+        self.winner_name_lbl = ttk.Label(actions_lf, text="BRAK DANYCH", font=("Segoe UI", 11, "bold"), foreground="gray")
+        self.winner_name_lbl.pack(anchor=tk.CENTER, pady=(0, 5))
+        self.winner_acc_lbl = ttk.Label(actions_lf, text="Skuteczność: 0.0%", font=("Segoe UI", 10))
+        self.winner_acc_lbl.pack(anchor=tk.CENTER, pady=(0, 10))
         
-        btn_lab = ttk.Button(set_lf, text="Laboratorium OCR (Ustaw Filtry)", command=self._open_filter_lab)
-        btn_lab.pack(fill=tk.X, ipady=5)
+        self.btn_fast_ocr = ttk.Button(actions_lf, text="1. Odczytaj znaki tablic (Szybki Test)", command=self._run_fast_ocr_test, style="Accent.TButton")
+        self.btn_fast_ocr.pack(fill=tk.X, ipady=8, pady=(10, 5))
+        self.btn_rank_presets = ttk.Button(actions_lf, text="2. Turniej (Zbadaj paczkę Presetami)", command=self._run_preset_ranking)
+        self.btn_rank_presets.pack(fill=tk.X, ipady=6)
 
-        HELP.bind_help(self.btn_fast_ocr, "btn_fast_test")
-        HELP.bind_help(self.btn_rank_presets, "btn_rank_presets")
-        HELP.bind_help(combo, "tab2_method")
-        HELP.bind_help(btn_lab, "btn_lab")
+        self.test_progress = ttk.Progressbar(actions_lf, maximum=100)
+        self.test_progress.pack(fill=tk.X, pady=(15, 5))
+        self.test_status_lbl = ttk.Label(actions_lf, text="Gotowy do testów", foreground="#2ecc71", font=("Segoe UI", 9, "bold"))
+        self.test_status_lbl.pack(anchor=tk.W)
 
-    def _update_winner_label(self):
-        best_preset_data, best_acc = self._get_best_preset()
-        if best_preset_data and best_preset_data.get("name"):
-            name = best_preset_data.get("name")
-            self.winner_name_lbl.config(text=name.upper(), foreground="#27ae60")
-            self.winner_acc_lbl.config(text=f"Skuteczność: {best_acc:.1f}%", foreground="black")
-        else:
-            self.winner_name_lbl.config(text="BRAK DANYCH Z TURNIEJU", foreground="gray")
-            self.winner_acc_lbl.config(text="Skuteczność: 0.0%", foreground="gray")
-
-    def _load_preview_data(self, quiet=False):
-        out_dir = Path(self.preview_dir_var.get().strip())
-        meta_path = out_dir / "metadata.json"
-        
-        self.frame.after(0, self._update_winner_label)
-        
-        if not meta_path.exists():
-            if not quiet: messagebox.showerror("Brak pliku", f"Nie znaleziono metadata.json w folderze:\n{out_dir}")
-            self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="red")
-            return
-            
-        try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                self.preview_metadata = json.load(f)
-                
-            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
-            self.plates_listbox.delete(0, tk.END)
-            
-            for idx, pid in enumerate(self.preview_plate_ids):
-                data = self.preview_metadata[pid]
-                chars = data.get("characters", [])
-                status = data.get("status", "unknown")
-                
-                # ZABEZPIECZONE SORTOWANIE (Bezpieczne łączenie w klamerkach)
-                valid_chars = [c for c in chars if isinstance(c, dict)]
-                try:
-                    chars_sorted = sorted(valid_chars, key=lambda c: float(c.get("bbox", [0])[0]) if c.get("bbox") else 0.0)
-                except Exception:
-                    chars_sorted = valid_chars
-                
-                text = "".join([str(c.get("character", "?")) for c in chars_sorted])
-                icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
-                
-                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text}]"
-                self.plates_listbox.insert(tk.END, display_text)
-                
-                # BEZPIECZNE KOLOROWANIE (Py 3.12 compatible)
-                if status == "perfect": 
-                    self.plates_listbox.itemconfig('end', foreground='#27ae60')
-                elif status == "needs_fix": 
-                    self.plates_listbox.itemconfig('end', foreground='#c0392b')
-                
-            self.preview_info_lbl.config(text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}", foreground="green")
-            
-            if self.preview_plate_ids:
-                self.plates_listbox.selection_set(0)
-                self._on_preview_select(None)
-                
-            self.frame.after(100, self._update_winner_label)
-                
-        except Exception as e:
-            if not quiet: messagebox.showerror("Błąd odświeżania listy", str(e))
-
-    def _on_preview_select(self, event):
-        sel = self.plates_listbox.curselection()
-        if not sel or not self.preview_plate_ids: return
-        
-        pid = self.preview_plate_ids[sel[0]]
-        data = self.preview_metadata[pid]
-        img_path = Path(self.preview_dir_var.get().strip()) / "images" / f"{pid}.jpg"
-        
-        self.preview_canvas.delete("all")
-        for i in self.chars_tree.get_children(): self.chars_tree.delete(i)
-            
-        if not img_path.exists(): return
-            
-        try:
-            pil_img = Image.open(img_path)
-            orig_w, orig_h = pil_img.size
-            
-            c_w = max(50, self.preview_canvas.winfo_width())
-            c_h = max(50, self.preview_canvas.winfo_height())
-            
-            margin_x, margin_y_top, margin_y_bottom = 80, 40, 140 
-            scale_w = (c_w - margin_x) / float(orig_w)
-            scale_h = (c_h - (margin_y_top + margin_y_bottom)) / float(orig_h)
-            SCALE = max(1.0, min(min(scale_w, scale_h), 6.0))
-            
-            new_w, new_h = int(orig_w * SCALE), int(orig_h * SCALE)
-            pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            
-            self._current_photo = ImageTk.PhotoImage(pil_img)
-            x_off = (c_w - new_w) // 2
-            y_off = (c_h - new_h - margin_y_bottom + margin_y_top) // 2
-            
-            self.preview_canvas.create_image(x_off, y_off, anchor=tk.NW, image=self._current_photo)
-            image_bottom_y = y_off + new_h
-            
-            chars = data.get("characters", [])
-            valid_chars = [c for c in chars if isinstance(c, dict)]
-            try:
-                chars_sorted = sorted(valid_chars, key=lambda c: float(c.get("bbox", [0])[0]) if c.get("bbox") else 0.0)
-            except Exception:
-                chars_sorted = valid_chars
-                
-            for c in chars_sorted:
-                x1, y1, x2, y2 = c["bbox"]
-                cx1, cy1 = (x1 * SCALE) + x_off, (y1 * SCALE) + y_off
-                cx2, cy2 = (x2 * SCALE) + x_off, (y2 * SCALE) + y_off
-                center_x = cx1 + (cx2 - cx1) / 2
-                
-                self.preview_canvas.create_rectangle(cx1, cy1, cx2, cy2, outline="#00ff00", width=2)
-                text_anchor_y = image_bottom_y + 35 
-                self.preview_canvas.create_line(center_x, cy2, center_x, text_anchor_y - 20, fill="#2ecc71", dash=(2, 2))
-                
-                char_text = str(c.get("character", "?"))
-                self.preview_canvas.create_text(center_x + 1, text_anchor_y + 1, text=char_text, fill="#000000", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
-                self.preview_canvas.create_text(center_x, text_anchor_y, text=char_text, fill="#f1c40f", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
-                
-                conf = float(c.get("confidence", 0.0))
-                self.chars_tree.insert("", tk.END, values=(char_text, str(c.get("method", "N/A")), f"{conf*100:.1f}%"))
-                
-        except Exception as e: logger.error(f"Błąd wyświetlania podglądu tablicy: {e}")
-
-    def _lock_ui_for_testing(self):
-        self.btn_fast_ocr.config(state=tk.DISABLED)
-        self.btn_rank_presets.config(state=tk.DISABLED)
-        self.plates_listbox.config(state=tk.DISABLED)  
-        self.preview_canvas.delete("all")
-        self.preview_canvas.create_text(self.preview_canvas.winfo_width()/2, self.preview_canvas.winfo_height()/2, text="Przetwarzanie...", fill="gray", font=("Arial", 12, "italic"))
-
-    def _unlock_ui_after_testing(self):
-        self.btn_fast_ocr.config(state=tk.NORMAL)
-        self.btn_rank_presets.config(state=tk.NORMAL)
-        self.plates_listbox.config(state=tk.NORMAL)
-        if self.preview_plate_ids:
-            sel = self.plates_listbox.curselection()
-            if not sel: self.plates_listbox.selection_set(0)
-            self._on_preview_select(None)
-
-    def _run_fast_ocr_test(self):
-        if not self.preview_plate_ids: return messagebox.showinfo("Brak", "Wczytaj paczkę!")
-        self._force_save_all()
-        out_dir = Path(self.preview_dir_var.get().strip())
-        imgs_dir = out_dir / "images"
-        
-        self.test_log_text.delete(1.0, tk.END)
-        self._lock_ui_for_testing()
-        self._log(self.test_log_text, "=======================================================", "HEADER")
-        self._log(self.test_log_text, "START - Szybki Test Celności\n", "HEADER")
-
-        method_str = self.detection_method_var.get().lower()
-        method = DetectionMethod(method_str) if method_str else DetectionMethod.OCR
-        
-        yolo_model = None
-        if method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
-            try:
-                device = self._device_to_ultralytics(self.yolo_device_var.get().split()[0].lower())
-                yolo_model = YOLO(str(self.yolo_model_path_var.get()))
-                yolo_model.to(device)
-            except Exception as e: self._log(self.test_log_text, f"Błąd YOLO: {e}", "ERROR")
-
-        prep_params = self._get_current_prep_params()
-        ocr_engine = None
-        if method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
-            use_gpu = self.yolo_device_var.get().split()[0].lower().startswith("cuda")
-            ocr_engine = PlateOCR(device='cuda' if use_gpu else 'cpu', confidence_threshold=self.ocr_conf_var.get())
-            ocr_engine.custom_prep_params = prep_params
-
-        detector = CharacterDetector(method=method, ocr_engine=ocr_engine, yolo_model=yolo_model)
-        
-        def worker():
-            try:
-                total = len(self.preview_plate_ids)
-                stat_total_chars, stat_sum_confidence, stat_perfect = 0, 0.0, 0
-                
-                for idx, pid in enumerate(self.preview_plate_ids):
-                    if self.is_processing: break
-                    img_path = imgs_dir / f"{pid}.jpg"
-                    if not img_path.exists(): continue
-                    img = cv2.imread(str(img_path))
-                    if img is None: continue
-                    
-                    source_image = self.preview_metadata[pid].get("source_image", "")
-                    true_texts = self._get_true_texts_from_filename(source_image)
-                    chars = detector.detect(img)
-                    
-                    c_clean = []
-                    for c in chars:
-                        c_clean.append({"character": str(c.character), "bbox": [float(x) for x in c.bbox], "confidence": float(c.confidence), "method": str(c.method)})
-                        
-                    self.preview_metadata[pid]["characters"] = c_clean
-                    
-                    if c_clean:
-                        txt = "".join([c["character"] for c in c_clean])
-                        stat_total_chars += len(c_clean)
-                        stat_sum_confidence += sum([c["confidence"] for c in c_clean])
-                        
-                        if txt in true_texts:
-                            self.preview_metadata[pid]["status"] = "perfect"
-                            stat_perfect += 1
-                            true_texts.remove(txt)
-                            self._log(self.test_log_text, f"✅ [{idx+1:03d}/{total}] {pid}: {txt}", "SUCCESS")
-                        else:
-                            self.preview_metadata[pid]["status"] = "needs_fix"
-                            expected_str = " / ".join(true_texts) if true_texts else "Brak"
-                            self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}]  (Oczek: [{expected_str}])", "ERROR")
-                    else:
-                        self.preview_metadata[pid]["status"] = "needs_fix"
-                        self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: NIC NIE ZNALEZIONO", "ERROR")
-
-                    self.frame.after(0, lambda p=((idx + 1) / total) * 100: self.test_progress.config(value=p))
-                    self.frame.after(0, lambda c=idx+1, t=total: self.test_status_lbl.config(text=f"Testuję: {c} z {t}", foreground="#e67e22"))
-
-                with open(out_dir / "metadata.json", 'w', encoding='utf-8') as f:
-                    json.dump(self.preview_metadata, f, indent=2, ensure_ascii=False)
-                    
-                acc = (stat_perfect / total * 100) if total > 0 else 0
-                self._log(self.test_log_text, f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)", "SUCCESS" if acc >= 80 else "WARNING")
-
-            except Exception as e: self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
-            finally:
-                def finalize():
-                    self._load_preview_data(quiet=True)
-                    self._unlock_ui_after_testing()
-                    self.test_progress.config(value=100)
-                    self.test_status_lbl.config(text="Zakończono Test!", foreground="#2ecc71")
-                self.frame.after(0, finalize)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _run_preset_ranking(self):
-        if not self.preview_plate_ids: return messagebox.showinfo("Brak", "Wczytaj paczkę danych do testu!")
-            
-        preset_files = list(self.presets_dir.glob("*.json"))
-        preset_files = [f for f in preset_files if f.name != "global_ranking.json"]
-        if not preset_files: return messagebox.showinfo("Brak presetów", "Brak presetów! Otwórz Laboratorium i zapisz filtry jako JSON.")
-
-        self.test_log_text.delete(1.0, tk.END)
-        self._lock_ui_for_testing()
-        self._log(self.test_log_text, "=======================================================", "HEADER")
-        self._log(self.test_log_text, f"ROZPOCZYNAM TURNIEJ PRESETÓW", "HEADER")
-
-        out_dir = Path(self.preview_dir_var.get().strip())
-        imgs_dir = out_dir / "images"
-        cache_file = self.presets_dir / "global_ranking.json"
-        
-        def worker():
-            try:
-                ranking_cache = {}
-                if cache_file.exists():
-                    try:
-                        with open(cache_file, 'r', encoding='utf-8') as f: ranking_cache = json.load(f)
-                    except: pass
-
-                ocr_engine = PlateOCR(device='cuda' if self.yolo_device_var.get().startswith("cuda") else 'cpu')
-                detector = CharacterDetector(method=DetectionMethod.OCR, ocr_engine=ocr_engine)
-                
-                results_table = []
-                total_imgs = len(self.preview_plate_ids)
-                total_presets = len(preset_files)
-
-                for p_idx, p_file in enumerate(preset_files):
-                    preset_name = p_file.stem
-                    try:
-                        with open(p_file, 'r', encoding='utf-8') as f: preset_params = json.load(f)
-                    except: continue
-                    
-                    clean_params = {k: v for k, v in preset_params.items() if not k.startswith("char_do_") and k != "char_ocr_conf"}
-                    param_signature = str(sorted(clean_params.items()))
-                    
-                    if preset_name in ranking_cache and ranking_cache[preset_name].get("signature") == param_signature:
-                        results_table.append((ranking_cache[preset_name]["acc"], ranking_cache[preset_name]["matches"], preset_name, True))
-                        self.frame.after(0, lambda p=((p_idx+1)/total_presets)*100: self.test_progress.config(value=p))
-                        continue
-
-                    ocr_engine.custom_prep_params = clean_params
-                    if "char_ocr_conf" in preset_params: ocr_engine.confidence_threshold = float(preset_params.get("char_ocr_conf", 0.25))
-
-                    perfect_matches = 0
-                    for pid in self.preview_plate_ids:
-                        img_path = imgs_dir / f"{pid}.jpg"
-                        if not img_path.exists(): continue
-                        plate_img = cv2.imread(str(img_path))
-                        if plate_img is None: continue
-                        
-                        expected = self._get_true_texts_from_filename(self.preview_metadata[pid].get("source_image", ""))
-                        chars = detector.detect(plate_img)
-                        if "".join([str(c.character) for c in chars]) in expected: perfect_matches += 1
-
-                    acc = (perfect_matches / total_imgs) * 100 if total_imgs > 0 else 0
-                    ranking_cache[preset_name] = {"name": preset_name, "acc": acc, "matches": perfect_matches, "signature": param_signature, "params": preset_params}
-                    results_table.append((acc, perfect_matches, preset_name, False))
-                    self.frame.after(0, lambda p=((p_idx+1)/total_presets)*100: self.test_progress.config(value=p))
-
-                with open(cache_file, 'w', encoding='utf-8') as f: json.dump(ranking_cache, f, indent=4)
-                results_table.sort(key=lambda x: x[0], reverse=True)
-
-                self._log(self.test_log_text, "="*55, "HEADER")
-                for i, (acc, matches, name, from_cache) in enumerate(results_table):
-                    self._log(self.test_log_text, f"#{i+1}. {name.ljust(22)} | {acc:5.1f}%  ({matches}/{total_imgs})", "SUCCESS" if i==0 else "INFO")
-
-                self.frame.after(0, self._update_winner_label)
-
-            except Exception as e: self._log(self.test_log_text, f"\n❌ BŁĄD RANKINGU: {e}", "ERROR")
-            finally:
-                self.frame.after(0, self._unlock_ui_after_testing)
-                self.frame.after(0, lambda: self.test_progress.config(value=100))
-                self.frame.after(0, lambda: self.test_status_lbl.config(text="Turniej Zakończony!", foreground="#2ecc71"))
-
-        threading.Thread(target=worker, daemon=True).start()
+        HELP.bind_help(top_frame, "t2_history")
+        HELP.bind_help(self.plates_listbox, "t2_listbox")
+        HELP.bind_help(self.preview_canvas, "t2_canvas")
+        HELP.bind_help(self.btn_fast_ocr, "t2_fast_test")
+        HELP.bind_help(self.btn_rank_presets, "t2_rank")
+        HELP.bind_help(combo, "t2_method")
+        HELP.bind_help(btn_lab, "t2_lab_btn")
 
     def _open_filter_lab(self):
         out_dir = Path(self.preview_dir_var.get().strip())
@@ -797,11 +498,10 @@ class CharacterAnnotationTab:
         lab_win = tk.Toplevel(self.frame)
         lab_win.title("Laboratorium Filtrów OCR")
         lab_win.geometry("1100x850")
-        
         bottom_bar = ttk.Frame(lab_win, padding=10, relief="raised")
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # ✅ DEDYKOWANY PASEK POMOCY DLA LABORATORIUM (Brak okienek)
+        # ✅ PRZYWRÓCENIE POMOCY: Dedykowany pasek tekstowy dla okna Laboratorium
         lab_help_text = tk.Text(
             bottom_bar, height=2, wrap=tk.WORD, 
             bg="#f0f0f0", bd=0, font=("Segoe UI", 10, "italic"), fg="#2980b9"
@@ -817,8 +517,11 @@ class CharacterAnnotationTab:
                 lab_help_text.insert(tk.END, msg)
                 lab_help_text.config(state=tk.DISABLED)
 
+        # Przechwytujemy globalny system pomocy dla tego okienka na czas jego trwania
         self.old_status_updater = HELP.status_updater
         HELP.status_updater = update_lab_help
+        
+        main_content = ttk.Frame(lab_win)        
         
         main_content = ttk.Frame(lab_win)
         main_content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -985,7 +688,13 @@ class CharacterAnnotationTab:
 
         geom = ttk.LabelFrame(scrollable_frame, text=" 1. Geometria ", padding=10)
         geom.pack(fill=tk.X, pady=(0,10))
-        add_slider(geom, "Ręczna korekta kąta [°]:", self.prep_angle_var, -30, 30, 1, "manual_angle", "lab_angle")
+        
+        # Tworzymy rządek dla kąta, by zmieścić przycisk Reset
+        angle_row = ttk.Frame(geom)
+        angle_row.pack(fill=tk.X)
+        add_slider(angle_row, "Ręczna korekta kąta [°]:", self.prep_angle_var, -30, 30, 1, "manual_angle", "lab_angle")
+        ttk.Button(geom, text="Reset Kąta", command=lambda: (self.prep_angle_var.set(0.0), update_preview())).pack(anchor=tk.E, pady=(0,5))
+        
         add_slider(geom, "Wysokość OCR (px):", self.prep_height_var, 40, 150, 0, "target_height", "lab_height")
         
         filt = ttk.LabelFrame(scrollable_frame, text=" 2. Filtry bazowe ", padding=10)
@@ -1038,6 +747,7 @@ class CharacterAnnotationTab:
                 except: pass
             self._force_save_all()
             self.lab_photo_refs.clear()
+            # ✅ ZMIANA: Po zamknięciu Labu, pomoc wraca do Głównego Okna
             HELP.status_updater = self.old_status_updater 
             lab_win.destroy()
 
@@ -1046,7 +756,260 @@ class CharacterAnnotationTab:
         ttk.Button(bottom_bar, text="Wczytaj Preset", command=load_preset).pack(side=tk.RIGHT)
         ttk.Button(bottom_bar, text="ZAMKNIJ", command=safe_close, style="Accent.TButton").pack(side=tk.RIGHT, padx=15)
 
-        update_preview()
+        # ✅ PRZYWRÓCONO: Przycisk losowania próbek (Po prawej od paska pomocy)
+        btn_roll = ttk.Button(bottom_bar, text="🎲 Losuj inną próbkę", command=lambda: (setattr(self, 'lab_current_images', roll_images()), update_preview()))
+        btn_roll.pack(side=tk.RIGHT, padx=15)
+
+        update_preview()        
+
+
+
+    def _update_winner_label(self):
+        best_preset_data, best_acc = self._get_best_preset()
+        if best_preset_data and best_preset_data.get("name"):
+            name = best_preset_data.get("name")
+            self.winner_name_lbl.config(text=name.upper(), foreground="#27ae60")
+            self.winner_acc_lbl.config(text=f"Skuteczność: {best_acc:.1f}%", foreground="black")
+        else:
+            self.winner_name_lbl.config(text="BRAK DANYCH Z TURNIEJU", foreground="gray")
+            self.winner_acc_lbl.config(text="Skuteczność: 0.0%", foreground="gray")
+
+    def _load_preview_data(self, quiet=False):
+        out_dir = Path(self.preview_dir_var.get().strip())
+        meta_path = out_dir / "metadata.json"
+        
+        self.frame.after(0, self._update_winner_label)
+        
+        if not meta_path.exists():
+            if not quiet: messagebox.showerror("Brak pliku", f"Nie znaleziono metadata.json w folderze:\n{out_dir}")
+            self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="red")
+            return
+            
+        try:
+            # ✅ ZMIANA: Zmuszamy program by czytał plik TYLKO WTEDY, gdy nie ma go jeszcze w świeżej pamięci!
+            # (Np. przy pierwszym uruchomieniu). Zabezpiecza to przed "Race Condition" z dyskiem.
+            if not self.preview_metadata or not quiet:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    self.preview_metadata = json.load(f)
+                
+            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
+            self.plates_listbox.delete(0, tk.END)
+            
+            for idx, pid in enumerate(self.preview_plate_ids):
+                data = self.preview_metadata[pid]
+                status = str(data.get("status", "unknown"))
+                chars = data.get("characters", [])
+                
+                # JEDYNE SŁUSZNE I BEZPIECZNE SORTOWANIE (Bez try/except)
+                clean_chars = []
+                if isinstance(chars, list):
+                    for c in chars:
+                        if isinstance(c, dict) and "character" in c and "bbox" in c:
+                            clean_chars.append(c)
+                
+                # Sortowanie po pierwszym elemencie bboxa (x1)
+                clean_chars.sort(key=lambda x: float(x["bbox"][0]))
+                
+                # Odpina wszystkie dziwne artefakty i zmusza znaki do bycia jednym spójnym wyrazem
+                text = "".join([str(c.get("character", "")).strip() for c in clean_chars])
+                icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
+                
+                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text}]"
+                self.plates_listbox.insert(tk.END, display_text)
+                
+                current_idx = self.plates_listbox.size() - 1
+                if status == "perfect": 
+                    self.plates_listbox.itemconfig(current_idx, foreground='#27ae60')
+                elif status == "needs_fix": 
+                    self.plates_listbox.itemconfig(current_idx, foreground='#c0392b')
+                
+            self.preview_info_lbl.config(text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}", foreground="green")
+            
+            if self.preview_plate_ids:
+                self.plates_listbox.selection_set(0)
+                self._on_preview_select(None)
+                
+            self.frame.after(100, self._update_winner_label)
+                
+        except Exception as e:
+            if not quiet: messagebox.showerror("Błąd odświeżania listy", str(e))
+
+    def _on_preview_select(self, event):
+        sel = self.plates_listbox.curselection()
+        if not sel or not self.preview_plate_ids: return
+        
+        pid = self.preview_plate_ids[sel[0]]
+        data = self.preview_metadata[pid]
+        img_path = Path(self.preview_dir_var.get().strip()) / "images" / f"{pid}.jpg"
+        
+        self.preview_canvas.delete("all")
+            
+        if not img_path.exists(): return
+            
+        try:
+            pil_img = Image.open(img_path)
+            orig_w, orig_h = pil_img.size
+            
+            c_w = max(50, self.preview_canvas.winfo_width())
+            c_h = max(50, self.preview_canvas.winfo_height())
+            
+            margin_x, margin_y_top, margin_y_bottom = 80, 40, 140 
+            scale_w = (c_w - margin_x) / float(orig_w)
+            scale_h = (c_h - (margin_y_top + margin_y_bottom)) / float(orig_h)
+            SCALE = max(1.0, min(min(scale_w, scale_h), 6.0))
+            
+            new_w, new_h = int(orig_w * SCALE), int(orig_h * SCALE)
+            pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
+            self._current_photo = ImageTk.PhotoImage(pil_img)
+            x_off = (c_w - new_w) // 2
+            y_off = (c_h - new_h - margin_y_bottom + margin_y_top) // 2
+            
+            self.preview_canvas.create_image(x_off, y_off, anchor=tk.NW, image=self._current_photo)
+            image_bottom_y = y_off + new_h
+            
+            chars = data.get("characters", [])
+            
+            # IDENTYCZNE SORTOWANIE JAK NA LIŚCIE
+            clean_chars = []
+            if isinstance(chars, list):
+                for c in chars:
+                    if isinstance(c, dict) and "character" in c and "bbox" in c:
+                        clean_chars.append(c)
+                        
+            clean_chars.sort(key=lambda x: float(x["bbox"][0]))
+                
+            for c in clean_chars:
+                x1, y1, x2, y2 = c["bbox"]
+                cx1, cy1 = (float(x1) * SCALE) + x_off, (float(y1) * SCALE) + y_off
+                cx2, cy2 = (float(x2) * SCALE) + x_off, (float(y2) * SCALE) + y_off
+                center_x = cx1 + (cx2 - cx1) / 2
+                
+                self.preview_canvas.create_rectangle(cx1, cy1, cx2, cy2, outline="#00ff00", width=2)
+                text_anchor_y = image_bottom_y + 35 
+                self.preview_canvas.create_line(center_x, cy2, center_x, text_anchor_y - 20, fill="#2ecc71", dash=(2, 2))
+                
+                char_text = str(c["character"])
+                self.preview_canvas.create_text(center_x + 1, text_anchor_y + 1, text=char_text, fill="#000000", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
+                self.preview_canvas.create_text(center_x, text_anchor_y, text=char_text, fill="#f1c40f", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
+                
+        except Exception as e: logger.error(f"Błąd wyświetlania podglądu tablicy: {e}")
+
+    def _lock_ui_for_testing(self):
+        self.btn_fast_ocr.config(state=tk.DISABLED)
+        self.btn_rank_presets.config(state=tk.DISABLED)
+        self.plates_listbox.config(state=tk.DISABLED)  
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_text(self.preview_canvas.winfo_width()/2, self.preview_canvas.winfo_height()/2, text="Przetwarzanie...", fill="gray", font=("Arial", 12, "italic"))
+
+    def _unlock_ui_after_testing(self):
+        self.btn_fast_ocr.config(state=tk.NORMAL)
+        self.btn_rank_presets.config(state=tk.NORMAL)
+        self.plates_listbox.config(state=tk.NORMAL)
+        if self.preview_plate_ids:
+            sel = self.plates_listbox.curselection()
+            if not sel: self.plates_listbox.selection_set(0)
+            self._on_preview_select(None)
+
+    def _run_fast_ocr_test(self):
+        if not self.preview_plate_ids: return messagebox.showinfo("Brak", "Wczytaj paczkę!")
+        self._force_save_all()
+        out_dir = Path(self.preview_dir_var.get().strip())
+        imgs_dir = out_dir / "images"
+        
+        self.test_log_text.delete(1.0, tk.END)
+        self._lock_ui_for_testing()
+        self._log(self.test_log_text, "=======================================================", "HEADER")
+        self._log(self.test_log_text, "START - Szybki Test Celności\n", "HEADER")
+
+        method_str = self.detection_method_var.get().lower()
+        method = DetectionMethod(method_str) if method_str else DetectionMethod.OCR
+        
+        yolo_model = None
+        if method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
+            try:
+                device = self._device_to_ultralytics(self.yolo_device_var.get().split()[0].lower())
+                yolo_model = YOLO(str(self.yolo_model_path_var.get()))
+                yolo_model.to(device)
+            except Exception as e: self._log(self.test_log_text, f"Błąd YOLO: {e}", "ERROR")
+
+        prep_params = self._get_current_prep_params()
+        ocr_engine = None
+        if method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
+            use_gpu = self.yolo_device_var.get().split()[0].lower().startswith("cuda")
+            ocr_engine = PlateOCR(device='cuda' if use_gpu else 'cpu', confidence_threshold=self.ocr_conf_var.get())
+            ocr_engine.custom_prep_params = prep_params
+
+        detector = CharacterDetector(method=method, ocr_engine=ocr_engine, yolo_model=yolo_model)
+        
+        def worker():
+            try:
+                total = len(self.preview_plate_ids)
+                stat_total_chars, stat_sum_confidence, stat_perfect = 0, 0.0, 0
+                
+                for idx, pid in enumerate(self.preview_plate_ids):
+                    if self.is_processing: break
+                    img_path = imgs_dir / f"{pid}.jpg"
+                    if not img_path.exists(): continue
+                    img = cv2.imread(str(img_path))
+                    if img is None: continue
+                    
+                    source_image = self.preview_metadata[pid].get("source_image", "")
+                    true_texts = self._get_true_texts_from_filename(source_image)
+                    chars = detector.detect(img)
+                    
+                    c_clean = []
+                    for c in chars:
+                        c_clean.append({
+                            "character": str(c.character), 
+                            "bbox": [float(x) for x in c.bbox], 
+                            "confidence": float(c.confidence), 
+                            "method": str(c.method)
+                        })
+                        
+                    # Aktualizujemy wewnętrzną pamięć z użyciem zabezpieczonej zmiennej!
+                    self.preview_metadata[pid]["characters"] = c_clean
+                    
+                    if c_clean:
+                        # Wymuszamy ostateczne sortowanie poziome OD RAZU przed testem prawdziwości
+                        c_clean.sort(key=lambda x: float(x["bbox"][0]))
+                        
+                        txt = "".join([str(c["character"]) for c in c_clean])
+                        stat_total_chars += len(c_clean)
+                        stat_sum_confidence += sum([c["confidence"] for c in c_clean])
+
+                        if txt in true_texts:
+                            self.preview_metadata[pid]["status"] = "perfect"
+                            stat_perfect += 1
+                            true_texts.remove(txt)
+                            self._log(self.test_log_text, f"✅ [{idx+1:03d}/{total}] {pid}: {txt}", "SUCCESS")
+                        else:
+                            self.preview_metadata[pid]["status"] = "needs_fix"
+                            expected_str = " / ".join(true_texts) if true_texts else "Brak"
+                            self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}]  (Oczek: [{expected_str}])", "ERROR")
+                    else:
+                        self.preview_metadata[pid]["status"] = "needs_fix"
+                        self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: NIC NIE ZNALEZIONO", "ERROR")
+
+                    self.frame.after(0, lambda p=((idx + 1) / total) * 100: self.test_progress.config(value=p))
+                    self.frame.after(0, lambda c=idx+1, t=total: self.test_status_lbl.config(text=f"Testuję: {c} z {t}", foreground="#e67e22"))
+
+                with open(out_dir / "metadata.json", 'w', encoding='utf-8') as f:
+                    json.dump(self.preview_metadata, f, indent=2, ensure_ascii=False)
+                    
+                acc = (stat_perfect / total * 100) if total > 0 else 0
+                self._log(self.test_log_text, f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)", "SUCCESS" if acc >= 80 else "WARNING")
+
+            except Exception as e: self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
+            finally:
+                def finalize():
+                    self._load_preview_data(quiet=True)
+                    self._unlock_ui_after_testing()
+                    self.test_progress.config(value=100)
+                    self.test_status_lbl.config(text="Zakończono Test!", foreground="#2ecc71")
+                self.frame.after(300, finalize)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_cvat_tab(self, parent):
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
@@ -1059,11 +1022,12 @@ class CharacterAnnotationTab:
         cvat_f.pack(fill=tk.X, pady=(5, 5))
         ttk.Label(cvat_f, text="OPCJA 1: Ręczna poprawa błędów", font=("Segoe UI", 10, "bold"), foreground="#c0392b").pack(anchor=tk.W)
         ttk.Label(cvat_f, text="Generuje plik .ZIP dla programu CVAT. Eksportowane są tylko te tablice,\nktóre OCR odczytał błędnie (🔴). Po ich poprawieniu, zaimportuj je z powrotem.", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
-        ttk.Checkbutton(cvat_f, text="Tylko tablice z błędami (Czerwone)", variable=self.smart_export_var).pack(anchor=tk.W)
+        
+        cb_smart = ttk.Checkbutton(cvat_f, text="Tylko tablice z błędami (Czerwone)", variable=self.smart_export_var)
+        cb_smart.pack(anchor=tk.W)
         
         btn_cvat = ttk.Button(cvat_f, text="WYGENERUJ .ZIP DLA CVAT", command=self._run_cvat_export, style="Accent.TButton")
         btn_cvat.pack(fill=tk.X, pady=(5, 0), ipady=3)
-        HELP.bind_help(btn_cvat, "btn_export_cvat")
 
         ttk.Separator(export_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
 
@@ -1074,7 +1038,6 @@ class CharacterAnnotationTab:
         
         btn_yolo = ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton")
         btn_yolo.pack(fill=tk.X, ipady=4)
-        HELP.bind_help(btn_yolo, "btn_export_yolo")
 
         info_lf = ttk.LabelFrame(export_lf, text=" Status i Wskazówki ", padding=5)
         info_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
@@ -1095,7 +1058,6 @@ class CharacterAnnotationTab:
         
         btn_import = ttk.Button(import_lf, text="ZAKTUALIZUJ BAZĘ", command=self._run_cvat_import, style="Accent.TButton")
         btn_import.pack(fill=tk.X, pady=(10, 5), ipady=3)
-        HELP.bind_help(btn_import, "btn_import_cvat")
         
         import_console_lf = ttk.LabelFrame(import_lf, text=" Status Importu ", padding=5)
         import_console_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
@@ -1103,6 +1065,11 @@ class CharacterAnnotationTab:
         self.import_console.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.import_console.insert(tk.END, "Oczekuje na plik XML...")
         self.import_console.config(state=tk.DISABLED)
+
+        HELP.bind_help(cb_smart, "cvat_smart_exp")
+        HELP.bind_help(btn_cvat, "btn_export_cvat")
+        HELP.bind_help(btn_yolo, "btn_export_yolo")
+        HELP.bind_help(btn_import, "btn_import_cvat")
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
@@ -1195,8 +1162,16 @@ class CharacterAnnotationTab:
                 self._set_console_text(self.export_console, "❌ Zatrzymano: W całej historii programu nie ma ani jednej tablicy ze statusem 🟢 Perfect!")
                 return
                 
-            yaml = f"train: images\nval: images\nnc: 36\nnames:\n" + "".join([f"  {i}: '{c}'\n" for c, i in char_map.items()])
-            with open(yolo_out / "data.yaml", "w") as f: f.write(yaml)
+            yaml_content = f"path: {yolo_out.absolute().as_posix()}\n"
+            yaml_content += f"train: images\n"
+            yaml_content += f"val: images\n"
+            yaml_content += f"nc: 36\n"
+            yaml_content += f"names:\n"
+            for char, class_id in char_map.items():
+                yaml_content += f"  {class_id}: '{char}'\n"
+                
+            yaml_path = yolo_out / "data.yaml"
+            yaml_path.write_text(yaml_content, encoding="utf-8")
             
             msg = (
                 f"🎉 SUKCES! Utworzono kompletny Mega-Dataset YOLO!\n"
@@ -1257,3 +1232,84 @@ class CharacterAnnotationTab:
             
         except Exception as e:
             self._set_console_text(self.import_console, f"❌ BŁĄD IMPORTU:\n{e}")
+
+    def _run_preset_ranking(self):
+        if not self.preview_plate_ids: return messagebox.showinfo("Brak", "Wczytaj paczkę danych do testu!")
+            
+        preset_files = list(self.presets_dir.glob("*.json"))
+        preset_files = [f for f in preset_files if f.name != "global_ranking.json"]
+        if not preset_files: return messagebox.showinfo("Brak presetów", "Brak presetów! Otwórz Laboratorium i zapisz filtry jako JSON.")
+
+        self.test_log_text.delete(1.0, tk.END)
+        self._lock_ui_for_testing()
+        self._log(self.test_log_text, "=======================================================", "HEADER")
+        self._log(self.test_log_text, f"ROZPOCZYNAM TURNIEJ PRESETÓW", "HEADER")
+
+        out_dir = Path(self.preview_dir_var.get().strip())
+        imgs_dir = out_dir / "images"
+        cache_file = self.presets_dir / "global_ranking.json"
+        
+        def worker():
+            try:
+                ranking_cache = {}
+                if cache_file.exists():
+                    try:
+                        with open(cache_file, 'r', encoding='utf-8') as f: ranking_cache = json.load(f)
+                    except: pass
+
+                ocr_engine = PlateOCR(device='cuda' if self.yolo_device_var.get().startswith("cuda") else 'cpu')
+                detector = CharacterDetector(method=DetectionMethod.OCR, ocr_engine=ocr_engine)
+                
+                results_table = []
+                total_imgs = len(self.preview_plate_ids)
+                total_presets = len(preset_files)
+
+                for p_idx, p_file in enumerate(preset_files):
+                    preset_name = p_file.stem
+                    try:
+                        with open(p_file, 'r', encoding='utf-8') as f: preset_params = json.load(f)
+                    except: continue
+                    
+                    clean_params = {k: v for k, v in preset_params.items() if not k.startswith("char_do_") and k != "char_ocr_conf"}
+                    param_signature = str(sorted(clean_params.items()))
+                    
+                    if preset_name in ranking_cache and ranking_cache[preset_name].get("signature") == param_signature:
+                        results_table.append((ranking_cache[preset_name]["acc"], ranking_cache[preset_name]["matches"], preset_name, True))
+                        self.frame.after(0, lambda p=((p_idx+1)/total_presets)*100: self.test_progress.config(value=p))
+                        continue
+
+                    ocr_engine.custom_prep_params = clean_params
+                    if "char_ocr_conf" in preset_params: ocr_engine.confidence_threshold = float(preset_params.get("char_ocr_conf", 0.25))
+
+                    perfect_matches = 0
+                    for pid in self.preview_plate_ids:
+                        img_path = imgs_dir / f"{pid}.jpg"
+                        if not img_path.exists(): continue
+                        plate_img = cv2.imread(str(img_path))
+                        if plate_img is None: continue
+                        
+                        expected = self._get_true_texts_from_filename(self.preview_metadata[pid].get("source_image", ""))
+                        chars = detector.detect(plate_img)
+                        if "".join([str(c.character) for c in chars]) in expected: perfect_matches += 1
+
+                    acc = (perfect_matches / total_imgs) * 100 if total_imgs > 0 else 0
+                    ranking_cache[preset_name] = {"name": preset_name, "acc": acc, "matches": perfect_matches, "signature": param_signature, "params": preset_params}
+                    results_table.append((acc, perfect_matches, preset_name, False))
+                    self.frame.after(0, lambda p=((p_idx+1)/total_presets)*100: self.test_progress.config(value=p))
+
+                with open(cache_file, 'w', encoding='utf-8') as f: json.dump(ranking_cache, f, indent=4)
+                results_table.sort(key=lambda x: x[0], reverse=True)
+
+                self._log(self.test_log_text, "="*55, "HEADER")
+                for i, (acc, matches, name, from_cache) in enumerate(results_table):
+                    self._log(self.test_log_text, f"#{i+1}. {name.ljust(22)} | {acc:5.1f}%  ({matches}/{total_imgs})", "SUCCESS" if i==0 else "INFO")
+
+                self.frame.after(0, self._update_winner_label)
+
+            except Exception as e: self._log(self.test_log_text, f"\n❌ BŁĄD RANKINGU: {e}", "ERROR")
+            finally:
+                self.frame.after(0, self._unlock_ui_after_testing)
+                self.frame.after(0, lambda: self.test_progress.config(value=100))
+                self.frame.after(0, lambda: self.test_status_lbl.config(text="Turniej Zakończony!", foreground="#2ecc71"))
+
+        threading.Thread(target=worker, daemon=True).start()

@@ -67,10 +67,11 @@ class YOLOPoseTrainer:
 
         try:
             config = safe_load_yaml(yaml_file)
-            if "kpt_shape" not in config:
-                return False, "Brak 'kpt_shape' w data.yaml", stats
-
-            stats["kpt_shape"] = config["kpt_shape"]
+            
+            # ✅ ZMIANA: kpt_shape jest OPCJONALNE (Zależne od tego, czy uczymy Pose czy Detect)
+            if "kpt_shape" in config:
+                stats["kpt_shape"] = config["kpt_shape"]
+                
             stats["nc"] = config.get("nc", 1)
 
         except Exception as e:
@@ -97,6 +98,7 @@ class YOLOPoseTrainer:
         batch_size: int = 16,
         img_size: int = 640,
         device: str = "auto",
+        lr0: float = 0.01,
         resume_from: str = None,
         **kwargs
     ) -> Optional[str]:
@@ -140,7 +142,8 @@ class YOLOPoseTrainer:
                 epochs=epochs,
                 batch_size=batch_size,
                 img_size=img_size,
-                device=device
+                device=device,
+                lr0=lr0  # ✅ DODANO LR
             )
 
         self.is_training = True
@@ -149,14 +152,14 @@ class YOLOPoseTrainer:
 
         thread = threading.Thread(
             target=self._training_loop,
-            args=(model_file, dataset_path, epochs, batch_size, img_size, device, resume_from),
+            args=(model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from),
             daemon=True
         )
         thread.start()
 
         return self.current_run.id
 
-    def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, resume_from):
+    def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from):
         run = self.current_run
         try:
             is_resuming = bool(resume_from and Path(resume_from).exists())
@@ -180,6 +183,7 @@ class YOLOPoseTrainer:
                 "batch": batch_size,
                 "imgsz": img_size,
                 "device": 0 if device == "auto" and CUDA_AVAILABLE else device,
+                "lr0": lr0,  # ✅ DODANO LR do opcji uczenia Ultralytics!
                 "project": run.output_dir,
                 "name": "train",
                 "exist_ok": True,
@@ -189,6 +193,7 @@ class YOLOPoseTrainer:
                 "save_period": 10,
                 "patience": 50,
                 "plots": True,   # <- to tworzy results.png, PR_curve.png itd.
+                "workers": 0  # ✅ ZMIANA: Zablokowanie Multiprocessingu w Windows (BARDZO WAŻNE!)
             }
 
             def on_train_epoch_end(trainer):
