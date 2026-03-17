@@ -12,6 +12,12 @@ from typing import Optional
 import datetime
 import threading
 import logging
+import numpy as np
+
+# Dodane importy do przeglądarki
+import cv2
+from PIL import Image, ImageTk
+from .zoomable_canvas import ZoomableCanvas
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, AVAILABLE_POSE_MODELS
 from ..icons import IconManager
@@ -32,6 +38,10 @@ class AnnotationTab:
         self.is_processing = False
         self.start_time = None
         
+        # Zmienne do przeglądarki (Przechowują wyniki po zakończeniu)
+        self.current_annotations = []
+        self.current_input_dir = None
+        
         # Zmienne sterujące
         self.export_format_var = tk.StringVar(value="CVAT + YOLO Pose (plate4)")
         self.copy_images_yolo_var = tk.BooleanVar(value=False)
@@ -50,7 +60,7 @@ class AnnotationTab:
 
         self._create_widgets()
         self._update_model_lists()
-        self._on_mode_change() # Wymuszenie odświeżenia UI na starcie
+        self._on_mode_change()
 
     def _get_available_devices(self):
         devices = ["auto", "cpu"]
@@ -81,7 +91,7 @@ class AnnotationTab:
 
         # Proporcje kolumn
         pane.add(left_frame, weight=2)
-        pane.add(center_frame, weight=3)
+        pane.add(center_frame, weight=4) # Środek dostał więcej miejsca na podgląd!
         pane.add(right_frame, weight=2)
 
         # ==========================================================
@@ -100,14 +110,9 @@ class AnnotationTab:
         row = ttk.Frame(paths_lf)
         row.pack(fill=tk.X, pady=(0, 5))
         
-        # Wymuszamy domyślną ścieżkę z Configu
         self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN)))
-        
-        # Tworzymy zablokowane pole (tylko do odczytu)
         entry_out = ttk.Entry(row, textvariable=self.output_dir_var, state="readonly")
         entry_out.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Brak przycisku "Wybierz" - pełna automatyzacja!
 
         actions_lf = ttk.LabelFrame(left_frame, text=" Przetwarzanie YOLO ", padding=15)
         actions_lf.pack(fill=tk.X)
@@ -125,14 +130,42 @@ class AnnotationTab:
         self.status_label.pack(anchor=tk.W)
 
         # ==========================================================
-        # ŚRODKOWA KOLUMNA: Logi
+        # ŚRODKOWA KOLUMNA: Logi i Przeglądarka Detekcji (Notebook)
         # ==========================================================
-        logs_lf = ttk.LabelFrame(center_frame, text=" Logi systemu YOLO ", padding=10)
-        logs_lf.pack(fill=tk.BOTH, expand=True, padx=10)
-
-        self.log_text = scrolledtext.ScrolledText(logs_lf, wrap=tk.WORD, font=("Consolas", 9))
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.center_nb = ttk.Notebook(center_frame)
+        self.center_nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
+        
+        # Zakładka 1: Logi Systemowe
+        tab_logs = ttk.Frame(self.center_nb)
+        self.center_nb.add(tab_logs, text="📄 Logi Systemowe")
+        self.log_text = scrolledtext.ScrolledText(tab_logs, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc")
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self._redirect_logs()
+        
+        # Zakładka 2: Interaktywny Podgląd (Canvas)
+        tab_preview = ttk.Frame(self.center_nb)
+        self.center_nb.add(tab_preview, text="👁️ Przeglądarka Wyników")
+        
+        preview_pane = ttk.PanedWindow(tab_preview, orient=tk.HORIZONTAL)
+        preview_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Lewa strona podglądu: Lista plików
+        list_frame = ttk.Frame(preview_pane)
+        preview_pane.add(list_frame, weight=1)
+        
+        self.preview_listbox = tk.Listbox(list_frame, font=("Consolas", 9), selectbackground="#3498db")
+        self.preview_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(list_frame, command=self.preview_listbox.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.preview_listbox.config(yscrollcommand=scroll.set)
+        self.preview_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
+        
+        # Prawa strona podglądu: Zoomable Canvas
+        canvas_frame = ttk.Frame(preview_pane)
+        preview_pane.add(canvas_frame, weight=4)
+        
+        self.preview_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
 
         # ==========================================================
         # PRAWA KOLUMNA: Ustawienia
@@ -140,14 +173,12 @@ class AnnotationTab:
         settings_lf = ttk.LabelFrame(right_frame, text=" Konfiguracja Detekcji ", padding=15)
         settings_lf.pack(fill=tk.BOTH, expand=True)
 
-        # --- Tryb ---
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         modes = ["A: Tylko pojazdy", "B: Tylko tablice", "C: Pojazdy + tablice"]
         self.mode_combo = ttk.Combobox(settings_lf, textvariable=self.mode_var, values=modes, state="readonly")
         self.mode_combo.pack(fill=tk.X, pady=(0, 15))
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
 
-        # --- Pojazdy ---
         self.veh_frame = ttk.LabelFrame(settings_lf, text=" Model Pojazdów (Detect) ", padding=10)
         self.veh_frame.pack(fill=tk.X, pady=(0, 10))
         self.vehicle_combo = ttk.Combobox(self.veh_frame, textvariable=self.vehicle_model_var, state="readonly")
@@ -159,7 +190,6 @@ class AnnotationTab:
         ttk.Button(self.veh_custom_row, text="Wybierz .pt", command=self._select_vehicle_custom).pack(side=tk.RIGHT, padx=(5,0))
         self.veh_custom_row.pack(fill=tk.X, pady=(5,0))
 
-        # --- Tablice ---
         self.pla_frame = ttk.LabelFrame(settings_lf, text=" Model Tablic (Pose) ", padding=10)
         self.pla_frame.pack(fill=tk.X, pady=(0, 10))
         self.plate_combo = ttk.Combobox(self.pla_frame, textvariable=self.plate_model_var, state="readonly")
@@ -171,7 +201,6 @@ class AnnotationTab:
         ttk.Button(self.pla_custom_row, text="Wybierz .pt", command=self._select_plate_custom).pack(side=tk.RIGHT, padx=(5,0))
         self.pla_custom_row.pack(fill=tk.X, pady=(5,0))
 
-        # --- Parametry Ogólne ---
         param_frame = ttk.LabelFrame(settings_lf, text=" Parametry ", padding=10)
         param_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -188,38 +217,26 @@ class AnnotationTab:
         self.device_combo = ttk.Combobox(param_frame, textvariable=self.device_var, values=self._get_available_devices(), state="readonly")
         self.device_combo.pack(fill=tk.X, pady=2)
 
-        # --- Eksport ---
-        exp_frame = ttk.LabelFrame(settings_lf, text=" Eksport po procesie ", padding=10)
-        exp_frame.pack(fill=tk.X)
-        
-        ttk.Label(exp_frame, text="Zapisz jako:").pack(anchor=tk.W)
-        ttk.Combobox(exp_frame, textvariable=self.export_format_var, state="readonly",
-                     values=["CVAT XML 1.1", "YOLO Pose (plate4)", "CVAT + YOLO Pose (plate4)"]).pack(fill=tk.X, pady=2)
-        ttk.Checkbutton(exp_frame, text="Kopiuj obrazy do zestawu YOLO", variable=self.copy_images_yolo_var).pack(anchor=tk.W, pady=(5,0))
+
         # ✅ PODPIĘCIE SYSTEMU POMOCY DO ZAKŁADKI 1
         from .help_manager import HELP
         HELP.bind_help(self.mode_combo, "tab1_mode")
-        HELP.bind_help(row, "tab1_conf") # Podpinamy pod cały rządek suwaka pewności
+        HELP.bind_help(row, "tab1_conf") 
         HELP.bind_help(self.device_combo, "tab1_device")
         HELP.bind_help(self.start_btn, "tab1_start")
 
     # ==========================================================
     # LOGIKA INTERFEJSU
     # ==========================================================
-
     def _on_mode_change(self, event=None):
-        """Włącza/wyłącza ramki modeli w zależności od trybu."""
         mode = self.mode_var.get()
-        
-        # Pojazdy
         if "A:" in mode or "C:" in mode:
             self.vehicle_combo.config(state="readonly")
-            self._on_vehicle_model_change() # Aktualizuje widoczność custom entry
+            self._on_vehicle_model_change() 
         else:
             self.vehicle_combo.config(state=tk.DISABLED)
             self.veh_custom_row.pack_forget()
 
-        # Tablice
         if "B:" in mode or "C:" in mode:
             self.plate_combo.config(state="readonly")
             self._on_plate_model_change()
@@ -237,7 +254,6 @@ class AnnotationTab:
             p_keys = sorted(list(AVAILABLE_POSE_MODELS.keys()))
             self.plate_combo['values'] = p_keys + ["Custom"]
             if not self.plate_model_var.get() and p_keys: 
-                # Preferujemy yolo11s-pose jako default do tablic
                 self.plate_model_var.set("yolo11s-pose" if "yolo11s-pose" in p_keys else p_keys[0])
 
     def _on_vehicle_model_change(self, event=None):
@@ -265,22 +281,17 @@ class AnnotationTab:
         if p: self.input_dir_var.set(p)
 
     def _redirect_logs(self):
-        """Kieruje główne logi aplikacji do okienka tekstowego."""
         class TextHandler(logging.Handler):
             def __init__(self, widget):
                 super().__init__()
                 self.widget = widget
-                
             def emit(self, record):
                 try:
                     if self.widget.winfo_exists():
                         msg = self.format(record)
-                        # ✅ ZMIANA: Zlecamy wpisanie tekstu głównemu wątkowi (after)
                         self.widget.after(0, self._safe_insert, msg)
                 except: pass
-                
             def _safe_insert(self, msg):
-                # Ta metoda wykona się bezpiecznie w wątku UI
                 try:
                     if self.widget.winfo_exists():
                         self.widget.insert(tk.END, msg + "\n")
@@ -295,10 +306,8 @@ class AnnotationTab:
     # ==========================================================
     # LOGIKA PRZETWARZANIA YOLO
     # ==========================================================
-
     def _validate_models(self):
         mode = self.mode_var.get()
-        
         if "A:" in mode or "C:" in mode:
             if self.vehicle_model_var.get() == "Custom":
                 p = self.vehicle_custom_var.get()
@@ -313,17 +322,11 @@ class AnnotationTab:
 
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
-            if self.vehicle_model_var.get() == "Custom":
-                return Path(self.vehicle_custom_var.get())
-            else:
-                f = AVAILABLE_DETECT_MODELS[self.vehicle_model_var.get()]["file"]
-                return Path(CONFIG.DEFAULT_MODELS_DIR) / f
+            if self.vehicle_model_var.get() == "Custom": return Path(self.vehicle_custom_var.get())
+            else: return Path(CONFIG.DEFAULT_MODELS_DIR) / AVAILABLE_DETECT_MODELS[self.vehicle_model_var.get()]["file"]
         else:
-            if self.plate_model_var.get() == "Custom":
-                return Path(self.plate_custom_var.get())
-            else:
-                f = AVAILABLE_POSE_MODELS[self.plate_model_var.get()]["file"]
-                return Path(CONFIG.DEFAULT_MODELS_DIR) / f
+            if self.plate_model_var.get() == "Custom": return Path(self.plate_custom_var.get())
+            else: return Path(CONFIG.DEFAULT_MODELS_DIR) / AVAILABLE_POSE_MODELS[self.plate_model_var.get()]["file"]
 
     def _start_annotation(self):
         in_d = self.input_dir_var.get().strip()
@@ -333,7 +336,6 @@ class AnnotationTab:
         
         try:
             self._validate_models()
-            
             mode_text = self.mode_var.get()
             conf = self.conf_var.get()
             raw_dev = self.device_var.get().split()[0].lower()
@@ -342,29 +344,28 @@ class AnnotationTab:
             v_p = self._get_model_path("vehicle") if ("A:" in mode_text or "C:" in mode_text) else None
             p_p = self._get_model_path("plate") if ("B:" in mode_text or "C:" in mode_text) else None
 
-            # ✅ ZMIANA: Zwalniamy stary model z VRAM zanim załadujemy nowy
             if self.annotator is not None:
-                try:
-                    self.annotator.unload_models()
-                except:
-                    pass
+                try: self.annotator.unload_models()
+                except: pass
 
-            if "A:" in mode_text:
-                self.annotator = VehicleAnnotator(v_p, conf, dev)
-            elif "B:" in mode_text:
-                self.annotator = PlateAnnotator(p_p, conf, dev)
-            else:
-                self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
+            if "A:" in mode_text: self.annotator = VehicleAnnotator(v_p, conf, dev)
+            elif "B:" in mode_text: self.annotator = PlateAnnotator(p_p, conf, dev)
+            else: self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
             
             success, msg = self.annotator.load_models()
-            if not success:
-                raise RuntimeError(f"Błąd silnika YOLO: {msg}")
+            if not success: raise RuntimeError(f"Błąd silnika YOLO: {msg}")
 
             self.is_processing = True
             self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
             self.progress['value'] = 0
+            
+            # Wyczyść przeglądarkę i przejdź na logi
+            self.center_nb.select(0)
+            self.preview_listbox.delete(0, tk.END)
+            self.preview_canvas.delete("all")
+            self.current_annotations = []
             
             logger.info("="*50)
             logger.info("ROZPOCZĘTO AUTOANOTACJĘ OBRAZÓW (YOLO)")
@@ -390,8 +391,7 @@ class AnnotationTab:
             self.start_time = datetime.datetime.now()
             
             def prog_cb(current, total, filename):
-                if not self.is_processing:
-                    raise KeyboardInterrupt("Anulowano")
+                if not self.is_processing: raise KeyboardInterrupt("Anulowano")
                 pct = (current / total) * 100 if total > 0 else 0
                 self.frame.after(0, lambda: self._update_progress(pct, current, total, filename))
             
@@ -403,60 +403,33 @@ class AnnotationTab:
                 success = False
                 return
 
-            # =======================================================
-            # GENEROWANIE UNIKALNEGO FOLDERU "RUN"
-            # =======================================================
-            # =======================================================
-            # GENEROWANIE UNIKALNEGO FOLDERU "RUN" (Z DATĄ I CZASEM)
-            # =======================================================
+            # PRZEKAZANIE DANYCH DO PRZEGLĄDARKI
+            self.current_annotations = annotations
+            self.current_input_dir = in_dir
+            self.frame.after(0, self._populate_preview_list)
+
+            # GENEROWANIE FOLDERU "RUN"
             base_out_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Pobierz aktualną datę i godzinę (np. 20241026_143025)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            
             counter = 1
             while True:
-                # Format: run_001_20241026_143025
                 run_dir = base_out_dir / f"run_{counter:03d}_{timestamp}"
-                if not run_dir.exists():
-                    break
+                if not run_dir.exists(): break
                 counter += 1
                 
             run_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Utworzono unikalny folder na wyniki: {run_dir.name}")
 
-            fmt = self.export_format_var.get()
-            
-            # Ścieżka do XML żyje w bezpiecznym, nowym folderze
+            # ✅ ZMIANA: Zawsze generujemy wyłącznie ujednolicony annotations.xml i raport.
+            # Eksport YOLO przeniesiono do Active Learningu w Zakładce 2!
             cvat_xml_path = run_dir / "annotations.xml"
 
-            if "CVAT" in fmt:
-                logger.info("Zapisywanie CVAT XML...")
-                CVATExporter().export(annotations, cvat_xml_path)
-                
-            if "YOLO" in fmt:
-                logger.info("Zapisywanie YOLO Dataset...")
-                y_out = run_dir / "yolo_dataset"
-                YOLOPosePlate4Exporter(copy_images=self.copy_images_yolo_var.get()).export(annotations, in_dir, y_out)
+            logger.info("Zapisywanie bazy detekcji (annotations.xml)...")
+            CVATExporter().export(annotations, cvat_xml_path)
 
             logger.info("Generowanie raportu statystycznego...")
             ReportGenerator.generate_text_report(report, run_dir / "report.txt")
 
-            # Automatyczny Export do ZIP (jeśli zaznaczono opcję na GUI)
-            if "CVAT" in fmt and getattr(self, 'create_zip_var', None) and self.create_zip_var.get():
-                logger.info("Pakowanie danych do formatu .ZIP dla CVAT...")
-                from auto_annotation_tool.cvat_tools.cvat_zip_manager import CVATZipManager
-                
-                zip_output_file = run_dir / f"CVAT_Import_Ready_{run_dir.name}.zip"
-                ok, zip_msg = CVATZipManager.create_cvat_import_zip(
-                    xml_path=cvat_xml_path,
-                    images_dir=in_dir, 
-                    output_zip_path=zip_output_file
-                )
-                if ok: logger.info(f"✅ {zip_msg}")
-                else: logger.error(f"❌ {zip_msg}")
-
-            # Bezpieczne obliczanie czasu (zabezpieczone .total_seconds() przed blędem datetime)
             elapsed = format_duration((datetime.datetime.now() - self.start_time).total_seconds())
             message = f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
             logger.info(f"✅ {message}")
@@ -473,6 +446,87 @@ class AnnotationTab:
         finally:
             self.frame.after(0, lambda: self._finish(success, message))
 
+    # ==========================================================
+    # LOGIKA PRZEGLĄDARKI (CANVAS)
+    # ==========================================================
+    def _populate_preview_list(self):
+        """Wypełnia Listboxa wynikami i automatycznie przełącza na zakładkę Podglądu."""
+        self.preview_listbox.delete(0, tk.END)
+        
+        for idx, ann in enumerate(self.current_annotations):
+            icon = "🟢" if ann.is_successful else "🔴"
+            self.preview_listbox.insert(tk.END, f"{icon} {ann.filename}")
+            
+            if ann.is_successful:
+                self.preview_listbox.itemconfig('end', foreground='#27ae60')
+            else:
+                self.preview_listbox.itemconfig('end', foreground='#c0392b')
+                
+        if self.current_annotations:
+            # Automatyczny skok do przeglądarki i wczytanie 1 zdjęcia!
+            self.center_nb.select(1) 
+            self.preview_listbox.selection_set(0)
+            self._on_preview_select(None)
+
+    def _on_preview_select(self, event):
+        sel = self.preview_listbox.curselection()
+        if not sel or not self.current_annotations: return
+            
+        idx = sel[0]
+        ann = self.current_annotations[idx]
+        img_path = self.current_input_dir / ann.filename
+        
+        if not img_path.exists():
+            self.preview_canvas.delete("all")
+            self.preview_canvas.create_text(20, 20, text="Plik nie istnieje na dysku!", fill="red")
+            return
+            
+        try:
+            # Używamy OpenCV do szybkiego narysowania ramek na surowym obrazie
+            img = cv2.imread(str(img_path))
+            if img is None: return
+            
+            for det in ann.detections:
+                label_name = det.label.lower()
+                conf = det.confidence
+                
+                if label_name == "vehicle":
+                    # Zielony Bounding Box dla pojazdów
+                    x1, y1, x2, y2 = map(int, det.bbox)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(img, f"Vehicle {conf:.2f}", (x1, max(0, y1 - 10)), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                
+                elif label_name == "plate":
+                    # Czerwony Polygon dla tablic (odporny na perspektywę)
+                    if det.polygon and len(det.polygon) == 4:
+                        pts = np.array(det.polygon, np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(img, [pts], isClosed=True, color=(0, 0, 255), thickness=3)
+                        # Podpis nad najwyższym punktem Y
+                        min_y = int(min([p[1] for p in det.polygon]))
+                        min_x = int(min([p[0] for p in det.polygon]))
+                        cv2.putText(img, f"Plate {conf:.2f}", (min_x, max(0, min_y - 10)), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    else:
+                        # Fallback (Zwykły prostokąt dla starych modeli YOLO)
+                        x1, y1, x2, y2 = map(int, det.bbox)
+                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                        cv2.putText(img, f"Plate {conf:.2f}", (x1, max(0, y1 - 10)), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            # Konwersja BGR -> RGB dla Pillow
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            
+            # Wysłanie do ZoomableCanvas
+            self.preview_canvas.set_image(pil_img)
+            
+        except Exception as e:
+            logger.error(f"Błąd rysowania podglądu YOLO: {e}")
+
+    # ==========================================================
+    # UI HELPERS
+    # ==========================================================
     def _update_progress(self, pct, current, total, filename):
         self.progress['value'] = pct
         self.status_label.config(text=f"Przetwarzanie {current}/{total} ({int(pct)}%)")

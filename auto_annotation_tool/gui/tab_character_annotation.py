@@ -5,7 +5,7 @@ Zakładka ZNAKÓW.
 Logicznie podzielona na:
 1. Wycinanie tablic (surowe)
 2. Wykrywanie znaków i Analiza (OCR/YOLO, Laboratorium Filtrów, Turniej z Cache)
-3. CVAT Export/Import
+3. Integracje i Dataset YOLO
 """
 
 import tkinter as tk
@@ -55,7 +55,6 @@ class CharacterAnnotationTab:
         self.preview_metadata = {}
         self.preview_plate_ids = []
         self._current_photo = None 
-        self.help_var = tk.StringVar(value="Gotowy")
         
         self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
         self.presets_dir.mkdir(parents=True, exist_ok=True)
@@ -191,21 +190,19 @@ class CharacterAnnotationTab:
                 elif "❌" in msg: final_tag = "ERROR"
             txt_widget.insert(tk.END, msg + "\n", final_tag)
             txt_widget.see(tk.END)
-        self.frame.after(0, do_log)  
+        self.frame.after(0, do_log)
+
+    def _update_status(self, text: str, color: str = "#2ecc71"):
+        self.frame.after(0, lambda: self.ext_status.config(text=text, foreground=color))
 
     def _get_true_texts_from_filename(self, filename: str) -> list:
         stem = Path(filename).stem.upper()
         import re
-        
-        # Pobieramy tylko ciągi znaków, które mają co najmniej 4 znaki (odrzucamy śmieci jak '1' czy 'IMG')
         parts = re.findall(r'[A-Z0-9]{4,}', stem)
         if not parts: 
             return []
-            
-        # Twój format to: rej1_rej2_identyfikator. Odrzucamy ostatni człon jako identyfikator.
         if len(parts) > 1:
             return parts[:-1]
-            
         return parts
 
     def _get_current_prep_params(self):
@@ -220,40 +217,17 @@ class CharacterAnnotationTab:
         }
 
     def _get_best_preset(self):
-        # Lider jest globalny, zapisany w folderze z presetami
         cache_file = self.presets_dir / "global_ranking.json"
-        
-        if not cache_file.exists(): 
-            return None, 0.0
-            
+        if not cache_file.exists(): return None, 0.0
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-            if not data: 
-                return None, 0.0
-                
-            best_name = None
-            best_acc = -1.0
-            best_params = {}
-            
+            with open(cache_file, 'r', encoding='utf-8') as f: data = json.load(f)
+            best_name, best_acc, best_params = None, -1.0, {}
             for preset_key, stats in data.items():
                 acc = float(stats.get("acc", 0.0))
                 if acc > best_acc:
-                    best_acc = acc
-                    best_name = str(stats.get("name", preset_key))
-                    best_params = stats.get("params", {})
-                    
-            if best_name:
-                result = {
-                    "name": best_name,
-                    "params": best_params if isinstance(best_params, dict) else {}
-                }
-                return result, best_acc
-                
-        except Exception as e:
-            logger.debug(f"Błąd odczytu Lidera z globalnego cache: {e}")
-            
+                    best_acc, best_name, best_params = acc, str(stats.get("name", preset_key)), stats.get("params", {})
+            if best_name: return {"name": best_name, "params": best_params}, best_acc
+        except: pass
         return None, 0.0
 
     def _create_widgets(self):
@@ -271,9 +245,6 @@ class CharacterAnnotationTab:
         tab3 = ttk.Frame(self.main_nb)
         self.main_nb.add(tab3, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
         self._build_cvat_tab(tab3)
-        
-        help_bar = ttk.Label(self.frame, textvariable=self.help_var, relief=tk.SUNKEN, anchor=tk.W)
-        help_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 4))        
 
     def _build_extraction_tab(self, parent):
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
@@ -303,6 +274,8 @@ class CharacterAnnotationTab:
         
         self.btn_extract = ttk.Button(lf_run, text="START (Wytnij tablice z paczki)", command=self._run_extraction, style="Accent.TButton")
         self.btn_extract.pack(fill=tk.X, ipady=5)
+        HELP.bind_help(self.btn_extract, "btn_wycinanie_start")
+
         self.btn_ext_stop = ttk.Button(lf_run, text="ZATRZYMAJ", command=lambda: setattr(self, 'is_processing', False), state=tk.DISABLED)
         self.btn_ext_stop.pack(fill=tk.X, pady=5)
         self.ext_progress = ttk.Progressbar(lf_run, maximum=100)
@@ -314,7 +287,6 @@ class CharacterAnnotationTab:
         lf_logs.pack(fill=tk.BOTH, expand=True)
         self.ext_log = scrolledtext.ScrolledText(lf_logs, wrap=tk.WORD, font=("Consolas", 10), bg="#fdfdfd")
         self.ext_log.pack(fill=tk.BOTH, expand=True)
-        HELP.bind_help(self.btn_extract, "btn_wycinanie_start")
 
     def _run_extraction(self):
         self._force_save_all()
@@ -392,7 +364,7 @@ class CharacterAnnotationTab:
         top_frame.pack(fill=tk.X, padx=10, pady=10)
         ttk.Label(top_frame, text="Paczka do analizy (folder run_XXX):", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
         ttk.Entry(top_frame, textvariable=self.preview_dir_var, width=45, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        ttk.Button(top_frame, text="Otwórz inną paczkę z historii", command=self._pick_and_load_preview_dir).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(top_frame, text="Otwórz inną paczkę", command=self._pick_and_load_preview_dir).pack(side=tk.LEFT, padx=(0, 5))
         self.preview_info_lbl = ttk.Label(top_frame, text="Wczytano tablic: 0", font=("Segoe UI", 9, "bold"), foreground="#2980b9")
         self.preview_info_lbl.pack(side=tk.RIGHT, padx=10)
 
@@ -438,16 +410,16 @@ class CharacterAnnotationTab:
 
         self.winner_lf = ttk.LabelFrame(right_frame, text=" Aktualny Lider ", padding=10)
         self.winner_lf.pack(fill=tk.X, pady=(0, 10))
-        self.winner_name_lbl = ttk.Label(self.winner_lf, text="BRAK DANYCH Z TURNIEJU", font=("Segoe UI", 12, "bold"), foreground="gray")
+        self.winner_name_lbl = ttk.Label(self.winner_lf, text="BRAK DANYCH", font=("Segoe UI", 12, "bold"), foreground="gray")
         self.winner_name_lbl.pack(anchor=tk.CENTER)
         self.winner_acc_lbl = ttk.Label(self.winner_lf, text="Skuteczność: 0.0%", font=("Segoe UI", 10))
         self.winner_acc_lbl.pack(anchor=tk.CENTER)
 
         actions_lf = ttk.LabelFrame(right_frame, text=" Uruchom Przetwarzanie ", padding=15)
         actions_lf.pack(fill=tk.X, pady=(0, 15))
-        self.btn_fast_ocr = ttk.Button(actions_lf, text="1. Szybki Test (Obecne Filtry z Labu)", command=self._run_fast_ocr_test, style="Accent.TButton")
+        self.btn_fast_ocr = ttk.Button(actions_lf, text="1. Szybki Test (Obecne Filtry)", command=self._run_fast_ocr_test, style="Accent.TButton")
         self.btn_fast_ocr.pack(fill=tk.X, ipady=6, pady=(0, 10))
-        self.btn_rank_presets = ttk.Button(actions_lf, text="2. Turniej (Zbadaj paczkę wszystkimi Presetami)", command=self._run_preset_ranking)
+        self.btn_rank_presets = ttk.Button(actions_lf, text="2. Turniej (Zbadaj paczkę Presetami)", command=self._run_preset_ranking)
         self.btn_rank_presets.pack(fill=tk.X, ipady=5)
 
         self.test_progress = ttk.Progressbar(actions_lf, maximum=100)
@@ -480,14 +452,14 @@ class CharacterAnnotationTab:
         else: self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
         
         ttk.Separator(set_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(15, 10))
-        ttk.Button(set_lf, text="Laboratorium OCR (Ustaw Filtry & Presety)", command=self._open_filter_lab).pack(fill=tk.X, ipady=5)
+        
+        btn_lab = ttk.Button(set_lf, text="Laboratorium OCR (Ustaw Filtry)", command=self._open_filter_lab)
+        btn_lab.pack(fill=tk.X, ipady=5)
+
         HELP.bind_help(self.btn_fast_ocr, "btn_fast_test")
         HELP.bind_help(self.btn_rank_presets, "btn_rank_presets")
         HELP.bind_help(combo, "tab2_method")
-        # Przycisk laboratorium to ostatni przycisk w set_lf, szukamy go po tekście lub prościej:
-        for child in set_lf.winfo_children():
-            if isinstance(child, ttk.Button) and "Laboratorium" in child.cget("text"):
-                HELP.bind_help(child, "btn_lab")
+        HELP.bind_help(btn_lab, "btn_lab")
 
     def _update_winner_label(self):
         best_preset_data, best_acc = self._get_best_preset()
@@ -522,15 +494,20 @@ class CharacterAnnotationTab:
                 chars = data.get("characters", [])
                 status = data.get("status", "unknown")
                 
-                # Zbieramy odczyt z JSON-a
-                text = "".join([str(c.get("character", "?")) for c in chars])
+                # ZABEZPIECZONE SORTOWANIE (Bezpieczne łączenie w klamerkach)
+                valid_chars = [c for c in chars if isinstance(c, dict)]
+                try:
+                    chars_sorted = sorted(valid_chars, key=lambda c: float(c.get("bbox", [0])[0]) if c.get("bbox") else 0.0)
+                except Exception:
+                    chars_sorted = valid_chars
+                
+                text = "".join([str(c.get("character", "?")) for c in chars_sorted])
                 icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
                 
-                # ✅ ZMIANA: Totalnie przejrzysty format wyświetlania. Oddziela nazwę pliku od odczytu!
-                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt OCR: [{text}]"
-                
+                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text}]"
                 self.plates_listbox.insert(tk.END, display_text)
                 
+                # BEZPIECZNE KOLOROWANIE (Py 3.12 compatible)
                 if status == "perfect": 
                     self.plates_listbox.itemconfig('end', foreground='#27ae60')
                 elif status == "needs_fix": 
@@ -583,7 +560,13 @@ class CharacterAnnotationTab:
             image_bottom_y = y_off + new_h
             
             chars = data.get("characters", [])
-            for c in chars:
+            valid_chars = [c for c in chars if isinstance(c, dict)]
+            try:
+                chars_sorted = sorted(valid_chars, key=lambda c: float(c.get("bbox", [0])[0]) if c.get("bbox") else 0.0)
+            except Exception:
+                chars_sorted = valid_chars
+                
+            for c in chars_sorted:
                 x1, y1, x2, y2 = c["bbox"]
                 cx1, cy1 = (x1 * SCALE) + x_off, (y1 * SCALE) + y_off
                 cx2, cy2 = (x2 * SCALE) + x_off, (y2 * SCALE) + y_off
@@ -627,7 +610,7 @@ class CharacterAnnotationTab:
         self.test_log_text.delete(1.0, tk.END)
         self._lock_ui_for_testing()
         self._log(self.test_log_text, "=======================================================", "HEADER")
-        self._log(self.test_log_text, "START - Szybki Test Celności (Obecne Filtry)\n", "HEADER")
+        self._log(self.test_log_text, "START - Szybki Test Celności\n", "HEADER")
 
         method_str = self.detection_method_var.get().lower()
         method = DetectionMethod(method_str) if method_str else DetectionMethod.OCR
@@ -661,10 +644,8 @@ class CharacterAnnotationTab:
                     img = cv2.imread(str(img_path))
                     if img is None: continue
                     
-                    # Pobieramy nazwę z JSONa (który pamięta z jakiego zdjęcia ucięto tablicę)
                     source_image = self.preview_metadata[pid].get("source_image", "")
                     true_texts = self._get_true_texts_from_filename(source_image)
-                    
                     chars = detector.detect(img)
                     
                     c_clean = []
@@ -678,17 +659,15 @@ class CharacterAnnotationTab:
                         stat_total_chars += len(c_clean)
                         stat_sum_confidence += sum([c["confidence"] for c in c_clean])
                         
-                        # LOGIKA: Jeśli tekst z OCR pasuje w 100% do nazwy zdjęcia (np. WLS19936)
                         if txt in true_texts:
                             self.preview_metadata[pid]["status"] = "perfect"
                             stat_perfect += 1
                             true_texts.remove(txt)
                             self._log(self.test_log_text, f"✅ [{idx+1:03d}/{total}] {pid}: {txt}", "SUCCESS")
                         else:
-                            # LOGIKA: OCR pomylił literę (np. MLS zamiast WLS). 
                             self.preview_metadata[pid]["status"] = "needs_fix"
                             expected_str = " / ".join(true_texts) if true_texts else "Brak"
-                            self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}]  (Oczekiwano: [{expected_str}])", "ERROR")
+                            self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}]  (Oczek: [{expected_str}])", "ERROR")
                     else:
                         self.preview_metadata[pid]["status"] = "needs_fix"
                         self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: NIC NIE ZNALEZIONO", "ERROR")
@@ -702,8 +681,7 @@ class CharacterAnnotationTab:
                 acc = (stat_perfect / total * 100) if total > 0 else 0
                 self._log(self.test_log_text, f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)", "SUCCESS" if acc >= 80 else "WARNING")
 
-            except Exception as e: 
-                self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
+            except Exception as e: self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
             finally:
                 def finalize():
                     self._load_preview_data(quiet=True)
@@ -718,9 +696,7 @@ class CharacterAnnotationTab:
         if not self.preview_plate_ids: return messagebox.showinfo("Brak", "Wczytaj paczkę danych do testu!")
             
         preset_files = list(self.presets_dir.glob("*.json"))
-        # Usunięcie global_ranking z plików testowych, jeśli przypadkiem by się złapał
         preset_files = [f for f in preset_files if f.name != "global_ranking.json"]
-        
         if not preset_files: return messagebox.showinfo("Brak presetów", "Brak presetów! Otwórz Laboratorium i zapisz filtry jako JSON.")
 
         self.test_log_text.delete(1.0, tk.END)
@@ -730,8 +706,6 @@ class CharacterAnnotationTab:
 
         out_dir = Path(self.preview_dir_var.get().strip())
         imgs_dir = out_dir / "images"
-        
-        # Zapisujemy do globalnego pliku turniejowego!
         cache_file = self.presets_dir / "global_ranking.json"
         
         def worker():
@@ -827,14 +801,24 @@ class CharacterAnnotationTab:
         bottom_bar = ttk.Frame(lab_win, padding=10, relief="raised")
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        # ✅ ZMIANA: Dedykowany pasek pomocy tylko dla Laboratorium!
-        lab_status_var = tk.StringVar(value="💡 Najedź myszką na nazwę suwaka, aby zobaczyć podpowiedź...")
-        lab_status_lbl = ttk.Label(bottom_bar, textvariable=lab_status_var, foreground="#2980b9", font=("Segoe UI", 9, "italic"))
-        lab_status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        # ✅ DEDYKOWANY PASEK POMOCY DLA LABORATORIUM (Brak okienek)
+        lab_help_text = tk.Text(
+            bottom_bar, height=2, wrap=tk.WORD, 
+            bg="#f0f0f0", bd=0, font=("Segoe UI", 10, "italic"), fg="#2980b9"
+        )
+        lab_help_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        lab_help_text.insert(tk.END, "💡 Najedź myszką na nazwę suwaka, aby zobaczyć podpowiedź...")
+        lab_help_text.config(state=tk.DISABLED)
         
-        # Przechwytujemy globalny system pomocy dla tego okienka
+        def update_lab_help(msg):
+            if lab_win.winfo_exists():
+                lab_help_text.config(state=tk.NORMAL)
+                lab_help_text.delete(1.0, tk.END)
+                lab_help_text.insert(tk.END, msg)
+                lab_help_text.config(state=tk.DISABLED)
+
         self.old_status_updater = HELP.status_updater
-        HELP.status_updater = lambda msg: lab_status_var.set(msg)
+        HELP.status_updater = update_lab_help
         
         main_content = ttk.Frame(lab_win)
         main_content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -987,7 +971,6 @@ class CharacterAnnotationTab:
             active_traces.append((var, trace_id))
             update_lbl()
             
-            # ✅ PRZYWRÓCONE PODPIĘCIE POMOCY
             if help_key:
                 HELP.bind_help(main_label, help_key)
                 HELP.bind_help(s, help_key)
@@ -1009,11 +992,9 @@ class CharacterAnnotationTab:
         filt.pack(fill=tk.X, pady=(0,10))
         add_slider(filt, "Odcięcie odblasków (255=Wył):", self.prep_clip_var, 100, 255, 0, "clip_thresh", "lab_clip")
         add_slider(filt, "Usuwanie ziarna (0=Wył):", self.prep_denoise_var, 0, 50, 0, "denoise_h", "lab_denoise")
-        
         cb2 = ttk.Checkbutton(filt, text="Wzmacniaj kontrast (CLAHE)", variable=self.do_clahe_var, command=update_preview)
         cb2.pack(anchor=tk.W)
         HELP.bind_help(cb2, "lab_clahe")
-        
         add_slider(filt, "Siła CLAHE:", self.prep_clahe_var, 0.0, 10.0, 1, "clahe_clip", "lab_clahe")
 
         bina = ttk.LabelFrame(scrollable_frame, text=" 3. Binaryzacja ", padding=10)
@@ -1057,15 +1038,13 @@ class CharacterAnnotationTab:
                 except: pass
             self._force_save_all()
             self.lab_photo_refs.clear()
-            
-            # ✅ ZMIANA: Oddajemy system pomocy głównemu oknu!
             HELP.status_updater = self.old_status_updater 
             lab_win.destroy()
 
         lab_win.protocol("WM_DELETE_WINDOW", safe_close)
         ttk.Button(bottom_bar, text="Zapisz Preset", command=save_preset).pack(side=tk.RIGHT)
         ttk.Button(bottom_bar, text="Wczytaj Preset", command=load_preset).pack(side=tk.RIGHT)
-        ttk.Button(bottom_bar, text="ZAMKNIJ", command=safe_close).pack(side=tk.RIGHT)
+        ttk.Button(bottom_bar, text="ZAMKNIJ", command=safe_close, style="Accent.TButton").pack(side=tk.RIGHT, padx=15)
 
         update_preview()
 
@@ -1081,7 +1060,10 @@ class CharacterAnnotationTab:
         ttk.Label(cvat_f, text="OPCJA 1: Ręczna poprawa błędów", font=("Segoe UI", 10, "bold"), foreground="#c0392b").pack(anchor=tk.W)
         ttk.Label(cvat_f, text="Generuje plik .ZIP dla programu CVAT. Eksportowane są tylko te tablice,\nktóre OCR odczytał błędnie (🔴). Po ich poprawieniu, zaimportuj je z powrotem.", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
         ttk.Checkbutton(cvat_f, text="Tylko tablice z błędami (Czerwone)", variable=self.smart_export_var).pack(anchor=tk.W)
-        ttk.Button(cvat_f, text="WYGENERUJ .ZIP DLA CVAT", command=self._run_cvat_export, style="Accent.TButton").pack(fill=tk.X, pady=(5, 0), ipady=3)
+        
+        btn_cvat = ttk.Button(cvat_f, text="WYGENERUJ .ZIP DLA CVAT", command=self._run_cvat_export, style="Accent.TButton")
+        btn_cvat.pack(fill=tk.X, pady=(5, 0), ipady=3)
+        HELP.bind_help(btn_cvat, "btn_export_cvat")
 
         ttk.Separator(export_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
 
@@ -1089,9 +1071,11 @@ class CharacterAnnotationTab:
         yolo_f.pack(fill=tk.X, pady=(0, 5))
         ttk.Label(yolo_f, text="OPCJA 2: Fabryka Datasetów (Active Learning)", font=("Segoe UI", 10, "bold"), foreground="#27ae60").pack(anchor=tk.W)
         ttk.Label(yolo_f, text="Przeszukuje całą historię w Workspace. Zbiera wyłącznie perfekcyjne (🟢) tablice,\nusuwa duplikaty i generuje gotowy zestaw uczący z plikiem data.yaml do folderu:\nWorkspace/4_training_datasets/...", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
-        ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton").pack(fill=tk.X, ipady=4)
+        
+        btn_yolo = ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton")
+        btn_yolo.pack(fill=tk.X, ipady=4)
+        HELP.bind_help(btn_yolo, "btn_export_yolo")
 
-        # ✅ ZMIANA: Piękna konsola tekstowa zamiast szarego napisu
         info_lf = ttk.LabelFrame(export_lf, text=" Status i Wskazówki ", padding=5)
         info_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
         self.export_console = tk.Text(info_lf, height=10, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa", bd=0)
@@ -1108,27 +1092,28 @@ class CharacterAnnotationTab:
         self.import_cvat_xml_var = tk.StringVar()
         ttk.Entry(row2, textvariable=self.import_cvat_xml_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row2, text="Wybierz XML", command=lambda: self._pick_file(self.import_cvat_xml_var)).pack(side=tk.RIGHT, padx=(5,0))
-        ttk.Button(import_lf, text="ZAKTUALIZUJ BAZĘ", command=self._run_cvat_import, style="Accent.TButton").pack(fill=tk.X, pady=(10, 5), ipady=3)
         
-        # ✅ ZMIANA: Konsola dla importu
+        btn_import = ttk.Button(import_lf, text="ZAKTUALIZUJ BAZĘ", command=self._run_cvat_import, style="Accent.TButton")
+        btn_import.pack(fill=tk.X, pady=(10, 5), ipady=3)
+        HELP.bind_help(btn_import, "btn_import_cvat")
+        
         import_console_lf = ttk.LabelFrame(import_lf, text=" Status Importu ", padding=5)
         import_console_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
         self.import_console = tk.Text(import_console_lf, height=4, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa", bd=0)
         self.import_console.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.import_console.insert(tk.END, "Oczekuje na plik XML...")
         self.import_console.config(state=tk.DISABLED)
-        
-        HELP.bind_help(cvat_f, "btn_export_cvat")
-        HELP.bind_help(yolo_f, "btn_export_yolo")
-        HELP.bind_help(import_lf, "btn_import_cvat")
 
     def _set_console_text(self, console_widget, text):
-        """Pomocnicza funkcja do wpisywania tekstu do konsoli."""
         console_widget.config(state=tk.NORMAL)
         console_widget.delete(1.0, tk.END)
         console_widget.insert(tk.END, text)
         console_widget.config(state=tk.DISABLED)
         self.frame.update()
+
+    def _pick_file(self, var):
+        p = filedialog.askopenfilename(filetypes=[("XML", "*.xml")])
+        if p: var.set(p)
 
     def _run_cvat_export(self):
         work_dir = Path(self.preview_dir_var.get().strip())

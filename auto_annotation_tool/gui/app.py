@@ -49,24 +49,33 @@ class AutoAnnotationApp:
         # Zmienne
         self.is_processing = False
         
-        # Notebook (główne zakładki na górze okna)
+        # 1. NAJPIERW tworzymy Menu
+        self._create_menu()
+        
+        # 2. NASTĘPNIE tworzymy i przypinamy NA SAM DÓŁ pojemny panel informacyjny
+        self.info_panel_frame = tk.Frame(root, bg="#f1f5f9", bd=1, relief=tk.SUNKEN)
+        self.info_panel_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.status_text = tk.Text(
+            self.info_panel_frame, height=2, wrap=tk.WORD, 
+            bg="#f1f5f9", bd=0, font=("Segoe UI", 10, "italic"), fg="#2c3e50"
+        )
+        self.status_text.pack(fill=tk.X, padx=10, pady=6)
+        self.status_text.insert(tk.END, f"{self.icon_manager.get('info')} Gotowy. Najedź myszką na element interfejsu, aby zobaczyć wskazówki.")
+        self.status_text.config(state=tk.DISABLED)
+        
+        # 3. DOPIERO TERAZ tworzymy Notatnik, który zajmie całą resztę ekranu (nad paskiem)
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
         
         # Tworzenie zakładek
         self.tabs = {}
         self._create_tabs()
         
-        # Menu
-        self._create_menu()
-        
-        # Status bar
-        self.status_var = tk.StringVar(value=f"{self.icon_manager.get('info')} Gotowy")
-        status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        
+        # 4. Podpinamy system pomocy
         from .help_manager import HELP
-        HELP.status_updater = lambda msg: self.update_status(msg, "info")        
+        HELP.status_updater = lambda msg: self.update_status(msg, "info")
+        
         logger.info("GUI zainicjalizowane pomyślnie")
     
     def _setup_style(self):
@@ -84,12 +93,12 @@ class AutoAnnotationApp:
         try:
             # 1. ZAKŁADKA AUTOANOTACJI
             self.tabs['annotation'] = AnnotationTab(self.notebook, self)
-            self.notebook.add(self.tabs['annotation'].frame, text=f"{self.icon_manager.get('car')} Autoanotacja")
+            self.notebook.add(self.tabs['annotation'].frame, text=f"1. Autoanotacja")
             
             # 2. ZAKŁADKA WYCINANIA ZNAKÓW
             try:
                 self.tabs['characters'] = CharacterAnnotationTab(self.notebook, self)
-                self.notebook.add(self.tabs['characters'].frame, text=f"{self.icon_manager.get('cut')} Znaki na tablicach")
+                self.notebook.add(self.tabs['characters'].frame, text=f"2. Znaki na tablicach")
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki ZNAKI: {e}")
                 messagebox.showerror("Błąd Zakładki", f"Błąd w zakładce Znaki na tablicach:\n{e}")
@@ -97,14 +106,14 @@ class AutoAnnotationApp:
             # 3. ZAKŁADKA TRENINGU
             try:
                 self.tabs['training'] = TrainingTab(self.notebook, self)
-                self.notebook.add(self.tabs['training'].frame, text=f"{self.icon_manager.get('training')} Trening i Analiza")
+                self.notebook.add(self.tabs['training'].frame, text=f"3. Trening i Analiza")
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki TRENING: {e}")
                 messagebox.showerror("Błąd Zakładki", f"Błąd w zakładce Trening:\n{e}")
             # ZAKŁADKA POMOCY / PRZEWODNIK
             if HelpTab:
                 self.tabs['help'] = HelpTab(self.notebook, self)
-                self.notebook.add(self.tabs['help'].frame, text=f"📖 Instrukcja & Architektura")
+                self.notebook.add(self.tabs['help'].frame, text=f"4. Instrukcja & Architektura")
 
             self.notebook.select(0)
             self.notebook.select(0)
@@ -130,11 +139,19 @@ class AutoAnnotationApp:
         help_menu.add_command(label=f"{self.icon_manager.get('info')} O programie", command=self._show_about)
     
     def update_status(self, message: str, icon: str = "info"):
-        """Aktualizuje główny, dolny pasek aplikacji (zapobiega migotaniu)."""
+        """Aktualizuje główny panel wskazówek (zapobiega migotaniu)."""
         new_text = f"{self.icon_manager.get(icon)} {message}"
-        if self.status_var.get() != new_text:
-            self.status_var.set(new_text)
-            self.root.update_idletasks()
+        
+        try:
+            current_text = self.status_text.get(1.0, tk.END).strip()
+            if current_text != new_text.strip():
+                self.status_text.config(state=tk.NORMAL)
+                self.status_text.delete(1.0, tk.END)
+                self.status_text.insert(tk.END, new_text)
+                self.status_text.config(state=tk.DISABLED)
+                self.root.update_idletasks()
+        except Exception:
+            pass # Zapobiega błędom, gdy aplikacja jest w trakcie zamykania
     
     def set_processing(self, processing: bool):
         self.is_processing = processing
