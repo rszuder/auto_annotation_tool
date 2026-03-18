@@ -147,7 +147,7 @@
         "full_help": "Walidacja: Zmusza model do zdania twardego egzaminu na zbiorze Val lub Test. W konsoli poniżej zobaczysz czystą, matematyczną ocenę jego umiejętności."
     },
     "tr_rank_cat": {
-        "full_help": "Kategoria: System dba o porządek, oddzielając zawody modeli szukających aut od tych czytających maleńkie znaki na tablicach."
+        "full_help": "Kategoria: System dba o porządek, oddzielając kategorie modeli do wykrywania aut/tablic/znaków"
     },
     "tr_rank_btn": {
         "full_help": "Ranking: Uruchamia wszystkie modele na wskazanym katalogu. Następnie porównuje wyniki z pracą człowieka (XML Ground Truth) i wylicza ostateczny wskaźnik F1-Score."
@@ -163,6 +163,21 @@
     },
     "tr_cvat_btn": {
         "full_help": "Stwórz Dataset: Przelicza wszystkie obiekty, wycina je i układa w gotowej strukturze YOLO (Train/Val)."
-    }      
+    },
+    "tr_train_custom": {
+        "full_help": "Własny Model (.pt): Wybierz model wygenerowany we wcześniejszych treningach (np. z folderu Workspace/6_models), aby kontynuować jego douczanie (Fine-Tuning) na nowych danych."
+    },
+    "tab1_custom_model": {
+        "full_help": "Własny Model: Jeśli wytrenowałeś w Zakładce Treningu lepszy model na własnych danych, skopiuj jego wagę (best.pt) do folderu Workspace/6_models i wskaż go tutaj."
+    },
+    "t2_yolo_model": {
+        "full_help": "Model YOLO (Znaki): Wskaż swój wytrenowany na literach model .pt z folderu Workspace/6_models, by użyć go zamiast powolnego silnika EasyOCR."
+    },
+    "tr_val_data": {
+        "full_help": "Dataset Testowy: Wskaż zbiór danych, na którym sprawdzisz umiejętności modelu (musi zawierać w środku plik data.yaml)."
+    },
+    "tr_val_split": {
+        "full_help": "Podzbiór: Wybierz, którą część zbioru przebadać. Zazwyczaj testuje się modele na zbiorze ewaluacyjnym ('val') lub specjalnie wydzielonym ('test'), by mieć pewność, że AI nie wykuło zdjęć na pamięć."
+    }    
     
 }

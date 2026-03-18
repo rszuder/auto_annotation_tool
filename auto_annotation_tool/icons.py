@@ -17,7 +17,7 @@ class IconManager:
     def get(cls, name):
         """Zwraca puste stringi lub absolutnie minimalne znaczniki."""
         mapping = {
-            "car": "[ AUTA ]",
+            "car": "[ AUTO ]",
             "cut": "[ WYTNIJ ]", 
             "training": "[ TRENING ]", 
             "check": "[ WALIDACJA ]", 

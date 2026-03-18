@@ -207,6 +207,9 @@ class AnnotationTab:
         HELP.bind_help(self.start_btn, "tab1_start")
         HELP.bind_help(self.stop_btn, "tab1_stop")
         HELP.bind_help(tab_logs, "tab1_logs")
+        # ✅ ZMIANA: Podpięcie własnych modeli do pomocy
+        HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
+        HELP.bind_help(self.pla_custom_row, "tab1_custom_model")        
 
     def _on_mode_change(self, event=None):
         mode = self.mode_var.get()
@@ -248,16 +251,16 @@ class AnnotationTab:
         else:
             self.pla_custom_row.pack_forget()
 
+    # ✅ ZMIANA: Bezwzględne wymuszanie początkowych folderów (initialdir)
     def _select_vehicle_custom(self):
-        p = filedialog.askopenfilename(filetypes=[("YOLO Model", "*.pt")])
+        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.vehicle_custom_var.set(p)
 
     def _select_plate_custom(self):
-        p = filedialog.askopenfilename(filetypes=[("YOLO Model", "*.pt")])
+        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.plate_custom_var.set(p)
 
     def _select_input_dir(self):
-        # ✅ ZMIANA: Eksplorator plików wie, gdzie szukać na start
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
         if p: self.input_dir_var.set(p)
 
