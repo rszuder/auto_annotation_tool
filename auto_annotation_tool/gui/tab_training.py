@@ -265,9 +265,17 @@ class TrainingTab:
         self.base_model_var.set("yolo11n.pt") 
         self.base_combo.bind("<<ComboboxSelected>>", lambda e: self._on_base_model_change())
 
+        # ✅ ZMIANA: Dodano wiersz z przyciskiem do wyboru modelu Fine-Tuningu (.pt) z folderu 6_models
         self.base_custom_var = tk.StringVar()
-        self.base_custom_entry = ttk.Entry(settings_col, textvariable=self.base_custom_var, state=tk.DISABLED)
-        self.base_custom_entry.pack(fill=tk.X, pady=2)
+        self.custom_row = ttk.Frame(settings_col)
+        self.custom_row.pack(fill=tk.X, pady=2)
+        
+        self.base_custom_entry = ttk.Entry(self.custom_row, textvariable=self.base_custom_var, state=tk.DISABLED)
+        self.base_custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.base_custom_btn = ttk.Button(self.custom_row, text="Wybierz .pt", state=tk.DISABLED, 
+                                          command=lambda: self._pick_file(self.base_custom_var, "*.pt", CONFIG.DIR_6_MODELS))
+        self.base_custom_btn.pack(side=tk.LEFT, padx=(5,0))
         
         grid = ttk.Frame(settings_col)
         grid.pack(fill=tk.X, pady=10)
@@ -367,6 +375,8 @@ class TrainingTab:
         HELP.bind_help(self.btn_start_train, "tr_train_btn")
         HELP.bind_help(self.tree, "tr_train_tree")
         HELP.bind_help(self.plots_tab, "tr_train_plot")
+        # ✅ ZMIANA: Podpięcie nowego przycisku pod system pomocy
+        HELP.bind_help(self.custom_row, "tr_train_custom")
 
     def _build_plots_ui(self):
         self.plots_pane = ttk.PanedWindow(self.plots_tab, orient=tk.HORIZONTAL)
@@ -424,9 +434,19 @@ class TrainingTab:
         self.val_log_text = scrolledtext.ScrolledText(log_f, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa")
         self.val_log_text.pack(fill=tk.BOTH, expand=True)
 
+        # ✅ ZMIANA: Aby łatwo podpiąć pomoc, zapisujemy ramkę comboboxa do zmiennej
+        split_combo = main_f.pack_slaves()[4] # Combobox jest na 5 miejscu (index 4) w głównym oknie (Label, row1, Label, row2, Combobox)
+        # Bezpieczniejsza metoda podpięcia:
+        
         # ✅ PODPIĘCIE POMOCY:
         HELP.bind_help(row1, "tr_val_model")
+        HELP.bind_help(row2, "tr_val_data")    # <-- Nowe (Dataset)
         HELP.bind_help(self.btn_run_val, "tr_val_btn")
+        
+        # Bezpieczne łapanie Comboboxa (szuka po klasie)
+        for child in main_f.winfo_children():
+            if isinstance(child, ttk.Combobox):
+                HELP.bind_help(child, "tr_val_split") # <-- Nowe (Combo)
 
     def _build_ranking_tab(self):
         pane = ttk.PanedWindow(self.tab_ranking, orient=tk.HORIZONTAL)
@@ -498,12 +518,21 @@ class TrainingTab:
         HELP.bind_help(cat_combo, "tr_rank_cat")
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
 
-    def _pick_file(self, var, ext):
-        p = filedialog.askopenfilename(filetypes=[("File", ext)])
+    # ✅ ZMIANA: Obsługa domyślnego folderu startowego (initialdir)
+    def _pick_file(self, var, ext, initialdir=None):
+        kwargs = {"filetypes": [("File", ext)]}
+        if initialdir and Path(initialdir).exists():
+            kwargs["initialdir"] = str(initialdir)
+            
+        p = filedialog.askopenfilename(**kwargs)
         if p: var.set(p)
         
-    def _pick_dir(self, var):
-        p = filedialog.askdirectory()
+    def _pick_dir(self, var, initialdir=None):
+        kwargs = {}
+        if initialdir and Path(initialdir).exists():
+            kwargs["initialdir"] = str(initialdir)
+            
+        p = filedialog.askdirectory(**kwargs)
         if p: var.set(p)
 
     def _update_ratio_labels(self):
@@ -518,11 +547,16 @@ class TrainingTab:
         self.val_lbl.configure(text=f"{val:.0f}%")
         self.test_lbl.configure(text=f"Test: {test:.0f}%")
 
+    # ✅ ZMIANA: Zabezpieczone włączanie i wyłączanie guzika Custom
     def _on_base_model_change(self):
         if self.base_model_var.get() == "Custom":
             self.base_custom_entry.configure(state=tk.NORMAL)
+            if hasattr(self, 'base_custom_btn'):
+                self.base_custom_btn.configure(state=tk.NORMAL)
         else:
             self.base_custom_entry.configure(state=tk.DISABLED)
+            if hasattr(self, 'base_custom_btn'):
+                self.base_custom_btn.configure(state=tk.DISABLED)
 
     def _create_dataset_thread(self):
         xml = Path(self.cvat_xml_var.get().strip())

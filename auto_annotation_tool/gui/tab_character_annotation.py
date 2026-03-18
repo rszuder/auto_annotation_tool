@@ -158,20 +158,21 @@ class CharacterAnnotationTab:
             except: return 0
         return "auto"
 
+    # ✅ ZMIANA: Automatyczne kierowanie do logicznych folderów Workspace
     def _pick_xml_file(self):
-        p = filedialog.askopenfilename(title="Wybierz annotations.xml", filetypes=[("XML", "*.xml")])
+        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()), title="Wybierz annotations.xml", filetypes=[("XML", "*.xml")])
         if p: self.xml_path_var.set(p)
 
     def _pick_images_dir(self):
-        p = filedialog.askdirectory(title="Wybierz folder z obrazami pojazdów")
+        p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()), title="Wybierz folder z obrazami pojazdów")
         if p: self.images_dir_var.set(p)
 
     def _pick_yolo_model(self):
-        p = filedialog.askopenfilename(title="Wybierz model YOLO (.pt)", filetypes=[("PyTorch", "*.pt")])
+        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), title="Wybierz model YOLO (.pt)", filetypes=[("PyTorch", "*.pt")])
         if p: self.yolo_model_path_var.set(p)
 
     def _pick_and_load_preview_dir(self):
-        p = filedialog.askdirectory(title="Wybierz folder wyników (zawierający metadata.json)")
+        p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_3_CHARS).absolute()), title="Wybierz folder wyników (zawierający metadata.json)")
         if p:
             self.preview_dir_var.set(p)
             self._force_save_all()
@@ -473,6 +474,8 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.btn_rank_presets, "t2_rank")
         HELP.bind_help(combo, "t2_method")
         HELP.bind_help(btn_lab, "t2_lab_btn")
+      # ✅ ZMIANA: Rejestracja pola modelu YOLO w systemie Help
+        HELP.bind_help(r_y, "t2_yolo_model") 
 
     def _open_filter_lab(self):
         out_dir = Path(self.preview_dir_var.get().strip())
@@ -1078,8 +1081,13 @@ class CharacterAnnotationTab:
         console_widget.config(state=tk.DISABLED)
         self.frame.update()
 
+    # ✅ ZMIANA: Import CVAT otwiera folder w którym pracowaliśmy
     def _pick_file(self, var):
-        p = filedialog.askopenfilename(filetypes=[("XML", "*.xml")])
+        initial = self.preview_dir_var.get().strip()
+        if not initial or not Path(initial).exists():
+            initial = str(CONFIG.WORKSPACE_DIR.absolute())
+            
+        p = filedialog.askopenfilename(initialdir=initial, filetypes=[("XML", "*.xml")])
         if p: var.set(p)
 
     def _run_cvat_export(self):
