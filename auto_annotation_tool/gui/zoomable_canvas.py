@@ -159,24 +159,28 @@ class ZoomableCanvas(tk.Canvas):
         
         # Opcjonalnie: wyświetl info na canvas
         if self.show_info:
-            info_text = f"Zoom: {self.zoom_level:.1f}x"
-            self.create_text(
-                10, 10,
-                text=info_text,
-                fill="yellow",
-                font=("Arial", 10, "bold"),
-                anchor="nw",
-                tags="info"
-            )
-            help_text = "[Scroll: Zoom] [Drag: Pan] [R: Reset] [I: Toggle Info]"
-            self.create_text(
-                10, 30,
-                text=help_text,
-                fill="white",
-                font=("Arial", 8),
-                anchor="nw",
-                tags="info"
-            )
+            vx = self.canvasx(10)
+            vy = self.canvasy(10)
+            
+            info_text = f"Zoom: {self.zoom_level:.2f}x"
+            help_text = "[Scroll: Zoom] [Drag: Pan] [R: Reset] [I: Ukryj]"
+            vy_help = self.canvasy(30)
+
+            # ✅ ZMIANA: Zamiast "cienia", robimy pełny "Outline" (Obrys) w 8 kierunkach!
+            # Gruby, czarny obrys zagwarantuje 100% czytelność na KAŻDYM kolorze tła.
+            offsets = [(-2,-2), (0,-2), (2,-2), (-2,0), (2,0), (-2,2), (0,2), (2,2)]
+            
+            # 1. Rysujemy czarną ramkę dla informacji o Zoomie
+            for dx, dy in offsets:
+                self.create_text(vx + dx, vy + dy, text=info_text, fill="black", font=("Arial", 11, "bold"), anchor="nw", tags="info")
+            # Główny napis na wierzch (Zoom)
+            self.create_text(vx, vy, text=info_text, fill="#f1c40f", font=("Arial", 11, "bold"), anchor="nw", tags="info")
+            
+            # 2. Rysujemy czarną ramkę dla Pomocy
+            for dx, dy in offsets:
+                self.create_text(vx + dx, vy_help + dy, text=help_text, fill="black", font=("Arial", 9, "bold"), anchor="nw", tags="info")
+            # Główny napis na wierzch (Pomoc)
+            self.create_text(vx, vy_help, text=help_text, fill="white", font=("Arial", 9, "bold"), anchor="nw", tags="info")
     
     def get_zoom_level(self):
         """Zwróć obecny poziom zoom'u."""

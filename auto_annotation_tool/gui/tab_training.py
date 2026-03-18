@@ -20,6 +20,7 @@ from ..validators import validate_yolo_dataset, validate_model_file
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
 from ..ranking import ModelRanking, ModelRankingEntry
 from .help_manager import HELP
+from .zoomable_canvas import ZoomableCanvas
 
 if PIL_AVAILABLE:
     from PIL import Image, ImageTk
@@ -87,14 +88,25 @@ class TrainingTab:
 
     def _selected_run(self):
         sel = self.tree.selection()
-        if not sel: return None
+        if not sel: 
+            return None
+            
         item = self.tree.item(sel[0])
+        # Tkinter zjadł podkreślenie? Nieważne. Zamieniamy na stringa.
+        corrupted_id = str(item["values"][0])
         
-        # Odbieramy pełne, zaktualizowane ID z pierwszej kolumny
-        run_id = str(item["values"][0])
-        
-        # Pobieramy twardo obiekt z bazy
-        return self.history.get_run(run_id)
+        # ✅ PANCERNE SZUKANIE: Porównujemy klucze bez żadnych znaków specjalnych
+        for db_key, run_obj in self.history.runs.items():
+            # Usuwamy wszystko co nie jest literą/cyfrą do sprawdzenia (np. z 2026_03 robimy 202603)
+            clean_db_key = "".join(filter(str.isalnum, db_key))
+            clean_ui_key = "".join(filter(str.isalnum, corrupted_id))
+            
+            # Jeśli "rdzeń" klucza się zgadza, to znaczy że znaleźliśmy nasz trening!
+            if clean_db_key == clean_ui_key:
+                return run_obj
+                
+        # Fallback (Gdyby jakoś to zawiodło)
+        return None
 
     def _build_ui(self):
 
@@ -363,22 +375,19 @@ class TrainingTab:
         left = ttk.Frame(self.plots_pane)
         right = ttk.Frame(self.plots_pane)
         self.plots_pane.add(left, weight=1)
-        self.plots_pane.add(right, weight=3)
+        self.plots_pane.add(right, weight=4) # Poszerzamy pole na wykres
 
-        self.plots_list = tk.Listbox(left, height=12)
+        # Lista obrazów
+        self.plots_list = tk.Listbox(left, height=12, font=("Consolas", 10), selectbackground="#3498db")
         self.plots_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.plots_list.bind("<<ListboxSelect>>", self._on_plot_selected)
 
-        topbar = ttk.Frame(right)
-        topbar.pack(fill=tk.X)
-        ttk.Label(topbar, text="Powiększenie:").pack(side=tk.LEFT)
-        self.zoom_var = tk.DoubleVar(value=1.0)
-        ttk.Button(topbar, text="-", width=3, command=lambda: self._change_zoom(0.8)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(topbar, text="+", width=3, command=lambda: self._change_zoom(1.25)).pack(side=tk.LEFT, padx=2)
-
+        # ✅ ZMIANA: Usunięto topbar z guzikami - i +. Od razu wrzucamy potężny ZoomableCanvas!
         canvas_frame = ttk.Frame(right)
-        canvas_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-        self.plot_canvas = tk.Canvas(canvas_frame, background="#ecf0f1")
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Inicjalizujemy ZoomableCanvas (ten sam co w przeglądarce tablic)
+        self.plot_canvas = ZoomableCanvas(canvas_frame, bg="#ecf0f1", highlightthickness=0)
         self.plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _build_validation_tab(self):
@@ -672,11 +681,20 @@ class TrainingTab:
     def _on_run_selected(self, event=None):
         run = self._selected_run()
         if not run: return
+        
         run_dir = Path(run.output_dir)
+        if not run_dir.exists(): return
+            
+        # Szukamy wykresów wygenerowanych przez Ultralytics
         paths = list(run_dir.rglob("*.png")) + list(run_dir.rglob("*.jpg"))
+        
+        # Filtrujemy tylko wartościowe obrazki (odrzucamy np. surowe zdjęcia z batchy, zostawiamy analizy)
         self._plots_paths = [p for p in paths if "plot" in p.name.lower() or "confusion" in p.name.lower() or "val" in p.name.lower()]
+        
+        # Wrzucamy nazwy wykresów na listę UI po lewej stronie
         self.plots_list.delete(0, tk.END)
-        for p in self._plots_paths: self.plots_list.insert(tk.END, p.name)
+        for p in self._plots_paths: 
+            self.plots_list.insert(tk.END, p.name)
 
     def _on_plot_selected(self, event=None):
         sel = self.plots_list.curselection()
@@ -687,17 +705,24 @@ class TrainingTab:
         if self._plot_original_path: self._show_plot(Path(self._plot_original_path))
 
     def _show_plot(self, path):
+        """Wczytuje fizyczny obraz z folderu Ultralytics i przekazuje do płynnej nawigacji."""
         if not PIL_AVAILABLE: return
         try:
             self._plot_original_path = str(path)
             img = Image.open(path)
-            w, h = img.size
-            z = self.zoom_var.get()
-            img = img.resize((int(w*z), int(h*z)), Image.Resampling.LANCZOS)
-            self._plot_photo = ImageTk.PhotoImage(img)
-            self.plot_canvas.delete("all")
-            self.plot_canvas.create_image(0, 0, anchor=tk.NW, image=self._plot_photo)
-        except: pass
+            
+            # ✅ ZMIANA: Nie musimy przeliczać zooma ręcznie. ZoomableCanvas sam to robi!
+            # Po prostu ładujemy obrazek (najlepiej ze zmienioną flagą na wysoką jakość w pamięci)
+            self.plot_canvas.set_image(img)
+            
+            # Resetujemy zoom do 1.0 przy ładowaniu nowego zdjęcia (opcjonalne, ale wygodne)
+            self.plot_canvas.reset_view()
+        except Exception as e: 
+            logger.error(f"Nie udało się wyświetlić wykresu: {e}")
+
+    # ✅ ZMIANA: Ta stara funkcja była od przycisków + i -, więc możemy ją usunąć, ale wstawmy dla bezpieczeństwa "dummy" metodę, by uniknąć ewentualnego błędu w pamięci Tkintera.
+    def _change_zoom(self, factor):
+        pass
 
     def _run_validation(self):
         if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak modułu YOLO!")
