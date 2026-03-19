@@ -244,9 +244,12 @@ class TrainingTab:
         console_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         # --- KOLUMNA LEWA: Ustawienia ---
+        # ✅ ZMIANA: Automatyczne generowanie nazwy treningu
         ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
-        self.name_var = tk.StringVar(value="YOLO_Training_Run")
+        self.name_var = tk.StringVar()
         ttk.Entry(settings_col, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
+        
+
 
         ttk.Label(settings_col, text="Gotowy Dataset (Katalog z data.yaml):").pack(anchor=tk.W, pady=(8, 0))
         self.dataset_var = tk.StringVar()
@@ -276,6 +279,19 @@ class TrainingTab:
         self.base_custom_btn = ttk.Button(self.custom_row, text="Wybierz .pt", state=tk.DISABLED, 
                                           command=lambda: self._pick_file(self.base_custom_var, "*.pt", CONFIG.DIR_6_MODELS))
         self.base_custom_btn.pack(side=tk.LEFT, padx=(5,0))
+
+        def auto_name(*args):
+            ds_name = Path(self.dataset_var.get()).name if self.dataset_var.get() else "UnknownDS"
+            model_name = self.base_model_var.get()
+            if model_name == "Custom": model_name = Path(self.base_custom_var.get()).stem if self.base_custom_var.get() else "Custom"
+            import datetime
+            ts = datetime.datetime.now().strftime("%d%b_%H%M")
+            self.name_var.set(f"Train_{model_name}_{ds_name}_{ts}")
+
+        self.dataset_var.trace_add("write", auto_name)
+        self.base_model_var.trace_add("write", auto_name)
+        self.base_custom_var.trace_add("write", auto_name)
+        auto_name() # Inicjalizacja pierwszego wpisu        
         
         grid = ttk.Frame(settings_col)
         grid.pack(fill=tk.X, pady=10)
@@ -434,9 +450,7 @@ class TrainingTab:
         self.val_log_text = scrolledtext.ScrolledText(log_f, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa")
         self.val_log_text.pack(fill=tk.BOTH, expand=True)
 
-        # ✅ ZMIANA: Aby łatwo podpiąć pomoc, zapisujemy ramkę comboboxa do zmiennej
-        split_combo = main_f.pack_slaves()[4] # Combobox jest na 5 miejscu (index 4) w głównym oknie (Label, row1, Label, row2, Combobox)
-        # Bezpieczniejsza metoda podpięcia:
+
         
         # ✅ PODPIĘCIE POMOCY:
         HELP.bind_help(row1, "tr_val_model")

@@ -116,16 +116,21 @@ class Config:
     # ==========================================
     # LOGICZNA STRUKTURA KATALOGÓW (WORKSPACE)
     # ==========================================
-    # Główny folder roboczy utworzy się obok pliku main.py
     WORKSPACE_DIR: Path = Path("Workspace").resolve()
     
-    # Numerowane podkatalogi dla zachowania chronologii procesu
     DIR_1_RAW: Path         = WORKSPACE_DIR / "1_raw_images"
     DIR_2_AUTO_ANN: Path    = WORKSPACE_DIR / "2_auto_annotations"
     DIR_3_CHARS: Path       = WORKSPACE_DIR / "3_cropped_characters"
     DIR_4_DATASETS: Path    = WORKSPACE_DIR / "4_training_datasets"
     DIR_5_RUNS: Path        = WORKSPACE_DIR / "5_training_runs"
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
+    
+    # ✅ ZMIANA: Podstruktura dla modeli
+    DIR_6_MODELS_BASE: Path          = DIR_6_MODELS / "base"
+    DIR_6_MODELS_TRAINED: Path       = DIR_6_MODELS / "trained"
+    DIR_6_MODELS_PLATES: Path        = DIR_6_MODELS_TRAINED / "plates_pose"
+    DIR_6_MODELS_CHARS: Path         = DIR_6_MODELS_TRAINED / "characters_ocr"
+    
     DIR_7_RANKINGS: Path    = WORKSPACE_DIR / "7_rankings"
 
     # Właściwości zachowujące wsteczną kompatybilność ze starym kodem GUI
@@ -148,7 +153,9 @@ class Config:
         """Automatycznie buduje strukturę katalogów przy starcie aplikacji."""
         directories = [
             self.DIR_1_RAW, self.DIR_2_AUTO_ANN, self.DIR_3_CHARS,
-            self.DIR_4_DATASETS, self.DIR_5_RUNS, self.DIR_6_MODELS, self.DIR_7_RANKINGS
+            self.DIR_4_DATASETS, self.DIR_5_RUNS, self.DIR_6_MODELS, 
+            self.DIR_6_MODELS_BASE, self.DIR_6_MODELS_PLATES, self.DIR_6_MODELS_CHARS,
+            self.DIR_7_RANKINGS
         ]
         
         for directory in directories:

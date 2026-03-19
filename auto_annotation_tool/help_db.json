@@ -178,6 +178,24 @@
     },
     "tr_val_split": {
         "full_help": "Podzbiór: Wybierz, którą część zbioru przebadać. Zazwyczaj testuje się modele na zbiorze ewaluacyjnym ('val') lub specjalnie wydzielonym ('test'), by mieć pewność, że AI nie wykuło zdjęć na pamięć."
+    },
+    "camp_models": {
+        "full_help": "Baza Wiedzy: Tutaj definiujesz 'mózgi' swojej aplikacji. Kliknij 'Zmień', aby wskazać najnowszą wagę .pt, którą wygenerowałeś po udanym treningu w Zakładce 3."
+    },
+    "camp_advance": {
+        "full_help": "Nowa Iteracja: Kiedy skończysz trenować, kliknij ten guzik. Zwiększy on numer iteracji i zresetuje cykl, pozwalając na ponowne, mądrzejsze przetworzenie kolejnej partii tysięcy zdjęć."
+    },
+    "camp_step1": {
+        "full_help": "Krok 1: Program tworzy czysty folder w Workspace/1_raw_images/. Przekopiuj do niego surowe zdjęcia (np. 500 sztuk) wyciągnięte z kamer lub internetu."
+    },
+    "camp_step2": {
+        "full_help": "Krok 2: Program przeniesie Cię do Zakładki 1, automatycznie wklejając ścieżkę do folderu z Kroku 1 i ładując modele zdefiniowane w lewym panelu. Gotowe do startu!"
+    },
+    "camp_step3": {
+        "full_help": "Krok 3: Program inteligentnie znajdzie plik annotations.xml z Kroku 2, otworzy Zakładkę Znaków i ustawi gotowość do wycinania tablic. To tutaj zrobisz żniwa 'Złotych Tablic'."
+    },
+    "camp_step4": {
+        "full_help": "Krok 4: Skok do Laboratorium Treningowego. Po podzieleniu datasetu zebranych tablic, wskażesz tu model bazowy i rozpoczniesz długi proces uczenia sieci."
     }    
     
 }

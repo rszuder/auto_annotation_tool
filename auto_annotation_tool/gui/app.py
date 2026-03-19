@@ -15,6 +15,7 @@ from ..icons import IconManager
 from .tab_annotation import AnnotationTab
 from .tab_character_annotation import CharacterAnnotationTab
 from .tab_training import TrainingTab
+from .tab_campaign import CampaignTab
 from .help_manager import HELP
 
 try:
@@ -72,6 +73,14 @@ class AutoAnnotationApp:
     
     def _create_tabs(self):
         try:
+            # ✅ ZMIANA: Menadżer Kampanii jako pierwsza zakładka (Index 0)
+            try:
+                self.tabs['campaign'] = CampaignTab(self.notebook, self)
+                self.notebook.add(self.tabs['campaign'].frame, text=f"{self.icon_manager.get('trophy')} Rozkład Jazdy")
+
+            except Exception as e:
+                logger.error(f"Nie udało się załadować zakładki Kampanii: {e}")
+
             self.tabs['annotation'] = AnnotationTab(self.notebook, self)
             self.notebook.add(self.tabs['annotation'].frame, text=f"{self.icon_manager.get('car')} Autoanotacja")
             

@@ -1197,6 +1197,16 @@ class CharacterAnnotationTab:
             )
             self._set_console_text(self.export_console, msg)
 
+            # =========================================================
+            # ✅ ŻETON 3: Meldunek do Menedżera Kampanii (Otwiera Krok 4)
+            # =========================================================
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 3:
+                    CAMPAIGN.set_current_step(4)
+                    if 'campaign' in self.app.tabs:
+                        self.app.tabs['campaign']._refresh_dashboard()
+            except Exception: pass
         except Exception as e:
             self._set_console_text(self.export_console, f"❌ BŁĄD EKSPORTU YOLO:\n{e}")
 
