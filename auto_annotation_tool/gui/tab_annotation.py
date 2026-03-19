@@ -487,6 +487,19 @@ class AnnotationTab:
         
         if success:
             self.status_label.config(text="Zakończono pomyślnie!", foreground="#2ecc71")
+            
+            # =========================================================
+            # ✅ ŻETON 2: Meldunek do Menedżera Kampanii o wykonaniu pracy
+            # =========================================================
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 2:
+                    CAMPAIGN.set_current_step(3)
+                    if 'campaign' in self.app.tabs:
+                        self.app.tabs['campaign']._refresh_dashboard()
+            except Exception as e:
+                logger.debug(f"Nie udało się awansować kampanii: {e}")
+
             messagebox.showinfo("Koniec", msg)
         else:
             self.status_label.config(text="Przerwano / Błąd", foreground="#e74c3c")

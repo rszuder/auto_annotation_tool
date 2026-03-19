@@ -239,24 +239,46 @@ class YOLOPoseTrainer:
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=epochs
             )
-
-            # --- NOWE: eksport wykresów + raport HTML ---
-            try:
-                run_obj = self.history.get_run(run.id)
-                run_dir = Path(run.output_dir)
-                plots_dir = TrainingReportGenerator.export_plots(train_dir=train_dir, run_dir=run_dir)
-
-                report_path = run_dir / "training_report.html"
-                TrainingReportGenerator.generate_html(
-                    run_dict=run_obj.to_dict() if hasattr(run_obj, "to_dict") else {},
-                    output_path=report_path,
-                    plots_source_dir=plots_dir
-                )
-                # zapisz ścieżki w historii
-                self.history.update_run(run.id, report_html=str(report_path), plots_dir=str(plots_dir))
-
-            except Exception as e:
-                logger.warning(f"Nie udało się wygenerować raportu (plots/html): {e}")
+            # ✅ ZMIANA: Automatyczny eksport best.pt ORAZ aktualizacja Mózgu Kampanii!
+            if best_weights.exists():
+                import shutil
+                from ..campaign_manager import CAMPAIGN # Pobieramy Menedżera!
+                
+                final_map = float(self.history.get_run(run.id).best_map50) * 100
+                is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
+                target_dir = CONFIG.DIR_6_MODELS_PLATES if is_pose else CONFIG.DIR_6_MODELS_CHARS
+                
+                new_model_name = f"V{epochs}ep_mAP{final_map:.0f}_{run.name}.pt"
+                target_path = target_dir / new_model_name
+                
+                shutil.copy2(best_weights, target_path)
+                logger.info(f"💾 Skopiowano najlepszy model do: {target_path.name}")
+                
+                # =========================================================
+                # AUTO-WIRING (Automatyczna aktualizacja obecnego projektu)
+                # =========================================================
+                try:
+                    active_proj = CAMPAIGN.get_active_project_name()
+                    if active_proj:
+                        if is_pose:
+                            CAMPAIGN.set_global_model("plate", str(target_path))
+                            logger.info("🧠 Menadżer: Zaktualizowano model TABLIC.")
+                        else:
+                            ds_path = str(run.dataset_path).lower()
+                            if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
+                                CAMPAIGN.set_global_model("char", str(target_path))
+                                logger.info("🧠 Menadżer: Zaktualizowano model ZNAKÓW.")
+                            else:
+                                CAMPAIGN.set_global_model("vehicle", str(target_path))
+                                logger.info("🧠 Menadżer: Zaktualizowano model POJAZDÓW.")
+                                
+                        # ✅ ZMIANA: Zaliczenie całej Iteracji! Odblokowanie guzika "Nowa Iteracja"
+                        if CAMPAIGN.get_current_step() == 4:
+                            CAMPAIGN.set_current_step(5)
+                            logger.info("🎉 Menadżer: Cykl zakończony. Odblokowano awans do nowej iteracji.")
+                            
+                except Exception as e:
+                    logger.error(f"Nie udało się wpiąć modelu do Kampanii: {e}")
 
             logger.info(f"Trening zakończony: {run.id}")
 
