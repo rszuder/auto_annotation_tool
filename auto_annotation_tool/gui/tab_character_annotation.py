@@ -1428,10 +1428,6 @@ class CharacterAnnotationTab:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # =========================================================
-    # OCR LAB (kept; unchanged logic)
-    # =========================================================
-
     def _open_filter_lab(self):
         out_dir = Path(self.preview_dir_var.get().strip())
         if not self.preview_plate_ids:
@@ -1463,8 +1459,11 @@ class CharacterAnnotationTab:
         bottom_bar = ttk.Frame(lab_win, padding=10, relief="raised")
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        lab_help_text = tk.Text(bottom_bar, height=2, wrap=tk.WORD, bg="#f0f0f0", bd=0,
-                                font=("Segoe UI", 10, "italic"), fg="#2980b9")
+        # ✅ Pasek pomocy dla okna Laboratorium
+        lab_help_text = tk.Text(
+            bottom_bar, height=2, wrap=tk.WORD,
+            bg="#f0f0f0", bd=0, font=("Segoe UI", 10, "italic"), fg="#2980b9"
+        )
         lab_help_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         lab_help_text.insert(tk.END, "💡 Najedź myszką na nazwę suwaka, aby zobaczyć podpowiedź...")
         lab_help_text.config(state=tk.DISABLED)
@@ -1491,7 +1490,7 @@ class CharacterAnnotationTab:
         scrollable_frame = ttk.Frame(canvas_sliders, padding=10)
 
         frame_id = canvas_sliders.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas_sliders.bind('<Configure>', lambda e: canvas_sliders.itemconfig(frame_id, width=e.width))
+        canvas_sliders.bind("<Configure>", lambda e: canvas_sliders.itemconfig(frame_id, width=e.width))
         scrollable_frame.bind("<Configure>", lambda e: canvas_sliders.configure(scrollregion=canvas_sliders.bbox("all")))
         canvas_sliders.configure(yscrollcommand=scroll_sliders.set)
 
@@ -1519,8 +1518,10 @@ class CharacterAnnotationTab:
         for i in range(3):
             f = ttk.LabelFrame(view_frame, text=f" Obraz testowy {i+1} ", padding=10)
             f.pack(fill=tk.BOTH, expand=True, pady=10, padx=10)
+
             lbl = ttk.Label(f, font=("Consolas", 10, "bold"))
             lbl.pack(anchor=tk.W, pady=(0, 5))
+
             c = ttk.Frame(f)
             c.pack(fill=tk.BOTH, expand=True)
 
@@ -1534,7 +1535,11 @@ class CharacterAnnotationTab:
             p_lbl = tk.Label(pf_frame, bg="black", bd=2, relief="solid")
             p_lbl.pack(anchor=tk.NW)
 
-            self.lab_image_labels.append({"lbl": lbl, "orig": o_lbl, "proc": p_lbl})
+            self.lab_image_labels.append({
+                "lbl": lbl,
+                "orig": o_lbl,
+                "proc": p_lbl
+            })
 
         self.lab_photo_refs = []
         active_traces = []
@@ -1543,16 +1548,25 @@ class CharacterAnnotationTab:
             if not lab_win.winfo_exists():
                 return
             try:
-                th, ma = self.prep_height_var.get(), self.prep_angle_var.get()
-                ct, dh = self.prep_clip_var.get(), self.prep_denoise_var.get()
+                th = self.prep_height_var.get()
+                ma = self.prep_angle_var.get()
+                ct = self.prep_clip_var.get()
+                dh = self.prep_denoise_var.get()
                 cc = self.prep_clahe_var.get()
-                use_bin, tb, t_c = self.prep_use_bin_var.get(), self.prep_block_var.get(), self.prep_c_var.get()
+                use_bin = self.prep_use_bin_var.get()
+                tb = self.prep_block_var.get()
+                t_c = self.prep_c_var.get()
                 if tb % 2 == 0:
                     tb += 1
                 ei = self.prep_erode_var.get()
 
                 interp_str = self.interpolation_var.get()
-                interp_map = {"nearest": cv2.INTER_NEAREST, "linear": cv2.INTER_LINEAR, "cubic": cv2.INTER_CUBIC, "lanczos4": cv2.INTER_LANCZOS4}
+                interp_map = {
+                    "nearest": cv2.INTER_NEAREST,
+                    "linear": cv2.INTER_LINEAR,
+                    "cubic": cv2.INTER_CUBIC,
+                    "lanczos4": cv2.INTER_LANCZOS4
+                }
                 cv2_interp = interp_map.get(interp_str.lower(), cv2.INTER_LANCZOS4)
 
                 self.lab_photo_refs.clear()
@@ -1564,7 +1578,11 @@ class CharacterAnnotationTab:
                     if abs(ma) > 0.1:
                         h, w = orig_img.shape[:2]
                         M = cv2.getRotationMatrix2D((w // 2, h // 2), ma, 1.0)
-                        rotated = cv2.warpAffine(orig_img, M, (w, h), flags=cv2_interp, borderMode=cv2.BORDER_REPLICATE)
+                        rotated = cv2.warpAffine(
+                            orig_img, M, (w, h),
+                            flags=cv2_interp,
+                            borderMode=cv2.BORDER_REPLICATE
+                        )
                     else:
                         rotated = orig_img.copy()
 
@@ -1577,7 +1595,11 @@ class CharacterAnnotationTab:
 
                     if ct < 255:
                         gray_scaled[gray_scaled > ct] = 255
-                    den = cv2.fastNlMeansDenoising(gray_scaled, None, h=dh, templateWindowSize=7, searchWindowSize=21) if dh > 0 else gray_scaled
+
+                    den = cv2.fastNlMeansDenoising(
+                        gray_scaled, None,
+                        h=dh, templateWindowSize=7, searchWindowSize=21
+                    ) if dh > 0 else gray_scaled
 
                     if self.do_clahe_var.get() and cc > 0:
                         clahe = cv2.createCLAHE(clipLimit=cc, tileGridSize=(8, 8))
@@ -1588,8 +1610,13 @@ class CharacterAnnotationTab:
                     blurred = cv2.GaussianBlur(contrasted, (3, 3), 0)
 
                     if use_bin:
-                        binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-                                                      blockSize=max(3, tb), C=t_c)
+                        binary = cv2.adaptiveThreshold(
+                            blurred, 255,
+                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY,
+                            blockSize=max(3, tb),
+                            C=t_c
+                        )
                         if ei > 0:
                             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
                             final = cv2.erode(binary, kernel, iterations=ei)
@@ -1618,8 +1645,10 @@ class CharacterAnnotationTab:
         def add_slider(parent, label, var, from_, to_, res, ghost_key="", help_key=""):
             f = ttk.Frame(parent)
             f.pack(fill=tk.X, pady=4)
+
             lbl_f = ttk.Frame(f)
             lbl_f.pack(fill=tk.X)
+
             main_label = ttk.Label(lbl_f, text=label)
             main_label.pack(side=tk.LEFT)
 
@@ -1628,11 +1657,16 @@ class CharacterAnnotationTab:
                 if ghost_key in params_dict:
                     val = params_dict[ghost_key]
                     ghost_str = f"{val:.1f}" if isinstance(val, float) else str(val)
-                    ttk.Label(lbl_f, text=f"[Zwycięzca: {ghost_str}]", foreground="#2980b9",
-                              font=("Segoe UI", 9, "bold italic")).pack(side=tk.RIGHT)
+                    ttk.Label(
+                        lbl_f,
+                        text=f"[Zwycięzca: {ghost_str}]",
+                        foreground="#2980b9",
+                        font=("Segoe UI", 9, "bold italic")
+                    ).pack(side=tk.RIGHT)
 
             s = ttk.Scale(f, from_=from_, to=to_, variable=var, command=update_preview)
             s.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
             l = ttk.Label(f, width=5)
             l.pack(side=tk.RIGHT)
 
@@ -1648,41 +1682,97 @@ class CharacterAnnotationTab:
                 HELP.bind_help(main_label, help_key)
                 HELP.bind_help(s, help_key)
 
-        # sliders
+        if best_preset_data and best_preset_data.get("name"):
+            leader_f = tk.Frame(scrollable_frame, bg="#fff3cd", bd=1, relief="solid")
+            leader_f.pack(fill=tk.X, pady=(0, 15))
+            tk.Label(
+                leader_f,
+                text=f"Lider: {best_preset_data.get('name').upper()}",
+                bg="#fff3cd", fg="#8a6d3b",
+                font=("Arial", 10, "bold")
+            ).pack(pady=(5, 0))
+            tk.Label(
+                leader_f,
+                text=f"Skuteczność: {best_acc:.1f}%",
+                bg="#fff3cd", fg="#8a6d3b",
+                font=("Arial", 9)
+            ).pack(pady=(0, 5))
+        else:
+            ttk.Label(scrollable_frame, text="Dostrojenie Algorytmu", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+
         geom = ttk.LabelFrame(scrollable_frame, text=" 1. Geometria ", padding=10)
         geom.pack(fill=tk.X, pady=(0, 10))
-        add_slider(geom, "Ręczna korekta kąta [°]:", self.prep_angle_var, -30, 30, 1, "manual_angle", "lab_angle")
+
+        angle_row = ttk.Frame(geom)
+        angle_row.pack(fill=tk.X)
+        add_slider(angle_row, "Ręczna korekta kąta [°]:", self.prep_angle_var, -30, 30, 1, "manual_angle", "lab_angle")
+        ttk.Button(geom, text="Reset Kąta", command=lambda: (self.prep_angle_var.set(0.0), update_preview())).pack(anchor=tk.E, pady=(0, 5))
+
         add_slider(geom, "Wysokość OCR (px):", self.prep_height_var, 40, 150, 0, "target_height", "lab_height")
 
         filt = ttk.LabelFrame(scrollable_frame, text=" 2. Filtry bazowe ", padding=10)
         filt.pack(fill=tk.X, pady=(0, 10))
         add_slider(filt, "Odcięcie odblasków (255=Wył):", self.prep_clip_var, 100, 255, 0, "clip_thresh", "lab_clip")
         add_slider(filt, "Usuwanie ziarna (0=Wył):", self.prep_denoise_var, 0, 50, 0, "denoise_h", "lab_denoise")
+        cb2 = ttk.Checkbutton(filt, text="Wzmacniaj kontrast (CLAHE)", variable=self.do_clahe_var, command=update_preview)
+        cb2.pack(anchor=tk.W)
+        HELP.bind_help(cb2, "lab_clahe")
         add_slider(filt, "Siła CLAHE:", self.prep_clahe_var, 0.0, 10.0, 1, "clahe_clip", "lab_clahe")
 
         bina = ttk.LabelFrame(scrollable_frame, text=" 3. Binaryzacja ", padding=10)
         bina.pack(fill=tk.X, pady=(0, 10))
-        add_slider(bina, "Rozmiar bloku:", self.prep_block_var, 3, 51, 0, "thresh_block", "lab_block")
+        ttk.Checkbutton(bina, text="Włącz pełną binaryzację", variable=self.prep_use_bin_var, command=update_preview).pack(anchor=tk.W)
+        add_slider(bina, "Rozmiar bloku (nieparzyste):", self.prep_block_var, 3, 51, 0, "thresh_block", "lab_block")
         add_slider(bina, "Stała odcięcia (C):", self.prep_c_var, -20, 20, 0, "thresh_c", "lab_c")
-        add_slider(bina, "Erozja:", self.prep_erode_var, 0, 5, 0, "erode_iter", "lab_erode")
-        add_slider(bina, "Biała ramka Padding [%]:", self.prep_padding_var, 0, 50, 0, "padding_pct", "lab_pad")
+        add_slider(bina, "Pogrubianie liter (Erozja):", self.prep_erode_var, 0, 5, 0, "erode_iter", "lab_erode")
+        add_slider(bina, "Biała ramka - Padding [%]:", self.prep_padding_var, 0, 50, 0, "padding_pct", "lab_pad")
 
-        ocr_f = ttk.LabelFrame(scrollable_frame, text=" 4. Confidence OCR ", padding=10)
+        ocr_f = ttk.LabelFrame(scrollable_frame, text=" 4. Parametry Sieci (OCR) ", padding=10)
         ocr_f.pack(fill=tk.X, pady=(0, 10))
-        add_slider(ocr_f, "Próg pewności (0-1.0):", self.ocr_conf_var, 0.05, 0.95, 2, "char_ocr_conf", "lab_conf")
+        add_slider(ocr_f, "Wymagany próg pewności (0-1.0):", self.ocr_conf_var, 0.05, 0.95, 2, "char_ocr_conf", "lab_conf")
+
+        def load_preset():
+            p = filedialog.askopenfilename(initialdir=self.presets_dir, filetypes=[("JSON", "*.json")], parent=lab_win)
+            if p:
+                try:
+                    with open(p, 'r') as f: data = json.load(f)
+                    if "target_height" in data: self.prep_height_var.set(data["target_height"])
+                    if "clip_thresh" in data: self.prep_clip_var.set(data["clip_thresh"])
+                    if "thresh_block" in data: self.prep_block_var.set(data["thresh_block"])
+                    if "thresh_c" in data: self.prep_c_var.set(data["thresh_c"])
+                    if "erode_iter" in data: self.prep_erode_var.set(data["erode_iter"])
+                    if "padding_pct" in data: self.prep_padding_var.set(data["padding_pct"])
+                    if "char_ocr_conf" in data: self.ocr_conf_var.set(data["char_ocr_conf"])
+                    update_preview()
+                except: pass
+
+        def save_preset():
+            name = simpledialog.askstring("Preset", "Podaj nazwę dla presetu:", parent=lab_win)
+            if name:
+                p = self.presets_dir / f"{name}.json"
+                data = self._get_current_prep_params()
+                data["char_ocr_conf"] = self.ocr_conf_var.get()
+                with open(p, 'w') as f: json.dump(data, f, indent=4)
 
         def safe_close():
             for var, tid in active_traces:
-                try:
-                    var.trace_remove("write", tid)
-                except Exception:
-                    pass
+                try: var.trace_remove("write", tid)
+                except: pass
             self._force_save_all()
-            self.lab_photo_refs.clear()
+            self.lab_photoRefs = []
             HELP.status_updater = self.old_status_updater
             lab_win.destroy()
 
         lab_win.protocol("WM_DELETE_WINDOW", safe_close)
+        ttk.Button(bottom_bar, text="Zapisz Preset", command=save_preset).pack(side=tk.RIGHT)
+        ttk.Button(bottom_bar, text="Wczytaj Preset", command=load_preset).pack(side=tk.RIGHT)
         ttk.Button(bottom_bar, text="ZAMKNIJ", command=safe_close, style="Accent.TButton").pack(side=tk.RIGHT, padx=15)
+
+        btn_roll = ttk.Button(
+            bottom_bar,
+            text="🎲 Losuj inną próbkę",
+            command=lambda: (setattr(self, 'lab_current_images', roll_images()), update_preview())
+        )
+        btn_roll.pack(side=tk.RIGHT, padx=15)
 
         update_preview()
