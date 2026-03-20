@@ -124,7 +124,8 @@ class Config:
     DIR_4_DATASETS: Path    = WORKSPACE_DIR / "4_training_datasets"
     DIR_5_RUNS: Path        = WORKSPACE_DIR / "5_training_runs"
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
-    
+    DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
+
     # ✅ ZMIANA: Podstruktura dla modeli
     DIR_6_MODELS_BASE: Path          = DIR_6_MODELS / "base"
     DIR_6_MODELS_TRAINED: Path       = DIR_6_MODELS / "trained"
@@ -152,10 +153,18 @@ class Config:
     def init_workspace(self):
         """Automatycznie buduje strukturę katalogów przy starcie aplikacji."""
         directories = [
-            self.DIR_1_RAW, self.DIR_2_AUTO_ANN, self.DIR_3_CHARS,
-            self.DIR_4_DATASETS, self.DIR_5_RUNS, self.DIR_6_MODELS, 
-            self.DIR_6_MODELS_BASE, self.DIR_6_MODELS_PLATES, self.DIR_6_MODELS_CHARS,
-            self.DIR_7_RANKINGS
+            self.DIR_1_RAW, 
+            self.DIR_2_AUTO_ANN, 
+            self.DIR_3_CHARS,
+            self.DIR_4_DATASETS, 
+            self.DIR_5_RUNS, 
+            self.DIR_6_MODELS, 
+            self.DIR_6_MODELS_BASE, 
+            self.DIR_6_MODELS_PLATES, 
+            self.DIR_6_MODELS_CHARS,
+            self.DIR_7_RANKINGS, 
+            self.DIR_9_PROJECTS,  # ✅ ZMIANA
+            
         ]
         
         for directory in directories:
