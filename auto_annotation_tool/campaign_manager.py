@@ -64,7 +64,13 @@ class CampaignManager:
         return list(self.state["projects"].keys())
 
     def get_active_project_name(self) -> str:
-        return self.state["active_project"]
+        # ✅ ZMIANA: zwracamy aktywny projekt tylko jeśli istnieje w rejestrze
+        act = self.state.get("active_project", "")
+        if not act:
+            return ""
+        if act not in self.state.get("projects", {}):
+            return ""
+        return act
 
     def set_active_project(self, name: str):
         if name in self.state["projects"]:
@@ -73,34 +79,49 @@ class CampaignManager:
 
     def create_project(self, name: str) -> bool:
         name = name.strip()
-        if not name: return False
+        if not name:
+            return False
         if name in self.state["projects"]:
-            return False # Projekt o tej nazwie już istnieje!
-            
+            return False
+
         self.state["projects"][name] = self._get_default_project_template(name)
         self.state["active_project"] = name
         self.save_state()
+
+        # ✅ ZMIANA: budujemy pełne drzewo projektu w 9_projects
+        root = self.get_project_root_dir(name)
+        for p in [
+            root / "1_raw_images",
+            root / "2_auto_annotations",
+            root / "3_cropped_characters",
+            root / "4_training_datasets",
+            root / "5_training_runs",
+            root / "6_models",
+            root / "7_rankings",
+            root / "8_ocr_presets",
+        ]:
+            p.mkdir(parents=True, exist_ok=True)
+
         return True
 
     def delete_project(self, name: str) -> bool:
-        if name not in self.state["projects"]: return False
-        
-        folder_name = self.state["projects"][name]["folder_name"]
-        target_dir = Path(CONFIG.DIR_1_RAW) / folder_name
-        if target_dir.exists():
-            try: shutil.rmtree(target_dir)
-            except Exception as e: logger.error(f"Nie można usunąć {target_dir}: {e}")
+        if name not in self.state["projects"]:
+            return False
+
+        # ✅ ZMIANA: kasujemy cały katalog projektu
+        root = self.get_project_root_dir(name)
+        try:
+            if root.exists():
+                shutil.rmtree(root)
+        except Exception as e:
+            logger.error(f"Nie można usunąć projektu {root}: {e}")
 
         del self.state["projects"][name]
-        
-        # ZMIANA: Jeśli usuniemy ostatni projekt, zostaje pusto.
-        if self.state["active_project"] == name:
+
+        if self.state.get("active_project") == name:
             remaining = list(self.state["projects"].keys())
-            if remaining:
-                self.state["active_project"] = remaining[0]
-            else:
-                self.state["active_project"] = ""
-                
+            self.state["active_project"] = remaining[0] if remaining else ""
+
         self.save_state()
         return True
 
@@ -146,6 +167,34 @@ class CampaignManager:
         if not act or act not in self.state.get("projects", {}): return ""
         key = f"best_{model_type}_model"
         return self.state["projects"][act].get(key, "")
+    # ✅ ZMIANA: standaryzowane katalogi wewnątrz projektu
+    def get_project_root_dir(self, project_name: str) -> Path:
+        folder_name = self.state["projects"][project_name]["folder_name"]
+        return Path(CONFIG.DIR_9_PROJECTS) / folder_name
+
+    def get_active_project_root_dir(self) -> Path | None:
+        act = self.get_active_project_name()  # ✅ ZMIANA: safe
+        if not act:
+            return None
+        return self.get_project_root_dir(act)
+
+    def get_dir(self, key: str) -> Path | None:
+        """Zwraca katalog dla aktywnego projektu."""
+        root = self.get_active_project_root_dir()
+        if root is None:
+            return None
+
+        mapping = {
+            "raw": root / "1_raw_images",
+            "auto_ann": root / "2_auto_annotations",
+            "chars": root / "3_cropped_characters",
+            "datasets": root / "4_training_datasets",
+            "runs": root / "5_training_runs",
+            "models": root / "6_models",
+            "rankings": root / "7_rankings",
+            "presets": root / "8_ocr_presets",
+        }
+        return mapping.get(key)    
 
 # Singleton Menadżera
 CAMPAIGN = CampaignManager()
