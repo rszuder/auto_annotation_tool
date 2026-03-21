@@ -232,23 +232,34 @@ class CharacterAnnotationTab:
         
 
     def unlock_detection_subtab(self):
-        self._set_subtab_state(self.tab_detect, "normal")
         self._set_button_state("btn_to_detect", True)
         
 
     def unlock_dataset_subtab(self):
-        self._set_subtab_state(self.tab_dataset, "normal")
         self._set_button_state("btn_to_dataset", True)
-        self._sync_step3_nav_buttons()
 
     def go_to_substep_2(self):
-        if self._get_subtab_state(self.tab_detect) != "normal":
+        btn = getattr(self, "btn_to_detect", None)
+        if btn is not None and str(btn.cget("state")) != "normal":
             return
+
+        if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_extract, "disabled")
+            self._set_subtab_state(self.tab_detect, "normal")
+            self._set_subtab_state(self.tab_dataset, "disabled")
+
         self._select_subtab(self.tab_detect)
 
     def go_to_substep_3(self):
-        if self._get_subtab_state(self.tab_dataset) != "normal":
+        btn = getattr(self, "btn_to_dataset", None)
+        if btn is not None and str(btn.cget("state")) != "normal":
             return
+
+        if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_extract, "disabled")
+            self._set_subtab_state(self.tab_detect, "disabled")
+            self._set_subtab_state(self.tab_dataset, "normal")
+
         self._select_subtab(self.tab_dataset)
 
     def back_to_substep_1(self):
@@ -256,6 +267,7 @@ class CharacterAnnotationTab:
         Cofnięcie do 1 blokuje 2 i 3.
         """
         if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_extract, "normal")
             self._set_subtab_state(self.tab_detect, "disabled")
             self._set_subtab_state(self.tab_dataset, "disabled")
             self._set_button_state("btn_to_detect", False)
@@ -268,51 +280,13 @@ class CharacterAnnotationTab:
         Cofnięcie do 2 blokuje 3.
         """
         if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_extract, "disabled")
             self._set_subtab_state(self.tab_detect, "normal")
             self._set_subtab_state(self.tab_dataset, "disabled")
-            self._set_button_state("btn_to_detect", True)
             self._set_button_state("btn_to_dataset", False)
 
         self._select_subtab(self.tab_detect)
-        self._sync_step3_nav_buttons()
 
-    def _set_subtab_state(self, tab_widget, state: str):
-        try:
-            self.main_nb.tab(str(tab_widget), state=state)
-        except Exception as e:
-            logger.debug(f"Nie udało się ustawić stanu podzakładki: {e}")
-
-    def enter_campaign_step3_mode(self):
-        """
-        Wejście z Wizarda do kroku 3:
-        - lądujemy zawsze na podzakładce 1
-        - podzakładki 2 i 3 są zablokowane
-        """
-        try:
-            self.main_nb.select(str(self.tab_extract))
-        except Exception as e:
-            logger.debug(f"Nie udało się przełączyć na podzakładkę 1: {e}")
-
-        self._set_subtab_state(self.tab_extract, "normal")
-        self._set_subtab_state(self.tab_detect, "disabled")
-        self._set_subtab_state(self.tab_dataset, "disabled")
-
-    def unlock_detection_subtab(self):
-        """Odblokowuje etap 2 po zakończonym wycinaniu tablic."""
-        self._set_subtab_state(self.tab_detect, "normal")
-
-    def unlock_dataset_subtab(self):
-        """Odblokowuje etap 3 po zakończonej analizie / detekcji znaków."""
-        self._set_subtab_state(self.tab_dataset, "normal")
-
-    def reset_subtab_flow(self):
-        """Stan neutralny poza liniowym workflow kampanii."""
-        self._set_subtab_state(self.tab_extract, "normal")
-        self._set_subtab_state(self.tab_detect, "normal")
-        self._set_subtab_state(self.tab_dataset, "normal")
-        self._set_button_state("btn_to_detect", True)
-        self._set_button_state("btn_to_dataset", True)
-        self._sync_step3_nav_buttons()
 
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
