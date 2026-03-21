@@ -150,7 +150,7 @@ class CampaignTab:
         lbl_val = tk.Label(row, text="Domyślny/Brak", fg="#2980b9", font=("Consolas", 10))
         lbl_val.pack(side=tk.LEFT, expand=True, anchor=tk.W)
 
-        btn = ttk.Button(row, text="Zmień", command=lambda: self._set_model(model_type, initial_dir))
+        btn = ttk.Button(row, text="Zmień", command=lambda mt=model_type: self._set_model(mt))
         btn.pack(side=tk.RIGHT)
 
         setattr(self, f"lbl_model_{model_type}", lbl_val)
@@ -200,7 +200,14 @@ class CampaignTab:
         dialog.wait_window()
         return result["value"]
 
-    def _set_model(self, model_type, initial_dir: Path):
+    def _set_model(self, model_type):
+        # ✅ ZMIANA: domyślnie startujemy z katalogu modeli aktywnego projektu
+        initial_dir = CAMPAIGN.get_dir("models")
+        if initial_dir is None:
+            initial_dir = Path(CONFIG.DIR_6_MODELS)
+        else:
+            initial_dir = Path(initial_dir)
+
         p = filedialog.askopenfilename(
             initialdir=str(initial_dir),
             filetypes=[("YOLO Model", "*.pt")]
@@ -307,7 +314,7 @@ class CampaignTab:
         ttk.Button(
             btn_row,
             text="↩ Autoanotacja",
-            command=self._step_goto_auto_annotation
+            command=self._rework_step3_via_auto_annotation
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Button(
@@ -315,6 +322,31 @@ class CampaignTab:
             text="🔬 Popraw OCR",
             command=self._step_goto_characters
         ).pack(side=tk.LEFT)
+
+    def _rework_step3_via_auto_annotation(self):
+        """
+        ✅ ZMIANA: użytkownik wybiera ścieżkę naprawczą przez ponowną Autoanotację.
+        Cofamy workflow do Kroku 2 i gasimy Krok 3.
+        """
+        try:
+            CAMPAIGN.set_current_step(2)
+            CAMPAIGN.reset_step3()
+
+            self._refresh_dashboard()
+            self.app.update_campaign_tab_access()
+
+            try:
+                self.app.update_status(
+                    "Wybrano ścieżkę naprawczą przez Autoanotację. Workflow cofnięto do Kroku 2.",
+                    "warning"
+                )
+            except Exception:
+                pass
+
+            self._step_goto_auto_annotation()
+
+        except Exception as e:
+            logger.error(f"Błąd przejścia do ścieżki naprawczej Autoanotacji: {e}")
 
     # ======================================================
     # DASHBOARD REFRESH
