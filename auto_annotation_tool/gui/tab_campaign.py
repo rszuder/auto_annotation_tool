@@ -846,7 +846,7 @@ class CampaignTab:
 
     def _step_goto_characters(self):
         if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 3:
-            return
+            return      
 
         raw_dir = CAMPAIGN.get_dir("raw")
         auto_dir = CAMPAIGN.get_dir("auto_ann")
