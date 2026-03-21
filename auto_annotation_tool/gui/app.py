@@ -161,86 +161,99 @@ class AutoAnnotationApp:
         self.campaign_mode_active = bool(active)
         self.update_campaign_tab_access()
 
+    def _get_selected_tab_key(self):
+        try:
+            selected_widget = str(self.notebook.select())
+        except Exception:
+            return None
+
+        for key, tab in self.tabs.items():
+            try:
+                if str(tab.frame) == selected_widget:
+                    return key
+            except Exception:
+                pass
+
+        return None
+
+
     def update_campaign_tab_access(self):
         """
-        Steruje dostępnością głównych zakładek w zależności od aktywnego projektu i kroku kampanii.
+        Steruje dostępnością głównych zakładek.
 
-        Zasady:
-        - bez aktywnego projektu: wszystkie zakładki są dostępne
-        - z aktywnym projektem: aktywna jest tylko zakładka Kampanii + zakładka odpowiadająca bieżącemu krokowi
-        - zakładka Pomoc pozostaje dostępna
+        Zasada:
+        - tryb swobodny: wszystko dostępne
+        - tryb aktywnego projektu: ręcznie klikalne są tylko:
+        * Wizard kampanii
+        * Help
+        * aktualnie OTWARTA zakładka robocza (jeśli weszliśmy tam z wizarda)
         """
-        try:
-            from ..campaign_manager import CAMPAIGN
 
-            active_proj = CAMPAIGN.get_active_project_name()
-            has_project = bool(active_proj)
+        from ..campaign_manager import CAMPAIGN
 
-            # mapowanie nazw zakładek na ich indeksy w notebooku
-            tab_indices = {}
-            notebook_tabs = self.notebook.tabs()
+        active = CAMPAIGN.get_active_project_name()
 
-            for i, widget_name in enumerate(notebook_tabs):
-                for key, tab in self.tabs.items():
-                    if str(tab.frame) == str(widget_name):
-                        tab_indices[key] = i
-                        break
-                    
-            logger.warning(f"AUDYT tabs.keys() = {list(self.tabs.keys())}")
-            logger.warning(f"AUDYT tab_indices = {tab_indices}")
-            
-            def set_tab_state(tab_key, state):
-                if tab_key in tab_indices:
-                    try:
-                        self.notebook.tab(tab_indices[tab_key], state=state)
-                    except Exception:
-                        pass
+        # ręczny free mode albo brak aktywnego projektu = pełna swoboda
+        if self.campaign_free_mode or not active:
+            self.campaign_mode_active = False
 
-            # ==================================================
-            # TRYB SWOBODNY
-            # ==================================================
-            if self.campaign_free_mode or not has_project or not self.campaign_mode_active:
-                for key in self.tabs.keys():
-                    set_tab_state(key, "normal")
-                return
+            for key, tab in self.tabs.items():
+                try:
+                    self.notebook.tab(str(tab.frame), state="normal")
+                except Exception:
+                    pass
+            return
 
-            # ==================================================
-            # TRYB KAMPANII
-            # ==================================================
-            current_step = CAMPAIGN.get_current_step()
+        # aktywny projekt
+        self.campaign_mode_active = True
 
+        selected_key = self._get_selected_tab_key()
 
-            allowed = {"campaign"}  # kampania zawsze dostępna
+        allowed = {"campaign", "help"}
 
-            if current_step == 2:
-                allowed.add("annotation")
+        # jeżeli użytkownik jest już w zakładce roboczej, zostaw ją aktywną
+        # ale nie odblokowuj innych roboczych tabów
+        if selected_key in {"annotation", "characters", "training"}:
+            allowed.add(selected_key)
 
-            elif current_step == 3:
-                # ✅ ZMIANA:
-                # w kroku 3 standardowo dostępna jest analiza znaków,
-                # ale jeśli etap wymaga poprawy, odblokowujemy również Autoanotację
-                allowed.add("characters")
-
-                if CAMPAIGN.get_step3_status() == "needs_rework":
-                    allowed.add("annotation")
-
-            elif current_step >= 4:
-                allowed.add("annotation")
-                allowed.add("characters")
-                if CAMPAIGN.get_step3_status() == "approved":
-                    allowed.add("training")
-
-            # Pomoc zawsze dostępna, jeśli istnieje
-            if "help" in self.tabs:
-                allowed.add("help")
-
-            for key in self.tabs.keys():
+        for key, tab in self.tabs.items():
+            try:
                 state = "normal" if key in allowed else "disabled"
+                self.notebook.tab(str(tab.frame), state=state)
+            except Exception:
+                pass
 
-                set_tab_state(key, state)
+    def get_tab_index(self, tab_key: str) -> int:
+        if tab_key not in self.tabs:
+            raise KeyError(f"Unknown tab key: {tab_key}")
 
-        except Exception as e:
-            logger.error(f"Błąd update_campaign_tab_access: {e}")
+        target_widget = str(self.tabs[tab_key].frame)
+
+        for i, widget_name in enumerate(self.notebook.tabs()):
+            if str(widget_name) == target_widget:
+                return i
+
+        raise KeyError(f"Tab widget not found in notebook for key: {tab_key}")
+
+
+    def select_tab(self, tab_key: str):
+        if tab_key not in self.tabs:
+            raise KeyError(f"Unknown tab key: {tab_key}")
+
+        self.notebook.select(str(self.tabs[tab_key].frame))
+
+    def open_controlled_tab(self, tab_key: str):
+        if tab_key not in self.tabs:
+            raise KeyError(f"Unknown tab key: {tab_key}")
+
+        tab_widget = str(self.tabs[tab_key].frame)
+
+        # tymczasowo odblokuj tab, aby dało się go wybrać programowo
+        self.notebook.tab(tab_widget, state="normal")
+        self.notebook.select(tab_widget)
+
+        # po przejściu od razu zsynchronizuj dostępność zakładek
+        self.update_campaign_tab_access()
 
     def _guard_campaign_navigation(self, event=None):
         return

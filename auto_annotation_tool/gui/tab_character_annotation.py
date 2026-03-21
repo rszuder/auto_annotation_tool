@@ -45,6 +45,7 @@ class CharacterAnnotationTab:
 
         # core state
         self.is_processing = False
+        self._step3_linear_mode = False
 
         # preview/cache state
         self.preview_metadata = {}
@@ -102,6 +103,7 @@ class CharacterAnnotationTab:
         self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
 
         self._create_widgets()
+        self.reset_subtab_flow()
         self._update_yolo_visibility()
 
         self.app.root.bind("<Destroy>", self._on_app_close, add="+")
@@ -151,6 +153,166 @@ class CharacterAnnotationTab:
             self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="#2980b9")
         except Exception:
             pass
+
+        try:
+            self.reset_subtab_flow()
+        except Exception as e:
+            logger.debug(f"Nie udało się zresetować stanów podzakładek: {e}") 
+
+    def _set_button_state(self, attr_name: str, enabled: bool):
+        btn = getattr(self, attr_name, None)
+        if btn is None:
+            return
+
+        try:
+            btn.config(state="normal" if enabled else "disabled")
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu przycisku '{attr_name}': {e}")       
+
+    def _set_subtab_state(self, tab_widget, state: str):
+        try:
+            self.main_nb.tab(str(tab_widget), state=state)
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu podzakładki: {e}")
+
+    def _get_subtab_state(self, tab_widget) -> str:
+        try:
+            return str(self.main_nb.tab(str(tab_widget), "state"))
+        except Exception:
+            return "normal"
+
+    def _select_subtab(self, tab_widget):
+        try:
+            self.main_nb.select(str(tab_widget))
+        except Exception as e:
+            logger.debug(f"Nie udało się przełączyć podzakładki: {e}")
+
+    def _sync_step3_nav_buttons(self):
+        detect_enabled = self._get_subtab_state(self.tab_detect) == "normal"
+        dataset_enabled = self._get_subtab_state(self.tab_dataset) == "normal"
+
+        if hasattr(self, "btn_to_detect"):
+            self.btn_to_detect.config(state=tk.NORMAL if detect_enabled else tk.DISABLED)
+
+        if hasattr(self, "btn_to_dataset"):
+            self.btn_to_dataset.config(state=tk.NORMAL if dataset_enabled else tk.DISABLED)
+
+    def enter_campaign_step3_mode(self):
+        """
+        Wejście z Wizarda do kroku 3:
+        - start zawsze w podzakładce 1
+        - 2 i 3 są zablokowane
+        """
+        self._step3_linear_mode = True
+
+        self._set_subtab_state(self.tab_extract, "normal")
+        self._set_subtab_state(self.tab_detect, "disabled")
+        self._set_subtab_state(self.tab_dataset, "disabled")
+
+        self._select_subtab(self.tab_extract)
+        self._set_button_state("btn_to_detect", False)
+        self._set_button_state("btn_to_dataset", False)
+        
+
+
+
+    def reset_subtab_flow(self):
+        """
+        Stan neutralny poza liniowym workflow kampanii.
+        """
+        self._step3_linear_mode = False
+
+        self._set_subtab_state(self.tab_extract, "normal")
+        self._set_subtab_state(self.tab_detect, "normal")
+        self._set_subtab_state(self.tab_dataset, "normal")
+
+        self._set_button_state("btn_to_detect", False)
+        self._set_button_state("btn_to_dataset", False)
+
+        
+
+    def unlock_detection_subtab(self):
+        self._set_subtab_state(self.tab_detect, "normal")
+        self._set_button_state("btn_to_detect", True)
+        
+
+    def unlock_dataset_subtab(self):
+        self._set_subtab_state(self.tab_dataset, "normal")
+        self._set_button_state("btn_to_dataset", True)
+        self._sync_step3_nav_buttons()
+
+    def go_to_substep_2(self):
+        if self._get_subtab_state(self.tab_detect) != "normal":
+            return
+        self._select_subtab(self.tab_detect)
+
+    def go_to_substep_3(self):
+        if self._get_subtab_state(self.tab_dataset) != "normal":
+            return
+        self._select_subtab(self.tab_dataset)
+
+    def back_to_substep_1(self):
+        """
+        Cofnięcie do 1 blokuje 2 i 3.
+        """
+        if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_detect, "disabled")
+            self._set_subtab_state(self.tab_dataset, "disabled")
+            self._set_button_state("btn_to_detect", False)
+            self._set_button_state("btn_to_dataset", False)
+
+        self._select_subtab(self.tab_extract)
+
+    def back_to_substep_2(self):
+        """
+        Cofnięcie do 2 blokuje 3.
+        """
+        if self._step3_linear_mode:
+            self._set_subtab_state(self.tab_detect, "normal")
+            self._set_subtab_state(self.tab_dataset, "disabled")
+            self._set_button_state("btn_to_detect", True)
+            self._set_button_state("btn_to_dataset", False)
+
+        self._select_subtab(self.tab_detect)
+        self._sync_step3_nav_buttons()
+
+    def _set_subtab_state(self, tab_widget, state: str):
+        try:
+            self.main_nb.tab(str(tab_widget), state=state)
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu podzakładki: {e}")
+
+    def enter_campaign_step3_mode(self):
+        """
+        Wejście z Wizarda do kroku 3:
+        - lądujemy zawsze na podzakładce 1
+        - podzakładki 2 i 3 są zablokowane
+        """
+        try:
+            self.main_nb.select(str(self.tab_extract))
+        except Exception as e:
+            logger.debug(f"Nie udało się przełączyć na podzakładkę 1: {e}")
+
+        self._set_subtab_state(self.tab_extract, "normal")
+        self._set_subtab_state(self.tab_detect, "disabled")
+        self._set_subtab_state(self.tab_dataset, "disabled")
+
+    def unlock_detection_subtab(self):
+        """Odblokowuje etap 2 po zakończonym wycinaniu tablic."""
+        self._set_subtab_state(self.tab_detect, "normal")
+
+    def unlock_dataset_subtab(self):
+        """Odblokowuje etap 3 po zakończonej analizie / detekcji znaków."""
+        self._set_subtab_state(self.tab_dataset, "normal")
+
+    def reset_subtab_flow(self):
+        """Stan neutralny poza liniowym workflow kampanii."""
+        self._set_subtab_state(self.tab_extract, "normal")
+        self._set_subtab_state(self.tab_detect, "normal")
+        self._set_subtab_state(self.tab_dataset, "normal")
+        self._set_button_state("btn_to_detect", True)
+        self._set_button_state("btn_to_dataset", True)
+        self._sync_step3_nav_buttons()
 
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -355,17 +517,17 @@ class CharacterAnnotationTab:
         self.main_nb = ttk.Notebook(self.frame)
         self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        tab1 = ttk.Frame(self.main_nb)
-        self.main_nb.add(tab1, text=f"{self.icon_manager.get('cut')} 1. Wycinanie Tablic")
-        self._build_extraction_tab(tab1)
+        self.tab_extract = ttk.Frame(self.main_nb)
+        self.main_nb.add(self.tab_extract, text=f"{self.icon_manager.get('cut')} 1. Wycinanie Tablic")
+        self._build_extraction_tab(self.tab_extract)
 
-        tab2 = ttk.Frame(self.main_nb)
-        self.main_nb.add(tab2, text=f"{self.icon_manager.get('eye')} 2. Wykrywanie Znaków i Analiza")
-        self._build_detection_tab(tab2)
+        self.tab_detect = ttk.Frame(self.main_nb)
+        self.main_nb.add(self.tab_detect, text=f"{self.icon_manager.get('eye')} 2. Wykrywanie Znaków i Analiza")
+        self._build_detection_tab(self.tab_detect)
 
-        tab3 = ttk.Frame(self.main_nb)
-        self.main_nb.add(tab3, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
-        self._build_cvat_tab(tab3)
+        self.tab_dataset = ttk.Frame(self.main_nb)
+        self.main_nb.add(self.tab_dataset, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
+        self._build_cvat_tab(self.tab_dataset)
 
     # =========================================================
     # TAB 1: Extraction
@@ -417,6 +579,23 @@ class CharacterAnnotationTab:
         HELP.bind_help(row_img, "t2_img")
         HELP.bind_help(self.btn_extract, "t2_cut_start")
         HELP.bind_help(lf_logs, "t2_cut_logs")
+
+        nav = ttk.Frame(parent)
+        nav.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        ttk.Button(
+            nav,
+            text="← Wstecz",
+            state=tk.DISABLED
+        ).pack(side=tk.LEFT)
+
+        self.btn_to_detect = ttk.Button(
+            nav,
+            text="Dalej → Wykrywanie Znaków i Analiza",
+            command=self.go_to_substep_2,
+            state=tk.DISABLED
+        )
+        self.btn_to_detect.pack(side=tk.RIGHT)
 
     def _run_extraction(self):
         self._force_save_all()
@@ -497,7 +676,11 @@ class CharacterAnnotationTab:
                 generator.save_metadata()
                 if self.is_processing:
                     self.frame.after(0, lambda: self._load_preview_data(quiet=True))
-                    self.frame.after(0, lambda: messagebox.showinfo("Gotowe", "Wycinanie zakończone!"))
+                    self.frame.after(0, self.unlock_detection_subtab)
+                    self.frame.after(0, lambda: messagebox.showinfo(
+                        "Gotowe",
+                        "Wycinanie zakończone!\n\nOdblokowano etap 2: Wykrywanie Znaków i Analiza."
+                    ))
             except Exception as e:
                 self._log(self.ext_log, f"\n❌ BŁĄD: {e}\n", "ERROR")
             finally:
@@ -626,6 +809,24 @@ class CharacterAnnotationTab:
         HELP.bind_help(combo, "t2_method")
         HELP.bind_help(btn_lab, "t2_lab_btn")
         HELP.bind_help(r_y, "t2_yolo_model")
+
+        nav = ttk.Frame(parent)
+        nav.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        self.btn_back_to_extract = ttk.Button(
+            nav,
+            text="← Wstecz do Wycinania Tablic",
+            command=self.back_to_substep_1
+        )
+        self.btn_back_to_extract.pack(side=tk.LEFT)
+
+        self.btn_to_dataset = ttk.Button(
+            nav,
+            text="Dalej → Integracje i Dataset",
+            command=self.go_to_substep_3,
+            state=tk.DISABLED
+        )
+        self.btn_to_dataset.pack(side=tk.RIGHT)
 
     def _update_winner_label(self):
         best_preset_data, best_acc = self._get_best_preset()
@@ -1064,6 +1265,7 @@ class CharacterAnnotationTab:
                 meta_file = out_dir / "metadata.json"
                 self._atomic_write_json(meta_file, local_meta)
                 self.preview_metadata = local_meta
+                self.frame.after(0, self.unlock_dataset_subtab)
 
                 plates_with_chars = sum(
                     1 for pid in self.preview_plate_ids
@@ -1309,8 +1511,8 @@ class CharacterAnnotationTab:
                         "warning"
                     )
 
-                    # ✅ ZMIANA: automatyczny powrót do Wizarda
-                    self.app.notebook.select(0)
+                    self.app.select_tab("campaign")
+                    self.app.update_campaign_tab_access()
 
                 except Exception:
                     pass
@@ -1338,7 +1540,8 @@ class CharacterAnnotationTab:
                         "Paczka YOLO została utworzona poprawnie. Odblokowano Krok 4 (Trening).",
                         "info"
                     )
-                    self.app.notebook.select(0)
+                    self.app.select_tab("campaign")
+                    self.app.update_campaign_tab_access()
 
             except Exception:
                 pass
