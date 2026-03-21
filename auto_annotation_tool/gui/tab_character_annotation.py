@@ -18,6 +18,7 @@ import cv2
 import os
 
 from ..config import CONFIG, logger
+from ..campaign_manager import CAMPAIGN
 from ..icons import IconManager
 from ..character_recognition import PlateGenerator, CharacterDetector, DetectionMethod
 from ..ocr import PlateOCR
@@ -82,7 +83,9 @@ class CharacterAnnotationTab:
         self.xml_path_var = tk.StringVar(value=get_val("char_xml_path", ""))
         self.images_dir_var = tk.StringVar(value=get_val("char_images_dir", ""))
         self.yolo_model_path_var = tk.StringVar(value=get_val("char_yolo_model", ""))
+        self.yolo_model_version_var = tk.StringVar(value=get_val("char_yolo_version", "11"))
         self.yolo_device_var = tk.StringVar(value=get_val("char_yolo_device", "auto"))
+        self.yolo_model_size_var = tk.StringVar(value=get_val("char_yolo_size", "s"))
         self.preview_dir_var = tk.StringVar(value=get_val("char_preview_dir", ""))
 
         self.ocr_conf_var = tk.DoubleVar(value=float(get_val("char_ocr_conf", 0.25)))
@@ -103,6 +106,8 @@ class CharacterAnnotationTab:
         self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
 
         self._create_widgets()
+        self._update_step3_source_path_lock()
+        self._update_preview_path_lock()
         self.reset_subtab_flow()
         self._update_yolo_visibility()
 
@@ -157,7 +162,232 @@ class CharacterAnnotationTab:
         try:
             self.reset_subtab_flow()
         except Exception as e:
-            logger.debug(f"Nie udało się zresetować stanów podzakładek: {e}") 
+            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}") 
+
+    def _set_widget_state(self, widget, state: str):
+        if widget is None:
+            return
+        try:
+            widget.config(state=state)
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu widgetu: {e}")
+
+    def _update_step3_source_path_lock(self):
+        """
+        W aktywnym, liniowym kroku 3 źródła wejściowe ustawia Wizard,
+        więc użytkownik nie powinien ich ręcznie zmieniać.
+        """
+        locked = bool(getattr(self, "_step3_linear_mode", False))
+
+        entry_state = "disabled" if locked else "normal"
+        button_state = "disabled" if locked else "normal"
+
+        for attr_name in ("xml_path_entry", "images_dir_entry"):
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.config(state=entry_state)
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić stanu {attr_name}: {e}")
+
+        for attr_name in ("xml_path_browse_btn", "images_dir_browse_btn"):
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.config(state=button_state)
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić stanu {attr_name}: {e}")
+
+    def _count_preview_statuses(self):
+        perfect = 0
+        needs_fix = 0
+        unknown = 0
+
+        for _, data in self.preview_metadata.items():
+            if not isinstance(data, dict):
+                unknown += 1
+                continue
+
+            status = str(data.get("status", "unknown")).strip().lower()
+            if status == "perfect":
+                perfect += 1
+            elif status == "needs_fix":
+                needs_fix += 1
+            else:
+                unknown += 1
+
+        return {
+            "perfect": perfect,
+            "needs_fix": needs_fix,
+            "unknown": unknown,
+            "total": perfect + needs_fix + unknown,
+        }
+
+
+    def _get_step3_summary_dir(self) -> Path:
+        """
+        Katalog, w którym zapisujemy podsumowanie kroku 3.
+        Priorytet:
+        1. aktywny run preview
+        2. projektowy chars dir
+        3. fallback do DIR_3_CHARS
+        """
+        preview_dir = Path(self.preview_dir_var.get().strip()) if self.preview_dir_var.get().strip() else None
+        if preview_dir and preview_dir.exists():
+            return preview_dir
+
+        campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
+        if campaign_chars_dir:
+            p = Path(campaign_chars_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+        fallback = Path(CONFIG.DIR_3_CHARS).absolute()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+    def _build_step3_export_summary(
+        self,
+        gold_dataset_path: str | None = None,
+        review_pack_path: str | None = None,
+        retry_pack_path: str | None = None,
+        note: str = ""
+    ):
+        counts = self._count_preview_statuses()
+
+        gold_exists = bool(gold_dataset_path and Path(gold_dataset_path).exists())
+        review_exists = bool(review_pack_path and Path(review_pack_path).exists())
+        retry_exists = bool(retry_pack_path and Path(retry_pack_path).exists())
+
+        return {
+            "gold_dataset_created": gold_exists,
+            "gold_dataset_path": str(gold_dataset_path or ""),
+            "review_pack_created": review_exists,
+            "review_pack_path": str(review_pack_path or ""),
+            "retry_pack_created": retry_exists,
+            "retry_pack_path": str(retry_pack_path or ""),
+            "perfect_count": counts["perfect"],
+            "needs_fix_count": counts["needs_fix"],
+            "unknown_count": counts["unknown"],
+            "total_count": counts["total"],
+            "note": note,
+        }
+
+
+    def _write_step3_export_summary(self, summary: dict) -> Path:
+        summary_dir = self._get_step3_summary_dir()
+        summary_path = summary_dir / "export_summary.json"
+        self._atomic_write_json(summary_path, summary)
+        return summary_path
+
+
+    def _return_step3_result_to_wizard(self, summary: dict):
+        """
+        Jeden kontrakt zwrotny do wizarda:
+        - jeśli istnieje gold dataset -> approve + krok 4
+        - jeśli nie -> needs_rework
+        """
+        gold_ok = bool(summary.get("gold_dataset_created"))
+
+        if gold_ok:
+            CAMPAIGN.approve_step3()
+            CAMPAIGN.set_current_step(4)
+            status_msg = (
+                "Krok 3 zakończony sukcesem. "
+                "Powstał dataset treningowy i odblokowano etap 4."
+            )
+            status_kind = "success"
+        else:
+            CAMPAIGN.set_step3_needs_rework()
+            status_msg = (
+                "Krok 3 nie utworzył datasetu treningowego. "
+                "Wracasz do wizarda w trybie poprawy."
+            )
+            status_kind = "warning"
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._rebuild_roadmap_ui()
+                campaign_tab._refresh_dashboard()
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć Wizarda po kroku 3: {e}")
+
+        try:
+            self.app.select_tab("campaign")
+            self.app.update_campaign_tab_access()
+        except Exception as e:
+            logger.debug(f"Nie udało się wrócić do Wizarda po kroku 3: {e}")
+
+        try:
+            self.app.update_status(status_msg, status_kind)
+        except Exception:
+            pass
+
+
+    def _finalize_step3_from_existing_outputs(self):
+        """
+        Miękki finał kroku 3:
+        - nie tworzy datasetu sam,
+        - tylko ocenia to, co już istnieje po eksporcie z zakładki 3
+        - zapisuje export_summary.json
+        - zwraca wynik do wizarda
+        """
+        counts = self._count_preview_statuses()
+
+        gold_dataset_path = ""
+        review_pack_path = ""
+
+        campaign_datasets_dir = getattr(self, "_campaign_datasets_dir", None)
+        if campaign_datasets_dir:
+            ds_root = Path(campaign_datasets_dir)
+            if ds_root.exists():
+                candidates = sorted(
+                    [p for p in ds_root.iterdir() if p.is_dir()],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                if candidates:
+                    gold_dataset_path = str(candidates[0])
+
+        campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
+        if campaign_chars_dir:
+            chars_root = Path(campaign_chars_dir)
+            review_dir = chars_root / "review"
+            if review_dir.exists():
+                review_pack_path = str(review_dir)
+
+        summary = self._build_step3_export_summary(
+            gold_dataset_path=gold_dataset_path,
+            review_pack_path=review_pack_path,
+            retry_pack_path="",
+            note="Finalizacja kroku 3 na podstawie istniejących artefaktów projektu."
+        )
+
+        self._write_step3_export_summary(summary)
+        self._return_step3_result_to_wizard(summary)
+
+    def _update_preview_path_lock(self):
+        """
+        W aktywnym, liniowym kroku 3 użytkownik nie powinien ręcznie
+        zmieniać paczki preview ani ścieżki do niej.
+        """
+        locked = bool(getattr(self, "_step3_linear_mode", False))
+
+        try:
+            if hasattr(self, "preview_dir_entry"):
+                self.preview_dir_entry.config(state="disabled" if locked else "readonly")
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu preview_dir_entry: {e}")
+
+        try:
+            if hasattr(self, "preview_dir_browse_btn"):
+                self.preview_dir_browse_btn.config(state="disabled" if locked else "normal")
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu preview_dir_browse_btn: {e}")
 
     def _set_button_state(self, attr_name: str, enabled: bool):
         btn = getattr(self, attr_name, None)
@@ -212,7 +442,9 @@ class CharacterAnnotationTab:
         self._select_subtab(self.tab_extract)
         self._set_button_state("btn_to_detect", False)
         self._set_button_state("btn_to_dataset", False)
-        
+        self._update_preview_path_lock()
+        self._update_step3_source_path_lock()
+        self._update_yolo_visibility()
 
 
 
@@ -228,7 +460,9 @@ class CharacterAnnotationTab:
 
         self._set_button_state("btn_to_detect", False)
         self._set_button_state("btn_to_dataset", False)
-
+        self._update_preview_path_lock()
+        self._update_step3_source_path_lock()
+        self._update_yolo_visibility()
         
 
     def unlock_detection_subtab(self):
@@ -319,9 +553,11 @@ class CharacterAnnotationTab:
                 ("char_images_dir", self.images_dir_var),
                 ("char_yolo_model", self.yolo_model_path_var),
                 ("char_yolo_device", self.yolo_device_var),
+                ("char_yolo_size", self.yolo_model_size_var),
                 ("char_preview_dir", self.preview_dir_var),
                 ("char_ocr_conf", self.ocr_conf_var),
                 ("char_smart_export", self.smart_export_var),
+                ("char_yolo_version", self.yolo_model_version_var),
                 ("char_prep_angle", self.prep_angle_var),
                 ("char_prep_height", self.prep_height_var),
                 ("char_prep_padding", self.prep_padding_var),
@@ -347,14 +583,81 @@ class CharacterAnnotationTab:
         self._update_yolo_visibility()
 
     def _update_yolo_visibility(self):
-        # ✅ fix: używamy self.yolo_panel (bo tak faktycznie nazywasz ten panel)
         if not hasattr(self, "yolo_panel"):
             return
+
         method = (self.detection_method_var.get() or "OCR").upper().strip()
-        if method in ["YOLO", "BOTH"]:
+
+        is_ocr = method == "OCR"
+        is_yolo = method == "YOLO"
+        is_hybrid = method == "BOTH"
+
+        # panel YOLO pokazujemy dla YOLO i HYBRYDY
+
+        if hasattr(self, "yolo_version_combo"):
+            self._set_widget_state(
+                self.yolo_version_combo,
+                "readonly" if (is_yolo or is_hybrid) else "disabled"
+            )
+
+        if hasattr(self, "yolo_size_combo"):
+            self._set_widget_state(
+                self.yolo_size_combo,
+                "readonly" if (is_yolo or is_hybrid) else "disabled"
+            )
+        if is_yolo or is_hybrid:
             self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
         else:
             self.yolo_panel.pack_forget()
+
+        # w trybie kampanii ścieżka modelu jest sterowana z Wizarda
+        path_locked = bool(getattr(self, "_step3_linear_mode", False))
+
+        if hasattr(self, "det_yolo_model_entry"):
+            self._set_widget_state(
+                self.det_yolo_model_entry,
+                "disabled" if path_locked else "readonly"
+            )
+
+        if hasattr(self, "det_yolo_model_browse_btn"):
+            self._set_widget_state(
+                self.det_yolo_model_browse_btn,
+                "disabled" if path_locked else "normal"
+            )
+
+        # YOLO-only: laboratorium OCR i ranking nieaktywne
+        if hasattr(self, "btn_ocr_lab"):
+            self._set_widget_state(self.btn_ocr_lab, "disabled" if is_yolo else "normal")
+
+        if hasattr(self, "btn_rank_presets"):
+            # ranking presetów zostawiamy tylko dla czystego OCR
+            self._set_widget_state(self.btn_rank_presets, "normal" if is_ocr else "disabled")
+
+        # prawy panel ma być "nieaktywny" w trybie YOLO:
+        # nie wyłączamy progressbara, ale wizualnie ustawiamy stan informacyjny
+        if hasattr(self, "winner_name_lbl") and hasattr(self, "winner_acc_lbl"):
+            if is_yolo:
+                self.winner_name_lbl.config(text="TRYB YOLO", foreground="gray")
+                self.winner_acc_lbl.config(text="Panel OCR / rankingu nieaktywny", foreground="gray")
+            else:
+                self._update_winner_label()
+
+        if hasattr(self, "test_status_lbl"):
+            if is_yolo:
+                self.test_status_lbl.config(
+                    text="Tryb YOLO: użyj przycisku 'Uruchom detekcję'.",
+                    foreground="#7f8c8d"
+                )
+            elif is_hybrid:
+                self.test_status_lbl.config(
+                    text="Tryb hybrydowy: uruchom wspólną detekcję.",
+                    foreground="#2980b9"
+                )
+            else:
+                self.test_status_lbl.config(
+                    text="Gotowy do testów",
+                    foreground="#2ecc71"
+                )
 
     def _get_available_devices(self):
         devices = ["auto", "cpu"]
@@ -521,14 +824,29 @@ class CharacterAnnotationTab:
         ttk.Label(lf_paths, text="annotations.xml (z Zakładki Autoanotacja):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         row_xml = ttk.Frame(lf_paths)
         row_xml.pack(fill=tk.X, pady=(0, 10))
-        ttk.Entry(row_xml, textvariable=self.xml_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row_xml, text="Wybierz", command=self._pick_xml_file).pack(side=tk.RIGHT, padx=(5, 0))
+        self.xml_path_entry = ttk.Entry(row_xml, textvariable=self.xml_path_var)
+        self.xml_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.xml_path_browse_btn = ttk.Button(
+            row_xml,
+            text="Wybierz",
+            command=self._pick_xml_file
+        )
+        self.xml_path_browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
         ttk.Label(lf_paths, text="Folder ze zdjęciami aut (źródło):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         row_img = ttk.Frame(lf_paths)
         row_img.pack(fill=tk.X, pady=(0, 10))
-        ttk.Entry(row_img, textvariable=self.images_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row_img, text="Wybierz", command=self._pick_images_dir).pack(side=tk.RIGHT, padx=(5, 0))
+
+        self.images_dir_entry = ttk.Entry(row_img, textvariable=self.images_dir_var)
+        self.images_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.images_dir_browse_btn = ttk.Button(
+            row_img,
+            text="Wybierz",
+            command=self._pick_images_dir
+        )
+        self.images_dir_browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
         lf_run = ttk.LabelFrame(left, text=" Wycinanie Tablic ", padding=15)
         lf_run.pack(fill=tk.X)
@@ -673,8 +991,20 @@ class CharacterAnnotationTab:
         top_frame.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Label(top_frame, text="Paczka do analizy (folder run_XXX):", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
-        ttk.Entry(top_frame, textvariable=self.preview_dir_var, width=45, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        ttk.Button(top_frame, text="Otwórz inną paczkę", command=self._pick_and_load_preview_dir).pack(side=tk.LEFT, padx=(0, 5))
+        self.preview_dir_entry = ttk.Entry(
+            top_frame,
+            textvariable=self.preview_dir_var,
+            width=45,
+            state="readonly"
+        )
+        self.preview_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+
+        self.preview_dir_browse_btn = ttk.Button(
+            top_frame,
+            text="Otwórz inną paczkę",
+            command=self._pick_and_load_preview_dir
+        )
+        self.preview_dir_browse_btn.pack(side=tk.LEFT, padx=(0, 5))
 
         self.preview_info_lbl = ttk.Label(top_frame, text="Wczytano tablic: 0", font=("Segoe UI", 9, "bold"), foreground="#2980b9")
         self.preview_info_lbl.pack(side=tk.RIGHT, padx=10)
@@ -722,68 +1052,164 @@ class CharacterAnnotationTab:
 
         row_meth = ttk.Frame(set_lf)
         row_meth.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(row_meth, text="Metoda:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
-        combo = ttk.Combobox(row_meth, textvariable=self.detection_method_var, values=["OCR", "YOLO", "BOTH"], state="readonly", width=12)
-        combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-        combo.bind("<<ComboboxSelected>>", self._on_method_change)
+        ttk.Label(
+            row_meth,
+            text="Metoda detekcji znaków:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT)
 
-        dev_row = ttk.Frame(set_lf)
-        dev_row.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(dev_row, text="Karta (Device):").pack(side=tk.LEFT)
-        dev_combo = ttk.Combobox(dev_row, textvariable=self.yolo_device_var, values=self._get_available_devices(), state="readonly", width=12)
-        dev_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+        self.det_method_combo = ttk.Combobox(
+            row_meth,
+            textvariable=self.detection_method_var,
+            values=["OCR", "YOLO", "BOTH"],
+            state="readonly",
+            width=12
+        )
+        self.det_method_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+        self.det_method_combo.bind("<<ComboboxSelected>>", self._on_method_change)
 
-        # YOLO panel (toggle)
+        self.det_device_row = ttk.Frame(set_lf)
+        self.det_device_row.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(self.det_device_row, text="Karta (Device):").pack(side=tk.LEFT)
+
+        self.det_device_combo = ttk.Combobox(
+            self.det_device_row,
+            textvariable=self.yolo_device_var,
+            values=self._get_available_devices(),
+            state="readonly",
+            width=12
+        )
+        self.det_device_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+
         self.yolo_panel = ttk.Frame(set_lf)
-        ttk.Label(self.yolo_panel, text="Model YOLO .pt:").pack(anchor=tk.W, pady=(5, 0))
-        r_y = ttk.Frame(self.yolo_panel)
-        r_y.pack(fill=tk.X)
-        ttk.Entry(r_y, textvariable=self.yolo_model_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(r_y, text="Wybierz", command=self._pick_yolo_model).pack(side=tk.RIGHT)
+
+        # --- wydanie YOLO ---
+        ttk.Label(
+            self.yolo_panel,
+            text="Wydanie YOLO:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(5, 0))
+
+        self.yolo_version_row = ttk.Frame(self.yolo_panel)
+        self.yolo_version_row.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(
+            self.yolo_version_row,
+            text="Wybierz rodzinę modelu:"
+        ).pack(side=tk.LEFT)
+
+        self.yolo_version_combo = ttk.Combobox(
+            self.yolo_version_row,
+            textvariable=self.yolo_model_version_var,
+            values=["8", "11", "26"],
+            state="readonly",
+            width=10
+        )
+        self.yolo_version_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+
+        # --- rozmiar YOLO ---
+        ttk.Label(
+            self.yolo_panel,
+            text="Rozmiar modelu:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(5, 0))
+
+        self.yolo_size_row = ttk.Frame(self.yolo_panel)
+        self.yolo_size_row.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            self.yolo_size_row,
+            text="Wybierz wariant modelu:"
+        ).pack(side=tk.LEFT)
+
+        self.yolo_size_combo = ttk.Combobox(
+            self.yolo_size_row,
+            textvariable=self.yolo_model_size_var,
+            values=["n", "s", "m", "l", "x"],
+            state="readonly",
+            width=10
+        )
+        self.yolo_size_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+
+        # --- ścieżka modelu sterowanego przez Wizard / iterację ---
+        ttk.Label(
+            self.yolo_panel,
+            text="Model YOLO z Wizarda / iteracji:",
+            foreground="gray"
+        ).pack(anchor=tk.W, pady=(5, 0))
+
+        self.yolo_model_row = ttk.Frame(self.yolo_panel)
+        self.yolo_model_row.pack(fill=tk.X)
+
+        self.det_yolo_model_entry = ttk.Entry(
+            self.yolo_model_row,
+            textvariable=self.yolo_model_path_var,
+            state="readonly"
+        )
+        self.det_yolo_model_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.det_yolo_model_browse_btn = ttk.Button(
+            self.yolo_model_row,
+            text="Wybierz",
+            command=self._pick_yolo_model
+        )
+        self.det_yolo_model_browse_btn.pack(side=tk.RIGHT)
 
         self._update_yolo_visibility()
 
         ttk.Separator(set_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(20, 15))
         lab_frame = ttk.Frame(set_lf)
         lab_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(lab_frame, text="Zbyt dużo błędów OCR?", foreground="gray", font=("Segoe UI", 9, "italic")).pack(anchor=tk.W, pady=(0, 5))
-        btn_lab = ttk.Button(lab_frame, text="🔬 LABORATORIUM OCR (FILTRY)", command=self._open_filter_lab, style="Accent.TButton")
-        btn_lab.pack(fill=tk.X, ipady=8)
+        ttk.Label(
+            lab_frame,
+            text="Laboratorium OCR przydaje się dla OCR i hybrydy.",
+            foreground="gray",
+            font=("Segoe UI", 9, "italic")
+        ).pack(anchor=tk.W, pady=(0, 5))
 
-        logs_test_lf = ttk.LabelFrame(col_mid, text=" Logi z Analizy i Testów ")
-        logs_test_lf.pack(fill=tk.BOTH, expand=True)
-        logs_test_lf.pack_propagate(False)
-        self.test_log_text = scrolledtext.ScrolledText(logs_test_lf, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc", height=8)
-        self.test_log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.btn_ocr_lab = ttk.Button(
+            lab_frame,
+            text="LABORATORIUM OCR (FILTRY)",
+            command=self._open_filter_lab,
+            style="Accent.TButton"
+        )
+        self.btn_ocr_lab.pack(fill=tk.X, ipady=8)
 
-        actions_lf = ttk.LabelFrame(col_right, text=" Uruchom Przetwarzanie ", padding=10)
-        actions_lf.pack(fill=tk.BOTH, expand=True)
+        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
+        self.actions_lf.pack(fill=tk.BOTH, expand=True)
 
-        self.winner_name_lbl = ttk.Label(actions_lf, text="BRAK DANYCH", font=("Segoe UI", 11, "bold"), foreground="gray")
+        self.winner_name_lbl = ttk.Label(
+            self.actions_lf,
+            text="BRAK DANYCH",
+            font=("Segoe UI", 11, "bold"),
+            foreground="gray"
+        )
         self.winner_name_lbl.pack(anchor=tk.CENTER, pady=(0, 5))
-        self.winner_acc_lbl = ttk.Label(actions_lf, text="Skuteczność: 0.0%", font=("Segoe UI", 10))
+
+        self.winner_acc_lbl = ttk.Label(
+            self.actions_lf,
+            text="Skuteczność: 0.0%",
+            font=("Segoe UI", 10)
+        )
         self.winner_acc_lbl.pack(anchor=tk.CENTER, pady=(0, 10))
 
-        self.btn_fast_ocr = ttk.Button(actions_lf, text="1. Odczytaj znaki tablic (Szybki Test)", command=self._run_fast_ocr_test, style="Accent.TButton")
-        self.btn_fast_ocr.pack(fill=tk.X, ipady=8, pady=(10, 5))
-
-        self.btn_rank_presets = ttk.Button(actions_lf, text="2. Turniej (Zbadaj paczkę Presetami)", command=self._run_preset_ranking)
+        self.btn_rank_presets = ttk.Button(
+            self.actions_lf,
+            text="Turniej presetów OCR",
+            command=self._run_preset_ranking
+        )
         self.btn_rank_presets.pack(fill=tk.X, ipady=6)
 
-        self.test_progress = ttk.Progressbar(actions_lf, maximum=100)
+        self.test_progress = ttk.Progressbar(self.actions_lf, maximum=100)
         self.test_progress.pack(fill=tk.X, pady=(15, 5))
-        self.test_status_lbl = ttk.Label(actions_lf, text="Gotowy do testów", foreground="#2ecc71", font=("Segoe UI", 9, "bold"))
+
+        self.test_status_lbl = ttk.Label(
+            self.actions_lf,
+            text="Gotowy do testów",
+            foreground="#2ecc71",
+            font=("Segoe UI", 9, "bold")
+        )
         self.test_status_lbl.pack(anchor=tk.W)
-
-        HELP.bind_help(top_frame, "t2_history")
-        HELP.bind_help(self.plates_listbox, "t2_listbox")
-        HELP.bind_help(self.preview_canvas, "t2_canvas")
-        HELP.bind_help(self.btn_fast_ocr, "t2_fast_test")
-        HELP.bind_help(self.btn_rank_presets, "t2_rank")
-        HELP.bind_help(combo, "t2_method")
-        HELP.bind_help(btn_lab, "t2_lab_btn")
-        HELP.bind_help(r_y, "t2_yolo_model")
-
         nav = ttk.Frame(parent)
         nav.pack(fill=tk.X, padx=10, pady=(0, 10))
 
@@ -794,6 +1220,14 @@ class CharacterAnnotationTab:
         )
         self.btn_back_to_extract.pack(side=tk.LEFT)
 
+        self.btn_run_detection = ttk.Button(
+            nav,
+            text="Uruchom detekcję",
+            command=self._run_detection_stage,
+            style="Accent.TButton"
+        )
+        self.btn_run_detection.pack(side=tk.LEFT, padx=(10, 0))
+
         self.btn_to_dataset = ttk.Button(
             nav,
             text="Dalej → Integracje i Dataset",
@@ -801,6 +1235,45 @@ class CharacterAnnotationTab:
             state=tk.DISABLED
         )
         self.btn_to_dataset.pack(side=tk.RIGHT)
+
+        HELP.bind_help(self.btn_run_detection, "t2_fast_test")
+        HELP.bind_help(self.btn_rank_presets, "t2_rank")
+        HELP.bind_help(self.det_method_combo, "t2_method")
+        HELP.bind_help(self.btn_ocr_lab, "t2_lab_btn")
+        HELP.bind_help(self.yolo_model_row, "t2_yolo_model")
+
+    def _run_detection_stage(self):
+        method = (self.detection_method_var.get() or "OCR").upper().strip()
+
+        if method in ("YOLO", "BOTH"):
+            version = (self.yolo_model_version_var.get() or "").strip()
+            size = (self.yolo_model_size_var.get() or "").strip().lower()
+
+            if version not in {"8", "11", "26"}:
+                messagebox.showwarning(
+                    "Brak wydania modelu",
+                    "Wybierz wydanie YOLO: 8, 11 albo 26."
+                )
+                return
+
+            if size not in {"n", "s", "m", "l", "x"}:
+                messagebox.showwarning(
+                    "Brak rozmiaru modelu",
+                    "Wybierz rozmiar modelu YOLO: n / s / m / l / x."
+                )
+                return
+
+            try:
+                self._log(
+                    self.test_log_text,
+                    f"[INFO] Wybrane YOLO v{version}{size}\n",
+                    "INFO"
+                )
+            except Exception:
+                pass
+
+        # korzystamy z istniejącego backendu analizy
+        self._run_fast_ocr_test()
 
     def _update_winner_label(self):
         best_preset_data, best_acc = self._get_best_preset()
@@ -1352,6 +1825,22 @@ class CharacterAnnotationTab:
         HELP.bind_help(btn_cvat, "btn_export_cvat")
         HELP.bind_help(btn_yolo, "btn_export_yolo")
         HELP.bind_help(btn_import, "btn_import_cvat")
+
+        nav = ttk.Frame(parent)
+        nav.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        ttk.Button(
+            nav,
+            text="← Wstecz do Wykrywania i Analizy",
+            command=self.back_to_substep_2
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            nav,
+            text="Zakończ krok 3 i wróć do Wizarda",
+            command=self._finalize_step3_from_existing_outputs,
+            style="Accent.TButton"
+        ).pack(side=tk.RIGHT)
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
