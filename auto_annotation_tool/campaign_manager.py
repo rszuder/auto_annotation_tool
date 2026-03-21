@@ -28,9 +28,12 @@ class CampaignManager:
             "created_at": datetime.now().isoformat(),
             "current_iteration": 1,
             "current_step": 1, # ✅ ZMIANA: Zapisujemy, na którym kroku jesteśmy!
+            "step2_status": "pending",   # ✅ ZMIANA: pending / generated / approved
+            "step2_staging_run": "",     # ✅ ZMIANA: ścieżka do ostatniego runa autoanotacji w stagingu
             "best_vehicle_model": "",
             "best_plate_model": "",
-            "best_char_model": ""
+            "best_char_model": "",
+            "step3_status": "pending"
         }
 
 
@@ -76,6 +79,11 @@ class CampaignManager:
         if name in self.state["projects"]:
             self.state["active_project"] = name
             self.save_state()
+
+    def clear_active_project(self):
+        """✅ ZMIANA: wyjście z aktywnego projektu i przejście w tryb swobodny."""
+        self.state["active_project"] = ""
+        self.save_state()
 
     def create_project(self, name: str) -> bool:
         name = name.strip()
@@ -147,12 +155,84 @@ class CampaignManager:
         self.state["projects"][act]["current_step"] = step
         self.save_state()
 
+    def set_step2_generated(self, staging_run_path: str):
+        """✅ ZMIANA: krok 2 został wykonany, ale jeszcze nie zatwierdzony."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step2_status"] = "generated"
+        self.state["projects"][act]["step2_staging_run"] = str(staging_run_path)
+        self.save_state()
+
+    def approve_step2(self):
+        """✅ ZMIANA: krok 2 został zatwierdzony."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step2_status"] = "approved"
+        self.save_state()
+
+    def reset_step2(self):
+        """Resetuje stan Kroku 2 (Autoanotacja) do oczekiwania na nowe zatwierdzenie."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step2_status"] = "pending"
+        self.state["projects"][act]["step2_staging_run"] = ""
+        self.save_state()
+
+    def get_step2_status(self) -> str:
+        act = self.get_active_project_name()
+        if not act:
+            return "pending"
+        return self.state["projects"][act].get("step2_status", "pending")
+
+    def get_step2_staging_run(self) -> str:
+        act = self.get_active_project_name()
+        if not act:
+            return ""
+        return self.state["projects"][act].get("step2_staging_run", "")
+    
+    def set_step3_needs_rework(self):
+        """✅ ZMIANA: Krok 3 nie zakończył się sukcesem i wymaga poprawy."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_status"] = "needs_rework"
+        self.save_state()
+
+    def approve_step3(self):
+        """✅ ZMIANA: Krok 3 zakończył się sukcesem."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_status"] = "approved"
+        self.save_state()
+
+    def reset_step3(self):
+        """✅ ZMIANA: reset stanu Kroku 3."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_status"] = "pending"
+        self.save_state()
+
+    def get_step3_status(self) -> str:
+        act = self.get_active_project_name()
+        if not act:
+            return "pending"
+        return self.state["projects"][act].get("step3_status", "pending")
+
     def advance_to_next_iteration(self):
         act = self.state.get("active_project", "")
         if not act or act not in self.state.get("projects", {}): return
         current = self.state["projects"][act].get("current_iteration", 1)
         self.state["projects"][act]["current_iteration"] = current + 1
         self.state["projects"][act]["current_step"] = 1
+        # ✅ ZMIANA: reset stanu zatwierdzania Autoanotacji dla nowej iteracji
+        self.state["projects"][act]["step2_status"] = "pending"
+        self.state["projects"][act]["step2_staging_run"] = ""
+        self.state["projects"][act]["step3_status"] = "pending"
         self.save_state()
 
     def set_global_model(self, model_type: str, model_path: str):
@@ -194,7 +274,22 @@ class CampaignManager:
             "rankings": root / "7_rankings",
             "presets": root / "8_ocr_presets",
         }
-        return mapping.get(key)    
+        return mapping.get(key) 
+
+    def get_staging_dir(self, key: str):
+        """
+        ✅ ZMIANA: katalogi tymczasowe projektu.
+        Obecnie obsługujemy staging dla autoanotacji.
+        """
+        root = self.get_active_project_root_dir()
+        if root is None:
+            return None
+
+        staging_root = root / "_staging"
+        mapping = {
+            "auto_ann": staging_root / "auto_annotations",
+        }
+        return mapping.get(key)   
 
 # Singleton Menadżera
 CAMPAIGN = CampaignManager()

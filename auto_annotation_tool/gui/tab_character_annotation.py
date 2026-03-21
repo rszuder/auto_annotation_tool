@@ -117,6 +117,41 @@ class CharacterAnnotationTab:
         self._loaded_meta_path = None
         self._loaded_meta_mtime = None
 
+    def clear_campaign_context(self):
+        """
+        ✅ ZMIANA: czyści projektowe ścieżki i override’y po wyjściu z projektu.
+        Przywraca stan neutralny dla trybu swobodnego.
+        """
+        # usuń override’y projektowe
+        if hasattr(self, "_campaign_chars_dir"):
+            self._campaign_chars_dir = None
+        if hasattr(self, "_campaign_datasets_dir"):
+            self._campaign_datasets_dir = None
+
+        # wyczyść źródła projektu
+        self.xml_path_var.set("")
+        self.images_dir_var.set("")
+        self.preview_dir_var.set("")
+
+        # wyczyść podgląd
+        self._reset_preview_cache()
+        self.preview_plate_ids = []
+
+        try:
+            self.plates_listbox.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.preview_canvas.delete("all")
+        except Exception:
+            pass
+
+        try:
+            self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="#2980b9")
+        except Exception:
+            pass
+
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1250,7 +1285,36 @@ class CharacterAnnotationTab:
                     copied += 1
 
             if copied == 0:
-                self._set_console_text(self.export_console, "❌ Brak tablic 🟢 perfect w tym projekcie.")
+                msg = (
+                    "❌ NIE UDAŁO SIĘ UTWORZYĆ DATASETU YOLO.\n\n"
+                    "Powód: w bieżącym projekcie nie znaleziono ani jednej tablicy ze statusem 🟢 perfect.\n\n"
+                    "CO DALEJ:\n"
+                    "1. Wróć do Autoanotacji i spróbuj ponownie na innych ustawieniach/modelu.\n"
+                    "2. Albo pozostań w Zakładce Znaków i popraw OCR / Laboratorium.\n"
+                    "3. Trening pozostaje zablokowany do czasu zbudowania poprawnej paczki YOLO."
+                )
+                self._set_console_text(self.export_console, msg)
+
+                try:
+                    from ..campaign_manager import CAMPAIGN
+                    if CAMPAIGN.get_active_project_name():
+                        CAMPAIGN.set_current_step(3)
+                        CAMPAIGN.set_step3_needs_rework()
+
+                        if 'campaign' in self.app.tabs:
+                            self.app.tabs['campaign']._refresh_dashboard()
+
+                    self.app.update_status(
+                        "Krok 3 wymaga poprawy. Wracasz do Rozkładu Jazdy, aby wybrać ścieżkę naprawczą.",
+                        "warning"
+                    )
+
+                    # ✅ ZMIANA: automatyczny powrót do Wizarda
+                    self.app.notebook.select(0)
+
+                except Exception:
+                    pass
+
                 return
 
             yaml_content = f"path: {yolo_out.absolute().as_posix()}\ntrain: images\nval: images\nnc: 36\nnames:\n"
@@ -1260,16 +1324,24 @@ class CharacterAnnotationTab:
 
             self._set_console_text(self.export_console, f"✅ Dataset YOLO gotowy: {yolo_out}")
 
-            # Campaign token
             try:
                 from ..campaign_manager import CAMPAIGN
                 if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 3:
+                    CAMPAIGN.approve_step3()
                     CAMPAIGN.set_current_step(4)
-                    if "campaign" in self.app.tabs:
-                        self.app.tabs["campaign"]._refresh_dashboard()
+
+                    if 'campaign' in self.app.tabs:
+                        self.app.tabs['campaign']._refresh_dashboard()
+
+                    # ✅ ZMIANA: po sukcesie też wracamy do Wizarda
+                    self.app.update_status(
+                        "Paczka YOLO została utworzona poprawnie. Odblokowano Krok 4 (Trening).",
+                        "info"
+                    )
+                    self.app.notebook.select(0)
+
             except Exception:
                 pass
-
         except Exception as e:
             self._set_console_text(self.export_console, f"❌ BŁĄD EKSPORTU YOLO:\n{e}")
 

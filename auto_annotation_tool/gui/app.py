@@ -3,6 +3,7 @@
 """
 Główna aplikacja GUI.
 """
+print("DEBUG_LOADED_APP_PY:", __file__)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -36,6 +37,9 @@ class AutoAnnotationApp:
         self.style = ttk.Style()
         self._setup_style()
         self.is_processing = False
+        # ✅ ZMIANA: lokalna flaga aktywnego trybu kampanii
+        self.campaign_mode_active = False
+        self.campaign_free_mode = False  # ✅ ZMIANA: ręczne wyjście z projektu ma pierwszeństwo nad automatycznym trybem kampanii
         
         self._create_menu()
         
@@ -60,7 +64,25 @@ class AutoAnnotationApp:
         
         self.tabs = {}
         self._create_tabs()
-        
+
+        # główna blokada działa przez disabled tabs
+        self.notebook.bind("<<NotebookTabChanged>>", self._guard_campaign_navigation)
+
+        # początkowa synchronizacja stanów zakładek
+        self.update_campaign_tab_access()
+
+        # ✅ ZMIANA: jeśli aplikacja wstaje z aktywnym projektem, pokaż to w głównym pasku statusu
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_proj = CAMPAIGN.get_active_project_name()
+            if active_proj:
+                self.update_status(
+                    f"Aktywny projekt: {active_proj}. Aplikacja działa w trybie kampanii — aby wrócić do trybu swobodnego, użyj „Wyjdź z projektu” w Wizardzie.",
+                    "warning"
+                )
+        except Exception:
+            pass
+
         logger.info("GUI zainicjalizowane pomyślnie")
     
     def _setup_style(self):
@@ -101,6 +123,7 @@ class AutoAnnotationApp:
                 self.notebook.add(self.tabs['help'].frame, text=f"📖 Instrukcja & Architektura")
 
             self.notebook.select(0)
+            logger.warning(f"AUDYT _create_tabs: utworzone klucze tabs = {list(self.tabs.keys())}")
         except Exception as e:
             logger.error(f"Krytyczny błąd budowania zakładek GUI: {e}")
     
@@ -129,6 +152,102 @@ class AutoAnnotationApp:
         self.is_processing = processing
         self.root.config(cursor="wait" if processing else "")
         self.root.update()
+
+    def set_campaign_mode(self, active: bool):
+        """
+        Przełącza tryb kampanii.
+        Uwaga: jeśli użytkownik ręcznie wszedł w tryb swobodny, nie nadpisujemy tego automatem.
+        """
+        self.campaign_mode_active = bool(active)
+        self.update_campaign_tab_access()
+
+    def update_campaign_tab_access(self):
+        """
+        Steruje dostępnością głównych zakładek w zależności od aktywnego projektu i kroku kampanii.
+
+        Zasady:
+        - bez aktywnego projektu: wszystkie zakładki są dostępne
+        - z aktywnym projektem: aktywna jest tylko zakładka Kampanii + zakładka odpowiadająca bieżącemu krokowi
+        - zakładka Pomoc pozostaje dostępna
+        """
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_proj = CAMPAIGN.get_active_project_name()
+            has_project = bool(active_proj)
+
+            # mapowanie nazw zakładek na ich indeksy w notebooku
+            tab_indices = {}
+            notebook_tabs = self.notebook.tabs()
+
+            for i, widget_name in enumerate(notebook_tabs):
+                for key, tab in self.tabs.items():
+                    if str(tab.frame) == str(widget_name):
+                        tab_indices[key] = i
+                        break
+                    
+            logger.warning(f"AUDYT tabs.keys() = {list(self.tabs.keys())}")
+            logger.warning(f"AUDYT tab_indices = {tab_indices}")
+            
+            def set_tab_state(tab_key, state):
+                if tab_key in tab_indices:
+                    try:
+                        self.notebook.tab(tab_indices[tab_key], state=state)
+                    except Exception:
+                        pass
+
+            # ==================================================
+            # TRYB SWOBODNY
+            # ==================================================
+            if self.campaign_free_mode or not has_project or not self.campaign_mode_active:
+                for key in self.tabs.keys():
+                    set_tab_state(key, "normal")
+                return
+
+            # ==================================================
+            # TRYB KAMPANII
+            # ==================================================
+            current_step = CAMPAIGN.get_current_step()
+
+
+            allowed = {"campaign"}  # kampania zawsze dostępna
+
+            if current_step == 2:
+                allowed.add("annotation")
+
+            elif current_step == 3:
+                allowed.add("annotation")
+                allowed.add("characters")
+
+            elif current_step >= 4:
+                allowed.add("annotation")
+                allowed.add("characters")
+                if CAMPAIGN.get_step3_status() == "approved":
+                    allowed.add("training")
+
+            # Pomoc zawsze dostępna, jeśli istnieje
+            if "help" in self.tabs:
+                allowed.add("help")
+
+            for key in self.tabs.keys():
+                state = "normal" if key in allowed else "disabled"
+                logger.warning(f"AUDYT setting tab '{key}' -> {state}")
+                set_tab_state(key, state)
+
+        except Exception as e:
+            logger.error(f"Błąd update_campaign_tab_access: {e}")
+
+    def _guard_campaign_navigation(self, event=None):
+        """
+        Neutralny strażnik.
+        Główna blokada działa przez update_campaign_tab_access() i stany zakładek.
+        """
+        return
+
+    def _guard_campaign_navigation(self, event=None):
+        # Główna blokada działa przez disabled tabs.
+        # Strażnik zostawiamy jako pusty noop.
+        return
     
     def _on_closing(self):
         if self.is_processing:
