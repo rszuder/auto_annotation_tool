@@ -43,6 +43,7 @@ class CampaignManager:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if "projects" in data and "active_project" in data:
+                        data["active_project"] = ""
                         return data
             except Exception as e:
                 logger.error(f"Błąd czytania rejestru kampanii: {e}")

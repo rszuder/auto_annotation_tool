@@ -591,11 +591,12 @@ class AnnotationTab:
                 "Zatwierdzono etap autoanotacji. Wyniki przeniesiono z katalogu stagingu do 2_auto_annotations projektu.",
                 "info"
             )
-            # ✅ ZMIANA: po zatwierdzeniu wracamy do Wizarda
+            # po zatwierdzeniu wracamy do Wizarda
             try:
-                self.app.notebook.select(0)
-            except Exception:
-                pass
+                self.app.select_tab("campaign")
+                self.app.update_campaign_tab_access()
+            except Exception as e:
+                logger.debug(f"Nie udało się wrócić do zakładki Wizarda: {e}")
 
             messagebox.showinfo("Sukces", f"Etap autoanotacji został zatwierdzony.\n\nWyniki przeniesiono do:\n{target_dir}")
 

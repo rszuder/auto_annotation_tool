@@ -406,9 +406,15 @@ class CampaignTab:
         self.app.campaign_free_mode = False
         self.app.set_campaign_mode(True)
 
+
         curr_step = CAMPAIGN.get_current_step()
         step2_status = CAMPAIGN.get_step2_status()
         step3_status = CAMPAIGN.get_step3_status()
+
+        logger.debug(
+            f"[CampaignTab] active_proj={active_proj}, curr_step={curr_step}, "
+            f"step2_status={step2_status}, step3_status={step3_status}"
+        )
         iter_num = CAMPAIGN.get_current_iteration_num()
 
         self.lbl_iter.config(text=f"Iteracja: {iter_num}")
@@ -473,7 +479,11 @@ class CampaignTab:
             if s < curr_step:
                 item["lbl_title"].config(text=f"✅ {title}", fg="#27ae60")
                 item["lbl_desc"].config(fg="#7f8c8d")
-                btn.config(text="Wykonano (skocz)", style="TButton", state="normal")
+
+                if s == 1:
+                    btn.config(text="Wykonano", style="TButton", state="disabled")
+                else:
+                    btn.config(text="Wykonano", style="TButton", state="disabled")
 
             elif s == curr_step:
                 item["lbl_title"].config(text=f"🔵 {title}", fg="#2980b9")
@@ -519,32 +529,41 @@ class CampaignTab:
         self.app.update_campaign_tab_access()
         self.frame.update_idletasks()
 
-    def _update_main_tabs_highlight(self, curr_step, has_project):
-        nb = self.app.notebook
-        try:
-            tabs_count = nb.index("end")
-        except Exception:
-            return
+    def _update_main_tabs_highlight(self, curr_step=None, has_project=True):
+        tab_names = {
+            "campaign": f"{self.icon_manager.get('trophy')} Rozkład Jazdy",
+            "annotation": f"{self.icon_manager.get('car')} Autoanotacja",
+            "characters": f"{self.icon_manager.get('cut')} Znaki na tablicach",
+            "training": f"{self.icon_manager.get('training')} Trening i Analiza",
+        }
 
-        for i in range(tabs_count):
-            txt = nb.tab(i, "text")
-            clean_txt = txt.replace("⭐ ", "").replace(" ⭐", "")
-            nb.tab(i, text=clean_txt)
+        for key, label in tab_names.items():
+            try:
+                if key in self.app.tabs:
+                    self.app.notebook.tab(str(self.app.tabs[key].frame), text=label)
+            except Exception:
+                pass
 
         if not has_project:
             return
 
-        target_idx = 0
-        if curr_step == 2:
-            target_idx = 1
-        elif curr_step == 3:
-            target_idx = 2
-        elif curr_step >= 4:
-            target_idx = 3
+        step_to_tab = {
+            1: "campaign",
+            2: "annotation",
+            3: "characters",
+            4: "training",
+        }
 
-        if target_idx < tabs_count:
-            txt = nb.tab(target_idx, "text")
-            nb.tab(target_idx, text=f"⭐ {txt} ⭐")
+        active_tab_key = step_to_tab.get(curr_step, "campaign")
+
+        try:
+            if active_tab_key in self.app.tabs:
+                self.app.notebook.tab(
+                    str(self.app.tabs[active_tab_key].frame),
+                    text=tab_names[active_tab_key] + " ★"
+                )
+        except Exception:
+            pass
 
     # ======================================================
     # PROJECT CRUD
@@ -602,6 +621,19 @@ class CampaignTab:
         else:
             messagebox.showerror("Błąd", "Projekt o takiej nazwie już istnieje lub nazwa jest nieprawidłowa.")
 
+    def _clear_project_contexts(self):
+        self.app.tabs["annotation"].clear_campaign_context()
+        self.app.tabs["characters"].clear_campaign_context()
+        self.app.tabs["training"].clear_campaign_context()
+
+    def _clear_project_contexts(self):
+        for tab_key in ("annotation", "characters", "training"):
+            try:
+                if tab_key in self.app.tabs:
+                    self.app.tabs[tab_key].clear_campaign_context()
+            except Exception:
+                pass
+
     def _delete_project(self):
         selected = self._ask_project_from_list(
             title="Usuń projekt",
@@ -617,34 +649,35 @@ class CampaignTab:
             was_active = (CAMPAIGN.get_active_project_name() == selected)
 
             if CAMPAIGN.delete_project(selected):
-                # jeśli skasowaliśmy aktywny projekt, przejdź do trybu swobodnego
                 if was_active:
-                    self.app.campaign_free_mode = True
-                    self.app.set_campaign_mode(False)
+                    self._clear_project_contexts()
 
-                    try:
-                        if "annotation" in self.app.tabs:
-                            self.app.tabs["annotation"].clear_campaign_context()
-                    except Exception:
-                        pass
-
-                    try:
-                        if "characters" in self.app.tabs:
-                            self.app.tabs["characters"].clear_campaign_context()
-                    except Exception:
-                        pass
-
-                    try:
-                        if "training" in self.app.tabs:
-                            self.app.tabs["training"].clear_campaign_context()
-                    except Exception:
-                        pass
+                    if CAMPAIGN.get_active_project_name():
+                        self.app.campaign_free_mode = False
+                        self.app.set_campaign_mode(True)
+                    else:
+                        self.app.campaign_free_mode = True
+                        self.app.set_campaign_mode(False)
 
                 self._rebuild_roadmap_ui()
                 self._refresh_dashboard()
                 self.app.update_campaign_tab_access()
 
                 messagebox.showinfo("Usunięto", f"Projekt '{selected}' został usunięty.")
+
+    def _clear_project_contexts(self):
+        tab_labels = {
+            "annotation": "Autoanotacji",
+            "characters": "Zakładki Znaków",
+            "training": "Treningu",
+        }
+
+        for tab_key, label in tab_labels.items():
+            try:
+                if tab_key in self.app.tabs:
+                    self.app.tabs[tab_key].clear_campaign_context()
+            except Exception as e:
+                logger.debug(f"Nie udało się wyczyścić kontekstu {label}: {e}")
 
     def _exit_project_mode(self):
         active = CAMPAIGN.get_active_project_name()
@@ -657,7 +690,7 @@ class CampaignTab:
             "Projekt nie zostanie usunięty."
         ):
 
-            # ✅ użytkownik ręcznie wymusza tryb swobodny
+            # użytkownik ręcznie wymusza tryb swobodny
             self.app.campaign_free_mode = True
 
             # czyścimy aktywny projekt
@@ -666,24 +699,8 @@ class CampaignTab:
             # wyłączamy tryb kampanii
             self.app.set_campaign_mode(False)
 
-            # ✅ ZMIANA: czyścimy projektowy kontekst innych zakładek
-            try:
-                if "annotation" in self.app.tabs:
-                    self.app.tabs["annotation"].clear_campaign_context()
-            except Exception as e:
-                logger.debug(f"Nie udało się wyczyścić kontekstu Autoanotacji: {e}")
-
-            try:
-                if "characters" in self.app.tabs:
-                    self.app.tabs["characters"].clear_campaign_context()
-            except Exception as e:
-                logger.debug(f"Nie udało się wyczyścić kontekstu Zakładki Znaków: {e}")
-
-            try:
-                if "training" in self.app.tabs:
-                    self.app.tabs["training"].clear_campaign_context()
-            except Exception as e:
-                logger.debug(f"Nie udało się wyczyścić kontekstu Treningu: {e}")
+            # czyścimy projektowy kontekst innych zakładek
+            self._clear_project_contexts()
 
             # odświeżamy dashboard
             self._rebuild_roadmap_ui()
@@ -825,7 +842,7 @@ class CampaignTab:
         except Exception:
             pass
 
-        self.app.notebook.select(1)
+        self.app.open_controlled_tab("annotation")
 
     def _step_goto_characters(self):
         if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 3:
@@ -904,7 +921,13 @@ class CampaignTab:
         except Exception:
             pass
 
-        self.app.notebook.select(2)
+        if tab_char:
+            try:
+                tab_char.enter_campaign_step3_mode()
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić liniowego trybu kroku 3: {e}")
+
+        self.app.open_controlled_tab("characters")
 
     def _step_goto_training(self):
         if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 4:
@@ -980,7 +1003,7 @@ class CampaignTab:
             except Exception:
                 pass
 
-            self.app.notebook.select(3)
+            self.app.open_controlled_tab("training")
 
         except Exception as e:
             logger.error(f"Błąd nawigacji (Krok 4): {e}")
