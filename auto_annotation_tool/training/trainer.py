@@ -248,11 +248,29 @@ class YOLOPoseTrainer:
                     final_map = float(self.history.get_run(run.id).best_map50) * 100
                     is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
 
-                    target_dir = CONFIG.DIR_6_MODELS_PLATES if is_pose else CONFIG.DIR_6_MODELS_CHARS
+                    # ✅ ZMIANA: katalog modeli aktywnego projektu
+                    project_models_dir = CAMPAIGN.get_dir("models")
+                    if project_models_dir is None:
+                        # fallback bezpieczeństwa
+                        project_models_dir = Path(CONFIG.DIR_6_MODELS)
+
+                    project_models_dir = Path(project_models_dir)
+
+                    # ✅ ZMIANA: porządek w modelach projektu
+                    if is_pose:
+                        target_dir = project_models_dir / "pose"
+                        task_tag = "plate"
+                    else:
+                        ds_path = str(run.dataset_path).lower()
+                        if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
+                            target_dir = project_models_dir / "chars"
+                            task_tag = "char"
+                        else:
+                            target_dir = project_models_dir / "detect"
+                            task_tag = "vehicle"
+
                     target_dir.mkdir(parents=True, exist_ok=True)
 
-                    # ✅ ZMIANA: krótka, bezpieczna nazwa pliku (bez run.name)
-                    task_tag = "plate" if is_pose else "char"
                     safe_model_name = f"{task_tag}_{run.id}_map{int(final_map):02d}.pt"
                     target_path = (target_dir / safe_model_name).resolve()
 
@@ -264,7 +282,7 @@ class YOLOPoseTrainer:
                     logger.info(f"✅ Skopiowano najlepszy model do: {target_path.name}")
 
                     # =========================================================
-                    # AUTO-WIRING (Aktualizacja aktywnego projektu)
+                    # AUTO-WIRING: aktualizacja modeli aktywnego projektu
                     # =========================================================
                     active_proj = CAMPAIGN.get_active_project_name()
                     if active_proj:
@@ -272,22 +290,20 @@ class YOLOPoseTrainer:
                             CAMPAIGN.set_global_model("plate", str(target_path))
                             logger.info("🧠 Menadżer Kampanii: Zaktualizowano model TABLIC.")
                         else:
-                            ds_path = str(run.dataset_path).lower()
-                            if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
+                            if task_tag == "char":
                                 CAMPAIGN.set_global_model("char", str(target_path))
                                 logger.info("🧠 Menadżer Kampanii: Zaktualizowano model ZNAKÓW.")
                             else:
                                 CAMPAIGN.set_global_model("vehicle", str(target_path))
                                 logger.info("🧠 Menadżer Kampanii: Zaktualizowano model POJAZDÓW.")
 
-                        # ✅ ZMIANA: ukończenie pełnego cyklu Kampanii
+                        # krok 4 zakończony
                         if CAMPAIGN.get_current_step() == 4:
                             CAMPAIGN.set_current_step(5)
                             logger.info("🎉 Menadżer Kampanii: Cykl ukończony. Odblokowano nową iterację.")
 
             except Exception as export_err:
-                # ✅ ZMIANA: to nie jest krytyczny błąd treningu
-                logger.warning(f"Nie udało się wyeksportować best.pt do katalogu modeli: {export_err}")
+                logger.warning(f"Nie udało się wyeksportować best.pt do katalogu modeli projektu: {export_err}")
 
             logger.info(f"Trening zakończony: {run.id}")
 

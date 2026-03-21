@@ -40,7 +40,7 @@ class AutoAnnotationApp:
         # ✅ ZMIANA: lokalna flaga aktywnego trybu kampanii
         self.campaign_mode_active = False
         self.campaign_free_mode = False  # ✅ ZMIANA: ręczne wyjście z projektu ma pierwszeństwo nad automatycznym trybem kampanii
-        
+    
         self._create_menu()
         
         # ✅ ZMIANA 1: Tworzenie Panelu Pomocy NA SAMYM DOLE (Musi być przed Notebookiem, żeby tk.BOTTOM zadziałało poprawnie)
@@ -216,8 +216,13 @@ class AutoAnnotationApp:
                 allowed.add("annotation")
 
             elif current_step == 3:
-                allowed.add("annotation")
+                # ✅ ZMIANA:
+                # w kroku 3 standardowo dostępna jest analiza znaków,
+                # ale jeśli etap wymaga poprawy, odblokowujemy również Autoanotację
                 allowed.add("characters")
+
+                if CAMPAIGN.get_step3_status() == "needs_rework":
+                    allowed.add("annotation")
 
             elif current_step >= 4:
                 allowed.add("annotation")
@@ -231,23 +236,16 @@ class AutoAnnotationApp:
 
             for key in self.tabs.keys():
                 state = "normal" if key in allowed else "disabled"
-                logger.warning(f"AUDYT setting tab '{key}' -> {state}")
+
                 set_tab_state(key, state)
 
         except Exception as e:
             logger.error(f"Błąd update_campaign_tab_access: {e}")
 
     def _guard_campaign_navigation(self, event=None):
-        """
-        Neutralny strażnik.
-        Główna blokada działa przez update_campaign_tab_access() i stany zakładek.
-        """
         return
 
-    def _guard_campaign_navigation(self, event=None):
-        # Główna blokada działa przez disabled tabs.
-        # Strażnik zostawiamy jako pusty noop.
-        return
+
     
     def _on_closing(self):
         if self.is_processing:
