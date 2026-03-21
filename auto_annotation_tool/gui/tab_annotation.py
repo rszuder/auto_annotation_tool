@@ -115,6 +115,15 @@ class AnnotationTab:
         self.start_btn.pack(fill=tk.X, pady=5, ipady=4)
         self.stop_btn = ttk.Button(actions_lf, text="ZATRZYMAJ", command=self._stop_annotation, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, pady=5)
+        # ✅ ZMIANA: etap zatwierdzany ręcznie przez użytkownika
+        self.approve_btn = ttk.Button(
+            actions_lf,
+            text="ZATWIERDŹ ETAP AUTOANOTACJI",
+            command=self._approve_annotation_stage,
+            state=tk.DISABLED
+        )
+        self.approve_btn.pack(fill=tk.X, pady=5)
+
         self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
         self.progress.pack(fill=tk.X, pady=(15, 5))
         self.status_label = ttk.Label(actions_lf, text="Gotowy", foreground="#2ecc71", font=("Segoe UI", 10, "bold"))
@@ -300,6 +309,17 @@ class AnnotationTab:
                 if not p or not Path(p).exists(): raise ValueError("Nie znaleziono własnego modelu tablic!")
                 if not validate_model_file(Path(p))[0]: raise ValueError("Model tablic jest uszkodzony!")
 
+    def clear_campaign_context(self):
+        """
+        ✅ ZMIANA: przywraca neutralny stan zakładki Autoanotacji po wyjściu z projektu.
+        """
+        self.input_dir_var.set(str(Path(CONFIG.DIR_1_RAW).absolute()))
+        self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()))
+
+        # wracamy do zwykłego trybu pracy, ale nie narzucamy modeli custom
+        self.mode_var.set("C: Pojazdy + tablice")
+        self._on_mode_change()
+
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
             if self.vehicle_model_var.get() == "Custom": return Path(self.vehicle_custom_var.get())
@@ -334,10 +354,21 @@ class AnnotationTab:
             success, msg = self.annotator.load_models()
             if not success: raise RuntimeError(f"Błąd silnika YOLO: {msg}")
 
+            # ✅ ZMIANA: nowa próba autoanotacji unieważnia poprzednie zatwierdzenie Kroku 2
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if CAMPAIGN.get_active_project_name():
+                    CAMPAIGN.reset_step2()
+                    if 'campaign' in self.app.tabs:
+                        self.app.tabs['campaign']._refresh_dashboard()
+            except Exception as e:
+                logger.debug(f"Nie udało się zresetować stanu Kroku 2: {e}")
+
             self.is_processing = True
             self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
+            self.approve_btn.config(state=tk.DISABLED)  # ✅ ZMIANA
             self.progress['value'] = 0
             
             self.center_nb.select(0)
@@ -401,6 +432,10 @@ class AnnotationTab:
             ReportGenerator.generate_text_report(report, run_dir / "report.txt")
 
             elapsed = format_duration((datetime.datetime.now() - self.start_time).total_seconds())
+
+            # ✅ ZMIANA: zapamiętujemy ostatni staging run
+            self.last_staging_run_dir = run_dir
+
             message = f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
             logger.info(f"✅ {message}")
             success = True
@@ -487,23 +522,85 @@ class AnnotationTab:
         
         if success:
             self.status_label.config(text="Zakończono pomyślnie!", foreground="#2ecc71")
-            
-            # =========================================================
-            # ✅ ŻETON 2: Meldunek do Menedżera Kampanii o wykonaniu pracy
-            # =========================================================
+
             try:
                 from ..campaign_manager import CAMPAIGN
                 if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 2:
-                    CAMPAIGN.set_current_step(3)
+                    # ✅ ZMIANA: etap wygenerowany, ale jeszcze nie zatwierdzony
+                    staging_run = getattr(self, "last_staging_run_dir", None)
+                    if staging_run is not None:
+                        CAMPAIGN.set_step2_generated(str(staging_run))
+
+                    # odblokuj przycisk ręcznego zatwierdzania
+                    self.approve_btn.config(state=tk.NORMAL)
+
                     if 'campaign' in self.app.tabs:
                         self.app.tabs['campaign']._refresh_dashboard()
+
             except Exception as e:
-                logger.debug(f"Nie udało się awansować kampanii: {e}")
+                logger.debug(f"Nie udało się zaktualizować stanu kroku 2: {e}")
 
             messagebox.showinfo("Koniec", msg)
         else:
             self.status_label.config(text="Przerwano / Błąd", foreground="#e74c3c")
             messagebox.showerror("Zatrzymano", msg)
+
+    def _approve_annotation_stage(self):
+        """
+        ✅ ZMIANA: zatwierdza staging autoanotacji i przenosi go do katalogu docelowego projektu.
+        """
+        try:
+            from ..campaign_manager import CAMPAIGN
+            import shutil
+
+            if not CAMPAIGN.get_active_project_name():
+                return messagebox.showwarning("Brak projektu", "Nie ma aktywnego projektu.")
+
+            staging_run_str = CAMPAIGN.get_step2_staging_run()
+            if not staging_run_str:
+                return messagebox.showwarning("Brak danych", "Nie znaleziono wygenerowanego staging runu do zatwierdzenia.")
+
+            staging_run = Path(staging_run_str)
+            if not staging_run.exists():
+                return messagebox.showerror("Brak folderu", f"Folder stagingu nie istnieje:\n{staging_run}")
+
+            final_auto_dir = CAMPAIGN.get_dir("auto_ann")
+            if final_auto_dir is None:
+                return messagebox.showerror("Błąd", "Nie udało się ustalić katalogu docelowego autoanotacji dla projektu.")
+
+            final_auto_dir = Path(final_auto_dir)
+            final_auto_dir.mkdir(parents=True, exist_ok=True)
+
+            target_dir = final_auto_dir / staging_run.name
+
+            # jeśli ktoś zatwierdza drugi raz, najpierw czyścimy stare
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+
+            shutil.move(str(staging_run), str(target_dir))
+
+            CAMPAIGN.approve_step2()
+            CAMPAIGN.set_current_step(3)
+
+            self.approve_btn.config(state=tk.DISABLED)
+
+            if 'campaign' in self.app.tabs:
+                self.app.tabs['campaign']._refresh_dashboard()
+
+            self.app.update_status(
+                "Zatwierdzono etap autoanotacji. Wyniki przeniesiono z katalogu stagingu do 2_auto_annotations projektu.",
+                "info"
+            )
+            # ✅ ZMIANA: po zatwierdzeniu wracamy do Wizarda
+            try:
+                self.app.notebook.select(0)
+            except Exception:
+                pass
+
+            messagebox.showinfo("Sukces", f"Etap autoanotacji został zatwierdzony.\n\nWyniki przeniesiono do:\n{target_dir}")
+
+        except Exception as e:
+            messagebox.showerror("Błąd zatwierdzania", str(e))
 
     def _stop_annotation(self):
         self.is_processing = False

@@ -14,11 +14,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
+
 from ..config import CONFIG, YOLO_AVAILABLE, AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS, PIL_AVAILABLE, logger
 from ..icons import IconManager
 from ..validators import validate_yolo_dataset, validate_model_file
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
 from ..ranking import ModelRanking, ModelRankingEntry
+from ..utils import safe_load_yaml
 from .help_manager import HELP
 from .zoomable_canvas import ZoomableCanvas
 
@@ -45,6 +47,9 @@ class TrainingTab:
         self.ranking_engine = ModelRanking()
 
         self.current_run_id = None
+        # ✅ ZMIANA: kontekst aktywnego projektu (ustawiany przez Wizard)
+        self._campaign_runs_dir = None
+        self._campaign_datasets_dir = None
         self._plots_paths = []
         self._plot_photo = None
         self._plot_img_id = None
@@ -54,6 +59,7 @@ class TrainingTab:
         self.rank_is_running = False
 
         self._build_ui()
+        self._attach_training_log_handlers()  # ✅ ZMIANA
         self._bind_trainer_callbacks()
         self._load_history()
         self._load_ranking()
@@ -62,6 +68,188 @@ class TrainingTab:
     def _ui(self, fn):
         self.frame.after(0, fn)
 
+    def _append_train_log(self, message: str):
+        """Bezpieczne dopisywanie linii do konsoli treningu z dowolnego wątku."""
+        def update():
+            try:
+                self.train_log_console.config(state=tk.NORMAL)
+                self.train_log_console.insert(tk.END, message.rstrip() + "\n")
+                self.train_log_console.see(tk.END)
+                self.train_log_console.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        self._ui(update)
+
+    def _attach_training_log_handlers(self):
+        """Przekierowuje logi aplikacji i Ultralytics do konsoli treningu w GUI."""
+        if getattr(self, "_training_log_handlers_attached", False):
+            return
+
+        import logging
+
+        class GuiLogHandler(logging.Handler):
+            def __init__(self, owner):
+                super().__init__()
+                self.owner = owner
+
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    if msg.strip():
+                        self.owner._append_train_log(msg)
+                except Exception:
+                    pass
+
+        fmt = logging.Formatter("%(asctime)s | %(message)s", "%H:%M:%S")
+
+        # ✅ ZMIANA: handler dla naszego loggera
+        self._gui_app_log_handler = GuiLogHandler(self)
+        self._gui_app_log_handler.setFormatter(fmt)
+        logger.addHandler(self._gui_app_log_handler)
+
+        # ✅ ZMIANA: handler dla loggera Ultralytics
+        self._gui_yolo_log_handler = GuiLogHandler(self)
+        self._gui_yolo_log_handler.setFormatter(fmt)
+
+        self._ultralytics_logger = logging.getLogger("ultralytics")
+        self._ultralytics_logger.addHandler(self._gui_yolo_log_handler)
+
+        self._training_log_handlers_attached = True
+        
+        #Konteksty katalogów
+        #=================================
+
+    def _get_datasets_base_dir(self) -> Path:
+        """✅ ZMIANA: bazowy katalog datasetów dla aktywnego projektu lub globalny fallback."""
+        if self._campaign_datasets_dir:
+            return Path(self._campaign_datasets_dir)
+        return Path(CONFIG.DEFAULT_DATASETS_DIR)
+
+    def _get_runs_base_dir(self) -> Path:
+        """✅ ZMIANA: bazowy katalog runów treningowych dla aktywnego projektu lub globalny fallback."""
+        if self._campaign_runs_dir:
+            return Path(self._campaign_runs_dir)
+        return Path(CONFIG.DEFAULT_TRAINING_DIR)
+    
+    #=====================================
+
+    def set_campaign_context(self, runs_dir=None, datasets_dir=None):
+        """
+        ✅ ZMIANA: przełącza TrainingTab na katalogi aktywnego projektu.
+        - runs_dir: katalog projektu 5_training_runs
+        - datasets_dir: katalog projektu 4_training_datasets
+
+        Działanie:
+        1. zapisuje kontekst katalogów projektu,
+        2. przełącza historię treningów na katalog projektu,
+        3. tworzy nowy obiekt trenera spięty z nową historią,
+        4. ponownie podpina callbacki UI,
+        5. odświeża historię i czyści bieżący stan podglądu.
+        """
+        # ------------------------------------------------------
+        # Krok 1: zapamiętaj katalog datasetów projektu
+        # ------------------------------------------------------
+        if datasets_dir is not None:
+            self._campaign_datasets_dir = str(Path(datasets_dir))
+
+        # ------------------------------------------------------
+        # Krok 2: jeśli nie podano runs_dir, nic więcej nie rób
+        # ------------------------------------------------------
+        if runs_dir is None:
+            return
+
+        new_runs_dir = Path(runs_dir)
+
+        # ------------------------------------------------------
+        # Krok 3: nie przełączaj kontekstu w trakcie aktywnego treningu
+        # ------------------------------------------------------
+        if getattr(self.trainer, "is_training", False):
+            logger.warning("Nie można zmienić kontekstu projektu podczas aktywnego treningu.")
+            return
+
+        # ------------------------------------------------------
+        # Krok 4: jeśli kontekst runów jest już taki sam, tylko odśwież historię
+        # ------------------------------------------------------
+        if self._campaign_runs_dir == str(new_runs_dir):
+            self._load_history()
+            return
+
+        # ------------------------------------------------------
+        # Krok 5: zapisz nowy katalog runów projektu
+        # ------------------------------------------------------
+        self._campaign_runs_dir = str(new_runs_dir)
+        new_runs_dir.mkdir(parents=True, exist_ok=True)
+
+        # ------------------------------------------------------
+        # Krok 6: przełącz historię treningów na katalog projektu
+        # ------------------------------------------------------
+        self.history = TrainingHistory(history_dir=new_runs_dir)
+
+        # ------------------------------------------------------
+        # Krok 7: utwórz nowy trener spięty z projektową historią
+        # ------------------------------------------------------
+        self.trainer = YOLOPoseTrainer(history=self.history)
+
+        # ------------------------------------------------------
+        # Krok 8: ponownie podepnij callbacki do nowego obiektu trenera
+        # ------------------------------------------------------
+        self._bind_trainer_callbacks()
+
+        # ------------------------------------------------------
+        # Krok 9: wyczyść lokalny stan zakładki związany z poprzednim projektem
+        # ------------------------------------------------------
+        self.current_run_id = None
+        self._plots_paths = []
+        self._plot_original_path = None
+        self._plot_photo = None
+        self._plot_img_id = None
+
+        try:
+            self.plots_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.tree.selection_remove(*self.tree.selection())
+        except Exception:
+            pass
+
+        # ------------------------------------------------------
+        # Krok 10: odśwież historię z nowego katalogu projektu
+        # ------------------------------------------------------
+        self._load_history()
+
+        logger.info(f"TrainingTab przełączony na projektowy katalog runów: {new_runs_dir}")
+
+    def clear_campaign_context(self):
+        """
+        ✅ ZMIANA: czyści projektowy kontekst treningu i wraca do globalnych katalogów Workspace.
+        """
+        self._campaign_runs_dir = None
+        self._campaign_datasets_dir = None
+
+        # przywróć globalną historię
+        self.history = TrainingHistory(history_dir=Path(CONFIG.DEFAULT_TRAINING_DIR))
+        self.trainer = YOLOPoseTrainer(history=self.history)
+        self._bind_trainer_callbacks()
+
+        # wyczyść pola ścieżek zależnych od projektu
+        self.split_src_var.set("")
+        self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        self.dataset_var.set("")
+        self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+
+        self.current_run_id = None
+        self._plots_paths = []
+        self._plot_original_path = None
+
+        try:
+            self.plots_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+        self._load_history()
+    
     def _get_available_devices(self):
         devices = ["auto", "cpu"]
         try:
@@ -576,86 +764,235 @@ class TrainingTab:
         xml = Path(self.cvat_xml_var.get().strip())
         images_dir = Path(self.cvat_images_var.get().strip())
 
-        if not xml.exists(): return messagebox.showerror("Błąd", "XML nie istnieje.")
-        if not images_dir.exists(): return messagebox.showerror("Błąd", "Folder images nie istnieje.")
+        if not xml.exists():
+            return messagebox.showerror("Błąd", "XML nie istnieje.")
+        if not images_dir.exists():
+            return messagebox.showerror("Błąd", "Folder obrazów nie istnieje.")
 
-        # ✅ ZMIANA: System sam decyduje gdzie i jak zapisać (Pełna kwarantanna danych)
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(CONFIG.DEFAULT_DATASETS_DIR) / f"Plates_CVAT_{timestamp}"
 
-        if not self.creator.annotations:
-            ok, msg, _ = self.creator.parse_cvat_xml(xml)
-            if not ok: return messagebox.showerror("Błąd", msg)
+        # ✅ ZMIANA: katalog datasetów zależny od kampanii/projektu
+        base_datasets_dir = self._get_datasets_base_dir()
+        out_dir = base_datasets_dir / f"Plates_CVAT_{timestamp}"
+
+        # ✅ ZMIANA: pokaż w UI faktyczną ścieżkę docelową
+        self.ds_out_var.set(str(out_dir))
+
+        # ✅ ZMIANA: zawsze parsujemy świeżo wskazany XML
+        try:
+            if hasattr(self.creator, "annotations"):
+                self.creator.annotations = []
+        except Exception:
+            pass
+
+        ok, msg, _ = self.creator.parse_cvat_xml(xml)
+        if not ok:
+            return messagebox.showerror("Błąd", msg)
 
         train = float(self.train_pct.get()) / 100.0
         val = float(self.val_pct.get()) / 100.0
-        ratios = {"train": train, "val": val, "test": max(0, 1.0 - train - val)} if self.use_test.get() else {"train": train / max(0.0001, train + val), "val": val / max(0.0001, train + val)}
 
-        def worker():
-            def prog(c, t, n):
-                self._ui(lambda: self.ds_progress_var.set((c/t)*100))
-                self._ui(lambda: self.ds_status.configure(text=f"{c}/{t} obrazów..."))
-            ok, msg, _ = self.creator.create_dataset(images_dir, out_dir, ratios, prog)
-            self._ui(lambda: messagebox.showinfo("Info", msg))
-            self._ui(lambda: self.ds_status.configure(text="Zakończono!"))
-            
-        threading.Thread(target=worker, daemon=True).start()
+        if self.use_test.get():
+            ratios = {
+                "train": train,
+                "val": val,
+                "test": max(0.0, 1.0 - train - val)
+            }
+        else:
+            denom = max(0.0001, train + val)
+            ratios = {
+                "train": train / denom,
+                "val": val / denom
+            }
 
-    def _split_dataset_thread(self):
-        src = Path(self.split_src_var.get().strip())
-
-        if not src.exists() or not (src / "images").exists(): 
-            return messagebox.showerror("Błąd", "Brak folderu wejściowego (lub brakuje w nim folderu 'images').")
-
-        # ✅ ZMIANA: System dziedziczy nazwę ze źródła i dopisuje _Split_ z datą. 
-        # Dzięki temu Dataset "MegaDataset_Chars_2023..." po podziale będzie nazywał się "MegaDataset_Chars_2023..._Split_2024..."
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = Path(CONFIG.DEFAULT_DATASETS_DIR) / f"{src.name}_Split_{timestamp}"
-
-        train = float(self.train_pct.get()) / 100.0
-        val = float(self.val_pct.get()) / 100.0
-        ratios = {"train": train, "val": val, "test": max(0, 1.0 - train - val)} if self.use_test.get() else {"train": train / max(0.0001, train + val), "val": val / max(0.0001, train + val)}
-
-        self.split_progress_var.set(0)
-        self.split_status.config(text="Rozpoczynam podział...")
+        self.ds_progress_var.set(0)
+        self.ds_status.configure(text="Rozpoczynam budowę datasetu...", foreground="black")
 
         def worker():
             try:
                 def prog(c, t, n):
-                    self._ui(lambda: self.split_progress_var.set((c/t)*100))
-                    self._ui(lambda: self.split_status.configure(text=f"Kopiowanie {c}/{t}..."))
-                
-                ok, msg, _ = self.splitter.split_dataset(src, out, ratios, prog)
-                
-                if ok:
-                    self._ui(lambda: messagebox.showinfo("Sukces", msg))
-                    self._ui(lambda: self.split_status.configure(text="Podział zakończony!", foreground="green"))
+                    pct = (c / t) * 100 if t > 0 else 0
+                    self._ui(lambda: self.ds_progress_var.set(pct))
+                    self._ui(lambda: self.ds_status.configure(
+                        text=f"{c}/{t} obrazów...",
+                        foreground="black"
+                    ))
+
+                ok2, msg2, _ = self.creator.create_dataset(images_dir, out_dir, ratios, prog)
+
+                if ok2:
+                    self._ui(lambda: self.ds_status.configure(
+                        text="Dataset utworzony!",
+                        foreground="green"
+                    ))
+                    self._ui(lambda: messagebox.showinfo("Sukces", msg2))
+
+                    # ✅ ZMIANA: po sukcesie od razu podstaw gotowy dataset do sekcji Treningu
+                    self._ui(lambda p=str(out_dir): self.dataset_var.set(p))
                 else:
-                    self._ui(lambda: messagebox.showerror("Błąd", msg))
-                    self._ui(lambda: self.split_status.configure(text="Błąd podziału", foreground="red"))
+                    self._ui(lambda: self.ds_status.configure(
+                        text="Błąd budowy datasetu",
+                        foreground="red"
+                    ))
+                    self._ui(lambda: messagebox.showerror("Błąd", msg2))
+
             except Exception as e:
-                self._ui(lambda: messagebox.showerror("Krytyczny Błąd", str(e)))
-                self._ui(lambda: self.split_status.configure(text="Krytyczny błąd podziału", foreground="red"))
+                self._ui(lambda: self.ds_status.configure(
+                    text="Krytyczny błąd budowy datasetu",
+                    foreground="red"
+                ))
+                self._ui(lambda err=str(e): messagebox.showerror("Krytyczny Błąd", err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _split_dataset_thread(self):
+        # ✅ ZMIANA: jawnie definiujemy źródło splitu
+        src = Path(self.split_src_var.get().strip())
+
+        if not src.exists() or not (src / "images").exists():
+            return messagebox.showerror(
+                "Błąd",
+                "Brak folderu wejściowego (lub brakuje w nim folderu 'images')."
+            )
+
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # ✅ ZMIANA: wynik splitu zapisujemy w katalogu datasetów aktywnego projektu
+        base_datasets_dir = self._get_datasets_base_dir()
+        out = base_datasets_dir / f"{src.name}_Split_{timestamp}"
+
+        # ✅ ZMIANA: pokaż w UI faktyczną ścieżkę wyniku
+        self.split_out_var.set(str(out))
+
+        train = float(self.train_pct.get()) / 100.0
+        val = float(self.val_pct.get()) / 100.0
+
+        if self.use_test.get():
+            ratios = {
+                "train": train,
+                "val": val,
+                "test": max(0.0, 1.0 - train - val)
+            }
+        else:
+            denom = max(0.0001, train + val)
+            ratios = {
+                "train": train / denom,
+                "val": val / denom
+            }
+
+        self.split_progress_var.set(0)
+        self.split_status.config(text="Rozpoczynam podział...", foreground="black")
+
+        def worker():
+            try:
+                def prog(c, t, n):
+                    pct = (c / t) * 100 if t > 0 else 0
+                    self._ui(lambda: self.split_progress_var.set(pct))
+                    self._ui(lambda: self.split_status.configure(
+                        text=f"Kopiowanie {c}/{t}...",
+                        foreground="black"
+                    ))
+
+                ok, msg, _ = self.splitter.split_dataset(src, out, ratios, prog)
+
+                if ok:
+                    self._ui(lambda: self.split_status.configure(
+                        text="Podział zakończony!",
+                        foreground="green"
+                    ))
+                    self._ui(lambda: messagebox.showinfo("Sukces", msg))
+
+                    # ✅ ZMIANA: po udanym splicie od razu podstaw gotowy dataset do sekcji Treningu
+                    self._ui(lambda p=str(out): self.dataset_var.set(p))
+                else:
+                    self._ui(lambda: self.split_status.configure(
+                        text="Błąd podziału",
+                        foreground="red"
+                    ))
+                    self._ui(lambda: messagebox.showerror("Błąd", msg))
+
+            except Exception as e:
+                self._ui(lambda: self.split_status.configure(
+                    text="Krytyczny błąd podziału",
+                    foreground="red"
+                ))
+                self._ui(lambda err=str(e): messagebox.showerror("Krytyczny Błąd", err))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _start_training(self):
-        if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak ultralytics.")
-        ds = self.dataset_var.get().strip()
-        if not ds: return messagebox.showerror("Błąd", "Podaj Dataset.")
+        if not YOLO_AVAILABLE:
+            return messagebox.showerror("Błąd", "Brak ultralytics.")
         
-        base_key = self.base_model_var.get()
-        base_model = self.base_custom_var.get() if base_key == "Custom" else base_key
+        # ✅ ZMIANA: czyścimy terminal live przed nowym treningiem
+        self.train_log_console.config(state=tk.NORMAL)
+        self.train_log_console.delete(1.0, tk.END)
+        self.train_log_console.insert(tk.END, "Uruchamianie treningu...\n")
+        self.train_log_console.config(state=tk.DISABLED)
+
+        ds = self.dataset_var.get().strip()
+        if not ds:
+            return messagebox.showerror("Błąd", "Podaj Dataset.")
+
+        ds_path = Path(ds)
+        yaml_path = ds_path / "data.yaml" if ds_path.is_dir() else ds_path
+        if not yaml_path.exists():
+            return messagebox.showerror("Błąd", "Nie znaleziono pliku data.yaml.")
+
+        # ✅ ZMIANA: rozpoznanie typu datasetu (POSE vs DETECT)
+        try:
+            cfg = safe_load_yaml(yaml_path)
+            is_pose_dataset = "kpt_shape" in cfg
+        except Exception as e:
+            return messagebox.showerror("Błąd", f"Nie udało się odczytać data.yaml:\n{e}")
+
+        base_key = self.base_model_var.get().strip()
+        base_model = self.base_custom_var.get().strip() if base_key == "Custom" else base_key
         device = self._device_to_ultralytics(self.device_var.get())
 
+        # ✅ ZMIANA: rozpoznanie typu modelu
+        is_pose_model = False
+        if base_key in AVAILABLE_POSE_MODELS:
+            is_pose_model = True
+        elif "pose" in str(base_model).lower():
+            is_pose_model = True
+
+        # ✅ ZMIANA: twarda walidacja zgodności dataset <-> model
+        if is_pose_dataset and not is_pose_model:
+            return messagebox.showerror(
+                "Niezgodność typu treningu",
+                "Wybrany dataset jest typu POSE (z keypointami), ale model bazowy NIE jest modelem pose.\n\n"
+                "Wybierz model z dopiskiem '-pose'."
+            )
+
+        if not is_pose_dataset and is_pose_model:
+            return messagebox.showerror(
+                "Niezgodność typu treningu",
+                "Wybrany dataset jest typu DETECT (bboxy, np. znaki), ale model bazowy jest typu POSE.\n\n"
+                "Dla znaków wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
+            )
+
+        # ✅ ZMIANA: czytelny nagłówek sesji
+        self._append_train_log("=" * 70)
+        self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
+        self._append_train_log(f"Dataset: {ds}")
+        self._append_train_log(f"Model bazowy: {base_model}")
+        self._append_train_log(f"Device: {device} | Epochs: {self.epochs_var.get()} | Batch: {self.batch_var.get()} | ImgSz: {self.imgsz_var.get()} | lr0: {self.lr0_var.get()}")
+        self._append_train_log("=" * 70)
+
         run_id = self.trainer.start_training(
-            name=self.name_var.get(), dataset_path=ds, base_model=base_model,
-            epochs=int(self.epochs_var.get()), batch_size=int(self.batch_var.get()),
-            img_size=int(self.imgsz_var.get()), device=device,
-            lr0=float(self.lr0_var.get()) # ✅ DODANE POBIERANIE Z GUI            
+            name=self.name_var.get(),
+            dataset_path=ds,
+            base_model=base_model,
+            epochs=int(self.epochs_var.get()),
+            batch_size=int(self.batch_var.get()),
+            img_size=int(self.imgsz_var.get()),
+            device=device,
+            lr0=float(self.lr0_var.get())
         )
+
         if run_id:
             self.current_run_id = run_id
             self.btn_start_train.configure(state=tk.DISABLED)
@@ -694,11 +1031,13 @@ class TrainingTab:
             self._ui(update_ui)
 
         def on_end(success, msg):
+            # ✅ ZMIANA: komunikat końcowy też ląduje w terminalu live
+            end_line = f"[KONIEC] {'SUKCES' if success else 'BŁĄD/STOP'} | {msg}"
+            self._append_train_log(end_line)
+
             self._ui(lambda: self.btn_start_train.configure(state=tk.NORMAL))
             self._ui(lambda: self.btn_stop_train.configure(state=tk.DISABLED))
             self._ui(lambda: self._load_history())
-        self.trainer.on_epoch_end = on_epoch
-        self.trainer.on_training_end = on_end
 
     def _load_history(self):
         self.tree.delete(*self.tree.get_children())

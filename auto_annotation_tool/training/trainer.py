@@ -239,46 +239,55 @@ class YOLOPoseTrainer:
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=epochs
             )
-            # ✅ ZMIANA: Automatyczny eksport best.pt ORAZ aktualizacja Mózgu Kampanii!
-            if best_weights.exists():
-                import shutil
-                from ..campaign_manager import CAMPAIGN # Pobieramy Menedżera!
-                
-                final_map = float(self.history.get_run(run.id).best_map50) * 100
-                is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
-                target_dir = CONFIG.DIR_6_MODELS_PLATES if is_pose else CONFIG.DIR_6_MODELS_CHARS
-                
-                new_model_name = f"V{epochs}ep_mAP{final_map:.0f}_{run.name}.pt"
-                target_path = target_dir / new_model_name
-                
-                shutil.copy2(best_weights, target_path)
-                logger.info(f"💾 Skopiowano najlepszy model do: {target_path.name}")
-                
-                # =========================================================
-                # AUTO-WIRING (Automatyczna aktualizacja obecnego projektu)
-                # =========================================================
-                try:
+            # ✅ ZMIANA: Eksport best.pt i aktualizacja Kampanii nie mogą wywalić całego treningu
+            try:
+                if best_weights.exists():
+                    import shutil
+                    from ..campaign_manager import CAMPAIGN
+
+                    final_map = float(self.history.get_run(run.id).best_map50) * 100
+                    is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
+
+                    target_dir = CONFIG.DIR_6_MODELS_PLATES if is_pose else CONFIG.DIR_6_MODELS_CHARS
+                    target_dir.mkdir(parents=True, exist_ok=True)
+
+                    # ✅ ZMIANA: krótka, bezpieczna nazwa pliku (bez run.name)
+                    task_tag = "plate" if is_pose else "char"
+                    safe_model_name = f"{task_tag}_{run.id}_map{int(final_map):02d}.pt"
+                    target_path = (target_dir / safe_model_name).resolve()
+
+                    logger.info(f"💾 Kopiowanie najlepszego modelu:")
+                    logger.info(f"   SRC: {best_weights}")
+                    logger.info(f"   DST: {target_path}")
+
+                    shutil.copy2(best_weights, target_path)
+                    logger.info(f"✅ Skopiowano najlepszy model do: {target_path.name}")
+
+                    # =========================================================
+                    # AUTO-WIRING (Aktualizacja aktywnego projektu)
+                    # =========================================================
                     active_proj = CAMPAIGN.get_active_project_name()
                     if active_proj:
                         if is_pose:
                             CAMPAIGN.set_global_model("plate", str(target_path))
-                            logger.info("🧠 Menadżer: Zaktualizowano model TABLIC.")
+                            logger.info("🧠 Menadżer Kampanii: Zaktualizowano model TABLIC.")
                         else:
                             ds_path = str(run.dataset_path).lower()
                             if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
                                 CAMPAIGN.set_global_model("char", str(target_path))
-                                logger.info("🧠 Menadżer: Zaktualizowano model ZNAKÓW.")
+                                logger.info("🧠 Menadżer Kampanii: Zaktualizowano model ZNAKÓW.")
                             else:
                                 CAMPAIGN.set_global_model("vehicle", str(target_path))
-                                logger.info("🧠 Menadżer: Zaktualizowano model POJAZDÓW.")
-                                
-                        # ✅ ZMIANA: Zaliczenie całej Iteracji! Odblokowanie guzika "Nowa Iteracja"
+                                logger.info("🧠 Menadżer Kampanii: Zaktualizowano model POJAZDÓW.")
+
+                        # ✅ ZMIANA: ukończenie pełnego cyklu Kampanii
                         if CAMPAIGN.get_current_step() == 4:
                             CAMPAIGN.set_current_step(5)
-                            logger.info("🎉 Menadżer: Cykl zakończony. Odblokowano awans do nowej iteracji.")
-                            
-                except Exception as e:
-                    logger.error(f"Nie udało się wpiąć modelu do Kampanii: {e}")
+                            logger.info("🎉 Menadżer Kampanii: Cykl ukończony. Odblokowano nową iterację.")
+
+            except Exception as export_err:
+                # ✅ ZMIANA: to nie jest krytyczny błąd treningu
+                logger.warning(f"Nie udało się wyeksportować best.pt do katalogu modeli: {export_err}")
 
             logger.info(f"Trening zakończony: {run.id}")
 
