@@ -113,11 +113,9 @@ class AutoAnnotationApp:
                     text=f"{self.icon_manager.get('cut')} Znaki na tablicach"
                 )
             except Exception as e:
-                import traceback
-                print("=== BŁĄD TWORZENIA ZAKŁADKI CHARACTERS ===")
-                print(traceback.format_exc())
+
                 logger.error(f"Nie udało się załadować zakładki ZNAKI: {e}")
-                logger.error(traceback.format_exc())
+
             
             try:
                 self.tabs['training'] = TrainingTab(self.notebook, self)
