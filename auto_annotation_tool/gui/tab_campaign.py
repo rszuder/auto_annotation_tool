@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zakładka: Rozkład Jazdy (Dashboard Kampanii MLOps).
+Zakładka: Rozkład Jazdy (Dashboard Kampanii MLOps)..
 """
 
 import tkinter as tk
