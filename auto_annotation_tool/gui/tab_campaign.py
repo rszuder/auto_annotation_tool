@@ -904,8 +904,51 @@ class CampaignTab:
 
             c_mod = CAMPAIGN.get_global_model("char")
             if c_mod and Path(c_mod).exists():
-                tab_char.detection_method_var.set("YOLO")
+                # ===== START NOWEGO BLOKU =====
+                # jeśli projekt ma już model znaków, kolejna iteracja
+                # powinna domyślnie startować w trybie hybrydowym
+                tab_char.detection_method_var.set("BOTH")
                 tab_char.yolo_model_path_var.set(c_mod)
+
+                try:
+                    version, size = tab_char._infer_yolo_arch_from_model_path(c_mod)
+                    if version in {"8", "11", "26"}:
+                        tab_char.yolo_model_version_var.set(version)
+                    if size in {"n", "s", "m", "l", "x"}:
+                        tab_char.yolo_model_size_var.set(size)
+                except Exception as e:
+                    logger.debug(f"Nie udało się odczytać architektury YOLO z nazwy modelu: {e}")
+
+                try:
+                    tab_char._sync_yolo_model_binding()
+                except Exception as e:
+                    logger.debug(f"Nie udało się zsynchronizować ścieżki modelu YOLO: {e}")
+
+                try:
+                    tab_char._update_yolo_visibility()
+                except Exception as e:
+                    logger.debug(f"Nie udało się odświeżyć widoku YOLO w Zakładce Znaków: {e}")
+                # ===== KONIEC NOWEGO BLOKU =====
+            else:
+                # ===== START NOWEGO BLOKU =====
+                # brak modelu znaków -> bootstrap przez OCR
+                try:
+                    tab_char.detection_method_var.set("OCR")
+                    tab_char.yolo_model_path_var.set("")
+                    tab_char._update_yolo_visibility()
+                except Exception as e:
+                    logger.debug(f"Nie udało się ustawić trybu OCR dla braku modelu znaków: {e}")
+                # ===== KONIEC NOWEGO BLOKU =====
+
+                try:
+                    tab_char._sync_yolo_model_binding()
+                except Exception:
+                    pass
+
+                try:
+                    tab_char._update_yolo_visibility()
+                except Exception:
+                    pass
 
             try:
                 tab_char._restore_preview_context_from_project()

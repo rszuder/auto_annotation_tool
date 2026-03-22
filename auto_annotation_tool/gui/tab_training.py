@@ -14,7 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-
+from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, YOLO_AVAILABLE, AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS, PIL_AVAILABLE, logger
 from ..icons import IconManager
 from ..validators import validate_yolo_dataset, validate_model_file
@@ -47,6 +47,12 @@ class TrainingTab:
         self.ranking_engine = ModelRanking()
 
         self.current_run_id = None
+        self._pending_campaign_model_type = None
+        self._current_training_dataset_is_pose = None
+        self._training_completion_poll_job = None
+        
+        
+        
         # ✅ ZMIANA: kontekst aktywnego projektu (ustawiany przez Wizard)
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
@@ -249,6 +255,204 @@ class TrainingTab:
             pass
 
         self._load_history()
+
+        self._pending_campaign_model_type = None
+        self._current_training_dataset_is_pose = None
+
+        if self._training_completion_poll_job is not None:
+            try:
+                self.frame.after_cancel(self._training_completion_poll_job)
+            except Exception:
+                pass
+            self._training_completion_poll_job = None
+
+    def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
+        if not run_id:
+            return None
+
+        base = self._get_runs_base_dir()
+        candidate = base / run_id
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        try:
+            matches = [p for p in base.iterdir() if p.is_dir() and run_id in p.name]
+            if matches:
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return matches[0]
+        except Exception:
+            pass
+
+        return None
+
+
+    def _find_best_weights_for_run(self, run_id: str) -> Path | None:
+        run_dir = self._get_run_dir_for_run_id(run_id)
+        if run_dir is None:
+            return None
+
+        direct = run_dir / "weights" / "best.pt"
+        if direct.exists():
+            return direct
+
+        try:
+            candidates = list(run_dir.rglob("best.pt"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return candidates[0]
+        except Exception:
+            pass
+
+        return None
+
+
+    def _promote_trained_model_to_campaign_if_needed(self):
+        """
+        Jeśli aktywny trening dotyczył detekcji znaków w projekcie kampanii,
+        to po pojawieniu się best.pt promuje model do best_char_model projektu.
+        """
+        if self._pending_campaign_model_type != "char":
+            return False
+
+        if not self.current_run_id:
+            return False
+
+        best_model = self._find_best_weights_for_run(self.current_run_id)
+        if best_model is None or not best_model.exists():
+            return False
+
+        CAMPAIGN.set_global_model("char", str(best_model))
+
+        try:
+            self._append_train_log(f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}")
+        except Exception:
+            pass
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        self._pending_campaign_model_type = None
+        return True
+
+
+    def _poll_training_completion(self):
+        """
+        Lekki polling końca treningu:
+        - czeka aż trainer.is_training spadnie do False
+        - jeśli powstał best.pt, promuje model do projektu
+        """
+        try:
+            is_training = bool(getattr(self.trainer, "is_training", False))
+
+            if is_training:
+                self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+                return
+
+            self._training_completion_poll_job = None
+            self._promote_trained_model_to_campaign_if_needed()
+
+        except Exception as e:
+            logger.error(f"Błąd pollingu końca treningu: {e}")
+            self._training_completion_poll_job = None
+
+    def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
+        if not run_id:
+            return None
+
+        base = self._get_runs_base_dir()
+        candidate = base / run_id
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        # fallback: szukaj po stemie / nazwie zawierającej run_id
+        try:
+            matches = [p for p in base.iterdir() if p.is_dir() and run_id in p.name]
+            if matches:
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return matches[0]
+        except Exception:
+            pass
+
+        return None
+
+
+    def _find_best_weights_for_run(self, run_id: str) -> Path | None:
+        run_dir = self._get_run_dir_for_run_id(run_id)
+        if run_dir is None:
+            return None
+
+        direct = run_dir / "weights" / "best.pt"
+        if direct.exists():
+            return direct
+
+        try:
+            candidates = list(run_dir.rglob("best.pt"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return candidates[0]
+        except Exception:
+            pass
+
+        return None
+
+
+    def _promote_trained_model_to_campaign_if_needed(self):
+        """
+        Jeśli aktywny trening dotyczył detekcji znaków w projekcie kampanii,
+        to po pojawieniu się best.pt promuje model do best_char_model projektu.
+        """
+        if self._pending_campaign_model_type != "char":
+            return False
+
+        if not self.current_run_id:
+            return False
+
+        best_model = self._find_best_weights_for_run(self.current_run_id)
+        if best_model is None or not best_model.exists():
+            return False
+
+        CAMPAIGN.set_global_model("char", str(best_model))
+
+        try:
+            self._append_train_log(f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}")
+        except Exception:
+            pass
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        self._pending_campaign_model_type = None
+        return True
+
+
+    def _poll_training_completion(self):
+        """
+        Lekki polling końca treningu:
+        - czeka aż trainer.is_training spadnie do False
+        - jeśli powstał best.pt, promuje model do projektu
+        """
+        try:
+            is_training = bool(getattr(self.trainer, "is_training", False))
+
+            if is_training:
+                self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+                return
+
+            # trening już się skończył / zatrzymał
+            self._training_completion_poll_job = None
+            self._promote_trained_model_to_campaign_if_needed()
+
+        except Exception as e:
+            logger.error(f"Błąd pollingu końca treningu: {e}")
+            self._training_completion_poll_job = None
     
     def _get_available_devices(self):
         devices = ["auto", "cpu"]
@@ -945,6 +1149,15 @@ class TrainingTab:
         try:
             cfg = safe_load_yaml(yaml_path)
             is_pose_dataset = "kpt_shape" in cfg
+
+            # jeśli to trening detekcji znaków w aktywnym projekcie kampanii,
+            # po zakończeniu chcemy promować best.pt do best_char_model
+            self._current_training_dataset_is_pose = bool(is_pose_dataset)
+
+            if CAMPAIGN.get_active_project_name() and not is_pose_dataset:
+                self._pending_campaign_model_type = "char"
+            else:
+                self._pending_campaign_model_type = None            
         except Exception as e:
             return messagebox.showerror("Błąd", f"Nie udało się odczytać data.yaml:\n{e}")
 
@@ -998,6 +1211,16 @@ class TrainingTab:
             self.btn_start_train.configure(state=tk.DISABLED)
             self.btn_stop_train.configure(state=tk.NORMAL)
             self.train_progress_label.configure(text=f"Trening uruchomiony: {run_id}")
+
+            # start lekkiego pollingu końca treningu
+            if self._training_completion_poll_job is not None:
+                try:
+                    self.frame.after_cancel(self._training_completion_poll_job)
+                except Exception:
+                    pass
+                self._training_completion_poll_job = None
+
+            self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)            
 
     def _stop_training(self):
         self.trainer.stop_training()
