@@ -95,6 +95,7 @@ class CampaignManager:
 
         self.state["projects"][name] = self._get_default_project_template(name)
         self.state["active_project"] = name
+        
         self.save_state()
 
         # ✅ ZMIANA: budujemy pełne drzewo projektu w 9_projects
