@@ -907,6 +907,11 @@ class CampaignTab:
                 tab_char.detection_method_var.set("YOLO")
                 tab_char.yolo_model_path_var.set(c_mod)
 
+            try:
+                tab_char._restore_preview_context_from_project()
+            except Exception as e:
+                logger.debug(f"Nie udało się przywrócić preview projektu: {e}")
+
         try:
             if latest_xml:
                 self.app.update_status(
@@ -923,18 +928,23 @@ class CampaignTab:
 
         if tab_char:
             try:
-                if (
-                    CAMPAIGN.get_step3_substep() > 1
+                saved_substep = CAMPAIGN.get_step3_substep()
+
+                should_restore = (
+                    saved_substep > 1
                     or CAMPAIGN.is_step3_stage1_done()
                     or CAMPAIGN.is_step3_stage2_done()
-                ):
+                )
+
+                if should_restore:
                     tab_char.restore_campaign_step3_mode()
                 else:
                     tab_char.enter_campaign_step3_mode()
+
             except Exception as e:
                 logger.debug(f"Nie udało się przywrócić stanu kroku 3: {e}")
+                CAMPAIGN.reset_step3_progress()
                 tab_char.enter_campaign_step3_mode()
-
         self.app.open_controlled_tab("characters")
 
     def _step_goto_training(self):
