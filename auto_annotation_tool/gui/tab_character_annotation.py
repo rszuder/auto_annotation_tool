@@ -691,6 +691,30 @@ class CharacterAnnotationTab:
             if (self.yolo_model_path_var.get() or "").strip() == "Brak modelu znaków w projekcie":
                 self.yolo_model_path_var.set("")
 
+    # ===== START NOWEGO BLOKU =====
+    def _infer_yolo_arch_from_model_path(self, model_path: str):
+        """
+        Próbuje odczytać wydanie i rozmiar YOLO z nazwy pliku, np.:
+        - yolo11s.pt
+        - best_yolo26m.pt
+        - chars_yolo8n_last.pt
+        """
+        raw = (model_path or "").strip().lower()
+        if not raw:
+            return None, None
+
+        name = Path(raw).name.lower()
+
+        import re
+        match = re.search(r"yolo(8|11|26)([nsmlx])", name)
+        if not match:
+            return None, None
+
+        version = match.group(1)
+        size = match.group(2)
+        return version, size
+    # ===== KONIEC NOWEGO BLOKU =====
+
 
     def _on_yolo_arch_change(self, event=None):
         """
@@ -1244,6 +1268,11 @@ class CharacterAnnotationTab:
 
         try:
             self._update_step3_source_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._sync_yolo_model_binding()
         except Exception:
             pass
 
