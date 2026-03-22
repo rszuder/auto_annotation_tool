@@ -124,6 +124,152 @@ class CharacterAnnotationTab:
         self._loaded_meta_path = None
         self._loaded_meta_mtime = None
 
+    def _format_plate_listbox_label(self, plate_id: str, data: dict) -> str:
+        status = str(data.get("status", "unknown")).strip().lower()
+        chars = data.get("characters", []) or []
+
+        if isinstance(chars, list):
+            chars_txt = "".join(str(c) for c in chars)
+        else:
+            chars_txt = str(chars)
+
+        if status == "perfect":
+            icon = "🟢"
+        elif status == "needs_fix":
+            icon = "🔴"
+        else:
+            icon = "⚪"
+
+        label = f"{icon} {plate_id}"
+        label += f" [{chars_txt}]"
+        return label
+
+
+    def _refresh_plate_rows_in_place(self):
+        """
+        Odświeża TYLKO tekst istniejących wierszy listy tablic,
+        bez przebudowy całego runu i bez resetowania selekcji.
+        """
+        try:
+            self._reloading_preview = True
+
+            # fallback: jeśli mapowanie indeks->pid nie istnieje, zbuduj je z preview_plate_ids
+            if not getattr(self, "_listbox_pid_by_index", None):
+                self._listbox_pid_by_index = list(self.preview_plate_ids)
+
+            row_count = self.plates_listbox.size()
+            pid_count = len(self._listbox_pid_by_index)
+            limit = min(row_count, pid_count)
+
+            for idx in range(limit):
+                plate_id = self._listbox_pid_by_index[idx]
+                data = self.preview_metadata.get(plate_id, {})
+                label = self._format_plate_listbox_label(plate_id, data)
+
+                try:
+                    self.plates_listbox.delete(idx)
+                    self.plates_listbox.insert(idx, label)
+                except Exception:
+                    pass
+
+            # jeśli z jakiegoś powodu lista w UI była krótsza, dopełnij brakujące rekordy
+            if pid_count > row_count:
+                for idx in range(row_count, pid_count):
+                    plate_id = self._listbox_pid_by_index[idx]
+                    data = self.preview_metadata.get(plate_id, {})
+                    label = self._format_plate_listbox_label(plate_id, data)
+                    try:
+                        self.plates_listbox.insert(tk.END, label)
+                    except Exception:
+                        pass
+
+            try:
+                perfect = 0
+                needs_fix = 0
+                unknown = 0
+
+                for pid in self._listbox_pid_by_index:
+                    status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
+                    if status == "perfect":
+                        perfect += 1
+                    elif status == "needs_fix":
+                        needs_fix += 1
+                    else:
+                        unknown += 1
+
+                self.preview_info_lbl.config(
+                    text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect} | 🔴 {needs_fix} | ⚪ {unknown}",
+                    foreground="#2980b9"
+                )
+            except Exception:
+                pass
+
+            try:
+                self.plates_listbox.update_idletasks()
+            except Exception:
+                pass
+
+        finally:
+            self._reloading_preview = False
+
+    def _refresh_plates_listbox(self, preserve_selection: bool = True):
+        current_plate_id = None
+
+        if preserve_selection:
+            try:
+                sel = self.plates_listbox.curselection()
+                if sel:
+                    idx = sel[0]
+                    if 0 <= idx < len(self.preview_plate_ids):
+                        current_plate_id = self.preview_plate_ids[idx]
+            except Exception:
+                current_plate_id = None
+
+        try:
+            self.plates_listbox.delete(0, tk.END)
+        except Exception:
+            return
+
+        self.preview_plate_ids = []
+
+        for plate_id, data in self.preview_metadata.items():
+            if not isinstance(data, dict):
+                continue
+
+            status = str(data.get("status", "unknown")).strip().lower()
+            chars = data.get("characters", []) or []
+            chars_txt = "".join(str(c) for c in chars) if isinstance(chars, list) else str(chars)
+
+            if status == "perfect":
+                icon = "🟢"
+            elif status == "needs_fix":
+                icon = "🔴"
+            else:
+                icon = "⚪"
+
+            label = f"{icon} {plate_id}"
+            if chars_txt:
+                label += f" [{chars_txt}]"
+
+            self.plates_listbox.insert(tk.END, label)
+            self.preview_plate_ids.append(plate_id)
+
+        # spróbuj przywrócić zaznaczenie
+        if current_plate_id and current_plate_id in self.preview_plate_ids:
+            try:
+                idx = self.preview_plate_ids.index(current_plate_id)
+                self.plates_listbox.selection_clear(0, tk.END)
+                self.plates_listbox.selection_set(idx)
+                self.plates_listbox.activate(idx)
+                self.plates_listbox.see(idx)
+            except Exception:
+                pass
+
+        try:
+            self.plates_listbox.update_idletasks()
+        except Exception:
+            pass
+
     def clear_campaign_context(self):
         """
         ✅ ZMIANA: czyści projektowe ścieżki i override’y po wyjściu z projektu.
@@ -429,28 +575,18 @@ class CharacterAnnotationTab:
 
     def enter_campaign_step3_mode(self):
         """
-        Wejście z Wizarda do kroku 3:
-        - start zawsze w podzakładce 1
-        - 2 i 3 są zablokowane
+        Start kroku 3 od początku.
         """
-        self._step3_linear_mode = True
-
-        self._set_subtab_state(self.tab_extract, "normal")
-        self._set_subtab_state(self.tab_detect, "disabled")
-        self._set_subtab_state(self.tab_dataset, "disabled")
-
-        self._select_subtab(self.tab_extract)
-        self._set_button_state("btn_to_detect", False)
-        self._set_button_state("btn_to_dataset", False)
-        self._update_preview_path_lock()
-        self._update_step3_source_path_lock()
-        self._update_yolo_visibility()
-
+        CAMPAIGN.reset_step3_progress()
+        self.restore_campaign_step3_mode()
+        self._set_button_emphasis("btn_to_detect_frame", False)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
 
 
     def reset_subtab_flow(self):
         """
         Stan neutralny poza liniowym workflow kampanii.
+        W trybie swobodnym wszystkie podzakładki i przyciski nawigacyjne są dostępne.
         """
         self._step3_linear_mode = False
 
@@ -458,47 +594,84 @@ class CharacterAnnotationTab:
         self._set_subtab_state(self.tab_detect, "normal")
         self._set_subtab_state(self.tab_dataset, "normal")
 
-        self._set_button_state("btn_to_detect", False)
-        self._set_button_state("btn_to_dataset", False)
-        self._update_preview_path_lock()
-        self._update_step3_source_path_lock()
-        self._update_yolo_visibility()
+        self._set_button_state("btn_to_detect", True)
+        self._set_button_state("btn_to_dataset", True)
+
+        self._set_button_emphasis("btn_to_detect_frame", False)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
+        self._set_button_emphasis("btn_run_detection_frame", False)
+
+        try:
+            self._update_preview_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_step3_source_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_yolo_visibility()
+        except Exception:
+            pass
         
 
     def unlock_detection_subtab(self):
         self._set_button_state("btn_to_detect", True)
+        self._set_button_emphasis("btn_to_detect_frame", True)
+
+        if self._step3_linear_mode:
+            CAMPAIGN.set_step3_stage1_done(True)
+            self._persist_step3_progress()
         
 
     def unlock_dataset_subtab(self):
         self._set_button_state("btn_to_dataset", True)
-
-    def go_to_substep_2(self):
-        btn = getattr(self, "btn_to_detect", None)
-        if btn is not None and str(btn.cget("state")) != "normal":
-            return
+        self._set_button_emphasis("btn_run_detection_frame", False)
+        self._set_button_emphasis("btn_to_dataset_frame", True)
 
         if self._step3_linear_mode:
+            CAMPAIGN.set_step3_stage2_done(True)
+            self._persist_step3_progress()
+
+    def go_to_substep_2(self):
+        if self._step3_linear_mode:
+            btn = getattr(self, "btn_to_detect", None)
+            if btn is not None and str(btn.cget("state")) != "normal":
+                return
+
             self._set_subtab_state(self.tab_extract, "disabled")
             self._set_subtab_state(self.tab_detect, "normal")
             self._set_subtab_state(self.tab_dataset, "disabled")
 
+            CAMPAIGN.set_step3_substep(2)
+            self._persist_step3_progress()
+
         self._select_subtab(self.tab_detect)
+        self._set_button_emphasis("btn_run_detection_frame", True)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
 
     def go_to_substep_3(self):
-        btn = getattr(self, "btn_to_dataset", None)
-        if btn is not None and str(btn.cget("state")) != "normal":
-            return
-
         if self._step3_linear_mode:
+            btn = getattr(self, "btn_to_dataset", None)
+            if btn is not None and str(btn.cget("state")) != "normal":
+                return
+
             self._set_subtab_state(self.tab_extract, "disabled")
             self._set_subtab_state(self.tab_detect, "disabled")
             self._set_subtab_state(self.tab_dataset, "normal")
 
+            CAMPAIGN.set_step3_substep(3)
+            self._persist_step3_progress()
+
         self._select_subtab(self.tab_dataset)
+        self._set_button_emphasis("btn_run_detection_frame", False)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
 
     def back_to_substep_1(self):
         """
-        Cofnięcie do 1 blokuje 2 i 3.
+        Cofnięcie do 1 blokuje 2 i 3 tylko w trybie kampanii.
         """
         if self._step3_linear_mode:
             self._set_subtab_state(self.tab_extract, "normal")
@@ -507,11 +680,20 @@ class CharacterAnnotationTab:
             self._set_button_state("btn_to_detect", False)
             self._set_button_state("btn_to_dataset", False)
 
+            self._set_button_emphasis("btn_to_detect_frame", False)
+            self._set_button_emphasis("btn_to_dataset_frame", False)
+
+            CAMPAIGN.set_step3_substep(1)
+            CAMPAIGN.set_step3_stage1_done(False)
+            CAMPAIGN.set_step3_stage2_done(False)
+            self._persist_step3_progress()
+
         self._select_subtab(self.tab_extract)
+
 
     def back_to_substep_2(self):
         """
-        Cofnięcie do 2 blokuje 3.
+        Cofnięcie do 2 blokuje 3 tylko w trybie kampanii.
         """
         if self._step3_linear_mode:
             self._set_subtab_state(self.tab_extract, "disabled")
@@ -519,7 +701,110 @@ class CharacterAnnotationTab:
             self._set_subtab_state(self.tab_dataset, "disabled")
             self._set_button_state("btn_to_dataset", False)
 
+            self._set_button_emphasis("btn_to_dataset_frame", False)
+
+            CAMPAIGN.set_step3_substep(2)
+            CAMPAIGN.set_step3_stage2_done(False)
+            self._persist_step3_progress()
+
         self._select_subtab(self.tab_detect)
+        self._set_button_emphasis("btn_run_detection_frame", True)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
+
+    def _persist_step3_progress(self):
+        if not getattr(self, "_step3_linear_mode", False):
+            return
+
+        current_substep = 1
+        try:
+            selected = str(self.main_nb.select())
+            if selected == str(self.tab_extract):
+                current_substep = 1
+            elif selected == str(self.tab_detect):
+                current_substep = 2
+            elif selected == str(self.tab_dataset):
+                current_substep = 3
+        except Exception:
+            current_substep = 1
+
+        CAMPAIGN.set_step3_substep(current_substep)
+
+        stage1_done = False
+        stage2_done = False
+
+        try:
+            btn = getattr(self, "btn_to_detect", None)
+            if btn is not None:
+                stage1_done = str(btn.cget("state")) == "normal"
+        except Exception:
+            pass
+
+        try:
+            btn = getattr(self, "btn_to_dataset", None)
+            if btn is not None:
+                stage2_done = str(btn.cget("state")) == "normal"
+        except Exception:
+            pass
+
+        CAMPAIGN.set_step3_stage1_done(stage1_done)
+        CAMPAIGN.set_step3_stage2_done(stage2_done)
+
+
+    def restore_campaign_step3_mode(self):
+        """
+        Przywraca zapisany postęp kroku 3 aktywnego projektu.
+        """
+        self._step3_linear_mode = True
+
+        saved_substep = CAMPAIGN.get_step3_substep()
+        stage1_done = CAMPAIGN.is_step3_stage1_done()
+        stage2_done = CAMPAIGN.is_step3_stage2_done()
+
+        self._set_button_state("btn_to_detect", stage1_done)
+        self._set_button_state("btn_to_dataset", stage2_done)
+
+        if saved_substep <= 1:
+            self._set_subtab_state(self.tab_extract, "normal")
+            self._set_subtab_state(self.tab_detect, "disabled")
+            self._set_subtab_state(self.tab_dataset, "disabled")
+            self._select_subtab(self.tab_extract)
+
+        elif saved_substep == 2:
+            self._set_subtab_state(self.tab_extract, "disabled")
+            self._set_subtab_state(self.tab_detect, "normal")
+            self._set_subtab_state(self.tab_dataset, "disabled")
+            self._select_subtab(self.tab_detect)
+
+        else:
+            self._set_subtab_state(self.tab_extract, "disabled")
+            self._set_subtab_state(self.tab_detect, "disabled")
+            self._set_subtab_state(self.tab_dataset, "normal")
+            self._select_subtab(self.tab_dataset)
+
+        self._set_button_emphasis("btn_run_detection_frame", False)
+        self._set_button_emphasis("btn_to_dataset_frame", False)
+
+        if saved_substep == 2 and not stage2_done:
+            self._set_button_emphasis("btn_run_detection_frame", True)
+        elif saved_substep == 2 and stage2_done:
+            self._set_button_emphasis("btn_to_dataset_frame", True)
+        elif saved_substep == 3:
+            self._set_button_emphasis("btn_to_dataset_frame", False)
+
+        try:
+            self._update_preview_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_step3_source_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_yolo_visibility()
+        except Exception:
+            pass
 
 
     def _atomic_write_json(self, path: Path, data: dict):
@@ -681,6 +966,27 @@ class CharacterAnnotationTab:
             except Exception:
                 return 0
         return "auto"
+    
+    def _set_button_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
+        frame = getattr(self, frame_attr, None)
+        if frame is None:
+            return
+
+        try:
+            if enabled:
+                frame.config(
+                    highlightthickness=2,
+                    highlightbackground=color,
+                    highlightcolor=color,
+                    bd=0
+                )
+            else:
+                frame.config(
+                    highlightthickness=0,
+                    bd=0
+                )
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić podświetlenia {frame_attr}: {e}")
 
     # =========================================================
     # Pickers
@@ -881,13 +1187,16 @@ class CharacterAnnotationTab:
             state=tk.DISABLED
         ).pack(side=tk.LEFT)
 
+        self.btn_to_detect_frame = tk.Frame(nav, bd=0, highlightthickness=0)
+        self.btn_to_detect_frame.pack(side=tk.RIGHT)
+
         self.btn_to_detect = ttk.Button(
-            nav,
+            self.btn_to_detect_frame,
             text="Dalej → Wykrywanie Znaków i Analiza",
             command=self.go_to_substep_2,
             state=tk.DISABLED
         )
-        self.btn_to_detect.pack(side=tk.RIGHT)
+        self.btn_to_detect.pack()
 
     def _run_extraction(self):
         self._force_save_all()
@@ -987,74 +1296,144 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _build_detection_tab(self, parent):
-        top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, padx=10, pady=10)
+        # =========================
+        # LAYOUT ROOT
+        # =========================
+        parent.grid_rowconfigure(0, weight=0)  # header
+        parent.grid_rowconfigure(1, weight=1)  # content
+        parent.grid_rowconfigure(2, weight=0)  # footer
+        parent.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(top_frame, text="Paczka do analizy (folder run_XXX):", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+        # =========================
+        # HEADER
+        # =========================
+        header_frame = ttk.Frame(parent)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        header_frame.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(
+            header_frame,
+            text="Paczka do analizy (folder run_XXX):",
+            font=("Segoe UI", 9, "bold")
+        ).grid(row=0, column=0, sticky="w")
+
         self.preview_dir_entry = ttk.Entry(
-            top_frame,
+            header_frame,
             textvariable=self.preview_dir_var,
-            width=45,
             state="readonly"
         )
-        self.preview_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        self.preview_dir_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
 
         self.preview_dir_browse_btn = ttk.Button(
-            top_frame,
+            header_frame,
             text="Otwórz inną paczkę",
             command=self._pick_and_load_preview_dir
         )
-        self.preview_dir_browse_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.preview_dir_browse_btn.grid(row=0, column=2, sticky="e", padx=(0, 5))
 
-        self.preview_info_lbl = ttk.Label(top_frame, text="Wczytano tablic: 0", font=("Segoe UI", 9, "bold"), foreground="#2980b9")
-        self.preview_info_lbl.pack(side=tk.RIGHT, padx=10)
+        self.preview_info_lbl = ttk.Label(
+            header_frame,
+            text="Wczytano tablic: 0",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#2980b9"
+        )
+        self.preview_info_lbl.grid(row=0, column=3, sticky="e", padx=(10, 0))
 
-        main_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # =========================
+        # CONTENT
+        # =========================
+        content_frame = ttk.Frame(parent)
+        content_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 5))
+        content_frame.grid_rowconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(0, weight=1)
 
-        top_split = ttk.Frame(main_pane, height=450)
-        bottom_split = ttk.Frame(main_pane, height=200)
+        main_pane = ttk.PanedWindow(content_frame, orient=tk.VERTICAL)
+        main_pane.grid(row=0, column=0, sticky="nsew")
+
+        top_split = ttk.Frame(main_pane)
+        bottom_split = ttk.Frame(main_pane)
+
         main_pane.add(top_split, weight=5)
         main_pane.add(bottom_split, weight=3)
 
+        # =========================
+        # TOP SPLIT: lista + canvas
+        # =========================
+        top_split.grid_rowconfigure(0, weight=1)
+        top_split.grid_columnconfigure(0, weight=1)
+
         viewer_pane = ttk.PanedWindow(top_split, orient=tk.HORIZONTAL)
-        viewer_pane.pack(fill=tk.BOTH, expand=True)
+        viewer_pane.grid(row=0, column=0, sticky="nsew")
 
         list_lf = ttk.LabelFrame(viewer_pane, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ")
         preview_lf = ttk.LabelFrame(viewer_pane, text=" Podgląd OCR ")
+
         viewer_pane.add(list_lf, weight=2)
         viewer_pane.add(preview_lf, weight=3)
 
-        self.plates_listbox = tk.Listbox(list_lf, font=("Consolas", 10), selectbackground="#3498db")
-        self.plates_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
+        list_lf.grid_rowconfigure(0, weight=1)
+        list_lf.grid_columnconfigure(0, weight=1)
+
+        self.plates_listbox = tk.Listbox(
+            list_lf,
+            font=("Consolas", 10),
+            selectbackground="#3498db"
+        )
+        self.plates_listbox.grid(row=0, column=0, sticky="nsew", padx=(5, 0), pady=5)
+
         scroll = ttk.Scrollbar(list_lf, command=self.plates_listbox.yview)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=5)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 5), pady=5)
+
         self.plates_listbox.config(yscrollcommand=scroll.set)
         self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
 
-        self.preview_canvas = tk.Canvas(preview_lf, bg="#1e1e1e", bd=3, relief="sunken", highlightthickness=0)
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=8, padx=8)
+        preview_lf.grid_rowconfigure(0, weight=1)
+        preview_lf.grid_columnconfigure(0, weight=1)
+
+        self.preview_canvas = tk.Canvas(
+            preview_lf,
+            bg="#1e1e1e",
+            bd=3,
+            relief="sunken",
+            highlightthickness=0
+        )
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.preview_canvas.bind("<Configure>", lambda e: self._on_preview_select(None))
 
-        bottom_body = ttk.Frame(bottom_split)
-        bottom_body.pack(fill=tk.BOTH, expand=True)
+        # =========================
+        # BOTTOM SPLIT: 3 kolumny
+        # =========================
+        bottom_split.grid_rowconfigure(0, weight=1)
+        bottom_split.grid_columnconfigure(0, weight=1)
+        bottom_split.grid_columnconfigure(1, weight=1)
+        bottom_split.grid_columnconfigure(2, weight=1)
 
-        bottom_nav = ttk.Frame(bottom_split)
-        bottom_nav.pack(fill=tk.X, pady=(8, 0))
+        col_left = ttk.Frame(bottom_split)
+        col_mid = ttk.Frame(bottom_split)
+        col_right = ttk.Frame(bottom_split)
 
-        col_left = ttk.Frame(bottom_body)
-        col_mid = ttk.Frame(bottom_body)
-        col_right = ttk.Frame(bottom_body)
+        col_left.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        col_mid.grid(row=0, column=1, sticky="nsew", padx=5)
+        col_right.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
-        col_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        col_mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-        col_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        col_left.grid_rowconfigure(0, weight=1)
+        col_left.grid_columnconfigure(0, weight=1)
 
+        col_mid.grid_rowconfigure(0, weight=1)
+        col_mid.grid_columnconfigure(0, weight=1)
+
+        col_right.grid_rowconfigure(0, weight=1)
+        col_right.grid_columnconfigure(0, weight=1)
+
+        # -------------------------
+        # LEFT: konfiguracja
+        # -------------------------
         set_lf = ttk.LabelFrame(col_left, text=" Konfiguracja Rozpoznawania ", padding=10)
-        set_lf.pack(fill=tk.BOTH, expand=True)
+        set_lf.grid(row=0, column=0, sticky="nsew")
 
         row_meth = ttk.Frame(set_lf)
         row_meth.pack(fill=tk.X, pady=(0, 5))
+
         ttk.Label(
             row_meth,
             text="Metoda detekcji znaków:",
@@ -1073,6 +1452,7 @@ class CharacterAnnotationTab:
 
         self.det_device_row = ttk.Frame(set_lf)
         self.det_device_row.pack(fill=tk.X, pady=(0, 10))
+
         ttk.Label(self.det_device_row, text="Karta (Device):").pack(side=tk.LEFT)
 
         self.det_device_combo = ttk.Combobox(
@@ -1086,7 +1466,6 @@ class CharacterAnnotationTab:
 
         self.yolo_panel = ttk.Frame(set_lf)
 
-        # --- wydanie YOLO ---
         ttk.Label(
             self.yolo_panel,
             text="Wydanie YOLO:",
@@ -1110,7 +1489,6 @@ class CharacterAnnotationTab:
         )
         self.yolo_version_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
 
-        # --- rozmiar YOLO ---
         ttk.Label(
             self.yolo_panel,
             text="Rozmiar modelu:",
@@ -1134,7 +1512,6 @@ class CharacterAnnotationTab:
         )
         self.yolo_size_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
 
-        # --- ścieżka modelu sterowanego przez Wizard / iterację ---
         ttk.Label(
             self.yolo_panel,
             text="Model YOLO z Wizarda / iteracji:",
@@ -1160,67 +1537,15 @@ class CharacterAnnotationTab:
 
         self._update_yolo_visibility()
 
-
-
-        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
-        self.actions_lf.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(
-            self.actions_lf,
-            text="Laboratorium OCR przydaje się dla OCR i hybrydy.",
-            foreground="gray",
-            font=("Segoe UI", 9, "italic")
-        ).pack(anchor=tk.W, pady=(0, 5))
-
-        self.btn_ocr_lab = ttk.Button(
-            self.actions_lf,
-            text="LABORATORIUM OCR (FILTRY)",
-            command=self._open_filter_lab,
-            style="Accent.TButton"
-        )
-        self.btn_ocr_lab.pack(fill=tk.X, ipady=8, pady=(0, 10))
-
-        ttk.Separator(self.actions_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
-
-        self.winner_name_lbl = ttk.Label(
-            self.actions_lf,
-            text="BRAK DANYCH",
-            font=("Segoe UI", 11, "bold"),
-            foreground="gray"
-        )
-        self.winner_name_lbl.pack(anchor=tk.CENTER, pady=(0, 5))
-
-        self.winner_acc_lbl = ttk.Label(
-            self.actions_lf,
-            text="Skuteczność: 0.0%",
-            font=("Segoe UI", 10)
-        )
-        self.winner_acc_lbl.pack(anchor=tk.CENTER, pady=(0, 10))
-
-        self.btn_rank_presets = ttk.Button(
-            self.actions_lf,
-            text="Turniej presetów OCR",
-            command=self._run_preset_ranking
-        )
-        self.btn_rank_presets.pack(fill=tk.X, ipady=6)
-
-        self.test_progress = ttk.Progressbar(self.actions_lf, maximum=100)
-        self.test_progress.pack(fill=tk.X, pady=(15, 5))
-
-        self.test_status_lbl = ttk.Label(
-            self.actions_lf,
-            text="Gotowy do testów",
-            foreground="#2ecc71",
-            font=("Segoe UI", 9, "bold")
-        )
-        self.test_status_lbl.pack(anchor=tk.W)
-
+        # -------------------------
+        # MIDDLE: konsola
+        # -------------------------
         log_lf = ttk.LabelFrame(col_mid, text=" Konsola informacji ", padding=10)
-        log_lf.pack(fill=tk.BOTH, expand=True)
+        log_lf.grid(row=0, column=0, sticky="nsew")
 
         self.test_log_text = scrolledtext.ScrolledText(
             log_lf,
-            height=12,
+            height=8,
             wrap=tk.WORD,
             font=("Consolas", 9)
         )
@@ -1232,32 +1557,114 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        # -------------------------
+        # RIGHT: OCR / ranking / lab
+        # -------------------------
+        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
+        self.actions_lf.grid(row=0, column=0, sticky="nsew")
 
-        nav = bottom_nav
+        # 1. Zwycięzca turnieju
+        ttk.Label(
+            self.actions_lf,
+            text="Zwycięzca turnieju:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
+
+        self.winner_name_lbl = ttk.Label(
+            self.actions_lf,
+            text="BRAK DANYCH",
+            font=("Segoe UI", 11, "bold"),
+            foreground="gray"
+        )
+        self.winner_name_lbl.pack(anchor=tk.W, pady=(0, 10))
+
+        # 2. Skuteczność OCR
+        ttk.Label(
+            self.actions_lf,
+            text="Skuteczność detekcji OCR:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
+
+        self.winner_acc_lbl = ttk.Label(
+            self.actions_lf,
+            text="0.0%",
+            font=("Segoe UI", 10)
+        )
+        self.winner_acc_lbl.pack(anchor=tk.W, pady=(0, 10))
+
+        ttk.Separator(self.actions_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
+
+        # 3. Laboratorium OCR
+        self.btn_ocr_lab = ttk.Button(
+            self.actions_lf,
+            text="LABORATORIUM OCR (FILTRY)",
+            command=self._open_filter_lab,
+            style="Accent.TButton"
+        )
+        self.btn_ocr_lab.pack(fill=tk.X, ipady=8, pady=(0, 10))
+
+        # 4. Turniej
+        self.btn_rank_presets = ttk.Button(
+            self.actions_lf,
+            text="Turniej presetów OCR",
+            command=self._run_preset_ranking
+        )
+        self.btn_rank_presets.pack(fill=tk.X, ipady=6, pady=(0, 10))
+
+        # Pasek postępu i status
+        self.test_progress = ttk.Progressbar(self.actions_lf, maximum=100)
+        self.test_progress.pack(fill=tk.X, pady=(5, 5))
+
+        self.test_status_lbl = ttk.Label(
+            self.actions_lf,
+            text="Gotowy do testów",
+            foreground="#2ecc71",
+            font=("Segoe UI", 9, "bold")
+        )
+        self.test_status_lbl.pack(anchor=tk.W)
+
+        # =========================
+        # FOOTER
+        # =========================
+        footer_nav = ttk.Frame(parent)
+        footer_nav.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+        footer_nav.grid_columnconfigure(0, weight=0)
+        footer_nav.grid_columnconfigure(1, weight=0)
+        footer_nav.grid_columnconfigure(2, weight=1)
+        footer_nav.grid_columnconfigure(3, weight=0)
 
         self.btn_back_to_extract = ttk.Button(
-            nav,
+            footer_nav,
             text="← Wstecz do Wycinania Tablic",
             command=self.back_to_substep_1
         )
-        self.btn_back_to_extract.pack(side=tk.LEFT)
+        self.btn_back_to_extract.grid(row=0, column=0, sticky="w")
+        self.btn_run_detection_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
+        self.btn_run_detection_frame.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
         self.btn_run_detection = ttk.Button(
-            nav,
+            self.btn_run_detection_frame,
             text="Uruchom detekcję",
             command=self._run_detection_stage,
             style="Accent.TButton"
         )
-        self.btn_run_detection.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_run_detection.pack()
+        self.btn_run_detection.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        self.btn_to_dataset_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
+        self.btn_to_dataset_frame.grid(row=0, column=3, sticky="e")
 
         self.btn_to_dataset = ttk.Button(
-            nav,
+            self.btn_to_dataset_frame,
             text="Dalej → Integracje i Dataset",
             command=self.go_to_substep_3,
             state=tk.DISABLED
         )
-        self.btn_to_dataset.pack(side=tk.RIGHT)
+        self.btn_to_dataset.pack()
 
+        # =========================
+        # HELP BINDS
+        # =========================
         HELP.bind_help(self.btn_run_detection, "t2_fast_test")
         HELP.bind_help(self.btn_rank_presets, "t2_rank")
         HELP.bind_help(self.det_method_combo, "t2_method")
@@ -1301,11 +1708,11 @@ class CharacterAnnotationTab:
         best_preset_data, best_acc = self._get_best_preset()
         if best_preset_data and best_preset_data.get("name"):
             name = best_preset_data.get("name")
-            self.winner_name_lbl.config(text=name.upper(), foreground="#27ae60")
-            self.winner_acc_lbl.config(text=f"Skuteczność: {best_acc:.1f}%", foreground="black")
+            self.winner_name_lbl.config(text=f"Lider: {name.upper()} .json", foreground="green")
+            self.winner_acc_lbl.config(text=f"Skuteczność detekcji lidera presetów: {best_acc:.1f}% ", foreground="green")
         else:
             self.winner_name_lbl.config(text="BRAK DANYCH Z TURNIEJU", foreground="gray")
-            self.winner_acc_lbl.config(text="Skuteczność: 0.0%", foreground="gray")
+            self.winner_acc_lbl.config(text="Skuteczność detekcji OCR: 0.0%", foreground="red")
 
     # =========================================================
     # Preview load + render
@@ -1591,6 +1998,7 @@ class CharacterAnnotationTab:
             fill="gray",
             font=("Arial", 12, "italic")
         )
+        self._set_button_emphasis("btn_run_detection_frame", False)
 
     def _unlock_ui_after_testing(self):
         self.btn_run_detection.config(state=tk.NORMAL)
@@ -1625,6 +2033,12 @@ class CharacterAnnotationTab:
                 fill="gray",
                 font=("Arial", 11, "italic")
             )
+        try:
+            btn = getattr(self, "btn_to_dataset", None)
+            if btn is not None and str(btn.cget("state")) != "normal":
+                self._set_button_emphasis("btn_run_detection_frame", True)
+        except Exception:
+            pass
 
     # =========================================================
     # FAST OCR TEST (stable)
@@ -1734,6 +2148,9 @@ class CharacterAnnotationTab:
                 meta_file = out_dir / "metadata.json"
                 self._atomic_write_json(meta_file, local_meta)
                 self.preview_metadata = local_meta
+                self.frame.after(0, self._refresh_plate_rows_in_place)
+                self.frame.after(0, lambda: self._refresh_plates_listbox(preserve_selection=True))
+                self.frame.after(0, lambda: self._on_preview_select(None))
                 self.frame.after(0, self.unlock_dataset_subtab)
 
                 plates_with_chars = sum(
