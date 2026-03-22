@@ -1015,7 +1015,7 @@ class CharacterAnnotationTab:
         top_split = ttk.Frame(main_pane, height=450)
         bottom_split = ttk.Frame(main_pane, height=200)
         main_pane.add(top_split, weight=5)
-        main_pane.add(bottom_split, weight=0)
+        main_pane.add(bottom_split, weight=3)
 
         viewer_pane = ttk.PanedWindow(top_split, orient=tk.HORIZONTAL)
         viewer_pane.pack(fill=tk.BOTH, expand=True)
@@ -1036,12 +1036,15 @@ class CharacterAnnotationTab:
         self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=8, padx=8)
         self.preview_canvas.bind("<Configure>", lambda e: self._on_preview_select(None))
 
-        bottom_cols = ttk.Frame(bottom_split)
-        bottom_cols.pack(fill=tk.BOTH, expand=True)
+        bottom_body = ttk.Frame(bottom_split)
+        bottom_body.pack(fill=tk.BOTH, expand=True)
 
-        col_left = ttk.Frame(bottom_cols)
-        col_mid = ttk.Frame(bottom_cols)
-        col_right = ttk.Frame(bottom_cols)
+        bottom_nav = ttk.Frame(bottom_split)
+        bottom_nav.pack(fill=tk.X, pady=(8, 0))
+
+        col_left = ttk.Frame(bottom_body)
+        col_mid = ttk.Frame(bottom_body)
+        col_right = ttk.Frame(bottom_body)
 
         col_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         col_mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
@@ -1157,26 +1160,27 @@ class CharacterAnnotationTab:
 
         self._update_yolo_visibility()
 
-        ttk.Separator(set_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(20, 15))
-        lab_frame = ttk.Frame(set_lf)
-        lab_frame.pack(fill=tk.X, pady=(0, 10))
+
+
+        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
+        self.actions_lf.pack(fill=tk.BOTH, expand=True)
+
         ttk.Label(
-            lab_frame,
+            self.actions_lf,
             text="Laboratorium OCR przydaje się dla OCR i hybrydy.",
             foreground="gray",
             font=("Segoe UI", 9, "italic")
         ).pack(anchor=tk.W, pady=(0, 5))
 
         self.btn_ocr_lab = ttk.Button(
-            lab_frame,
+            self.actions_lf,
             text="LABORATORIUM OCR (FILTRY)",
             command=self._open_filter_lab,
             style="Accent.TButton"
         )
-        self.btn_ocr_lab.pack(fill=tk.X, ipady=8)
+        self.btn_ocr_lab.pack(fill=tk.X, ipady=8, pady=(0, 10))
 
-        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
-        self.actions_lf.pack(fill=tk.BOTH, expand=True)
+        ttk.Separator(self.actions_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
 
         self.winner_name_lbl = ttk.Label(
             self.actions_lf,
@@ -1210,8 +1214,26 @@ class CharacterAnnotationTab:
             font=("Segoe UI", 9, "bold")
         )
         self.test_status_lbl.pack(anchor=tk.W)
-        nav = ttk.Frame(parent)
-        nav.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        log_lf = ttk.LabelFrame(col_mid, text=" Konsola informacji ", padding=10)
+        log_lf.pack(fill=tk.BOTH, expand=True)
+
+        self.test_log_text = scrolledtext.ScrolledText(
+            log_lf,
+            height=12,
+            wrap=tk.WORD,
+            font=("Consolas", 9)
+        )
+        self.test_log_text.pack(fill=tk.BOTH, expand=True)
+
+        try:
+            self.test_log_text.insert(tk.END, "Gotowy do uruchomienia detekcji znaków.\n")
+            self.test_log_text.configure(state="disabled")
+        except Exception:
+            pass
+
+
+        nav = bottom_nav
 
         self.btn_back_to_extract = ttk.Button(
             nav,
@@ -1558,7 +1580,7 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _lock_ui_for_testing(self):
-        self.btn_fast_ocr.config(state=tk.DISABLED)
+        self.btn_run_detection.config(state=tk.DISABLED)
         self.btn_rank_presets.config(state=tk.DISABLED)
         self.plates_listbox.config(state=tk.DISABLED)
         self.preview_canvas.delete("all")
@@ -1571,7 +1593,7 @@ class CharacterAnnotationTab:
         )
 
     def _unlock_ui_after_testing(self):
-        self.btn_fast_ocr.config(state=tk.NORMAL)
+        self.btn_run_detection.config(state=tk.NORMAL)
         self.btn_rank_presets.config(state=tk.NORMAL)
         self.plates_listbox.config(state=tk.NORMAL)
 
