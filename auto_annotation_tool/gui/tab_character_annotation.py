@@ -15,6 +15,7 @@ import threading
 import xml.etree.ElementTree as ET
 import json
 import cv2
+import requests
 import os
 
 from ..config import CONFIG, logger
@@ -35,6 +36,26 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+YOLO_REMOTE_URLS = {
+    "yolo8n.pt":  "TU_WPISZ_URL",
+    "yolo8s.pt":  "TU_WPISZ_URL",
+    "yolo8m.pt":  "TU_WPISZ_URL",
+    "yolo8l.pt":  "TU_WPISZ_URL",
+    "yolo8x.pt":  "TU_WPISZ_URL",
+
+    "yolo11n.pt": "TU_WPISZ_URL",
+    "yolo11s.pt": "TU_WPISZ_URL",
+    "yolo11m.pt": "TU_WPISZ_URL",
+    "yolo11l.pt": "TU_WPISZ_URL",
+    "yolo11x.pt": "TU_WPISZ_URL",
+
+    "yolo26n.pt": "TU_WPISZ_URL",
+    "yolo26s.pt": "TU_WPISZ_URL",
+    "yolo26m.pt": "TU_WPISZ_URL",
+    "yolo26l.pt": "TU_WPISZ_URL",
+    "yolo26x.pt": "TU_WPISZ_URL",
+}
 
 
 class CharacterAnnotationTab:
@@ -166,6 +187,114 @@ class CharacterAnnotationTab:
             pass
 
         return symbol, x_key
+        
+    def _find_latest_preview_run_dir(self) -> str:
+        """
+        Szuka najnowszej poprawnej paczki preview w katalogu chars projektu.
+        Poprawna paczka to katalog zawierający:
+        - metadata.json
+        - images/
+        """
+        chars_root = getattr(self, "_campaign_chars_dir", None)
+        if not chars_root:
+            return ""
+
+        root = Path(chars_root)
+        if not root.exists() or not root.is_dir():
+            return ""
+
+        candidates = []
+        try:
+            for p in root.rglob("*"):
+                if not p.is_dir():
+                    continue
+
+                meta_file = p / "metadata.json"
+                images_dir = p / "images"
+
+                if meta_file.exists() and images_dir.exists() and images_dir.is_dir():
+                    candidates.append(p)
+        except Exception:
+            return ""
+
+        if not candidates:
+            return ""
+
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return str(candidates[0])
+        
+    def _restore_preview_context_from_project(self):
+        """
+        Przywraca ostatnią paczkę preview projektu, jeśli istnieje.
+        """
+        preview_dir = self._find_latest_preview_run_dir()
+        if not preview_dir:
+            return False
+
+        try:
+            self.preview_dir_var.set(preview_dir)
+            self._reset_preview_cache()
+            self._load_preview_data(quiet=True)
+            return True
+        except Exception as e:
+            logger.debug(f"Nie udało się przywrócić preview paczki projektu: {e}")
+            return False
+    
+    def _ascii_progress_bar(self, current: int, total: int, width: int = 24) -> str:
+        total = max(1, total)
+        current = max(0, min(current, total))
+        filled = int(round((current / total) * width))
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+    def _log_download_progress(self, label: str, downloaded: int, total: int):
+        pct = (downloaded / total * 100.0) if total > 0 else 0.0
+        bar = self._ascii_progress_bar(downloaded, total, width=24)
+
+        try:
+            self.test_status_lbl.config(
+                text=f"Pobieranie modelu: {label} {pct:.1f}%",
+                foreground="#e67e22"
+            )
+        except Exception:
+            pass
+
+        self._log(
+            self.test_log_text,
+            f"[DOWNLOAD] {label} {bar} {pct:.1f}% ({downloaded}/{total} B)",
+            "INFO"
+        )
+
+
+    def _download_file_with_progress(self, url: str, dst_path: Path, label: str):
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._log(self.test_log_text, f"[INFO] Rozpoczynam pobieranie modelu: {label}", "INFO")
+        self._log(self.test_log_text, f"[INFO] Źródło: {url}", "INFO")
+
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length", "0") or "0")
+
+            downloaded = 0
+            last_logged_pct = -1
+
+            with open(dst_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 256):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    pct = int(downloaded / total * 100) if total > 0 else -1
+                    if total > 0 and pct >= last_logged_pct + 5:
+                        last_logged_pct = pct
+                        self.frame.after(
+                            0,
+                            lambda d=downloaded, t=total, lbl=label: self._log_download_progress(lbl, d, t)
+                        )
+
+        self._log(self.test_log_text, f"[SUCCESS] Pobieranie zakończone: {dst_path}", "SUCCESS")
     
     def _ascii_progress_bar(self, current: int, total: int, width: int = 24) -> str:
         total = max(1, total)
@@ -445,8 +574,6 @@ class CharacterAnnotationTab:
     def clear_campaign_context(self):
         """
         Czyści projektowy kontekst UI po wyjściu z projektu.
-        Nie usuwa wpisów z local_session — źródłem prawdy dla projektu
-        jest Wizard/CAMPAIGN, a dla trybu swobodnego osobne ustawienia sesji.
         """
         if hasattr(self, "_campaign_chars_dir"):
             self._campaign_chars_dir = None
@@ -454,7 +581,7 @@ class CharacterAnnotationTab:
         if hasattr(self, "_campaign_datasets_dir"):
             self._campaign_datasets_dir = None
 
-        # czyścimy tylko pola UI związane z aktywnym projektem
+        # wyczyść projektowe pola UI
         try:
             self.xml_path_var.set("")
         except Exception:
@@ -475,6 +602,54 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        # wyczyść preview
+        self._reset_preview_cache()
+        self.preview_plate_ids = []
+        self._listbox_pid_by_index = []
+
+        try:
+            self.plates_listbox.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.preview_canvas.delete("all")
+        except Exception:
+            pass
+
+        try:
+            self.preview_info_lbl.config(
+                text="Brak wczytanych danych",
+                foreground="#2980b9"
+            )
+        except Exception:
+            pass
+
+        # zresetuj stan testu
+        try:
+            self.fast_test_running = False
+            self.fast_test_stop.clear()
+        except Exception:
+            pass
+
+        try:
+            self.test_progress.config(value=0)
+        except Exception:
+            pass
+
+        try:
+            self.test_status_lbl.config(
+                text="Gotowy do testów",
+                foreground="#2ecc71"
+            )
+        except Exception:
+            pass
+
+        # wróć do trybu swobodnego
+        try:
+            self.reset_subtab_flow()
+        except Exception as e:
+            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
     def _get_campaign_char_model_path(self) -> str:
         """
         Zwraca ścieżkę do modelu znaków przypiętego do aktywnego projektu.
@@ -520,7 +695,7 @@ class CharacterAnnotationTab:
     def _on_yolo_arch_change(self, event=None):
         """
         Reaguje na zmianę wydania / rozmiaru YOLO.
-        Nie zmienia modelu projektu, ale aktualizuje status/podgląd konfiguracji.
+        Nie nadpisuje panelu zwycięzcy turnieju OCR.
         """
         version = (self.yolo_model_version_var.get() or "").strip()
         size = (self.yolo_model_size_var.get() or "").strip().lower()
@@ -530,43 +705,6 @@ class CharacterAnnotationTab:
                 text=f"Wybrana konfiguracja: YOLOv{version}{size}",
                 foreground="#2980b9"
             )
-
-        try:
-            if (self.detection_method_var.get() or "").upper().strip() in {"YOLO", "BOTH"}:
-                self.winner_name_lbl.config(
-                    text=f"Konfiguracja: YOLOv{version}{size}",
-                    foreground="#2c3e50"
-                )
-        except Exception:
-            pass
-
-        # czyścimy pamięć preview
-        self._reset_preview_cache()
-        self.preview_plate_ids = []
-        self._listbox_pid_by_index = []
-
-        try:
-            self.plates_listbox.delete(0, tk.END)
-        except Exception:
-            pass
-
-        try:
-            self.preview_canvas.delete("all")
-        except Exception:
-            pass
-
-        try:
-            self.preview_info_lbl.config(
-                text="Brak wczytanych danych",
-                foreground="#2980b9"
-            )
-        except Exception:
-            pass
-
-        try:
-            self.reset_subtab_flow()
-        except Exception as e:
-            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
 
     def _set_widget_state(self, widget, state: str):
         if widget is None:
@@ -580,8 +718,9 @@ class CharacterAnnotationTab:
         """
         W aktywnym, liniowym kroku 3 źródła wejściowe ustawia Wizard,
         więc użytkownik nie powinien ich ręcznie zmieniać.
+        W trybie swobodnym pola mają być edytowalne.
         """
-        locked = bool(getattr(self, "_step3_linear_mode", False))
+        locked = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
 
         entry_state = "disabled" if locked else "normal"
         button_state = "disabled" if locked else "normal"
@@ -778,8 +917,9 @@ class CharacterAnnotationTab:
         """
         W aktywnym, liniowym kroku 3 użytkownik nie powinien ręcznie
         zmieniać paczki preview ani ścieżki do niej.
+        W trybie swobodnym pole ma być readonly, a przycisk aktywny.
         """
-        locked = bool(getattr(self, "_step3_linear_mode", False))
+        locked = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
 
         try:
             if hasattr(self, "preview_dir_entry"):
@@ -851,17 +991,26 @@ class CharacterAnnotationTab:
         """
         self._step3_linear_mode = False
 
+        # podzakładki
         self._set_subtab_state(self.tab_extract, "normal")
         self._set_subtab_state(self.tab_detect, "normal")
         self._set_subtab_state(self.tab_dataset, "normal")
 
+        # nawigacja między podzakładkami ma działać w free mode
         self._set_button_state("btn_to_detect", True)
         self._set_button_state("btn_to_dataset", True)
 
+        # akcje operacyjne też mają być aktywne
+        self._set_button_state("btn_run_detection", True)
+        self._set_button_state("btn_rank_presets", True)
+        self._set_button_state("btn_ocr_lab", True)
+
+        # zdejmij podświetlenia akcji
         self._set_button_emphasis("btn_to_detect_frame", False)
         self._set_button_emphasis("btn_to_dataset_frame", False)
         self._set_button_emphasis("btn_run_detection_frame", False)
 
+        # odblokuj pola ścieżek
         try:
             self._update_preview_path_lock()
         except Exception:
@@ -876,10 +1025,27 @@ class CharacterAnnotationTab:
             self._update_yolo_visibility()
         except Exception:
             pass
+
+        # wyczyść stan ostatniego testu
         try:
-            self._sync_yolo_model_binding()
+            self.test_progress.config(value=0)
         except Exception:
-            pass        
+            pass
+
+        try:
+            self.test_status_lbl.config(
+                text="Gotowy do testów",
+                foreground="#2ecc71"
+            )
+        except Exception:
+            pass
+
+        # jeśli konsola była zablokowana po teście, przywróć normalny stan logowania
+        try:
+            self.fast_test_running = False
+            self.fast_test_stop.clear()
+        except Exception:
+            pass
 
     def unlock_detection_subtab(self):
         self._set_button_state("btn_to_detect", True)
@@ -1024,6 +1190,22 @@ class CharacterAnnotationTab:
         stage1_done = CAMPAIGN.is_step3_stage1_done()
         stage2_done = CAMPAIGN.is_step3_stage2_done()
 
+        if saved_substep > 1 and not (self.preview_dir_var.get() or "").strip():
+            try:
+                self._restore_preview_context_from_project()
+            except Exception:
+                pass        
+        # jeśli zapisany stan nie ma pokrycia w realnych artefaktach, wracamy do substepu 1
+        if not self.can_restore_step3_substep(saved_substep):
+            saved_substep = 1
+            stage1_done = False
+            stage2_done = False
+
+            try:
+                CAMPAIGN.reset_step3_progress()
+            except Exception:
+                pass
+
         self._set_button_state("btn_to_detect", stage1_done)
         self._set_button_state("btn_to_dataset", stage2_done)
 
@@ -1075,6 +1257,45 @@ class CharacterAnnotationTab:
         except Exception:
             pass        
 
+    def can_restore_step3_substep(self, substep: int) -> bool:
+        """
+        Sprawdza, czy dla zapisanego substepu istnieją realne artefakty
+        pozwalające wejść do tego miejsca workflow.
+        """
+        substep = int(substep)
+
+        # substep 1 zawsze można otworzyć, jeśli mamy źródła z wizarda
+        if substep <= 1:
+            xml_ok = bool((self.xml_path_var.get() or "").strip())
+            img_ok = bool((self.images_dir_var.get() or "").strip())
+            return xml_ok and img_ok
+
+        # substep 2 i 3 wymagają paczki preview z metadata i katalogiem images
+        preview_dir_raw = (self.preview_dir_var.get() or "").strip()
+        if not preview_dir_raw:
+            return False
+
+        preview_dir = Path(preview_dir_raw)
+        if not preview_dir.exists() or not preview_dir.is_dir():
+            return False
+
+        meta_file = preview_dir / "metadata.json"
+        images_dir = preview_dir / "images"
+
+        if not meta_file.exists():
+            return False
+
+        if not images_dir.exists() or not images_dir.is_dir():
+            return False
+
+        # substep 3 dodatkowo wymaga, żeby etap 2 był realnie zakończony
+        if substep >= 3:
+            try:
+                return bool(CAMPAIGN.is_step3_stage2_done())
+            except Exception:
+                return False
+
+        return True
 
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -1150,6 +1371,7 @@ class CharacterAnnotationTab:
             return
 
         method = (self.detection_method_var.get() or "OCR").upper().strip()
+
         try:
             self._sync_yolo_model_binding()
         except Exception:
@@ -1160,7 +1382,12 @@ class CharacterAnnotationTab:
         is_hybrid = method == "BOTH"
 
         # panel YOLO pokazujemy dla YOLO i HYBRYDY
+        if is_yolo or is_hybrid:
+            self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
+        else:
+            self.yolo_panel.pack_forget()
 
+        # comboboxy architektury YOLO aktywne tylko dla YOLO/BOTH
         if hasattr(self, "yolo_version_combo"):
             self._set_widget_state(
                 self.yolo_version_combo,
@@ -1172,10 +1399,6 @@ class CharacterAnnotationTab:
                 self.yolo_size_combo,
                 "readonly" if (is_yolo or is_hybrid) else "disabled"
             )
-        if is_yolo or is_hybrid:
-            self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
-        else:
-            self.yolo_panel.pack_forget()
 
         # w trybie kampanii ścieżka modelu jest sterowana z Wizarda
         path_locked = bool(getattr(self, "_step3_linear_mode", False))
@@ -1192,37 +1415,61 @@ class CharacterAnnotationTab:
                 "disabled" if path_locked else "normal"
             )
 
-        # YOLO-only: laboratorium OCR i ranking nieaktywne
+        # Laboratorium OCR:
+        # - OCR: aktywne
+        # - YOLO: nieaktywne
+        # - BOTH: aktywne
         if hasattr(self, "btn_ocr_lab"):
             self._set_widget_state(self.btn_ocr_lab, "disabled" if is_yolo else "normal")
 
+        # Turniej presetów OCR:
+        # - tylko dla czystego OCR
         if hasattr(self, "btn_rank_presets"):
-            # ranking presetów zostawiamy tylko dla czystego OCR
             self._set_widget_state(self.btn_rank_presets, "normal" if is_ocr else "disabled")
 
-        # prawy panel ma być "nieaktywny" w trybie YOLO:
-        # nie wyłączamy progressbara, ale wizualnie ustawiamy stan informacyjny
+        # Panel zwycięzcy rankingu dotyczy wyłącznie rankingu OCR.
+        # YOLO i HYBRYDA nie mogą podszywać się pod "zwycięzcę turnieju".
         if hasattr(self, "winner_name_lbl") and hasattr(self, "winner_acc_lbl"):
-            if is_yolo:
-                self.winner_name_lbl.config(text="TRYB YOLO", foreground="gray")
-                self.winner_acc_lbl.config(text="Panel OCR / rankingu nieaktywny", foreground="gray")
-            else:
+            if is_ocr:
                 self._update_winner_label()
+            elif is_yolo:
+                self.winner_name_lbl.config(
+                    text="Brak rankingu OCR",
+                    foreground="gray"
+                )
+                self.winner_acc_lbl.config(
+                    text="Tryb YOLO nie bierze udziału w turnieju OCR",
+                    foreground="gray"
+                )
+            else:  # BOTH
+                self.winner_name_lbl.config(
+                    text="Brak rankingu OCR",
+                    foreground="gray"
+                )
+                self.winner_acc_lbl.config(
+                    text="Tryb hybrydowy nie ustala zwycięzcy turnieju OCR",
+                    foreground="gray"
+                )
 
+        # Status dolny ma pokazywać, co użytkownik może teraz zrobić
         if hasattr(self, "test_status_lbl"):
             if is_yolo:
+                version = (self.yolo_model_version_var.get() or "").strip()
+                size = (self.yolo_model_size_var.get() or "").strip().lower()
                 self.test_status_lbl.config(
-                    text="Tryb YOLO: użyj przycisku 'Uruchom detekcję'.",
+                    text=f"Tryb YOLO: wybierz konfigurację i użyj 'Uruchom detekcję' (YOLOv{version}{size})",
                     foreground="#7f8c8d"
                 )
             elif is_hybrid:
+                version = (self.yolo_model_version_var.get() or "").strip()
+                size = (self.yolo_model_size_var.get() or "").strip().lower()
                 self.test_status_lbl.config(
-                    text="Tryb hybrydowy: uruchom wspólną detekcję.",
+                    text=f"Tryb hybrydowy: uruchom wspólną detekcję (YOLOv{version}{size} + OCR)",
                     foreground="#2980b9"
                 )
             else:
                 self.test_status_lbl.config(
-                    text="Gotowy do testów",
+                    text="Tryb OCR: możesz uruchomić detekcję lub turniej presetów OCR",
                     foreground="#2ecc71"
                 )
 
@@ -1270,6 +1517,51 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się ustawić podświetlenia {frame_attr}: {e}")
 
+    def _ensure_yolo_model_available(self) -> str:
+        """
+        Zwraca lokalną ścieżkę do modelu YOLO.
+        Jeśli model ma być pobrany z sieci, robi to jawnie z logowaniem postępu.
+        """
+        # 1. jeśli mamy realny lokalny model projektu / free mode, użyj go
+        effective_model = self._get_effective_yolo_model_path()
+        if effective_model and Path(effective_model).exists():
+            self._log(self.test_log_text, f"[INFO] Używam lokalnego modelu: {effective_model}", "INFO")
+            return str(Path(effective_model))
+
+        # 2. fallback: model wbudowany wybrany z combo
+        filename = self._get_selected_builtin_yolo_filename()
+        if not filename:
+            raise RuntimeError("Nie udało się ustalić nazwy modelu YOLO z wybranego wydania i rozmiaru.")
+
+        url = YOLO_REMOTE_URLS.get(filename)
+        if not url:
+            raise RuntimeError(f"Brak skonfigurowanego URL dla modelu {filename}")
+
+        models_dir = Path(self.session_dir) / "downloaded_models"
+        dst_path = models_dir / filename
+
+        if dst_path.exists():
+            self._log(self.test_log_text, f"[INFO] Model już istnieje lokalnie: {dst_path}", "INFO")
+            return str(dst_path)
+
+        self._download_file_with_progress(url, dst_path, filename)
+        return str(dst_path)
+
+    # =========================================================
+    # Resolvers
+    # =========================================================
+
+    def _get_selected_builtin_yolo_filename(self) -> str:
+        version = (self.yolo_model_version_var.get() or "").strip()
+        size = (self.yolo_model_size_var.get() or "").strip().lower()
+
+        if version not in {"8", "11", "26"}:
+            return ""
+        if size not in {"n", "s", "m", "l", "x"}:
+            return ""
+
+        return f"yolo{version}{size}.pt"
+    
     # =========================================================
     # Pickers
     # =========================================================
@@ -1863,7 +2155,7 @@ class CharacterAnnotationTab:
         # 1. Zwycięzca turnieju
         ttk.Label(
             self.actions_lf,
-            text="Zwycięzca turnieju:",
+            text="Wynik rankingu OCR:",
             font=("Segoe UI", 9, "bold")
         ).pack(anchor=tk.W, pady=(0, 2))
 
@@ -1878,7 +2170,7 @@ class CharacterAnnotationTab:
         # 2. Skuteczność OCR
         ttk.Label(
             self.actions_lf,
-            text="Skuteczność detekcji OCR:",
+            text="Wynik rankingu OCR:",
             font=("Segoe UI", 9, "bold")
         ).pack(anchor=tk.W, pady=(0, 2))
 
@@ -1989,25 +2281,27 @@ class CharacterAnnotationTab:
                 )
                 return
 
-            model_path = self._get_effective_yolo_model_path()
-            if not model_path:
-                messagebox.showwarning(
-                    "Brak modelu znaków",
-                    "W trybie YOLO/HYBRYDA potrzebny jest przypięty model znaków.\n\n"
-                    "W aktywnym projekcie model powinien pochodzić z projektu/wizarda."
-                )
-                return
+            try:
+                resolved_model = self._ensure_yolo_model_available()
+                self.yolo_model_path_var.set(resolved_model)
 
-            self._log(
-                self.test_log_text,
-                f"[INFO] Wybrana konfiguracja: YOLOv{version}{size}",
-                "INFO"
-            )
-            self._log(
-                self.test_log_text,
-                f"[INFO] Aktywny model: {model_path}",
-                "INFO"
-            )
+                self._log(
+                    self.test_log_text,
+                    f"[INFO] Wybrana konfiguracja: YOLOv{version}{size}",
+                    "INFO"
+                )
+                self._log(
+                    self.test_log_text,
+                    f"[INFO] Model gotowy do użycia: {resolved_model}",
+                    "INFO"
+                )
+            except Exception as e:
+                messagebox.showwarning(
+                    "Błąd modelu YOLO",
+                    f"Nie udało się przygotować modelu YOLO:\n{e}"
+                )
+                self._log(self.test_log_text, f"[ERROR] {e}", "ERROR")
+                return
 
         self._run_fast_ocr_test()
 
@@ -2016,7 +2310,7 @@ class CharacterAnnotationTab:
         if best_preset_data and best_preset_data.get("name"):
             name = best_preset_data.get("name")
             self.winner_name_lbl.config(text=f"Lider: {name.upper()} .json", foreground="green")
-            self.winner_acc_lbl.config(text=f"Skuteczność detekcji lidera presetów: {best_acc:.1f}% ", foreground="green")
+            self.winner_acc_lbl.config(text=f" Skuteczność najlepszego presetu: {best_acc:.1f}% ", foreground="green")
         else:
             self.winner_name_lbl.config(text="BRAK DANYCH Z TURNIEJU", foreground="gray")
             self.winner_acc_lbl.config(text="Skuteczność detekcji OCR: 0.0%", foreground="red")
@@ -2294,59 +2588,106 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _lock_ui_for_testing(self):
-        self.btn_run_detection.config(state=tk.DISABLED)
-        self.btn_rank_presets.config(state=tk.DISABLED)
-        self.plates_listbox.config(state=tk.DISABLED)
-        self.preview_canvas.delete("all")
-        self.preview_canvas.create_text(
-            self.preview_canvas.winfo_width() / 2,
-            self.preview_canvas.winfo_height() / 2,
-            text="Przetwarzanie...",
-            fill="gray",
-            font=("Arial", 12, "italic")
-        )
-        self._set_button_emphasis("btn_run_detection_frame", False)
+        self.is_processing = True
 
-    def _unlock_ui_after_testing(self):
-        self.btn_run_detection.config(state=tk.NORMAL)
-        self.btn_rank_presets.config(state=tk.NORMAL)
-        self.plates_listbox.config(state=tk.NORMAL)
+        # główne akcje
+        for attr_name in ("btn_run_detection", "btn_rank_presets", "btn_ocr_lab"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                try:
+                    widget.config(state=tk.DISABLED)
+                except Exception:
+                    pass
 
-        # ✅ zdejmij napis "Przetwarzanie..." jeśli canvas się nie odrysował
-        if self.preview_plate_ids:
-            sel = self.plates_listbox.curselection()
-            if not sel:
-                self.plates_listbox.selection_set(0)
-                self.plates_listbox.activate(0)
+        # na czas detekcji blokujemy też nawigację workflow
+        for attr_name in ("btn_to_detect", "btn_to_dataset"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                try:
+                    widget.config(state=tk.DISABLED)
+                except Exception:
+                    pass
 
-            try:
-                self._on_preview_select(None)
-            except Exception as e:
-                logger.error(f"Błąd odblokowania podglądu po teście: {e}")
-                self.preview_canvas.delete("all")
-                self.preview_canvas.create_text(
-                    self.preview_canvas.winfo_width() / 2,
-                    self.preview_canvas.winfo_height() / 2,
-                    text="Nie udało się odświeżyć podglądu",
-                    fill="red",
-                    font=("Arial", 11, "italic")
-                )
-        else:
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(
-                self.preview_canvas.winfo_width() / 2,
-                self.preview_canvas.winfo_height() / 2,
-                text="Brak danych do podglądu",
-                fill="gray",
-                font=("Arial", 11, "italic")
-            )
+        # lista tablic ma być zablokowana tylko na czas testu
         try:
-            btn = getattr(self, "btn_to_dataset", None)
-            if btn is not None and str(btn.cget("state")) != "normal":
-                self._set_button_emphasis("btn_run_detection_frame", True)
+            self.plates_listbox.config(state=tk.DISABLED)
         except Exception:
             pass
 
+        # zdejmij podświetlenie głównej akcji na czas pracy
+        try:
+            self._set_button_emphasis("btn_run_detection_frame", False)
+        except Exception:
+            pass
+
+    def _unlock_ui_after_testing(self):
+        # NAJWAŻNIEJSZE: kończymy stan "processing"
+        self.is_processing = False
+        self.fast_test_running = False
+
+        try:
+            self.fast_test_stop.clear()
+        except Exception:
+            pass
+
+        # lista tablic ma znowu działać zawsze po zakończeniu testu
+        try:
+            self.plates_listbox.config(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        # przyciski operacyjne
+        for attr_name in ("btn_run_detection", "btn_rank_presets", "btn_ocr_lab"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                try:
+                    widget.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+
+        # odśwież blokady/odblokowania pól ścieżek zgodnie z aktualnym trybem
+        try:
+            self._update_preview_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_step3_source_path_lock()
+        except Exception:
+            pass
+
+        try:
+            self._update_yolo_visibility()
+        except Exception:
+            pass
+
+        # różne zachowanie dla kampanii i trybu swobodnego
+        in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+
+        if not in_campaign:
+            # w trybie swobodnym wszystko ma działać
+            for attr_name in ("btn_to_detect", "btn_to_dataset"):
+                widget = getattr(self, attr_name, None)
+                if widget is not None:
+                    try:
+                        widget.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+
+            try:
+                self._set_subtab_state(self.tab_extract, "normal")
+                self._set_subtab_state(self.tab_detect, "normal")
+                self._set_subtab_state(self.tab_dataset, "normal")
+            except Exception:
+                pass
+        else:
+            # w kampanii zostawiamy workflow tak, jak ustawiły go wcześniejsze kroki
+            pass
+
+        try:
+            self.test_progress.update_idletasks()
+        except Exception:
+            pass
     # =========================================================
     # FAST OCR TEST (stable)
     # =========================================================
@@ -2619,14 +2960,34 @@ class CharacterAnnotationTab:
 
                         try:
                             method_name = (self.detection_method_var.get() or "OCR").upper().strip()
-                            self.winner_name_lbl.config(
-                                text=f"Ostatni test: {method_name}",
-                                foreground="#2c3e50"
-                            )
-                            self.winner_acc_lbl.config(
-                                text=f"{acc:.1f}%",
-                                foreground="#2c3e50"
-                            )
+
+                            if method_name == "OCR":
+                                self.winner_name_lbl.config(
+                                    text="Brak zwycięzcy turnieju",
+                                    foreground="gray"
+                                )
+                                self.winner_acc_lbl.config(
+                                    text="Uruchom turniej presetów OCR",
+                                    foreground="gray"
+                                )
+                            elif method_name == "YOLO":
+                                self.winner_name_lbl.config(
+                                    text="Brak rankingu OCR",
+                                    foreground="gray"
+                                )
+                                self.winner_acc_lbl.config(
+                                    text="Tryb YOLO nie bierze udziału w turnieju OCR",
+                                    foreground="gray"
+                                )
+                            else:  # BOTH
+                                self.winner_name_lbl.config(
+                                    text="Brak rankingu OCR",
+                                    foreground="gray"
+                                )
+                                self.winner_acc_lbl.config(
+                                    text="Tryb hybrydowy nie ustala zwycięzcy turnieju OCR",
+                                    foreground="gray"
+                                )
                         except Exception:
                             pass
 
