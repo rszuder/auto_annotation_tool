@@ -106,11 +106,16 @@ class CharacterAnnotationTab:
         self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
 
         self._create_widgets()
+  
         self._update_step3_source_path_lock()
         self._update_preview_path_lock()
         self.reset_subtab_flow()
-        self._update_yolo_visibility()
 
+        if not CAMPAIGN.get_active_project_name():
+            self._clear_project_bound_session_values(clear_ui=True)
+            self.reset_subtab_flow()
+
+        self._update_yolo_visibility()
         self.app.root.bind("<Destroy>", self._on_app_close, add="+")
         if self.preview_dir_var.get().strip():
             self.frame.after(100, lambda: self._load_preview_data(quiet=True))
@@ -161,6 +166,12 @@ class CharacterAnnotationTab:
             pass
 
         return symbol, x_key
+    
+    def _ascii_progress_bar(self, current: int, total: int, width: int = 24) -> str:
+        total = max(1, total)
+        current = max(0, min(current, total))
+        filled = int(round((current / total) * width))
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
     def _characters_to_text(self, chars) -> str:
@@ -256,6 +267,44 @@ class CharacterAnnotationTab:
 
         finally:
             self._reloading_preview = False
+
+    def _clear_project_bound_session_values(self, clear_ui: bool = False):
+        """
+        Usuwa z local_session ścieżki, które w trybie kampanii są sterowane przez Wizard.
+        """
+        project_bound_keys = (
+            "char_xml_path",
+            "char_images_dir",
+            "char_preview_dir",
+            "char_yolo_model",
+        )
+
+        for key in project_bound_keys:
+            self.local_session.pop(key, None)
+
+        try:
+            with open(self.session_file, "w", encoding="utf-8") as f:
+                json.dump(self.local_session, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
+        if clear_ui:
+            try:
+                self.xml_path_var.set("")
+            except Exception:
+                pass
+            try:
+                self.images_dir_var.set("")
+            except Exception:
+                pass
+            try:
+                self.preview_dir_var.set("")
+            except Exception:
+                pass
+            try:
+                self.yolo_model_path_var.set("")
+            except Exception:
+                pass
 
 
     def _apply_preview_metadata_update(self, new_meta: dict, preserve_selection: bool = True):
@@ -395,23 +444,106 @@ class CharacterAnnotationTab:
 
     def clear_campaign_context(self):
         """
-        ✅ ZMIANA: czyści projektowe ścieżki i override’y po wyjściu z projektu.
-        Przywraca stan neutralny dla trybu swobodnego.
+        Czyści projektowy kontekst UI po wyjściu z projektu.
+        Nie usuwa wpisów z local_session — źródłem prawdy dla projektu
+        jest Wizard/CAMPAIGN, a dla trybu swobodnego osobne ustawienia sesji.
         """
-        # usuń override’y projektowe
         if hasattr(self, "_campaign_chars_dir"):
             self._campaign_chars_dir = None
+
         if hasattr(self, "_campaign_datasets_dir"):
             self._campaign_datasets_dir = None
 
-        # wyczyść źródła projektu
-        self.xml_path_var.set("")
-        self.images_dir_var.set("")
-        self.preview_dir_var.set("")
+        # czyścimy tylko pola UI związane z aktywnym projektem
+        try:
+            self.xml_path_var.set("")
+        except Exception:
+            pass
 
-        # wyczyść podgląd
+        try:
+            self.images_dir_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.preview_dir_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.yolo_model_path_var.set("")
+        except Exception:
+            pass
+
+    def _get_campaign_char_model_path(self) -> str:
+        """
+        Zwraca ścieżkę do modelu znaków przypiętego do aktywnego projektu.
+        """
+        try:
+            model_path = CAMPAIGN.get_global_model("char")
+            if model_path and Path(model_path).exists():
+                return str(Path(model_path))
+        except Exception:
+            pass
+        return ""
+
+
+    def _get_effective_yolo_model_path(self) -> str:
+        """
+        Zwraca rzeczywistą ścieżkę modelu YOLO używaną do detekcji.
+        W trybie kampanii źródłem prawdy jest projekt, nie local session.
+        """
+        if getattr(self, "_step3_linear_mode", False):
+            return self._get_campaign_char_model_path()
+
+        raw = (self.yolo_model_path_var.get() or "").strip()
+        if raw and raw != "Brak modelu znaków w projekcie" and Path(raw).exists():
+            return raw
+        return ""
+
+
+    def _sync_yolo_model_binding(self):
+        """
+        Ustawia zawartość pola ścieżki modelu YOLO zgodnie z aktualnym trybem.
+        """
+        if getattr(self, "_step3_linear_mode", False):
+            project_model = self._get_campaign_char_model_path()
+            if project_model:
+                self.yolo_model_path_var.set(project_model)
+            else:
+                self.yolo_model_path_var.set("Brak modelu znaków w projekcie")
+        else:
+            if (self.yolo_model_path_var.get() or "").strip() == "Brak modelu znaków w projekcie":
+                self.yolo_model_path_var.set("")
+
+
+    def _on_yolo_arch_change(self, event=None):
+        """
+        Reaguje na zmianę wydania / rozmiaru YOLO.
+        Nie zmienia modelu projektu, ale aktualizuje status/podgląd konfiguracji.
+        """
+        version = (self.yolo_model_version_var.get() or "").strip()
+        size = (self.yolo_model_size_var.get() or "").strip().lower()
+
+        if hasattr(self, "test_status_lbl"):
+            self.test_status_lbl.config(
+                text=f"Wybrana konfiguracja: YOLOv{version}{size}",
+                foreground="#2980b9"
+            )
+
+        try:
+            if (self.detection_method_var.get() or "").upper().strip() in {"YOLO", "BOTH"}:
+                self.winner_name_lbl.config(
+                    text=f"Konfiguracja: YOLOv{version}{size}",
+                    foreground="#2c3e50"
+                )
+        except Exception:
+            pass
+
+        # czyścimy pamięć preview
         self._reset_preview_cache()
         self.preview_plate_ids = []
+        self._listbox_pid_by_index = []
 
         try:
             self.plates_listbox.delete(0, tk.END)
@@ -424,14 +556,17 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="#2980b9")
+            self.preview_info_lbl.config(
+                text="Brak wczytanych danych",
+                foreground="#2980b9"
+            )
         except Exception:
             pass
 
         try:
             self.reset_subtab_flow()
         except Exception as e:
-            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}") 
+            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
 
     def _set_widget_state(self, widget, state: str):
         if widget is None:
@@ -704,7 +839,10 @@ class CharacterAnnotationTab:
         self.restore_campaign_step3_mode()
         self._set_button_emphasis("btn_to_detect_frame", False)
         self._set_button_emphasis("btn_to_dataset_frame", False)
-
+        try:
+            self._sync_yolo_model_binding()
+        except Exception:
+            pass
 
     def reset_subtab_flow(self):
         """
@@ -738,7 +876,10 @@ class CharacterAnnotationTab:
             self._update_yolo_visibility()
         except Exception:
             pass
-        
+        try:
+            self._sync_yolo_model_binding()
+        except Exception:
+            pass        
 
     def unlock_detection_subtab(self):
         self._set_button_state("btn_to_detect", True)
@@ -929,6 +1070,11 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            self._sync_yolo_model_binding()
+        except Exception:
+            pass        
+
 
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -955,17 +1101,13 @@ class CharacterAnnotationTab:
 
     def _force_save_all(self):
         try:
-            for k, var in [
+            always_saved = [
                 ("char_det_method", self.detection_method_var),
-                ("char_xml_path", self.xml_path_var),
-                ("char_images_dir", self.images_dir_var),
-                ("char_yolo_model", self.yolo_model_path_var),
                 ("char_yolo_device", self.yolo_device_var),
                 ("char_yolo_size", self.yolo_model_size_var),
-                ("char_preview_dir", self.preview_dir_var),
+                ("char_yolo_version", self.yolo_model_version_var),
                 ("char_ocr_conf", self.ocr_conf_var),
                 ("char_smart_export", self.smart_export_var),
-                ("char_yolo_version", self.yolo_model_version_var),
                 ("char_prep_angle", self.prep_angle_var),
                 ("char_prep_height", self.prep_height_var),
                 ("char_prep_padding", self.prep_padding_var),
@@ -978,8 +1120,21 @@ class CharacterAnnotationTab:
                 ("char_prep_erode", self.prep_erode_var),
                 ("char_do_clahe", self.do_clahe_var),
                 ("char_interpolation", self.interpolation_var),
-            ]:
+            ]
+
+            for k, var in always_saved:
                 self._save_local_setting(k, var.get())
+
+            # ścieżki wejściowe zapisujemy tylko poza liniowym workflow kampanii
+            if not getattr(self, "_step3_linear_mode", False):
+                for k, var in [
+                    ("char_xml_path", self.xml_path_var),
+                    ("char_images_dir", self.images_dir_var),
+                    ("char_yolo_model", self.yolo_model_path_var),
+                    ("char_preview_dir", self.preview_dir_var),
+                ]:
+                    self._save_local_setting(k, var.get())
+
         except Exception:
             pass
 
@@ -995,6 +1150,10 @@ class CharacterAnnotationTab:
             return
 
         method = (self.detection_method_var.get() or "OCR").upper().strip()
+        try:
+            self._sync_yolo_model_binding()
+        except Exception:
+            pass
 
         is_ocr = method == "OCR"
         is_yolo = method == "YOLO"
@@ -1156,20 +1315,33 @@ class CharacterAnnotationTab:
 
     def _log(self, txt_widget, msg: str, tag: str = "INFO"):
         def do_log():
-            if not txt_widget.tag_names():
-                txt_widget.tag_config("SUCCESS", foreground="#27ae60", font=("Consolas", 9, "bold"))
-                txt_widget.tag_config("ERROR", foreground="#c0392b", font=("Consolas", 9, "bold"))
-                txt_widget.tag_config("WARNING", foreground="#d35400", font=("Consolas", 9, "bold"))
-                txt_widget.tag_config("INFO", foreground="#2980b9", font=("Consolas", 9))
-                txt_widget.tag_config("HEADER", foreground="#8e44ad", font=("Consolas", 10, "bold"))
-            final_tag = tag
-            if tag == "INFO":
-                if "✅" in msg:
-                    final_tag = "SUCCESS"
-                elif "❌" in msg:
-                    final_tag = "ERROR"
-            txt_widget.insert(tk.END, msg + "\n", final_tag)
-            txt_widget.see(tk.END)
+            try:
+                txt_widget.configure(state="normal")
+
+                if not txt_widget.tag_names():
+                    txt_widget.tag_config("SUCCESS", foreground="#27ae60", font=("Consolas", 9, "bold"))
+                    txt_widget.tag_config("ERROR", foreground="#c0392b", font=("Consolas", 9, "bold"))
+                    txt_widget.tag_config("WARNING", foreground="#d35400", font=("Consolas", 9, "bold"))
+                    txt_widget.tag_config("INFO", foreground="#2980b9", font=("Consolas", 9))
+                    txt_widget.tag_config("HEADER", foreground="#8e44ad", font=("Consolas", 10, "bold"))
+
+                final_tag = tag
+                if tag == "INFO":
+                    if "✅" in msg:
+                        final_tag = "SUCCESS"
+                    elif "❌" in msg:
+                        final_tag = "ERROR"
+
+                txt_widget.insert(tk.END, msg + "\n", final_tag)
+                txt_widget.see(tk.END)
+                txt_widget.update_idletasks()
+
+            finally:
+                try:
+                    txt_widget.configure(state="disabled")
+                except Exception:
+                    pass
+
         self.frame.after(0, do_log)
 
     def _get_true_texts_from_filename(self, filename: str) -> list:
@@ -1611,7 +1783,8 @@ class CharacterAnnotationTab:
             width=10
         )
         self.yolo_version_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-
+        self.yolo_version_combo.bind("<<ComboboxSelected>>", self._on_yolo_arch_change)
+        
         ttk.Label(
             self.yolo_panel,
             text="Rozmiar modelu:",
@@ -1634,6 +1807,7 @@ class CharacterAnnotationTab:
             width=10
         )
         self.yolo_size_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+        self.yolo_size_combo.bind("<<ComboboxSelected>>", self._on_yolo_arch_change)
 
         ttk.Label(
             self.yolo_panel,
@@ -1815,16 +1989,26 @@ class CharacterAnnotationTab:
                 )
                 return
 
-            try:
-                self._log(
-                    self.test_log_text,
-                    f"[INFO] Wybrane YOLO v{version}{size}\n",
-                    "INFO"
+            model_path = self._get_effective_yolo_model_path()
+            if not model_path:
+                messagebox.showwarning(
+                    "Brak modelu znaków",
+                    "W trybie YOLO/HYBRYDA potrzebny jest przypięty model znaków.\n\n"
+                    "W aktywnym projekcie model powinien pochodzić z projektu/wizarda."
                 )
-            except Exception:
-                pass
+                return
 
-        # korzystamy z istniejącego backendu analizy
+            self._log(
+                self.test_log_text,
+                f"[INFO] Wybrana konfiguracja: YOLOv{version}{size}",
+                "INFO"
+            )
+            self._log(
+                self.test_log_text,
+                f"[INFO] Aktywny model: {model_path}",
+                "INFO"
+            )
+
         self._run_fast_ocr_test()
 
     def _update_winner_label(self):
@@ -2180,6 +2364,8 @@ class CharacterAnnotationTab:
 
         self.test_log_text.delete(1.0, tk.END)
         self._lock_ui_for_testing()
+        self.test_status_lbl.config(text="Start detekcji...", foreground="#2980b9")
+        self.test_progress.config(value=0)
 
         self.fast_test_stop.clear()
         self.fast_test_running = True
@@ -2196,7 +2382,10 @@ class CharacterAnnotationTab:
         yolo_model = None
         if method in [DetectionMethod.YOLO, DetectionMethod.BOTH] and YOLO is not None:
             try:
-                yolo_model = YOLO(str(self.yolo_model_path_var.get()))
+                effective_model_path = self._get_effective_yolo_model_path()
+                if not effective_model_path:
+                    raise RuntimeError("Brak aktywnej ścieżki modelu YOLO dla detekcji znaków.")
+                yolo_model = YOLO(str(effective_model_path))
             except Exception as e:
                 self._log(self.test_log_text, f"Błąd YOLO: {e}", "ERROR")
                 yolo_model = None
@@ -2285,13 +2474,15 @@ class CharacterAnnotationTab:
                         0,
                         lambda p=((idx + 1) / max(1, total)) * 100: self.test_progress.config(value=p)
                     )
+
                     self.frame.after(
                         0,
                         lambda c=idx + 1, t=total: self.test_status_lbl.config(
-                            text=f"Testuję: {c} z {t}",
+                            text=f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
                             foreground="#e67e22"
                         )
                     )
+                    
 
                 meta_file = out_dir / "metadata.json"
                 self._atomic_write_json(meta_file, local_meta)
@@ -2422,14 +2613,40 @@ class CharacterAnnotationTab:
                         finally:
                             self._reloading_preview = False
 
+                        
                         # 6. odśwież canvas i resztę UI na aktualnym wyborze
                         self._on_preview_select(None)
 
+                        try:
+                            method_name = (self.detection_method_var.get() or "OCR").upper().strip()
+                            self.winner_name_lbl.config(
+                                text=f"Ostatni test: {method_name}",
+                                foreground="#2c3e50"
+                            )
+                            self.winner_acc_lbl.config(
+                                text=f"{acc:.1f}%",
+                                foreground="#2c3e50"
+                            )
+                        except Exception:
+                            pass
+
+                        try:
+                            summary_msg = (
+                                f"Podsumowanie detekcji: perfect={stat_perfect}/{total}, "
+                                f"skuteczność={acc:.1f}%"
+                            )
+                            self._log(self.test_log_text, summary_msg, "INFO")
+                        except Exception:
+                            pass
+
                         self.test_progress.config(value=100)
                         self.test_status_lbl.config(
-                            text="Zakończono Test!",
+                            text=f"Zakończono detekcję — skuteczność {acc:.1f}%",
                             foreground="#2ecc71"
                         )
+
+                        # 7. odblokuj dalszy krok
+                        self.unlock_dataset_subtab()
 
                         # 7. odblokuj dalszy krok
                         self.unlock_dataset_subtab()
