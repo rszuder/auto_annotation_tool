@@ -923,9 +923,17 @@ class CampaignTab:
 
         if tab_char:
             try:
-                tab_char.enter_campaign_step3_mode()
+                if (
+                    CAMPAIGN.get_step3_substep() > 1
+                    or CAMPAIGN.is_step3_stage1_done()
+                    or CAMPAIGN.is_step3_stage2_done()
+                ):
+                    tab_char.restore_campaign_step3_mode()
+                else:
+                    tab_char.enter_campaign_step3_mode()
             except Exception as e:
-                logger.debug(f"Nie udało się ustawić liniowego trybu kroku 3: {e}")
+                logger.debug(f"Nie udało się przywrócić stanu kroku 3: {e}")
+                tab_char.enter_campaign_step3_mode()
 
         self.app.open_controlled_tab("characters")
 

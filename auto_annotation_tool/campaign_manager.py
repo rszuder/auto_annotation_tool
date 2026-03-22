@@ -15,6 +15,7 @@ from typing import Dict, Any, List
 
 from .config import CONFIG, logger
 
+
 class CampaignManager:
     def __init__(self):
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
@@ -33,7 +34,10 @@ class CampaignManager:
             "best_vehicle_model": "",
             "best_plate_model": "",
             "best_char_model": "",
-            "step3_status": "pending"
+            "step3_status": "pending",
+            "step3_substep": 1,
+            "step3_stage1_done": False,
+            "step3_stage2_done": False,
         }
 
 
@@ -216,7 +220,11 @@ class CampaignManager:
         act = self.get_active_project_name()
         if not act:
             return
+
         self.state["projects"][act]["step3_status"] = "pending"
+        self.state["projects"][act]["step3_substep"] = 1
+        self.state["projects"][act]["step3_stage1_done"] = False
+        self.state["projects"][act]["step3_stage2_done"] = False
         self.save_state()
 
     def get_step3_status(self) -> str:
@@ -224,6 +232,70 @@ class CampaignManager:
         if not act:
             return "pending"
         return self.state["projects"][act].get("step3_status", "pending")
+    
+    def get_step3_substep(self) -> int:
+        act = self.get_active_project_name()
+        if not act:
+            return 1
+        return int(self.state["projects"][act].get("step3_substep", 1))
+
+
+    def set_step3_substep(self, value: int):
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        value = int(value)
+        if value < 1:
+            value = 1
+        if value > 3:
+            value = 3
+
+        self.state["projects"][act]["step3_substep"] = value
+        self.save_state()
+
+
+    def is_step3_stage1_done(self) -> bool:
+        act = self.get_active_project_name()
+        if not act:
+            return False
+        return bool(self.state["projects"][act].get("step3_stage1_done", False))
+
+
+    def set_step3_stage1_done(self, done: bool):
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        self.state["projects"][act]["step3_stage1_done"] = bool(done)
+        self.save_state()
+
+
+    def is_step3_stage2_done(self) -> bool:
+        act = self.get_active_project_name()
+        if not act:
+            return False
+        return bool(self.state["projects"][act].get("step3_stage2_done", False))
+
+
+    def set_step3_stage2_done(self, done: bool):
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        self.state["projects"][act]["step3_stage2_done"] = bool(done)
+        self.save_state()
+
+
+    def reset_step3_progress(self):
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        self.state["projects"][act]["step3_substep"] = 1
+        self.state["projects"][act]["step3_stage1_done"] = False
+        self.state["projects"][act]["step3_stage2_done"] = False
+        self.save_state()
 
     def advance_to_next_iteration(self):
         act = self.state.get("active_project", "")
@@ -235,6 +307,9 @@ class CampaignManager:
         self.state["projects"][act]["step2_status"] = "pending"
         self.state["projects"][act]["step2_staging_run"] = ""
         self.state["projects"][act]["step3_status"] = "pending"
+        self.state["projects"][act]["step3_substep"] = 1
+        self.state["projects"][act]["step3_stage1_done"] = False
+        self.state["projects"][act]["step3_stage2_done"] = False
         self.save_state()
 
     def set_global_model(self, model_type: str, model_path: str):
