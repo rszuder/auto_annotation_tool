@@ -124,14 +124,68 @@ class CharacterAnnotationTab:
         self._loaded_meta_path = None
         self._loaded_meta_mtime = None
 
+    def _char_record_to_symbol_and_x(self, rec, fallback_index: int = 0):
+        symbol = ""
+        x_key = float(fallback_index)
+
+        if isinstance(rec, dict):
+            symbol = str(
+                rec.get("character")
+                or rec.get("text")
+                or rec.get("char")
+                or ""
+            )
+
+            bbox = rec.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                try:
+                    x_key = (float(bbox[0]) + float(bbox[2])) / 2.0
+                except Exception:
+                    pass
+
+            return symbol, x_key
+
+        if isinstance(rec, str):
+            return rec, x_key
+
+        try:
+            symbol = str(getattr(rec, "character", getattr(rec, "text", "")) or "")
+        except Exception:
+            symbol = ""
+
+        try:
+            bbox = getattr(rec, "bbox", None)
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                x_key = (float(bbox[0]) + float(bbox[2])) / 2.0
+        except Exception:
+            pass
+
+        return symbol, x_key
+
+
+    def _characters_to_text(self, chars) -> str:
+        if chars is None:
+            return ""
+
+        if isinstance(chars, str):
+            return chars
+
+        if not isinstance(chars, list):
+            return str(chars)
+
+        prepared = []
+        for i, rec in enumerate(chars):
+            symbol, x_key = self._char_record_to_symbol_and_x(rec, fallback_index=i)
+            if symbol:
+                prepared.append((x_key, symbol))
+
+        prepared.sort(key=lambda item: item[0])
+        return "".join(symbol for _, symbol in prepared)
+
+
     def _format_plate_listbox_label(self, plate_id: str, data: dict) -> str:
         status = str(data.get("status", "unknown")).strip().lower()
-        chars = data.get("characters", []) or []
-
-        if isinstance(chars, list):
-            chars_txt = "".join(str(c) for c in chars)
-        else:
-            chars_txt = str(chars)
+        chars_txt = self._characters_to_text(data.get("characters", []))
 
         if status == "perfect":
             icon = "🟢"
@@ -141,8 +195,77 @@ class CharacterAnnotationTab:
             icon = "⚪"
 
         label = f"{icon} {plate_id}"
-        label += f" [{chars_txt}]"
+        if chars_txt:
+            label += f" [{chars_txt}]"
         return label
+
+
+    def _rebuild_preview_listbox(self, preserve_selection: bool = True):
+        selected_pid = None
+
+        if preserve_selection:
+            try:
+                sel = self.plates_listbox.curselection()
+                if sel:
+                    idx = sel[0]
+                    if 0 <= idx < len(self._listbox_pid_by_index):
+                        selected_pid = self._listbox_pid_by_index[idx]
+            except Exception:
+                selected_pid = None
+
+        current_order = [pid for pid in self.preview_plate_ids if pid in self.preview_metadata]
+        appended = [pid for pid in self.preview_metadata.keys() if pid not in current_order]
+        self.preview_plate_ids = current_order + appended
+        self._listbox_pid_by_index = list(self.preview_plate_ids)
+
+        self._reloading_preview = True
+        try:
+            self.plates_listbox.delete(0, tk.END)
+
+            for pid in self._listbox_pid_by_index:
+                data = self.preview_metadata.get(pid, {})
+                label = self._format_plate_listbox_label(pid, data)
+                self.plates_listbox.insert(tk.END, label)
+
+            if selected_pid and selected_pid in self._listbox_pid_by_index:
+                idx = self._listbox_pid_by_index.index(selected_pid)
+                self.plates_listbox.selection_clear(0, tk.END)
+                self.plates_listbox.selection_set(idx)
+                self.plates_listbox.activate(idx)
+                self.plates_listbox.see(idx)
+
+            perfect = 0
+            needs_fix = 0
+            unknown = 0
+
+            for pid in self._listbox_pid_by_index:
+                status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
+                if status == "perfect":
+                    perfect += 1
+                elif status == "needs_fix":
+                    needs_fix += 1
+                else:
+                    unknown += 1
+
+            self.preview_info_lbl.config(
+                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect} | 🔴 {needs_fix} | ⚪ {unknown}",
+                foreground="#2980b9"
+            )
+
+            self.plates_listbox.update_idletasks()
+
+        finally:
+            self._reloading_preview = False
+
+
+    def _apply_preview_metadata_update(self, new_meta: dict, preserve_selection: bool = True):
+        self.preview_metadata = new_meta
+        self._rebuild_preview_listbox(preserve_selection=preserve_selection)
+
+        try:
+            self._on_preview_select(None)
+        except Exception:
+            pass
 
 
     def _refresh_plate_rows_in_place(self):
@@ -2083,7 +2206,10 @@ class CharacterAnnotationTab:
         if method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
             try:
                 use_gpu = self.yolo_device_var.get().split()[0].lower().startswith("cuda")
-                ocr_engine = PlateOCR(device="cuda" if use_gpu else "cpu", confidence_threshold=self.ocr_conf_var.get())
+                ocr_engine = PlateOCR(
+                    device="cuda" if use_gpu else "cpu",
+                    confidence_threshold=self.ocr_conf_var.get()
+                )
                 ocr_engine.custom_prep_params = prep_params
             except Exception as e:
                 self._log(self.test_log_text, f"Błąd OCR Engine: {e}", "ERROR")
@@ -2092,12 +2218,11 @@ class CharacterAnnotationTab:
         detector = CharacterDetector(method=method, ocr_engine=ocr_engine, yolo_model=yolo_model)
 
         def worker():
+            local_meta = dict(self.preview_metadata) if isinstance(self.preview_metadata, dict) else {}
+            total = len(self.preview_plate_ids)
+            stat_perfect = 0
+
             try:
-                total = len(self.preview_plate_ids)
-                stat_perfect = 0
-
-                local_meta = dict(self.preview_metadata) if isinstance(self.preview_metadata, dict) else {}
-
                 for idx, pid in enumerate(self.preview_plate_ids):
                     if self.fast_test_stop.is_set():
                         break
@@ -2125,11 +2250,17 @@ class CharacterAnnotationTab:
                         "method": str(c.method),
                     } for c in chars]
 
+                    # WAŻNE: sortujemy znaki po X PRZED zapisem do metadata
+                    c_clean.sort(
+                        key=lambda x: (
+                            float(x["bbox"][0]) if isinstance(x.get("bbox"), (list, tuple)) and len(x["bbox"]) >= 4 else 1e9
+                        )
+                    )
+
                     local_meta[pid]["characters"] = c_clean
 
                     if c_clean:
-                        c_clean.sort(key=lambda x: float(x["bbox"][0]))
-                        txt = "".join([str(c["character"]) for c in c_clean])
+                        txt = "".join(str(c.get("character", "")) for c in c_clean)
                         if txt in true_texts:
                             local_meta[pid]["status"] = "perfect"
                             stat_perfect += 1
@@ -2137,65 +2268,183 @@ class CharacterAnnotationTab:
                         else:
                             local_meta[pid]["status"] = "needs_fix"
                             expected_str = " / ".join(true_texts) if true_texts else "Brak"
-                            self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}] (Oczek: [{expected_str}])", "ERROR")
+                            self._log(
+                                self.test_log_text,
+                                f"❌ [{idx+1:03d}/{total}] {pid}: Odczyt=[{txt}] (Oczek: [{expected_str}])",
+                                "ERROR"
+                            )
                     else:
                         local_meta[pid]["status"] = "needs_fix"
-                        self._log(self.test_log_text, f"❌ [{idx+1:03d}/{total}] {pid}: NIC NIE ZNALEZIONO", "ERROR")
+                        self._log(
+                            self.test_log_text,
+                            f"❌ [{idx+1:03d}/{total}] {pid}: NIC NIE ZNALEZIONO",
+                            "ERROR"
+                        )
 
-                    self.frame.after(0, lambda p=((idx + 1) / max(1, total)) * 100: self.test_progress.config(value=p))
-                    self.frame.after(0, lambda c=idx+1, t=total: self.test_status_lbl.config(text=f"Testuję: {c} z {t}", foreground="#e67e22"))
+                    self.frame.after(
+                        0,
+                        lambda p=((idx + 1) / max(1, total)) * 100: self.test_progress.config(value=p)
+                    )
+                    self.frame.after(
+                        0,
+                        lambda c=idx + 1, t=total: self.test_status_lbl.config(
+                            text=f"Testuję: {c} z {t}",
+                            foreground="#e67e22"
+                        )
+                    )
 
                 meta_file = out_dir / "metadata.json"
                 self._atomic_write_json(meta_file, local_meta)
-                self.preview_metadata = local_meta
-                self.frame.after(0, self._refresh_plate_rows_in_place)
-                self.frame.after(0, lambda: self._refresh_plates_listbox(preserve_selection=True))
-                self.frame.after(0, lambda: self._on_preview_select(None))
-                self.frame.after(0, self.unlock_dataset_subtab)
 
                 plates_with_chars = sum(
                     1 for pid in self.preview_plate_ids
                     if isinstance(local_meta.get(pid), dict) and local_meta[pid].get("characters")
                 )
-                self._log(self.test_log_text, f"\n[DIAG] Tablice z wykrytymi znakami: {plates_with_chars}/{total}", "INFO")
+                self._log(
+                    self.test_log_text,
+                    f"\n[DIAG] Tablice z wykrytymi znakami: {plates_with_chars}/{total}",
+                    "INFO"
+                )
 
                 acc = (stat_perfect / total * 100) if total > 0 else 0
-                self._log(self.test_log_text, f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)", "SUCCESS" if acc >= 80 else "WARNING")
+                self._log(
+                    self.test_log_text,
+                    f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)",
+                    "SUCCESS" if acc >= 80 else "WARNING"
+                )
 
             except Exception as e:
                 self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
+
             finally:
                 def finalize():
                     try:
                         self.fast_test_running = False
                         self.fast_test_stop.clear()
 
-                        # ✅ najpierw odśwież dane
-                        self._reset_preview_cache()
-                        self._load_preview_data(quiet=True)
-                        self._refresh_listbox_rows_from_metadata()
+                        # 1. przejmujemy świeże metadata do pamięci
+                        self.preview_metadata = local_meta
 
-                        # ✅ jeśli nic nie zaznaczone, zaznacz pierwszy wpis
-                        if self.plates_listbox.size() > 0:
+                        # 2. zachowujemy aktualne zaznaczenie po pid
+                        selected_pid = None
+                        try:
                             sel = self.plates_listbox.curselection()
-                            if not sel:
-                                self.plates_listbox.selection_set(0)
+                            if sel:
+                                sel_idx = sel[0]
+                                pid_map = getattr(self, "_listbox_pid_by_index", [])
+                                if 0 <= sel_idx < len(pid_map):
+                                    selected_pid = pid_map[sel_idx]
+                        except Exception:
+                            selected_pid = None
 
-                        # ✅ odśwież canvas
+                        # 3. porządek listy: zachowaj bieżącą kolejność preview_plate_ids
+                        current_order = [pid for pid in self.preview_plate_ids if pid in self.preview_metadata]
+                        appended = [pid for pid in self.preview_metadata.keys() if pid not in current_order]
+                        self.preview_plate_ids = current_order + appended
+                        self._listbox_pid_by_index = list(self.preview_plate_ids)
+
+                        # 4. przebuduj listbox z aktualnego metadata
+                        self._reloading_preview = True
+                        try:
+                            self.plates_listbox.delete(0, tk.END)
+
+                            perfect_count = 0
+                            needs_fix_count = 0
+                            unknown_count = 0
+
+                            for pid in self._listbox_pid_by_index:
+                                data = self.preview_metadata.get(pid, {})
+                                status = str(data.get("status", "unknown")).strip().lower()
+                                chars = data.get("characters", []) or []
+
+                                if isinstance(chars, list):
+                                    try:
+                                        chars_sorted = sorted(
+                                            chars,
+                                            key=lambda rec: (
+                                                float(rec["bbox"][0])
+                                                if isinstance(rec, dict)
+                                                and isinstance(rec.get("bbox"), (list, tuple))
+                                                and len(rec["bbox"]) >= 4
+                                                else 1e9
+                                            )
+                                        )
+                                    except Exception:
+                                        chars_sorted = chars
+
+                                    chars_txt = "".join(
+                                        str(
+                                            rec.get("character")
+                                            if isinstance(rec, dict)
+                                            else rec
+                                        )
+                                        for rec in chars_sorted
+                                    )
+                                else:
+                                    chars_txt = str(chars) if chars else ""
+
+                                if status == "perfect":
+                                    icon = "🟢"
+                                    perfect_count += 1
+                                elif status == "needs_fix":
+                                    icon = "🔴"
+                                    needs_fix_count += 1
+                                else:
+                                    icon = "⚪"
+                                    unknown_count += 1
+
+                                label = f"{icon} {pid}"
+                                if chars_txt:
+                                    label += f" [{chars_txt}]"
+
+                                self.plates_listbox.insert(tk.END, label)
+
+                            self.preview_info_lbl.config(
+                                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect_count} | 🔴 {needs_fix_count} | ⚪ {unknown_count}",
+                                foreground="#2980b9"
+                            )
+
+                            # 5. przywróć zaznaczenie albo wybierz pierwszy wpis
+                            if selected_pid and selected_pid in self._listbox_pid_by_index:
+                                idx = self._listbox_pid_by_index.index(selected_pid)
+                                self.plates_listbox.selection_clear(0, tk.END)
+                                self.plates_listbox.selection_set(idx)
+                                self.plates_listbox.activate(idx)
+                                self.plates_listbox.see(idx)
+                            elif self.plates_listbox.size() > 0:
+                                self.plates_listbox.selection_clear(0, tk.END)
+                                self.plates_listbox.selection_set(0)
+                                self.plates_listbox.activate(0)
+                                self.plates_listbox.see(0)
+
+                            self.plates_listbox.update_idletasks()
+
+                        finally:
+                            self._reloading_preview = False
+
+                        # 6. odśwież canvas i resztę UI na aktualnym wyborze
                         self._on_preview_select(None)
 
                         self.test_progress.config(value=100)
-                        self.test_status_lbl.config(text="Zakończono Test!", foreground="#2ecc71")
+                        self.test_status_lbl.config(
+                            text="Zakończono Test!",
+                            foreground="#2ecc71"
+                        )
+
+                        # 7. odblokuj dalszy krok
+                        self.unlock_dataset_subtab()
 
                     except Exception as e:
                         logger.error(f"Błąd finalize() po Szybkim Teście: {e}")
-                        self.test_status_lbl.config(text="Błąd odświeżania UI", foreground="#c0392b")
+                        self.test_status_lbl.config(
+                            text="Błąd odświeżania UI",
+                            foreground="#c0392b"
+                        )
 
                     finally:
-                        # ✅ NAJWAŻNIEJSZE: UI ma się odblokować ZAWSZE, nawet przy błędzie
                         self._unlock_ui_after_testing()
 
-                self.frame.after(200, finalize)
+                self.frame.after(0, finalize)
 
         threading.Thread(target=worker, daemon=True).start()
 
