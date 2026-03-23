@@ -815,6 +815,68 @@ class CharacterAnnotationTab:
         fallback = Path(CONFIG.DIR_3_CHARS).absolute()
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
+    
+    def _is_valid_step3_training_dataset_dir(self, dataset_dir: Path | None) -> bool:
+        """
+        Sprawdza, czy katalog wygląda jak realny dataset treningowy znaków
+        gotowy do użycia w etapie 4.
+        """
+        if dataset_dir is None:
+            return False
+
+        try:
+            if not dataset_dir.exists() or not dataset_dir.is_dir():
+                return False
+
+            data_yaml = dataset_dir / "data.yaml"
+            images_dir = dataset_dir / "images"
+            labels_dir = dataset_dir / "labels"
+
+            if not data_yaml.exists():
+                return False
+
+            if not images_dir.exists() or not images_dir.is_dir():
+                return False
+
+            if not labels_dir.exists() or not labels_dir.is_dir():
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def _get_preferred_step3_training_dataset_dir(self) -> Path | None:
+        """
+        Zwraca najlepszy dostępny dataset znaków dla finału kroku 3.
+
+        Priorytet:
+        1. char_merged_pool
+        2. najnowszy poprawny dataset z katalogu projektowych datasetów
+        """
+        merged_dir = self._get_char_merged_pool_dir()
+        if self._is_valid_step3_training_dataset_dir(merged_dir):
+            return merged_dir
+
+        campaign_datasets_dir = getattr(self, "_campaign_datasets_dir", None)
+        if not campaign_datasets_dir:
+            return None
+
+        ds_root = Path(campaign_datasets_dir)
+        if not ds_root.exists() or not ds_root.is_dir():
+            return None
+
+        try:
+            candidates = [
+                p for p in ds_root.iterdir()
+                if p.is_dir() and self._is_valid_step3_training_dataset_dir(p)
+            ]
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0]
+        except Exception:
+            return None
 
 
     def _build_step3_export_summary(
@@ -909,17 +971,9 @@ class CharacterAnnotationTab:
         gold_dataset_path = ""
         review_pack_path = ""
 
-        campaign_datasets_dir = getattr(self, "_campaign_datasets_dir", None)
-        if campaign_datasets_dir:
-            ds_root = Path(campaign_datasets_dir)
-            if ds_root.exists():
-                candidates = sorted(
-                    [p for p in ds_root.iterdir() if p.is_dir()],
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True
-                )
-                if candidates:
-                    gold_dataset_path = str(candidates[0])
+        preferred_dataset_dir = self._get_preferred_step3_training_dataset_dir()
+        if preferred_dataset_dir is not None:
+            gold_dataset_path = str(preferred_dataset_dir)
 
         campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
         if campaign_chars_dir:
@@ -932,7 +986,7 @@ class CharacterAnnotationTab:
             gold_dataset_path=gold_dataset_path,
             review_pack_path=review_pack_path,
             retry_pack_path="",
-            note="Finalizacja kroku 3 na podstawie istniejących artefaktów projektu."
+            note="Finalizacja kroku 3 na podstawie najlepszego dostępnego datasetu znaków projektu (merged preferowany, fallback do istniejącego datasetu)."
         )
 
         self._write_step3_export_summary(summary)
@@ -987,6 +1041,69 @@ class CharacterAnnotationTab:
         return pool_dir
     # ===== KONIEC NOWEGO BLOKU =====
         # ===== START NOWEGO BLOKU: katalog review packa projektu =====
+
+    def _is_valid_step3_training_dataset_dir(self, dataset_dir: Path | None) -> bool:
+        """
+        Sprawdza, czy katalog wygląda jak realny dataset treningowy znaków
+        gotowy do użycia w etapie 4.
+        """
+        if dataset_dir is None:
+            return False
+
+        try:
+            if not dataset_dir.exists() or not dataset_dir.is_dir():
+                return False
+
+            data_yaml = dataset_dir / "data.yaml"
+            images_dir = dataset_dir / "images"
+            labels_dir = dataset_dir / "labels"
+
+            if not data_yaml.exists():
+                return False
+
+            if not images_dir.exists() or not images_dir.is_dir():
+                return False
+
+            if not labels_dir.exists() or not labels_dir.is_dir():
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def _get_preferred_step3_training_dataset_dir(self) -> Path | None:
+        """
+        Zwraca najlepszy dostępny dataset znaków dla finiszu kroku 3.
+
+        Priorytet:
+        1. char_merged_pool
+        2. najnowszy poprawny dataset z katalogu projektowych datasetów
+        """
+        merged_dir = self._get_char_merged_pool_dir()
+        if self._is_valid_step3_training_dataset_dir(merged_dir):
+            return merged_dir
+
+        campaign_datasets_dir = getattr(self, "_campaign_datasets_dir", None)
+        if not campaign_datasets_dir:
+            return None
+
+        ds_root = Path(campaign_datasets_dir)
+        if not ds_root.exists() or not ds_root.is_dir():
+            return None
+
+        try:
+            candidates = [
+                p for p in ds_root.iterdir()
+                if p.is_dir() and self._is_valid_step3_training_dataset_dir(p)
+            ]
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0]
+        except Exception:
+            return None
+        
     def _get_project_review_dir(self) -> Path | None:
         """
         Projektowy katalog review dla eksportów CVAT z kroku 3.
@@ -1065,42 +1182,15 @@ class CharacterAnnotationTab:
 
     def _has_any_step3_export_outputs(self) -> bool:
         """
-        Krok 3 można zakończyć dopiero, gdy istnieją artefakty związane
-        z modelem znaków:
-        - złota paczka znaków
-        - import ręcznych poprawek znaków
-        - scalona pula znaków
-        - review pack do CVAT zapisany w katalogu projektu
+        Krok 3 można zakończyć dopiero wtedy, gdy istnieje realny dataset
+        treningowy znaków dla etapu 4.
+
+        Sam review export do CVAT nie wystarcza.
         """
         try:
-            if self._has_char_gold_exports():
-                return True
+            return self._get_preferred_step3_training_dataset_dir() is not None
         except Exception:
-            pass
-
-        try:
-            if self._has_char_manual_imports():
-                return True
-        except Exception:
-            pass
-
-        merged_dir = self._get_char_merged_pool_dir()
-        if merged_dir is not None and merged_dir.exists():
-            try:
-                if any(p.exists() for p in merged_dir.iterdir()):
-                    return True
-            except Exception:
-                pass
-
-        review_dir = self._get_project_review_dir()
-        if review_dir is not None and review_dir.exists():
-            try:
-                if any(p.is_dir() for p in review_dir.iterdir()):
-                    return True
-            except Exception:
-                pass
-
-        return False
+            return False
     
     # ===== START NOWEGO BLOKU =====
     def _update_step3_finish_button_state(self):
@@ -1329,8 +1419,6 @@ class CharacterAnnotationTab:
             self._set_button_emphasis("btn_to_dataset_frame", False)
 
             CAMPAIGN.set_step3_substep(1)
-            CAMPAIGN.set_step3_stage1_done(False)
-            CAMPAIGN.set_step3_stage2_done(False)
 
         self._select_subtab(self.tab_extract)
         self._persist_step3_progress()
@@ -1349,7 +1437,6 @@ class CharacterAnnotationTab:
             self._set_button_emphasis("btn_to_dataset_frame", False)
 
             CAMPAIGN.set_step3_substep(2)
-            CAMPAIGN.set_step3_stage2_done(False)
 
         self._select_subtab(self.tab_detect)
         self._persist_step3_progress()
