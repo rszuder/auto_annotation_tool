@@ -3247,10 +3247,15 @@ class CharacterAnnotationTab:
         cvat_f = ttk.Frame(export_lf)
         cvat_f.pack(fill=tk.X, pady=(5, 5))
         ttk.Label(cvat_f, text="OPCJA 1: Ręczna poprawa błędów", font=("Segoe UI", 10, "bold"), foreground="#c0392b").pack(anchor=tk.W)
-        ttk.Label(cvat_f, text="Generuje plik .ZIP dla programu CVAT. Eksportowane są tylko tablice z błędami (🔴).", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
+        ttk.Label(
+            export_lf,
+            text="Eksport do CVAT obejmuje wyłącznie tablice oznaczone jako błędne (czerwone).",
+            foreground="gray",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 8))
 
-        cb_smart = ttk.Checkbutton(cvat_f, text="Tylko tablice z błędami (Czerwone)", variable=self.smart_export_var)
-        cb_smart.pack(anchor=tk.W)
+
 
         btn_cvat = ttk.Button(cvat_f, text="WYGENERUJ .ZIP DLA CVAT", command=self._run_cvat_export, style="Accent.TButton")
         btn_cvat.pack(fill=tk.X, pady=(5, 0), ipady=3)
@@ -3298,7 +3303,7 @@ class CharacterAnnotationTab:
         self.import_console.insert(tk.END, "Oczekuje na plik XML...")
         self.import_console.config(state=tk.DISABLED)
 
-        HELP.bind_help(cb_smart, "cvat_smart_exp")
+        
         HELP.bind_help(btn_cvat, "btn_export_cvat")
         HELP.bind_help(btn_yolo, "btn_export_yolo")
         HELP.bind_help(btn_import, "btn_import_cvat")
