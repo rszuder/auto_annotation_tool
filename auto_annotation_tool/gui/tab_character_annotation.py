@@ -1054,6 +1054,19 @@ class CharacterAnnotationTab:
                 pass
 
         return False
+    
+    # ===== START NOWEGO BLOKU =====
+    def _update_step3_finish_button_state(self):
+        btn = getattr(self, "btn_finish_step3", None)
+        if btn is None:
+            return
+
+        enabled = self._has_any_step3_export_outputs()
+        try:
+            btn.config(state=("normal" if enabled else "disabled"))
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stanu btn_finish_step3: {e}")
+    # ===== KONIEC NOWEGO BLOKU =====
 
     def _update_preview_path_lock(self):
         """
@@ -3212,7 +3225,7 @@ class CharacterAnnotationTab:
         self.export_console.insert(tk.END, "Oczekuje na akcję...")
         self.export_console.config(state=tk.DISABLED)
 
-        import_lf = ttk.LabelFrame(pane, text=" Import poprawek CVAT ", padding=15)
+        import_lf = ttk.LabelFrame(pane, text=" Import poprawek znaków z CVAT ", padding=15)
         pane.add(import_lf, weight=1)
 
         ttk.Label(import_lf, text="Importuj poprawki znaków z CVAT", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
@@ -3252,12 +3265,16 @@ class CharacterAnnotationTab:
             command=self.back_to_substep_2
         ).pack(side=tk.LEFT)
 
-        ttk.Button(
+        # ===== START NOWEGO BLOKU =====
+        self.btn_finish_step3 = ttk.Button(
             nav,
             text="Zakończ krok 3 i wróć do Wizarda",
             command=self._finalize_step3_from_existing_outputs,
-            style="Accent.TButton"
-        ).pack(side=tk.RIGHT)
+            style="Accent.TButton",
+            state=tk.DISABLED
+        )
+        self.btn_finish_step3.pack(side=tk.RIGHT)
+        # ===== KONIEC NOWEGO BLOKU =====
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
@@ -3276,7 +3293,8 @@ class CharacterAnnotationTab:
 
     def _run_cvat_export(self):
         work_dir = Path(self.preview_dir_var.get().strip())
-                # ===== START NOWEGO BLOKU: wybór docelowego katalogu review =====
+
+        # ===== START NOWEGO BLOKU: wybór docelowego katalogu review =====
         export_dir = work_dir
 
         project_review_dir = self._get_project_review_dir()
@@ -3289,13 +3307,16 @@ class CharacterAnnotationTab:
             export_dir = project_review_dir / preview_name
             export_dir.mkdir(parents=True, exist_ok=True)
         # ===== KONIEC NOWEGO BLOKU =====
-        export_dir = work_dir / "metadata.json"
-        out_xml, out_zip = export_dir / "annotations.xml", work_dir / f"{work_dir.name}_CVAT.zip"
+        # ===== START NOWEGO BLOKU: osobno ścieżka metadata preview =====
+        meta_path = work_dir / "metadata.json"
+        out_xml = export_dir / "annotations.xml"
+        out_zip = export_dir / "cvat_export.zip"
+        # ===== KONIEC NOWEGO BLOKU =====
 
         self._set_console_text(self.export_console, "⌛ Eksportowanie do CVAT w toku...")
 
         try:
-            with open(export_dir, 'r', encoding='utf-8') as f:
+            with open(meta_path, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
 
             if self.smart_export_var.get():
@@ -3305,7 +3326,7 @@ class CharacterAnnotationTab:
                     json.dump(filtered, f, indent=2, ensure_ascii=False)
                 source_meta = tmp_meta
             else:
-                source_meta = export_dir
+                source_meta = meta_path
 
             from ..cvat_tools.cvat_character_exporter import CVATCharacterExporter
             from ..cvat_tools.cvat_zip_manager import CVATZipManager
