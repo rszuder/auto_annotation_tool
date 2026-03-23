@@ -937,6 +937,108 @@ class CharacterAnnotationTab:
         self._write_step3_export_summary(summary)
         self._return_step3_result_to_wizard(summary)
 
+    # ===== START NOWEGO BLOKU: katalogi puli danych znaków =====
+    def _get_char_manual_pool_dir(self) -> Path | None:
+        """
+        Katalog na ręcznie poprawione paczki znaków importowane z CVAT.
+        """
+        campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
+        if not campaign_chars_dir:
+            return None
+
+        root = Path(campaign_chars_dir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        pool_dir = root / "manual_char_pool"
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        return pool_dir
+
+
+    def _get_char_gold_pool_dir(self) -> Path | None:
+        """
+        Katalog na złotą paczkę znaków projektu.
+        """
+        campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
+        if not campaign_chars_dir:
+            return None
+
+        root = Path(campaign_chars_dir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        pool_dir = root / "gold_char_pool"
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        return pool_dir
+
+
+    def _get_char_merged_pool_dir(self) -> Path | None:
+        """
+        Katalog na scaloną pulę znaków: gold + manual.
+        """
+        campaign_datasets_dir = getattr(self, "_campaign_datasets_dir", None)
+        if not campaign_datasets_dir:
+            return None
+
+        root = Path(campaign_datasets_dir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        pool_dir = root / "char_merged_pool"
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        return pool_dir
+    # ===== KONIEC NOWEGO BLOKU =====
+
+    # ===== START NOWEGO BLOKU: stan artefaktów znakowych =====
+    def _has_char_manual_imports(self) -> bool:
+        pool_dir = self._get_char_manual_pool_dir()
+        if pool_dir is None or not pool_dir.exists():
+            return False
+
+        try:
+            return any(p.exists() for p in pool_dir.iterdir())
+        except Exception:
+            return False
+
+
+    def _has_char_gold_exports(self) -> bool:
+        pool_dir = self._get_char_gold_pool_dir()
+        if pool_dir is None or not pool_dir.exists():
+            return False
+
+        try:
+            return any(p.exists() for p in pool_dir.iterdir())
+        except Exception:
+            return False
+    # ===== KONIEC NOWEGO BLOKU =====
+
+    def _has_any_step3_export_outputs(self) -> bool:
+        """
+        Krok 3 można zakończyć dopiero, gdy istnieją artefakty związane
+        z modelem znaków:
+        - złota paczka znaków
+        - import ręcznych poprawek znaków
+        - scalona pula znaków
+        """
+        try:
+            if self._has_char_gold_exports():
+                return True
+        except Exception:
+            pass
+
+        try:
+            if self._has_char_manual_imports():
+                return True
+        except Exception:
+            pass
+
+        merged_dir = self._get_char_merged_pool_dir()
+        if merged_dir is not None and merged_dir.exists():
+            try:
+                if any(p.exists() for p in merged_dir.iterdir()):
+                    return True
+            except Exception:
+                pass
+
+        return False
+
     def _update_preview_path_lock(self):
         """
         W aktywnym, liniowym kroku 3 użytkownik nie powinien ręcznie
@@ -3094,11 +3196,15 @@ class CharacterAnnotationTab:
         self.export_console.insert(tk.END, "Oczekuje na akcję...")
         self.export_console.config(state=tk.DISABLED)
 
-        import_lf = ttk.LabelFrame(pane, text=" IMPORT (Dane Wejściowe) ", padding=15)
+        import_lf = ttk.LabelFrame(pane, text=" Import poprawek CVAT ", padding=15)
         pane.add(import_lf, weight=1)
 
-        ttk.Label(import_lf, text="Aktualizacja Bazy Danych z CVAT", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(import_lf, text="Wskaż XML z CVAT, aby nadpisać błędy OCR.", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
+        ttk.Label(import_lf, text="Importuj poprawki znaków z CVAT", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(import_lf,
+                  text=" Ten import służy wyłącznie do wczytywania ręcznie poprawionych " \
+                       " adnotacji znaków z CVAT.\n " \
+                       " Zaimportowane dane zostaną dołączone do puli treningowej modelu znaków. Plik *.xml " ,
+                         foreground="gray").pack(anchor=tk.W, pady=(2, 8))
 
         row2 = ttk.Frame(import_lf)
         row2.pack(fill=tk.X, pady=5)
@@ -3106,7 +3212,7 @@ class CharacterAnnotationTab:
         ttk.Entry(row2, textvariable=self.import_cvat_xml_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row2, text="Wybierz XML", command=lambda: self._pick_file(self.import_cvat_xml_var)).pack(side=tk.RIGHT, padx=(5, 0))
 
-        btn_import = ttk.Button(import_lf, text="ZAKTUALIZUJ BAZĘ", command=self._run_cvat_import, style="Accent.TButton")
+        btn_import = ttk.Button(import_lf, text="Importuj", command=self._run_cvat_import, style="Accent.TButton")
         btn_import.pack(fill=tk.X, pady=(10, 5), ipady=3)
 
         import_console_lf = ttk.LabelFrame(import_lf, text=" Status Importu ", padding=5)
