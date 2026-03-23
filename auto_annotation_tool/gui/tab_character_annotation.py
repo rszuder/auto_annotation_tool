@@ -985,6 +985,22 @@ class CharacterAnnotationTab:
         pool_dir.mkdir(parents=True, exist_ok=True)
         return pool_dir
     # ===== KONIEC NOWEGO BLOKU =====
+        # ===== START NOWEGO BLOKU: katalog review packa projektu =====
+    def _get_project_review_dir(self) -> Path | None:
+        """
+        Projektowy katalog review dla eksportów CVAT z kroku 3.
+        """
+        campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
+        if not campaign_chars_dir:
+            return None
+
+        root = Path(campaign_chars_dir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        review_dir = root / "review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        return review_dir
+    # ===== KONIEC NOWEGO BLOKU =====
 
     # ===== START NOWEGO BLOKU: stan artefaktów znakowych =====
     def _has_char_manual_imports(self) -> bool:
@@ -3260,13 +3276,26 @@ class CharacterAnnotationTab:
 
     def _run_cvat_export(self):
         work_dir = Path(self.preview_dir_var.get().strip())
-        meta_path = work_dir / "metadata.json"
-        out_xml, out_zip = work_dir / "annotations.xml", work_dir / f"{work_dir.name}_CVAT.zip"
+                # ===== START NOWEGO BLOKU: wybór docelowego katalogu review =====
+        export_dir = work_dir
+
+        project_review_dir = self._get_project_review_dir()
+        if project_review_dir is not None:
+            try:
+                preview_name = work_dir.name if work_dir.name else "review_pack"
+            except Exception:
+                preview_name = "review_pack"
+
+            export_dir = project_review_dir / preview_name
+            export_dir.mkdir(parents=True, exist_ok=True)
+        # ===== KONIEC NOWEGO BLOKU =====
+        export_dir = work_dir / "metadata.json"
+        out_xml, out_zip = export_dir / "annotations.xml", work_dir / f"{work_dir.name}_CVAT.zip"
 
         self._set_console_text(self.export_console, "⌛ Eksportowanie do CVAT w toku...")
 
         try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
+            with open(export_dir, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
 
             if self.smart_export_var.get():
@@ -3276,7 +3305,7 @@ class CharacterAnnotationTab:
                     json.dump(filtered, f, indent=2, ensure_ascii=False)
                 source_meta = tmp_meta
             else:
-                source_meta = meta_path
+                source_meta = export_dir
 
             from ..cvat_tools.cvat_character_exporter import CVATCharacterExporter
             from ..cvat_tools.cvat_zip_manager import CVATZipManager
@@ -3284,9 +3313,25 @@ class CharacterAnnotationTab:
             if CVATCharacterExporter().export(source_meta, out_xml):
                 CVATZipManager.create_cvat_import_zip(out_xml, work_dir / "images", out_zip)
                 self._set_console_text(self.export_console, f"✅ Wygenerowano ZIP:\n{out_zip}")
+                                # ===== START NOWEGO BLOKU: informacja o docelowym review dir =====
+                try:
+                    self._log(
+                        self.export_console,
+                        f"[INFO] Review pack zapisano w katalogu projektu: {export_dir}",
+                        "INFO"
+                    )
+                except Exception:
+                    pass
+                # ===== KONIEC NOWEGO BLOKU =====
+                # ===== START NOWEGO BLOKU =====
+                try:
+                    self._update_step3_finish_button_state()
+                except Exception:
+                    pass
+                # ===== KONIEC NOWEGO BLOKU =====
 
-            if self.smart_export_var.get() and source_meta.exists():
-                source_meta.unlink()
+                if self.smart_export_var.get() and source_meta.exists():
+                    source_meta.unlink()
 
         except Exception as e:
             self._set_console_text(self.export_console, f"❌ BŁĄD EKSPORTU CVAT:\n{e}")
@@ -3389,6 +3434,12 @@ class CharacterAnnotationTab:
             (yolo_out / "data.yaml").write_text(yaml_content, encoding="utf-8")
 
             self._set_console_text(self.export_console, f"✅ Dataset YOLO gotowy: {yolo_out}")
+            # ===== START NOWEGO BLOKU =====
+            try:
+                self._update_step3_finish_button_state()
+            except Exception:
+                pass
+            # ===== KONIEC NOWEGO BLOKU =====
 
             try:
                 from ..campaign_manager import CAMPAIGN
@@ -3459,6 +3510,12 @@ class CharacterAnnotationTab:
             self._load_preview_data(quiet=True)
 
             self._set_console_text(self.import_console, f"✅ Zaktualizowano: {updated} tablic.")
+            # ===== START NOWEGO BLOKU =====
+            try:
+                self._update_step3_finish_button_state()
+            except Exception:
+                pass
+            # ===== KONIEC NOWEGO BLOKU =====
 
         except Exception as e:
             self._set_console_text(self.import_console, f"❌ BŁĄD IMPORTU:\n{e}")
