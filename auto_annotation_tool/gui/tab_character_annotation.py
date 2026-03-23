@@ -1163,6 +1163,19 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się przełączyć podzakładki: {e}")
 
+    # --- STEP3 NOTEBOOK PERSIST ---
+    def _on_main_nb_tab_changed(self, event=None):
+        if event is not None and getattr(event, "widget", None) is not self.main_nb:
+            return
+
+        if not getattr(self, "_step3_linear_mode", False):
+            return
+
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._persist_step3_progress()
+
     def _sync_step3_nav_buttons(self):
         detect_enabled = self._get_subtab_state(self.tab_detect) == "normal"
         dataset_enabled = self._get_subtab_state(self.tab_dataset) == "normal"
@@ -1278,9 +1291,9 @@ class CharacterAnnotationTab:
             self._set_subtab_state(self.tab_dataset, "disabled")
 
             CAMPAIGN.set_step3_substep(2)
-            self._persist_step3_progress()
 
         self._select_subtab(self.tab_detect)
+        self._persist_step3_progress()
         self._set_button_emphasis("btn_run_detection_frame", True)
         self._set_button_emphasis("btn_to_dataset_frame", False)
 
@@ -1295,9 +1308,9 @@ class CharacterAnnotationTab:
             self._set_subtab_state(self.tab_dataset, "normal")
 
             CAMPAIGN.set_step3_substep(3)
-            self._persist_step3_progress()
 
         self._select_subtab(self.tab_dataset)
+        self._persist_step3_progress()
         self._set_button_emphasis("btn_run_detection_frame", False)
         self._set_button_emphasis("btn_to_dataset_frame", False)
 
@@ -1318,9 +1331,9 @@ class CharacterAnnotationTab:
             CAMPAIGN.set_step3_substep(1)
             CAMPAIGN.set_step3_stage1_done(False)
             CAMPAIGN.set_step3_stage2_done(False)
-            self._persist_step3_progress()
 
         self._select_subtab(self.tab_extract)
+        self._persist_step3_progress()
 
 
     def back_to_substep_2(self):
@@ -1337,9 +1350,9 @@ class CharacterAnnotationTab:
 
             CAMPAIGN.set_step3_substep(2)
             CAMPAIGN.set_step3_stage2_done(False)
-            self._persist_step3_progress()
 
         self._select_subtab(self.tab_detect)
+        self._persist_step3_progress()
         self._set_button_emphasis("btn_run_detection_frame", True)
         self._set_button_emphasis("btn_to_dataset_frame", False)
 
@@ -1905,6 +1918,7 @@ class CharacterAnnotationTab:
         self.tab_dataset = ttk.Frame(self.main_nb)
         self.main_nb.add(self.tab_dataset, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
         self._build_cvat_tab(self.tab_dataset)
+        self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
 
     # =========================================================
     # TAB 1: Extraction
@@ -3702,9 +3716,18 @@ class CharacterAnnotationTab:
             except Exception as e:
                 self._log(self.test_log_text, f"\n❌ BŁĄD RANKINGU: {e}", "ERROR")
             finally:
-                self.frame.after(0, self._unlock_ui_after_testing)
-                self.frame.after(0, lambda: self.test_progress.config(value=100))
-                self.frame.after(0, lambda: self.test_status_lbl.config(text="Turniej Zakończony!", foreground="#2ecc71"))
+                def finalize():
+                    if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
+                        self.unlock_dataset_subtab()
+
+                    self.test_progress.config(value=100)
+                    self.test_status_lbl.config(
+                        text="Turniej Zakończony!",
+                        foreground="#2ecc71"
+                    )
+                    self._unlock_ui_after_testing()
+
+                self.frame.after(0, finalize)
 
         threading.Thread(target=worker, daemon=True).start()
 
