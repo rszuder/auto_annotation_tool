@@ -3574,29 +3574,22 @@ class CharacterAnnotationTab:
                     "❌ NIE UDAŁO SIĘ UTWORZYĆ DATASETU YOLO.\n\n"
                     "Powód: w bieżącym projekcie nie znaleziono ani jednej tablicy ze statusem 🟢 perfect.\n\n"
                     "CO DALEJ:\n"
-                    "1. Wróć do Autoanotacji i spróbuj ponownie na innych ustawieniach/modelu.\n"
-                    "2. Albo pozostań w Zakładce Znaków i popraw OCR / Laboratorium.\n"
-                    "3. Trening pozostaje zablokowany do czasu zbudowania poprawnej paczki YOLO."
+                    "1. Możesz wrócić do pz2 i poprawić OCR / Laboratorium.\n"
+                    "2. Możesz wykonać eksport do CVAT i później zaimportować poprawki.\n"
+                    "3. Krok 3 pozostaje otwarty — finish będzie dostępny dopiero po pojawieniu się realnego datasetu treningowego."
                 )
                 self._set_console_text(self.export_console, msg)
 
                 try:
-                    from ..campaign_manager import CAMPAIGN
-                    if CAMPAIGN.get_active_project_name():
-                        CAMPAIGN.set_current_step(3)
-                        CAMPAIGN.set_step3_needs_rework()
+                    self._update_step3_finish_button_state()
+                except Exception:
+                    pass
 
-                        if 'campaign' in self.app.tabs:
-                            self.app.tabs['campaign']._refresh_dashboard()
-
+                try:
                     self.app.update_status(
-                        "Krok 3 wymaga poprawy. Wracasz do Rozkładu Jazdy, aby wybrać ścieżkę naprawczą.",
+                        "Nie utworzono gold packa — pozostajesz w z3/pz3, aby kontynuować pracę.",
                         "warning"
                     )
-
-                    self.app.select_tab("campaign")
-                    self.app.update_campaign_tab_access()
-
                 except Exception:
                     pass
 
@@ -3616,22 +3609,10 @@ class CharacterAnnotationTab:
             # ===== KONIEC NOWEGO BLOKU =====
 
             try:
-                from ..campaign_manager import CAMPAIGN
-                if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 3:
-                    CAMPAIGN.approve_step3()
-                    CAMPAIGN.set_current_step(4)
-
-                    if 'campaign' in self.app.tabs:
-                        self.app.tabs['campaign']._refresh_dashboard()
-
-                    # ✅ ZMIANA: po sukcesie też wracamy do Wizarda
-                    self.app.update_status(
-                        "Paczka YOLO została utworzona poprawnie. Odblokowano Krok 4 (Trening).",
-                        "info"
-                    )
-                    self.app.select_tab("campaign")
-                    self.app.update_campaign_tab_access()
-
+                self.app.update_status(
+                    "Paczka YOLO została utworzona poprawnie. Możesz zakończyć ten krok przyciskiem finish.",
+                    "info"
+                )
             except Exception:
                 pass
         except Exception as e:
