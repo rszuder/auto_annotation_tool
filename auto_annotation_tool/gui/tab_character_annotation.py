@@ -3723,7 +3723,7 @@ class CharacterAnnotationTab:
                     self.test_progress.config(value=100)
                     self.test_status_lbl.config(
                         text="Turniej Zakończony!",
-                        foreground="#2ecc71"
+                        foreground="#2ecc72"
                     )
                     self._unlock_ui_after_testing()
 
