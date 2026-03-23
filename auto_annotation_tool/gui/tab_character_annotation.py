@@ -17,6 +17,7 @@ import json
 import cv2
 import requests
 import os
+import shutil
 
 from ..config import CONFIG, logger
 from ..campaign_manager import CAMPAIGN
@@ -1002,6 +1003,43 @@ class CharacterAnnotationTab:
         return review_dir
     # ===== KONIEC NOWEGO BLOKU =====
 
+    # ===== START NOWEGO BLOKU: zapis poprawionej paczki do manual_char_pool =====
+    def _store_current_preview_in_manual_char_pool(self, metadata: dict):
+        """
+        Zapisuje aktualnie poprawioną paczkę preview do manual_char_pool,
+        aby mogła później zasilić trening modelu znaków.
+        """
+        manual_pool_dir = self._get_char_manual_pool_dir()
+        if manual_pool_dir is None:
+            raise RuntimeError("Brak katalogu manual_char_pool dla aktywnego projektu.")
+
+        preview_dir = Path((self.preview_dir_var.get() or "").strip())
+        if not preview_dir.exists() or not preview_dir.is_dir():
+            raise RuntimeError("Brak poprawnego katalogu preview do zapisania w manual_char_pool.")
+
+        preview_name = preview_dir.name if preview_dir.name else "manual_import"
+        target_dir = manual_pool_dir / preview_name
+        target_images_dir = target_dir / "images"
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_images_dir.mkdir(parents=True, exist_ok=True)
+
+        # zapis metadata
+        target_meta = target_dir / "metadata.json"
+        self._atomic_write_json(target_meta, metadata)
+
+        # kopiowanie obrazów źródłowych preview
+        source_images_dir = preview_dir / "images"
+        if source_images_dir.exists() and source_images_dir.is_dir():
+            for img_file in source_images_dir.iterdir():
+                if not img_file.is_file():
+                    continue
+                dst = target_images_dir / img_file.name
+                shutil.copy2(img_file, dst)
+
+        return target_dir
+    # ===== KONIEC NOWEGO BLOKU =====
+
     # ===== START NOWEGO BLOKU: stan artefaktów znakowych =====
     def _has_char_manual_imports(self) -> bool:
         pool_dir = self._get_char_manual_pool_dir()
@@ -1032,6 +1070,7 @@ class CharacterAnnotationTab:
         - złota paczka znaków
         - import ręcznych poprawek znaków
         - scalona pula znaków
+        - review pack do CVAT zapisany w katalogu projektu
         """
         try:
             if self._has_char_gold_exports():
@@ -1049,6 +1088,14 @@ class CharacterAnnotationTab:
         if merged_dir is not None and merged_dir.exists():
             try:
                 if any(p.exists() for p in merged_dir.iterdir()):
+                    return True
+            except Exception:
+                pass
+
+        review_dir = self._get_project_review_dir()
+        if review_dir is not None and review_dir.exists():
+            try:
+                if any(p.is_dir() for p in review_dir.iterdir()):
                     return True
             except Exception:
                 pass
@@ -3531,6 +3578,17 @@ class CharacterAnnotationTab:
             self._load_preview_data(quiet=True)
 
             self._set_console_text(self.import_console, f"✅ Zaktualizowano: {updated} tablic.")
+            # ===== START NOWEGO BLOKU: zapisz poprawki do manual_char_pool =====
+            try:
+                stored_dir = self._store_current_preview_in_manual_char_pool(metadata)
+                self._set_console_text(
+                    self.import_console,
+                    f"✅ Zaktualizowano: {updated} tablic.\n\n"
+                    f"📦 Poprawki zapisano do puli ręcznej:\n{stored_dir}"
+                )
+            except Exception as e:
+                logger.debug(f"Nie udało się zapisać paczki do manual_char_pool: {e}")
+            # ===== KONIEC NOWEGO BLOKU =====
             # ===== START NOWEGO BLOKU =====
             try:
                 self._update_step3_finish_button_state()
