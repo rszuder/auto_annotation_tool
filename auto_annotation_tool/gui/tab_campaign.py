@@ -319,8 +319,8 @@ class CampaignTab:
 
         ttk.Button(
             btn_row,
-            text="🔬 Popraw OCR",
-            command=self._step_goto_characters
+            text=" Popraw OCR",
+            command=self._rework_step3_via_ocr
         ).pack(side=tk.LEFT)
 
     def _rework_step3_via_auto_annotation(self):
@@ -347,6 +347,34 @@ class CampaignTab:
 
         except Exception as e:
             logger.error(f"Błąd przejścia do ścieżki naprawczej Autoanotacji: {e}")
+
+    def _rework_step3_via_ocr(self):
+        """
+        Ścieżka naprawcza OCR dla Kroku 3.
+        Ma zawsze prowadzić do z3/pz2, a nie do ostatnio zapamiętanego pz3.
+        """
+        try:
+            CAMPAIGN.set_current_step(3)
+            CAMPAIGN.set_step3_needs_rework()
+            CAMPAIGN.set_step3_substep(2)
+            CAMPAIGN.set_step3_stage1_done(True)
+            CAMPAIGN.set_step3_stage2_done(False)
+
+            self._refresh_dashboard()
+            self.app.update_campaign_tab_access()
+
+            try:
+                self.app.update_status(
+                    "Wybrano ścieżkę naprawczą OCR. Przechodzę do Kroku 3 / pz2.",
+                    "warning"
+                )
+            except Exception:
+                pass
+
+            self._step_goto_characters()
+
+        except Exception as e:
+            logger.error(f"Błąd przejścia do ścieżki naprawczej OCR: {e}")
 
     # ======================================================
     # DASHBOARD REFRESH
