@@ -49,6 +49,7 @@ class TrainingTab:
         self.current_run_id = None
         self._pending_campaign_model_type = None
         self._current_training_dataset_is_pose = None
+        self._current_training_dataset_is_pose = None
         self._training_completion_poll_job = None
         
         
@@ -220,6 +221,9 @@ class TrainingTab:
         except Exception:
             pass
 
+        #test kontekst char/plate
+        self.set_campaign_training_target("plate")
+
         # ------------------------------------------------------
         # Krok 10: odśwież historię z nowego katalogu projektu
         # ------------------------------------------------------
@@ -257,6 +261,7 @@ class TrainingTab:
         self._load_history()
 
         self._pending_campaign_model_type = None
+        self._campaign_training_target = "char"
         self._current_training_dataset_is_pose = None
 
         if self._training_completion_poll_job is not None:
@@ -265,99 +270,25 @@ class TrainingTab:
             except Exception:
                 pass
             self._training_completion_poll_job = None
+            self._set_training_ui_idle_state()
 
-    def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
-        if not run_id:
-            return None
+    def set_campaign_training_target(self, target: str):
+        target = (target or "char").strip().lower()
+        if target not in ("char", "plate"):
+            target = "char"
 
-        base = self._get_runs_base_dir()
-        candidate = base / run_id
-        if candidate.exists() and candidate.is_dir():
-            return candidate
+        self._campaign_training_target = target
 
         try:
-            matches = [p for p in base.iterdir() if p.is_dir() and run_id in p.name]
-            if matches:
-                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                return matches[0]
+            label = "znaków" if target == "char" else "tablic"
+            self._append_train_log(f"[TARGET] Ustawiono kampanijny target treningu: model {label}.")
         except Exception:
             pass
 
-        return None
-
-
-    def _find_best_weights_for_run(self, run_id: str) -> Path | None:
-        run_dir = self._get_run_dir_for_run_id(run_id)
-        if run_dir is None:
-            return None
-
-        direct = run_dir / "weights" / "best.pt"
-        if direct.exists():
-            return direct
-
-        try:
-            candidates = list(run_dir.rglob("best.pt"))
-            if candidates:
-                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                return candidates[0]
-        except Exception:
-            pass
-
-        return None
-
-
-    def _promote_trained_model_to_campaign_if_needed(self):
-        """
-        Jeśli aktywny trening dotyczył detekcji znaków w projekcie kampanii,
-        to po pojawieniu się best.pt promuje model do best_char_model projektu.
-        """
-        if self._pending_campaign_model_type != "char":
-            return False
-
-        if not self.current_run_id:
-            return False
-
-        best_model = self._find_best_weights_for_run(self.current_run_id)
-        if best_model is None or not best_model.exists():
-            return False
-
-        CAMPAIGN.set_global_model("char", str(best_model))
-
-        try:
-            self._append_train_log(f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}")
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        self._pending_campaign_model_type = None
-        return True
-
-
-    def _poll_training_completion(self):
-        """
-        Lekki polling końca treningu:
-        - czeka aż trainer.is_training spadnie do False
-        - jeśli powstał best.pt, promuje model do projektu
-        """
-        try:
-            is_training = bool(getattr(self.trainer, "is_training", False))
-
-            if is_training:
-                self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
-                return
-
-            self._training_completion_poll_job = None
-            self._promote_trained_model_to_campaign_if_needed()
-
-        except Exception as e:
-            logger.error(f"Błąd pollingu końca treningu: {e}")
-            self._training_completion_poll_job = None
+    def get_campaign_training_target(self) -> str:
+        target = getattr(self, "_campaign_training_target", "char")
+        return target if target in ("char", "plate") else "char"
+    
 
     def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
         if not run_id:
@@ -402,10 +333,12 @@ class TrainingTab:
 
     def _promote_trained_model_to_campaign_if_needed(self):
         """
-        Jeśli aktywny trening dotyczył detekcji znaków w projekcie kampanii,
-        to po pojawieniu się best.pt promuje model do best_char_model projektu.
+        Jeśli aktywny trening dotyczył modelu kampanijnego,
+        to po pojawieniu się best.pt promuje model do odpowiedniego
+        slotu projektu: best_char_model albo best_plate_model.
         """
-        if self._pending_campaign_model_type != "char":
+        target = (self._pending_campaign_model_type or "").strip().lower()
+        if target not in ("char", "plate"):
             return False
 
         if not self.current_run_id:
@@ -415,10 +348,17 @@ class TrainingTab:
         if best_model is None or not best_model.exists():
             return False
 
-        CAMPAIGN.set_global_model("char", str(best_model))
+        CAMPAIGN.set_global_model(target, str(best_model))
 
         try:
-            self._append_train_log(f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}")
+            if target == "char":
+                self._append_train_log(
+                    f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}"
+                )
+            else:
+                self._append_train_log(
+                    f"[MODEL] Ustawiono nowy aktywny model tablic projektu: {best_model}"
+                )
         except Exception:
             pass
 
@@ -431,7 +371,6 @@ class TrainingTab:
 
         self._pending_campaign_model_type = None
         return True
-
 
     def _poll_training_completion(self):
         """
@@ -449,10 +388,55 @@ class TrainingTab:
             # trening już się skończył / zatrzymał
             self._training_completion_poll_job = None
             self._promote_trained_model_to_campaign_if_needed()
+            try:
+                self._load_history()
+            except Exception:
+                pass
+
+            self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")            
 
         except Exception as e:
             logger.error(f"Błąd pollingu końca treningu: {e}")
             self._training_completion_poll_job = None
+
+    def _set_training_ui_running_state(self):
+        try:
+            self.btn_start_train.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.btn_stop_train.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.train_progress_label.configure(
+                text="Trening w toku...",
+                foreground="#d35400"
+            )
+        except Exception:
+            pass
+
+    def _set_training_ui_idle_state(self, status_text="Czekam na start...", color="gray"):
+        try:
+            self.btn_start_train.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.btn_stop_train.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.train_progress_label.configure(
+                text=status_text,
+                foreground=color
+            )
+        except Exception:
+            pass
+
     
     def _get_available_devices(self):
         devices = ["auto", "cpu"]
@@ -1212,6 +1196,18 @@ class TrainingTab:
             self.btn_stop_train.configure(state=tk.NORMAL)
             self.train_progress_label.configure(text=f"Trening uruchomiony: {run_id}")
 
+        if CAMPAIGN.get_active_project_name():
+            self._pending_campaign_model_type = self.get_campaign_training_target()
+            try:
+                label = "znaków" if self._pending_campaign_model_type == "char" else "tablic"
+                self._append_train_log(
+                    f"[TARGET] Ten trening zostanie zapisany jako aktywny model {label} projektu."
+                )
+            except Exception:
+                pass
+        else:
+            self._pending_campaign_model_type = None
+
             # start lekkiego pollingu końca treningu
             if self._training_completion_poll_job is not None:
                 try:
@@ -1225,6 +1221,10 @@ class TrainingTab:
     def _stop_training(self):
         self.trainer.stop_training()
         self.btn_stop_train.configure(state=tk.DISABLED)
+        self.train_progress_label.configure(
+            text="Zatrzymywanie treningu...",
+            foreground="#c0392b"
+        )
 
     def _bind_trainer_callbacks(self):
         def on_epoch(epoch, metrics):
@@ -1254,12 +1254,15 @@ class TrainingTab:
             self._ui(update_ui)
 
         def on_end(success, msg):
-            # ✅ ZMIANA: komunikat końcowy też ląduje w terminalu live
             end_line = f"[KONIEC] {'SUKCES' if success else 'BŁĄD/STOP'} | {msg}"
             self._append_train_log(end_line)
 
             self._ui(lambda: self.btn_start_train.configure(state=tk.NORMAL))
             self._ui(lambda: self.btn_stop_train.configure(state=tk.DISABLED))
+            self._ui(lambda: self.train_progress_label.configure(
+                text="Trening zakończony." if success else "Trening zatrzymany / zakończony błędem.",
+                foreground="#2c3e50" if success else "#c0392b"
+            ))
             self._ui(lambda: self._load_history())
 
     def _load_history(self):
