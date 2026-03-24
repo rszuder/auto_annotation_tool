@@ -340,6 +340,27 @@ class CharacterAnnotationTab:
             label += f" [{chars_txt}]"
         return label
 
+    def _get_plate_row_foreground(self, status: str) -> str:
+        status = str(status or "unknown").strip().lower()
+
+        if status == "perfect":
+            return "#27ae60"
+        if status == "needs_fix":
+            return "#c0392b"
+        return "#444444"
+
+
+    def _apply_plate_listbox_row_style(self, row_index: int, status: str):
+        try:
+            fg = self._get_plate_row_foreground(status)
+            self.plates_listbox.itemconfig(
+                row_index,
+                foreground=fg,
+                selectforeground="#ffffff"
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić stylu wiersza listy [{row_index}]: {e}")
+
 
     def _rebuild_preview_listbox(self, preserve_selection: bool = True):
         selected_pid = None
@@ -362,11 +383,13 @@ class CharacterAnnotationTab:
         self._reloading_preview = True
         try:
             self.plates_listbox.delete(0, tk.END)
-
-            for pid in self._listbox_pid_by_index:
+            for idx, pid in enumerate(self._listbox_pid_by_index):
                 data = self.preview_metadata.get(pid, {})
+                status = str(data.get("status", "unknown")).strip().lower()
                 label = self._format_plate_listbox_label(pid, data)
+
                 self.plates_listbox.insert(tk.END, label)
+                self._apply_plate_listbox_row_style(idx, status)
 
             if selected_pid and selected_pid in self._listbox_pid_by_index:
                 idx = self._listbox_pid_by_index.index(selected_pid)
@@ -466,11 +489,13 @@ class CharacterAnnotationTab:
             for idx in range(limit):
                 plate_id = self._listbox_pid_by_index[idx]
                 data = self.preview_metadata.get(plate_id, {})
+                status = str(data.get("status", "unknown")).strip().lower()
                 label = self._format_plate_listbox_label(plate_id, data)
 
                 try:
                     self.plates_listbox.delete(idx)
                     self.plates_listbox.insert(idx, label)
+                    self._apply_plate_listbox_row_style(idx, status)
                 except Exception:
                     pass
 
@@ -479,9 +504,11 @@ class CharacterAnnotationTab:
                 for idx in range(row_count, pid_count):
                     plate_id = self._listbox_pid_by_index[idx]
                     data = self.preview_metadata.get(plate_id, {})
+                    status = str(data.get("status", "unknown")).strip().lower()
                     label = self._format_plate_listbox_label(plate_id, data)
                     try:
                         self.plates_listbox.insert(tk.END, label)
+                        self._apply_plate_listbox_row_style(idx, status)
                     except Exception:
                         pass
 
@@ -539,22 +566,11 @@ class CharacterAnnotationTab:
                 continue
 
             status = str(data.get("status", "unknown")).strip().lower()
-            chars = data.get("characters", []) or []
-            chars_txt = "".join(str(c) for c in chars) if isinstance(chars, list) else str(chars)
-
-            if status == "perfect":
-                icon = "🟢"
-            elif status == "needs_fix":
-                icon = "🔴"
-            else:
-                icon = "⚪"
-
-            label = f"{icon} {plate_id}"
-            if chars_txt:
-                label += f" [{chars_txt}]"
+            label = self._format_plate_listbox_label(plate_id, data)
 
             self.plates_listbox.insert(tk.END, label)
             self.preview_plate_ids.append(plate_id)
+            self._apply_plate_listbox_row_style(len(self.preview_plate_ids) - 1, status)
 
         # spróbuj przywrócić zaznaczenie
         if current_plate_id and current_plate_id in self.preview_plate_ids:
