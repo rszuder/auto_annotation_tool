@@ -49,6 +49,8 @@ class TrainingTab:
         self.current_run_id = None
         self._pending_campaign_model_type = None
         self._campaign_training_target = "char"
+        self._step4_dataset_mode = "char"
+        self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
         self._training_completion_poll_job = None
         
@@ -221,7 +223,13 @@ class TrainingTab:
         except Exception:
             pass
 
-        self._campaign_training_target = "char"
+        self.set_campaign_training_target("char")
+        self._step4_dataset_mode = "char"
+
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
 
         # ------------------------------------------------------
         # Krok 10: odśwież historię z nowego katalogu projektu
@@ -261,6 +269,8 @@ class TrainingTab:
 
         self._pending_campaign_model_type = None
         self._campaign_training_target = "char"
+        self._step4_dataset_mode = "char"
+        self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
 
         if self._training_completion_poll_job is not None:
@@ -270,6 +280,10 @@ class TrainingTab:
                 pass
             self._training_completion_poll_job = None
             self._set_training_ui_idle_state()
+            try:
+                self._refresh_step4_dataset_mode_ui()
+            except Exception:
+                pass
 
     def set_campaign_training_target(self, target: str):
         target = (target or "char").strip().lower()
@@ -288,6 +302,106 @@ class TrainingTab:
         target = getattr(self, "_campaign_training_target", "char")
         return target if target in ("char", "plate") else "char"
     
+    def _append_step4_builder_log(self, message: str):
+        if not hasattr(self, "step4_builder_log_text"):
+            return
+
+        try:
+            self.step4_builder_log_text.configure(state=tk.NORMAL)
+            self.step4_builder_log_text.insert(tk.END, message.rstrip() + "\n")
+            self.step4_builder_log_text.see(tk.END)
+            self.step4_builder_log_text.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def _toggle_step4_builder_log(self):
+        if not hasattr(self, "step4_builder_log_frame"):
+            return
+
+        self._step4_builder_log_visible = not getattr(self, "_step4_builder_log_visible", False)
+
+        if self._step4_builder_log_visible:
+            self.step4_builder_log_frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
+            self.btn_toggle_step4_log.configure(text="Ukryj log")
+        else:
+            self.step4_builder_log_frame.pack_forget()
+            self.btn_toggle_step4_log.configure(text="Pokaż log")
+
+    def _set_step4_dataset_mode(self, mode: str):
+        mode = (mode or "char").strip().lower()
+        if mode not in ("char", "plate"):
+            mode = "char"
+
+        self._step4_dataset_mode = mode
+        self.set_campaign_training_target(mode)
+        self._refresh_step4_dataset_mode_ui()
+
+        try:
+            label = "tablic (YOLO Pose)" if mode == "plate" else "znaków (YOLO Detect)"
+            self._append_step4_builder_log(f"[TRYB] Wybrano tor budowy datasetu dla modelu {label}.")
+        except Exception:
+            pass
+
+    def _refresh_step4_dataset_mode_ui(self):
+        if not hasattr(self, "ds_mode_host"):
+            return
+
+        mode = getattr(self, "_step4_dataset_mode", "char")
+
+        try:
+            self.ds_creator_frame.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self.ds_split_frame.pack_forget()
+        except Exception:
+            pass
+
+        if mode == "plate":
+            self.ds_mode_title_var.set("Tor tablic (YOLO Pose)")
+            self.ds_mode_desc_var.set(
+                "Wybierz ten tor, jeśli chcesz zbudować dataset tablic z XML CVAT "
+                "i trenować model tablic rejestracyjnych."
+            )
+            self.btn_choose_plate.configure(state=tk.DISABLED)
+            self.btn_choose_char.configure(state=tk.NORMAL)
+            self.ds_creator_frame.pack(fill=tk.BOTH, expand=True)
+            self.btn_step4_next.configure(text="Dalej: Trening modelu tablic")
+        else:
+            self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
+            self.ds_mode_desc_var.set(
+                "Wybierz ten tor, jeśli chcesz przygotować / dzielić dataset znaków "
+                "i trenować model znaków na tablicach."
+            )
+            self.btn_choose_plate.configure(state=tk.NORMAL)
+            self.btn_choose_char.configure(state=tk.DISABLED)
+            self.ds_split_frame.pack(fill=tk.BOTH, expand=True)
+            self.btn_step4_next.configure(text="Dalej: Trening modelu znaków")
+
+    def _step4_dataset_go_next(self):
+        try:
+            mode = getattr(self, "_step4_dataset_mode", "char")
+            self.set_campaign_training_target(mode)
+        except Exception:
+            pass
+
+        try:
+            self.main_nb.select(self.tab_train)
+        except Exception:
+            pass
+
+    def _step4_dataset_go_back(self):
+        if CAMPAIGN.get_active_project_name():
+            try:
+                self.app.open_controlled_tab("campaign")
+                return
+            except Exception:
+                pass
+
+        self._append_step4_builder_log(
+            "[NAWIGACJA] Tryb swobodny: brak poprzedniego kroku wizardowego do otwarcia."
+        )
 
     def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
         if not run_id:
@@ -508,16 +622,139 @@ class TrainingTab:
         self._build_ranking_tab()
 
     def _build_dataset_tab(self):
-        self.ds_pane = ttk.PanedWindow(self.tab_dataset, orient=tk.VERTICAL)
-        self.ds_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        root = ttk.Frame(self.tab_dataset, padding=8)
+        root.pack(fill=tk.BOTH, expand=True)
 
-        self.ds_creator_frame = ttk.LabelFrame(self.ds_pane, text=" Opcja A: Budowa Datasetu Tablic (Z XML CVAT) ", padding=10)
-        self.ds_split_frame = ttk.LabelFrame(self.ds_pane, text=" Opcja B: Podział Gotowego Datasetu (np. Mega-Dataset Znaków) ", padding=10)
-        self.ds_pane.add(self.ds_creator_frame, weight=1)
-        self.ds_pane.add(self.ds_split_frame, weight=1)
+        top = ttk.Frame(root)
+        top.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.LabelFrame(top, text=" Wybór ścieżki treningowej ", padding=10)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        ttk.Label(
+            left,
+            text="Najpierw wybierz, który model chcesz prowadzić w tej iteracji.",
+            font=("Segoe UI", 9, "italic"),
+            wraplength=240,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        self.btn_choose_plate = ttk.Button(
+            left,
+            text="Tor tablic (YOLO Pose)",
+            command=lambda: self._set_step4_dataset_mode("plate")
+        )
+        self.btn_choose_plate.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(
+            left,
+            text=(
+                "Buduje dataset tablic z XML CVAT i prowadzi dalej do treningu "
+                "modelu tablic rejestracyjnych."
+            ),
+            wraplength=240,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        self.btn_choose_char = ttk.Button(
+            left,
+            text="Tor znaków (YOLO Detect)",
+            command=lambda: self._set_step4_dataset_mode("char")
+        )
+        self.btn_choose_char.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(
+            left,
+            text=(
+                "Dzieli gotowy dataset znaków i prowadzi dalej do treningu "
+                "modelu znaków na tablicach."
+            ),
+            wraplength=240,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W)
+
+        right = ttk.Frame(top)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        header = ttk.LabelFrame(right, text=" Aktywny tor ", padding=10)
+        header.pack(fill=tk.X)
+
+        self.ds_mode_title_var = tk.StringVar(value="Tor znaków (YOLO Detect)")
+        self.ds_mode_desc_var = tk.StringVar(value="")
+
+        ttk.Label(
+            header,
+            textvariable=self.ds_mode_title_var,
+            font=("Segoe UI", 11, "bold")
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            header,
+            textvariable=self.ds_mode_desc_var,
+            wraplength=700,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(6, 0))
+
+        self.ds_mode_host = ttk.Frame(right)
+        self.ds_mode_host.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        self.ds_creator_frame = ttk.LabelFrame(
+            self.ds_mode_host,
+            text=" Budowa datasetu tablic (YOLO Pose) ",
+            padding=10
+        )
+        self.ds_split_frame = ttk.LabelFrame(
+            self.ds_mode_host,
+            text=" Przygotowanie datasetu znaków (YOLO Detect) ",
+            padding=10
+        )
 
         self._build_creator_ui()
         self._build_splitter_ui()
+
+        tools = ttk.Frame(root)
+        tools.pack(fill=tk.X, pady=(8, 0))
+
+        self.btn_toggle_step4_log = ttk.Button(
+            tools,
+            text="Pokaż log",
+            command=self._toggle_step4_builder_log
+        )
+        self.btn_toggle_step4_log.pack(side=tk.LEFT)
+
+        self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Log operacji pz1 ", padding=6)
+        self.step4_builder_log_text = scrolledtext.ScrolledText(
+            self.step4_builder_log_frame,
+            wrap=tk.WORD,
+            height=10,
+            font=("Consolas", 10)
+        )
+        self.step4_builder_log_text.pack(fill=tk.BOTH, expand=True)
+        self.step4_builder_log_text.configure(state=tk.DISABLED)
+
+        nav = ttk.Frame(root)
+        nav.pack(fill=tk.X, pady=(8, 0))
+
+        self.btn_step4_back = ttk.Button(
+            nav,
+            text="Wstecz",
+            command=self._step4_dataset_go_back
+        )
+        self.btn_step4_back.pack(side=tk.LEFT)
+
+        self.btn_step4_next = ttk.Button(
+            nav,
+            text="Dalej: Trening modelu znaków",
+            command=self._step4_dataset_go_next
+        )
+        self.btn_step4_next.pack(side=tk.RIGHT)
+
+        initial_mode = self.get_campaign_training_target()
+        if initial_mode not in ("char", "plate"):
+            initial_mode = "char"
+
+        self._step4_builder_log_visible = False
+        self._set_step4_dataset_mode(initial_mode)
 
     def _build_creator_ui(self):
         f = self.ds_creator_frame
