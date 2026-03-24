@@ -512,6 +512,7 @@ class CharacterAnnotationTab:
                     data = self.preview_metadata.get(plate_id, {})
                     status = str(data.get("status", "unknown")).strip().lower()
                     label = self._format_plate_listbox_label(plate_id, data)
+
                     try:
                         self.plates_listbox.insert(tk.END, label)
                         self._apply_plate_listbox_row_style(idx, status)
@@ -519,7 +520,6 @@ class CharacterAnnotationTab:
                         pass
 
             self._update_preview_info_label()
-
 
         finally:
             self._reloading_preview = False
@@ -2564,9 +2564,13 @@ class CharacterAnnotationTab:
             self.actions_lf,
             text="BRAK DANYCH",
             font=("Segoe UI", 11, "bold"),
-            foreground="gray"
+            foreground="gray",
+            width=34,
+            anchor="w",
+            justify="left",
+            wraplength=260
         )
-        self.winner_name_lbl.pack(anchor=tk.W, pady=(0, 10))
+        self.winner_name_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
         # 2. Skuteczność OCR
         ttk.Label(
@@ -2578,9 +2582,13 @@ class CharacterAnnotationTab:
         self.winner_acc_lbl = ttk.Label(
             self.actions_lf,
             text="0.0%",
-            font=("Segoe UI", 10)
+            font=("Segoe UI", 10),
+            width=34,
+            anchor="w",
+            justify="left",
+            wraplength=260
         )
-        self.winner_acc_lbl.pack(anchor=tk.W, pady=(0, 10))
+        self.winner_acc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
         ttk.Separator(self.actions_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
 
@@ -2609,9 +2617,13 @@ class CharacterAnnotationTab:
             self.actions_lf,
             text="Gotowy do testów",
             foreground="#2ecc71",
-            font=("Segoe UI", 9, "bold")
+            font=("Segoe UI", 9, "bold"),
+            width=34,
+            anchor="w",
+            justify="left",
+            wraplength=260
         )
-        self.test_status_lbl.pack(anchor=tk.W)
+        self.test_status_lbl.pack(anchor=tk.W, fill=tk.X)
 
         # =========================
         # FOOTER
@@ -3401,88 +3413,9 @@ class CharacterAnnotationTab:
                         self.preview_plate_ids = current_order + appended
                         self._listbox_pid_by_index = list(self.preview_plate_ids)
 
-                        # 4. przebuduj listbox z aktualnego metadata
-                        self._reloading_preview = True
-                        try:
-                            self.plates_listbox.delete(0, tk.END)
-
-                            perfect_count = 0
-                            needs_fix_count = 0
-                            unknown_count = 0
-
-                            for pid in self._listbox_pid_by_index:
-                                data = self.preview_metadata.get(pid, {})
-                                status = str(data.get("status", "unknown")).strip().lower()
-                                chars = data.get("characters", []) or []
-
-                                if isinstance(chars, list):
-                                    try:
-                                        chars_sorted = sorted(
-                                            chars,
-                                            key=lambda rec: (
-                                                float(rec["bbox"][0])
-                                                if isinstance(rec, dict)
-                                                and isinstance(rec.get("bbox"), (list, tuple))
-                                                and len(rec["bbox"]) >= 4
-                                                else 1e9
-                                            )
-                                        )
-                                    except Exception:
-                                        chars_sorted = chars
-
-                                    chars_txt = "".join(
-                                        str(
-                                            rec.get("character")
-                                            if isinstance(rec, dict)
-                                            else rec
-                                        )
-                                        for rec in chars_sorted
-                                    )
-                                else:
-                                    chars_txt = str(chars) if chars else ""
-
-                                if status == "perfect":
-                                    icon = "🟢"
-                                    perfect_count += 1
-                                elif status == "needs_fix":
-                                    icon = "🔴"
-                                    needs_fix_count += 1
-                                else:
-                                    icon = "⚪"
-                                    unknown_count += 1
-
-                                label = f"{icon} {pid}"
-                                if chars_txt:
-                                    label += f" [{chars_txt}]"
-
-                                self.plates_listbox.insert(tk.END, label)
-
-                            self.preview_info_lbl.config(
-                                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect_count} | 🔴 {needs_fix_count} | ⚪ {unknown_count}",
-                                foreground="#2980b9"
-                            )
-
-                            # 5. przywróć zaznaczenie albo wybierz pierwszy wpis
-                            if selected_pid and selected_pid in self._listbox_pid_by_index:
-                                idx = self._listbox_pid_by_index.index(selected_pid)
-                                self.plates_listbox.selection_clear(0, tk.END)
-                                self.plates_listbox.selection_set(idx)
-                                self.plates_listbox.activate(idx)
-                                self.plates_listbox.see(idx)
-                            elif self.plates_listbox.size() > 0:
-                                self.plates_listbox.selection_clear(0, tk.END)
-                                self.plates_listbox.selection_set(0)
-                                self.plates_listbox.activate(0)
-                                self.plates_listbox.see(0)
-
-                            self.plates_listbox.update_idletasks()
-
-                        finally:
-                            self._reloading_preview = False
-
-                        
-                        # 6. odśwież canvas i resztę UI na aktualnym wyborze
-                        self._on_preview_select(None)
+                        # 4. kanoniczne odświeżenie listy i preview z aktualnego metadata
+                        self._reset_preview_cache()
+                        self._load_preview_data(quiet=True)
 
                         try:
                             method_name = (self.detection_method_var.get() or "OCR").upper().strip()
