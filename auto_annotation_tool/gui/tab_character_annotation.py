@@ -1218,9 +1218,33 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się wrócić do wizarda dla rework kroku 3: {e}")
 
-    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 3, interval_ms: int = 300, color: str = "#f39c12"):
-        frame = getattr(self, frame_attr, None)
+    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
+        resolved_attr = frame_attr
+        if frame_attr.endswith("_frame"):
+            pulse_attr = frame_attr[:-6] + "_pulse_frame"
+            if hasattr(self, pulse_attr):
+                resolved_attr = pulse_attr
+
+        frame = getattr(self, resolved_attr, None)
         if frame is None:
+            return
+
+        try:
+            try:
+                base_color = frame.cget("background")
+            except Exception:
+                try:
+                    base_color = frame.cget("bg")
+                except Exception:
+                    base_color = "#f0f0f0"
+
+            frame.config(
+                highlightthickness=4,
+                highlightbackground=base_color,
+                highlightcolor=base_color,
+                bd=0
+            )
+        except Exception:
             return
 
         def tick(step=0):
@@ -1228,14 +1252,26 @@ class CharacterAnnotationTab:
                 if not frame.winfo_exists():
                     return
 
-                self._set_button_emphasis(frame_attr, step % 2 == 0, color)
+                pulse_color = color if (step % 2 == 0) else base_color
+
+                frame.config(
+                    highlightthickness=4,
+                    highlightbackground=pulse_color,
+                    highlightcolor=pulse_color,
+                    bd=0
+                )
 
                 if step < (pulses * 2 - 1):
                     self.frame.after(interval_ms, lambda: tick(step + 1))
                 else:
-                    self._set_button_emphasis(frame_attr, False, color)
+                    frame.config(
+                        highlightthickness=4,
+                        highlightbackground=base_color,
+                        highlightcolor=base_color,
+                        bd=0
+                    )
             except Exception as e:
-                logger.debug(f"Nie udało się pulsować podświetlenia {frame_attr}: {e}")
+                logger.debug(f"Nie udało się pulsować podświetlenia {resolved_attr}: {e}")
 
         tick()
 
@@ -1266,6 +1302,9 @@ class CharacterAnnotationTab:
                     command=self._return_to_wizard_for_step3_rework,
                     state="normal"
                 )
+                self._set_button_emphasis("btn_finish_step3_frame", True)
+                self._pulse_button_emphasis("btn_finish_step3_frame")
+
                 if back_btn is not None:
                     back_btn.config(state="normal")
                 return
@@ -1275,6 +1314,12 @@ class CharacterAnnotationTab:
                 command=self._finalize_step3_from_existing_outputs,
                 state=("normal" if enabled else "disabled")
             )
+
+            if enabled:
+                self._set_button_emphasis("btn_finish_step3_frame", True)
+                self._pulse_button_emphasis("btn_finish_step3_frame")
+            else:
+                self._set_button_emphasis("btn_finish_step3_frame", False)
 
             if back_btn is not None:
                 back_btn.config(state="disabled")
@@ -1432,6 +1477,7 @@ class CharacterAnnotationTab:
     def unlock_detection_subtab(self):
         self._set_button_state("btn_to_detect", True)
         self._set_button_emphasis("btn_to_detect_frame", True)
+        self._pulse_button_emphasis("btn_to_detect_frame")
 
         if self._step3_linear_mode:
             CAMPAIGN.set_step3_stage1_done(True)
@@ -1442,6 +1488,7 @@ class CharacterAnnotationTab:
         self._set_button_state("btn_to_dataset", True)
         self._set_button_emphasis("btn_run_detection_frame", False)
         self._set_button_emphasis("btn_to_dataset_frame", True)
+        self._pulse_button_emphasis("btn_to_dataset_frame")
 
         if self._step3_linear_mode:
             CAMPAIGN.set_step3_stage2_done(True)
@@ -1609,10 +1656,12 @@ class CharacterAnnotationTab:
 
         if saved_substep == 2 and not stage2_done:
             self._set_button_emphasis("btn_run_detection_frame", True)
+            self._pulse_button_emphasis("btn_run_detection_frame")
         elif saved_substep == 2 and stage2_done:
             self._set_button_emphasis("btn_to_dataset_frame", True)
+            self._pulse_button_emphasis("btn_to_dataset_frame")
         elif saved_substep == 3:
-            self._set_button_emphasis("btn_to_dataset_frame", False)
+            self._update_step3_finish_button_state()
 
         try:
             self._update_preview_path_lock()
@@ -1879,25 +1928,33 @@ class CharacterAnnotationTab:
         return "auto"
     
     def _set_button_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
-        frame = getattr(self, frame_attr, None)
+        resolved_attr = frame_attr
+        if frame_attr.endswith("_frame"):
+            pulse_attr = frame_attr[:-6] + "_pulse_frame"
+            if hasattr(self, pulse_attr):
+                resolved_attr = pulse_attr
+
+        frame = getattr(self, resolved_attr, None)
         if frame is None:
             return
 
         try:
-            if enabled:
-                frame.config(
-                    highlightthickness=4,
-                    highlightbackground=color,
-                    highlightcolor=color,
-                    bd=0
-                )
-            else:
-                frame.config(
-                    highlightthickness=0,
-                    bd=0
-                )
+            try:
+                base_color = frame.cget("background")
+            except Exception:
+                try:
+                    base_color = frame.cget("bg")
+                except Exception:
+                    base_color = "#f0f0f0"
+
+            frame.config(
+                highlightthickness=4,
+                highlightbackground=(color if enabled else base_color),
+                highlightcolor=(color if enabled else base_color),
+                bd=0
+            )
         except Exception as e:
-            logger.debug(f"Nie udało się ustawić podświetlenia {frame_attr}: {e}")
+            logger.debug(f"Nie udało się ustawić podświetlenia {resolved_attr}: {e}")
 
     def _ensure_yolo_model_available(self) -> str:
         """
@@ -2613,28 +2670,42 @@ class CharacterAnnotationTab:
             command=self.back_to_substep_1
         )
         self.btn_back_to_extract.grid(row=0, column=0, sticky="w")
+
         self.btn_run_detection_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
         self.btn_run_detection_frame.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        self.btn_run_detection = ttk.Button(
+        self.btn_run_detection_pulse_frame = tk.Frame(
             self.btn_run_detection_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_run_detection_pulse_frame.pack(anchor=tk.W)
+
+        self.btn_run_detection = ttk.Button(
+            self.btn_run_detection_pulse_frame,
             text="Uruchom detekcję",
             command=self._run_detection_stage,
             style="Accent.TButton"
         )
-        self.btn_run_detection.pack()
-        self.btn_run_detection.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.btn_run_detection.pack(ipadx=18, ipady=2)
 
         self.btn_to_dataset_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
         self.btn_to_dataset_frame.grid(row=0, column=3, sticky="e")
 
-        self.btn_to_dataset = ttk.Button(
+        self.btn_to_dataset_pulse_frame = tk.Frame(
             self.btn_to_dataset_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_to_dataset_pulse_frame.pack(anchor=tk.E)
+
+        self.btn_to_dataset = ttk.Button(
+            self.btn_to_dataset_pulse_frame,
             text="Dalej → Integracje i Dataset",
             command=self.go_to_substep_3,
             state=tk.DISABLED
         )
-        self.btn_to_dataset.pack()
+        self.btn_to_dataset.pack(ipadx=18, ipady=2)
 
         # =========================
         # HELP BINDS
@@ -3495,16 +3566,24 @@ class CharacterAnnotationTab:
             command=self.back_to_substep_2
         ).pack(side=tk.LEFT)
 
-        # ===== START NOWEGO BLOKU =====
+        self.btn_finish_step3_frame = tk.Frame(nav, bd=0, highlightthickness=0)
+        self.btn_finish_step3_frame.pack(side=tk.RIGHT)
+
+        self.btn_finish_step3_pulse_frame = tk.Frame(
+            self.btn_finish_step3_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_finish_step3_pulse_frame.pack(anchor=tk.E)
+
         self.btn_finish_step3 = ttk.Button(
-            nav,
+            self.btn_finish_step3_pulse_frame,
             text="Zakończ krok 3 i wróć do Wizarda",
             command=self._finalize_step3_from_existing_outputs,
             style="Accent.TButton",
             state=tk.DISABLED
         )
-        self.btn_finish_step3.pack(side=tk.RIGHT)
-        # ===== KONIEC NOWEGO BLOKU =====
+        self.btn_finish_step3.pack(ipadx=18, ipady=2)
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
