@@ -48,6 +48,9 @@ class AnnotationTab:
         self.plate_custom_var = tk.StringVar()
         self.device_var = tk.StringVar(value="auto")
         self.conf_var = tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE)
+        self._campaign_paths_locked = False
+        self.project_paths_info_var = tk.StringVar(value="")
+        self.project_paths_rel_var = tk.StringVar(value="")
         # ✅ ZMIANA: Program startuje z od razu wypełnioną sugestią na folder źródłowy!
         self.input_dir_var = tk.StringVar(value=str(Path(CONFIG.DIR_1_RAW).absolute()))
         self.output_dir_var = tk.StringVar(value=str(Path(CONFIG.DEFAULT_OUTPUT_DIR)))
@@ -68,12 +71,25 @@ class AnnotationTab:
         return devices
 
     def _device_to_ultralytics(self, device_str: str):
-        if not device_str or device_str == "auto": return "auto"
-        if device_str == "cpu": return "cpu"
+        if not device_str or device_str == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return 0
+            except Exception:
+                pass
+            return "cpu"
+
+        if device_str == "cpu":
+            return "cpu"
+
         if device_str.startswith("cuda:"):
-            try: return int(device_str.split(":")[1].split()[0])
-            except: return 0
-        return "auto"
+            try:
+                return int(device_str.split(":")[1].split()[0])
+            except Exception:
+                return 0
+
+        return "cpu"
 
     def _create_widgets(self):
 
@@ -95,12 +111,34 @@ class AnnotationTab:
         # --- LEWA KOLUMNA ---
         paths_lf = ttk.LabelFrame(left_frame, text=" Ścieżki danych ", padding=15)
         paths_lf.pack(fill=tk.X, pady=(0, 10))
-
         ttk.Label(paths_lf, text="Folder wejściowy (obrazy):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         row_in = ttk.Frame(paths_lf)
-        row_in.pack(fill=tk.X, pady=(0, 10))
-        ttk.Entry(row_in, textvariable=self.input_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row_in, text="Wybierz", command=self._select_input_dir).pack(side=tk.RIGHT, padx=(5,0))
+        row_in.pack(fill=tk.X, pady=(0, 6))
+
+        self.input_dir_entry = ttk.Entry(row_in, textvariable=self.input_dir_var)
+        self.input_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.input_dir_browse_btn = ttk.Button(row_in, text="Wybierz", command=self._select_input_dir)
+        self.input_dir_browse_btn.pack(side=tk.RIGHT, padx=(5,0))
+
+        self.project_paths_info_lbl = ttk.Label(
+            paths_lf,
+            textvariable=self.project_paths_info_var,
+            foreground="#1f618d",
+            font=("Segoe UI", 9, "bold"),
+            wraplength=360,
+            justify=tk.LEFT
+        )
+        self.project_paths_info_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.project_paths_rel_lbl = ttk.Label(
+            paths_lf,
+            textvariable=self.project_paths_rel_var,
+            foreground="#566573",
+            wraplength=360,
+            justify=tk.LEFT
+        )
+        self.project_paths_rel_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 10))
 
         ttk.Label(paths_lf, text="Katalog docelowy (tworzony automatycznie):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         row_out = ttk.Frame(paths_lf)
@@ -111,18 +149,30 @@ class AnnotationTab:
         actions_lf = ttk.LabelFrame(left_frame, text=" Przetwarzanie YOLO ", padding=15)
         actions_lf.pack(fill=tk.X)
 
-        self.start_btn = ttk.Button(actions_lf, text="STARTUJ – AUTOANOTACJĘ", command=self._start_annotation, style="Accent.TButton")
-        self.start_btn.pack(fill=tk.X, pady=5, ipady=4)
+        self.start_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
+        self.start_btn_frame.pack(anchor=tk.W, pady=5)
+
+        self.start_btn = ttk.Button(
+            self.start_btn_frame,
+            text="STARTUJ – AUTOANOTACJĘ",
+            command=self._start_annotation,
+            style="Accent.TButton"
+        )
+        self.start_btn.pack(ipadx=18, ipady=4)
+
         self.stop_btn = ttk.Button(actions_lf, text="ZATRZYMAJ", command=self._stop_annotation, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, pady=5)
-        # ✅ ZMIANA: etap zatwierdzany ręcznie przez użytkownika
+
+        self.approve_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
+        self.approve_btn_frame.pack(anchor=tk.W, pady=5)
+
         self.approve_btn = ttk.Button(
-            actions_lf,
+            self.approve_btn_frame,
             text="ZATWIERDŹ ETAP AUTOANOTACJI",
             command=self._approve_annotation_stage,
             state=tk.DISABLED
         )
-        self.approve_btn.pack(fill=tk.X, pady=5)
+        self.approve_btn.pack(ipadx=18, ipady=2)
 
         self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
         self.progress.pack(fill=tk.X, pady=(15, 5))
@@ -318,7 +368,87 @@ class AnnotationTab:
 
         # wracamy do zwykłego trybu pracy, ale nie narzucamy modeli custom
         self.mode_var.set("C: Pojazdy + tablice")
+        self.device_var.set("auto")
         self._on_mode_change()
+        self._set_campaign_paths_lock_state(False)
+
+    def _format_project_relative_path(self, path_value: str) -> str:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            root = CAMPAIGN.get_active_project_root_dir()
+            p = Path(path_value)
+
+            if root is not None:
+                try:
+                    return str(p.relative_to(root))
+                except Exception:
+                    pass
+
+            return str(p)
+        except Exception:
+            return str(path_value)
+
+    def _set_campaign_paths_lock_state(self, locked: bool):
+        self._campaign_paths_locked = bool(locked)
+
+        try:
+            self.input_dir_entry.configure(state=("readonly" if locked else "normal"))
+        except Exception:
+            pass
+
+        try:
+            self.input_dir_browse_btn.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+        except Exception:
+            pass
+
+        if locked:
+            self.project_paths_info_var.set(
+                "Ścieżki zostały uzupełnione automatycznie z aktywnego projektu."
+            )
+            self.project_paths_rel_var.set(
+                f"IN:  {self._format_project_relative_path(self.input_dir_var.get().strip())}\n"
+                f"OUT: {self._format_project_relative_path(self.output_dir_var.get().strip())}"
+            )
+        else:
+            self.project_paths_info_var.set("")
+            self.project_paths_rel_var.set("")
+
+    def _pulse_action_frame(self, frame_attr: str, pulses: int = 8, interval_ms: int = 300, color: str = "#f39c12"):
+        frame = getattr(self, frame_attr, None)
+        if frame is None:
+            return
+
+        def tick(step=0):
+            try:
+                if not frame.winfo_exists():
+                    return
+
+                if step % 2 == 0:
+                    frame.config(
+                        highlightthickness=4,
+                        highlightbackground=color,
+                        highlightcolor=color,
+                        bd=0
+                    )
+                else:
+                    frame.config(highlightthickness=0, bd=0)
+
+                if step < (pulses * 2 - 1):
+                    self.frame.after(interval_ms, lambda: tick(step + 1))
+                else:
+                    frame.config(highlightthickness=0, bd=0)
+            except Exception as e:
+                logger.debug(f"Nie udało się pulsować ramki {frame_attr}: {e}")
+
+        tick()
+
+    def apply_campaign_context(self, input_dir: Path, output_dir: Path):
+        self.input_dir_var.set(str(input_dir))
+        self.output_dir_var.set(str(output_dir))
+        self.mode_var.set("C: Pojazdy + tablice")
+        self._on_mode_change()
+        self._set_campaign_paths_lock_state(True)
+        self._pulse_action_frame("start_btn_frame")
 
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
@@ -533,6 +663,7 @@ class AnnotationTab:
 
                     # odblokuj przycisk ręcznego zatwierdzania
                     self.approve_btn.config(state=tk.NORMAL)
+                    self._pulse_action_frame("approve_btn_frame")
 
                     if 'campaign' in self.app.tabs:
                         self.app.tabs['campaign']._refresh_dashboard()
