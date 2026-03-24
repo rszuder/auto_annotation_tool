@@ -339,7 +339,7 @@ class CharacterAnnotationTab:
         if chars_txt:
             label += f" [{chars_txt}]"
         return label
-
+    
     def _get_plate_row_foreground(self, status: str) -> str:
         status = str(status or "unknown").strip().lower()
 
@@ -361,6 +361,30 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się ustawić stylu wiersza listy [{row_index}]: {e}")
 
+    def _update_preview_info_label(self):
+        try:
+            perfect = 0
+            needs_fix = 0
+            unknown = 0
+
+            for pid in self._listbox_pid_by_index:
+                status = str(
+                    self.preview_metadata.get(pid, {}).get("status", "unknown")
+                ).strip().lower()
+
+                if status == "perfect":
+                    perfect += 1
+                elif status == "needs_fix":
+                    needs_fix += 1
+                else:
+                    unknown += 1
+
+            self.preview_info_lbl.config(
+                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | {perfect} | {needs_fix} | ⚪ {unknown}",
+                foreground="#2980b9"
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć preview_info_lbl: {e}")
 
     def _rebuild_preview_listbox(self, preserve_selection: bool = True):
         selected_pid = None
@@ -398,25 +422,7 @@ class CharacterAnnotationTab:
                 self.plates_listbox.activate(idx)
                 self.plates_listbox.see(idx)
 
-            perfect = 0
-            needs_fix = 0
-            unknown = 0
-
-            for pid in self._listbox_pid_by_index:
-                status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
-                if status == "perfect":
-                    perfect += 1
-                elif status == "needs_fix":
-                    needs_fix += 1
-                else:
-                    unknown += 1
-
-            self.preview_info_lbl.config(
-                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect} | 🔴 {needs_fix} | ⚪ {unknown}",
-                foreground="#2980b9"
-            )
-
-            self.plates_listbox.update_idletasks()
+            self._update_preview_info_label()
 
         finally:
             self._reloading_preview = False
@@ -512,81 +518,18 @@ class CharacterAnnotationTab:
                     except Exception:
                         pass
 
-            try:
-                perfect = 0
-                needs_fix = 0
-                unknown = 0
+            self._update_preview_info_label()
 
-                for pid in self._listbox_pid_by_index:
-                    status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
-                    if status == "perfect":
-                        perfect += 1
-                    elif status == "needs_fix":
-                        needs_fix += 1
-                    else:
-                        unknown += 1
-
-                self.preview_info_lbl.config(
-                    text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | 🟢 {perfect} | 🔴 {needs_fix} | ⚪ {unknown}",
-                    foreground="#2980b9"
-                )
-            except Exception:
-                pass
-
-            try:
-                self.plates_listbox.update_idletasks()
-            except Exception:
-                pass
 
         finally:
             self._reloading_preview = False
 
     def _refresh_plates_listbox(self, preserve_selection: bool = True):
-        current_plate_id = None
-
-        if preserve_selection:
-            try:
-                sel = self.plates_listbox.curselection()
-                if sel:
-                    idx = sel[0]
-                    if 0 <= idx < len(self.preview_plate_ids):
-                        current_plate_id = self.preview_plate_ids[idx]
-            except Exception:
-                current_plate_id = None
-
-        try:
-            self.plates_listbox.delete(0, tk.END)
-        except Exception:
-            return
-
-        self.preview_plate_ids = []
-
-        for plate_id, data in self.preview_metadata.items():
-            if not isinstance(data, dict):
-                continue
-
-            status = str(data.get("status", "unknown")).strip().lower()
-            label = self._format_plate_listbox_label(plate_id, data)
-
-            self.plates_listbox.insert(tk.END, label)
-            self.preview_plate_ids.append(plate_id)
-            self._apply_plate_listbox_row_style(len(self.preview_plate_ids) - 1, status)
-
-        # spróbuj przywrócić zaznaczenie
-        if current_plate_id and current_plate_id in self.preview_plate_ids:
-            try:
-                idx = self.preview_plate_ids.index(current_plate_id)
-                self.plates_listbox.selection_clear(0, tk.END)
-                self.plates_listbox.selection_set(idx)
-                self.plates_listbox.activate(idx)
-                self.plates_listbox.see(idx)
-            except Exception:
-                pass
-
-        try:
-            self.plates_listbox.update_idletasks()
-        except Exception:
-            pass
+        """
+        Wrapper kompatybilności.
+        Kanoniczny pełny rebuild listy tablic wykonuje _rebuild_preview_listbox().
+        """
+        self._rebuild_preview_listbox(preserve_selection=preserve_selection)
 
     def clear_campaign_context(self):
         """
@@ -2846,31 +2789,14 @@ class CharacterAnnotationTab:
 
             for idx, pid in enumerate(self.preview_plate_ids):
                 data = self.preview_metadata.get(pid, {})
-                status = str(data.get("status", "unknown"))
-                chars = data.get("characters", [])
+                status = str(data.get("status", "unknown")).strip().lower()
+                label = self._format_plate_listbox_label(pid, data)
 
-                clean_chars = []
-                if isinstance(chars, list):
-                    for c in chars:
-                        if isinstance(c, dict) and "character" in c and "bbox" in c:
-                            bbox = c.get("bbox", [])
-                            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                                clean_chars.append(c)
-
-                clean_chars.sort(key=lambda x: float(x["bbox"][0]))
-                text = "".join([str(c.get("character", "")).strip() for c in clean_chars])
-
-                icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
-                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text}]"
-                
-                self.plates_listbox.insert(tk.END, display_text)
+                self.plates_listbox.insert(tk.END, label)
                 self._listbox_pid_by_index.append(pid)  # Mapa 1:1 z wierszem
 
                 current_idx = self.plates_listbox.size() - 1
-                if status == "perfect":
-                    self.plates_listbox.itemconfig(current_idx, foreground="#27ae60")
-                elif status == "needs_fix":
-                    self.plates_listbox.itemconfig(current_idx, foreground="#c0392b")
+                self._apply_plate_listbox_row_style(current_idx, status)
 
             self.preview_info_lbl.config(
                 text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}",
