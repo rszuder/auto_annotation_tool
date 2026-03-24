@@ -1192,18 +1192,95 @@ class CharacterAnnotationTab:
         except Exception:
             return False
     
-    # ===== START NOWEGO BLOKU =====
+    def _return_to_wizard_for_step3_rework(self):
+        try:
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_current_step(3)
+                CAMPAIGN.set_step3_needs_rework()
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić trybu poprawy kroku 3: {e}")
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._rebuild_roadmap_ui()
+                campaign_tab._refresh_dashboard()
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć wizarda dla rework kroku 3: {e}")
+
+        try:
+            self.app.select_tab("campaign")
+            self.app.update_campaign_tab_access()
+            self.app.update_status(
+                "Wracasz do wizarda w trybie poprawy kroku 3.",
+                "warning"
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się wrócić do wizarda dla rework kroku 3: {e}")
+
+    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 3, interval_ms: int = 300, color: str = "#f39c12"):
+        frame = getattr(self, frame_attr, None)
+        if frame is None:
+            return
+
+        def tick(step=0):
+            try:
+                if not frame.winfo_exists():
+                    return
+
+                self._set_button_emphasis(frame_attr, step % 2 == 0, color)
+
+                if step < (pulses * 2 - 1):
+                    self.frame.after(interval_ms, lambda: tick(step + 1))
+                else:
+                    self._set_button_emphasis(frame_attr, False, color)
+            except Exception as e:
+                logger.debug(f"Nie udało się pulsować podświetlenia {frame_attr}: {e}")
+
+        tick()
+
     def _update_step3_finish_button_state(self):
         btn = getattr(self, "btn_finish_step3", None)
+        back_btn = getattr(self, "btn_back_to_wizard_step3", None)
+
         if btn is None:
             return
 
         enabled = self._has_any_step3_export_outputs()
+
+        rework_return_mode = False
         try:
-            btn.config(state=("normal" if enabled else "disabled"))
+            rework_return_mode = bool(
+                getattr(self, "_step3_linear_mode", False)
+                and CAMPAIGN.get_active_project_name()
+                and CAMPAIGN.get_step3_status() == "needs_rework"
+                and not enabled
+            )
+        except Exception:
+            rework_return_mode = False
+
+        try:
+            if rework_return_mode:
+                btn.config(
+                    text="Powrót do wizarda",
+                    command=self._return_to_wizard_for_step3_rework,
+                    state="normal"
+                )
+                if back_btn is not None:
+                    back_btn.config(state="normal")
+                return
+
+            btn.config(
+                text="Zakończ krok 3 i wróć do Wizarda",
+                command=self._finalize_step3_from_existing_outputs,
+                state=("normal" if enabled else "disabled")
+            )
+
+            if back_btn is not None:
+                back_btn.config(state="disabled")
+
         except Exception as e:
             logger.debug(f"Nie udało się ustawić stanu btn_finish_step3: {e}")
-    # ===== KONIEC NOWEGO BLOKU =====
 
     def _update_preview_path_lock(self):
         """
@@ -1384,8 +1461,7 @@ class CharacterAnnotationTab:
 
         self._select_subtab(self.tab_detect)
         self._persist_step3_progress()
-        self._set_button_emphasis("btn_run_detection_frame", True)
-        self._set_button_emphasis("btn_to_dataset_frame", False)
+        self._pulse_button_emphasis("btn_run_detection_frame")
 
     def go_to_substep_3(self):
         if self._step3_linear_mode:
@@ -1440,8 +1516,7 @@ class CharacterAnnotationTab:
 
         self._select_subtab(self.tab_detect)
         self._persist_step3_progress()
-        self._set_button_emphasis("btn_run_detection_frame", True)
-        self._set_button_emphasis("btn_to_dataset_frame", False)
+        self._pulse_button_emphasis("btn_run_detection_frame")
 
     def _persist_step3_progress(self):
         if not getattr(self, "_step3_linear_mode", False):
@@ -1560,9 +1635,9 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self._sync_yolo_model_binding()
+            self._update_step3_finish_button_state()
         except Exception:
-            pass        
+            pass      
 
     def can_restore_step3_substep(self, substep: int) -> bool:
         """
@@ -1811,7 +1886,7 @@ class CharacterAnnotationTab:
         try:
             if enabled:
                 frame.config(
-                    highlightthickness=2,
+                    highlightthickness=4,
                     highlightbackground=color,
                     highlightcolor=color,
                     bd=0
@@ -2076,11 +2151,13 @@ class CharacterAnnotationTab:
         nav = ttk.Frame(parent)
         nav.pack(fill=tk.X, padx=10, pady=(0, 10))
 
-        ttk.Button(
+        self.btn_back_to_wizard_step3 = ttk.Button(
             nav,
             text="← Wstecz",
+            command=self._return_to_wizard_for_step3_rework,
             state=tk.DISABLED
-        ).pack(side=tk.LEFT)
+        )
+        self.btn_back_to_wizard_step3.pack(side=tk.LEFT)
 
         self.btn_to_detect_frame = tk.Frame(nav, bd=0, highlightthickness=0)
         self.btn_to_detect_frame.pack(side=tk.RIGHT)
@@ -3576,9 +3653,15 @@ class CharacterAnnotationTab:
                     "CO DALEJ:\n"
                     "1. Możesz wrócić do pz2 i poprawić OCR / Laboratorium.\n"
                     "2. Możesz wykonać eksport do CVAT i później zaimportować poprawki.\n"
-                    "3. Krok 3 pozostaje otwarty — finish będzie dostępny dopiero po pojawieniu się realnego datasetu treningowego."
+                    "3. Możesz też wrócić do wizarda i skorzystać z trybów naprawczych."
                 )
                 self._set_console_text(self.export_console, msg)
+
+                try:
+                    if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
+                        CAMPAIGN.set_step3_needs_rework()
+                except Exception:
+                    pass
 
                 try:
                     self._update_step3_finish_button_state()
