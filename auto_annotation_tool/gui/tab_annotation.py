@@ -149,8 +149,16 @@ class AnnotationTab:
         actions_lf = ttk.LabelFrame(left_frame, text=" Przetwarzanie YOLO ", padding=15)
         actions_lf.pack(fill=tk.X)
 
-        self.start_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
-        self.start_btn_frame.pack(anchor=tk.W, pady=5)
+        self.start_btn_row = ttk.Frame(actions_lf)
+        self.start_btn_row.pack(fill=tk.X, pady=5)
+
+        self.start_btn_frame = tk.Frame(
+            self.start_btn_row,
+            bd=0,
+            highlightthickness=0
+        )
+        self.start_btn_frame.pack(anchor=tk.W)
+        self.start_btn_frame.pack_propagate(True)
 
         self.start_btn = ttk.Button(
             self.start_btn_frame,
@@ -163,8 +171,16 @@ class AnnotationTab:
         self.stop_btn = ttk.Button(actions_lf, text="ZATRZYMAJ", command=self._stop_annotation, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, pady=5)
 
-        self.approve_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
-        self.approve_btn_frame.pack(anchor=tk.W, pady=5)
+        self.approve_btn_row = ttk.Frame(actions_lf)
+        self.approve_btn_row.pack(fill=tk.X, pady=5)
+
+        self.approve_btn_frame = tk.Frame(
+            self.approve_btn_row,
+            bd=0,
+            highlightthickness=0
+        )
+        self.approve_btn_frame.pack(anchor=tk.W)
+        self.approve_btn_frame.pack_propagate(True)
 
         self.approve_btn = ttk.Button(
             self.approve_btn_frame,
@@ -413,10 +429,15 @@ class AnnotationTab:
             self.project_paths_info_var.set("")
             self.project_paths_rel_var.set("")
 
-    def _pulse_action_frame(self, frame_attr: str, pulses: int = 8, interval_ms: int = 300, color: str = "#f39c12"):
+    def _pulse_action_frame(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
         frame = getattr(self, frame_attr, None)
         if frame is None:
             return
+
+        try:
+            base_bg = frame.cget("bg")
+        except Exception:
+            base_bg = None
 
         def tick(step=0):
             try:
@@ -431,12 +452,18 @@ class AnnotationTab:
                         bd=0
                     )
                 else:
-                    frame.config(highlightthickness=0, bd=0)
+                    frame.config(
+                        highlightthickness=0,
+                        bd=0
+                    )
 
                 if step < (pulses * 2 - 1):
                     self.frame.after(interval_ms, lambda: tick(step + 1))
                 else:
-                    frame.config(highlightthickness=0, bd=0)
+                    frame.config(
+                        highlightthickness=0,
+                        bd=0
+                    )
             except Exception as e:
                 logger.debug(f"Nie udało się pulsować ramki {frame_attr}: {e}")
 
