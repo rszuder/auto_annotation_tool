@@ -48,7 +48,7 @@ class TrainingTab:
 
         self.current_run_id = None
         self._pending_campaign_model_type = None
-        self._current_training_dataset_is_pose = None
+        self._campaign_training_target = "char"
         self._current_training_dataset_is_pose = None
         self._training_completion_poll_job = None
         
@@ -221,8 +221,7 @@ class TrainingTab:
         except Exception:
             pass
 
-        #test kontekst char/plate
-        self.set_campaign_training_target("plate")
+        self._campaign_training_target = "char"
 
         # ------------------------------------------------------
         # Krok 10: odśwież historię z nowego katalogu projektu
@@ -393,11 +392,13 @@ class TrainingTab:
             except Exception:
                 pass
 
-            self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")            
+            self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
 
         except Exception as e:
             logger.error(f"Błąd pollingu końca treningu: {e}")
             self._training_completion_poll_job = None
+            self._pending_campaign_model_type = None
+            self._set_training_ui_idle_state("Błąd monitorowania końca treningu.", "#c0392b")
 
     def _set_training_ui_running_state(self):
         try:
@@ -1264,6 +1265,10 @@ class TrainingTab:
                 foreground="#2c3e50" if success else "#c0392b"
             ))
             self._ui(lambda: self._load_history())
+
+        self.trainer.on_epoch_end = on_epoch
+        self.trainer.on_training_end = on_end
+
 
     def _load_history(self):
         self.tree.delete(*self.tree.get_children())
