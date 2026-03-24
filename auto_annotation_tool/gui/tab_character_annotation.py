@@ -2737,12 +2737,18 @@ class CharacterAnnotationTab:
         out_dir = Path(self.preview_dir_var.get().strip())
         meta_path = out_dir / "metadata.json"
 
-        self.frame.after(0, self._update_winner_label)
+        try:
+            self.frame.after(0, self._update_winner_label)
+        except Exception:
+            pass
 
         if not meta_path.exists():
             if not quiet:
                 messagebox.showerror("Brak pliku", f"Nie znaleziono metadata.json w folderze:\n{out_dir}")
-            self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="red")
+            try:
+                self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="red")
+            except Exception:
+                pass
             return
 
         try:
@@ -2755,6 +2761,7 @@ class CharacterAnnotationTab:
             if (not self.preview_metadata) or (not quiet) or need_reload:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
+
                 if not isinstance(loaded, dict):
                     loaded = {}
 
@@ -2762,7 +2769,6 @@ class CharacterAnnotationTab:
                 self._loaded_meta_path = meta_path
                 self._loaded_meta_mtime = current_mtime
 
-                # Normalizacja schematu
                 changed = False
                 for pid, d in self.preview_metadata.items():
                     if not isinstance(d, dict):
@@ -2778,105 +2784,194 @@ class CharacterAnnotationTab:
                     self._atomic_write_json(meta_path, self.preview_metadata)
                     self._loaded_meta_mtime = meta_path.stat().st_mtime
 
-            # ==========================================================
-            # ✅ START BLOKADY - Canvas nie może nic rysować w trakcie tej pętli
-            # ==========================================================
+            selected_pid = None
+            try:
+                current_sel = self.plates_listbox.curselection()
+                if current_sel:
+                    selected_idx = int(current_sel[0])
+                    if 0 <= selected_idx < len(self._listbox_pid_by_index):
+                        selected_pid = self._listbox_pid_by_index[selected_idx]
+            except Exception:
+                selected_pid = None
+
             self._reloading_preview = True
-            
+
             self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
             self.plates_listbox.delete(0, tk.END)
-            self._listbox_pid_by_index = []  # Reset mapy PIDów
+            self._listbox_pid_by_index = []
 
-            for idx, pid in enumerate(self.preview_plate_ids):
+            for pid in self.preview_plate_ids:
                 data = self.preview_metadata.get(pid, {})
                 status = str(data.get("status", "unknown")).strip().lower()
-                label = self._format_plate_listbox_label(pid, data)
+
+                try:
+                    label = self._format_plate_listbox_label(pid, data)
+                except Exception:
+                    chars_txt = ""
+                    try:
+                        chars_txt = self._characters_to_text(data.get("characters", []))
+                    except Exception:
+                        chars_txt = ""
+
+                    if status == "perfect":
+                        icon = "🟢"
+                    elif status == "needs_fix":
+                        icon = "🔴"
+                    else:
+                        icon = "⚪"
+
+                    label = f"{icon} {pid}"
+                    if chars_txt:
+                        label += f" [{chars_txt}]"
 
                 self.plates_listbox.insert(tk.END, label)
-                self._listbox_pid_by_index.append(pid)  # Mapa 1:1 z wierszem
+                self._listbox_pid_by_index.append(pid)
 
                 current_idx = self.plates_listbox.size() - 1
-                self._apply_plate_listbox_row_style(current_idx, status)
+                try:
+                    if hasattr(self, "_apply_plate_listbox_row_style"):
+                        self._apply_plate_listbox_row_style(current_idx, status)
+                    else:
+                        if status == "perfect":
+                            self.plates_listbox.itemconfig(current_idx, foreground="#27ae60")
+                        elif status == "needs_fix":
+                            self.plates_listbox.itemconfig(current_idx, foreground="#c0392b")
+                        else:
+                            self.plates_listbox.itemconfig(current_idx, foreground="#444444")
+                except Exception:
+                    pass
 
-            self.preview_info_lbl.config(
-                text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}",
-                foreground="green"
-            )
+            try:
+                self.preview_info_lbl.config(
+                    text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}",
+                    foreground="green"
+                )
+            except Exception:
+                pass
 
             if self.preview_plate_ids:
-                self.plates_listbox.selection_set(0)
-                self._on_preview_select(None)
+                restore_idx = 0
+                if selected_pid and selected_pid in self._listbox_pid_by_index:
+                    restore_idx = self._listbox_pid_by_index.index(selected_pid)
 
-            self.frame.after(100, self._update_winner_label)
+                self.plates_listbox.selection_clear(0, tk.END)
+                self.plates_listbox.selection_set(restore_idx)
+                self.plates_listbox.activate(restore_idx)
+                self.plates_listbox.see(restore_idx)
+
+            try:
+                self.frame.after(100, self._update_winner_label)
+            except Exception:
+                pass
 
         except Exception as e:
             if not quiet:
                 messagebox.showerror("Błąd odświeżania listy", str(e))
             logger.error(f"Błąd _load_preview_data: {e}")
         finally:
-            # ==========================================================
-            # ✅ KONIEC BLOKADY - Zawsze zdejmij flagę, nawet jak jest błąd
-            # ==========================================================
             self._reloading_preview = False
 
+        try:
+            if self.preview_plate_ids and self.plates_listbox.curselection():
+                self.frame.after_idle(lambda: self._on_preview_select(None))
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć preview po _load_preview_data: {e}")
+
+
     def _refresh_listbox_rows_from_metadata(self):
-        """Pełne odświeżenie tekstów i kolorów listy na podstawie aktualnego self.preview_metadata."""
+        """Pełne odświeżenie listy i preview na podstawie aktualnego self.preview_metadata."""
         if not hasattr(self, "plates_listbox"):
             return
 
-        self._reloading_preview = True
         try:
             current_sel = self.plates_listbox.curselection()
-            selected_idx = int(current_sel[0]) if current_sel else None
+            selected_pid = None
 
+            if current_sel:
+                try:
+                    selected_idx = int(current_sel[0])
+                    if 0 <= selected_idx < len(self._listbox_pid_by_index):
+                        selected_pid = self._listbox_pid_by_index[selected_idx]
+                except Exception:
+                    selected_pid = None
+
+            self._reloading_preview = True
+            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
             self.plates_listbox.delete(0, tk.END)
             self._listbox_pid_by_index = []
 
-            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
-
-            for idx, pid in enumerate(self.preview_plate_ids):
+            for pid in self.preview_plate_ids:
                 data = self.preview_metadata.get(pid, {})
-                status = str(data.get("status", "unknown"))
-                chars = data.get("characters", [])
+                status = str(data.get("status", "unknown")).strip().lower()
 
-                clean_chars = []
-                if isinstance(chars, list):
-                    for c in chars:
-                        if isinstance(c, dict) and "character" in c and "bbox" in c:
-                            bbox = c.get("bbox", [])
-                            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                                clean_chars.append(c)
+                try:
+                    label = self._format_plate_listbox_label(pid, data)
+                except Exception:
+                    chars_txt = ""
+                    try:
+                        chars_txt = self._characters_to_text(data.get("characters", []))
+                    except Exception:
+                        chars_txt = ""
 
-                clean_chars.sort(key=lambda x: float(x.get("bbox", [0])[0]))
-                text = "".join([str(c.get("character", "")).strip() for c in clean_chars])
+                    if status == "perfect":
+                        icon = "🟢"
+                    elif status == "needs_fix":
+                        icon = "🔴"
+                    else:
+                        icon = "⚪"
 
-                icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
-                display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text}]"
+                    label = f"{icon} {pid}"
+                    if chars_txt:
+                        label += f" [{chars_txt}]"
 
-                self.plates_listbox.insert(tk.END, display_text)
+                self.plates_listbox.insert(tk.END, label)
                 self._listbox_pid_by_index.append(pid)
 
-                if status == "perfect":
-                    self.plates_listbox.itemconfig(idx, foreground="#27ae60")
-                elif status == "needs_fix":
-                    self.plates_listbox.itemconfig(idx, foreground="#c0392b")
-                else:
-                    self.plates_listbox.itemconfig(idx, foreground="#444444")
+                current_idx = self.plates_listbox.size() - 1
+                try:
+                    if hasattr(self, "_apply_plate_listbox_row_style"):
+                        self._apply_plate_listbox_row_style(current_idx, status)
+                    else:
+                        if status == "perfect":
+                            self.plates_listbox.itemconfig(current_idx, foreground="#27ae60")
+                        elif status == "needs_fix":
+                            self.plates_listbox.itemconfig(current_idx, foreground="#c0392b")
+                        else:
+                            self.plates_listbox.itemconfig(current_idx, foreground="#444444")
+                except Exception:
+                    pass
 
-            # Przywróć zaznaczenie, jeśli było
-            if selected_idx is not None and 0 <= selected_idx < self.plates_listbox.size():
-                self.plates_listbox.selection_set(selected_idx)
-                self.plates_listbox.activate(selected_idx)
+            if self._listbox_pid_by_index:
+                restore_idx = 0
+                if selected_pid and selected_pid in self._listbox_pid_by_index:
+                    restore_idx = self._listbox_pid_by_index.index(selected_pid)
+
+                self.plates_listbox.selection_clear(0, tk.END)
+                self.plates_listbox.selection_set(restore_idx)
+                self.plates_listbox.activate(restore_idx)
+                self.plates_listbox.see(restore_idx)
+
+            try:
+                if hasattr(self, "_update_preview_info_label"):
+                    self._update_preview_info_label()
+            except Exception:
+                pass
 
         finally:
             self._reloading_preview = False
 
+        try:
+            if self._listbox_pid_by_index and self.plates_listbox.curselection():
+                self.frame.after_idle(lambda: self._on_preview_select(None))
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć preview po _refresh_listbox_rows_from_metadata: {e}")
+
     def _on_preview_select(self, event=None):
-        """Podgląd tablicy + bboxy znaków. PID bierzemy z TEKSTU wiersza listy (zero rozjazdów)."""
+        """Podgląd tablicy + bboxy znaków."""
         if not PIL_AVAILABLE:
             return
 
-        # ✅ ZMIANA: jeśli akurat przebudowujemy listę - nie renderujemy
+        # jeśli akurat przebudowujemy listę - nie renderujemy
         if getattr(self, "_reloading_preview", False):
             return
 
@@ -2884,20 +2979,20 @@ class CharacterAnnotationTab:
         if not sel:
             return
 
-        idx = int(sel[0])
-        row_text = self.plates_listbox.get(idx)
-
-        # ✅ ZMIANA: wyciągamy pid z wiersza listboxa (zawsze spójne z tym, co widzisz)
-        import re
-        m = re.search(r"Plik:\s*([^\s|]+)", row_text)
-        if not m:
+        try:
+            idx = int(sel[0])
+        except Exception:
             return
-        pid = m.group(1).strip()
 
+        pid_map = getattr(self, "_listbox_pid_by_index", [])
+        if not (0 <= idx < len(pid_map)):
+            return
+
+        pid = pid_map[idx]
         data = self.preview_metadata.get(pid, {})
         chars = data.get("characters", [])
 
-        # ✅ ZMIANA: sort + tekst do podglądu (TA sama logika co lista)
+        # ta sama logika kolejności co na liście: sort po osi X
         clean_chars = []
         if isinstance(chars, list):
             for c in chars:
@@ -2909,30 +3004,43 @@ class CharacterAnnotationTab:
         clean_chars.sort(key=lambda x: float(x.get("bbox", [0])[0]))
         text_now = "".join([str(c.get("character", "")).strip() for c in clean_chars])
 
-        status = str(data.get("status", "unknown"))
+        status = str(data.get("status", "unknown")).strip().lower()
         icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
-        display_text = f"[{idx+1:03d}] {icon} Plik: {pid}  |  Odczyt: [{text_now}]"
+        display_text = f"{icon} {pid}"
+        if text_now:
+            display_text += f" [{text_now}]"
 
-        # ✅ ZMIANA: samoleczenie listy - jeśli wiersz pokazuje stare `[...]`, nadpisz go
+        # samoleczenie listy - jeśli wiersz pokazuje stary tekst, nadpisz go na nowy format
+        try:
+            row_text = self.plates_listbox.get(idx)
+        except Exception:
+            row_text = None
+
         if row_text != display_text:
             try:
                 self._reloading_preview = True
                 self.plates_listbox.delete(idx)
                 self.plates_listbox.insert(idx, display_text)
 
-                if status == "perfect":
-                    self.plates_listbox.itemconfig(idx, foreground="#27ae60")
-                elif status == "needs_fix":
-                    self.plates_listbox.itemconfig(idx, foreground="#c0392b")
+                if hasattr(self, "_apply_plate_listbox_row_style"):
+                    self._apply_plate_listbox_row_style(idx, status)
                 else:
-                    self.plates_listbox.itemconfig(idx, foreground="#000000")
+                    if status == "perfect":
+                        self.plates_listbox.itemconfig(idx, foreground="#27ae60")
+                    elif status == "needs_fix":
+                        self.plates_listbox.itemconfig(idx, foreground="#c0392b")
+                    else:
+                        self.plates_listbox.itemconfig(idx, foreground="#444444")
 
                 self.plates_listbox.selection_clear(0, tk.END)
                 self.plates_listbox.selection_set(idx)
+                self.plates_listbox.activate(idx)
+                self.plates_listbox.see(idx)
             finally:
                 self._reloading_preview = False
 
         img_path = Path(self.preview_dir_var.get().strip()) / "images" / f"{pid}.jpg"
+
         self.preview_canvas.delete("all")
         if not img_path.exists():
             return
@@ -2957,6 +3065,7 @@ class CharacterAnnotationTab:
             y_off = (c_h - new_h - margin_y_bottom + margin_y_top) // 2
 
             self.preview_canvas.create_image(x_off, y_off, anchor=tk.NW, image=self._current_photo)
+
             image_bottom_y = y_off + new_h
 
             # rysowanie bboxów + znaków
@@ -2964,19 +3073,38 @@ class CharacterAnnotationTab:
                 x1, y1, x2, y2 = c.get("bbox", [0, 0, 0, 0])
                 cx1, cy1 = (float(x1) * SCALE) + x_off, (float(y1) * SCALE) + y_off
                 cx2, cy2 = (float(x2) * SCALE) + x_off, (float(y2) * SCALE) + y_off
+
                 center_x = cx1 + (cx2 - cx1) / 2
 
-                self.preview_canvas.create_rectangle(cx1, cy1, cx2, cy2, outline="#00ff00", width=2)
+                self.preview_canvas.create_rectangle(
+                    cx1, cy1, cx2, cy2,
+                    outline="#00ff00",
+                    width=2
+                )
 
                 text_anchor_y = image_bottom_y + 35
-                self.preview_canvas.create_line(center_x, cy2, center_x, text_anchor_y - 20,
-                                                fill="#2ecc71", dash=(2, 2))
+                self.preview_canvas.create_line(
+                    center_x, cy2,
+                    center_x, text_anchor_y - 20,
+                    fill="#2ecc71",
+                    dash=(2, 2)
+                )
 
                 char_text = str(c.get("character", ""))
-                self.preview_canvas.create_text(center_x + 1, text_anchor_y + 1, text=char_text,
-                                                fill="#000000", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
-                self.preview_canvas.create_text(center_x, text_anchor_y, text=char_text,
-                                                fill="#f1c40f", font=("Segoe UI", 18, "bold"), anchor=tk.CENTER)
+                self.preview_canvas.create_text(
+                    center_x + 1, text_anchor_y + 1,
+                    text=char_text,
+                    fill="#000000",
+                    font=("Segoe UI", 18, "bold"),
+                    anchor=tk.CENTER
+                )
+                self.preview_canvas.create_text(
+                    center_x, text_anchor_y,
+                    text=char_text,
+                    fill="#f1c40f",
+                    font=("Segoe UI", 18, "bold"),
+                    anchor=tk.CENTER
+                )
 
         except Exception as e:
             logger.error(f"Błąd wyświetlania podglądu tablicy: {e}")
