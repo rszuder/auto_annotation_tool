@@ -142,78 +142,51 @@ class TrainingTab:
             return Path(self._campaign_runs_dir)
         return Path(CONFIG.DEFAULT_TRAINING_DIR)
     
-    #=====================================
-
+        #=====================================
     def set_campaign_context(self, runs_dir=None, datasets_dir=None):
         """
-        ✅ ZMIANA: przełącza TrainingTab na katalogi aktywnego projektu.
-        - runs_dir: katalog projektu 5_training_runs
-        - datasets_dir: katalog projektu 4_training_datasets
-
-        Działanie:
-        1. zapisuje kontekst katalogów projektu,
-        2. przełącza historię treningów na katalog projektu,
-        3. tworzy nowy obiekt trenera spięty z nową historią,
-        4. ponownie podpina callbacki UI,
-        5. odświeża historię i czyści bieżący stan podglądu.
+        Przełącza TrainingTab na katalogi aktywnego projektu
+        i odtwarza stan z4 dla bieżącego projektu.
         """
-        # ------------------------------------------------------
-        # Krok 1: zapamiętaj katalog datasetów projektu
-        # ------------------------------------------------------
         if datasets_dir is not None:
             self._campaign_datasets_dir = str(Path(datasets_dir))
 
-        # ------------------------------------------------------
-        # Krok 2: jeśli nie podano runs_dir, nic więcej nie rób
-        # ------------------------------------------------------
+        # jeśli nie podano katalogu runów, to i tak spróbuj odtworzyć stan z4
         if runs_dir is None:
+            try:
+                self._restore_step4_campaign_project_state()
+            except Exception:
+                pass
             return
 
         new_runs_dir = Path(runs_dir)
 
-        # ------------------------------------------------------
-        # Krok 3: nie przełączaj kontekstu w trakcie aktywnego treningu
-        # ------------------------------------------------------
         if getattr(self.trainer, "is_training", False):
             logger.warning("Nie można zmienić kontekstu projektu podczas aktywnego treningu.")
             return
 
-        # ------------------------------------------------------
-        # Krok 4: jeśli kontekst runów jest już taki sam, tylko odśwież historię
-        # ------------------------------------------------------
+        # jeśli kontekst runów jest już taki sam, nie kończ na samym _load_history()
         if self._campaign_runs_dir == str(new_runs_dir):
             self._load_history()
+            try:
+                self._restore_step4_campaign_project_state()
+            except Exception:
+                pass
             return
 
-        # ------------------------------------------------------
-        # Krok 5: zapisz nowy katalog runów projektu
-        # ------------------------------------------------------
         self._campaign_runs_dir = str(new_runs_dir)
         new_runs_dir.mkdir(parents=True, exist_ok=True)
 
-        # ------------------------------------------------------
-        # Krok 6: przełącz historię treningów na katalog projektu
-        # ------------------------------------------------------
         self.history = TrainingHistory(history_dir=new_runs_dir)
-
-        # ------------------------------------------------------
-        # Krok 7: utwórz nowy trener spięty z projektową historią
-        # ------------------------------------------------------
         self.trainer = YOLOPoseTrainer(history=self.history)
-
-        # ------------------------------------------------------
-        # Krok 8: ponownie podepnij callbacki do nowego obiektu trenera
-        # ------------------------------------------------------
         self._bind_trainer_callbacks()
 
-        # ------------------------------------------------------
-        # Krok 9: wyczyść lokalny stan zakładki związany z poprzednim projektem
-        # ------------------------------------------------------
         self.current_run_id = None
         self._plots_paths = []
         self._plot_original_path = None
         self._plot_photo = None
         self._plot_img_id = None
+        self._step4_campaign_finish_ready = False
 
         try:
             self.plots_list.delete(0, tk.END)
@@ -228,17 +201,291 @@ class TrainingTab:
         self.set_campaign_training_target("char")
         self._step4_dataset_mode = "char"
 
+        self._load_history()
+
+        try:
+            self._restore_step4_campaign_project_state()
+        except Exception:
+            pass
+
+        logger.info(f"TrainingTab przełączony na projektowy katalog runów: {new_runs_dir}")
+
+
+    def _restore_step4_campaign_project_state(self):
+        """
+        Odtwarza stan z4 dla aktywnego projektu:
+        - czyści ścieżki z poprzedniego projektu,
+        - uzupełnia źródło splitu w pz1, jeśli istnieje sensowna paczka źródłowa,
+        - jeśli istnieje gotowy dataset treningowy dla bieżącego projektu,
+        przechodzi od razu do pz2,
+        - w przeciwnym razie zostawia użytkownika w pz1.
+        """
+        datasets_dir = Path(self._campaign_datasets_dir) if self._campaign_datasets_dir else None
+
+        # Zawsze najpierw wyczyść stan ścieżek, żeby nie zostały śmieci z poprzedniego projektu
+        try:
+            self.split_src_var.set("")
+        except Exception:
+            pass
+
+        try:
+            if datasets_dir is not None:
+                self.split_out_var.set(str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
+            else:
+                self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        except Exception:
+            pass
+
+        try:
+            self.dataset_var.set("")
+        except Exception:
+            pass
+
+        try:
+            if datasets_dir is not None:
+                self.ds_out_var.set(str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]"))
+            else:
+                self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        except Exception:
+            pass
+
+        remembered_target = self.get_campaign_training_target()
+        if remembered_target not in ("char", "plate"):
+            remembered_target = "char"
+
+        latest_source = None
+        ready_dataset = None
+        ready_target = remembered_target
+
+        if datasets_dir is not None and datasets_dir.exists():
+            # 1. znajdź potencjalne źródło splitu / datasetu źródłowego
+            try:
+                source_candidates = [
+                    p for p in datasets_dir.iterdir()
+                    if p.is_dir()
+                    and "_Split_" not in p.name
+                    and (p / "images").exists()
+                ]
+                if source_candidates:
+                    latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
+            except Exception:
+                latest_source = None
+
+            # 2. znajdź gotowe datasety treningowe
+            ready_candidates = []
+            try:
+                for p in datasets_dir.iterdir():
+                    if not p.is_dir():
+                        continue
+
+                    yaml_path = p / "data.yaml"
+                    if not yaml_path.exists():
+                        continue
+
+                    try:
+                        cfg = safe_load_yaml(yaml_path) or {}
+                    except Exception:
+                        continue
+
+                    is_pose = "kpt_shape" in cfg
+                    target = "plate" if is_pose else "char"
+                    ready_candidates.append((p, target, p.stat().st_mtime))
+            except Exception:
+                ready_candidates = []
+
+            preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
+            if preferred:
+                ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
+            elif ready_candidates:
+                ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
+
+        if latest_source is not None:
+            try:
+                self.split_src_var.set(str(latest_source))
+                self.split_out_var.set(str(Path(self._campaign_datasets_dir) / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
+            except Exception:
+                pass
+
+        self._step4_dataset_mode = ready_target
+        self.set_campaign_training_target(ready_target)
+
+        if ready_dataset is not None:
+            try:
+                self.dataset_var.set(str(ready_dataset))
+            except Exception:
+                pass
+
+            try:
+                self._append_step4_builder_log(
+                    f"[KAMPANIA] Odtworzono gotowy dataset projektu: {ready_dataset.name}. "
+                    f"Przechodzę bezpośrednio do pz2."
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self._append_step4_builder_log(
+                    "[KAMPANIA] Brak gotowego datasetu treningowego dla tego projektu. "
+                    "Pozostaję w pz1."
+                )
+            except Exception:
+                pass
+
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+
         try:
             self._refresh_step4_campaign_navigation_ui()
         except Exception:
             pass
 
-        # ------------------------------------------------------
-        # Krok 10: odśwież historię z nowego katalogu projektu
-        # ------------------------------------------------------
-        self._load_history()
+        try:
+            if ready_dataset is not None:
+                self.main_nb.select(self.tab_train)
+            else:
+                self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
 
-        logger.info(f"TrainingTab przełączony na projektowy katalog runów: {new_runs_dir}")
+    def _restore_step4_campaign_project_state(self):
+        """
+        Odtwarza stan z4 dla aktywnego projektu:
+        - czyści ścieżki z poprzedniego projektu,
+        - uzupełnia źródło splitu w pz1, jeśli istnieje sensowna paczka źródłowa,
+        - jeśli istnieje gotowy dataset treningowy dla bieżącego projektu,
+        przechodzi od razu do pz2,
+        - w przeciwnym razie zostawia użytkownika w pz1.
+        """
+        datasets_dir = Path(self._campaign_datasets_dir) if self._campaign_datasets_dir else None
+
+        # zawsze najpierw wyczyść stan ścieżek, żeby nie zostały śmieci z poprzedniego projektu
+        try:
+            self.split_src_var.set("")
+        except Exception:
+            pass
+
+        try:
+            if datasets_dir is not None:
+                self.split_out_var.set(str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
+            else:
+                self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        except Exception:
+            pass
+
+        try:
+            self.dataset_var.set("")
+        except Exception:
+            pass
+
+        try:
+            if datasets_dir is not None:
+                self.ds_out_var.set(str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]"))
+            else:
+                self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        except Exception:
+            pass
+
+        remembered_target = self.get_campaign_training_target()
+        if remembered_target not in ("char", "plate"):
+            remembered_target = "char"
+
+        latest_source = None
+        ready_dataset = None
+        ready_target = remembered_target
+
+        if datasets_dir is not None and datasets_dir.exists():
+            # 1. znajdź potencjalne źródło splitu / datasetu źródłowego
+            try:
+                source_candidates = [
+                    p for p in datasets_dir.iterdir()
+                    if p.is_dir()
+                    and "_Split_" not in p.name
+                    and (p / "images").exists()
+                ]
+                if source_candidates:
+                    latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
+            except Exception:
+                latest_source = None
+
+            # 2. znajdź gotowe datasety treningowe
+            ready_candidates = []
+            try:
+                for p in datasets_dir.iterdir():
+                    if not p.is_dir():
+                        continue
+
+                    yaml_path = p / "data.yaml"
+                    if not yaml_path.exists():
+                        continue
+
+                    try:
+                        cfg = safe_load_yaml(yaml_path) or {}
+                    except Exception:
+                        continue
+
+                    is_pose = "kpt_shape" in cfg
+                    target = "plate" if is_pose else "char"
+                    ready_candidates.append((p, target, p.stat().st_mtime))
+            except Exception:
+                ready_candidates = []
+
+            preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
+            if preferred:
+                ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
+            elif ready_candidates:
+                ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
+
+        if latest_source is not None:
+            try:
+                self.split_src_var.set(str(latest_source))
+                self.split_out_var.set(str(Path(self._campaign_datasets_dir) / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
+            except Exception:
+                pass
+
+        self._step4_dataset_mode = ready_target
+        self.set_campaign_training_target(ready_target)
+
+        if ready_dataset is not None:
+            try:
+                self.dataset_var.set(str(ready_dataset))
+            except Exception:
+                pass
+
+            try:
+                self._append_step4_builder_log(
+                    f"[KAMPANIA] Odtworzono gotowy dataset projektu: {ready_dataset.name}. "
+                    f"Przechodzę bezpośrednio do pz2."
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self._append_step4_builder_log(
+                    "[KAMPANIA] Brak gotowego datasetu treningowego dla tego projektu. "
+                    "Pozostaję w pz1."
+                )
+            except Exception:
+                pass
+
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
+            if ready_dataset is not None:
+                self.main_nb.select(self.tab_train)
+            else:
+                self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
 
     def clear_campaign_context(self):
         """
@@ -248,22 +495,41 @@ class TrainingTab:
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
 
-        # przywróć globalną historię
         self.history = TrainingHistory(history_dir=Path(CONFIG.DEFAULT_TRAINING_DIR))
         self.trainer = YOLOPoseTrainer(history=self.history)
         self._bind_trainer_callbacks()
 
-        # wyczyść pola ścieżek zależnych od projektu
-        self.split_src_var.set("")
-        self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
-        self.dataset_var.set("")
-        self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        try:
+            self.split_src_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        except Exception:
+            pass
+
+        try:
+            self.dataset_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        except Exception:
+            pass
 
         self.current_run_id = None
         self._plots_paths = []
         self._plot_original_path = None
         self._plot_photo = None
         self._plot_img_id = None
+        self._pending_campaign_model_type = None
+        self._campaign_training_target = "char"
+        self._step4_dataset_mode = "char"
+        self._step4_builder_log_visible = False
+        self._current_training_dataset_is_pose = None
+        self._step4_campaign_finish_ready = False
 
         try:
             self.plots_list.delete(0, tk.END)
@@ -295,15 +561,6 @@ class TrainingTab:
         except Exception:
             pass
 
-        self._load_history()
-
-        self._pending_campaign_model_type = None
-        self._campaign_training_target = "char"
-        self._step4_dataset_mode = "char"
-        self._step4_builder_log_visible = False
-        self._current_training_dataset_is_pose = None
-        self._step4_campaign_finish_ready = False
-
         if self._training_completion_poll_job is not None:
             try:
                 self.frame.after_cancel(self._training_completion_poll_job)
@@ -311,6 +568,7 @@ class TrainingTab:
                 pass
             self._training_completion_poll_job = None
 
+        self._load_history()
         self._set_training_ui_idle_state()
 
         try:
@@ -341,7 +599,7 @@ class TrainingTab:
         try:
             self._refresh_step4_campaign_navigation_ui()
         except Exception:
-            pass  
+            pass
 
     def set_campaign_training_target(self, target: str):
         target = (target or "char").strip().lower()
@@ -729,9 +987,8 @@ class TrainingTab:
 
     def _complete_campaign_step4_if_needed(self, target: str) -> bool:
         """
-        Jeśli zakończony trening dotyczył aktywnego projektu i jednego
-        z torów kampanijnych (char / plate), zamyka krok 4 kampanii
-        i odświeża dashboard tak, aby odblokować przejście do nowej iteracji.
+        Po promocji modelu kampanijnego tylko sygnalizuje gotowość
+        do ręcznego zakończenia kroku 4. Nie zamyka kroku automatycznie.
         """
         target = str(target or "").strip().lower()
         if target not in ("char", "plate"):
@@ -741,14 +998,10 @@ class TrainingTab:
             return False
 
         try:
-            CAMPAIGN.set_current_step(5)
-        except Exception:
-            return False
-
-        try:
+            label = "znaków" if target == "char" else "tablic"
             self._append_train_log(
-                f"[KAMPANIA] Zakończono krok 4 dla toru '{target}'. "
-                f"Cykl iteracji został domknięty i można przejść do nowej iteracji."
+                f"[KAMPANIA] Model {label} został wypromowany do projektu. "
+                f"Możesz teraz zakończyć krok 4 z poziomu z4."
             )
         except Exception:
             pass
@@ -762,7 +1015,7 @@ class TrainingTab:
 
         try:
             self.app.update_status(
-                f"✅ Zakończono trening toru '{target}'. Cykl iteracji został domknięty.",
+                f"✅ Zakończono trening toru '{target}'. Model został zapisany w projekcie.",
                 "info"
             )
         except Exception:
@@ -1782,8 +2035,6 @@ class TrainingTab:
             except Exception:
                 pass
 
-
-
         if CAMPAIGN.get_active_project_name():
             self._pending_campaign_model_type = self.get_campaign_training_target()
             try:
@@ -1796,15 +2047,15 @@ class TrainingTab:
         else:
             self._pending_campaign_model_type = None
 
-            # start lekkiego pollingu końca treningu
-            if self._training_completion_poll_job is not None:
-                try:
-                    self.frame.after_cancel(self._training_completion_poll_job)
-                except Exception:
-                    pass
-                self._training_completion_poll_job = None
+        # start lekkiego pollingu końca treningu
+        if self._training_completion_poll_job is not None:
+            try:
+                self.frame.after_cancel(self._training_completion_poll_job)
+            except Exception:
+                pass
+            self._training_completion_poll_job = None
 
-            self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)            
+        self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
 
     def _stop_training(self):
         self.trainer.stop_training()

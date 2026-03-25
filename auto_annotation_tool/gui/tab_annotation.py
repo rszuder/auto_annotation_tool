@@ -157,11 +157,18 @@ class AnnotationTab:
             bd=0,
             highlightthickness=0
         )
-        self.start_btn_frame.pack(anchor=tk.W)
-        self.start_btn_frame.pack_propagate(True)
+        self.start_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
+        self.start_btn_frame.pack(anchor=tk.W, pady=5)
+
+        self.start_btn_pulse_frame = tk.Frame(
+            self.start_btn_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.start_btn_pulse_frame.pack(anchor=tk.W)
 
         self.start_btn = ttk.Button(
-            self.start_btn_frame,
+            self.start_btn_pulse_frame,
             text="STARTUJ – AUTOANOTACJĘ",
             command=self._start_annotation,
             style="Accent.TButton"
@@ -179,11 +186,19 @@ class AnnotationTab:
             bd=0,
             highlightthickness=0
         )
-        self.approve_btn_frame.pack(anchor=tk.W)
-        self.approve_btn_frame.pack_propagate(True)
+
+        self.approve_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
+        self.approve_btn_frame.pack(anchor=tk.W, pady=5)
+
+        self.approve_btn_pulse_frame = tk.Frame(
+            self.approve_btn_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.approve_btn_pulse_frame.pack(anchor=tk.W)
 
         self.approve_btn = ttk.Button(
-            self.approve_btn_frame,
+            self.approve_btn_pulse_frame,
             text="ZATWIERDŹ ETAP AUTOANOTACJI",
             command=self._approve_annotation_stage,
             state=tk.DISABLED
@@ -377,16 +392,127 @@ class AnnotationTab:
 
     def clear_campaign_context(self):
         """
-        ✅ ZMIANA: przywraca neutralny stan zakładki Autoanotacji po wyjściu z projektu.
+        Przywraca neutralny stan zakładki Autoanotacji po wyjściu z projektu
+        i czyści wszystkie artefakty poprzedniego projektu z UI.
         """
+        # ścieżki bazowe
         self.input_dir_var.set(str(Path(CONFIG.DIR_1_RAW).absolute()))
         self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()))
 
-        # wracamy do zwykłego trybu pracy, ale nie narzucamy modeli custom
+        # wracamy do zwykłego trybu pracy
         self.mode_var.set("C: Pojazdy + tablice")
         self.device_var.set("auto")
-        self._on_mode_change()
+
+        # reset modeli i custom ścieżek
+        try:
+            if YOLO_AVAILABLE:
+                v_keys = sorted(list(AVAILABLE_DETECT_MODELS.keys()))
+                p_keys = sorted(list(AVAILABLE_POSE_MODELS.keys()))
+
+                if v_keys:
+                    self.vehicle_model_var.set(v_keys[0])
+
+                if p_keys:
+                    self.plate_model_var.set("yolo11s-pose" if "yolo11s-pose" in p_keys else p_keys[0])
+        except Exception:
+            pass
+
+        try:
+            self.vehicle_custom_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.plate_custom_var.set("")
+        except Exception:
+            pass
+
+        # odtwórz standardowy layout UI
+        try:
+            self._on_mode_change()
+        except Exception:
+            pass
+
+        try:
+            self._on_vehicle_model_change()
+        except Exception:
+            pass
+
+        try:
+            self._on_plate_model_change()
+        except Exception:
+            pass
+
         self._set_campaign_paths_lock_state(False)
+
+        # wyczyść pomocnicze opisy ścieżek projektowych
+        try:
+            self.project_paths_info_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.project_paths_rel_var.set("")
+        except Exception:
+            pass
+
+        # wyczyść stan przetwarzania / wyników
+        self.current_annotations = []
+        self.is_processing = False
+
+        try:
+            self.current_input_dir = Path(self.input_dir_var.get().strip())
+        except Exception:
+            self.current_input_dir = None
+
+        # wyczyść preview listy
+        try:
+            self.preview_listbox.delete(0, tk.END)
+        except Exception:
+            pass
+
+        # wyczyść canvas
+        try:
+            self.preview_canvas.delete("all")
+        except Exception:
+            pass
+
+        # wyczyść logi tej zakładki
+        try:
+            self.log_text.delete("1.0", tk.END)
+        except Exception:
+            pass
+
+        # zresetuj progress / status / przyciski
+        try:
+            self.progress["value"] = 0
+        except Exception:
+            pass
+
+        try:
+            self.status_label.config(text="Gotowy do uruchomienia", foreground="gray")
+        except Exception:
+            pass
+
+        try:
+            self.start_btn.config(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.stop_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.approve_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.center_nb.select(0)
+        except Exception:
+            pass
 
     def _format_project_relative_path(self, path_value: str) -> str:
         try:
@@ -435,33 +561,44 @@ class AnnotationTab:
             return
 
         try:
-            base_bg = frame.cget("bg")
+            base_color = frame.cget("background")
         except Exception:
-            base_bg = None
+            try:
+                base_color = frame.cget("bg")
+            except Exception:
+                base_color = "#f0f0f0"
+
+        try:
+            frame.config(
+                highlightthickness=4,
+                highlightbackground=base_color,
+                highlightcolor=base_color,
+                bd=0
+            )
+        except Exception:
+            return
 
         def tick(step=0):
             try:
                 if not frame.winfo_exists():
                     return
 
-                if step % 2 == 0:
-                    frame.config(
-                        highlightthickness=4,
-                        highlightbackground=color,
-                        highlightcolor=color,
-                        bd=0
-                    )
-                else:
-                    frame.config(
-                        highlightthickness=0,
-                        bd=0
-                    )
+                pulse_color = color if (step % 2 == 0) else base_color
+
+                frame.config(
+                    highlightthickness=4,
+                    highlightbackground=pulse_color,
+                    highlightcolor=pulse_color,
+                    bd=0
+                )
 
                 if step < (pulses * 2 - 1):
                     self.frame.after(interval_ms, lambda: tick(step + 1))
                 else:
                     frame.config(
-                        highlightthickness=0,
+                        highlightthickness=4,
+                        highlightbackground=base_color,
+                        highlightcolor=base_color,
                         bd=0
                     )
             except Exception as e:
@@ -475,7 +612,7 @@ class AnnotationTab:
         self.mode_var.set("C: Pojazdy + tablice")
         self._on_mode_change()
         self._set_campaign_paths_lock_state(True)
-        self._pulse_action_frame("start_btn_frame")
+        self._pulse_action_frame("start_btn_pulse_frame")
 
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
@@ -690,7 +827,7 @@ class AnnotationTab:
 
                     # odblokuj przycisk ręcznego zatwierdzania
                     self.approve_btn.config(state=tk.NORMAL)
-                    self._pulse_action_frame("approve_btn_frame")
+                    self._pulse_action_frame("approve_btn_pulse_frame")
 
                     if 'campaign' in self.app.tabs:
                         self.app.tabs['campaign']._refresh_dashboard()
