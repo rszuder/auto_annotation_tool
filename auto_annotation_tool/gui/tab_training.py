@@ -53,7 +53,8 @@ class TrainingTab:
         self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
         self._step4_campaign_finish_ready = False
-        self._step4_campaign_finish_ready = False
+        self._step4_route_selected = False
+        self._step4_train_unlocked = False
         self._training_completion_poll_job = None
         
         
@@ -151,7 +152,13 @@ class TrainingTab:
         if datasets_dir is not None:
             self._campaign_datasets_dir = str(Path(datasets_dir))
 
+        project_datasets_dir = Path(self._campaign_datasets_dir) if self._campaign_datasets_dir else None
+
         if runs_dir is None:
+            self._reset_step4_transient_ui(
+                datasets_dir=project_datasets_dir,
+                require_route_selection=True
+            )
             try:
                 self._restore_step4_campaign_project_state()
             except Exception:
@@ -165,7 +172,10 @@ class TrainingTab:
             return
 
         if self._campaign_runs_dir == str(new_runs_dir):
-            self._load_history()
+            self._reset_step4_transient_ui(
+                datasets_dir=project_datasets_dir,
+                require_route_selection=True
+            )
             try:
                 self._restore_step4_campaign_project_state()
             except Exception:
@@ -179,27 +189,12 @@ class TrainingTab:
         self.trainer = YOLOPoseTrainer(history=self.history)
         self._bind_trainer_callbacks()
 
-        self.current_run_id = None
-        self._plots_paths = []
-        self._plot_original_path = None
-        self._plot_photo = None
-        self._plot_img_id = None
-        self._step4_campaign_finish_ready = False
-
-        try:
-            self.plots_list.delete(0, tk.END)
-        except Exception:
-            pass
-
-        try:
-            self.tree.selection_remove(*self.tree.selection())
-        except Exception:
-            pass
-
-        self.set_campaign_training_target("char")
-        self._step4_dataset_mode = "char"
-
-        self._load_history()
+        self._reset_step4_transient_ui(
+            datasets_dir=project_datasets_dir,
+            target="char",
+            clear_builder_inputs=True,
+            require_route_selection=True
+        )
 
         try:
             self._restore_step4_campaign_project_state()
@@ -255,6 +250,8 @@ class TrainingTab:
         latest_source = None
         ready_dataset = None
         ready_target = remembered_target
+        latest_xml = ""
+        current_iter_images = ""
 
         if datasets_dir is not None and datasets_dir.exists():
             try:
@@ -296,6 +293,25 @@ class TrainingTab:
             elif ready_candidates:
                 ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
 
+        try:
+            auto_dir = CAMPAIGN.get_dir("auto_ann")
+            if auto_dir is not None:
+                xml_files = list(Path(auto_dir).rglob("annotations.xml"))
+                if xml_files:
+                    latest_xml = str(max(xml_files, key=lambda p: p.stat().st_mtime))
+        except Exception:
+            latest_xml = ""
+
+        try:
+            raw_dir = CAMPAIGN.get_dir("raw")
+            if raw_dir is not None:
+                iter_num = CAMPAIGN.get_current_iteration_num()
+                iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+                if iter_dir.exists():
+                    current_iter_images = str(iter_dir)
+        except Exception:
+            current_iter_images = ""
+
         if latest_source is not None:
             try:
                 self.split_src_var.set(str(latest_source))
@@ -303,8 +319,20 @@ class TrainingTab:
             except Exception:
                 pass
 
+        try:
+            self.cvat_xml_var.set(latest_xml)
+        except Exception:
+            pass
+
+        try:
+            self.cvat_images_var.set(current_iter_images)
+        except Exception:
+            pass
+
         self._step4_dataset_mode = ready_target
         self.set_campaign_training_target(ready_target)
+        self._step4_route_selected = False
+        self._step4_train_unlocked = False
 
         if ready_dataset is not None:
             try:
@@ -315,7 +343,7 @@ class TrainingTab:
             try:
                 self._append_step4_builder_log(
                     f"[KAMPANIA] Odtworzono gotowy dataset projektu: {ready_dataset.name}. "
-                    f"Przechodzę bezpośrednio do pz2."
+                    "Pozostaję w pz1, aby zachować liniowy workflow kroku 4."
                 )
             except Exception:
                 pass
@@ -339,10 +367,12 @@ class TrainingTab:
             pass
 
         try:
-            if ready_dataset is not None:
-                self.main_nb.select(self.tab_train)
-            else:
-                self.main_nb.select(self.tab_dataset)
+            self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        try:
+            self._guide_step4_route_selection()
         except Exception:
             pass
 
@@ -358,13 +388,50 @@ class TrainingTab:
         self.trainer = YOLOPoseTrainer(history=self.history)
         self._bind_trainer_callbacks()
 
+        self._reset_step4_transient_ui(
+            target="char",
+            clear_builder_inputs=True,
+            require_route_selection=False
+        )
+
+    def _reset_step4_transient_ui(
+        self,
+        datasets_dir: Path | None = None,
+        target: str | None = None,
+        clear_builder_inputs: bool = False,
+        require_route_selection: bool | None = None,
+    ):
+        if target is not None:
+            target = str(target).strip().lower()
+            if target not in ("char", "plate"):
+                target = "char"
+            self._campaign_training_target = target
+            self._step4_dataset_mode = target
+
+        if require_route_selection is None:
+            require_route_selection = bool(CAMPAIGN.get_active_project_name())
+
+        self._step4_route_selected = not bool(require_route_selection)
+        self._step4_train_unlocked = False
+
+        split_out_default = (
+            str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+            if datasets_dir is not None
+            else f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"
+        )
+        ds_out_default = (
+            str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]")
+            if datasets_dir is not None
+            else f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]"
+        )
+
         try:
             self.split_src_var.set("")
         except Exception:
             pass
 
         try:
-            self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+            self.split_out_var.set(split_out_default)
         except Exception:
             pass
 
@@ -374,9 +441,20 @@ class TrainingTab:
             pass
 
         try:
-            self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+            self.ds_out_var.set(ds_out_default)
         except Exception:
             pass
+
+        if clear_builder_inputs:
+            try:
+                self.cvat_xml_var.set("")
+            except Exception:
+                pass
+
+            try:
+                self.cvat_images_var.set("")
+            except Exception:
+                pass
 
         self.current_run_id = None
         self._plots_paths = []
@@ -384,14 +462,21 @@ class TrainingTab:
         self._plot_photo = None
         self._plot_img_id = None
         self._pending_campaign_model_type = None
-        self._campaign_training_target = "char"
-        self._step4_dataset_mode = "char"
         self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
         self._step4_campaign_finish_ready = False
 
         try:
             self.plots_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "plot_canvas"):
+                self.plot_canvas.original_image = None
+                self.plot_canvas.photo_image = None
+                self.plot_canvas.image_id = None
+                self.plot_canvas.delete("all")
         except Exception:
             pass
 
@@ -410,6 +495,26 @@ class TrainingTab:
             self.train_log_console.delete(1.0, tk.END)
             self.train_log_console.insert(tk.END, "Oczekuje na rozpoczęcie treningu...\nGotowy na dane z Ultralytics.\n")
             self.train_log_console.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.ds_progress_var.set(0.0)
+        except Exception:
+            pass
+
+        try:
+            self.ds_status.configure(text="Gotowy", foreground="green")
+        except Exception:
+            pass
+
+        try:
+            self.split_progress_var.set(0.0)
+        except Exception:
+            pass
+
+        try:
+            self.split_status.configure(text="Gotowy", foreground="black")
         except Exception:
             pass
 
@@ -460,6 +565,14 @@ class TrainingTab:
         except Exception:
             pass
 
+        try:
+            if require_route_selection:
+                self._guide_step4_route_selection()
+            else:
+                self._clear_step4_guidance()
+        except Exception:
+            pass
+
     def set_campaign_training_target(self, target: str):
         target = (target or "char").strip().lower()
         if target not in ("char", "plate"):
@@ -502,14 +615,163 @@ class TrainingTab:
             self.step4_builder_log_frame.pack_forget()
             self.btn_toggle_step4_log.configure(text="Pokaż log")
 
+    def _set_step4_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
+        resolved_attr = frame_attr
+        if frame_attr.endswith("_frame"):
+            pulse_attr = frame_attr[:-6] + "_pulse_frame"
+            if hasattr(self, pulse_attr):
+                resolved_attr = pulse_attr
+
+        frame = getattr(self, resolved_attr, None)
+        if frame is None:
+            return
+
+        try:
+            try:
+                base_color = frame.cget("background")
+            except Exception:
+                try:
+                    base_color = frame.cget("bg")
+                except Exception:
+                    base_color = "#f0f0f0"
+
+            frame.config(
+                highlightthickness=4,
+                highlightbackground=(color if enabled else base_color),
+                highlightcolor=(color if enabled else base_color),
+                bd=0
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić podświetlenia {resolved_attr}: {e}")
+
+    def _pulse_step4_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
+        resolved_attr = frame_attr
+        if frame_attr.endswith("_frame"):
+            pulse_attr = frame_attr[:-6] + "_pulse_frame"
+            if hasattr(self, pulse_attr):
+                resolved_attr = pulse_attr
+
+        frame = getattr(self, resolved_attr, None)
+        if frame is None:
+            return
+
+        try:
+            try:
+                base_color = frame.cget("background")
+            except Exception:
+                try:
+                    base_color = frame.cget("bg")
+                except Exception:
+                    base_color = "#f0f0f0"
+
+            frame.config(
+                highlightthickness=4,
+                highlightbackground=base_color,
+                highlightcolor=base_color,
+                bd=0
+            )
+        except Exception:
+            return
+
+        def tick(step=0):
+            try:
+                if not frame.winfo_exists():
+                    return
+
+                pulse_color = color if (step % 2 == 0) else base_color
+
+                frame.config(
+                    highlightthickness=4,
+                    highlightbackground=pulse_color,
+                    highlightcolor=pulse_color,
+                    bd=0
+                )
+
+                if step < (pulses * 2 - 1):
+                    self.frame.after(interval_ms, lambda: tick(step + 1))
+                else:
+                    frame.config(
+                        highlightthickness=4,
+                        highlightbackground=base_color,
+                        highlightcolor=base_color,
+                        bd=0
+                    )
+            except Exception as e:
+                logger.debug(f"Nie udało się pulsować podświetlenia {resolved_attr}: {e}")
+
+        tick()
+
+    def _clear_step4_guidance(self):
+        for attr_name in (
+            "step4_route_panel_frame",
+            "btn_step4_create_frame",
+            "btn_step4_split_frame",
+            "btn_step4_next_frame",
+        ):
+            try:
+                self._set_step4_emphasis(attr_name, False)
+            except Exception:
+                pass
+
+    def _guide_step4_route_selection(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._clear_step4_guidance()
+        self._set_step4_emphasis("step4_route_panel_frame", True)
+        self._pulse_step4_emphasis("step4_route_panel_frame")
+
+    def _guide_step4_builder_action(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._clear_step4_guidance()
+        frame_attr = "btn_step4_create_frame" if self._step4_dataset_mode == "plate" else "btn_step4_split_frame"
+        self._set_step4_emphasis(frame_attr, True)
+        self._pulse_step4_emphasis(frame_attr)
+
+    def _guide_step4_next_action(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._clear_step4_guidance()
+        self._set_step4_emphasis("btn_step4_next_frame", True)
+        self._pulse_step4_emphasis("btn_step4_next_frame")
+
+    def _mark_step4_dataset_ready(self, dataset_path: str | Path | None = None):
+        if dataset_path:
+            try:
+                self.dataset_var.set(str(dataset_path))
+            except Exception:
+                pass
+
+        if CAMPAIGN.get_active_project_name():
+            self._step4_train_unlocked = True
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
+            self._guide_step4_next_action()
+        except Exception:
+            pass
+
     def _set_step4_dataset_mode(self, mode: str):
         mode = (mode or "char").strip().lower()
         if mode not in ("char", "plate"):
             mode = "char"
 
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+
         self._step4_dataset_mode = mode
         self.set_campaign_training_target(mode)
+        if campaign_active:
+            self._step4_route_selected = True
+            self._step4_train_unlocked = False
         self._refresh_step4_dataset_mode_ui()
+        self._refresh_step4_campaign_navigation_ui()
 
         try:
             label = "tablic (YOLO Pose)" if mode == "plate" else "znaków (YOLO Detect)"
@@ -517,11 +779,19 @@ class TrainingTab:
         except Exception:
             pass
 
+        if campaign_active:
+            try:
+                self._guide_step4_builder_action()
+            except Exception:
+                pass
+
     def _refresh_step4_dataset_mode_ui(self):
         if not hasattr(self, "ds_mode_host"):
             return
 
         mode = getattr(self, "_step4_dataset_mode", "char")
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        route_selected = bool(getattr(self, "_step4_route_selected", False))
 
         try:
             self.ds_creator_frame.pack_forget()
@@ -532,6 +802,26 @@ class TrainingTab:
             self.ds_split_frame.pack_forget()
         except Exception:
             pass
+
+        try:
+            self.ds_mode_waiting_frame.pack_forget()
+        except Exception:
+            pass
+
+        if campaign_active and not route_selected:
+            self.ds_mode_title_var.set("Wybierz tor po lewej stronie")
+            self.ds_mode_desc_var.set(
+                "W trybie projektu najpierw wybierz tor tablic albo tor znaków. "
+                "Dopiero wtedy odblokuje się panel budowy datasetu."
+            )
+            self.btn_choose_plate.configure(state=tk.NORMAL)
+            self.btn_choose_char.configure(state=tk.NORMAL)
+            self.ds_mode_waiting_frame.pack(fill=tk.BOTH, expand=True)
+            self.btn_step4_next.configure(
+                text="Dalej: najpierw wybierz tor",
+                state=tk.DISABLED
+            )
+            return
 
         if mode == "plate":
             self.ds_mode_title_var.set("Tor tablic (YOLO Pose)")
@@ -555,6 +845,9 @@ class TrainingTab:
             self.btn_step4_next.configure(text="Dalej: Trening modelu znaków")
 
     def _step4_dataset_go_next(self):
+        if CAMPAIGN.get_active_project_name() and not getattr(self, "_step4_train_unlocked", False):
+            return
+
         try:
             mode = getattr(self, "_step4_dataset_mode", "char")
             self.set_campaign_training_target(mode)
@@ -585,87 +878,15 @@ class TrainingTab:
 
     def _refresh_step4_campaign_navigation_ui(self):
         campaign_active = bool(CAMPAIGN.get_active_project_name())
-
-        try:
-            if campaign_active:
-                self.step4_train_nav.pack(fill=tk.X, padx=5, pady=(0, 5))
-            else:
-                self.step4_train_nav.pack_forget()
-        except Exception:
-            pass
-
-        try:
-            self.btn_step4_train_back.configure(
-                state=(tk.NORMAL if campaign_active else tk.DISABLED)
-            )
-        except Exception:
-            pass
-
-        try:
-            finish_state = tk.NORMAL if (campaign_active and self._step4_campaign_finish_ready) else tk.DISABLED
-            self.btn_step4_finish.configure(state=finish_state)
-        except Exception:
-            pass
-
-
-    def _step4_train_go_back(self):
-        if CAMPAIGN.get_active_project_name():
-            try:
-                self.main_nb.select(self.tab_dataset)
-                return
-            except Exception:
-                pass
-
-
-    def _finish_campaign_step4(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        if not self._step4_campaign_finish_ready:
-            return
-
-        try:
-            CAMPAIGN.set_current_step(5)
-        except Exception:
-            return
-
-        self._step4_campaign_finish_ready = False
-
-        try:
-            self._append_train_log(
-                "[KAMPANIA] Użytkownik zakończył krok 4. Cykl iteracji został domknięty."
-            )
-        except Exception:
-            pass
-
-        try:
-            self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            self.app.open_controlled_tab("campaign")
-        except Exception:
-            pass
-
-    def _refresh_step4_campaign_navigation_ui(self):
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        train_unlocked = bool(getattr(self, "_step4_train_unlocked", False))
+        route_selected = bool(getattr(self, "_step4_route_selected", False))
 
         try:
             self.main_nb.tab(self.tab_dataset, state="normal")
-            self.main_nb.tab(self.tab_train, state="normal")
+            self.main_nb.tab(
+                self.tab_train,
+                state=("normal" if (not campaign_active or train_unlocked) else "disabled")
+            )
         except Exception:
             pass
 
@@ -676,6 +897,18 @@ class TrainingTab:
             else:
                 self.main_nb.tab(self.tab_val, state="normal")
                 self.main_nb.tab(self.tab_ranking, state="normal")
+        except Exception:
+            pass
+
+        try:
+            next_state = tk.NORMAL if (not campaign_active or (route_selected and train_unlocked)) else tk.DISABLED
+            self.btn_step4_next.configure(state=next_state)
+        except Exception:
+            pass
+
+        try:
+            if campaign_active and not train_unlocked and str(self.main_nb.select()) == str(self.tab_train):
+                self.main_nb.select(self.tab_dataset)
         except Exception:
             pass
 
@@ -708,6 +941,8 @@ class TrainingTab:
         if CAMPAIGN.get_active_project_name():
             try:
                 self.main_nb.select(self.tab_dataset)
+                if getattr(self, "_step4_train_unlocked", False):
+                    self._guide_step4_next_action()
                 return
             except Exception:
                 pass
@@ -1045,8 +1280,11 @@ class TrainingTab:
         top = ttk.Frame(root)
         top.pack(fill=tk.BOTH, expand=True)
 
-        left = ttk.LabelFrame(top, text=" Wybór ścieżki treningowej ", padding=10)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=4)
+        self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        left = ttk.LabelFrame(self.step4_route_panel_frame, text=" Wybór ścieżki treningowej ", padding=10)
+        left.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(
             left,
@@ -1115,6 +1353,22 @@ class TrainingTab:
         self.ds_mode_host = ttk.Frame(right)
         self.ds_mode_host.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
+        self.ds_mode_waiting_frame = ttk.LabelFrame(
+            self.ds_mode_host,
+            text=" Oczekiwanie na wybór toru ",
+            padding=18
+        )
+        ttk.Label(
+            self.ds_mode_waiting_frame,
+            text=(
+                "Panel zostanie odblokowany po wyborze toru po lewej stronie.\n\n"
+                "W trybie projektu najpierw wskaż, czy prowadzisz tor tablic czy tor znaków."
+            ),
+            foreground="gray",
+            justify=tk.LEFT,
+            wraplength=520
+        ).pack(anchor=tk.W)
+
         self.ds_creator_frame = ttk.LabelFrame(
             self.ds_mode_host,
             text=" Budowa datasetu tablic (YOLO Pose) ",
@@ -1159,18 +1413,30 @@ class TrainingTab:
         )
         self.btn_step4_back.pack(side=tk.LEFT)
 
+        self.btn_step4_next_frame = tk.Frame(nav, bd=0, highlightthickness=0)
+        self.btn_step4_next_frame.pack(side=tk.RIGHT)
+
+        self.btn_step4_next_pulse_frame = tk.Frame(
+            self.btn_step4_next_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_step4_next_pulse_frame.pack(anchor=tk.E)
+
         self.btn_step4_next = ttk.Button(
-            nav,
+            self.btn_step4_next_pulse_frame,
             text="Dalej: Trening modelu znaków",
             command=self._step4_dataset_go_next
         )
-        self.btn_step4_next.pack(side=tk.RIGHT)
+        self.btn_step4_next.pack()
 
         initial_mode = self.get_campaign_training_target()
         if initial_mode not in ("char", "plate"):
             initial_mode = "char"
 
         self._step4_builder_log_visible = False
+        self._step4_route_selected = True
+        self._step4_train_unlocked = True
         self._set_step4_dataset_mode(initial_mode)
 
     def _build_creator_ui(self):
@@ -1194,9 +1460,22 @@ class TrainingTab:
         self.ds_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
         ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # ✅ ZMIANA: Przycisk zyskał nazwę (btn_create), by można go było podpiąć pod pomoc
-        btn_create = ttk.Button(f, text="Stwórz Dataset", command=self._create_dataset_thread)
-        btn_create.pack(anchor=tk.W, pady=(10, 5))
+        self.btn_step4_create_frame = tk.Frame(f, bd=0, highlightthickness=0)
+        self.btn_step4_create_frame.pack(anchor=tk.W, pady=(10, 5))
+
+        self.btn_step4_create_pulse_frame = tk.Frame(
+            self.btn_step4_create_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_step4_create_pulse_frame.pack(anchor=tk.W)
+
+        self.btn_step4_create = ttk.Button(
+            self.btn_step4_create_pulse_frame,
+            text="Stwórz Dataset",
+            command=self._create_dataset_thread
+        )
+        self.btn_step4_create.pack()
         
         self.ds_progress_var = tk.DoubleVar(value=0.0)
         self.ds_progress = ttk.Progressbar(f, variable=self.ds_progress_var, maximum=100)
@@ -1208,7 +1487,7 @@ class TrainingTab:
         # ✅ PODPIĘCIE POMOCY DO OPCJI A (BUDOWA Z CVAT)
         HELP.bind_help(row1, "tr_cvat_xml")
         HELP.bind_help(row2, "tr_cvat_img")
-        HELP.bind_help(btn_create, "tr_cvat_btn") # Teraz HELP wie, pod jaki przycisk się podpiąć!
+        HELP.bind_help(self.btn_step4_create, "tr_cvat_btn") # Teraz HELP wie, pod jaki przycisk się podpiąć!
 
     def _build_splitter_ui(self):
         f = self.ds_split_frame
@@ -1242,8 +1521,23 @@ class TrainingTab:
         self.test_lbl = ttk.Label(ratios, text="Test: 0%"); self.test_lbl.grid(row=2, column=2, sticky=tk.W)
         ratios.columnconfigure(1, weight=1)
 
-        btn_split = ttk.Button(f, text="Rozpocznij Podział (Split)", command=self._split_dataset_thread, style="Accent.TButton")
-        btn_split.pack(anchor=tk.W, pady=10)
+        self.btn_step4_split_frame = tk.Frame(f, bd=0, highlightthickness=0)
+        self.btn_step4_split_frame.pack(anchor=tk.W, pady=10)
+
+        self.btn_step4_split_pulse_frame = tk.Frame(
+            self.btn_step4_split_frame,
+            bd=0,
+            highlightthickness=4
+        )
+        self.btn_step4_split_pulse_frame.pack(anchor=tk.W)
+
+        self.btn_step4_split = ttk.Button(
+            self.btn_step4_split_pulse_frame,
+            text="Rozpocznij Podział (Split)",
+            command=self._split_dataset_thread,
+            style="Accent.TButton"
+        )
+        self.btn_step4_split.pack()
         
         self.split_progress_var = tk.DoubleVar(value=0.0)
         self.split_progress = ttk.Progressbar(f, variable=self.split_progress_var, maximum=100)
@@ -1254,7 +1548,7 @@ class TrainingTab:
         # ✅ PODPIĘCIE POMOCY:
         HELP.bind_help(row1, "tr_split_src")
         HELP.bind_help(ratios, "tr_split_ratios")
-        HELP.bind_help(btn_split, "tr_split_btn")
+        HELP.bind_help(self.btn_step4_split, "tr_split_btn")
 
     def _build_train_tab(self):
         self.train_pane = ttk.PanedWindow(self.tab_train, orient=tk.HORIZONTAL)
@@ -1403,25 +1697,6 @@ class TrainingTab:
         hist_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hist_btns, text="Usuń", command=self._delete_selected).pack(side=tk.LEFT)
         ttk.Button(hist_btns, text="Otwórz Folder", command=self._open_run_folder).pack(side=tk.RIGHT)
-        self.step4_train_nav = ttk.Frame(self.tab_train)
-
-        self.btn_step4_train_back = ttk.Button(
-            self.step4_train_nav,
-            text="← Wstecz do wyboru toru",
-            command=self._step4_train_go_back
-        )
-        self.btn_step4_train_back.pack(side=tk.LEFT)
-
-        self.btn_step4_finish = ttk.Button(
-            self.step4_train_nav,
-            text="Zakończ krok 4 i wróć do kampanii",
-            command=self._finish_campaign_step4,
-            style="Accent.TButton",
-            state=tk.DISABLED
-        )
-        self.btn_step4_finish.pack(side=tk.RIGHT)
-        self._refresh_step4_campaign_navigation_ui()
-
         self.step4_train_nav = ttk.Frame(self.tab_train)
 
         self.btn_step4_train_back = ttk.Button(
@@ -1709,7 +1984,7 @@ class TrainingTab:
                     self._ui(lambda: messagebox.showinfo("Sukces", msg2))
 
                     # ✅ ZMIANA: po sukcesie od razu podstaw gotowy dataset do sekcji Treningu
-                    self._ui(lambda p=str(out_dir): self.dataset_var.set(p))
+                    self._ui(lambda p=str(out_dir): self._mark_step4_dataset_ready(p))
                 else:
                     self._ui(lambda: self.ds_status.configure(
                         text="Błąd budowy datasetu",
@@ -1785,7 +2060,7 @@ class TrainingTab:
                     self._ui(lambda: messagebox.showinfo("Sukces", msg))
 
                     # ✅ ZMIANA: po udanym splicie od razu podstaw gotowy dataset do sekcji Treningu
-                    self._ui(lambda p=str(out): self.dataset_var.set(p))
+                    self._ui(lambda p=str(out): self._mark_step4_dataset_ready(p))
                 else:
                     self._ui(lambda: self.split_status.configure(
                         text="Błąd podziału",

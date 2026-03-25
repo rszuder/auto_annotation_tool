@@ -86,6 +86,7 @@ class CharacterAnnotationTab:
         # ✅ fast test state (separate from extraction)
         self.fast_test_stop = threading.Event()
         self.fast_test_running = False
+        self._project_reset_token = 0
 
         # presets (global; later can be project-scoped)
         self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
@@ -539,6 +540,10 @@ class CharacterAnnotationTab:
         Oprócz pól wejściowych czyści też preview, metadata, log testów
         i local_session powiązany z projektem.
         """
+        self._project_reset_token += 1
+        self.is_processing = False
+        self._reloading_preview = False
+
         if hasattr(self, "_campaign_chars_dir"):
             self._campaign_chars_dir = None
 
@@ -602,7 +607,7 @@ class CharacterAnnotationTab:
 
         try:
             self.fast_test_running = False
-            self.fast_test_stop.clear()
+            self.fast_test_stop.set()
         except Exception:
             pass
 
@@ -620,6 +625,67 @@ class CharacterAnnotationTab:
             pass
 
         try:
+            self.ext_log.configure(state=tk.NORMAL)
+            self.ext_log.delete("1.0", tk.END)
+            self.ext_log.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.ext_progress.config(value=0)
+        except Exception:
+            pass
+
+        try:
+            self.ext_status.config(
+                text="Gotowy",
+                foreground="#2ecc71"
+            )
+        except Exception:
+            pass
+
+        try:
+            self.btn_extract.config(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.btn_ext_stop.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.import_cvat_xml_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self._set_console_text(self.export_console, "Oczekuje na akcję...")
+        except Exception:
+            pass
+
+        try:
+            self._set_console_text(self.import_console, "Oczekuje na plik XML...")
+        except Exception:
+            pass
+
+        try:
+            self.winner_name_lbl.config(
+                text="BRAK DANYCH Z TURNIEJU",
+                foreground="gray"
+            )
+        except Exception:
+            pass
+
+        try:
+            self.winner_acc_lbl.config(
+                text="Skuteczność detekcji OCR: 0.0%",
+                foreground="red"
+            )
+        except Exception:
+            pass
+
+        try:
             if hasattr(self, "btn_finish_step3"):
                 self.btn_finish_step3.config(
                     text="Zakończ krok 3 i wróć do Wizarda",
@@ -631,6 +697,11 @@ class CharacterAnnotationTab:
         try:
             if hasattr(self, "btn_back_to_wizard_step3"):
                 self.btn_back_to_wizard_step3.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self._set_button_emphasis("btn_finish_step3_frame", False)
         except Exception:
             pass
 
@@ -2219,6 +2290,7 @@ class CharacterAnnotationTab:
         self._force_save_all()
         xml_path = Path(self.xml_path_var.get().strip())
         images_dir = Path(self.images_dir_var.get().strip())
+        session_token = self._project_reset_token
 
         if not xml_path.exists() or not images_dir.exists():
             return messagebox.showerror("Błąd", "Brak plików wejściowych!")
@@ -2252,13 +2324,16 @@ class CharacterAnnotationTab:
 
         def worker():
             try:
+                if session_token != self._project_reset_token:
+                    return
+
                 self._log(self.ext_log, f"\nROZPOCZĘTO WYCINANIE DO: {run_dir.name}\n", "HEADER")
                 generator = PlateGenerator(run_dir)
                 total = len(xml_images)
                 processed = 0
 
                 for img_name, img_el in xml_images.items():
-                    if not self.is_processing:
+                    if (not self.is_processing) or session_token != self._project_reset_token:
                         break
                     img_path = images_dir / img_name
                     if not img_path.exists():
@@ -2288,11 +2363,23 @@ class CharacterAnnotationTab:
                         )
 
                     processed += 1
-                    self.frame.after(0, lambda p=(processed / max(1, total)) * 100: self.ext_progress.config(value=p))
-                    self.frame.after(0, lambda c=processed, t=total: self.ext_status.config(text=f"{c}/{t} obrazów..."))
+                    self.frame.after(
+                        0,
+                        lambda p=(processed / max(1, total)) * 100: (
+                            self.ext_progress.config(value=p)
+                            if session_token == self._project_reset_token else None
+                        )
+                    )
+                    self.frame.after(
+                        0,
+                        lambda c=processed, t=total: (
+                            self.ext_status.config(text=f"{c}/{t} obrazów...")
+                            if session_token == self._project_reset_token else None
+                        )
+                    )
 
                 generator.save_metadata()
-                if self.is_processing:
+                if self.is_processing and session_token == self._project_reset_token:
                     self.frame.after(0, lambda: self._load_preview_data(quiet=True))
                     self.frame.after(0, self.unlock_detection_subtab)
                     self.frame.after(0, lambda: messagebox.showinfo(
@@ -2300,11 +2387,13 @@ class CharacterAnnotationTab:
                         "Wycinanie zakończone!\n\nOdblokowano etap 2: Wykrywanie Znaków i Analiza."
                     ))
             except Exception as e:
-                self._log(self.ext_log, f"\n❌ BŁĄD: {e}\n", "ERROR")
+                if session_token == self._project_reset_token:
+                    self._log(self.ext_log, f"\n❌ BŁĄD: {e}\n", "ERROR")
             finally:
-                self.is_processing = False
-                self.frame.after(0, lambda: self.btn_extract.config(state=tk.NORMAL))
-                self.frame.after(0, lambda: self.btn_ext_stop.config(state=tk.DISABLED))
+                if session_token == self._project_reset_token:
+                    self.is_processing = False
+                    self.frame.after(0, lambda: self.btn_extract.config(state=tk.NORMAL))
+                    self.frame.after(0, lambda: self.btn_ext_stop.config(state=tk.DISABLED))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3269,6 +3358,7 @@ class CharacterAnnotationTab:
         self._force_save_all()
         out_dir = Path(self.preview_dir_var.get().strip())
         imgs_dir = out_dir / "images"
+        session_token = self._project_reset_token
 
         self.test_log_text.delete(1.0, tk.END)
         self._lock_ui_for_testing()
@@ -3321,7 +3411,7 @@ class CharacterAnnotationTab:
 
             try:
                 for idx, pid in enumerate(self.preview_plate_ids):
-                    if self.fast_test_stop.is_set():
+                    if self.fast_test_stop.is_set() or session_token != self._project_reset_token:
                         break
 
                     img_path = imgs_dir / f"{pid}.jpg"
@@ -3339,6 +3429,8 @@ class CharacterAnnotationTab:
                     true_texts = self._get_true_texts_from_filename(source_image)
 
                     chars = detector.detect(img)
+                    if session_token != self._project_reset_token:
+                        break
 
                     c_clean = [{
                         "character": str(c.character),
@@ -3380,17 +3472,25 @@ class CharacterAnnotationTab:
 
                     self.frame.after(
                         0,
-                        lambda p=((idx + 1) / max(1, total)) * 100: self.test_progress.config(value=p)
+                        lambda p=((idx + 1) / max(1, total)) * 100: (
+                            self.test_progress.config(value=p)
+                            if session_token == self._project_reset_token else None
+                        )
                     )
 
                     self.frame.after(
                         0,
-                        lambda c=idx + 1, t=total: self.test_status_lbl.config(
-                            text=f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
-                            foreground="#e67e22"
+                        lambda c=idx + 1, t=total: (
+                            self.test_status_lbl.config(
+                                text=f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
+                                foreground="#e67e22"
+                            )
+                            if session_token == self._project_reset_token else None
                         )
                     )
-                    
+
+                if session_token != self._project_reset_token:
+                    return
 
                 meta_file = out_dir / "metadata.json"
                 self._atomic_write_json(meta_file, local_meta)
@@ -3417,6 +3517,9 @@ class CharacterAnnotationTab:
 
             finally:
                 def finalize():
+                    if session_token != self._project_reset_token:
+                        return
+
                     try:
                         self.fast_test_running = False
                         self.fast_test_stop.clear()
@@ -3901,6 +4004,7 @@ class CharacterAnnotationTab:
         out_dir = Path(self.preview_dir_var.get().strip())
         imgs_dir = out_dir / "images"
         cache_file = self.presets_dir / "global_ranking.json"
+        session_token = self._project_reset_token
 
         def worker():
             try:
@@ -3920,6 +4024,9 @@ class CharacterAnnotationTab:
                 total_presets = len(preset_files)
 
                 for p_idx, p_file in enumerate(preset_files):
+                    if session_token != self._project_reset_token:
+                        return
+
                     preset_name = p_file.stem
                     try:
                         with open(p_file, 'r', encoding='utf-8') as f:
@@ -3932,7 +4039,13 @@ class CharacterAnnotationTab:
 
                     if preset_name in ranking_cache and ranking_cache[preset_name].get("signature") == param_signature:
                         results_table.append((ranking_cache[preset_name]["acc"], ranking_cache[preset_name]["matches"], preset_name, True))
-                        self.frame.after(0, lambda p=((p_idx + 1) / total_presets) * 100: self.test_progress.config(value=p))
+                        self.frame.after(
+                            0,
+                            lambda p=((p_idx + 1) / total_presets) * 100: (
+                                self.test_progress.config(value=p)
+                                if session_token == self._project_reset_token else None
+                            )
+                        )
                         continue
 
                     ocr_engine.custom_prep_params = clean_params
@@ -3941,6 +4054,9 @@ class CharacterAnnotationTab:
 
                     perfect_matches = 0
                     for pid in self.preview_plate_ids:
+                        if session_token != self._project_reset_token:
+                            return
+
                         img_path = imgs_dir / f"{pid}.jpg"
                         if not img_path.exists():
                             continue
@@ -3962,7 +4078,16 @@ class CharacterAnnotationTab:
                         "params": preset_params
                     }
                     results_table.append((acc, perfect_matches, preset_name, False))
-                    self.frame.after(0, lambda p=((p_idx + 1) / total_presets) * 100: self.test_progress.config(value=p))
+                    self.frame.after(
+                        0,
+                        lambda p=((p_idx + 1) / total_presets) * 100: (
+                            self.test_progress.config(value=p)
+                            if session_token == self._project_reset_token else None
+                        )
+                    )
+
+                if session_token != self._project_reset_token:
+                    return
 
                 with open(cache_file, 'w', encoding='utf-8') as f:
                     json.dump(ranking_cache, f, indent=4, ensure_ascii=False)
@@ -3979,6 +4104,9 @@ class CharacterAnnotationTab:
                 self._log(self.test_log_text, f"\n❌ BŁĄD RANKINGU: {e}", "ERROR")
             finally:
                 def finalize():
+                    if session_token != self._project_reset_token:
+                        return
+
                     if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
                         self.unlock_dataset_subtab()
 
