@@ -2254,7 +2254,7 @@ class CharacterAnnotationTab:
         self.ext_status = ttk.Label(lf_run, text="Gotowy", foreground="#2ecc71", font=("Segoe UI", 10, "bold"))
         self.ext_status.pack(anchor=tk.W)
 
-        lf_logs = ttk.LabelFrame(right, text=" Logi z Wycinania ", padding=10)
+        lf_logs = ttk.LabelFrame(right, text=" Terminal procesu ", padding=10)
         lf_logs.pack(fill=tk.BOTH, expand=True)
         self.ext_log = scrolledtext.ScrolledText(lf_logs, wrap=tk.WORD, font=("Consolas", 10), bg="#fdfdfd")
         self.ext_log.pack(fill=tk.BOTH, expand=True)
@@ -2648,7 +2648,7 @@ class CharacterAnnotationTab:
         # -------------------------
         # MIDDLE: konsola
         # -------------------------
-        log_lf = ttk.LabelFrame(col_mid, text=" Konsola informacji ", padding=10)
+        log_lf = ttk.LabelFrame(col_mid, text=" Terminal procesu ", padding=10)
         log_lf.grid(row=0, column=0, sticky="nsew")
 
         self.test_log_text = scrolledtext.ScrolledText(

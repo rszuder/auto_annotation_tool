@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zakładka Treningu: Dataset Builder + Trening YOLO + Walidacja + Ranking Modelów.
+Zakładka Treningu: Budowa datasetu + trening YOLO + analiza modeli.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ class TrainingTab:
         self._campaign_training_target = "char"
         self._step4_dataset_mode = "char"
         self._step4_builder_log_visible = False
+        self._step4_train_log_visible = False
         self._current_training_dataset_is_pose = None
         self._step4_campaign_finish_ready = False
         self._step4_route_selected = False
@@ -463,6 +464,7 @@ class TrainingTab:
         self._plot_img_id = None
         self._pending_campaign_model_type = None
         self._step4_builder_log_visible = False
+        self._step4_train_log_visible = False
         self._current_training_dataset_is_pose = None
         self._step4_campaign_finish_ready = False
 
@@ -491,10 +493,10 @@ class TrainingTab:
             pass
 
         try:
-            self.train_log_console.config(state=tk.NORMAL)
-            self.train_log_console.delete(1.0, tk.END)
-            self.train_log_console.insert(tk.END, "Oczekuje na rozpoczęcie treningu...\nGotowy na dane z Ultralytics.\n")
-            self.train_log_console.config(state=tk.DISABLED)
+            self._set_step4_process_console_text(
+                "Oczekuje na rozpoczęcie treningu lub walidacji...\n"
+                "Terminal procesu jest gotowy na dane z Ultralytics.\n"
+            )
         except Exception:
             pass
 
@@ -525,6 +527,46 @@ class TrainingTab:
         except Exception:
             pass
 
+        try:
+            self.val_model_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.val_data_var.set("")
+        except Exception:
+            pass
+
+        try:
+            self.val_split_var.set("val")
+        except Exception:
+            pass
+
+        try:
+            self.val_status.configure(text="Gotowy", foreground="gray")
+        except Exception:
+            pass
+
+        try:
+            self.rank_progress_var.set(0.0)
+        except Exception:
+            pass
+
+        try:
+            self.rank_status.configure(text="Gotowy", foreground="gray")
+        except Exception:
+            pass
+
+        try:
+            self.rank_models_dir.set(str(Path(CONFIG.DEFAULT_MODELS_DIR)))
+        except Exception:
+            pass
+
+        try:
+            self.rank_data_dir.set("")
+        except Exception:
+            pass
+
         if self._training_completion_poll_job is not None:
             try:
                 self.frame.after_cancel(self._training_completion_poll_job)
@@ -536,12 +578,17 @@ class TrainingTab:
         self._set_training_ui_idle_state()
 
         try:
-            self.btn_toggle_step4_log.configure(text="Pokaż log")
+            self.btn_toggle_step4_log.configure(text="Pokaż terminal")
         except Exception:
             pass
 
         try:
             self.step4_builder_log_frame.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self._set_step4_train_log_visibility(False)
         except Exception:
             pass
 
@@ -610,10 +657,53 @@ class TrainingTab:
 
         if self._step4_builder_log_visible:
             self.step4_builder_log_frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
-            self.btn_toggle_step4_log.configure(text="Ukryj log")
+            self.btn_toggle_step4_log.configure(text="Ukryj terminal")
         else:
             self.step4_builder_log_frame.pack_forget()
-            self.btn_toggle_step4_log.configure(text="Pokaż log")
+            self.btn_toggle_step4_log.configure(text="Pokaż terminal")
+
+    def _set_step4_process_console_text(self, message: str):
+        if not hasattr(self, "train_log_console"):
+            return
+
+        try:
+            self.train_log_console.config(state=tk.NORMAL)
+            self.train_log_console.delete(1.0, tk.END)
+            if message:
+                self.train_log_console.insert(tk.END, message)
+            self.train_log_console.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def _set_step4_train_log_visibility(self, visible: bool):
+        if not hasattr(self, "step4_train_log_frame"):
+            return
+
+        self._step4_train_log_visible = bool(visible)
+
+        if self._step4_train_log_visible:
+            if hasattr(self, "step4_train_log_host"):
+                try:
+                    self.step4_train_log_host.grid()
+                except Exception:
+                    pass
+            self.step4_train_log_frame.pack(fill=tk.BOTH, expand=False)
+            if hasattr(self, "btn_toggle_step4_train_log"):
+                self.btn_toggle_step4_train_log.configure(text="Ukryj terminal")
+        else:
+            self.step4_train_log_frame.pack_forget()
+            if hasattr(self, "step4_train_log_host"):
+                try:
+                    self.step4_train_log_host.grid_remove()
+                except Exception:
+                    pass
+            if hasattr(self, "btn_toggle_step4_train_log"):
+                self.btn_toggle_step4_train_log.configure(text="Pokaż terminal")
+
+    def _toggle_step4_train_log(self):
+        self._set_step4_train_log_visibility(
+            not getattr(self, "_step4_train_log_visible", False)
+        )
 
     def _set_step4_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
         resolved_attr = frame_attr
@@ -832,7 +922,7 @@ class TrainingTab:
             self.btn_choose_plate.configure(state=tk.DISABLED)
             self.btn_choose_char.configure(state=tk.NORMAL)
             self.ds_creator_frame.pack(fill=tk.BOTH, expand=True)
-            self.btn_step4_next.configure(text="Dalej: Trening modelu tablic")
+            self.btn_step4_next.configure(text="Dalej: Trening i analiza modelu tablic")
         else:
             self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
             self.ds_mode_desc_var.set(
@@ -842,7 +932,7 @@ class TrainingTab:
             self.btn_choose_plate.configure(state=tk.NORMAL)
             self.btn_choose_char.configure(state=tk.DISABLED)
             self.ds_split_frame.pack(fill=tk.BOTH, expand=True)
-            self.btn_step4_next.configure(text="Dalej: Trening modelu znaków")
+            self.btn_step4_next.configure(text="Dalej: Trening i analiza modelu znaków")
 
     def _step4_dataset_go_next(self):
         if CAMPAIGN.get_active_project_name() and not getattr(self, "_step4_train_unlocked", False):
@@ -891,16 +981,6 @@ class TrainingTab:
             pass
 
         try:
-            if campaign_active:
-                self.main_nb.tab(self.tab_val, state="disabled")
-                self.main_nb.tab(self.tab_ranking, state="disabled")
-            else:
-                self.main_nb.tab(self.tab_val, state="normal")
-                self.main_nb.tab(self.tab_ranking, state="normal")
-        except Exception:
-            pass
-
-        try:
             next_state = tk.NORMAL if (not campaign_active or (route_selected and train_unlocked)) else tk.DISABLED
             self.btn_step4_next.configure(state=next_state)
         except Exception:
@@ -917,9 +997,9 @@ class TrainingTab:
 
         try:
             if campaign_active:
-                self.step4_train_nav.pack(fill=tk.X, padx=5, pady=(0, 5))
+                self.step4_train_nav.grid()
             else:
-                self.step4_train_nav.pack_forget()
+                self.step4_train_nav.grid_remove()
         except Exception:
             pass
 
@@ -1260,18 +1340,14 @@ class TrainingTab:
 
         self.tab_dataset = ttk.Frame(self.main_nb)
         self.tab_train = ttk.Frame(self.main_nb)
-        self.tab_val = ttk.Frame(self.main_nb)
-        self.tab_ranking = ttk.Frame(self.main_nb)
+        self.tab_val = None
+        self.tab_ranking = None
 
         self.main_nb.add(self.tab_dataset, text="1. Budowa Datasetu")
-        self.main_nb.add(self.tab_train, text="2. Trening Modelu")
-        self.main_nb.add(self.tab_val, text="3. Walidacja / Test Modelu")
-        self.main_nb.add(self.tab_ranking, text=f"{self.icon_manager.get('trophy')} 4. Ranking Modelów")
+        self.main_nb.add(self.tab_train, text="2. Trening i Analiza")
 
         self._build_dataset_tab()
         self._build_train_tab()
-        self._build_validation_tab()
-        self._build_ranking_tab()
 
     def _build_dataset_tab(self):
         root = ttk.Frame(self.tab_dataset, padding=8)
@@ -1388,12 +1464,12 @@ class TrainingTab:
 
         self.btn_toggle_step4_log = ttk.Button(
             tools,
-            text="Pokaż log",
+            text="Pokaż terminal",
             command=self._toggle_step4_builder_log
         )
         self.btn_toggle_step4_log.pack(side=tk.LEFT)
 
-        self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Log operacji pz1 ", padding=6)
+        self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Terminal procesu ", padding=6)
         self.step4_builder_log_text = scrolledtext.ScrolledText(
             self.step4_builder_log_frame,
             wrap=tk.WORD,
@@ -1425,7 +1501,7 @@ class TrainingTab:
 
         self.btn_step4_next = ttk.Button(
             self.btn_step4_next_pulse_frame,
-            text="Dalej: Trening modelu znaków",
+            text="Dalej: Trening i analiza modelu znaków",
             command=self._step4_dataset_go_next
         )
         self.btn_step4_next.pack()
@@ -1551,25 +1627,22 @@ class TrainingTab:
         HELP.bind_help(self.btn_step4_split, "tr_split_btn")
 
     def _build_train_tab(self):
-        self.train_pane = ttk.PanedWindow(self.tab_train, orient=tk.HORIZONTAL)
-        self.train_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        root = ttk.Frame(self.tab_train, padding=5)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        self.train_pane = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+        self.train_pane.grid(row=0, column=0, sticky="nsew")
 
         self.left = ttk.LabelFrame(self.train_pane, text=" Konfiguracja Treningu ", padding=10)
-        self.right = ttk.LabelFrame(self.train_pane, text=" Historia i Wykresy ", padding=10)
+        self.right = ttk.LabelFrame(self.train_pane, text=" Analiza i narzędzia ", padding=10)
         self.train_pane.add(self.left, weight=0)
         self.train_pane.add(self.right, weight=1)
 
-        # =======================================================
-        # NOWY UKŁAD: Dwie kolumny wewnątrz "Konfiguracji"
-        # =======================================================
         settings_col = ttk.Frame(self.left)
-        settings_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-        
-        console_col = ttk.Frame(self.left)
-        console_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        settings_col.pack(fill=tk.BOTH, expand=True)
 
-        # --- KOLUMNA LEWA: Ustawienia ---
-        # ✅ ZMIANA: Automatyczne generowanie nazwy treningu
         ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
         self.name_var = tk.StringVar()
         ttk.Entry(settings_col, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
@@ -1655,25 +1728,55 @@ class TrainingTab:
         self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 8, "italic"))
         self.train_progress_label.pack(anchor=tk.W)
 
-        # --- KOLUMNA PRAWA: Terminal na żywo ---
-        ttk.Label(console_col, text="Terminal Treningu (Live):", font=("Segoe UI", 9, "bold"), foreground="#2980b9").pack(anchor=tk.W, pady=(0, 2))
-        
+        terminal_tools = ttk.Frame(root)
+        terminal_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+        self.btn_toggle_step4_train_log = ttk.Button(
+            terminal_tools,
+            text="Pokaż terminal",
+            command=self._toggle_step4_train_log
+        )
+        self.btn_toggle_step4_train_log.pack(side=tk.LEFT)
+
+        ttk.Label(
+            terminal_tools,
+            text="Wspólny terminal procesu dla treningu i walidacji jest dostępny na żądanie.",
+            foreground="gray"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.step4_train_log_host = ttk.Frame(root)
+        self.step4_train_log_host.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+
+        self.step4_train_log_frame = ttk.LabelFrame(
+            self.step4_train_log_host,
+            text=" Terminal procesu ",
+            padding=6
+        )
         self.train_log_console = scrolledtext.ScrolledText(
-            console_col, width=50, height=18, font=("Consolas", 10), 
+            self.step4_train_log_frame,
+            width=50,
+            height=10,
+            font=("Consolas", 10),
             bg="#1e1e1e", fg="#ecf0f1", bd=2, relief="sunken"
         )
-        self.train_log_console.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
-        self.train_log_console.insert(tk.END, "Oczekuje na rozpoczęcie treningu...\nGotowy na dane z Ultralytics.\n")
-        self.train_log_console.config(state=tk.DISABLED)
+        self.train_log_console.pack(fill=tk.BOTH, expand=True)
+        self._set_step4_process_console_text(
+            "Oczekuje na rozpoczęcie treningu lub walidacji...\n"
+            "Terminal procesu jest gotowy na dane z Ultralytics.\n"
+        )
+        self._set_step4_train_log_visibility(False)
 
-        # RIGHT: notebook historii (Prawa, wielka kolumna główna)
         self.right_nb = ttk.Notebook(self.right)
         self.right_nb.pack(fill=tk.BOTH, expand=True)
 
         self.hist_tab = ttk.Frame(self.right_nb)
         self.plots_tab = ttk.Frame(self.right_nb)
+        self.val_tab = ttk.Frame(self.right_nb)
+        self.ranking_tab = ttk.Frame(self.right_nb)
         self.right_nb.add(self.hist_tab, text="Historia Treningów")
         self.right_nb.add(self.plots_tab, text="Analiza (Wykresy)")
+        self.right_nb.add(self.val_tab, text="Walidacja")
+        self.right_nb.add(self.ranking_tab, text="Ranking")
 
         hist_top = ttk.Frame(self.hist_tab)
         hist_top.pack(fill=tk.BOTH, expand=True)
@@ -1697,7 +1800,13 @@ class TrainingTab:
         hist_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hist_btns, text="Usuń", command=self._delete_selected).pack(side=tk.LEFT)
         ttk.Button(hist_btns, text="Otwórz Folder", command=self._open_run_folder).pack(side=tk.RIGHT)
-        self.step4_train_nav = ttk.Frame(self.tab_train)
+
+        self._build_plots_ui()
+        self._build_validation_panel(self.val_tab)
+        self._build_ranking_panel(self.ranking_tab)
+
+        self.step4_train_nav = ttk.Frame(root)
+        self.step4_train_nav.grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
         self.btn_step4_train_back = ttk.Button(
             self.step4_train_nav,
@@ -1715,14 +1824,11 @@ class TrainingTab:
         )
         self.btn_step4_finish.pack(side=tk.RIGHT)
 
-        self._build_plots_ui()
         self._refresh_step4_campaign_navigation_ui()
 
-        # ✅ PRZYWRÓCONE, ZABEZPIECZONE PODPIĘCIE POMOCY
         HELP.bind_help(ds_row, "tr_train_ds")
         HELP.bind_help(self.base_combo, "tr_train_base")
         
-        # Ochrona na wypadek błędów siatki (Tkinter Grid)
         try:
             HELP.bind_help(grid.grid_slaves(row=0, column=1)[0], "tr_train_ep") 
             HELP.bind_help(grid.grid_slaves(row=1, column=1)[0], "tr_train_bs") 
@@ -1734,7 +1840,6 @@ class TrainingTab:
         HELP.bind_help(self.btn_start_train, "tr_train_btn")
         HELP.bind_help(self.tree, "tr_train_tree")
         HELP.bind_help(self.plots_tab, "tr_train_plot")
-        # ✅ ZMIANA: Podpięcie nowego przycisku pod system pomocy
         HELP.bind_help(self.custom_row, "tr_train_custom")
 
     def _build_plots_ui(self):
@@ -1759,58 +1864,71 @@ class TrainingTab:
         self.plot_canvas = ZoomableCanvas(canvas_frame, bg="#ecf0f1", highlightthickness=0)
         self.plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    def _build_validation_tab(self):
-        main_f = ttk.Frame(self.tab_val, padding=10)
-        main_f.pack(fill=tk.BOTH, expand=True)
-        
-        ttk.Label(main_f, text="Sprawdź jakość dowolnego wytrenowanego modelu YOLO na zbiorze testowym.", font=("Segoe UI", 10, "italic")).pack(anchor=tk.W, pady=(0, 15))
-        
-        ttk.Label(main_f, text="Wytrenowany Model (.pt):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(5,2))
-        row1 = ttk.Frame(main_f)
+    def _build_validation_panel(self, parent):
+        ttk.Label(
+            parent,
+            text="Sprawdź jakość wytrenowanego modelu YOLO na wybranym zbiorze testowym.",
+            font=("Segoe UI", 10, "italic"),
+            wraplength=360,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        ttk.Label(parent, text="Wytrenowany Model (.pt):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
+        row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X)
         self.val_model_var = tk.StringVar()
         ttk.Entry(row1, textvariable=self.val_model_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row1, text="Wybierz", command=lambda: self._pick_file(self.val_model_var, "*.pt")).pack(side=tk.RIGHT, padx=(5,0))
         
-        ttk.Label(main_f, text="Dataset Testowy (data.yaml):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15,2))
-        row2 = ttk.Frame(main_f)
+        ttk.Label(parent, text="Dataset Testowy (data.yaml):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15, 2))
+        row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X)
         self.val_data_var = tk.StringVar()
         ttk.Entry(row2, textvariable=self.val_data_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.val_data_var)).pack(side=tk.RIGHT, padx=(5,0))
 
-        ttk.Label(main_f, text="Przetestuj na podzbiorze:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15,2))
+        ttk.Label(parent, text="Przetestuj na podzbiorze:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15, 2))
         self.val_split_var = tk.StringVar(value="val")
-        ttk.Combobox(main_f, textvariable=self.val_split_var, values=["val", "test", "train"], state="readonly", width=15).pack(anchor=tk.W)
+        split_combo = ttk.Combobox(parent, textvariable=self.val_split_var, values=["val", "test", "train"], state="readonly", width=15)
+        split_combo.pack(anchor=tk.W)
 
-        ttk.Separator(main_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
-        
-        self.btn_run_val = ttk.Button(main_f, text="🚀 PRZEPROWADŹ WALIDACJĘ", style="Accent.TButton", command=self._run_validation)
-        self.btn_run_val.pack(anchor=tk.W, ipady=4)
-        
-        log_f = ttk.LabelFrame(main_f, text=" Wyniki Walidacji ", padding=5)
-        log_f.pack(fill=tk.BOTH, expand=True, pady=(15,0))
-        self.val_log_text = scrolledtext.ScrolledText(log_f, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa")
-        self.val_log_text.pack(fill=tk.BOTH, expand=True)
+        action_row = ttk.Frame(parent)
+        action_row.pack(fill=tk.X, pady=(20, 4))
 
+        self.btn_run_val = ttk.Button(action_row, text="🚀 PRZEPROWADŹ WALIDACJĘ", style="Accent.TButton", command=self._run_validation)
+        self.btn_run_val.pack(side=tk.LEFT, ipady=4)
 
-        
-        # ✅ PODPIĘCIE POMOCY:
+        self.val_status = ttk.Label(action_row, text="Gotowy", foreground="gray")
+        self.val_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        ttk.Label(
+            parent,
+            text="Wyniki walidacji pojawią się w Terminalu procesu.",
+            foreground="gray",
+            wraplength=360,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(8, 0))
+
         HELP.bind_help(row1, "tr_val_model")
-        HELP.bind_help(row2, "tr_val_data")    # <-- Nowe (Dataset)
+        HELP.bind_help(row2, "tr_val_data")
         HELP.bind_help(self.btn_run_val, "tr_val_btn")
-        
-        # Bezpieczne łapanie Comboboxa (szuka po klasie)
-        for child in main_f.winfo_children():
-            if isinstance(child, ttk.Combobox):
-                HELP.bind_help(child, "tr_val_split") # <-- Nowe (Combo)
 
-    def _build_ranking_tab(self):
-        pane = ttk.PanedWindow(self.tab_ranking, orient=tk.HORIZONTAL)
+        HELP.bind_help(split_combo, "tr_val_split")
+
+    def _build_ranking_panel(self, parent):
+        ttk.Label(
+            parent,
+            text="Porównuj wytrenowane modele względem ground truth z annotations.xml.",
+            font=("Segoe UI", 10, "italic"),
+            wraplength=520,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        left_f = ttk.LabelFrame(pane, text=" Testowane Modele ", padding=10)
-        right_f = ttk.LabelFrame(pane, text=" Tabela Wyników ", padding=10)
+        left_f = ttk.Frame(pane, padding=2)
+        right_f = ttk.Frame(pane, padding=2)
         pane.add(left_f, weight=1)
         pane.add(right_f, weight=3)
 
@@ -1856,6 +1974,7 @@ class TrainingTab:
         self.rank_status = ttk.Label(left_f, text="Gotowy", foreground="gray")
         self.rank_status.pack(anchor=tk.W)
 
+        ttk.Label(right_f, text="Tabela wyników", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 6))
         cols = ("Miejsce", "Model", "Zadanie", "F1-Score", "Precision", "Recall")
         self.rank_tree = ttk.Treeview(right_f, columns=cols, show="headings")
         for c in cols: self.rank_tree.heading(c, text=c)
@@ -2081,11 +2200,7 @@ class TrainingTab:
         if not YOLO_AVAILABLE:
             return messagebox.showerror("Błąd", "Brak ultralytics.")
         
-        # ✅ ZMIANA: czyścimy terminal live przed nowym treningiem
-        self.train_log_console.config(state=tk.NORMAL)
-        self.train_log_console.delete(1.0, tk.END)
-        self.train_log_console.insert(tk.END, "Uruchamianie treningu...\n")
-        self.train_log_console.config(state=tk.DISABLED)
+        self._set_step4_process_console_text("Uruchamianie treningu...\n")
 
         ds = self.dataset_var.get().strip()
         if not ds:
@@ -2329,8 +2444,12 @@ class TrainingTab:
 
         self.val_is_running = True
         self.btn_run_val.config(state=tk.DISABLED, text="Walidacja w toku...")
-        self.val_log_text.delete(1.0, tk.END)
-        self.val_log_text.insert(tk.END, f"Inicjalizowanie silnika YOLO do ewaluacji...\nModel: {Path(model_path).name}\nDataset: {Path(data_path).parent.name}\n\n")
+        self.val_status.config(text="Walidacja w toku...", foreground="#d35400")
+        self._set_step4_process_console_text(
+            f"Inicjalizowanie silnika YOLO do ewaluacji...\n"
+            f"Model: {Path(model_path).name}\n"
+            f"Dataset: {Path(data_path).parent.name}\n\n"
+        )
 
         def worker():
             try:
@@ -2356,11 +2475,13 @@ class TrainingTab:
                     else:
                         res += str(metrics)
                         
-                self._ui(lambda r=res: self.val_log_text.insert(tk.END, r))
+                self._append_train_log(res.rstrip())
+                self._ui(lambda: self.val_status.config(text="Walidacja zakończona.", foreground="green"))
                 self._ui(lambda: messagebox.showinfo("Sukces", "Walidacja zakończona pomyślnie!"))
                 
             except Exception as e:
-                self._ui(lambda err=e: self.val_log_text.insert(tk.END, f"\nBŁĄD WALIDACJI:\n{err}"))
+                self._append_train_log(f"\nBŁĄD WALIDACJI:\n{e}")
+                self._ui(lambda: self.val_status.config(text="Błąd walidacji", foreground="red"))
                 logger.error(f"Validation error: {e}")
                 
             finally:
