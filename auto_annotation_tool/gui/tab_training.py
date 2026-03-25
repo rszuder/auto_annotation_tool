@@ -52,6 +52,8 @@ class TrainingTab:
         self._step4_dataset_mode = "char"
         self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
+        self._step4_campaign_finish_ready = False
+        self._step4_campaign_finish_ready = False
         self._training_completion_poll_job = None
         
         
@@ -227,7 +229,7 @@ class TrainingTab:
         self._step4_dataset_mode = "char"
 
         try:
-            self._refresh_step4_dataset_mode_ui()
+            self._refresh_step4_campaign_navigation_ui()
         except Exception:
             pass
 
@@ -240,7 +242,8 @@ class TrainingTab:
 
     def clear_campaign_context(self):
         """
-        ✅ ZMIANA: czyści projektowy kontekst treningu i wraca do globalnych katalogów Workspace.
+        Czyści projektowy kontekst treningu i wraca do globalnych katalogów Workspace.
+        Dodatkowo czyści kampanijne logi / wyniki widoczne w UI.
         """
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
@@ -259,9 +262,36 @@ class TrainingTab:
         self.current_run_id = None
         self._plots_paths = []
         self._plot_original_path = None
+        self._plot_photo = None
+        self._plot_img_id = None
 
         try:
             self.plots_list.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.tree.selection_remove(*self.tree.selection())
+        except Exception:
+            pass
+
+        try:
+            self.train_progress_var.set(0.0)
+        except Exception:
+            pass
+
+        try:
+            self.train_log_console.config(state=tk.NORMAL)
+            self.train_log_console.delete(1.0, tk.END)
+            self.train_log_console.insert(tk.END, "Oczekuje na rozpoczęcie treningu...\nGotowy na dane z Ultralytics.\n")
+            self.train_log_console.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.step4_builder_log_text.configure(state=tk.NORMAL)
+            self.step4_builder_log_text.delete(1.0, tk.END)
+            self.step4_builder_log_text.configure(state=tk.DISABLED)
         except Exception:
             pass
 
@@ -272,6 +302,7 @@ class TrainingTab:
         self._step4_dataset_mode = "char"
         self._step4_builder_log_visible = False
         self._current_training_dataset_is_pose = None
+        self._step4_campaign_finish_ready = False
 
         if self._training_completion_poll_job is not None:
             try:
@@ -279,11 +310,38 @@ class TrainingTab:
             except Exception:
                 pass
             self._training_completion_poll_job = None
-            self._set_training_ui_idle_state()
-            try:
-                self._refresh_step4_dataset_mode_ui()
-            except Exception:
-                pass
+
+        self._set_training_ui_idle_state()
+
+        try:
+            self.btn_toggle_step4_log.configure(text="Pokaż log")
+        except Exception:
+            pass
+
+        try:
+            self.step4_builder_log_frame.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        try:
+            self.right_nb.select(self.hist_tab)
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass  
 
     def set_campaign_training_target(self, target: str):
         target = (target or "char").strip().lower()
@@ -387,6 +445,11 @@ class TrainingTab:
             pass
 
         try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
             self.main_nb.select(self.tab_train)
         except Exception:
             pass
@@ -402,6 +465,180 @@ class TrainingTab:
         self._append_step4_builder_log(
             "[NAWIGACJA] Tryb swobodny: brak poprzedniego kroku wizardowego do otwarcia."
         )
+
+    def _refresh_step4_campaign_navigation_ui(self):
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+
+        try:
+            if campaign_active:
+                self.step4_train_nav.pack(fill=tk.X, padx=5, pady=(0, 5))
+            else:
+                self.step4_train_nav.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self.btn_step4_train_back.configure(
+                state=(tk.NORMAL if campaign_active else tk.DISABLED)
+            )
+        except Exception:
+            pass
+
+        try:
+            finish_state = tk.NORMAL if (campaign_active and self._step4_campaign_finish_ready) else tk.DISABLED
+            self.btn_step4_finish.configure(state=finish_state)
+        except Exception:
+            pass
+
+
+    def _step4_train_go_back(self):
+        if CAMPAIGN.get_active_project_name():
+            try:
+                self.main_nb.select(self.tab_dataset)
+                return
+            except Exception:
+                pass
+
+
+    def _finish_campaign_step4(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        if not self._step4_campaign_finish_ready:
+            return
+
+        try:
+            CAMPAIGN.set_current_step(5)
+        except Exception:
+            return
+
+        self._step4_campaign_finish_ready = False
+
+        try:
+            self._append_train_log(
+                "[KAMPANIA] Użytkownik zakończył krok 4. Cykl iteracji został domknięty."
+            )
+        except Exception:
+            pass
+
+        try:
+            self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
+            self.app.open_controlled_tab("campaign")
+        except Exception:
+            pass
+
+    def _refresh_step4_campaign_navigation_ui(self):
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+
+        try:
+            self.main_nb.tab(self.tab_dataset, state="normal")
+            self.main_nb.tab(self.tab_train, state="normal")
+        except Exception:
+            pass
+
+        try:
+            if campaign_active:
+                self.main_nb.tab(self.tab_val, state="disabled")
+                self.main_nb.tab(self.tab_ranking, state="disabled")
+            else:
+                self.main_nb.tab(self.tab_val, state="normal")
+                self.main_nb.tab(self.tab_ranking, state="normal")
+        except Exception:
+            pass
+
+        if not hasattr(self, "step4_train_nav"):
+            return
+
+        try:
+            if campaign_active:
+                self.step4_train_nav.pack(fill=tk.X, padx=5, pady=(0, 5))
+            else:
+                self.step4_train_nav.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            self.btn_step4_train_back.configure(
+                state=(tk.NORMAL if campaign_active else tk.DISABLED)
+            )
+        except Exception:
+            pass
+
+        try:
+            finish_state = tk.NORMAL if (campaign_active and self._step4_campaign_finish_ready) else tk.DISABLED
+            self.btn_step4_finish.configure(state=finish_state)
+        except Exception:
+            pass
+
+
+    def _step4_train_go_back(self):
+        if CAMPAIGN.get_active_project_name():
+            try:
+                self.main_nb.select(self.tab_dataset)
+                return
+            except Exception:
+                pass
+
+
+    def _finish_campaign_step4(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        if not self._step4_campaign_finish_ready:
+            return
+
+        try:
+            CAMPAIGN.set_current_step(5)
+        except Exception:
+            return
+
+        self._step4_campaign_finish_ready = False
+
+        try:
+            self._append_train_log(
+                "[KAMPANIA] Użytkownik zakończył krok 4. "
+                "Cykl iteracji został domknięty."
+            )
+        except Exception:
+            pass
+
+        try:
+            self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
+            self.app.open_controlled_tab("campaign")
+        except Exception:
+            pass
 
     def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
         if not run_id:
@@ -482,7 +719,55 @@ class TrainingTab:
         except Exception:
             pass
 
+        try:
+            self._complete_campaign_step4_if_needed(target)
+        except Exception:
+            pass
+
         self._pending_campaign_model_type = None
+        return True
+
+    def _complete_campaign_step4_if_needed(self, target: str) -> bool:
+        """
+        Jeśli zakończony trening dotyczył aktywnego projektu i jednego
+        z torów kampanijnych (char / plate), zamyka krok 4 kampanii
+        i odświeża dashboard tak, aby odblokować przejście do nowej iteracji.
+        """
+        target = str(target or "").strip().lower()
+        if target not in ("char", "plate"):
+            return False
+
+        if not CAMPAIGN.get_active_project_name():
+            return False
+
+        try:
+            CAMPAIGN.set_current_step(5)
+        except Exception:
+            return False
+
+        try:
+            self._append_train_log(
+                f"[KAMPANIA] Zakończono krok 4 dla toru '{target}'. "
+                f"Cykl iteracji został domknięty i można przejść do nowej iteracji."
+            )
+        except Exception:
+            pass
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        try:
+            self.app.update_status(
+                f"✅ Zakończono trening toru '{target}'. Cykl iteracji został domknięty.",
+                "info"
+            )
+        except Exception:
+            pass
+
         return True
 
     def _poll_training_completion(self):
@@ -490,6 +775,7 @@ class TrainingTab:
         Lekki polling końca treningu:
         - czeka aż trainer.is_training spadnie do False
         - jeśli powstał best.pt, promuje model do projektu
+        - w trybie kampanijnym odblokowuje ręczne zakończenie kroku 4
         """
         try:
             is_training = bool(getattr(self.trainer, "is_training", False))
@@ -498,21 +784,40 @@ class TrainingTab:
                 self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
                 return
 
-            # trening już się skończył / zatrzymał
             self._training_completion_poll_job = None
-            self._promote_trained_model_to_campaign_if_needed()
+            promoted = self._promote_trained_model_to_campaign_if_needed()
+
             try:
                 self._load_history()
             except Exception:
                 pass
 
-            self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
+            if CAMPAIGN.get_active_project_name() and promoted:
+                self._step4_campaign_finish_ready = True
+                self._set_training_ui_idle_state(
+                    "Trening zakończony. Kliknij „Zakończ krok 4 i wróć do kampanii”.",
+                    "#1e8449"
+                )
+            else:
+                self._step4_campaign_finish_ready = False
+                self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
+
+            try:
+                self._refresh_step4_campaign_navigation_ui()
+            except Exception:
+                pass
 
         except Exception as e:
             logger.error(f"Błąd pollingu końca treningu: {e}")
             self._training_completion_poll_job = None
             self._pending_campaign_model_type = None
+            self._step4_campaign_finish_ready = False
             self._set_training_ui_idle_state("Błąd monitorowania końca treningu.", "#c0392b")
+
+            try:
+                self._refresh_step4_campaign_navigation_ui()
+            except Exception:
+                pass
 
     def _set_training_ui_running_state(self):
         try:
@@ -986,8 +1291,45 @@ class TrainingTab:
         hist_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hist_btns, text="Usuń", command=self._delete_selected).pack(side=tk.LEFT)
         ttk.Button(hist_btns, text="Otwórz Folder", command=self._open_run_folder).pack(side=tk.RIGHT)
+        self.step4_train_nav = ttk.Frame(self.tab_train)
+
+        self.btn_step4_train_back = ttk.Button(
+            self.step4_train_nav,
+            text="← Wstecz do wyboru toru",
+            command=self._step4_train_go_back
+        )
+        self.btn_step4_train_back.pack(side=tk.LEFT)
+
+        self.btn_step4_finish = ttk.Button(
+            self.step4_train_nav,
+            text="Zakończ krok 4 i wróć do kampanii",
+            command=self._finish_campaign_step4,
+            style="Accent.TButton",
+            state=tk.DISABLED
+        )
+        self.btn_step4_finish.pack(side=tk.RIGHT)
+        self._refresh_step4_campaign_navigation_ui()
+
+        self.step4_train_nav = ttk.Frame(self.tab_train)
+
+        self.btn_step4_train_back = ttk.Button(
+            self.step4_train_nav,
+            text="← Wstecz do wyboru toru",
+            command=self._step4_train_go_back
+        )
+        self.btn_step4_train_back.pack(side=tk.LEFT)
+
+        self.btn_step4_finish = ttk.Button(
+            self.step4_train_nav,
+            text="Zakończ krok 4 i wróć do kampanii",
+            command=self._finish_campaign_step4,
+            style="Accent.TButton",
+            state=tk.DISABLED
+        )
+        self.btn_step4_finish.pack(side=tk.RIGHT)
 
         self._build_plots_ui()
+        self._refresh_step4_campaign_navigation_ui()
 
         # ✅ PRZYWRÓCONE, ZABEZPIECZONE PODPIĘCIE POMOCY
         HELP.bind_help(ds_row, "tr_train_ds")
@@ -1430,9 +1772,17 @@ class TrainingTab:
 
         if run_id:
             self.current_run_id = run_id
+            self._step4_campaign_finish_ready = False
             self.btn_start_train.configure(state=tk.DISABLED)
             self.btn_stop_train.configure(state=tk.NORMAL)
             self.train_progress_label.configure(text=f"Trening uruchomiony: {run_id}")
+
+            try:
+                self._refresh_step4_campaign_navigation_ui()
+            except Exception:
+                pass
+
+
 
         if CAMPAIGN.get_active_project_name():
             self._pending_campaign_model_type = self.get_campaign_training_target()
