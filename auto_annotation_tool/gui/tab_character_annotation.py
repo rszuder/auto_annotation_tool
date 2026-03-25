@@ -531,15 +531,25 @@ class CharacterAnnotationTab:
         """
         self._rebuild_preview_listbox(preserve_selection=preserve_selection)
 
+
+
     def clear_campaign_context(self):
         """
         Czyści projektowy kontekst UI po wyjściu z projektu.
+        Oprócz pól wejściowych czyści też preview, metadata, log testów
+        i local_session powiązany z projektem.
         """
         if hasattr(self, "_campaign_chars_dir"):
             self._campaign_chars_dir = None
 
         if hasattr(self, "_campaign_datasets_dir"):
             self._campaign_datasets_dir = None
+
+        # usuń project-bound session values
+        try:
+            self._clear_project_bound_session_values(clear_ui=False)
+        except Exception:
+            pass
 
         # wyczyść projektowe pola UI
         try:
@@ -562,8 +572,9 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # wyczyść preview
+        # wyczyść preview i metadata
         self._reset_preview_cache()
+        self.preview_metadata = {}
         self.preview_plate_ids = []
         self._listbox_pid_by_index = []
 
@@ -582,6 +593,14 @@ class CharacterAnnotationTab:
                 text="Brak wczytanych danych",
                 foreground="#2980b9"
             )
+        except Exception:
+            pass
+
+        # wyczyść log testów OCR / detekcji
+        try:
+            self.test_log_text.configure(state=tk.NORMAL)
+            self.test_log_text.delete("1.0", tk.END)
+            self.test_log_text.configure(state=tk.DISABLED)
         except Exception:
             pass
 
@@ -605,11 +624,28 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        # przywróć neutralny stan finish / nawigacji kroku 3, jeśli istnieją
+        try:
+            if hasattr(self, "btn_finish_step3"):
+                self.btn_finish_step3.config(
+                    text="Zakończ krok 3 i wróć do Wizarda",
+                    state=tk.DISABLED
+                )
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "btn_back_to_wizard_step3"):
+                self.btn_back_to_wizard_step3.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
         # wróć do trybu swobodnego
         try:
             self.reset_subtab_flow()
         except Exception as e:
-            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
+            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}") 
+
     def _get_campaign_char_model_path(self) -> str:
         """
         Zwraca ścieżkę do modelu znaków przypiętego do aktywnego projektu.
