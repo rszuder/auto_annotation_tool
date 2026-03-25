@@ -845,9 +845,9 @@ class CampaignTab:
         tab_ann = self.app.tabs.get("annotation")
         if tab_ann:
             if folder.exists():
-                tab_ann.input_dir_var.set(str(folder))
-
-            tab_ann.output_dir_var.set(str(auto_out))
+                tab_ann.apply_campaign_context(folder, auto_out)
+            else:
+                tab_ann.apply_campaign_context(raw_dir, auto_out)
 
             v_mod = CAMPAIGN.get_global_model("vehicle")
             p_mod = CAMPAIGN.get_global_model("plate")
