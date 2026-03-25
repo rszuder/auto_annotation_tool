@@ -395,15 +395,12 @@ class AnnotationTab:
         Przywraca neutralny stan zakładki Autoanotacji po wyjściu z projektu
         i czyści wszystkie artefakty poprzedniego projektu z UI.
         """
-        # ścieżki bazowe
         self.input_dir_var.set(str(Path(CONFIG.DIR_1_RAW).absolute()))
         self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()))
 
-        # wracamy do zwykłego trybu pracy
         self.mode_var.set("C: Pojazdy + tablice")
         self.device_var.set("auto")
 
-        # reset modeli i custom ścieżek
         try:
             if YOLO_AVAILABLE:
                 v_keys = sorted(list(AVAILABLE_DETECT_MODELS.keys()))
@@ -427,7 +424,6 @@ class AnnotationTab:
         except Exception:
             pass
 
-        # odtwórz standardowy layout UI
         try:
             self._on_mode_change()
         except Exception:
@@ -445,7 +441,6 @@ class AnnotationTab:
 
         self._set_campaign_paths_lock_state(False)
 
-        # wyczyść pomocnicze opisy ścieżek projektowych
         try:
             self.project_paths_info_var.set("")
         except Exception:
@@ -456,7 +451,6 @@ class AnnotationTab:
         except Exception:
             pass
 
-        # wyczyść stan przetwarzania / wyników
         self.current_annotations = []
         self.is_processing = False
 
@@ -465,25 +459,21 @@ class AnnotationTab:
         except Exception:
             self.current_input_dir = None
 
-        # wyczyść preview listy
         try:
             self.preview_listbox.delete(0, tk.END)
         except Exception:
             pass
 
-        # wyczyść canvas
         try:
             self.preview_canvas.delete("all")
         except Exception:
             pass
 
-        # wyczyść logi tej zakładki
         try:
             self.log_text.delete("1.0", tk.END)
         except Exception:
             pass
 
-        # zresetuj progress / status / przyciski
         try:
             self.progress["value"] = 0
         except Exception:

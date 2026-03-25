@@ -545,13 +545,11 @@ class CharacterAnnotationTab:
         if hasattr(self, "_campaign_datasets_dir"):
             self._campaign_datasets_dir = None
 
-        # usuń project-bound session values
         try:
             self._clear_project_bound_session_values(clear_ui=False)
         except Exception:
             pass
 
-        # wyczyść projektowe pola UI
         try:
             self.xml_path_var.set("")
         except Exception:
@@ -572,7 +570,6 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # wyczyść preview i metadata
         self._reset_preview_cache()
         self.preview_metadata = {}
         self.preview_plate_ids = []
@@ -596,7 +593,6 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # wyczyść log testów OCR / detekcji
         try:
             self.test_log_text.configure(state=tk.NORMAL)
             self.test_log_text.delete("1.0", tk.END)
@@ -604,7 +600,6 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # zresetuj stan testu
         try:
             self.fast_test_running = False
             self.fast_test_stop.clear()
@@ -624,7 +619,6 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # przywróć neutralny stan finish / nawigacji kroku 3, jeśli istnieją
         try:
             if hasattr(self, "btn_finish_step3"):
                 self.btn_finish_step3.config(
@@ -640,11 +634,10 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # wróć do trybu swobodnego
         try:
             self.reset_subtab_flow()
         except Exception as e:
-            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}") 
+            logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
 
     def _get_campaign_char_model_path(self) -> str:
         """
