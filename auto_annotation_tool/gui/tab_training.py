@@ -210,7 +210,7 @@ class TrainingTab:
 
 
 
-
+    #=====================================
     def _restore_step4_campaign_project_state(self):
         """
         Odtwarza stan z4 dla aktywnego projektu oryg:
