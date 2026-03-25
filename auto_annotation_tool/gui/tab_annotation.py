@@ -215,7 +215,7 @@ class AnnotationTab:
         self.center_nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
         
         tab_logs = ttk.Frame(self.center_nb)
-        self.center_nb.add(tab_logs, text="📄 Logi Systemowe")
+        self.center_nb.add(tab_logs, text="📄 Terminal procesu")
         self.log_text = scrolledtext.ScrolledText(tab_logs, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc")
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self._redirect_logs()
