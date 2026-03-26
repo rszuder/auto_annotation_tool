@@ -1,201 +1,251 @@
 {
     "tab1_input": {
-        "full_help": "Źródło: Wskaż folder zawierający surowe, nieopisane zdjęcia pojazdów z kamer."
+        "full_help": "Folder wejściowy dla Z2. W trybie projektu ścieżka jest podstawiana z aktywnej iteracji. W trybie swobodnym wskazujesz własny katalog zdjęć."
     },
     "tab1_output": {
-        "full_help": "Cel: Program automatycznie utworzy tu folder Workspace/2_auto_annotations i zapisze w nim wyniki XML."
+        "full_help": "Katalog wynikowy autoanotacji. Program zapisuje tu plik annotations.xml i artefakty runu. W kampanii pole jest sterowane przez Wizard."
     },
     "tab1_start": {
-        "full_help": "START: Uruchamia modele AI (YOLO). Przeskanuje zdjęcia, znajdzie pojazdy i tablice, generując plik annotations.xml."
+        "full_help": "Uruchamia autoanotację w Z2. System wykrywa pojazdy i tablice zgodnie z wybranym trybem pracy i aktualnymi modelami."
     },
     "tab1_stop": {
-        "full_help": "STOP: Bezpiecznie zatrzymuje proces przetwarzania po ukończeniu obecnego zdjęcia."
+        "full_help": "Bezpiecznie zatrzymuje trwający run po domknięciu bieżącej operacji."
     },
     "tab1_logs": {
-        "full_help": "Konsola: Wyświetla na żywo co wykryto na danym zdjęciu, czasy inferencji oraz ewentualne błędy silnika YOLO."
+        "full_help": "Pokazuje lub ukrywa terminal procesu dla Z2. Terminal nie jest potrzebny do zwykłej pracy, ale pomaga diagnozować problemy i śledzić postęp."
     },
     "tab1_mode": {
-        "full_help": "Tryb C (Zalecany): Szuka pojazdów, a potem tablic. Odrzuca 'fałszywe' tablice (np. znaki drogowe), jeśli nie są na aucie."
+        "full_help": "Tryb detekcji w Z2. Tryb C jest najpełniejszy, bo najpierw wykrywa pojazdy, a potem szuka tablic w ich obrębie."
     },
     "tab1_model_veh": {
-        "full_help": "Model Pojazdów (Detect): Wybierz wielkość sieci. Wersje 'n' i 's' są błyskawiczne, 'm' i 'l' wolniejsze, ale precyzyjniejsze."
+        "full_help": "Model YOLO Detect dla pojazdów. Możesz wybrać model domyślny albo własny model z folderu modeli."
     },
     "tab1_model_pla": {
-        "full_help": "Model Tablic (Pose): Modele '-pose' szukają 4 rogów tablicy (Polygon), co pozwala na późniejsze prostowanie perspektywy w Zakładce 2."
+        "full_help": "Model YOLO Pose dla tablic. Modele pose zwracają rogi tablicy, co pozwala później na prostowanie i wycinanie."
     },
     "tab1_conf": {
-        "full_help": "Pewność (Confidence): Ustawienie >0.50 zignoruje rozmazane obiekty. Ustawienie <0.30 wykryje wszystko, ale złapie też śmieci."
+        "full_help": "Próg pewności detekcji. Wyżej oznacza mniej fałszywych alarmów, niżej oznacza większą czułość."
     },
     "tab1_device": {
-        "full_help": "Akceleracja (Device): 'cuda:0' włącza potężną akcelerację karty graficznej NVIDIA. 'cpu' wymusza powolne obliczenia na procesorze."
-    },
-    "t2_xml": {
-        "full_help": "Anotacje: Wskaż plik annotations.xml wygenerowany w Zakładce 1 (lub poprawiony w CVAT)."
-    },
-    "t2_img": {
-        "full_help": "Obrazy: Wskaż oryginalny folder ze zdjęciami aut. Program musi wiedzieć, skąd ma wycinać tablice."
-    },
-    "t2_cut_start": {
-        "full_help": "Wycinanie: OpenCV wytnie tablice, położy je na płasko (prostowanie perspektywy) i zapisze jako małe obrazki w folderze run_XXX."
-    },
-    "t2_cut_logs": {
-        "full_help": "Logi Wycinarki: Zobaczysz tu, z jakiego pliku wycięto tablicę i czy udało się ją wyprostować."
-    },
-    "t2_history": {
-        "full_help": "Historia: Pozwala załadować poprzednie eksperymenty (foldery run_XXX) z Workspace/3_cropped_characters."
-    },
-    "t2_listbox": {
-        "full_help": "Lista Tablic: 🟢 (Złote) - OCR przeczytał je bezbłędnie (zgodnie z nazwą pliku). 🔴 (Błędy) - AI się pomyliło, wyślij je do CVAT!"
-    },
-    "t2_canvas": {
-        "full_help": "Podgląd: Interaktywne płótno. Płynnie powiększa tablicę i precyzyjnie nakłada zielone ramki (Bounding Boxy) na każdą znalezioną literę."
-    },
-    "t2_tree": {
-        "full_help": "Tabela Znaków: Pokazuje każdy znak z osobna oraz to, jak bardzo sztuczna inteligencja (AI) była pewna swojej decyzji (0-100%)."
-    },
-    "t2_fast_test": {
-        "full_help": "Szybki Test OCR: Przepuszcza obecną paczkę tablic przez ustawione filtry i ocenia skuteczność AI względem nazw plików zdjęć."
-    },
-    "t2_rank": {
-        "full_help": "Turniej Presetów: Testuje w tle wszystkie filtry (pliki JSON z Laboratorium). Szuka konfiguracji, która da najwyższą celność (True Accuracy)."
-    },
-    "t2_method": {
-        "full_help": "Metoda: 'OCR' (EasyOCR, powolny, podatny na hologramy). Zmień na 'YOLO', gdy zbudujesz Mega-Dataset i wytrenujesz własny model!"
-    },
-    "t2_lab_btn": {
-        "full_help": "Laboratorium OCR: Otwiera zaawansowane studio. Ustawisz tu m.in. kontrast, binaryzację i białą ramkę, aby zmaksymalizować celność Szybkiego Testu."
-    },
-    "lab_angle": {
-        "full_help": "Ręczna korekta kąta: Jeśli wycięta tablica jest krzywa, wymuś obrót. Poziomy tekst drastycznie ułatwia pracę silnikom OCR."
-    },
-    "lab_height": {
-        "full_help": "Wysokość (px): Skalowanie. Zbyt mały obrazek gubi piksele, zbyt duży spowalnia program i wywołuje halucynacje AI (Zalecane: 60-80px)."
-    },
-    "lab_clip": {
-        "full_help": "Odcinanie odblasków: Wycina najjaśniejsze punkty obrazu. Idealne do usuwania refleksów świetlnych i mocnych przepaleń."
-    },
-    "lab_denoise": {
-        "full_help": "Usuwanie szumu (Denoise): Wygładza cyfrowe ziarno z nocnych zdjęć. Uważaj: zbyt wysoka wartość 'rozmyje' cienkie litery!"
-    },
-    "lab_clahe": {
-        "full_help": "Adaptacyjny Kontrast (CLAHE): Wyciąga detale z cienia. Niezastąpione dla tablic schowanych pod zderzakiem albo źle oświetlonych."
-    },
-    "lab_block": {
-        "full_help": "Rozmiar bloku: Parametr binaryzacji (czarno-białe cięcie). Mniejsze wartości łapią cienkie rysy, większe radzą sobie z padającym cieniem."
-    },
-    "lab_c": {
-        "full_help": "Stała odcięcia (C): Potężne narzędzie! Dostrój ten suwak tak, aby 'rozpuścić' brud i hologramy w białym tle, zostawiając same czarne litery."
-    },
-    "lab_erode": {
-        "full_help": "Erozja (Pogrubianie): Jeśli litery są przerywane (jak z drukarki igłowej), to je połączy. Przesada zamieni litery w czarne kwadraty."
-    },
-    "lab_pad": {
-        "full_help": "Biała ramka (Padding): Daje 'oddech' na krawędziach. Zapobiega czytaniu czarnych, ochronnych ramek tablicy jako liter I, L lub cyfry 1."
-    },
-    "lab_conf": {
-        "full_help": "Próg pewności (OCR Confidence): Jeśli ustawisz np. 0.85, wszystkie niepewne odczyty AI (nawet poprawne) polecą jako Błędy (🔴) do sprawdzenia przez człowieka."
-    },
-    "cvat_smart_exp": {
-        "full_help": "SMART Export: Zaznacz to! Zamiast pakować tysiące tablic, program wrzuci do CVAT-a tylko te, których AI nie potrafiło przeczytać."
-    },
-    "btn_export_cvat": {
-        "full_help": "Eksport Błędów: Generuje plik ZIP. Wgraj go do CVAT, popraw pomylone literki na stronie, wyeksportuj XML i zaimportuj go z powrotem niżej."
-    },
-    "btn_export_yolo": {
-        "full_help": "Fabryka YOLO: Pobiera WSZYSTKIE idealne tablice 🟢 (z całego programu), usuwa duplikaty i buduje perfekcyjny, gotowy folder treningowy."
-    },
-    "btn_import_cvat": {
-        "full_help": "Aktualizacja Bazy: Wgrywa poprawiony plik z CVAT. Tablice, które przed chwilą naprawiłeś ręcznie, zapalają się na 🟢 i zasilają bazę dla YOLO!"
-    },
-    "tr_split_src": {
-        "full_help": "Źródło: Wskaż folder wygenerowany przez 'Fabrykę YOLO' z poprzedniej zakładki (np. YOLO_MegaDataset_Chars_...)."
-    },
-    "tr_split_ratios": {
-        "full_help": "Proporcje: Podział na 'Train' (zdjęcia z których AI się uczy) i 'Val' (zdjęcia, na których zdaje egzamin, żeby sprawdzić czy nie wkuło na pamięć)."
-    },
-    "tr_split_btn": {
-        "full_help": "Splitter: Fizycznie rozdziela zdjęcia i pliki .txt do odpowiednich folderów (images/train, images/val), przygotowując grunt pod trening."
-    },
-    "tr_train_ds": {
-        "full_help": "Dataset: Wskaż folder, który przed chwilą podzieliłeś Splitterem (musi zawierać w środku plik data.yaml)."
-    },
-    "tr_train_base": {
-        "full_help": "Wiedza początkowa: Wybierz model z dopiskiem '-pose' by uczyć szukania tablic. Wybierz czysty model (np. yolo11n.pt), by uczyć czytania liter."
-    },
-    "tr_train_ep": {
-        "full_help": "Epoki: Ile razy AI ma przerobić cały materiał. Dla małych datasetów (100 zdjęć) daj 100-200. Program i tak sam przerwie, jeśli AI przestanie się uczyć."
-    },
-    "tr_train_bs": {
-        "full_help": "Batch Size: Ile zdjęć wrzucić naraz do karty graficznej. Zwiększaj (16, 32, 64) aby przyspieszyć, ale jeśli wyskoczy błąd OOM (Brak Pamięci), zmniejsz do 8."
-    },
-    "tr_train_imgsz": {
-        "full_help": "Rozdzielczość: Jeśli uczysz czytać małe litery, zmniejsz to z 640 na 128 lub 256. Trening będzie 10x szybszy, a jakość wzrośnie!"
-    },
-    "tr_train_btn": {
-        "full_help": "Start Treningu: Uruchamia wielogodzinny proces uczenia. Po wszystkim program wygeneruje raport HTML i wagi najlepszego modelu (best.pt)."
-    },
-    "tr_train_tree": {
-        "full_help": "Historia Treningów: Kliknij dowolny wiersz, aby zobaczyć szczegóły po prawej. mAP50 to ogólna ocena modelu (im bliżej 1.0, tym lepiej!)."
-    },
-    "tr_train_plot": {
-        "full_help": "Wykresy i Analiza: Kliknij plik z listy po lewej, aby obejrzeć m.in. Confusion Matrix (macierz pomyłek - zobaczysz tam, że np. AI nadal myli 0 z literą O)."
-    },
-    "tr_val_model": {
-        "full_help": "Model: Wskaż swój wytrenowany plik .pt (np. z folderu Workspace/5_training_runs/run_XXX/weights/best.pt)."
-    },
-    "tr_val_btn": {
-        "full_help": "Walidacja: Zmusza model do zdania twardego egzaminu na zbiorze Val lub Test. W konsoli poniżej zobaczysz czystą, matematyczną ocenę jego umiejętności."
-    },
-    "tr_rank_cat": {
-        "full_help": "Kategoria: System dba o porządek, oddzielając kategorie modeli do wykrywania aut/tablic/znaków"
-    },
-    "tr_rank_btn": {
-        "full_help": "Ranking: Uruchamia wszystkie modele na wskazanym katalogu. Następnie porównuje wyniki z pracą człowieka (XML Ground Truth) i wylicza ostateczny wskaźnik F1-Score."
-    },
-    "tr_train_lr0": {
-        "full_help": "Learning Rate (lr0): Prędkość przyswajania wiedzy przez sztuczną inteligencję. Standard to 0.01. Jeśli na wykresach skuteczność nie rośnie, tylko chaotycznie skacze, zmniejsz tę wartość (np. do 0.001)."
-    },
-    "tr_cvat_xml": {
-        "full_help": "Plik XML (CVAT 1.1): Zawiera koordynaty wyciętych tablic."
-    },
-    "tr_cvat_img": {
-        "full_help": "Obrazy: Katalog ze zdjęciami, z których będą wycinane tablice dla datasetu YOLO."
-    },
-    "tr_cvat_btn": {
-        "full_help": "Stwórz Dataset: Przelicza wszystkie obiekty, wycina je i układa w gotowej strukturze YOLO (Train/Val)."
-    },
-    "tr_train_custom": {
-        "full_help": "Własny Model (.pt): Wybierz model wygenerowany we wcześniejszych treningach (np. z folderu Workspace/6_models), aby kontynuować jego douczanie (Fine-Tuning) na nowych danych."
+        "full_help": "Urządzenie obliczeniowe. CUDA korzysta z GPU, a CPU wymusza liczenie na procesorze."
     },
     "tab1_custom_model": {
-        "full_help": "Własny Model: Jeśli wytrenowałeś w Zakładce Treningu lepszy model na własnych danych, skopiuj jego wagę (best.pt) do folderu Workspace/6_models i wskaż go tutaj."
+        "full_help": "Własny model .pt dla Z2. Przydaje się po treningu, gdy chcesz podmienić model domyślny na swój najlepszy run."
+    },
+    "tab1_preview_list": {
+        "full_help": "Lista wyników autoanotacji. Pozwala szybko przeglądać pliki przetworzone w bieżącym runie."
+    },
+    "tab1_preview_canvas": {
+        "full_help": "Podgląd obrazu i wykryć dla zaznaczonego wpisu z listy. Tu najłatwiej sprawdzić, czy Z2 wykryła obiekty poprawnie."
+    },
+    "t2_xml": {
+        "full_help": "Plik annotations.xml używany w Z3/PZ1 do wycinania tablic. W kampanii jest podstawiany automatycznie z poprzedniego etapu."
+    },
+    "t2_img": {
+        "full_help": "Folder z oryginalnymi obrazami dla Z3/PZ1. To z nich system wycina tablice."
+    },
+    "t2_cut_start": {
+        "full_help": "Start wycinania tablic w Z3/PZ1. Tworzy paczkę run_XXX z obrazami tablic i plikiem metadata.json."
+    },
+    "t2_cut_logs": {
+        "full_help": "Terminal procesu dla Z3. Pokazuje log wycinania, testów OCR, rankingów i importów, gdy potrzebujesz diagnostyki."
+    },
+    "t2_history": {
+        "full_help": "Historia paczek run_XXX. Pozwala wracać do wcześniej utworzonych paczek tablic."
+    },
+    "t2_listbox": {
+        "full_help": "Lista tablic w Z3/PZ2. Zielony wpis oznacza zgodność z ground truth, czerwony wymaga poprawy. Znaki w nawiasach kwadratowych są składane w kolejności osi X."
+    },
+    "t2_canvas": {
+        "full_help": "Canvas podglądu tablicy w Z3/PZ2. Pokazuje obraz tablicy oraz położenie znaków wykrytych przez OCR lub YOLO."
+    },
+    "t2_preview_run": {
+        "full_help": "Aktywna paczka run_XXX analizowana w Z3/PZ2. Tu sprawdzasz, z jakiego katalogu pochodzą aktualne wyniki."
+    },
+    "t2_preview_info": {
+        "full_help": "Status i licznik tablic dla aktualnie wczytanej paczki. Pomaga kontrolować, ile rekordów masz do analizy."
+    },
+    "t2_tree": {
+        "full_help": "Widok szczegółów znaków. Jeśli jest dostępny w danym narzędziu, pokazuje pojedyncze znaki i informacje pomocnicze."
+    },
+    "t2_fast_test": {
+        "full_help": "Uruchamia test OCR dla aktywnej paczki. Wyniki są porównywane z ground truth zapisanym w nazwie zdjęcia."
+    },
+    "t2_rank": {
+        "full_help": "Porównuje zapisane presety OCR i wskazuje lidera skuteczności dla bieżącej paczki."
+    },
+    "t2_method": {
+        "full_help": "Wybiera metodę rozpoznawania znaków: OCR, YOLO albo tryb łączony. W kampanii wybór powinien odpowiadać aktualnemu torowi modeli."
+    },
+    "t2_lab_btn": {
+        "full_help": "Otwiera Laboratorium OCR. Tu stroisz filtry obrazu i zapisujesz presety do dalszych testów oraz turnieju."
     },
     "t2_yolo_model": {
-        "full_help": "Model YOLO (Znaki): Wskaż swój wytrenowany na literach model .pt z folderu Workspace/6_models, by użyć go zamiast powolnego silnika EasyOCR."
+        "full_help": "Model YOLO dla znaków w Z3/PZ2. Wskazujesz go, gdy chcesz użyć własnego modelu zamiast klasycznego OCR."
+    },
+    "lab_angle": {
+        "full_help": "Korekta kąta tablicy w Laboratorium OCR. Pomaga, gdy tablica jest lekko przekrzywiona."
+    },
+    "lab_height": {
+        "full_help": "Docelowa wysokość obrazu tablicy po skalowaniu. Wpływa na czytelność znaków i szybkość OCR."
+    },
+    "lab_clip": {
+        "full_help": "Przycinanie przepaleń i odblasków. Przydaje się przy mocnych refleksach lub bardzo jasnych tablicach."
+    },
+    "lab_denoise": {
+        "full_help": "Usuwanie szumu z obrazu. Pomaga na nocnych i ziarnistych kadrach, ale zbyt mocne ustawienie może rozmyć znaki."
+    },
+    "lab_clahe": {
+        "full_help": "Lokalne wzmacnianie kontrastu. Dobrze działa na ciemnych, nierówno oświetlonych tablicach."
+    },
+    "lab_block": {
+        "full_help": "Rozmiar bloku dla binaryzacji adaptacyjnej. Wpływa na to, jak agresywnie obraz jest dzielony na czerń i biel."
+    },
+    "lab_c": {
+        "full_help": "Stała odcięcia dla binaryzacji. Używana do dopracowania separacji tła i znaków."
+    },
+    "lab_erode": {
+        "full_help": "Operacja erozji lub pogrubienia znaków. Używaj ostrożnie, bo zbyt mocna wartość deformuje litery."
+    },
+    "lab_pad": {
+        "full_help": "Biała ramka wokół tablicy. Dodaje margines, aby OCR nie mylił krawędzi tablicy ze znakami."
+    },
+    "lab_conf": {
+        "full_help": "Próg pewności odczytu OCR. Wyżej oznacza ostrzejszą selekcję poprawnych znaków."
+    },
+    "cvat_smart_exp": {
+        "full_help": "Tryb smart export. Zamiast wszystkiego eksportuje głównie przypadki wymagające korekty."
+    },
+    "btn_export_cvat": {
+        "full_help": "Eksportuje dane do paczki CVAT. Używasz tego wtedy, gdy chcesz poprawić błędne tablice ręcznie."
+    },
+    "btn_export_yolo": {
+        "full_help": "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu."
+    },
+    "btn_import_cvat": {
+        "full_help": "Importuje poprawki z CVAT z powrotem do metadata.json i aktualizuje statusy tablic."
+    },
+    "tr_route_panel": {
+        "full_help": "Panel wyboru toru w Z4/PZ1. Najpierw wybierasz, czy dana iteracja prowadzi tor tablic, czy tor znaków."
+    },
+    "tr_route_plate": {
+        "full_help": "Tor tablic w Z4. Buduje dataset YOLO Pose z XML CVAT i folderu obrazów."
+    },
+    "tr_route_char": {
+        "full_help": "Tor znaków w Z4. Dzieli gotowy dataset znaków na train/val i przygotowuje go do treningu YOLO Detect."
+    },
+    "tr_builder_log": {
+        "full_help": "Pokazuje lub ukrywa terminal procesu dla budowy datasetu w Z4/PZ1."
+    },
+    "tr_builder_next": {
+        "full_help": "Przechodzi z Z4/PZ1 do Z4/PZ2 po poprawnym przygotowaniu datasetu dla wybranego toru."
+    },
+    "tr_split_src": {
+        "full_help": "Źródło datasetu do splitu w Z4/PZ1. Zwykle wskazuje na gotowy gold pack znaków."
+    },
+    "tr_split_ratios": {
+        "full_help": "Ustawienia proporcji train/val/test dla splitu. Określają podział danych treningowych."
+    },
+    "tr_split_btn": {
+        "full_help": "Uruchamia split datasetu w torze znaków i przygotowuje plik data.yaml."
+    },
+    "tr_cvat_xml": {
+        "full_help": "Plik XML CVAT dla toru tablic w Z4/PZ1."
+    },
+    "tr_cvat_img": {
+        "full_help": "Folder obrazów potrzebny do zbudowania datasetu tablic w Z4/PZ1."
+    },
+    "tr_cvat_btn": {
+        "full_help": "Tworzy dataset tablic z XML CVAT i obrazów aktywnej iteracji."
+    },
+    "tr_train_ds": {
+        "full_help": "Gotowy dataset treningowy dla Z4/PZ2. Wskaż katalog zawierający plik data.yaml."
+    },
+    "tr_train_base": {
+        "full_help": "Model bazowy do treningu. Może to być model domyślny albo własny checkpoint .pt."
+    },
+    "tr_train_ep": {
+        "full_help": "Liczba epok treningu. Więcej epok oznacza dłuższe uczenie, ale nie zawsze lepszy wynik."
+    },
+    "tr_train_bs": {
+        "full_help": "Batch size dla treningu. Jest związany z szybkością i zużyciem pamięci GPU."
+    },
+    "tr_train_imgsz": {
+        "full_help": "Rozdzielczość treningu. Dla małych obiektów i liter ma duży wpływ na wynik."
+    },
+    "tr_train_lr0": {
+        "full_help": "Początkowy learning rate treningu. Przy niestabilnym uczeniu zwykle warto go obniżyć."
+    },
+    "tr_train_btn": {
+        "full_help": "Start treningu w Z4/PZ2. Po zakończonym treningu system odświeża historię runów i może odblokować zakończenie kroku 4."
+    },
+    "tr_train_tree": {
+        "full_help": "Historia treningów. Pozwala wybierać runy i przeglądać ich stan oraz metryki."
+    },
+    "tr_train_plot": {
+        "full_help": "Panel wykresów i analizy dla wybranego runu. Tu przeglądasz metryki, straty i obrazy diagnostyczne."
+    },
+    "tr_train_custom": {
+        "full_help": "Własny checkpoint .pt do fine-tuningu lub kontynuacji treningu."
+    },
+    "tr_train_log": {
+        "full_help": "Pokazuje lub ukrywa wspólny terminal procesu dla treningu i walidacji w Z4/PZ2."
+    },
+    "tr_analysis_nav": {
+        "full_help": "Przyciski szybkiej nawigacji po sekcjach Historia, Wykresy, Walidacja i Ranking w Z4/PZ2."
+    },
+    "tr_train_back": {
+        "full_help": "Powrót z Z4/PZ2 do wyboru toru i budowy datasetu w Z4/PZ1."
+    },
+    "tr_train_finish": {
+        "full_help": "Kończy krok 4 w kampanii i wraca do Z1 po udanym domknięciu workflow treningowego."
+    },
+    "tr_val_model": {
+        "full_help": "Model .pt używany do walidacji w Z4/PZ2."
     },
     "tr_val_data": {
-        "full_help": "Dataset Testowy: Wskaż zbiór danych, na którym sprawdzisz umiejętności modelu (musi zawierać w środku plik data.yaml)."
+        "full_help": "Dataset testowy albo walidacyjny z plikiem data.yaml do sprawdzenia modelu."
     },
     "tr_val_split": {
-        "full_help": "Podzbiór: Wybierz, którą część zbioru przebadać. Zazwyczaj testuje się modele na zbiorze ewaluacyjnym ('val') lub specjalnie wydzielonym ('test'), by mieć pewność, że AI nie wykuło zdjęć na pamięć."
+        "full_help": "Wybiera podzbiór danych, na którym ma zostać uruchomiona walidacja."
+    },
+    "tr_val_btn": {
+        "full_help": "Uruchamia walidację wybranego modelu na wskazanym zbiorze danych."
+    },
+    "tr_rank_cat": {
+        "full_help": "Kategoria modeli w rankingu. Pozwala porównywać modele odpowiedniego typu."
+    },
+    "tr_rank_btn": {
+        "full_help": "Uruchamia ranking modeli i zapisuje zestawienie wyników."
+    },
+    "camp_new_project": {
+        "full_help": "Tworzy nowy projekt kampanii wraz z osobnym drzewem katalogów projektu."
+    },
+    "camp_open_project": {
+        "full_help": "Otwiera wybrany projekt i włącza tryb kampanii dla jego aktywnej iteracji."
+    },
+    "camp_delete_project": {
+        "full_help": "Usuwa wskazany projekt i jego katalog. Jeśli usuniesz aktywny projekt, aplikacja wraca do trybu swobodnego."
+    },
+    "camp_exit_project": {
+        "full_help": "Opuszcza aktywny projekt bez usuwania danych i przełącza aplikację do trybu swobodnego."
     },
     "camp_models": {
-        "full_help": "Baza Wiedzy: Tutaj definiujesz 'mózgi' swojej aplikacji. Kliknij 'Zmień', aby wskazać najnowszą wagę .pt, którą wygenerowałeś po udanym treningu w Zakładce 3."
+        "full_help": "Lewy panel Z1 pokazuje aktualne modele projektu i pozwala wskazać lepsze checkpointy po treningu."
     },
     "camp_advance": {
-        "full_help": "Nowa Iteracja: Kiedy skończysz trenować, kliknij ten guzik. Zwiększy on numer iteracji i zresetuje cykl, pozwalając na ponowne, mądrzejsze przetworzenie kolejnej partii tysięcy zdjęć."
+        "full_help": "Zamyka bieżącą iterację i przygotowuje kolejną, gdy cały cykl E1-E4 został zakończony."
     },
     "camp_step1": {
-        "full_help": "Krok 1: Program tworzy czysty folder w Workspace/1_raw_images/. Przekopiuj do niego surowe zdjęcia (np. 500 sztuk) wyciągnięte z kamer lub internetu."
+        "full_help": "E1 Ingestia. Tutaj wskazujesz nową porcję zdjęć dla aktywnej iteracji projektu. Wizard kopiuje materiał do drzewa projektu i przygotowuje bazę pod E2."
     },
     "camp_step2": {
-        "full_help": "Krok 2: Program przeniesie Cię do Zakładki 1, automatycznie wklejając ścieżkę do folderu z Kroku 1 i ładując modele zdefiniowane w lewym panelu. Gotowe do startu!"
+        "full_help": "E2 Autoanotacja. Wizard przechodzi do Z2, podstawia ścieżki projektowe i prowadzi przez generowanie oraz zatwierdzenie adnotacji dla bieżącej iteracji."
     },
     "camp_step3": {
-        "full_help": "Krok 3: Program inteligentnie znajdzie plik annotations.xml z Kroku 2, otworzy Zakładkę Znaków i ustawi gotowość do wycinania tablic. To tutaj zrobisz żniwa 'Złotych Tablic'."
+        "full_help": "E3 Wycinanie tablic i gold pack. Wizard przechodzi do Z3, gdzie wycinasz tablice, uruchamiasz OCR, porównujesz wynik z ground truth z nazwy pliku i budujesz czystą złotą paczkę bez duplikatów."
     },
     "camp_step4": {
-        "full_help": "Krok 4: Skok do Laboratorium Treningowego. Po podzieleniu datasetu zebranych tablic, wskażesz tu model bazowy i rozpoczniesz długi proces uczenia sieci."
-    }    
-    
+        "full_help": "E4 Trening i analiza. Wizard przechodzi do Z4, gdzie wybierasz tor tablic albo znaków, przygotowujesz dataset iteracji, uruchamiasz trening i analizujesz wynik modelu."
+    }
 }
