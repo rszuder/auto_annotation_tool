@@ -120,10 +120,10 @@
         "full_help": "Eksportuje dane do paczki CVAT. Używasz tego wtedy, gdy chcesz poprawić błędne tablice ręcznie."
     },
     "btn_export_yolo": {
-        "full_help": "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu."
+        "full_help": "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu. Ta zaakceptowana pula zasila też bilans znaków dla kolejnych iteracji ingestii."
     },
     "btn_import_cvat": {
-        "full_help": "Importuje poprawki z CVAT z powrotem do metadata.json i aktualizuje statusy tablic."
+        "full_help": "Importuje poprawki z CVAT z powrotem do metadata.json i aktualizuje statusy tablic. Poprawne importy mogą później zasilić wspólną pulę gold/manual i wpłynąć na dobór następnych porcji danych w E1."
     },
     "tr_route_panel": {
         "full_help": "Panel wyboru toru w Z4/PZ1. Najpierw wybierasz, czy dana iteracja prowadzi tor tablic, czy tor znaków."
@@ -237,7 +237,7 @@
         "full_help": "Zamyka bieżącą iterację i przygotowuje kolejną, gdy cały cykl E1-E4 został zakończony."
     },
     "camp_step1": {
-        "full_help": "E1 Ingestia. Tutaj wskazujesz nową porcję zdjęć dla aktywnej iteracji projektu. Wizard kopiuje materiał do drzewa projektu i przygotowuje bazę pod E2."
+        "full_help": "E1 Ingestia. Tutaj wskazujesz nową porcję zdjęć dla aktywnej iteracji projektu. Docelowo aplikacja powinna proponować porcję automatycznie na podstawie bilansu znaków w dotychczas zaakceptowanym zbiorze gold/manual, a użytkownik ma móc tę propozycję skorygować przed zatwierdzeniem."
     },
     "camp_step2": {
         "full_help": "E2 Autoanotacja. Wizard przechodzi do Z2, podstawia ścieżki projektowe i prowadzi przez generowanie oraz zatwierdzenie adnotacji dla bieżącej iteracji."
