@@ -57,10 +57,7 @@ class TrainingTab:
         self._step4_route_selected = False
         self._step4_train_unlocked = False
         self._training_completion_poll_job = None
-        
-        
-        
-        # ✅ ZMIANA: kontekst aktywnego projektu (ustawiany przez Wizard)
+        # Kontekst projektu jest ustawiany przez wizard kampanii.
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
         self._plots_paths = []
@@ -72,7 +69,7 @@ class TrainingTab:
         self.rank_is_running = False
 
         self._build_ui()
-        self._attach_training_log_handlers()  # ✅ ZMIANA
+        self._attach_training_log_handlers()
         self._bind_trainer_callbacks()
         self._load_history()
         self._load_ranking()
@@ -115,12 +112,12 @@ class TrainingTab:
 
         fmt = logging.Formatter("%(asctime)s | %(message)s", "%H:%M:%S")
 
-        # ✅ ZMIANA: handler dla naszego loggera
+        # Handler dla loggera aplikacji.
         self._gui_app_log_handler = GuiLogHandler(self)
         self._gui_app_log_handler.setFormatter(fmt)
         logger.addHandler(self._gui_app_log_handler)
 
-        # ✅ ZMIANA: handler dla loggera Ultralytics
+        # Handler dla loggera Ultralytics.
         self._gui_yolo_log_handler = GuiLogHandler(self)
         self._gui_yolo_log_handler.setFormatter(fmt)
 
@@ -128,18 +125,14 @@ class TrainingTab:
         self._ultralytics_logger.addHandler(self._gui_yolo_log_handler)
 
         self._training_log_handlers_attached = True
-        
-        #Konteksty katalogów
-        #=================================
-
     def _get_datasets_base_dir(self) -> Path:
-        """✅ ZMIANA: bazowy katalog datasetów dla aktywnego projektu lub globalny fallback."""
+        """Zwraca bazowy katalog datasetów dla aktywnego projektu albo globalny fallback."""
         if self._campaign_datasets_dir:
             return Path(self._campaign_datasets_dir)
         return Path(CONFIG.DEFAULT_DATASETS_DIR)
 
     def _get_runs_base_dir(self) -> Path:
-        """✅ ZMIANA: bazowy katalog runów treningowych dla aktywnego projektu lub globalny fallback."""
+        """Zwraca bazowy katalog runów treningowych dla aktywnego projektu albo globalny fallback."""
         if self._campaign_runs_dir:
             return Path(self._campaign_runs_dir)
         return Path(CONFIG.DEFAULT_TRAINING_DIR)
@@ -494,7 +487,7 @@ class TrainingTab:
 
         try:
             self._set_step4_process_console_text(
-                "Oczekuje na rozpoczęcie treningu lub walidacji...\n"
+                "Oczekuję na rozpoczęcie treningu lub walidacji...\n"
                 "Terminal procesu jest gotowy na dane z Ultralytics.\n"
             )
         except Exception:
@@ -603,6 +596,11 @@ class TrainingTab:
             pass
 
         try:
+            self._sync_step4_analysis_nav_buttons()
+        except Exception:
+            pass
+
+        try:
             self._refresh_step4_dataset_mode_ui()
         except Exception:
             pass
@@ -675,6 +673,75 @@ class TrainingTab:
         except Exception:
             pass
 
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        console_bg = palette.get("console_bg", "#252526")
+        console_fg = palette.get("console_fg", "#f3f3f3")
+        console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+
+        for widget_name in ("step4_builder_log_text", "train_log_console"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(
+                    bg=console_bg,
+                    fg=console_fg,
+                    insertbackground=console_fg,
+                    bd=0,
+                    relief=tk.FLAT,
+                    highlightthickness=1,
+                    highlightbackground=console_border,
+                    highlightcolor=console_border
+                )
+            except Exception:
+                pass
+
+        try:
+            self.plots_list.configure(
+                bg=palette.get("field", "#1a1a1a"),
+                fg=palette.get("fg", "#f3f3f3"),
+                selectbackground=palette.get("accent", "#3498db"),
+                selectforeground=palette.get("accent_text", "#ffffff"),
+                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
+                highlightthickness=1,
+                highlightbackground=console_border,
+                highlightcolor=console_border,
+                bd=0,
+                relief=tk.FLAT
+            )
+        except Exception:
+            pass
+
+        try:
+            self.plot_canvas.configure(
+                bg=palette.get("panel", "#252526"),
+                highlightthickness=1,
+                highlightbackground=console_border,
+                highlightcolor=console_border,
+                bd=0,
+                relief=tk.FLAT
+            )
+        except Exception:
+            pass
+
+        for frame_name in (
+            "step4_route_panel_frame",
+            "btn_step4_next_pulse_frame",
+            "btn_step4_create_pulse_frame",
+            "btn_step4_split_pulse_frame",
+            "btn_step4_start_train_pulse_frame",
+            "btn_step4_finish_pulse_frame",
+        ):
+            frame = getattr(self, frame_name, None)
+            if frame is None:
+                continue
+            try:
+                bg = palette.get("bg", "#1e1e1e") if frame_name == "step4_route_panel_frame" else palette.get("panel", "#252526")
+                self.app.style_guidance_frame(frame, background=bg)
+            except Exception:
+                pass
+
     def _set_step4_train_log_visibility(self, visible: bool):
         if not hasattr(self, "step4_train_log_frame"):
             return
@@ -705,91 +772,119 @@ class TrainingTab:
             not getattr(self, "_step4_train_log_visible", False)
         )
 
-    def _set_step4_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
-        resolved_attr = frame_attr
-        if frame_attr.endswith("_frame"):
-            pulse_attr = frame_attr[:-6] + "_pulse_frame"
-            if hasattr(self, pulse_attr):
-                resolved_attr = pulse_attr
-
-        frame = getattr(self, resolved_attr, None)
-        if frame is None:
+    def _select_step4_analysis_tab(self, tab_widget):
+        if not hasattr(self, "right_nb"):
             return
 
         try:
-            try:
-                base_color = frame.cget("background")
-            except Exception:
-                try:
-                    base_color = frame.cget("bg")
-                except Exception:
-                    base_color = "#f0f0f0"
+            self.right_nb.select(tab_widget)
+            self._sync_step4_analysis_nav_buttons()
+        except Exception:
+            pass
 
-            frame.config(
-                highlightthickness=4,
-                highlightbackground=(color if enabled else base_color),
-                highlightcolor=(color if enabled else base_color),
-                bd=0
-            )
-        except Exception as e:
-            logger.debug(f"Nie udało się ustawić podświetlenia {resolved_attr}: {e}")
+    def _sync_step4_analysis_nav_buttons(self, event=None):
+        if not hasattr(self, "right_nb"):
+            return
+
+        try:
+            selected = str(self.right_nb.select())
+        except Exception:
+            selected = ""
+
+        mapping = (
+            ("btn_step4_nav_hist", getattr(self, "hist_tab", None)),
+            ("btn_step4_nav_plots", getattr(self, "plots_tab", None)),
+            ("btn_step4_nav_val", getattr(self, "val_tab", None)),
+            ("btn_step4_nav_rank", getattr(self, "ranking_tab", None)),
+        )
+
+        for attr_name, tab_widget in mapping:
+            btn = getattr(self, attr_name, None)
+            if btn is None or tab_widget is None:
+                continue
+
+            try:
+                btn.configure(state=(tk.DISABLED if selected == str(tab_widget) else tk.NORMAL))
+            except Exception:
+                pass
+
+    def _resolve_step4_guidance_buttons(self, attr_name: str):
+        if attr_name == "step4_route_panel_frame":
+            return [getattr(self, "btn_choose_plate", None), getattr(self, "btn_choose_char", None)]
+
+        candidates = [attr_name]
+        if attr_name.endswith("_pulse_frame"):
+            candidates.append(attr_name[:-12])
+        if attr_name.endswith("_frame"):
+            candidates.append(attr_name[:-6])
+
+        resolved = []
+        for candidate in candidates:
+            widget = getattr(self, candidate, None)
+            if isinstance(widget, ttk.Button):
+                resolved.append(widget)
+
+        unique_buttons = []
+        seen = set()
+        for btn in resolved:
+            if btn is None:
+                continue
+            btn_id = str(btn)
+            if btn_id not in seen:
+                unique_buttons.append(btn)
+                seen.add(btn_id)
+        return unique_buttons
+
+    def _resolve_step4_guidance_frame(self, attr_name: str):
+        if not attr_name:
+            return None
+
+        if attr_name == "step4_route_panel_frame":
+            return getattr(self, "step4_route_panel_frame", None)
+
+        candidates = []
+        if attr_name.endswith("_frame"):
+            candidates.append(f"{attr_name[:-6]}_pulse_frame")
+        candidates.append(attr_name)
+
+        for candidate in candidates:
+            widget = getattr(self, candidate, None)
+            if isinstance(widget, tk.Frame):
+                return widget
+
+        return None
+
+    def _set_step4_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
+        frame = self._resolve_step4_guidance_frame(frame_attr)
+        if frame is not None:
+            try:
+                bg = self.app.palette.get("bg", "#1e1e1e") if frame_attr == "step4_route_panel_frame" else self.app.palette.get("panel", "#252526")
+                self.app.set_frame_emphasis(frame, enabled, background=bg)
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić podświetlenia ramki dla {frame_attr}: {e}")
+
+        buttons = self._resolve_step4_guidance_buttons(frame_attr)
+        for btn in buttons:
+            try:
+                self.app.set_button_emphasis(btn, enabled)
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
 
     def _pulse_step4_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
-        resolved_attr = frame_attr
-        if frame_attr.endswith("_frame"):
-            pulse_attr = frame_attr[:-6] + "_pulse_frame"
-            if hasattr(self, pulse_attr):
-                resolved_attr = pulse_attr
-
-        frame = getattr(self, resolved_attr, None)
-        if frame is None:
-            return
-
-        try:
+        frame = self._resolve_step4_guidance_frame(frame_attr)
+        if frame is not None:
             try:
-                base_color = frame.cget("background")
-            except Exception:
-                try:
-                    base_color = frame.cget("bg")
-                except Exception:
-                    base_color = "#f0f0f0"
-
-            frame.config(
-                highlightthickness=4,
-                highlightbackground=base_color,
-                highlightcolor=base_color,
-                bd=0
-            )
-        except Exception:
-            return
-
-        def tick(step=0):
-            try:
-                if not frame.winfo_exists():
-                    return
-
-                pulse_color = color if (step % 2 == 0) else base_color
-
-                frame.config(
-                    highlightthickness=4,
-                    highlightbackground=pulse_color,
-                    highlightcolor=pulse_color,
-                    bd=0
-                )
-
-                if step < (pulses * 2 - 1):
-                    self.frame.after(interval_ms, lambda: tick(step + 1))
-                else:
-                    frame.config(
-                        highlightthickness=4,
-                        highlightbackground=base_color,
-                        highlightcolor=base_color,
-                        bd=0
-                    )
+                bg = self.app.palette.get("bg", "#1e1e1e") if frame_attr == "step4_route_panel_frame" else self.app.palette.get("panel", "#252526")
+                self.app.pulse_frame(frame, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True, background=bg)
             except Exception as e:
-                logger.debug(f"Nie udało się pulsować podświetlenia {resolved_attr}: {e}")
+                logger.debug(f"Nie udało się pulsować ramki dla {frame_attr}: {e}")
 
-        tick()
+        buttons = self._resolve_step4_guidance_buttons(frame_attr)
+        for btn in buttons:
+            try:
+                self.app.pulse_button(btn, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
+            except Exception as e:
+                logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
 
     def _clear_step4_guidance(self):
         for attr_name in (
@@ -797,6 +892,8 @@ class TrainingTab:
             "btn_step4_create_frame",
             "btn_step4_split_frame",
             "btn_step4_next_frame",
+            "btn_step4_start_train_frame",
+            "btn_step4_finish_frame",
         ):
             try:
                 self._set_step4_emphasis(attr_name, False)
@@ -827,6 +924,22 @@ class TrainingTab:
         self._clear_step4_guidance()
         self._set_step4_emphasis("btn_step4_next_frame", True)
         self._pulse_step4_emphasis("btn_step4_next_frame")
+
+    def _guide_step4_training_action(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._clear_step4_guidance()
+        self._set_step4_emphasis("btn_step4_start_train_frame", True)
+        self._pulse_step4_emphasis("btn_step4_start_train_frame")
+
+    def _guide_step4_finish_action(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        self._clear_step4_guidance()
+        self._set_step4_emphasis("btn_step4_finish_frame", True)
+        self._pulse_step4_emphasis("btn_step4_finish_frame")
 
     def _mark_step4_dataset_ready(self, dataset_path: str | Path | None = None):
         if dataset_path:
@@ -926,7 +1039,7 @@ class TrainingTab:
         else:
             self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
             self.ds_mode_desc_var.set(
-                "Wybierz ten tor, jeśli chcesz przygotować / dzielić dataset znaków "
+                "Wybierz ten tor, jeśli chcesz przygotować i podzielić dataset znaków "
                 "i trenować model znaków na tablicach."
             )
             self.btn_choose_plate.configure(state=tk.NORMAL)
@@ -953,6 +1066,20 @@ class TrainingTab:
             self.main_nb.select(self.tab_train)
         except Exception:
             pass
+
+        try:
+            self._select_step4_analysis_tab(self.hist_tab)
+        except Exception:
+            pass
+
+        if CAMPAIGN.get_active_project_name():
+            try:
+                if getattr(self, "_step4_campaign_finish_ready", False):
+                    self._guide_step4_finish_action()
+                else:
+                    self._guide_step4_training_action()
+            except Exception:
+                pass
 
     def _step4_dataset_go_back(self):
         if CAMPAIGN.get_active_project_name():
@@ -1234,6 +1361,12 @@ class TrainingTab:
             except Exception:
                 pass
 
+            if CAMPAIGN.get_active_project_name() and promoted:
+                try:
+                    self._guide_step4_finish_action()
+                except Exception:
+                    pass
+
         except Exception as e:
             logger.error(f"Błąd pollingu końca treningu: {e}")
             self._training_completion_poll_job = None
@@ -1315,12 +1448,12 @@ class TrainingTab:
             return None
             
         item = self.tree.item(sel[0])
-        # Tkinter zjadł podkreślenie? Nieważne. Zamieniamy na stringa.
+        # Wartość z drzewa traktujemy zawsze jako zwykły tekst.
         corrupted_id = str(item["values"][0])
         
-        # ✅ PANCERNE SZUKANIE: Porównujemy klucze bez żadnych znaków specjalnych
+        # Porównujemy identyfikatory po usunięciu znaków specjalnych.
         for db_key, run_obj in self.history.runs.items():
-            # Usuwamy wszystko co nie jest literą/cyfrą do sprawdzenia (np. z 2026_03 robimy 202603)
+            # Usuwamy wszystkie znaki poza literami i cyframi.
             clean_db_key = "".join(filter(str.isalnum, db_key))
             clean_ui_key = "".join(filter(str.isalnum, corrupted_id))
             
@@ -1328,7 +1461,7 @@ class TrainingTab:
             if clean_db_key == clean_ui_key:
                 return run_obj
                 
-        # Fallback (Gdyby jakoś to zawiodło)
+        # Zachowaj prosty fallback na wypadek rozbieżności w formacie identyfikatora.
         return None
 
     def _build_ui(self):
@@ -1343,8 +1476,8 @@ class TrainingTab:
         self.tab_val = None
         self.tab_ranking = None
 
-        self.main_nb.add(self.tab_dataset, text="1. Budowa Datasetu")
-        self.main_nb.add(self.tab_train, text="2. Trening i Analiza")
+        self.main_nb.add(self.tab_dataset, text="[PZ1] Budowa datasetu")
+        self.main_nb.add(self.tab_train, text="[PZ2] Trening i analiza")
 
         self._build_dataset_tab()
         self._build_train_tab()
@@ -1356,7 +1489,7 @@ class TrainingTab:
         top = ttk.Frame(root)
         top.pack(fill=tk.BOTH, expand=True)
 
-        self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=4)
+        self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=1)
         self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
 
         left = ttk.LabelFrame(self.step4_route_panel_frame, text=" Wybór ścieżki treningowej ", padding=10)
@@ -1365,7 +1498,7 @@ class TrainingTab:
         ttk.Label(
             left,
             text="Najpierw wybierz, który model chcesz prowadzić w tej iteracji.",
-            font=("Segoe UI", 9, "italic"),
+            font=("Segoe UI", 9),
             wraplength=240,
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(0, 12))
@@ -1495,7 +1628,7 @@ class TrainingTab:
         self.btn_step4_next_pulse_frame = tk.Frame(
             self.btn_step4_next_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=1
         )
         self.btn_step4_next_pulse_frame.pack(anchor=tk.E)
 
@@ -1505,6 +1638,12 @@ class TrainingTab:
             command=self._step4_dataset_go_next
         )
         self.btn_step4_next.pack()
+
+        HELP.bind_help(self.step4_route_panel_frame, "tr_route_panel")
+        HELP.bind_help(self.btn_choose_plate, "tr_route_plate")
+        HELP.bind_help(self.btn_choose_char, "tr_route_char")
+        HELP.bind_help(self.btn_toggle_step4_log, "tr_builder_log")
+        HELP.bind_help(self.btn_step4_next, "tr_builder_next")
 
         initial_mode = self.get_campaign_training_target()
         if initial_mode not in ("char", "plate"):
@@ -1517,7 +1656,11 @@ class TrainingTab:
 
     def _build_creator_ui(self):
         f = self.ds_creator_frame
-        ttk.Label(f, text="Tworzy strukturę YOLO Pose z wyeksportowanego pliku annotations.xml", font=("Arial", 9, "italic")).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Label(
+            f,
+            text="Tworzy strukturę YOLO Pose na podstawie wyeksportowanego pliku annotations.xml.",
+            font=("Segoe UI", 9)
+        ).pack(anchor=tk.W, pady=(0, 10))
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="CVAT XML:").pack(side=tk.LEFT)
         self.cvat_xml_var = tk.StringVar()
@@ -1531,8 +1674,8 @@ class TrainingTab:
         ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.cvat_images_var)).pack(side=tk.LEFT)
 
         row3 = ttk.Frame(f); row3.pack(fill=tk.X, pady=2)
-        ttk.Label(row3, text="Zapisze się do:").pack(side=tk.LEFT)
-        # ✅ ZMIANA: Twardo zablokowana ścieżka z automatycznym, unikalnym dopiskiem (Plates_CVAT)
+        ttk.Label(row3, text="Zapis danych:").pack(side=tk.LEFT)
+        # Ścieżka docelowa jest wyliczana automatycznie i pozostaje tylko do odczytu.
         self.ds_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
         ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
@@ -1542,13 +1685,13 @@ class TrainingTab:
         self.btn_step4_create_pulse_frame = tk.Frame(
             self.btn_step4_create_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=1
         )
         self.btn_step4_create_pulse_frame.pack(anchor=tk.W)
 
         self.btn_step4_create = ttk.Button(
             self.btn_step4_create_pulse_frame,
-            text="Stwórz Dataset",
+            text="Stwórz dataset",
             command=self._create_dataset_thread
         )
         self.btn_step4_create.pack()
@@ -1560,24 +1703,28 @@ class TrainingTab:
         self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
         self.ds_status.pack(anchor=tk.W)
 
-        # ✅ PODPIĘCIE POMOCY DO OPCJI A (BUDOWA Z CVAT)
+        # Powiązania pomocy dla budowy datasetu z CVAT.
         HELP.bind_help(row1, "tr_cvat_xml")
         HELP.bind_help(row2, "tr_cvat_img")
-        HELP.bind_help(self.btn_step4_create, "tr_cvat_btn") # Teraz HELP wie, pod jaki przycisk się podpiąć!
+        HELP.bind_help(self.btn_step4_create, "tr_cvat_btn")
 
     def _build_splitter_ui(self):
         f = self.ds_split_frame
-        ttk.Label(f, text="Dzieli zbiór (np. wygenerowany w Zakładce Znaków) na foldery train/val potrzebne dla maszyny.", font=("Arial", 9, "italic")).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Label(
+            f,
+            text="Dzieli zbiór (np. wygenerowany w zakładce Znaków) na foldery train/val potrzebne do treningu.",
+            font=("Segoe UI", 9)
+        ).pack(anchor=tk.W, pady=(0, 10))
         
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="Źródło (np. Mega-Dataset):").pack(side=tk.LEFT)
+        ttk.Label(row1, text="Źródło (np. mega-dataset):").pack(side=tk.LEFT)
         self.split_src_var = tk.StringVar()
         ttk.Entry(row1, textvariable=self.split_src_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var)).pack(side=tk.LEFT)
 
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="Wynik Podziału:").pack(side=tk.LEFT)
-        # ✅ ZMIANA: Twardo zablokowana ścieżka z automatycznym, unikalnym dopiskiem (Split)
+        ttk.Label(row2, text="Wynik podziału:").pack(side=tk.LEFT)
+        # Ścieżka wyniku splitu jest wyliczana automatycznie i pozostaje tylko do odczytu.
         self.split_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
         ttk.Entry(row2, textvariable=self.split_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
@@ -1593,7 +1740,7 @@ class TrainingTab:
         self.val_lbl = ttk.Label(ratios, text="20%"); self.val_lbl.grid(row=1, column=2, sticky=tk.W)
 
         self.use_test = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ratios, text="Wydziel też zbiór Testowy", variable=self.use_test, command=self._update_ratio_labels).grid(row=2, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(ratios, text="Wydziel też zbiór testowy", variable=self.use_test, command=self._update_ratio_labels).grid(row=2, column=0, columnspan=2, sticky=tk.W)
         self.test_lbl = ttk.Label(ratios, text="Test: 0%"); self.test_lbl.grid(row=2, column=2, sticky=tk.W)
         ratios.columnconfigure(1, weight=1)
 
@@ -1603,7 +1750,7 @@ class TrainingTab:
         self.btn_step4_split_pulse_frame = tk.Frame(
             self.btn_step4_split_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=1
         )
         self.btn_step4_split_pulse_frame.pack(anchor=tk.W)
 
@@ -1621,7 +1768,7 @@ class TrainingTab:
         self.split_status = ttk.Label(f, text="Gotowy")
         self.split_status.pack(anchor=tk.W)
 
-        # ✅ PODPIĘCIE POMOCY:
+        # Powiązania pomocy dla splitu datasetu.
         HELP.bind_help(row1, "tr_split_src")
         HELP.bind_help(ratios, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_split, "tr_split_btn")
@@ -1649,14 +1796,14 @@ class TrainingTab:
         
 
 
-        ttk.Label(settings_col, text="Gotowy Dataset (Katalog z data.yaml):").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Label(settings_col, text="Gotowy dataset (katalog z plikiem data.yaml):").pack(anchor=tk.W, pady=(8, 0))
         self.dataset_var = tk.StringVar()
         ds_row = ttk.Frame(settings_col)
         ds_row.pack(fill=tk.X, pady=2)
         ttk.Entry(ds_row, textvariable=self.dataset_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(ds_row, text="Wybierz", command=lambda: self._pick_dir(self.dataset_var)).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(settings_col, text="Architektura (Model Bazowy):").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Label(settings_col, text="Architektura (model bazowy):").pack(anchor=tk.W, pady=(8, 0))
         self.base_model_var = tk.StringVar()
         
         base_values = list(AVAILABLE_DETECT_MODELS.keys()) + list(AVAILABLE_POSE_MODELS.keys()) + ["Custom"]
@@ -1666,7 +1813,7 @@ class TrainingTab:
         self.base_model_var.set("yolo11n.pt") 
         self.base_combo.bind("<<ComboboxSelected>>", lambda e: self._on_base_model_change())
 
-        # ✅ ZMIANA: Dodano wiersz z przyciskiem do wyboru modelu Fine-Tuningu (.pt) z folderu 6_models
+        # Pozwól wskazać własny model do fine-tuningu z katalogu modeli.
         self.base_custom_var = tk.StringVar()
         self.custom_row = ttk.Frame(settings_col)
         self.custom_row.pack(fill=tk.X, pady=2)
@@ -1715,8 +1862,23 @@ class TrainingTab:
         self.device_var = tk.StringVar(value="auto")
         ttk.Combobox(grid, textvariable=self.device_var, values=self._get_available_devices(), state="readonly", width=15).grid(row=4, column=1, sticky=tk.W, padx=5)
 
-        self.btn_start_train = ttk.Button(settings_col, text="▶ ROZPOCZNIJ TRENING", command=self._start_training, style="Accent.TButton")
-        self.btn_start_train.pack(fill=tk.X, pady=(15, 5), ipady=6)
+        self.btn_step4_start_train_frame = tk.Frame(settings_col, bd=0, highlightthickness=0)
+        self.btn_step4_start_train_frame.pack(fill=tk.X, pady=(15, 5))
+
+        self.btn_step4_start_train_pulse_frame = tk.Frame(
+            self.btn_step4_start_train_frame,
+            bd=0,
+            highlightthickness=1
+        )
+        self.btn_step4_start_train_pulse_frame.pack(fill=tk.X)
+
+        self.btn_start_train = ttk.Button(
+            self.btn_step4_start_train_pulse_frame,
+            text="▶ ROZPOCZNIJ TRENING",
+            command=self._start_training,
+            style="Accent.TButton"
+        )
+        self.btn_start_train.pack(fill=tk.X)
         
         self.btn_stop_train = ttk.Button(settings_col, text="ZATRZYMAJ", command=self._stop_training, state=tk.DISABLED)
         self.btn_stop_train.pack(fill=tk.X, pady=2)
@@ -1725,7 +1887,7 @@ class TrainingTab:
         self.train_progress = ttk.Progressbar(settings_col, variable=self.train_progress_var, maximum=100)
         self.train_progress.pack(fill=tk.X, pady=(15, 2))
         
-        self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 8, "italic"))
+        self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 9))
         self.train_progress_label.pack(anchor=tk.W)
 
         terminal_tools = ttk.Frame(root)
@@ -1761,7 +1923,7 @@ class TrainingTab:
         )
         self.train_log_console.pack(fill=tk.BOTH, expand=True)
         self._set_step4_process_console_text(
-            "Oczekuje na rozpoczęcie treningu lub walidacji...\n"
+            "Oczekuję na rozpoczęcie treningu lub walidacji...\n"
             "Terminal procesu jest gotowy na dane z Ultralytics.\n"
         )
         self._set_step4_train_log_visibility(False)
@@ -1773,10 +1935,11 @@ class TrainingTab:
         self.plots_tab = ttk.Frame(self.right_nb)
         self.val_tab = ttk.Frame(self.right_nb)
         self.ranking_tab = ttk.Frame(self.right_nb)
-        self.right_nb.add(self.hist_tab, text="Historia Treningów")
-        self.right_nb.add(self.plots_tab, text="Analiza (Wykresy)")
+        self.right_nb.add(self.hist_tab, text="Historia treningów")
+        self.right_nb.add(self.plots_tab, text="Analiza (wykresy)")
         self.right_nb.add(self.val_tab, text="Walidacja")
         self.right_nb.add(self.ranking_tab, text="Ranking")
+        self.right_nb.bind("<<NotebookTabChanged>>", self._sync_step4_analysis_nav_buttons)
 
         hist_top = ttk.Frame(self.hist_tab)
         hist_top.pack(fill=tk.BOTH, expand=True)
@@ -1799,11 +1962,43 @@ class TrainingTab:
         hist_btns = ttk.Frame(self.hist_tab)
         hist_btns.pack(fill=tk.X, pady=5)
         ttk.Button(hist_btns, text="Usuń", command=self._delete_selected).pack(side=tk.LEFT)
-        ttk.Button(hist_btns, text="Otwórz Folder", command=self._open_run_folder).pack(side=tk.RIGHT)
+        ttk.Button(hist_btns, text="Otwórz folder", command=self._open_run_folder).pack(side=tk.RIGHT)
+
+        self.step4_analysis_nav = ttk.Frame(self.right)
+        self.step4_analysis_nav.pack(fill=tk.X, pady=(8, 0))
+
+        self.btn_step4_nav_hist = ttk.Button(
+            self.step4_analysis_nav,
+            text="Historia",
+            command=lambda: self._select_step4_analysis_tab(self.hist_tab)
+        )
+        self.btn_step4_nav_hist.pack(side=tk.LEFT)
+
+        self.btn_step4_nav_plots = ttk.Button(
+            self.step4_analysis_nav,
+            text="Wykresy",
+            command=lambda: self._select_step4_analysis_tab(self.plots_tab)
+        )
+        self.btn_step4_nav_plots.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.btn_step4_nav_val = ttk.Button(
+            self.step4_analysis_nav,
+            text="Walidacja",
+            command=lambda: self._select_step4_analysis_tab(self.val_tab)
+        )
+        self.btn_step4_nav_val.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.btn_step4_nav_rank = ttk.Button(
+            self.step4_analysis_nav,
+            text="Ranking",
+            command=lambda: self._select_step4_analysis_tab(self.ranking_tab)
+        )
+        self.btn_step4_nav_rank.pack(side=tk.LEFT, padx=(6, 0))
 
         self._build_plots_ui()
         self._build_validation_panel(self.val_tab)
         self._build_ranking_panel(self.ranking_tab)
+        self._sync_step4_analysis_nav_buttons()
 
         self.step4_train_nav = ttk.Frame(root)
         self.step4_train_nav.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -1815,14 +2010,24 @@ class TrainingTab:
         )
         self.btn_step4_train_back.pack(side=tk.LEFT)
 
+        self.btn_step4_finish_frame = tk.Frame(self.step4_train_nav, bd=0, highlightthickness=0)
+        self.btn_step4_finish_frame.pack(side=tk.RIGHT)
+
+        self.btn_step4_finish_pulse_frame = tk.Frame(
+            self.btn_step4_finish_frame,
+            bd=0,
+            highlightthickness=1
+        )
+        self.btn_step4_finish_pulse_frame.pack(anchor=tk.E)
+
         self.btn_step4_finish = ttk.Button(
-            self.step4_train_nav,
+            self.btn_step4_finish_pulse_frame,
             text="Zakończ krok 4 i wróć do kampanii",
             command=self._finish_campaign_step4,
             style="Accent.TButton",
             state=tk.DISABLED
         )
-        self.btn_step4_finish.pack(side=tk.RIGHT)
+        self.btn_step4_finish.pack()
 
         self._refresh_step4_campaign_navigation_ui()
 
@@ -1841,6 +2046,10 @@ class TrainingTab:
         HELP.bind_help(self.tree, "tr_train_tree")
         HELP.bind_help(self.plots_tab, "tr_train_plot")
         HELP.bind_help(self.custom_row, "tr_train_custom")
+        HELP.bind_help(self.btn_toggle_step4_train_log, "tr_train_log")
+        HELP.bind_help(self.step4_analysis_nav, "tr_analysis_nav")
+        HELP.bind_help(self.btn_step4_train_back, "tr_train_back")
+        HELP.bind_help(self.btn_step4_finish, "tr_train_finish")
 
     def _build_plots_ui(self):
         self.plots_pane = ttk.PanedWindow(self.plots_tab, orient=tk.HORIZONTAL)
@@ -1856,31 +2065,30 @@ class TrainingTab:
         self.plots_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.plots_list.bind("<<ListboxSelect>>", self._on_plot_selected)
 
-        # ✅ ZMIANA: Usunięto topbar z guzikami - i +. Od razu wrzucamy potężny ZoomableCanvas!
         canvas_frame = ttk.Frame(right)
         canvas_frame.pack(fill=tk.BOTH, expand=True)
         
         # Inicjalizujemy ZoomableCanvas (ten sam co w przeglądarce tablic)
-        self.plot_canvas = ZoomableCanvas(canvas_frame, bg="#ecf0f1", highlightthickness=0)
+        self.plot_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
         self.plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _build_validation_panel(self, parent):
         ttk.Label(
             parent,
             text="Sprawdź jakość wytrenowanego modelu YOLO na wybranym zbiorze testowym.",
-            font=("Segoe UI", 10, "italic"),
+            font=("Segoe UI", 10),
             wraplength=360,
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(0, 15))
 
-        ttk.Label(parent, text="Wytrenowany Model (.pt):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
+        ttk.Label(parent, text="Wytrenowany model (.pt):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(5, 2))
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X)
         self.val_model_var = tk.StringVar()
         ttk.Entry(row1, textvariable=self.val_model_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row1, text="Wybierz", command=lambda: self._pick_file(self.val_model_var, "*.pt")).pack(side=tk.RIGHT, padx=(5,0))
         
-        ttk.Label(parent, text="Dataset Testowy (data.yaml):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15, 2))
+        ttk.Label(parent, text="Dataset testowy (data.yaml):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(15, 2))
         row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X)
         self.val_data_var = tk.StringVar()
@@ -1919,7 +2127,7 @@ class TrainingTab:
         ttk.Label(
             parent,
             text="Porównuj wytrenowane modele względem ground truth z annotations.xml.",
-            font=("Segoe UI", 10, "italic"),
+            font=("Segoe UI", 10),
             wraplength=520,
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(0, 15))
@@ -1990,11 +2198,9 @@ class TrainingTab:
         self.rank_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ✅ PODPIĘCIE POMOCY:
         HELP.bind_help(cat_combo, "tr_rank_cat")
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
 
-    # ✅ ZMIANA: Obsługa domyślnego folderu startowego (initialdir)
     def _pick_file(self, var, ext, initialdir=None):
         kwargs = {"filetypes": [("File", ext)]}
         if initialdir and Path(initialdir).exists():
@@ -2023,7 +2229,6 @@ class TrainingTab:
         self.val_lbl.configure(text=f"{val:.0f}%")
         self.test_lbl.configure(text=f"Test: {test:.0f}%")
 
-    # ✅ ZMIANA: Zabezpieczone włączanie i wyłączanie guzika Custom
     def _on_base_model_change(self):
         if self.base_model_var.get() == "Custom":
             self.base_custom_entry.configure(state=tk.NORMAL)
@@ -2046,14 +2251,14 @@ class TrainingTab:
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # ✅ ZMIANA: katalog datasetów zależny od kampanii/projektu
+        # Dataset zapisuj w katalogu projektu albo w przestrzeni globalnej.
         base_datasets_dir = self._get_datasets_base_dir()
         out_dir = base_datasets_dir / f"Plates_CVAT_{timestamp}"
 
-        # ✅ ZMIANA: pokaż w UI faktyczną ścieżkę docelową
+        # Pokaż użytkownikowi docelową ścieżkę zapisu.
         self.ds_out_var.set(str(out_dir))
 
-        # ✅ ZMIANA: zawsze parsujemy świeżo wskazany XML
+        # Wyczyść poprzedni stan parsera przed nowym odczytem XML.
         try:
             if hasattr(self.creator, "annotations"):
                 self.creator.annotations = []
@@ -2097,12 +2302,12 @@ class TrainingTab:
 
                 if ok2:
                     self._ui(lambda: self.ds_status.configure(
-                        text="Dataset utworzony!",
+                        text="Dataset został utworzony!",
                         foreground="green"
                     ))
                     self._ui(lambda: messagebox.showinfo("Sukces", msg2))
 
-                    # ✅ ZMIANA: po sukcesie od razu podstaw gotowy dataset do sekcji Treningu
+                    # Po sukcesie od razu podstaw dataset do sekcji treningu.
                     self._ui(lambda p=str(out_dir): self._mark_step4_dataset_ready(p))
                 else:
                     self._ui(lambda: self.ds_status.configure(
@@ -2121,7 +2326,6 @@ class TrainingTab:
         threading.Thread(target=worker, daemon=True).start()
 
     def _split_dataset_thread(self):
-        # ✅ ZMIANA: jawnie definiujemy źródło splitu
         src = Path(self.split_src_var.get().strip())
 
         if not src.exists() or not (src / "images").exists():
@@ -2133,11 +2337,11 @@ class TrainingTab:
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # ✅ ZMIANA: wynik splitu zapisujemy w katalogu datasetów aktywnego projektu
+        # Wynik splitu zapisuj obok innych datasetów projektu.
         base_datasets_dir = self._get_datasets_base_dir()
         out = base_datasets_dir / f"{src.name}_Split_{timestamp}"
 
-        # ✅ ZMIANA: pokaż w UI faktyczną ścieżkę wyniku
+        # Pokaż użytkownikowi docelową ścieżkę splitu.
         self.split_out_var.set(str(out))
 
         train = float(self.train_pct.get()) / 100.0
@@ -2178,7 +2382,7 @@ class TrainingTab:
                     ))
                     self._ui(lambda: messagebox.showinfo("Sukces", msg))
 
-                    # ✅ ZMIANA: po udanym splicie od razu podstaw gotowy dataset do sekcji Treningu
+                    # Po sukcesie od razu podstaw dataset do sekcji treningu.
                     self._ui(lambda p=str(out): self._mark_step4_dataset_ready(p))
                 else:
                     self._ui(lambda: self.split_status.configure(
@@ -2199,6 +2403,11 @@ class TrainingTab:
     def _start_training(self):
         if not YOLO_AVAILABLE:
             return messagebox.showerror("Błąd", "Brak ultralytics.")
+
+        try:
+            self._clear_step4_guidance()
+        except Exception:
+            pass
         
         self._set_step4_process_console_text("Uruchamianie treningu...\n")
 
@@ -2211,13 +2420,12 @@ class TrainingTab:
         if not yaml_path.exists():
             return messagebox.showerror("Błąd", "Nie znaleziono pliku data.yaml.")
 
-        # ✅ ZMIANA: rozpoznanie typu datasetu (POSE vs DETECT)
+        # Rozpoznaj typ datasetu na podstawie zawartości data.yaml.
         try:
             cfg = safe_load_yaml(yaml_path)
             is_pose_dataset = "kpt_shape" in cfg
 
-            # jeśli to trening detekcji znaków w aktywnym projekcie kampanii,
-            # po zakończeniu chcemy promować best.pt do best_char_model
+            # W kampanii trening detekcji znaków powinien promować model toru char.
             self._current_training_dataset_is_pose = bool(is_pose_dataset)
 
             if CAMPAIGN.get_active_project_name() and not is_pose_dataset:
@@ -2231,14 +2439,14 @@ class TrainingTab:
         base_model = self.base_custom_var.get().strip() if base_key == "Custom" else base_key
         device = self._device_to_ultralytics(self.device_var.get())
 
-        # ✅ ZMIANA: rozpoznanie typu modelu
+        # Rozpoznaj, czy wybrany model jest modelem pose.
         is_pose_model = False
         if base_key in AVAILABLE_POSE_MODELS:
             is_pose_model = True
         elif "pose" in str(base_model).lower():
             is_pose_model = True
 
-        # ✅ ZMIANA: twarda walidacja zgodności dataset <-> model
+        # Zablokuj niezgodne pary dataset-model przed startem treningu.
         if is_pose_dataset and not is_pose_model:
             return messagebox.showerror(
                 "Niezgodność typu treningu",
@@ -2253,7 +2461,7 @@ class TrainingTab:
                 "Dla znaków wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
             )
 
-        # ✅ ZMIANA: czytelny nagłówek sesji
+        # Zapisz czytelny nagłówek sesji w terminalu procesu.
         self._append_train_log("=" * 70)
         self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
         self._append_train_log(f"Dataset: {ds}")
@@ -2296,7 +2504,7 @@ class TrainingTab:
         else:
             self._pending_campaign_model_type = None
 
-        # start lekkiego pollingu końca treningu
+        # Uruchom polling zakończenia treningu, aby odblokować dalszy workflow.
         if self._training_completion_poll_job is not None:
             try:
                 self.frame.after_cancel(self._training_completion_poll_job)
@@ -2360,7 +2568,7 @@ class TrainingTab:
     def _load_history(self):
         self.tree.delete(*self.tree.get_children())
         for run in self.history.get_all_runs():
-            # ✅ ZMIANA: Twardo wstawiamy pełne run.id. Zabezpiecza to klikanie i wyszukiwanie folderów.
+            # Zachowaj pełne run.id, aby wybór historii i folderów był jednoznaczny.
             best_map = getattr(run, 'best_map50', 0.0) or 0.0
             
             self.tree.insert("", tk.END, values=(
@@ -2390,13 +2598,13 @@ class TrainingTab:
         run_dir = Path(run.output_dir)
         if not run_dir.exists(): return
             
-        # Szukamy wykresów wygenerowanych przez Ultralytics
+        # Wczytaj artefakty analityczne wygenerowane przez Ultralytics.
         paths = list(run_dir.rglob("*.png")) + list(run_dir.rglob("*.jpg"))
         
-        # Filtrujemy tylko wartościowe obrazki (odrzucamy np. surowe zdjęcia z batchy, zostawiamy analizy)
+        # Zachowaj tylko obrazy przydatne w analizie treningu.
         self._plots_paths = [p for p in paths if "plot" in p.name.lower() or "confusion" in p.name.lower() or "val" in p.name.lower()]
         
-        # Wrzucamy nazwy wykresów na listę UI po lewej stronie
+        # Odśwież listę artefaktów widocznych w panelu analizy.
         self.plots_list.delete(0, tk.END)
         for p in self._plots_paths: 
             self.plots_list.insert(tk.END, p.name)
@@ -2416,16 +2624,14 @@ class TrainingTab:
             self._plot_original_path = str(path)
             img = Image.open(path)
             
-            # ✅ ZMIANA: Nie musimy przeliczać zooma ręcznie. ZoomableCanvas sam to robi!
-            # Po prostu ładujemy obrazek (najlepiej ze zmienioną flagą na wysoką jakość w pamięci)
+            # ZoomableCanvas sam zarządza skalą i przesuwaniem obrazu.
             self.plot_canvas.set_image(img)
             
-            # Resetujemy zoom do 1.0 przy ładowaniu nowego zdjęcia (opcjonalne, ale wygodne)
+            # Przy nowym obrazie wróć do domyślnego widoku.
             self.plot_canvas.reset_view()
         except Exception as e: 
             logger.error(f"Nie udało się wyświetlić wykresu: {e}")
 
-    # ✅ ZMIANA: Ta stara funkcja była od przycisków + i -, więc możemy ją usunąć, ale wstawmy dla bezpieczeństwa "dummy" metodę, by uniknąć ewentualnego błędu w pamięci Tkintera.
     def _change_zoom(self, factor):
         pass
 

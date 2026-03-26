@@ -73,20 +73,21 @@ class CharacterAnnotationTab:
         # preview/cache state
         self.preview_metadata = {}
         self.preview_plate_ids = []
-        self._listbox_pid_by_index = []  # ✅ ZMIANA: index listbox -> pid (żeby nie rozjeżdżało się przy reloadach)
+        self._listbox_pid_by_index = []
         self._current_photo = None
-        self._reloading_preview = False          # ✅ ZMIANA: blokuje render w trakcie przebudowy listy
+        self._reloading_preview = False
 
 
 
-        # ✅ cache keys (run switching + file changes)
+        # Cache kluczy dla przełączania runów i zmian plików.
         self._loaded_meta_path = None
         self._loaded_meta_mtime = None
 
-        # ✅ fast test state (separate from extraction)
+        # Stan szybkiego testu OCR niezależny od procesu wycinania.
         self.fast_test_stop = threading.Event()
         self.fast_test_running = False
         self._project_reset_token = 0
+        self._detection_log_visible = False
 
         # presets (global; later can be project-scoped)
         self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
@@ -305,6 +306,19 @@ class CharacterAnnotationTab:
         return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
+    def _sort_character_records_by_x(self, chars):
+        if not isinstance(chars, list):
+            return []
+
+        prepared = []
+        for i, rec in enumerate(chars):
+            _, x_key = self._char_record_to_symbol_and_x(rec, fallback_index=i)
+            prepared.append((x_key, i, rec))
+
+        prepared.sort(key=lambda item: (item[0], item[1]))
+        return [rec for _, _, rec in prepared]
+
+
     def _characters_to_text(self, chars) -> str:
         if chars is None:
             return ""
@@ -316,7 +330,7 @@ class CharacterAnnotationTab:
             return str(chars)
 
         prepared = []
-        for i, rec in enumerate(chars):
+        for i, rec in enumerate(self._sort_character_records_by_x(chars)):
             symbol, x_key = self._char_record_to_symbol_and_x(rec, fallback_index=i)
             if symbol:
                 prepared.append((x_key, symbol))
@@ -343,12 +357,13 @@ class CharacterAnnotationTab:
     
     def _get_plate_row_foreground(self, status: str) -> str:
         status = str(status or "unknown").strip().lower()
+        palette = getattr(self.app, "palette", {})
 
         if status == "perfect":
-            return "#27ae60"
+            return palette.get("success", "#27ae60")
         if status == "needs_fix":
-            return "#c0392b"
-        return "#444444"
+            return palette.get("error", "#c0392b")
+        return palette.get("muted_dim", "#444444")
 
 
     def _apply_plate_listbox_row_style(self, row_index: int, status: str):
@@ -416,12 +431,23 @@ class CharacterAnnotationTab:
                 self.plates_listbox.insert(tk.END, label)
                 self._apply_plate_listbox_row_style(idx, status)
 
+            restore_idx = None
             if selected_pid and selected_pid in self._listbox_pid_by_index:
-                idx = self._listbox_pid_by_index.index(selected_pid)
+                restore_idx = self._listbox_pid_by_index.index(selected_pid)
+            elif self._listbox_pid_by_index:
+                restore_idx = 0
+
+            if restore_idx is not None:
                 self.plates_listbox.selection_clear(0, tk.END)
-                self.plates_listbox.selection_set(idx)
-                self.plates_listbox.activate(idx)
-                self.plates_listbox.see(idx)
+                self.plates_listbox.selection_set(restore_idx)
+                self.plates_listbox.activate(restore_idx)
+                self.plates_listbox.see(restore_idx)
+                try:
+                    self.frame.after_idle(
+                        lambda: self.plates_listbox.event_generate("<<ListboxSelect>>")
+                    )
+                except Exception:
+                    pass
 
             self._update_preview_info_label()
 
@@ -532,6 +558,24 @@ class CharacterAnnotationTab:
         """
         self._rebuild_preview_listbox(preserve_selection=preserve_selection)
 
+    def _set_detection_process_log_visibility(self, visible: bool):
+        self._detection_log_visible = bool(visible)
+
+        try:
+            if self._detection_log_visible:
+                self.detection_log_frame.grid()
+                self.btn_toggle_detection_log.config(text="Ukryj terminal")
+            else:
+                self.detection_log_frame.grid_remove()
+                self.btn_toggle_detection_log.config(text="Pokaż terminal")
+        except Exception:
+            pass
+
+    def _toggle_detection_process_log(self):
+        self._set_detection_process_log_visibility(
+            not getattr(self, "_detection_log_visible", False)
+        )
+
 
 
     def clear_campaign_context(self):
@@ -606,6 +650,11 @@ class CharacterAnnotationTab:
             pass
 
         try:
+            self._set_detection_process_log_visibility(False)
+        except Exception:
+            pass
+
+        try:
             self.fast_test_running = False
             self.fast_test_stop.set()
         except Exception:
@@ -660,12 +709,12 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self._set_console_text(self.export_console, "Oczekuje na akcję...")
+            self._set_console_text(self.export_console, "Oczekuję na akcję...")
         except Exception:
             pass
 
         try:
-            self._set_console_text(self.import_console, "Oczekuje na plik XML...")
+            self._set_console_text(self.import_console, "Oczekuję na plik XML...")
         except Exception:
             pass
 
@@ -710,6 +759,67 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
 
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        console_bg = palette.get("console_bg", "#252526")
+        console_fg = palette.get("console_fg", "#f3f3f3")
+        console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#27ae60")
+        error = palette.get("error", "#c0392b")
+
+        for widget_name in ("ext_log", "test_log_text", "export_console", "import_console"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(
+                    bg=console_bg,
+                    fg=console_fg,
+                    insertbackground=console_fg,
+                    bd=0,
+                    relief=tk.FLAT,
+                    highlightthickness=1,
+                    highlightbackground=console_border,
+                    highlightcolor=console_border
+                )
+            except Exception:
+                pass
+
+        try:
+            self.plates_listbox.configure(
+                bg=palette.get("field", "#1a1a1a"),
+                fg=palette.get("fg", "#f3f3f3"),
+                selectbackground=palette.get("accent", "#3498db"),
+                selectforeground=palette.get("accent_text", "#ffffff"),
+                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
+                highlightthickness=1,
+                highlightbackground=console_border,
+                highlightcolor=console_border,
+                bd=0,
+                relief=tk.FLAT
+            )
+            for idx, pid in enumerate(getattr(self, "_listbox_pid_by_index", [])):
+                status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
+                self._apply_plate_listbox_row_style(idx, status)
+        except Exception:
+            pass
+
+        for label_name, color in (
+            ("cvat_option1_title_lbl", error),
+            ("cvat_option2_title_lbl", success),
+            ("cvat_option1_desc_lbl", muted),
+            ("cvat_option2_desc_lbl", muted),
+            ("cvat_import_desc_lbl", muted),
+        ):
+            label = getattr(self, label_name, None)
+            if label is None:
+                continue
+            try:
+                label.configure(foreground=color)
+            except Exception:
+                pass
+
     def _get_campaign_char_model_path(self) -> str:
         """
         Zwraca ścieżkę do modelu znaków przypiętego do aktywnego projektu.
@@ -751,7 +861,6 @@ class CharacterAnnotationTab:
             if (self.yolo_model_path_var.get() or "").strip() == "Brak modelu znaków w projekcie":
                 self.yolo_model_path_var.set("")
 
-    # ===== START NOWEGO BLOKU =====
     def _infer_yolo_arch_from_model_path(self, model_path: str):
         """
         Próbuje odczytać wydanie i rozmiar YOLO z nazwy pliku, np.:
@@ -773,9 +882,6 @@ class CharacterAnnotationTab:
         version = match.group(1)
         size = match.group(2)
         return version, size
-    # ===== KONIEC NOWEGO BLOKU =====
-
-
     def _on_yolo_arch_change(self, event=None):
         """
         Reaguje na zmianę wydania / rozmiaru YOLO.
@@ -1051,7 +1157,6 @@ class CharacterAnnotationTab:
         self._write_step3_export_summary(summary)
         self._return_step3_result_to_wizard(summary)
 
-    # ===== START NOWEGO BLOKU: katalogi puli danych znaków =====
     def _get_char_manual_pool_dir(self) -> Path | None:
         """
         Katalog na ręcznie poprawione paczki znaków importowane z CVAT.
@@ -1098,9 +1203,6 @@ class CharacterAnnotationTab:
         pool_dir = root / "char_merged_pool"
         pool_dir.mkdir(parents=True, exist_ok=True)
         return pool_dir
-    # ===== KONIEC NOWEGO BLOKU =====
-        # ===== START NOWEGO BLOKU: katalog review packa projektu =====
-
     def _is_valid_step3_training_dataset_dir(self, dataset_dir: Path | None) -> bool:
         """
         Sprawdza, czy katalog wygląda jak realny dataset treningowy znaków
@@ -1177,9 +1279,6 @@ class CharacterAnnotationTab:
         review_dir = root / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
         return review_dir
-    # ===== KONIEC NOWEGO BLOKU =====
-
-    # ===== START NOWEGO BLOKU: zapis poprawionej paczki do manual_char_pool =====
     def _store_current_preview_in_manual_char_pool(self, metadata: dict):
         """
         Zapisuje aktualnie poprawioną paczkę preview do manual_char_pool,
@@ -1214,9 +1313,6 @@ class CharacterAnnotationTab:
                 shutil.copy2(img_file, dst)
 
         return target_dir
-    # ===== KONIEC NOWEGO BLOKU =====
-
-    # ===== START NOWEGO BLOKU: stan artefaktów znakowych =====
     def _has_char_manual_imports(self) -> bool:
         pool_dir = self._get_char_manual_pool_dir()
         if pool_dir is None or not pool_dir.exists():
@@ -1237,8 +1333,6 @@ class CharacterAnnotationTab:
             return any(p.exists() for p in pool_dir.iterdir())
         except Exception:
             return False
-    # ===== KONIEC NOWEGO BLOKU =====
-
     def _has_any_step3_export_outputs(self) -> bool:
         """
         Krok 3 można zakończyć dopiero wtedy, gdy istnieje realny dataset
@@ -1277,62 +1371,32 @@ class CharacterAnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się wrócić do wizarda dla rework kroku 3: {e}")
 
-    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
-        resolved_attr = frame_attr
-        if frame_attr.endswith("_frame"):
-            pulse_attr = frame_attr[:-6] + "_pulse_frame"
-            if hasattr(self, pulse_attr):
-                resolved_attr = pulse_attr
+    def _resolve_guidance_button(self, attr_name: str):
+        if not attr_name:
+            return None
 
-        frame = getattr(self, resolved_attr, None)
-        if frame is None:
+        candidates = [attr_name]
+        if attr_name.endswith("_pulse_frame"):
+            candidates.append(attr_name[:-12])
+        if attr_name.endswith("_frame"):
+            candidates.append(attr_name[:-6])
+
+        for candidate in candidates:
+            widget = getattr(self, candidate, None)
+            if isinstance(widget, ttk.Button):
+                return widget
+
+        return None
+
+    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
+        btn = self._resolve_guidance_button(frame_attr)
+        if btn is None:
             return
 
         try:
-            try:
-                base_color = frame.cget("background")
-            except Exception:
-                try:
-                    base_color = frame.cget("bg")
-                except Exception:
-                    base_color = "#f0f0f0"
-
-            frame.config(
-                highlightthickness=4,
-                highlightbackground=base_color,
-                highlightcolor=base_color,
-                bd=0
-            )
-        except Exception:
-            return
-
-        def tick(step=0):
-            try:
-                if not frame.winfo_exists():
-                    return
-
-                pulse_color = color if (step % 2 == 0) else base_color
-
-                frame.config(
-                    highlightthickness=4,
-                    highlightbackground=pulse_color,
-                    highlightcolor=pulse_color,
-                    bd=0
-                )
-
-                if step < (pulses * 2 - 1):
-                    self.frame.after(interval_ms, lambda: tick(step + 1))
-                else:
-                    frame.config(
-                        highlightthickness=4,
-                        highlightbackground=base_color,
-                        highlightcolor=base_color,
-                        bd=0
-                    )
-            except Exception as e:
-                logger.debug(f"Nie udało się pulsować podświetlenia {resolved_attr}: {e}")
-
-        tick()
+            self.app.pulse_button(btn, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
+        except Exception as e:
+            logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
 
     def _update_step3_finish_button_state(self):
         btn = getattr(self, "btn_finish_step3", None)
@@ -1987,33 +2051,14 @@ class CharacterAnnotationTab:
         return "auto"
     
     def _set_button_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
-        resolved_attr = frame_attr
-        if frame_attr.endswith("_frame"):
-            pulse_attr = frame_attr[:-6] + "_pulse_frame"
-            if hasattr(self, pulse_attr):
-                resolved_attr = pulse_attr
-
-        frame = getattr(self, resolved_attr, None)
-        if frame is None:
+        btn = self._resolve_guidance_button(frame_attr)
+        if btn is None:
             return
 
         try:
-            try:
-                base_color = frame.cget("background")
-            except Exception:
-                try:
-                    base_color = frame.cget("bg")
-                except Exception:
-                    base_color = "#f0f0f0"
-
-            frame.config(
-                highlightthickness=4,
-                highlightbackground=(color if enabled else base_color),
-                highlightcolor=(color if enabled else base_color),
-                bd=0
-            )
+            self.app.set_button_emphasis(btn, enabled)
         except Exception as e:
-            logger.debug(f"Nie udało się ustawić podświetlenia {resolved_attr}: {e}")
+            logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
 
     def _ensure_yolo_model_available(self) -> str:
         """
@@ -2186,15 +2231,15 @@ class CharacterAnnotationTab:
         self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         self.tab_extract = ttk.Frame(self.main_nb)
-        self.main_nb.add(self.tab_extract, text=f"{self.icon_manager.get('cut')} 1. Wycinanie Tablic")
+        self.main_nb.add(self.tab_extract, text="[PZ1] Wycinanie tablic")
         self._build_extraction_tab(self.tab_extract)
 
         self.tab_detect = ttk.Frame(self.main_nb)
-        self.main_nb.add(self.tab_detect, text=f"{self.icon_manager.get('eye')} 2. Wykrywanie Znaków i Analiza")
+        self.main_nb.add(self.tab_detect, text="[PZ2] Wykrywanie znaków i analiza")
         self._build_detection_tab(self.tab_detect)
 
         self.tab_dataset = ttk.Frame(self.main_nb)
-        self.main_nb.add(self.tab_dataset, text=f"{self.icon_manager.get('save')} 3. Integracje i Dataset (YOLO)")
+        self.main_nb.add(self.tab_dataset, text="[PZ3] Integracje i dataset (YOLO)")
         self._build_cvat_tab(self.tab_dataset)
         self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
 
@@ -2256,7 +2301,7 @@ class CharacterAnnotationTab:
 
         lf_logs = ttk.LabelFrame(right, text=" Terminal procesu ", padding=10)
         lf_logs.pack(fill=tk.BOTH, expand=True)
-        self.ext_log = scrolledtext.ScrolledText(lf_logs, wrap=tk.WORD, font=("Consolas", 10), bg="#fdfdfd")
+        self.ext_log = scrolledtext.ScrolledText(lf_logs, wrap=tk.WORD, font=("Consolas", 10), bg="#161616", fg="#f3f3f3", insertbackground="#f3f3f3")
         self.ext_log.pack(fill=tk.BOTH, expand=True)
 
         HELP.bind_help(row_xml, "t2_xml")
@@ -2402,97 +2447,31 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _build_detection_tab(self, parent):
-        # =========================
-        # LAYOUT ROOT
-        # =========================
-        parent.grid_rowconfigure(0, weight=0)  # header
-        parent.grid_rowconfigure(1, weight=1)  # content
-        parent.grid_rowconfigure(2, weight=0)  # footer
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=0)
         parent.grid_columnconfigure(0, weight=1)
 
-        # =========================
-        # HEADER
-        # =========================
-        header_frame = ttk.Frame(parent)
-        header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-        header_frame.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(
-            header_frame,
-            text="Paczka do analizy (folder run_XXX):",
-            font=("Segoe UI", 9, "bold")
-        ).grid(row=0, column=0, sticky="w")
-
-        self.preview_dir_entry = ttk.Entry(
-            header_frame,
-            textvariable=self.preview_dir_var,
-            state="readonly"
-        )
-        self.preview_dir_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
-
-        self.preview_dir_browse_btn = ttk.Button(
-            header_frame,
-            text="Otwórz inną paczkę",
-            command=self._pick_and_load_preview_dir
-        )
-        self.preview_dir_browse_btn.grid(row=0, column=2, sticky="e", padx=(0, 5))
-
-        self.preview_info_lbl = ttk.Label(
-            header_frame,
-            text="Wczytano tablic: 0",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#2980b9"
-        )
-        self.preview_info_lbl.grid(row=0, column=3, sticky="e", padx=(10, 0))
-
-        # =========================
-        # CONTENT
-        # =========================
         content_frame = ttk.Frame(parent)
-        content_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 5))
+        content_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         content_frame.grid_rowconfigure(0, weight=1)
+        content_frame.grid_rowconfigure(1, weight=0)
+        content_frame.grid_rowconfigure(2, weight=0)
         content_frame.grid_columnconfigure(0, weight=1)
 
-        main_pane = ttk.PanedWindow(content_frame, orient=tk.VERTICAL)
-        main_pane.grid(row=0, column=0, sticky="nsew")
+        split = ttk.PanedWindow(content_frame, orient=tk.HORIZONTAL)
+        split.grid(row=0, column=0, sticky="nsew")
 
-        top_split = ttk.Frame(main_pane)
-        bottom_split = ttk.Frame(main_pane)
+        left_panel = ttk.Frame(split)
+        right_panel = ttk.Frame(split)
+        split.add(left_panel, weight=3)
+        split.add(right_panel, weight=2)
 
-        main_pane.add(top_split, weight=5)
-        main_pane.add(bottom_split, weight=3)
+        left_panel.grid_rowconfigure(0, weight=4)
+        left_panel.grid_rowconfigure(1, weight=2)
+        left_panel.grid_columnconfigure(0, weight=1)
 
-        # =========================
-        # TOP SPLIT: lista + canvas
-        # =========================
-        top_split.grid_rowconfigure(0, weight=1)
-        top_split.grid_columnconfigure(0, weight=1)
-
-        viewer_pane = ttk.PanedWindow(top_split, orient=tk.HORIZONTAL)
-        viewer_pane.grid(row=0, column=0, sticky="nsew")
-
-        list_lf = ttk.LabelFrame(viewer_pane, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ")
-        preview_lf = ttk.LabelFrame(viewer_pane, text=" Podgląd OCR ")
-
-        viewer_pane.add(list_lf, weight=2)
-        viewer_pane.add(preview_lf, weight=3)
-
-        list_lf.grid_rowconfigure(0, weight=1)
-        list_lf.grid_columnconfigure(0, weight=1)
-
-        self.plates_listbox = tk.Listbox(
-            list_lf,
-            font=("Consolas", 10),
-            selectbackground="#3498db"
-        )
-        self.plates_listbox.grid(row=0, column=0, sticky="nsew", padx=(5, 0), pady=5)
-
-        scroll = ttk.Scrollbar(list_lf, command=self.plates_listbox.yview)
-        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 5), pady=5)
-
-        self.plates_listbox.config(yscrollcommand=scroll.set)
-        self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
-
+        preview_lf = ttk.LabelFrame(left_panel, text=" Podgląd tablicy ", padding=8)
+        preview_lf.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         preview_lf.grid_rowconfigure(0, weight=1)
         preview_lf.grid_columnconfigure(0, weight=1)
 
@@ -2503,39 +2482,34 @@ class CharacterAnnotationTab:
             relief="sunken",
             highlightthickness=0
         )
-        self.preview_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
         self.preview_canvas.bind("<Configure>", lambda e: self._on_preview_select(None))
 
-        # =========================
-        # BOTTOM SPLIT: 3 kolumny
-        # =========================
-        bottom_split.grid_rowconfigure(0, weight=1)
-        bottom_split.grid_columnconfigure(0, weight=1)
-        bottom_split.grid_columnconfigure(1, weight=1)
-        bottom_split.grid_columnconfigure(2, weight=1)
+        list_lf = ttk.LabelFrame(left_panel, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ", padding=8)
+        list_lf.grid(row=1, column=0, sticky="nsew")
+        list_lf.grid_rowconfigure(0, weight=1)
+        list_lf.grid_columnconfigure(0, weight=1)
 
-        col_left = ttk.Frame(bottom_split)
-        col_mid = ttk.Frame(bottom_split)
-        col_right = ttk.Frame(bottom_split)
+        self.plates_listbox = tk.Listbox(
+            list_lf,
+            font=("Consolas", 10),
+            selectbackground="#3498db"
+        )
+        self.plates_listbox.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=0)
 
-        col_left.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        col_mid.grid(row=0, column=1, sticky="nsew", padx=5)
-        col_right.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+        scroll = ttk.Scrollbar(list_lf, command=self.plates_listbox.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
 
-        col_left.grid_rowconfigure(0, weight=1)
-        col_left.grid_columnconfigure(0, weight=1)
+        self.plates_listbox.config(yscrollcommand=scroll.set)
+        self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
 
-        col_mid.grid_rowconfigure(0, weight=1)
-        col_mid.grid_columnconfigure(0, weight=1)
+        right_panel.grid_rowconfigure(0, weight=0)
+        right_panel.grid_rowconfigure(1, weight=1)
+        right_panel.grid_rowconfigure(2, weight=0)
+        right_panel.grid_columnconfigure(0, weight=1)
 
-        col_right.grid_rowconfigure(0, weight=1)
-        col_right.grid_columnconfigure(0, weight=1)
-
-        # -------------------------
-        # LEFT: konfiguracja
-        # -------------------------
-        set_lf = ttk.LabelFrame(col_left, text=" Konfiguracja Rozpoznawania ", padding=10)
-        set_lf.grid(row=0, column=0, sticky="nsew")
+        set_lf = ttk.LabelFrame(right_panel, text=" Konfiguracja Rozpoznawania ", padding=8)
+        set_lf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         row_meth = ttk.Frame(set_lf)
         row_meth.pack(fill=tk.X, pady=(0, 5))
@@ -2595,7 +2569,7 @@ class CharacterAnnotationTab:
         )
         self.yolo_version_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
         self.yolo_version_combo.bind("<<ComboboxSelected>>", self._on_yolo_arch_change)
-        
+
         ttk.Label(
             self.yolo_panel,
             text="Rozmiar modelu:",
@@ -2645,15 +2619,141 @@ class CharacterAnnotationTab:
 
         self._update_yolo_visibility()
 
-        # -------------------------
-        # MIDDLE: konsola
-        # -------------------------
-        log_lf = ttk.LabelFrame(col_mid, text=" Terminal procesu ", padding=10)
-        log_lf.grid(row=0, column=0, sticky="nsew")
+        self.actions_lf = ttk.LabelFrame(right_panel, text=" Panel OCR ", padding=8)
+        self.actions_lf.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+
+        ocr_top_row = ttk.Frame(self.actions_lf)
+        ocr_top_row.pack(fill=tk.X)
+        ocr_top_row.grid_columnconfigure(0, weight=3)
+        ocr_top_row.grid_columnconfigure(1, weight=2)
+
+        leader_block = ttk.Frame(ocr_top_row)
+        leader_block.grid(row=0, column=0, sticky="nsew")
+
+        actions_block = ttk.Frame(ocr_top_row)
+        actions_block.grid(row=0, column=1, sticky="ne", padx=(12, 0))
+
+        ttk.Label(
+            leader_block,
+            text="Lider OCR:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
+
+        self.winner_name_lbl = ttk.Label(
+            leader_block,
+            text="BRAK DANYCH",
+            font=("Segoe UI", 11, "bold"),
+            foreground="gray",
+            width=30,
+            anchor="w",
+            justify="left",
+            wraplength=340
+        )
+        self.winner_name_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+
+        ttk.Label(
+            leader_block,
+            text="Skuteczność najlepszego presetu:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
+
+        self.winner_acc_lbl = ttk.Label(
+            self.actions_lf,
+            text="0.0%",
+            font=("Segoe UI", 10),
+            width=30,
+            anchor="w",
+            justify="left",
+            wraplength=340
+        )
+        self.winner_acc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+
+        self.btn_ocr_lab = ttk.Button(
+            actions_block,
+            text="Laboratorium OCR (filtry)",
+            command=self._open_filter_lab,
+            style="Accent.TButton"
+        )
+        self.btn_ocr_lab.pack(fill=tk.X, ipady=4, pady=(0, 6))
+
+        self.btn_rank_presets = ttk.Button(
+            actions_block,
+            text="Turniej presetów OCR",
+            command=self._run_preset_ranking
+        )
+        self.btn_rank_presets.pack(fill=tk.X, ipady=3, pady=(0, 6))
+
+        self.test_progress = ttk.Progressbar(actions_block, maximum=100)
+        self.test_progress.pack(fill=tk.X, pady=(2, 4))
+
+        self.test_status_lbl = ttk.Label(
+            actions_block,
+            text="Gotowy do testów",
+            foreground="#2ecc71",
+            font=("Segoe UI", 9, "bold"),
+            width=30,
+            anchor="w",
+            justify="left",
+            wraplength=340
+        )
+        self.test_status_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        package_lf = ttk.LabelFrame(right_panel, text=" Paczka do analizy ", padding=8)
+        package_lf.grid(row=2, column=0, sticky="ew")
+        package_lf.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(
+            package_lf,
+            text="Folder run_XXX:",
+            font=("Segoe UI", 9, "bold")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        self.preview_dir_entry = ttk.Entry(
+            package_lf,
+            textvariable=self.preview_dir_var,
+            state="readonly"
+        )
+        self.preview_dir_entry.grid(row=1, column=0, sticky="ew")
+
+        self.preview_dir_browse_btn = ttk.Button(
+            package_lf,
+            text="Otwórz inną paczkę",
+            command=self._pick_and_load_preview_dir
+        )
+        self.preview_dir_browse_btn.grid(row=2, column=0, sticky="w", pady=(6, 4))
+
+        self.preview_info_lbl = ttk.Label(
+            package_lf,
+            text="Wczytano tablic: 0",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#2980b9",
+            justify="left",
+            wraplength=360
+        )
+        self.preview_info_lbl.grid(row=3, column=0, sticky="w")
+
+        detection_log_tools = ttk.Frame(content_frame)
+        detection_log_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+        self.btn_toggle_detection_log = ttk.Button(
+            detection_log_tools,
+            text="Pokaż terminal",
+            command=self._toggle_detection_process_log
+        )
+        self.btn_toggle_detection_log.pack(side=tk.LEFT)
+
+        ttk.Label(
+            detection_log_tools,
+            text="Terminal procesu jest dostępny na żądanie użytkownika.",
+            foreground="gray"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.detection_log_frame = ttk.LabelFrame(content_frame, text=" Terminal procesu ", padding=10)
+        self.detection_log_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
 
         self.test_log_text = scrolledtext.ScrolledText(
-            log_lf,
-            height=8,
+            self.detection_log_frame,
+            height=7,
             wrap=tk.WORD,
             font=("Consolas", 9)
         )
@@ -2665,89 +2765,10 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        # -------------------------
-        # RIGHT: OCR / ranking / lab
-        # -------------------------
-        self.actions_lf = ttk.LabelFrame(col_right, text=" Panel OCR / Ranking ", padding=10)
-        self.actions_lf.grid(row=0, column=0, sticky="nsew")
+        self._set_detection_process_log_visibility(False)
 
-        # 1. Zwycięzca turnieju
-        ttk.Label(
-            self.actions_lf,
-            text="Wynik rankingu OCR:",
-            font=("Segoe UI", 9, "bold")
-        ).pack(anchor=tk.W, pady=(0, 2))
-
-        self.winner_name_lbl = ttk.Label(
-            self.actions_lf,
-            text="BRAK DANYCH",
-            font=("Segoe UI", 11, "bold"),
-            foreground="gray",
-            width=34,
-            anchor="w",
-            justify="left",
-            wraplength=260
-        )
-        self.winner_name_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
-
-        # 2. Skuteczność OCR
-        ttk.Label(
-            self.actions_lf,
-            text="Wynik rankingu OCR:",
-            font=("Segoe UI", 9, "bold")
-        ).pack(anchor=tk.W, pady=(0, 2))
-
-        self.winner_acc_lbl = ttk.Label(
-            self.actions_lf,
-            text="0.0%",
-            font=("Segoe UI", 10),
-            width=34,
-            anchor="w",
-            justify="left",
-            wraplength=260
-        )
-        self.winner_acc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
-
-        ttk.Separator(self.actions_lf, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
-
-        # 3. Laboratorium OCR
-        self.btn_ocr_lab = ttk.Button(
-            self.actions_lf,
-            text="LABORATORIUM OCR (FILTRY)",
-            command=self._open_filter_lab,
-            style="Accent.TButton"
-        )
-        self.btn_ocr_lab.pack(fill=tk.X, ipady=8, pady=(0, 10))
-
-        # 4. Turniej
-        self.btn_rank_presets = ttk.Button(
-            self.actions_lf,
-            text="Turniej presetów OCR",
-            command=self._run_preset_ranking
-        )
-        self.btn_rank_presets.pack(fill=tk.X, ipady=6, pady=(0, 10))
-
-        # Pasek postępu i status
-        self.test_progress = ttk.Progressbar(self.actions_lf, maximum=100)
-        self.test_progress.pack(fill=tk.X, pady=(5, 5))
-
-        self.test_status_lbl = ttk.Label(
-            self.actions_lf,
-            text="Gotowy do testów",
-            foreground="#2ecc71",
-            font=("Segoe UI", 9, "bold"),
-            width=34,
-            anchor="w",
-            justify="left",
-            wraplength=260
-        )
-        self.test_status_lbl.pack(anchor=tk.W, fill=tk.X)
-
-        # =========================
-        # FOOTER
-        # =========================
         footer_nav = ttk.Frame(parent)
-        footer_nav.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+        footer_nav.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         footer_nav.grid_columnconfigure(0, weight=0)
         footer_nav.grid_columnconfigure(1, weight=0)
         footer_nav.grid_columnconfigure(2, weight=1)
@@ -2776,7 +2797,7 @@ class CharacterAnnotationTab:
             command=self._run_detection_stage,
             style="Accent.TButton"
         )
-        self.btn_run_detection.pack(ipadx=18, ipady=2)
+        self.btn_run_detection.pack()
 
         self.btn_to_dataset_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
         self.btn_to_dataset_frame.grid(row=0, column=3, sticky="e")
@@ -2790,11 +2811,11 @@ class CharacterAnnotationTab:
 
         self.btn_to_dataset = ttk.Button(
             self.btn_to_dataset_pulse_frame,
-            text="Dalej → Integracje i Dataset",
+            text="Dalej → Integracje i dataset",
             command=self.go_to_substep_3,
             state=tk.DISABLED
         )
-        self.btn_to_dataset.pack(ipadx=18, ipady=2)
+        self.btn_to_dataset.pack()
 
         # =========================
         # HELP BINDS
@@ -2804,6 +2825,12 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.det_method_combo, "t2_method")
         HELP.bind_help(self.btn_ocr_lab, "t2_lab_btn")
         HELP.bind_help(self.yolo_model_row, "t2_yolo_model")
+        HELP.bind_help(self.btn_toggle_detection_log, "t2_cut_logs")
+        HELP.bind_help(self.plates_listbox, "t2_listbox")
+        HELP.bind_help(self.preview_canvas, "t2_canvas")
+        HELP.bind_help(self.preview_dir_entry, "t2_preview_run")
+        HELP.bind_help(self.preview_dir_browse_btn, "t2_preview_run")
+        HELP.bind_help(self.preview_info_lbl, "t2_preview_info")
 
     def _run_detection_stage(self):
         method = (self.detection_method_var.get() or "OCR").upper().strip()
@@ -2895,12 +2922,8 @@ class CharacterAnnotationTab:
                 if not isinstance(loaded, dict):
                     loaded = {}
 
-                self.preview_metadata = loaded
-                self._loaded_meta_path = meta_path
-                self._loaded_meta_mtime = current_mtime
-
                 changed = False
-                for pid, d in self.preview_metadata.items():
+                for pid, d in loaded.items():
                     if not isinstance(d, dict):
                         continue
                     if "status" not in d:
@@ -2909,85 +2932,21 @@ class CharacterAnnotationTab:
                     if "characters" not in d or not isinstance(d.get("characters"), list):
                         d["characters"] = []
                         changed = True
+                    else:
+                        sorted_chars = self._sort_character_records_by_x(d.get("characters", []))
+                        if sorted_chars != d.get("characters", []):
+                            d["characters"] = sorted_chars
+                            changed = True
 
                 if changed:
-                    self._atomic_write_json(meta_path, self.preview_metadata)
-                    self._loaded_meta_mtime = meta_path.stat().st_mtime
+                    self._atomic_write_json(meta_path, loaded)
+                    current_mtime = meta_path.stat().st_mtime
 
-            selected_pid = None
-            try:
-                current_sel = self.plates_listbox.curselection()
-                if current_sel:
-                    selected_idx = int(current_sel[0])
-                    if 0 <= selected_idx < len(self._listbox_pid_by_index):
-                        selected_pid = self._listbox_pid_by_index[selected_idx]
-            except Exception:
-                selected_pid = None
+                self.preview_metadata = loaded
+                self._loaded_meta_path = meta_path
+                self._loaded_meta_mtime = current_mtime
 
-            self._reloading_preview = True
-
-            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
-            self.plates_listbox.delete(0, tk.END)
-            self._listbox_pid_by_index = []
-
-            for pid in self.preview_plate_ids:
-                data = self.preview_metadata.get(pid, {})
-                status = str(data.get("status", "unknown")).strip().lower()
-
-                try:
-                    label = self._format_plate_listbox_label(pid, data)
-                except Exception:
-                    chars_txt = ""
-                    try:
-                        chars_txt = self._characters_to_text(data.get("characters", []))
-                    except Exception:
-                        chars_txt = ""
-
-                    if status == "perfect":
-                        icon = "🟢"
-                    elif status == "needs_fix":
-                        icon = "🔴"
-                    else:
-                        icon = "⚪"
-
-                    label = f"{icon} {pid}"
-                    if chars_txt:
-                        label += f" [{chars_txt}]"
-
-                self.plates_listbox.insert(tk.END, label)
-                self._listbox_pid_by_index.append(pid)
-
-                current_idx = self.plates_listbox.size() - 1
-                try:
-                    if hasattr(self, "_apply_plate_listbox_row_style"):
-                        self._apply_plate_listbox_row_style(current_idx, status)
-                    else:
-                        if status == "perfect":
-                            self.plates_listbox.itemconfig(current_idx, foreground="#27ae60")
-                        elif status == "needs_fix":
-                            self.plates_listbox.itemconfig(current_idx, foreground="#c0392b")
-                        else:
-                            self.plates_listbox.itemconfig(current_idx, foreground="#444444")
-                except Exception:
-                    pass
-
-            try:
-                self.preview_info_lbl.config(
-                    text=f"Wczytano tablic: {len(self.preview_plate_ids)} z folderu: {out_dir.name}",
-                    foreground="green"
-                )
-            except Exception:
-                pass
-
-            if self.preview_plate_ids:
-                restore_idx = 0
-                if selected_pid and selected_pid in self._listbox_pid_by_index:
-                    restore_idx = self._listbox_pid_by_index.index(selected_pid)
-
-                self.plates_listbox.selection_clear(0, tk.END)
-                self.plates_listbox.selection_set(restore_idx)
-                self.plates_listbox.activate(restore_idx)
-                self.plates_listbox.see(restore_idx)
+            self._apply_preview_metadata_update(self.preview_metadata, preserve_selection=True)
 
             try:
                 self.frame.after(100, self._update_winner_label)
@@ -3014,81 +2973,9 @@ class CharacterAnnotationTab:
             return
 
         try:
-            current_sel = self.plates_listbox.curselection()
-            selected_pid = None
-
-            if current_sel:
-                try:
-                    selected_idx = int(current_sel[0])
-                    if 0 <= selected_idx < len(self._listbox_pid_by_index):
-                        selected_pid = self._listbox_pid_by_index[selected_idx]
-                except Exception:
-                    selected_pid = None
-
-            self._reloading_preview = True
-            self.preview_plate_ids = sorted(list(self.preview_metadata.keys()))
-            self.plates_listbox.delete(0, tk.END)
-            self._listbox_pid_by_index = []
-
-            for pid in self.preview_plate_ids:
-                data = self.preview_metadata.get(pid, {})
-                status = str(data.get("status", "unknown")).strip().lower()
-
-                try:
-                    label = self._format_plate_listbox_label(pid, data)
-                except Exception:
-                    chars_txt = ""
-                    try:
-                        chars_txt = self._characters_to_text(data.get("characters", []))
-                    except Exception:
-                        chars_txt = ""
-
-                    if status == "perfect":
-                        icon = "🟢"
-                    elif status == "needs_fix":
-                        icon = "🔴"
-                    else:
-                        icon = "⚪"
-
-                    label = f"{icon} {pid}"
-                    if chars_txt:
-                        label += f" [{chars_txt}]"
-
-                self.plates_listbox.insert(tk.END, label)
-                self._listbox_pid_by_index.append(pid)
-
-                current_idx = self.plates_listbox.size() - 1
-                try:
-                    if hasattr(self, "_apply_plate_listbox_row_style"):
-                        self._apply_plate_listbox_row_style(current_idx, status)
-                    else:
-                        if status == "perfect":
-                            self.plates_listbox.itemconfig(current_idx, foreground="#27ae60")
-                        elif status == "needs_fix":
-                            self.plates_listbox.itemconfig(current_idx, foreground="#c0392b")
-                        else:
-                            self.plates_listbox.itemconfig(current_idx, foreground="#444444")
-                except Exception:
-                    pass
-
-            if self._listbox_pid_by_index:
-                restore_idx = 0
-                if selected_pid and selected_pid in self._listbox_pid_by_index:
-                    restore_idx = self._listbox_pid_by_index.index(selected_pid)
-
-                self.plates_listbox.selection_clear(0, tk.END)
-                self.plates_listbox.selection_set(restore_idx)
-                self.plates_listbox.activate(restore_idx)
-                self.plates_listbox.see(restore_idx)
-
-            try:
-                if hasattr(self, "_update_preview_info_label"):
-                    self._update_preview_info_label()
-            except Exception:
-                pass
-
-        finally:
-            self._reloading_preview = False
+            self._apply_preview_metadata_update(self.preview_metadata, preserve_selection=True)
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć listy tablic: {e}")
 
         try:
             if self._listbox_pid_by_index and self.plates_listbox.curselection():
@@ -3120,27 +3007,10 @@ class CharacterAnnotationTab:
 
         pid = pid_map[idx]
         data = self.preview_metadata.get(pid, {})
-        chars = data.get("characters", [])
+        clean_chars = self._sort_character_records_by_x(data.get("characters", []))
+        display_text = self._format_plate_listbox_label(pid, data)
 
-        # ta sama logika kolejności co na liście: sort po osi X
-        clean_chars = []
-        if isinstance(chars, list):
-            for c in chars:
-                if isinstance(c, dict) and "character" in c and "bbox" in c:
-                    bbox = c.get("bbox", [])
-                    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                        clean_chars.append(c)
-
-        clean_chars.sort(key=lambda x: float(x.get("bbox", [0])[0]))
-        text_now = "".join([str(c.get("character", "")).strip() for c in clean_chars])
-
-        status = str(data.get("status", "unknown")).strip().lower()
-        icon = "🟢" if status == "perfect" else "🔴" if status == "needs_fix" else "⚪"
-        display_text = f"{icon} {pid}"
-        if text_now:
-            display_text += f" [{text_now}]"
-
-        # samoleczenie listy - jeśli wiersz pokazuje stary tekst, nadpisz go na nowy format
+        # Jeśli tekst listy jest nieaktualny, zsynchronizuj go z bieżącym metadata.
         try:
             row_text = self.plates_listbox.get(idx)
         except Exception:
@@ -3152,6 +3022,7 @@ class CharacterAnnotationTab:
                 self.plates_listbox.delete(idx)
                 self.plates_listbox.insert(idx, display_text)
 
+                status = str(data.get("status", "unknown")).strip().lower()
                 if hasattr(self, "_apply_plate_listbox_row_style"):
                     self._apply_plate_listbox_row_style(idx, status)
                 else:
@@ -3182,10 +3053,16 @@ class CharacterAnnotationTab:
             c_w = max(50, self.preview_canvas.winfo_width())
             c_h = max(50, self.preview_canvas.winfo_height())
 
-            margin_x, margin_y_top, margin_y_bottom = 80, 40, 140
-            scale_w = (c_w - margin_x) / float(orig_w)
-            scale_h = (c_h - (margin_y_top + margin_y_bottom)) / float(orig_h)
-            SCALE = max(1.0, min(min(scale_w, scale_h), 6.0))
+            margin_x = max(84, int(c_w * 0.18))
+            margin_y_top = max(24, int(c_h * 0.06))
+            margin_y_bottom = max(96, int(c_h * 0.20))
+
+            usable_w = max(80, min(c_w - margin_x, int(c_w * 0.78)))
+            usable_h = max(60, c_h - (margin_y_top + margin_y_bottom))
+
+            scale_w = usable_w / float(orig_w)
+            scale_h = usable_h / float(orig_h)
+            SCALE = max(1.0, min(min(scale_w, scale_h), 5.0))
 
             new_w, new_h = int(orig_w * SCALE), int(orig_h * SCALE)
             pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -3440,11 +3317,7 @@ class CharacterAnnotationTab:
                     } for c in chars]
 
                     # WAŻNE: sortujemy znaki po X PRZED zapisem do metadata
-                    c_clean.sort(
-                        key=lambda x: (
-                            float(x["bbox"][0]) if isinstance(x.get("bbox"), (list, tuple)) and len(x["bbox"]) >= 4 else 1e9
-                        )
-                    )
+                    c_clean = self._sort_character_records_by_x(c_clean)
 
                     local_meta[pid]["characters"] = c_clean
 
@@ -3524,30 +3397,13 @@ class CharacterAnnotationTab:
                         self.fast_test_running = False
                         self.fast_test_stop.clear()
 
-                        # 1. przejmujemy świeże metadata do pamięci
-                        self.preview_metadata = local_meta
-
-                        # 2. zachowujemy aktualne zaznaczenie po pid
-                        selected_pid = None
+                        # Odśwież listę i preview na podstawie aktualnego metadata.
+                        self._apply_preview_metadata_update(local_meta, preserve_selection=True)
+                        self._loaded_meta_path = out_dir / "metadata.json"
                         try:
-                            sel = self.plates_listbox.curselection()
-                            if sel:
-                                sel_idx = sel[0]
-                                pid_map = getattr(self, "_listbox_pid_by_index", [])
-                                if 0 <= sel_idx < len(pid_map):
-                                    selected_pid = pid_map[sel_idx]
+                            self._loaded_meta_mtime = self._loaded_meta_path.stat().st_mtime
                         except Exception:
-                            selected_pid = None
-
-                        # 3. porządek listy: zachowaj bieżącą kolejność preview_plate_ids
-                        current_order = [pid for pid in self.preview_plate_ids if pid in self.preview_metadata]
-                        appended = [pid for pid in self.preview_metadata.keys() if pid not in current_order]
-                        self.preview_plate_ids = current_order + appended
-                        self._listbox_pid_by_index = list(self.preview_plate_ids)
-
-                        # 4. kanoniczne odświeżenie listy i preview z aktualnego metadata
-                        self._reset_preview_cache()
-                        self._load_preview_data(quiet=True)
+                            self._loaded_meta_mtime = None
 
                         try:
                             method_name = (self.detection_method_var.get() or "OCR").upper().strip()
@@ -3622,22 +3478,31 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _build_cvat_tab(self, parent):
+        palette = getattr(self.app, "palette", {})
+
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         pane.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
 
-        export_lf = ttk.LabelFrame(pane, text=" EKSPORTY (Dane Wyjściowe) ", padding=15)
+        export_lf = ttk.LabelFrame(pane, text=" Eksporty (dane wyjściowe) ", padding=15)
         pane.add(export_lf, weight=1)
 
         cvat_f = ttk.Frame(export_lf)
         cvat_f.pack(fill=tk.X, pady=(5, 5))
-        ttk.Label(cvat_f, text="OPCJA 1: Ręczna poprawa błędów", font=("Segoe UI", 10, "bold"), foreground="#c0392b").pack(anchor=tk.W)
-        ttk.Label(
+        self.cvat_option1_title_lbl = ttk.Label(
+            cvat_f,
+            text="OPCJA 1: Ręczna poprawa błędów",
+            font=("Segoe UI", 10, "bold"),
+            foreground=palette.get("error", "#c0392b")
+        )
+        self.cvat_option1_title_lbl.pack(anchor=tk.W)
+        self.cvat_option1_desc_lbl = ttk.Label(
             export_lf,
             text="Eksport do CVAT obejmuje wyłącznie tablice oznaczone jako błędne (czerwone).",
-            foreground="gray",
+            foreground=palette.get("muted", "gray"),
             wraplength=320,
             justify=tk.LEFT
-        ).pack(anchor=tk.W, pady=(0, 8))
+        )
+        self.cvat_option1_desc_lbl.pack(anchor=tk.W, pady=(0, 8))
 
 
 
@@ -3648,28 +3513,58 @@ class CharacterAnnotationTab:
 
         yolo_f = ttk.Frame(export_lf)
         yolo_f.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(yolo_f, text="OPCJA 2: Fabryka Datasetów (Active Learning)", font=("Segoe UI", 10, "bold"), foreground="#27ae60").pack(anchor=tk.W)
-        ttk.Label(yolo_f, text="Zbiera 🟢 perfect i buduje dataset YOLO.", foreground="gray").pack(anchor=tk.W, pady=(2, 8))
+        self.cvat_option2_title_lbl = ttk.Label(
+            yolo_f,
+            text="OPCJA 2: Budowa datasetu (active learning)",
+            font=("Segoe UI", 10, "bold"),
+            foreground=palette.get("success", "#27ae60")
+        )
+        self.cvat_option2_title_lbl.pack(anchor=tk.W)
+        self.cvat_option2_desc_lbl = ttk.Label(
+            yolo_f,
+            text="Zbiera perfekcyjne tablice i buduje dataset YOLO.",
+            foreground=palette.get("muted", "gray"),
+            wraplength=320,
+            justify=tk.LEFT
+        )
+        self.cvat_option2_desc_lbl.pack(anchor=tk.W, pady=(2, 8))
 
         btn_yolo = ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton")
         btn_yolo.pack(fill=tk.X, ipady=4)
 
-        info_lf = ttk.LabelFrame(export_lf, text=" Status i Wskazówki ", padding=5)
+        info_lf = ttk.LabelFrame(export_lf, text=" Status i wskazówki ", padding=5)
         info_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
-        self.export_console = tk.Text(info_lf, height=10, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa", bd=0)
+        self.export_console = tk.Text(
+            info_lf,
+            height=10,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg=palette.get("console_bg", "#252526"),
+            fg=palette.get("console_fg", "#f3f3f3"),
+            insertbackground=palette.get("console_fg", "#f3f3f3"),
+            bd=0
+        )
         self.export_console.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.export_console.insert(tk.END, "Oczekuje na akcję...")
+        self.export_console.insert(tk.END, "Oczekuję na akcję...")
         self.export_console.config(state=tk.DISABLED)
 
         import_lf = ttk.LabelFrame(pane, text=" Import poprawek znaków z CVAT ", padding=15)
         pane.add(import_lf, weight=1)
 
         ttk.Label(import_lf, text="Importuj poprawki znaków z CVAT", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
-        ttk.Label(import_lf,
-                  text=" Ten import służy wyłącznie do wczytywania ręcznie poprawionych " \
-                       " adnotacji znaków z CVAT.\n " \
-                       " Zaimportowane dane zostaną dołączone do puli treningowej modelu znaków. Plik *.xml " ,
-                         foreground="gray").pack(anchor=tk.W, pady=(2, 8))
+        self.cvat_import_desc_lbl = ttk.Label(
+            import_lf,
+            text=(
+                "Ten import służy wyłącznie do wczytywania ręcznie poprawionych "
+                "adnotacji znaków z CVAT.\n"
+                "Zaimportowane dane zostaną dołączone do puli treningowej modelu znaków. "
+                "Wskaż plik *.xml z poprawkami."
+            ),
+            foreground=palette.get("muted", "gray"),
+            wraplength=320,
+            justify=tk.LEFT
+        )
+        self.cvat_import_desc_lbl.pack(anchor=tk.W, pady=(2, 8))
 
         row2 = ttk.Frame(import_lf)
         row2.pack(fill=tk.X, pady=5)
@@ -3680,11 +3575,20 @@ class CharacterAnnotationTab:
         btn_import = ttk.Button(import_lf, text="Importuj", command=self._run_cvat_import, style="Accent.TButton")
         btn_import.pack(fill=tk.X, pady=(10, 5), ipady=3)
 
-        import_console_lf = ttk.LabelFrame(import_lf, text=" Status Importu ", padding=5)
+        import_console_lf = ttk.LabelFrame(import_lf, text=" Status importu ", padding=5)
         import_console_lf.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
-        self.import_console = tk.Text(import_console_lf, height=4, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa", bd=0)
+        self.import_console = tk.Text(
+            import_console_lf,
+            height=4,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg=palette.get("console_bg", "#252526"),
+            fg=palette.get("console_fg", "#f3f3f3"),
+            insertbackground=palette.get("console_fg", "#f3f3f3"),
+            bd=0
+        )
         self.import_console.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.import_console.insert(tk.END, "Oczekuje na plik XML...")
+        self.import_console.insert(tk.END, "Oczekuję na plik XML...")
         self.import_console.config(state=tk.DISABLED)
 
         
@@ -3718,7 +3622,7 @@ class CharacterAnnotationTab:
             style="Accent.TButton",
             state=tk.DISABLED
         )
-        self.btn_finish_step3.pack(ipadx=18, ipady=2)
+        self.btn_finish_step3.pack()
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
@@ -3738,7 +3642,6 @@ class CharacterAnnotationTab:
     def _run_cvat_export(self):
         work_dir = Path(self.preview_dir_var.get().strip())
 
-        # ===== START NOWEGO BLOKU: wybór docelowego katalogu review =====
         export_dir = work_dir
 
         project_review_dir = self._get_project_review_dir()
@@ -3750,12 +3653,9 @@ class CharacterAnnotationTab:
 
             export_dir = project_review_dir / preview_name
             export_dir.mkdir(parents=True, exist_ok=True)
-        # ===== KONIEC NOWEGO BLOKU =====
-        # ===== START NOWEGO BLOKU: osobno ścieżka metadata preview =====
         meta_path = work_dir / "metadata.json"
         out_xml = export_dir / "annotations.xml"
         out_zip = export_dir / "cvat_export.zip"
-        # ===== KONIEC NOWEGO BLOKU =====
 
         self._set_console_text(self.export_console, "⌛ Eksportowanie do CVAT w toku...")
 
@@ -3778,7 +3678,6 @@ class CharacterAnnotationTab:
             if CVATCharacterExporter().export(source_meta, out_xml):
                 CVATZipManager.create_cvat_import_zip(out_xml, work_dir / "images", out_zip)
                 self._set_console_text(self.export_console, f"✅ Wygenerowano ZIP:\n{out_zip}")
-                                # ===== START NOWEGO BLOKU: informacja o docelowym review dir =====
                 try:
                     self._log(
                         self.export_console,
@@ -3787,13 +3686,10 @@ class CharacterAnnotationTab:
                     )
                 except Exception:
                     pass
-                # ===== KONIEC NOWEGO BLOKU =====
-                # ===== START NOWEGO BLOKU =====
                 try:
                     self._update_step3_finish_button_state()
                 except Exception:
                     pass
-                # ===== KONIEC NOWEGO BLOKU =====
 
                 if self.smart_export_var.get() and source_meta.exists():
                     source_meta.unlink()
@@ -3820,10 +3716,16 @@ class CharacterAnnotationTab:
             char_map = {c: i for i, c in enumerate("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
             copied, seen = 0, set()
 
-            for run_dir in base_chars_dir.iterdir():
-                meta = run_dir / "metadata.json"
-                if not meta.exists():
-                    continue
+            meta_candidates = []
+            for meta in base_chars_dir.rglob("metadata.json"):
+                run_dir = meta.parent
+                if (run_dir / "images").exists():
+                    meta_candidates.append(meta)
+
+            meta_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+            for meta in meta_candidates:
+                run_dir = meta.parent
                 with open(meta, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
 
@@ -3898,12 +3800,12 @@ class CharacterAnnotationTab:
             (yolo_out / "data.yaml").write_text(yaml_content, encoding="utf-8")
 
             self._set_console_text(self.export_console, f"✅ Dataset YOLO gotowy: {yolo_out}")
-            # ===== START NOWEGO BLOKU =====
             try:
                 self._update_step3_finish_button_state()
+                self._set_button_emphasis("btn_finish_step3_frame", True)
+                self._pulse_button_emphasis("btn_finish_step3_frame")
             except Exception:
                 pass
-            # ===== KONIEC NOWEGO BLOKU =====
 
             try:
                 self.app.update_status(
@@ -3953,16 +3855,19 @@ class CharacterAnnotationTab:
                             "method": "cvat_manual"
                         })
 
-                metadata[pid]["characters"] = new_chars
+                metadata[pid]["characters"] = self._sort_character_records_by_x(new_chars)
                 metadata[pid]["status"] = "perfect"
                 updated += 1
 
             self._atomic_write_json(meta_path, metadata)
-            self._reset_preview_cache()
-            self._load_preview_data(quiet=True)
+            self._apply_preview_metadata_update(metadata, preserve_selection=True)
+            self._loaded_meta_path = meta_path
+            try:
+                self._loaded_meta_mtime = meta_path.stat().st_mtime
+            except Exception:
+                self._loaded_meta_mtime = None
 
             self._set_console_text(self.import_console, f"✅ Zaktualizowano: {updated} tablic.")
-            # ===== START NOWEGO BLOKU: zapisz poprawki do manual_char_pool =====
             try:
                 stored_dir = self._store_current_preview_in_manual_char_pool(metadata)
                 self._set_console_text(
@@ -3972,19 +3877,16 @@ class CharacterAnnotationTab:
                 )
             except Exception as e:
                 logger.debug(f"Nie udało się zapisać paczki do manual_char_pool: {e}")
-            # ===== KONIEC NOWEGO BLOKU =====
-            # ===== START NOWEGO BLOKU =====
             try:
                 self._update_step3_finish_button_state()
             except Exception:
                 pass
-            # ===== KONIEC NOWEGO BLOKU =====
 
         except Exception as e:
             self._set_console_text(self.import_console, f"❌ BŁĄD IMPORTU:\n{e}")
 
     # =========================================================
-    # Preset ranking (left as-is)
+    # Ranking presetów OCR
     # =========================================================
 
     def _run_preset_ranking(self):
@@ -4152,10 +4054,10 @@ class CharacterAnnotationTab:
         bottom_bar = ttk.Frame(lab_win, padding=10, relief="raised")
         bottom_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # ✅ Pasek pomocy dla okna Laboratorium
+        # Lokalny pasek pomocy dla okna laboratorium.
         lab_help_text = tk.Text(
             bottom_bar, height=2, wrap=tk.WORD,
-            bg="#f0f0f0", bd=0, font=("Segoe UI", 10, "italic"), fg="#2980b9"
+            bg="#050505", bd=0, font=("Segoe UI", 10), fg="#f3f3f3", insertbackground="#f3f3f3"
         )
         lab_help_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         lab_help_text.insert(tk.END, "💡 Najedź myszką na nazwę suwaka, aby zobaczyć podpowiedź...")
@@ -4354,7 +4256,7 @@ class CharacterAnnotationTab:
                         lbl_f,
                         text=f"[Zwycięzca: {ghost_str}]",
                         foreground="#2980b9",
-                        font=("Segoe UI", 9, "bold italic")
+                        font=("Segoe UI", 9, "bold")
                     ).pack(side=tk.RIGHT)
 
             s = ttk.Scale(f, from_=from_, to=to_, variable=var, command=update_preview)
@@ -4376,22 +4278,22 @@ class CharacterAnnotationTab:
                 HELP.bind_help(s, help_key)
 
         if best_preset_data and best_preset_data.get("name"):
-            leader_f = tk.Frame(scrollable_frame, bg="#fff3cd", bd=1, relief="solid")
+            leader_f = tk.Frame(scrollable_frame, bg="#252526", bd=1, relief="solid")
             leader_f.pack(fill=tk.X, pady=(0, 15))
             tk.Label(
                 leader_f,
                 text=f"Lider: {best_preset_data.get('name').upper()}",
-                bg="#fff3cd", fg="#8a6d3b",
-                font=("Arial", 10, "bold")
+                bg="#252526", fg="#f3f3f3",
+                font=("Segoe UI", 10, "bold")
             ).pack(pady=(5, 0))
             tk.Label(
                 leader_f,
                 text=f"Skuteczność: {best_acc:.1f}%",
-                bg="#fff3cd", fg="#8a6d3b",
-                font=("Arial", 9)
+                bg="#252526", fg="#c7c7c7",
+                font=("Segoe UI", 9)
             ).pack(pady=(0, 5))
         else:
-            ttk.Label(scrollable_frame, text="Dostrojenie Algorytmu", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+            ttk.Label(scrollable_frame, text="Dostrojenie Algorytmu", font=("Segoe UI", 12, "bold")).pack(pady=(0, 10))
 
         geom = ttk.LabelFrame(scrollable_frame, text=" 1. Geometria ", padding=10)
         geom.pack(fill=tk.X, pady=(0, 10))

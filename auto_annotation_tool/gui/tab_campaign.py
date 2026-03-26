@@ -5,8 +5,9 @@ Zakładka: Rozkład Jazdy (Dashboard Kampanii MLOps)..
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
+from textwrap import shorten
 import os
 
 from ..config import CONFIG, logger
@@ -25,6 +26,12 @@ class CampaignTab:
         # UI state
         self.roadmap_ui_elements = []
         self.right_panel = None
+        self._model_status_title_labels = []
+        self.project_listbox = None
+        self.project_list_status_lbl = None
+        self.project_list_status_labels = []
+        self._project_name_by_index = []
+        self._project_list_refreshing = False
 
         self._build_ui()
         self._refresh_dashboard()
@@ -34,22 +41,28 @@ class CampaignTab:
     # ======================================================
 
     def _build_ui(self):
+        palette = getattr(self.app, "palette", {})
+
         # ---------------- HEADER ----------------
         header_f = ttk.Frame(self.frame, padding=15)
         header_f.pack(fill=tk.X)
+        header_f.columnconfigure(0, weight=0)
+        header_f.columnconfigure(1, weight=1)
+        header_f.columnconfigure(2, weight=0)
 
         self.lbl_title = tk.Label(
             header_f,
-            text="🚀 MENADŻER KAMPANII (PROJEKTY)",
+            text="MENEDŻER KAMPANII (PROJEKTY)",
             font=("Segoe UI", 16, "bold"),
-            fg="#2c3e50"
+            fg=palette.get("fg", "#f3f3f3"),
+            bg=palette.get("bg", "#1e1e1e")
         )
-        self.lbl_title.pack(side=tk.LEFT)
+        self.lbl_title.grid(row=0, column=0, sticky="w")
 
         proj_frame = ttk.Frame(header_f)
-        proj_frame.pack(side=tk.LEFT, padx=(20, 0))
+        proj_frame.grid(row=0, column=1, sticky="w", padx=(20, 0))
 
-        self.btn_add_proj = ttk.Button(proj_frame, text="Nowy Projekt", command=self._add_new_project)
+        self.btn_add_proj = ttk.Button(proj_frame, text="Nowy projekt", command=self._add_new_project)
         self.btn_add_proj.pack(side=tk.LEFT, padx=5)
 
         self.btn_open_proj = ttk.Button(proj_frame, text="Otwórz projekt", command=self._open_selected_project)
@@ -65,20 +78,20 @@ class CampaignTab:
             header_f,
             text="Iteracja: -",
             font=("Segoe UI", 14, "bold"),
-            fg="#e74c3c",
-            bg="#fadbd8",
+            fg=palette.get("warning", "#ffb3b3"),
+            bg=palette.get("surface_warning", palette.get("panel_alt", "#3a2323")),
             padx=10,
             pady=5
         )
-        self.lbl_iter.pack(side=tk.RIGHT)
+        self.lbl_iter.grid(row=0, column=2, sticky="e", padx=(12, 0))
 
-        # ✅ ZMIANA: banner informujący, że użytkownik pracuje w aktywnym projekcie
+        # Baner aktywnego projektu.
         self.lbl_campaign_banner = tk.Label(
             self.frame,
             text="",
             font=("Segoe UI", 10, "bold"),
-            fg="#8a4b08",
-            bg="#fff3cd",
+            fg=palette.get("warning", "#ffd37a"),
+            bg=palette.get("surface_info", palette.get("panel_alt", "#33250f")),
             padx=10,
             pady=6,
             anchor="w",
@@ -91,40 +104,94 @@ class CampaignTab:
         # ---------------- MAIN 2-COLUMN GRID ----------------
         main_container = ttk.Frame(self.frame, padding=15)
         main_container.pack(fill=tk.BOTH, expand=True)
+        self.main_container = main_container
 
-        # ✅ stabilny układ: 2 kolumny
-        main_container.columnconfigure(0, weight=1, minsize=360)   # lewy panel
-        main_container.columnconfigure(1, weight=2, minsize=700)   # prawy panel
+        # Stały układ dwukolumnowy.
+        main_container.columnconfigure(0, weight=0, minsize=420)
+        main_container.columnconfigure(1, weight=1, minsize=700)
         main_container.rowconfigure(0, weight=1)
 
         # LEFT PANEL
+        left_panel_host = ttk.Frame(main_container, width=420)
+        left_panel_host.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        try:
+            left_panel_host.grid_propagate(False)
+            left_panel_host.columnconfigure(0, weight=1)
+            left_panel_host.rowconfigure(0, weight=1)
+        except Exception:
+            pass
+        self.left_panel_host = left_panel_host
+
         left_panel = ttk.LabelFrame(
-            main_container,
+            left_panel_host,
             text=" Wiedza Algorytmów (Aktywny Projekt) ",
             padding=15
         )
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        left_panel.grid(row=0, column=0, sticky="nsew")
+        self.left_panel = left_panel
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(0, weight=1)
 
-        tk.Label(
-            left_panel,
+        self.left_scroll_host = ttk.Frame(left_panel)
+        self.left_scroll_host.grid(row=0, column=0, sticky="nsew")
+        self.left_scroll_host.columnconfigure(0, weight=1)
+        self.left_scroll_host.rowconfigure(0, weight=1)
+
+        self.left_panel_canvas = tk.Canvas(
+            self.left_scroll_host,
+            bg=palette.get("panel", "#252526"),
+            bd=0,
+            highlightthickness=0
+        )
+        self.left_panel_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.left_panel_scrollbar = ttk.Scrollbar(
+            self.left_scroll_host,
+            orient=tk.VERTICAL,
+            command=self.left_panel_canvas.yview
+        )
+        self.left_panel_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.left_panel_canvas.configure(yscrollcommand=self.left_panel_scrollbar.set)
+
+        self.left_content = ttk.Frame(self.left_panel_canvas)
+        self.left_content_window = self.left_panel_canvas.create_window(
+            (0, 0),
+            window=self.left_content,
+            anchor="nw"
+        )
+        self.left_content.bind("<Configure>", self._sync_left_panel_scrollregion, add="+")
+        self.left_panel_canvas.bind("<Configure>", self._sync_left_panel_canvas_width, add="+")
+
+        self.left_footer = ttk.Frame(left_panel)
+        self.left_footer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+
+        self.left_panel_hint_lbl = tk.Label(
+            self.left_content,
             text="Mózg projektu (aktualizuje się automatycznie po treningu).\n"
                  "Przycisk 'Zmień' to ręczna korekta.",
             justify=tk.LEFT,
-            fg="gray"
-        ).pack(anchor=tk.W, pady=(0, 15))
+            fg=palette.get("muted", "#b8b8b8"),
+            bg=palette.get("panel", "#252526")
+        )
+        self.left_panel_hint_lbl.pack(anchor=tk.W, pady=(0, 15))
+        self._build_projects_browser(self.left_content)
 
-        self._build_model_status(left_panel, "Model Pojazdów (Detect):", "vehicle", Path(CONFIG.DIR_6_MODELS))
-        self._build_model_status(left_panel, "Model Tablic (Pose):", "plate", Path(CONFIG.DIR_6_MODELS))
-        self._build_model_status(left_panel, "Model Znaków (OCR/YOLO):", "char", Path(CONFIG.DIR_6_MODELS))
+        self._build_model_status(self.left_content, "Model Pojazdów (Detect):", "vehicle", Path(CONFIG.DIR_6_MODELS))
+        self._build_model_status(self.left_content, "Model Tablic (Pose):", "plate", Path(CONFIG.DIR_6_MODELS))
+        self._build_model_status(self.left_content, "Model Znaków (OCR/YOLO):", "char", Path(CONFIG.DIR_6_MODELS))
 
         self.btn_advance = ttk.Button(
-            left_panel,
+            self.left_footer,
             text="Awansuj do Nowej Iteracji",
             command=self._advance_iteration,
             style="Accent.TButton"
         )
-        self.btn_advance.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        self.btn_advance.pack(fill=tk.X)
 
+        HELP.bind_help(self.btn_add_proj, "camp_new_project")
+        HELP.bind_help(self.btn_open_proj, "camp_open_project")
+        HELP.bind_help(self.btn_del_proj, "camp_delete_project")
+        HELP.bind_help(self.btn_exit_project, "camp_exit_project")
         HELP.bind_help(left_panel, "camp_models")
         HELP.bind_help(self.btn_advance, "camp_advance")
 
@@ -137,17 +204,129 @@ class CampaignTab:
         self.right_panel.grid(row=0, column=1, sticky="nsew")
 
         self._rebuild_roadmap_ui()
+        self.frame.after_idle(self._sync_left_panel_scrollregion)
+        self.frame.after_idle(self._sync_left_panel_canvas_width)
+
+    def _sync_left_panel_scrollregion(self, event=None):
+        if not hasattr(self, "left_panel_canvas") or self.left_panel_canvas is None:
+            return
+
+        try:
+            self.left_panel_canvas.configure(scrollregion=self.left_panel_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_left_panel_canvas_width(self, event=None):
+        if not hasattr(self, "left_panel_canvas") or self.left_panel_canvas is None:
+            return
+
+        try:
+            width = max(50, int(self.left_panel_canvas.winfo_width()))
+            self.left_panel_canvas.itemconfigure(self.left_content_window, width=width)
+        except Exception:
+            pass
+
+    def _build_projects_browser(self, parent):
+        palette = getattr(self.app, "palette", {})
+
+        browser_lf = ttk.LabelFrame(parent, text=" Zapisane projekty ", padding=10)
+        browser_lf.pack(fill=tk.X, pady=(0, 12))
+        self.project_browser_frame = browser_lf
+
+        status_panel = tk.Frame(
+            browser_lf,
+            bg=palette.get("panel", "#252526")
+        )
+        status_panel.pack(fill=tk.X, pady=(0, 6))
+        self.project_list_status_lbl = status_panel
+        self.project_list_status_labels = []
+
+        status_fonts = [
+            ("Segoe UI", 9, "bold"),
+            ("Segoe UI", 9),
+            ("Segoe UI", 9),
+        ]
+        for font_spec in status_fonts:
+            lbl = tk.Label(
+                status_panel,
+                text="",
+                justify=tk.LEFT,
+                anchor="w",
+                height=1,
+                fg=palette.get("muted", "#b8b8b8"),
+                bg=palette.get("panel", "#252526"),
+                font=font_spec
+            )
+            lbl.pack(fill=tk.X)
+            self.project_list_status_labels.append(lbl)
+
+        list_host = tk.Frame(
+            browser_lf,
+            bg=palette.get("panel", "#252526"),
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=palette.get("border", "#3c3c3c")
+        )
+        list_host.pack(fill=tk.X, expand=False)
+
+        scroll = ttk.Scrollbar(list_host, orient=tk.VERTICAL)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.project_listbox = tk.Listbox(
+            list_host,
+            exportselection=False,
+            height=5,
+            width=1,
+            font=("Segoe UI", 10),
+            bg=palette.get("field", "#1a1a1a"),
+            fg=palette.get("fg", "#f3f3f3"),
+            selectbackground=palette.get("accent", "#2980b9"),
+            selectforeground="#ffffff",
+            activestyle="none",
+            bd=0,
+            highlightthickness=0,
+            yscrollcommand=scroll.set
+        )
+        self.project_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.project_listbox.bind("<<ListboxSelect>>", self._on_project_changed)
+        self.project_listbox.bind("<Double-Button-1>", lambda _e: self._open_selected_project())
+        scroll.config(command=self.project_listbox.yview)
+
+        HELP.bind_help(browser_lf, "camp_open_project")
+        HELP.bind_help(status_panel, "camp_open_project")
+        for lbl in self.project_list_status_labels:
+            HELP.bind_help(lbl, "camp_open_project")
+        HELP.bind_help(self.project_listbox, "camp_open_project")
+
+    def _sync_project_browser_wraplength(self, event=None):
+        return
 
     def _build_model_status(self, parent, title, model_type, initial_dir: Path):
+        palette = getattr(self.app, "palette", {})
+
         f = ttk.Frame(parent)
         f.pack(fill=tk.X, pady=10)
 
-        tk.Label(f, text=title, font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
+        title_lbl = tk.Label(
+            f,
+            text=title,
+            font=("Segoe UI", 10, "bold"),
+            fg=palette.get("fg", "#f3f3f3"),
+            bg=palette.get("panel", "#252526")
+        )
+        title_lbl.pack(anchor=tk.W)
+        self._model_status_title_labels.append(title_lbl)
 
         row = ttk.Frame(f)
         row.pack(fill=tk.X)
 
-        lbl_val = tk.Label(row, text="Domyślny/Brak", fg="#2980b9", font=("Consolas", 10))
+        lbl_val = tk.Label(
+            row,
+            text="Domyslny/Brak",
+            fg=palette.get("accent", "#4fc1ff"),
+            bg=palette.get("panel", "#252526"),
+            font=("Consolas", 10)
+        )
         lbl_val.pack(side=tk.LEFT, expand=True, anchor=tk.W)
 
         btn = ttk.Button(row, text="Zmień", command=lambda mt=model_type: self._set_model(mt))
@@ -156,52 +335,178 @@ class CampaignTab:
         setattr(self, f"lbl_model_{model_type}", lbl_val)
         setattr(self, f"btn_model_{model_type}", btn)
 
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("bg", "#1e1e1e")
+        panel = palette.get("panel", "#252526")
+        panel_alt = palette.get("surface_info", palette.get("panel_alt", panel))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+
+        try:
+            self.lbl_title.config(bg=bg, fg=fg)
+        except Exception:
+            pass
+
+        try:
+            self.lbl_iter.config(bg=palette.get("surface_warning", panel_alt))
+        except Exception:
+            pass
+
+        try:
+            self.lbl_campaign_banner.config(bg=panel_alt)
+        except Exception:
+            pass
+
+        try:
+            self.left_panel_hint_lbl.config(bg=panel, fg=muted)
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "left_panel_canvas", None) is not None:
+                self.left_panel_canvas.config(bg=panel)
+        except Exception:
+            pass
+
+        try:
+            if self.project_list_status_lbl is not None:
+                self.project_list_status_lbl.config(bg=panel)
+            for lbl in getattr(self, "project_list_status_labels", []):
+                lbl.config(bg=panel, fg=muted)
+        except Exception:
+            pass
+
+        try:
+            if self.project_listbox is not None:
+                self.project_listbox.config(
+                    bg=palette.get("field", "#1a1a1a"),
+                    fg=fg,
+                    selectbackground=palette.get("accent", "#2980b9"),
+                    selectforeground="#ffffff"
+                )
+        except Exception:
+            pass
+
+        for lbl in getattr(self, "_model_status_title_labels", []):
+            try:
+                lbl.config(bg=panel, fg=fg)
+            except Exception:
+                pass
+
+        for model_type in ("vehicle", "plate", "char"):
+            lbl_val = getattr(self, f"lbl_model_{model_type}", None)
+            if lbl_val is not None:
+                try:
+                    lbl_val.config(bg=panel)
+                except Exception:
+                    pass
+
+        for item in getattr(self, "roadmap_ui_elements", []):
+            try:
+                item["lbl_title"].config(bg=panel)
+            except Exception:
+                pass
+            try:
+                item["lbl_desc"].config(bg=panel)
+            except Exception:
+                pass
+
+        try:
+            self._refresh_dashboard()
+        except Exception:
+            pass
+
     def _ask_project_from_list(self, title="Wybierz projekt", action_label="OK"):
-        """
-        ✅ ZMIANA: modalne okno wyboru projektu z listy.
-        Zwraca nazwę projektu albo None.
-        """
+        """Wyświetla modalny wybór projektu i zwraca nazwę albo None."""
         projects = CAMPAIGN.get_all_projects()
         if not projects:
-            messagebox.showinfo("Brak projektów", "Nie ma żadnych zapisanych projektów.")
+            self.app.themed_info("Brak projektów", "Nie ma żadnych zapisanych projektów.", parent=self.frame)
             return None
 
         dialog = tk.Toplevel(self.frame)
-        dialog.title(title)
-        dialog.geometry("420x140")
-        dialog.transient(self.frame)
-        dialog.grab_set()
-        dialog.resizable(False, False)
+        self.app.style_dialog_window(dialog, title=title, geometry="460x300", parent=self.frame)
+        palette = self.app.palette
 
-        ttk.Label(dialog, text="Wybierz projekt z listy:", font=("Segoe UI", 10, "bold")).pack(
-            anchor=tk.W, padx=15, pady=(15, 5)
+        shell = tk.Frame(dialog, bg=palette["bg"], bd=1, highlightthickness=1, highlightbackground=palette["border"])
+        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        body = tk.Frame(shell, bg=palette["panel"])
+        body.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            body,
+            text=title,
+            bg=palette["panel"],
+            fg=palette["fg"],
+            font=("Segoe UI", 11, "bold")
+        ).pack(anchor=tk.W, padx=16, pady=(16, 8))
+
+        tk.Label(
+            body,
+            text="Wybierz projekt z listy:",
+            bg=palette["panel"],
+            fg=palette["fg"],
+            font=("Segoe UI", 10)
+        ).pack(anchor=tk.W, padx=16, pady=(0, 6))
+
+        list_frame = tk.Frame(body, bg=palette["panel"])
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+
+        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        project_list = tk.Listbox(
+            list_frame,
+            exportselection=False,
+            font=("Segoe UI", 10),
+            bg=palette["field"],
+            fg=palette["fg"],
+            selectbackground=palette["accent"],
+            selectforeground="#ffffff",
+            activestyle="none",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette["border"],
+            yscrollcommand=scroll.set,
         )
+        project_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.config(command=project_list.yview)
 
-        chosen_var = tk.StringVar(value=projects[0])
-
-        combo = ttk.Combobox(dialog, textvariable=chosen_var, values=projects, state="readonly", width=40)
-        combo.pack(fill=tk.X, padx=15, pady=(0, 15))
+        for project in projects:
+            project_list.insert(tk.END, project)
+        project_list.selection_set(0)
+        project_list.activate(0)
+        project_list.focus_set()
 
         result = {"value": None}
 
-        btn_row = ttk.Frame(dialog)
-        btn_row.pack(fill=tk.X, padx=15, pady=(0, 15))
+        btn_row = tk.Frame(body, bg=palette["panel"])
+        btn_row.pack(fill=tk.X, padx=16, pady=(0, 16))
 
         def accept():
-            result["value"] = chosen_var.get().strip()
+            selection = project_list.curselection()
+            if selection:
+                result["value"] = project_list.get(selection[0]).strip()
             dialog.destroy()
 
         def cancel():
             dialog.destroy()
 
-        ttk.Button(btn_row, text=action_label, command=accept).pack(side=tk.RIGHT)
+        ttk.Button(btn_row, text=action_label, command=accept, style="Accent.TButton").pack(side=tk.RIGHT)
         ttk.Button(btn_row, text="Anuluj", command=cancel).pack(side=tk.RIGHT, padx=(0, 8))
 
+        project_list.bind("<Double-Button-1>", lambda _e: accept())
+        fit_dialog = getattr(self.app, "_fit_dialog_to_content", None)
+        if callable(fit_dialog):
+            fit_dialog(dialog, parent=self.frame, min_width=460, min_height=300)
+        dialog.bind("<Return>", lambda _e: accept())
+        dialog.bind("<Escape>", lambda _e: cancel())
         dialog.wait_window()
         return result["value"]
 
     def _set_model(self, model_type):
-        # ✅ ZMIANA: domyślnie startujemy z katalogu modeli aktywnego projektu
+        # Otwórz wybór modelu od katalogu modeli aktywnego projektu.
         initial_dir = CAMPAIGN.get_dir("models")
         if initial_dir is None:
             initial_dir = Path(CONFIG.DIR_6_MODELS)
@@ -221,22 +526,37 @@ class CampaignTab:
     # ======================================================
 
     def _build_roadmap_step(self, parent, step_num, title, desc, btn_text, command):
+        palette = getattr(self.app, "palette", {})
+
         f = ttk.Frame(parent)
         f.pack(fill=tk.X, pady=10)
 
         text_f = ttk.Frame(f)
         text_f.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        lbl_title = tk.Label(text_f, text=title, font=("Segoe UI", 12, "bold"))
+        lbl_title = tk.Label(
+            text_f,
+            text=title,
+            font=("Segoe UI", 12, "bold"),
+            fg=palette.get("fg", "#f3f3f3"),
+            bg=palette.get("panel", "#252526")
+        )
         lbl_title.pack(anchor=tk.W)
 
-        lbl_desc = tk.Label(text_f, text=desc, fg="#7f8c8d", justify=tk.LEFT, wraplength=520)
+        lbl_desc = tk.Label(
+            text_f,
+            text=desc,
+            fg=palette.get("muted", "#b8b8b8"),
+            bg=palette.get("panel", "#252526"),
+            justify=tk.LEFT,
+            wraplength=520
+        )
         lbl_desc.pack(anchor=tk.W)
 
         btn = ttk.Button(f, text=btn_text, command=command, width=25)
         btn.pack(side=tk.RIGHT, padx=10)
 
-        # ✅ ZMIANA: kontener na dodatkowe akcje naprawcze (domyślnie pusty)
+        # Kontener na dodatkowe akcje naprawcze kroku.
         extra_actions_frame = ttk.Frame(parent)
         extra_actions_frame.pack(fill=tk.X, pady=(0, 5))
 
@@ -244,6 +564,7 @@ class CampaignTab:
 
         self.roadmap_ui_elements.append({
             "step_num": step_num,
+            "frame": f,
             "original_title": title,
             "orig_btn_text": btn_text,
             "lbl_title": lbl_title,
@@ -259,8 +580,8 @@ class CampaignTab:
 
         self._build_roadmap_step(
             self.right_panel, 1,
-            "1. Ingestia Danych",
-            "Wskaż folder z NOWĄ paczką zdjęć. Wizard skopiuje obrazy do katalogu bieżącej iteracji projektu.",
+            "1. Ingestia danych",
+            "E1. Wskazujesz nową porcję zdjęć dla aktywnej iteracji. Wizard kopiuje obrazy do drzewa projektu i przygotowuje bazę dla kolejnych etapów.",
             "Wybierz i skopiuj zdjęcia",
             self._step_create_raw_folder
         )
@@ -268,7 +589,7 @@ class CampaignTab:
         self._build_roadmap_step(
             self.right_panel, 2,
             "2. Detekcja kaskadowa (Autoanotacja)",
-            "Ustawia automatycznie ścieżki IN/OUT i przenosi do Autoanotacji.",
+            "E2. Wizard przechodzi do Z2, podstawia ścieżki projektowe i prowadzi przez autoanotację pojazdów oraz tablic.",
             "Skocz: Autoanotacja",
             self._step_goto_auto_annotation
         )
@@ -276,7 +597,7 @@ class CampaignTab:
         self._build_roadmap_step(
             self.right_panel, 3,
             "3. Wycinanie tablic + Złota paczka",
-            "Ustawia XML + folder obrazów (z projektu) i przenosi do Zakładki Znaków.",
+            "E3. Wizard przechodzi do Z3, gdzie wycinasz tablice, uruchamiasz OCR, porównujesz wynik z ground truth i budujesz gold pack.",
             "Skocz: Znaki",
             self._step_goto_characters
         )
@@ -284,49 +605,63 @@ class CampaignTab:
         self._build_roadmap_step(
             self.right_panel, 4,
             "4. Trening i analiza",
-            "Przenosi do Zakładki Trening. Krok odblokowuje się po utworzeniu datasetu YOLO.",
+            "E4. Wizard przechodzi do Z4, gdzie wybierasz tor, przygotowujesz dataset iteracji i uruchamiasz trening oraz analizę modelu.",
             "Skocz: Trening",
             self._step_goto_training
         )
 
-        steps_frames = [f for f in self.right_panel.winfo_children() if isinstance(f, ttk.Frame)]
-        if len(steps_frames) >= 4:
-            HELP.bind_help(steps_frames[0], "camp_step1")
-            HELP.bind_help(steps_frames[1], "camp_step2")
-            HELP.bind_help(steps_frames[2], "camp_step3")
-            HELP.bind_help(steps_frames[3], "camp_step4")
+        for item in self.roadmap_ui_elements:
+            help_key = f"camp_step{item['step_num']}"
+            for widget in (
+                item.get("frame"),
+                item.get("lbl_title"),
+                item.get("lbl_desc"),
+                item.get("btn"),
+                item.get("extra_actions_frame"),
+            ):
+                HELP.bind_help(widget, help_key)
 
     def _render_step3_rework_actions(self, frame):
-        """✅ ZMIANA: dodatkowe przyciski naprawcze dla Kroku 3."""
+        """Renderuje dodatkowe akcje naprawcze dla kroku 3."""
+        palette = getattr(self.app, "palette", {})
+
         for w in frame.winfo_children():
             w.destroy()
 
-        ttk.Label(
+        tk.Label(
             frame,
             text="Dostępne ścieżki naprawcze:",
-            foreground="#d35400",
+            fg=palette.get("warning", "#d35400"),
+            bg=palette.get("panel", "#252526"),
             font=("Segoe UI", 9, "bold")
         ).pack(anchor=tk.W, pady=(0, 4))
 
         btn_row = ttk.Frame(frame)
         btn_row.pack(anchor=tk.W)
 
-        ttk.Button(
+        btn_auto = ttk.Button(
             btn_row,
             text="↩ Autoanotacja",
             command=self._rework_step3_via_auto_annotation
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        )
+        btn_auto.pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Button(
+        btn_ocr = ttk.Button(
             btn_row,
             text=" Popraw OCR",
             command=self._rework_step3_via_ocr
-        ).pack(side=tk.LEFT)
+        )
+        btn_ocr.pack(side=tk.LEFT)
+
+        HELP.bind_help(frame, "camp_step3")
+        HELP.bind_help(btn_row, "camp_step3")
+        HELP.bind_help(btn_auto, "camp_step3")
+        HELP.bind_help(btn_ocr, "camp_step3")
 
     def _rework_step3_via_auto_annotation(self):
         """
-        ✅ ZMIANA: użytkownik wybiera ścieżkę naprawczą przez ponowną Autoanotację.
-        Cofamy workflow do Kroku 2 i gasimy Krok 3.
+        Uruchamia ścieżkę naprawczą przez ponowną autoanotację.
+        Cofnij workflow do kroku 2 i unieważnij krok 3.
         """
         try:
             CAMPAIGN.set_current_step(2)
@@ -383,8 +718,20 @@ class CampaignTab:
     def _refresh_dashboard(self):
         self._refresh_projects_list()
 
+        palette = getattr(self.app, "palette", {})
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        muted_dim = palette.get("muted_dim", "#9a9a9a")
+        accent = palette.get("accent", "#2980b9")
+        success = palette.get("success", "#27ae60")
+        warning = palette.get("warning", "#d35400")
+        surface_info = palette.get("surface_info", palette.get("panel_alt", "#252526"))
+        surface_success = palette.get("surface_success", palette.get("panel_alt", "#1f3320"))
+        surface_warning = palette.get("surface_warning", palette.get("panel_alt", "#3a2323"))
+
         active_proj = CAMPAIGN.get_active_project_name()
         has_project = bool(active_proj)
+        projects_available = bool(CAMPAIGN.get_all_projects())
 
         # ======================================================
         # TRYB SWOBODNY / BRAK AKTYWNEGO PROJEKTU
@@ -393,21 +740,21 @@ class CampaignTab:
             self.app.campaign_free_mode = True
             self.app.set_campaign_mode(False)
 
-            self.lbl_iter.config(text="Iteracja: -")
+            self.lbl_iter.config(text="Iteracja: -", fg=muted, bg=surface_info)
             self.lbl_campaign_banner.config(
                 text="TRYB SWOBODNY — brak aktywnego projektu. Wybierz projekt z listy i kliknij „Otwórz projekt” albo utwórz nowy.",
-                fg="#5f6b77",
-                bg="#ecf0f1"
+                fg=muted,
+                bg=surface_info
             )
 
             # Lewy panel wygaszony
             for mt in ["vehicle", "plate", "char"]:
-                getattr(self, f"lbl_model_{mt}").config(text="Zablokowane", fg="gray")
+                getattr(self, f"lbl_model_{mt}").config(text="Zablokowane", fg=muted_dim)
                 getattr(self, f"btn_model_{mt}").config(state="disabled")
 
             # Przyciski nagłówka
-            self.btn_open_proj.config(state="normal")
-            self.btn_del_proj.config(state="disabled")
+            self.btn_open_proj.config(state="normal" if projects_available else "disabled")
+            self.btn_del_proj.config(state="normal" if projects_available else "disabled")
             self.btn_exit_project.config(state="disabled")
 
             # Awans nieaktywny
@@ -415,8 +762,8 @@ class CampaignTab:
 
             # Prawy panel wygaszony
             for item in self.roadmap_ui_elements:
-                item["lbl_title"].config(text=f"🔒 {item['original_title']}", fg="#bdc3c7")
-                item["lbl_desc"].config(fg="#bdc3c7")
+                item["lbl_title"].config(text=f"🔒 {item['original_title']}", fg=muted_dim)
+                item["lbl_desc"].config(fg=muted_dim)
                 item["btn"].config(text="Zablokowane", style="TButton", state="disabled")
 
                 extra_frame = item.get("extra_actions_frame")
@@ -445,14 +792,14 @@ class CampaignTab:
         )
         iter_num = CAMPAIGN.get_current_iteration_num()
 
-        self.lbl_iter.config(text=f"Iteracja: {iter_num}")
+        self.lbl_iter.config(text=f"Iteracja: {iter_num}", fg=warning, bg=surface_warning)
         self.lbl_campaign_banner.config(
             text=(
                 f"AKTYWNY PROJEKT: {active_proj}  |  TRYB KAMPANII WŁĄCZONY\n"
                 "Masz włączone sterowanie workflow. Aby wrócić do trybu swobodnego, kliknij „Wyjdź z projektu”."
             ),
-            fg="#145a32",
-            bg="#d5f5e3"
+            fg=success,
+            bg=surface_success
         )
 
         # Przyciski nagłówka
@@ -467,14 +814,14 @@ class CampaignTab:
         def fmt_model(p):
             return Path(p).name if p and Path(p).exists() else "Domyślny/Brak"
 
-        self.lbl_model_vehicle.config(text=fmt_model(CAMPAIGN.get_global_model("vehicle")), fg="#2980b9")
-        self.lbl_model_plate.config(text=fmt_model(CAMPAIGN.get_global_model("plate")), fg="#2980b9")
-        self.lbl_model_char.config(text=fmt_model(CAMPAIGN.get_global_model("char")), fg="#2980b9")
+        self.lbl_model_vehicle.config(text=fmt_model(CAMPAIGN.get_global_model("vehicle")), fg=accent)
+        self.lbl_model_plate.config(text=fmt_model(CAMPAIGN.get_global_model("plate")), fg=accent)
+        self.lbl_model_char.config(text=fmt_model(CAMPAIGN.get_global_model("char")), fg=accent)
 
         # Awans iteracji
         if curr_step >= 5:
             self.btn_advance.config(
-                text="🎉 Cykl zakończony → Nowa Iteracja",
+                text="🎉 Cykl zakończony → Nowa iteracja",
                 state="normal",
                 style="Accent.TButton"
             )
@@ -505,8 +852,8 @@ class CampaignTab:
                     w.destroy()
 
             if s < curr_step:
-                item["lbl_title"].config(text=f"✅ {title}", fg="#27ae60")
-                item["lbl_desc"].config(fg="#7f8c8d")
+                item["lbl_title"].config(text=f"✅ {title}", fg=success)
+                item["lbl_desc"].config(fg=muted)
 
                 if s == 1:
                     btn.config(text="Wykonano", style="TButton", state="disabled")
@@ -514,7 +861,7 @@ class CampaignTab:
                     btn.config(text="Wykonano", style="TButton", state="disabled")
 
             elif s == curr_step:
-                item["lbl_title"].config(text=f"🔵 {title}", fg="#2980b9")
+                item["lbl_title"].config(text=f"🔵 {title}", fg=accent)
 
                 if s == 2 and step2_status == "generated":
                     item["lbl_desc"].config(
@@ -522,7 +869,7 @@ class CampaignTab:
                             "Autoanotacja została wykonana, ale etap NIE został jeszcze zatwierdzony.\n"
                             "Przejdź do Zakładki Autoanotacja, sprawdź wynik i kliknij „Zatwierdź etap autoanotacji”."
                         ),
-                        fg="#d35400"
+                        fg=warning
                     )
 
                 elif s == 3 and step3_status == "needs_rework":
@@ -532,12 +879,12 @@ class CampaignTab:
                             "Wróć do Autoanotacji albo popraw OCR w Zakładce Znaków.\n"
                             "Trening pozostaje zablokowany do czasu powodzenia tego etapu."
                         ),
-                        fg="#d35400"
+                        fg=warning
                     )
                     self._render_step3_rework_actions(extra_frame)
 
                 else:
-                    item["lbl_desc"].config(fg="#2c3e50")
+                    item["lbl_desc"].config(fg=fg)
 
                 if s == 1:
                     btn.config(
@@ -549,8 +896,8 @@ class CampaignTab:
                     btn.config(text=orig_btn_txt, style="Accent.TButton", state="normal")
 
             else:
-                item["lbl_title"].config(text=f"⚪ {title}", fg="#bdc3c7")
-                item["lbl_desc"].config(fg="#bdc3c7")
+                item["lbl_title"].config(text=f"⚪ {title}", fg=muted)
+                item["lbl_desc"].config(fg=muted_dim)
                 btn.config(text=orig_btn_txt, style="TButton", state="disabled")
 
         self._update_main_tabs_highlight(curr_step=curr_step, has_project=True)
@@ -558,38 +905,18 @@ class CampaignTab:
         self.frame.update_idletasks()
 
     def _update_main_tabs_highlight(self, curr_step=None, has_project=True):
-        tab_names = {
-            "campaign": f"{self.icon_manager.get('trophy')} Rozkład Jazdy",
-            "annotation": f"{self.icon_manager.get('car')} Autoanotacja",
-            "characters": f"{self.icon_manager.get('cut')} Znaki na tablicach",
-            "training": f"{self.icon_manager.get('training')} Trening i Analiza",
-        }
-
-        for key, label in tab_names.items():
-            try:
-                if key in self.app.tabs:
-                    self.app.notebook.tab(str(self.app.tabs[key].frame), text=label)
-            except Exception:
-                pass
-
-        if not has_project:
-            return
-
-        step_to_tab = {
-            1: "campaign",
-            2: "annotation",
-            3: "characters",
-            4: "training",
-        }
-
-        active_tab_key = step_to_tab.get(curr_step, "campaign")
+        active_tab_key = None
+        if has_project:
+            step_to_tab = {
+                1: "campaign",
+                2: "annotation",
+                3: "characters",
+                4: "training",
+            }
+            active_tab_key = step_to_tab.get(curr_step, "campaign")
 
         try:
-            if active_tab_key in self.app.tabs:
-                self.app.notebook.tab(
-                    str(self.app.tabs[active_tab_key].frame),
-                    text=tab_names[active_tab_key] + " ★"
-                )
+            self.app.refresh_main_tab_labels(active_tab_key=active_tab_key)
         except Exception:
             pass
 
@@ -598,16 +925,11 @@ class CampaignTab:
     # ======================================================
 
     def _refresh_projects_list(self):
-        """
-        ✅ ZMIANA: zachowana dla spójności API, ale główny combobox został usunięty z nagłówka.
-        Wybór projektu odbywa się teraz przez popup.
-        """
+        """Zachowane dla spójności API; wybór projektu odbywa się przez popup."""
         return
 
     def _on_project_changed(self, event=None):
-        """
-        ✅ ZMIANA: pozostawione dla kompatybilności, ale nieużywane.
-        """
+        """Pozostawione dla kompatybilności; obecnie nieużywane."""
         return
 
     def _open_selected_project(self):
@@ -635,32 +957,28 @@ class CampaignTab:
             pass
         
     def _add_new_project(self):
-        new_name = simpledialog.askstring("Nowy Projekt", "Podaj unikalną nazwę projektu:", parent=self.frame)
+        new_name = self.app.themed_ask_string(
+            "Nowy projekt",
+            "Podaj unikalną nazwę projektu.",
+            parent=self.frame,
+            action_label="Utwórz"
+        )
         if not new_name:
             return
 
         if CAMPAIGN.create_project(new_name):
-            self.app.campaign_free_mode = False  # ✅ ZMIANA
+            self.app.campaign_free_mode = False
             self.app.set_campaign_mode(True)
             self._rebuild_roadmap_ui()
             self._refresh_dashboard()
             self.app.update_campaign_tab_access()
-            messagebox.showinfo("Sukces", f"Projekt '{new_name}' utworzony.")
+            self.app.themed_info("Sukces", f"Projekt '{new_name}' został utworzony.", parent=self.frame, tone="success")
         else:
-            messagebox.showerror("Błąd", "Projekt o takiej nazwie już istnieje lub nazwa jest nieprawidłowa.")
-
-    def _clear_project_contexts(self):
-        self.app.tabs["annotation"].clear_campaign_context()
-        self.app.tabs["characters"].clear_campaign_context()
-        self.app.tabs["training"].clear_campaign_context()
-
-    def _clear_project_contexts(self):
-        for tab_key in ("annotation", "characters", "training"):
-            try:
-                if tab_key in self.app.tabs:
-                    self.app.tabs[tab_key].clear_campaign_context()
-            except Exception:
-                pass
+            self.app.themed_error(
+                "Błąd",
+                "Projekt o takiej nazwie już istnieje lub nazwa jest nieprawidłowa.",
+                parent=self.frame
+            )
 
     def _delete_project(self):
         selected = self._ask_project_from_list(
@@ -670,28 +988,291 @@ class CampaignTab:
         if not selected:
             return
 
-        if messagebox.askyesno(
-            "OSTRZEŻENIE",
-            f"Usunąć projekt '{selected}' (cały katalog projektu)?"
+        if self.app.themed_confirm(
+            "Usuwanie projektu",
+            f"Usunąć projekt '{selected}' wraz z całym katalogiem projektu?",
+            parent=self.frame,
+            confirm_label="Usuń",
+            tone="warning"
         ):
             was_active = (CAMPAIGN.get_active_project_name() == selected)
 
             if CAMPAIGN.delete_project(selected):
                 if was_active:
                     self._clear_project_contexts()
-
-                    if CAMPAIGN.get_active_project_name():
-                        self.app.campaign_free_mode = False
-                        self.app.set_campaign_mode(True)
-                    else:
-                        self.app.campaign_free_mode = True
-                        self.app.set_campaign_mode(False)
+                    self.app.campaign_free_mode = True
+                    self.app.set_campaign_mode(False)
 
                 self._rebuild_roadmap_ui()
                 self._refresh_dashboard()
                 self.app.update_campaign_tab_access()
 
-                messagebox.showinfo("Usunięto", f"Projekt '{selected}' został usunięty.")
+                self.app.themed_info(
+                    "Usunięto",
+                    f"Projekt '{selected}' został usunięty.",
+                    parent=self.frame,
+                    tone="success"
+                )
+
+    def _get_selected_project_from_list(self) -> str:
+        if self.project_listbox is None:
+            return ""
+
+        try:
+            selection = self.project_listbox.curselection()
+            if not selection:
+                return ""
+
+            idx = int(selection[0])
+            if idx < 0 or idx >= len(self._project_name_by_index):
+                return ""
+
+            return str(self._project_name_by_index[idx]).strip()
+        except Exception:
+            return ""
+
+    def _select_project_in_list(self, project_name: str):
+        if self.project_listbox is None or not project_name:
+            return
+
+        try:
+            idx = self._project_name_by_index.index(project_name)
+            self.project_listbox.selection_clear(0, tk.END)
+            self.project_listbox.selection_set(idx)
+            self.project_listbox.activate(idx)
+            self.project_listbox.see(idx)
+        except Exception:
+            pass
+
+    def _set_project_list_status(self, selected: str = "", project_count: int = 0):
+        if self.project_list_status_lbl is None:
+            return
+
+        def compact(value: str, width: int = 54) -> str:
+            text = str(value or "").replace("\n", " ").strip()
+            if not text:
+                return ""
+            return shorten(text, width=width, placeholder="...")
+
+        def apply_lines(*lines: str):
+            labels = list(getattr(self, "project_list_status_labels", []))
+            if not labels:
+                return
+            normalized = [compact(line) for line in lines[:3]]
+            while len(normalized) < len(labels):
+                normalized.append("")
+            for lbl, line in zip(labels, normalized):
+                lbl.config(text=line)
+
+        if not selected:
+            if project_count > 0:
+                apply_lines(
+                    f"Zapisane projekty: {project_count}",
+                    "Wybierz projekt z listy.",
+                    "Dwuklik otwiera zaznaczony projekt."
+                )
+            else:
+                apply_lines(
+                    "Brak zapisanych projektów.",
+                    "Utwórz pierwszy projekt.",
+                    "Lista pojawi się po dodaniu projektu."
+                )
+            return
+
+        created_at = ""
+        try:
+            created_raw = CAMPAIGN.get_project_created_at(selected)
+            if created_raw:
+                formatter = getattr(self.app, "_format_project_created_at", None)
+                created_at = formatter(created_raw) if callable(formatter) else str(created_raw).replace("T", " ")
+        except Exception:
+            created_at = ""
+
+        created_line = f"Utworzono: {created_at}" if created_at else "Utworzono: brak danych"
+
+        if selected == CAMPAIGN.get_active_project_name():
+            action_line = "Projekt jest już aktywny."
+        else:
+            action_line = "Dwuklik otwiera zaznaczony projekt."
+
+        apply_lines(
+            f"Projekt: {selected}",
+            created_line,
+            action_line
+        )
+
+    def _refresh_projects_list(self):
+        if self.project_listbox is None:
+            return
+
+        projects = CAMPAIGN.get_all_projects()
+        active_project = CAMPAIGN.get_active_project_name()
+        previous_selection = self._get_selected_project_from_list()
+
+        self._project_list_refreshing = True
+        try:
+            self.project_listbox.delete(0, tk.END)
+            self._project_name_by_index = []
+
+            if not projects:
+                self._set_project_list_status("", 0)
+                self.project_listbox.insert(tk.END, "(brak zapisanych projektów)")
+                self.project_listbox.itemconfig(0, foreground="#888888")
+                self.frame.after_idle(self._sync_left_panel_scrollregion)
+                return
+
+            for project_name in projects:
+                display_name = f"* {project_name}" if project_name == active_project else project_name
+                self.project_listbox.insert(tk.END, display_name)
+                idx = len(self._project_name_by_index)
+                self._project_name_by_index.append(project_name)
+                if project_name == active_project:
+                    self.project_listbox.itemconfig(idx, foreground="#27ae60")
+
+            target_name = active_project or previous_selection or projects[0]
+            self._select_project_in_list(target_name)
+        finally:
+            self._project_list_refreshing = False
+
+        self._set_project_list_status(self._get_selected_project_from_list(), len(projects))
+        self.frame.after_idle(self._sync_left_panel_scrollregion)
+
+    def _on_project_changed(self, event=None):
+        if self._project_list_refreshing:
+            return
+
+        selected = self._get_selected_project_from_list()
+        if not selected or self.project_list_status_lbl is None:
+            return
+
+        try:
+            self._set_project_list_status(selected, len(self._project_name_by_index))
+            self.frame.after_idle(self._sync_left_panel_scrollregion)
+        except Exception:
+            pass
+
+    def _open_selected_project(self):
+        """Aktywuje projekt wybrany z listy i włącza tryb kampanii."""
+        selected = self._get_selected_project_from_list()
+        if not selected:
+            selected = self._ask_project_from_list(
+                title="Otwórz projekt",
+                action_label="Otwórz"
+            )
+        if not selected:
+            return
+
+        CAMPAIGN.set_active_project(selected)
+        self.app.campaign_free_mode = False
+        self.app.set_campaign_mode(True)
+        self._rebuild_roadmap_ui()
+        self._refresh_dashboard()
+        self.app.update_campaign_tab_access()
+
+        try:
+            self.app.update_status(
+                f"Aktywowano projekt: {selected}. Aplikacja działa w trybie kampanii.",
+                "info"
+            )
+        except Exception:
+            pass
+
+    def _delete_project(self):
+        selected = self._get_selected_project_from_list()
+        if not selected:
+            selected = self._ask_project_from_list(
+                title="Usuń projekt",
+                action_label="Usuń"
+            )
+        if not selected:
+            return
+
+        if self.app.themed_confirm(
+            "Usuwanie projektu",
+            f"Usunąć projekt '{selected}' wraz z całym katalogiem projektu?",
+            parent=self.frame,
+            confirm_label="Usuń",
+            tone="warning"
+        ):
+            was_active = (CAMPAIGN.get_active_project_name() == selected)
+
+            if CAMPAIGN.delete_project(selected):
+                if was_active:
+                    self._clear_project_contexts()
+                    self.app.campaign_free_mode = True
+                    self.app.set_campaign_mode(False)
+
+                self._rebuild_roadmap_ui()
+                self._refresh_dashboard()
+                self.app.update_campaign_tab_access()
+
+                self.app.themed_info(
+                    "Usunięto",
+                    f"Projekt '{selected}' został usunięty.",
+                    parent=self.frame,
+                    tone="success"
+                )
+
+    def _open_selected_project(self):
+        selected = self._get_selected_project_from_list()
+        if not selected:
+            selected = self._ask_project_from_list(
+                title="Otwórz projekt",
+                action_label="Otwórz"
+            )
+        if not selected:
+            return
+
+        CAMPAIGN.set_active_project(selected)
+        self.app.campaign_free_mode = False
+        self.app.set_campaign_mode(True)
+        self._rebuild_roadmap_ui()
+        self._refresh_dashboard()
+        self.app.update_campaign_tab_access()
+
+        try:
+            self.app.update_status(
+                f"Aktywowano projekt: {selected}. Aplikacja działa w trybie kampanii.",
+                "info"
+            )
+        except Exception:
+            pass
+
+    def _delete_project(self):
+        selected = self._get_selected_project_from_list()
+        if not selected:
+            selected = self._ask_project_from_list(
+                title="Usuń projekt",
+                action_label="Usuń"
+            )
+        if not selected:
+            return
+
+        if self.app.themed_confirm(
+            "Usuwanie projektu",
+            f"Usunąć projekt '{selected}' wraz z całym katalogiem projektu?",
+            parent=self.frame,
+            confirm_label="Usuń",
+            tone="warning"
+        ):
+            was_active = (CAMPAIGN.get_active_project_name() == selected)
+
+            if CAMPAIGN.delete_project(selected):
+                if was_active:
+                    self._clear_project_contexts()
+                    self.app.campaign_free_mode = True
+                    self.app.set_campaign_mode(False)
+
+                self._rebuild_roadmap_ui()
+                self._refresh_dashboard()
+                self.app.update_campaign_tab_access()
+
+                self.app.themed_info(
+                    "Usunięto",
+                    f"Projekt '{selected}' został usunięty.",
+                    parent=self.frame,
+                    tone="success"
+                )
 
     def _clear_project_contexts(self):
         tab_labels = {
@@ -712,10 +1293,13 @@ class CampaignTab:
         if not active:
             return
 
-        if messagebox.askyesno(
-            "Wyjdź z projektu",
+        if self.app.themed_confirm(
+            "Wyjście z projektu",
             f"Czy na pewno chcesz opuścić projekt '{active}' i przejść do trybu swobodnego?\n\n"
-            "Projekt nie zostanie usunięty."
+            "Projekt nie zostanie usunięty.",
+            parent=self.frame,
+            confirm_label="Wyjdź",
+            tone="warning"
         ):
 
             # użytkownik ręcznie wymusza tryb swobodny
@@ -761,7 +1345,7 @@ class CampaignTab:
         target_iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
         target_iter_dir.mkdir(parents=True, exist_ok=True)
 
-        # ✅ ZMIANA: jeśli folder iteracji już ma zdjęcia, traktujemy to jako etap gotowy do zatwierdzenia
+        # Jeśli folder iteracji zawiera już zdjęcia, etap ingestii można uznać za gotowy.
         existing_images = [f for f in target_iter_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS]
         if existing_images:
             CAMPAIGN.set_current_step(2)
@@ -775,7 +1359,7 @@ class CampaignTab:
                 pass
             return
 
-        # ✅ ZMIANA: użytkownik wskazuje źródłowy folder, a wizard kopiuje zdjęcia do projektu
+        # Użytkownik wskazuje folder źródłowy, a wizard kopiuje zdjęcia do projektu.
         source_dir = filedialog.askdirectory(
             initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()),
             title="Wybierz folder źródłowy z NOWĄ paczką zdjęć do tej iteracji"
@@ -832,7 +1416,7 @@ class CampaignTab:
             return
 
         raw_dir = CAMPAIGN.get_dir("raw")
-        auto_out = CAMPAIGN.get_staging_dir("auto_ann")  # ✅ ZMIANA: autoanotacja idzie najpierw do stagingu
+        auto_out = CAMPAIGN.get_staging_dir("auto_ann")
         if auto_out is not None:
             Path(auto_out).mkdir(parents=True, exist_ok=True)
 
@@ -884,7 +1468,7 @@ class CampaignTab:
         if raw_dir is None or auto_dir is None:
             return
 
-        # ✅ ZMIANA: najnowszy XML tylko z katalogu zatwierdzonych autoanotacji projektu
+        # Wybierz najnowszy XML z zatwierdzonych autoanotacji projektu.
         xml_files = list(Path(auto_dir).rglob("annotations.xml"))
         latest_xml = str(max(xml_files, key=lambda p: p.stat().st_mtime)) if xml_files else ""
 
@@ -893,9 +1477,7 @@ class CampaignTab:
 
         tab_char = self.app.tabs.get("characters")
         if tab_char:
-            # ======================================================
-            # ✅ ZMIANA: twardy reset poprzedniego kontekstu Zakładki Znaków
-            # ======================================================
+            # Wyczyść poprzedni kontekst zakładki znaków przed podaniem nowych źródeł.
             tab_char.preview_dir_var.set("")
             tab_char.preview_metadata = {}
             tab_char.preview_plate_ids = []
@@ -918,9 +1500,7 @@ class CampaignTab:
             except Exception:
                 pass
 
-            # ======================================================
-            # ✅ ZMIANA: ustaw świeże źródła z najnowszej próby
-            # ======================================================
+            # Podstaw źródła z najnowszej zatwierdzonej próby.
             if folder.exists():
                 tab_char.images_dir_var.set(str(folder))
             if latest_xml:
@@ -932,9 +1512,7 @@ class CampaignTab:
 
             c_mod = CAMPAIGN.get_global_model("char")
             if c_mod and Path(c_mod).exists():
-                # ===== START NOWEGO BLOKU =====
-                # jeśli projekt ma już model znaków, kolejna iteracja
-                # powinna domyślnie startować w trybie hybrydowym
+                # Jeśli projekt ma już model znaków, kolejna iteracja startuje w trybie hybrydowym.
                 tab_char.detection_method_var.set("BOTH")
                 tab_char.yolo_model_path_var.set(c_mod)
 
@@ -956,18 +1534,14 @@ class CampaignTab:
                     tab_char._update_yolo_visibility()
                 except Exception as e:
                     logger.debug(f"Nie udało się odświeżyć widoku YOLO w Zakładce Znaków: {e}")
-                # ===== KONIEC NOWEGO BLOKU =====
             else:
-                # ===== START NOWEGO BLOKU =====
-                # brak modelu znaków -> bootstrap przez OCR
+                # Brak modelu znaków oznacza bootstrap wyłącznie przez OCR.
                 try:
                     tab_char.detection_method_var.set("OCR")
                     tab_char.yolo_model_path_var.set("")
                     tab_char._update_yolo_visibility()
                 except Exception as e:
                     logger.debug(f"Nie udało się ustawić trybu OCR dla braku modelu znaków: {e}")
-                # ===== KONIEC NOWEGO BLOKU =====
-
                 try:
                     tab_char._sync_yolo_model_binding()
                 except Exception:
@@ -1035,7 +1609,7 @@ class CampaignTab:
                 logger.error("Nie znaleziono zakładki TrainingTab w app.tabs.")
                 return
 
-            # ✅ pełne przełączenie TrainingTab na kontekst projektu
+            # Przełącz TrainingTab na kontekst aktywnego projektu.
             tab_train.set_campaign_context(
                 runs_dir=str(runs_dir) if runs_dir is not None else None,
                 datasets_dir=str(datasets_dir)
@@ -1098,7 +1672,13 @@ class CampaignTab:
             logger.error(f"Błąd nawigacji (Krok 4): {e}")
 
     def _advance_iteration(self):
-        if messagebox.askyesno("Nowa Iteracja", "Zamknąć obecną iterację i rozpocząć nową?"):
+        if self.app.themed_confirm(
+            "Nowa iteracja",
+            "Zamknąć obecną iterację i rozpocząć nową?",
+            parent=self.frame,
+            confirm_label="Rozpocznij",
+            tone="warning"
+        ):
             CAMPAIGN.advance_to_next_iteration()
             self._rebuild_roadmap_ui()
             self._refresh_dashboard()

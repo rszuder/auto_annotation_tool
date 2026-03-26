@@ -49,9 +49,10 @@ class AnnotationTab:
         self.device_var = tk.StringVar(value="auto")
         self.conf_var = tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE)
         self._campaign_paths_locked = False
+        self._annotation_log_visible = False
         self.project_paths_info_var = tk.StringVar(value="")
         self.project_paths_rel_var = tk.StringVar(value="")
-        # ✅ ZMIANA: Program startuje z od razu wypełnioną sugestią na folder źródłowy!
+        # Domyślnie podpowiadaj katalog wejściowy z workspace.
         self.input_dir_var = tk.StringVar(value=str(Path(CONFIG.DIR_1_RAW).absolute()))
         self.output_dir_var = tk.StringVar(value=str(Path(CONFIG.DEFAULT_OUTPUT_DIR)))
 
@@ -92,11 +93,6 @@ class AnnotationTab:
         return "cpu"
 
     def _create_widgets(self):
-
-        pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
-        pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
-
-        #  Główny obszar roboczy
         pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
         pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
 
@@ -152,18 +148,13 @@ class AnnotationTab:
         self.start_btn_row = ttk.Frame(actions_lf)
         self.start_btn_row.pack(fill=tk.X, pady=5)
 
-        self.start_btn_frame = tk.Frame(
-            self.start_btn_row,
-            bd=0,
-            highlightthickness=0
-        )
         self.start_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
         self.start_btn_frame.pack(anchor=tk.W, pady=5)
 
         self.start_btn_pulse_frame = tk.Frame(
             self.start_btn_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=1
         )
         self.start_btn_pulse_frame.pack(anchor=tk.W)
 
@@ -173,7 +164,7 @@ class AnnotationTab:
             command=self._start_annotation,
             style="Accent.TButton"
         )
-        self.start_btn.pack(ipadx=18, ipady=4)
+        self.start_btn.pack()
 
         self.stop_btn = ttk.Button(actions_lf, text="ZATRZYMAJ", command=self._stop_annotation, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, pady=5)
@@ -181,19 +172,13 @@ class AnnotationTab:
         self.approve_btn_row = ttk.Frame(actions_lf)
         self.approve_btn_row.pack(fill=tk.X, pady=5)
 
-        self.approve_btn_frame = tk.Frame(
-            self.approve_btn_row,
-            bd=0,
-            highlightthickness=0
-        )
-
         self.approve_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
         self.approve_btn_frame.pack(anchor=tk.W, pady=5)
 
         self.approve_btn_pulse_frame = tk.Frame(
             self.approve_btn_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=1
         )
         self.approve_btn_pulse_frame.pack(anchor=tk.W)
 
@@ -203,28 +188,19 @@ class AnnotationTab:
             command=self._approve_annotation_stage,
             state=tk.DISABLED
         )
-        self.approve_btn.pack(ipadx=18, ipady=2)
+        self.approve_btn.pack()
 
         self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
         self.progress.pack(fill=tk.X, pady=(15, 5))
         self.status_label = ttk.Label(actions_lf, text="Gotowy", foreground="#2ecc71", font=("Segoe UI", 10, "bold"))
         self.status_label.pack(anchor=tk.W)
 
-        # --- ŚRODKOWA KOLUMNA (NOTATNIK) ---
-        self.center_nb = ttk.Notebook(center_frame)
-        self.center_nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
-        
-        tab_logs = ttk.Frame(self.center_nb)
-        self.center_nb.add(tab_logs, text="📄 Terminal procesu")
-        self.log_text = scrolledtext.ScrolledText(tab_logs, wrap=tk.WORD, font=("Consolas", 9), bg="#fcfcfc")
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self._redirect_logs()
-        
-        tab_preview = ttk.Frame(self.center_nb)
-        self.center_nb.add(tab_preview, text="👁️ Przeglądarka Detekcji")
-        
-        preview_pane = ttk.PanedWindow(tab_preview, orient=tk.HORIZONTAL)
-        preview_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # --- ŚRODKOWA KOLUMNA (PODGLĄD + TERMINAL PROCESU) ---
+        preview_host = ttk.Frame(center_frame)
+        preview_host.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
+
+        preview_pane = ttk.PanedWindow(preview_host, orient=tk.HORIZONTAL)
+        preview_pane.pack(fill=tk.BOTH, expand=True)
         
         list_frame = ttk.Frame(preview_pane)
         preview_pane.add(list_frame, weight=1)
@@ -239,6 +215,35 @@ class AnnotationTab:
         preview_pane.add(canvas_frame, weight=4)
         self.preview_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        log_tools = ttk.Frame(center_frame)
+        log_tools.pack(fill=tk.X, padx=5, pady=(8, 0))
+
+        self.btn_toggle_annotation_log = ttk.Button(
+            log_tools,
+            text="Pokaż terminal",
+            command=self._toggle_annotation_process_log
+        )
+        self.btn_toggle_annotation_log.pack(side=tk.LEFT)
+
+        ttk.Label(
+            log_tools,
+            text="Terminal procesu jest dostępny na żądanie użytkownika.",
+            foreground="gray"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        self.annotation_log_frame = ttk.LabelFrame(center_frame, text=" Terminal procesu ", padding=6)
+        self.log_text = scrolledtext.ScrolledText(
+            self.annotation_log_frame,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            bg="#161616",
+            fg="#f3f3f3",
+            insertbackground="#f3f3f3"
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self._redirect_logs()
+        self._set_annotation_process_log_visibility(False)
 
         # --- PRAWA KOLUMNA ---
         settings_lf = ttk.LabelFrame(right_frame, text=" Konfiguracja Detekcji ", padding=15)
@@ -296,8 +301,9 @@ class AnnotationTab:
         HELP.bind_help(self.device_combo, "tab1_device")
         HELP.bind_help(self.start_btn, "tab1_start")
         HELP.bind_help(self.stop_btn, "tab1_stop")
-        HELP.bind_help(tab_logs, "tab1_logs")
-        # ✅ ZMIANA: Podpięcie własnych modeli do pomocy
+        HELP.bind_help(self.btn_toggle_annotation_log, "tab1_logs")
+        HELP.bind_help(self.preview_listbox, "tab1_preview_list")
+        HELP.bind_help(self.preview_canvas, "tab1_preview_canvas")
         HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
         HELP.bind_help(self.pla_custom_row, "tab1_custom_model")        
 
@@ -341,7 +347,7 @@ class AnnotationTab:
         else:
             self.pla_custom_row.pack_forget()
 
-    # ✅ ZMIANA: Bezwzględne wymuszanie początkowych folderów (initialdir)
+    # Własne modele wybieramy domyślnie z katalogu modeli.
     def _select_vehicle_custom(self):
         p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.vehicle_custom_var.set(p)
@@ -375,6 +381,93 @@ class AnnotationTab:
         handler = TextHandler(self.log_text)
         handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', '%H:%M:%S'))
         logger.addHandler(handler)
+
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        console_bg = palette.get("console_bg", "#252526")
+        console_fg = palette.get("console_fg", "#f3f3f3")
+        console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            self.log_text.configure(
+                bg=console_bg,
+                fg=console_fg,
+                insertbackground=console_fg,
+                highlightthickness=1,
+                highlightbackground=console_border,
+                highlightcolor=console_border
+            )
+        except Exception:
+            pass
+
+        try:
+            self.preview_listbox.configure(
+                bg=palette.get("field", "#1a1a1a"),
+                fg=palette.get("fg", "#f3f3f3"),
+                selectbackground=palette.get("accent", "#3498db"),
+                selectforeground=palette.get("accent_text", "#ffffff"),
+                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
+                highlightthickness=1,
+                highlightbackground=panel_border,
+                highlightcolor=panel_border,
+                bd=0,
+                relief=tk.FLAT
+            )
+
+            ok_color = palette.get("success", "#27ae60")
+            err_color = palette.get("error", "#c0392b")
+            for idx, ann in enumerate(getattr(self, "current_annotations", [])):
+                try:
+                    self.preview_listbox.itemconfig(
+                        idx,
+                        foreground=ok_color if ann.is_successful else err_color
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self.preview_canvas.configure(
+                bg=palette.get("panel", "#1e1e1e"),
+                highlightthickness=1,
+                highlightbackground=panel_border,
+                highlightcolor=panel_border,
+                bd=0,
+                relief=tk.FLAT
+            )
+        except Exception:
+            pass
+
+        for frame_name in ("start_btn_pulse_frame", "approve_btn_pulse_frame"):
+            frame = getattr(self, frame_name, None)
+            if frame is None:
+                continue
+            try:
+                self.app.style_guidance_frame(frame, background=palette.get("panel", "#252526"))
+            except Exception:
+                pass
+
+    def _set_annotation_process_log_visibility(self, visible: bool):
+        if not hasattr(self, "annotation_log_frame"):
+            return
+
+        self._annotation_log_visible = bool(visible)
+
+        if self._annotation_log_visible:
+            self.annotation_log_frame.pack(fill=tk.BOTH, expand=False, padx=5, pady=(8, 0))
+            if hasattr(self, "btn_toggle_annotation_log"):
+                self.btn_toggle_annotation_log.configure(text="Ukryj terminal")
+        else:
+            self.annotation_log_frame.pack_forget()
+            if hasattr(self, "btn_toggle_annotation_log"):
+                self.btn_toggle_annotation_log.configure(text="Pokaż terminal")
+
+    def _toggle_annotation_process_log(self):
+        self._set_annotation_process_log_visibility(
+            not getattr(self, "_annotation_log_visible", False)
+        )
 
     def _validate_models(self):
         mode = self.mode_var.get()
@@ -500,7 +593,7 @@ class AnnotationTab:
             pass
 
         try:
-            self.center_nb.select(0)
+            self._set_annotation_process_log_visibility(False)
         except Exception:
             pass
 
@@ -545,56 +638,55 @@ class AnnotationTab:
             self.project_paths_info_var.set("")
             self.project_paths_rel_var.set("")
 
+    def _resolve_guidance_button(self, attr_name: str):
+        if not attr_name:
+            return None
+
+        candidates = [attr_name]
+        if attr_name.endswith("_pulse_frame"):
+            candidates.append(attr_name[:-12])
+        if attr_name.endswith("_frame"):
+            candidates.append(attr_name[:-6])
+
+        for candidate in candidates:
+            widget = getattr(self, candidate, None)
+            if isinstance(widget, ttk.Button):
+                return widget
+
+        return None
+
+    def _resolve_guidance_frame(self, attr_name: str):
+        if not attr_name:
+            return None
+
+        candidates = [attr_name]
+        if attr_name.endswith("_frame"):
+            candidates.insert(0, f"{attr_name[:-6]}_pulse_frame")
+
+        for candidate in candidates:
+            widget = getattr(self, candidate, None)
+            if isinstance(widget, tk.Frame):
+                return widget
+
+        return None
+
     def _pulse_action_frame(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
-        frame = getattr(self, frame_attr, None)
-        if frame is None:
-            return
+        btn = self._resolve_guidance_button(frame_attr)
+        frame = self._resolve_guidance_frame(frame_attr)
 
-        try:
-            base_color = frame.cget("background")
-        except Exception:
+        if frame is not None:
             try:
-                base_color = frame.cget("bg")
-            except Exception:
-                base_color = "#f0f0f0"
-
-        try:
-            frame.config(
-                highlightthickness=4,
-                highlightbackground=base_color,
-                highlightcolor=base_color,
-                bd=0
-            )
-        except Exception:
-            return
-
-        def tick(step=0):
-            try:
-                if not frame.winfo_exists():
-                    return
-
-                pulse_color = color if (step % 2 == 0) else base_color
-
-                frame.config(
-                    highlightthickness=4,
-                    highlightbackground=pulse_color,
-                    highlightcolor=pulse_color,
-                    bd=0
-                )
-
-                if step < (pulses * 2 - 1):
-                    self.frame.after(interval_ms, lambda: tick(step + 1))
-                else:
-                    frame.config(
-                        highlightthickness=4,
-                        highlightbackground=base_color,
-                        highlightcolor=base_color,
-                        bd=0
-                    )
+                self.app.pulse_frame(frame, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
             except Exception as e:
-                logger.debug(f"Nie udało się pulsować ramki {frame_attr}: {e}")
+                logger.debug(f"Nie udało się pulsować ramki dla {frame_attr}: {e}")
 
-        tick()
+        if btn is None:
+            return
+
+        try:
+            self.app.pulse_button(btn, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
+        except Exception as e:
+            logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
 
     def apply_campaign_context(self, input_dir: Path, output_dir: Path):
         self.input_dir_var.set(str(input_dir))
@@ -638,7 +730,7 @@ class AnnotationTab:
             success, msg = self.annotator.load_models()
             if not success: raise RuntimeError(f"Błąd silnika YOLO: {msg}")
 
-            # ✅ ZMIANA: nowa próba autoanotacji unieważnia poprzednie zatwierdzenie Kroku 2
+            # Nowy run autoanotacji unieważnia poprzednie zatwierdzenie kroku 2.
             try:
                 from ..campaign_manager import CAMPAIGN
                 if CAMPAIGN.get_active_project_name():
@@ -652,10 +744,9 @@ class AnnotationTab:
             self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
-            self.approve_btn.config(state=tk.DISABLED)  # ✅ ZMIANA
+            self.approve_btn.config(state=tk.DISABLED)
             self.progress['value'] = 0
             
-            self.center_nb.select(0)
             self.preview_listbox.delete(0, tk.END)
             self.preview_canvas.delete("all")
             self.current_annotations = []
@@ -717,7 +808,7 @@ class AnnotationTab:
 
             elapsed = format_duration((datetime.datetime.now() - self.start_time).total_seconds())
 
-            # ✅ ZMIANA: zapamiętujemy ostatni staging run
+            # Zachowaj ścieżkę do ostatniego runu w stagingu.
             self.last_staging_run_dir = run_dir
 
             message = f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
@@ -738,16 +829,20 @@ class AnnotationTab:
     # ==========================================================
     def _populate_preview_list(self):
         self.preview_listbox.delete(0, tk.END)
+        palette = getattr(self.app, "palette", {})
+        ok_color = palette.get("success", "#27ae60")
+        err_color = palette.get("error", "#c0392b")
         for idx, ann in enumerate(self.current_annotations):
             icon = "🟢" if ann.is_successful else "🔴"
             self.preview_listbox.insert(tk.END, f"{icon} {ann.filename}")
             
             # Bezpieczne dla Pythona 3.12
-            if ann.is_successful: self.preview_listbox.itemconfig('end', foreground='#27ae60')
-            else: self.preview_listbox.itemconfig('end', foreground='#c0392b')
+            if ann.is_successful:
+                self.preview_listbox.itemconfig('end', foreground=ok_color)
+            else:
+                self.preview_listbox.itemconfig('end', foreground=err_color)
                 
         if self.current_annotations:
-            self.center_nb.select(1) 
             self.preview_listbox.selection_set(0)
             self._on_preview_select(None)
 
@@ -810,7 +905,7 @@ class AnnotationTab:
             try:
                 from ..campaign_manager import CAMPAIGN
                 if CAMPAIGN.get_active_project_name() and CAMPAIGN.get_current_step() == 2:
-                    # ✅ ZMIANA: etap wygenerowany, ale jeszcze nie zatwierdzony
+                    # Etap został wygenerowany, ale wymaga jeszcze ręcznego zatwierdzenia.
                     staging_run = getattr(self, "last_staging_run_dir", None)
                     if staging_run is not None:
                         CAMPAIGN.set_step2_generated(str(staging_run))
@@ -832,7 +927,7 @@ class AnnotationTab:
 
     def _approve_annotation_stage(self):
         """
-        ✅ ZMIANA: zatwierdza staging autoanotacji i przenosi go do katalogu docelowego projektu.
+        Zatwierdza staging autoanotacji i przenosi go do katalogu docelowego projektu.
         """
         try:
             from ..campaign_manager import CAMPAIGN
