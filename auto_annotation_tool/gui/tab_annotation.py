@@ -120,7 +120,7 @@ class AnnotationTab:
         self.project_paths_info_lbl = ttk.Label(
             paths_lf,
             textvariable=self.project_paths_info_var,
-            foreground="#1f618d",
+            style="PanelInfo.TLabel",
             font=("Segoe UI", 9, "bold"),
             wraplength=360,
             justify=tk.LEFT
@@ -130,7 +130,7 @@ class AnnotationTab:
         self.project_paths_rel_lbl = ttk.Label(
             paths_lf,
             textvariable=self.project_paths_rel_var,
-            foreground="#566573",
+            style="PanelMuted.TLabel",
             wraplength=360,
             justify=tk.LEFT
         )
@@ -146,17 +146,19 @@ class AnnotationTab:
         actions_lf.pack(fill=tk.X)
 
         self.start_btn_row = ttk.Frame(actions_lf)
-        self.start_btn_row.pack(fill=tk.X, pady=5)
+        self.start_btn_row.pack(fill=tk.X, pady=(5, 0))
+        self.start_btn_row.columnconfigure(0, weight=3)
+        self.start_btn_row.columnconfigure(1, weight=2)
 
-        self.start_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
-        self.start_btn_frame.pack(anchor=tk.W, pady=5)
+        self.start_btn_frame = tk.Frame(self.start_btn_row, bd=0, highlightthickness=0)
+        self.start_btn_frame.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         self.start_btn_pulse_frame = tk.Frame(
             self.start_btn_frame,
             bd=0,
             highlightthickness=1
         )
-        self.start_btn_pulse_frame.pack(anchor=tk.W)
+        self.start_btn_pulse_frame.pack(fill=tk.X)
 
         self.start_btn = ttk.Button(
             self.start_btn_pulse_frame,
@@ -164,35 +166,23 @@ class AnnotationTab:
             command=self._start_annotation,
             style="Accent.TButton"
         )
-        self.start_btn.pack()
+        self.start_btn.pack(fill=tk.X)
 
-        self.stop_btn = ttk.Button(actions_lf, text="ZATRZYMAJ", command=self._stop_annotation, state=tk.DISABLED)
-        self.stop_btn.pack(fill=tk.X, pady=5)
-
-        self.approve_btn_row = ttk.Frame(actions_lf)
-        self.approve_btn_row.pack(fill=tk.X, pady=5)
-
-        self.approve_btn_frame = tk.Frame(actions_lf, bd=0, highlightthickness=0)
-        self.approve_btn_frame.pack(anchor=tk.W, pady=5)
-
-        self.approve_btn_pulse_frame = tk.Frame(
-            self.approve_btn_frame,
-            bd=0,
-            highlightthickness=1
-        )
-        self.approve_btn_pulse_frame.pack(anchor=tk.W)
-
-        self.approve_btn = ttk.Button(
-            self.approve_btn_pulse_frame,
-            text="ZATWIERDŹ ETAP AUTOANOTACJI",
-            command=self._approve_annotation_stage,
+        self.stop_btn = ttk.Button(
+            self.start_btn_row,
+            text="ZATRZYMAJ",
+            command=self._stop_annotation,
             state=tk.DISABLED
         )
-        self.approve_btn.pack()
+        self.stop_btn.grid(row=0, column=1, sticky="ew")
 
         self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
         self.progress.pack(fill=tk.X, pady=(15, 5))
-        self.status_label = ttk.Label(actions_lf, text="Gotowy", foreground="#2ecc71", font=("Segoe UI", 10, "bold"))
+        self.status_label = ttk.Label(
+            actions_lf,
+            text="Gotowy",
+            style="PanelStatusNeutral.TLabel"
+        )
         self.status_label.pack(anchor=tk.W)
 
         # --- ŚRODKOWA KOLUMNA (PODGLĄD + TERMINAL PROCESU) ---
@@ -201,18 +191,22 @@ class AnnotationTab:
 
         preview_pane = ttk.PanedWindow(preview_host, orient=tk.HORIZONTAL)
         preview_pane.pack(fill=tk.BOTH, expand=True)
-        
-        list_frame = ttk.Frame(preview_pane)
-        preview_pane.add(list_frame, weight=1)
+
+        list_lf = ttk.LabelFrame(preview_pane, text=" Lista wyników autoanotacji ", padding=8)
+        preview_pane.add(list_lf, weight=1)
+        list_frame = ttk.Frame(list_lf)
+        list_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_listbox = tk.Listbox(list_frame, font=("Consolas", 9), selectbackground="#3498db")
         self.preview_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll = ttk.Scrollbar(list_frame, command=self.preview_listbox.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_listbox.config(yscrollcommand=scroll.set)
         self.preview_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
-        
-        canvas_frame = ttk.Frame(preview_pane)
-        preview_pane.add(canvas_frame, weight=4)
+
+        preview_lf = ttk.LabelFrame(preview_pane, text=" Podgląd autoanotacji ", padding=8)
+        preview_pane.add(preview_lf, weight=4)
+        canvas_frame = ttk.Frame(preview_lf)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
 
@@ -229,7 +223,7 @@ class AnnotationTab:
         ttk.Label(
             log_tools,
             text="Terminal procesu jest dostępny na żądanie użytkownika.",
-            foreground="gray"
+            style="Muted.TLabel"
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         self.annotation_log_frame = ttk.LabelFrame(center_frame, text=" Terminal procesu ", padding=6)
@@ -248,6 +242,10 @@ class AnnotationTab:
         # --- PRAWA KOLUMNA ---
         settings_lf = ttk.LabelFrame(right_frame, text=" Konfiguracja Detekcji ", padding=15)
         settings_lf.pack(fill=tk.BOTH, expand=True)
+
+        self.approve_btn_row = ttk.Frame(right_frame)
+        self.approve_btn_row.pack(fill=tk.X, pady=(8, 0))
+        self.approve_btn_row.columnconfigure(0, weight=1)
 
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         modes = ["A: Tylko pojazdy", "B: Tylko tablice", "C: Pojazdy + tablice"]
@@ -290,6 +288,24 @@ class AnnotationTab:
         ttk.Label(param_frame, text="Urządzenie (Device):").pack(anchor=tk.W, pady=(10, 0))
         self.device_combo = ttk.Combobox(param_frame, textvariable=self.device_var, values=self._get_available_devices(), state="readonly")
         self.device_combo.pack(fill=tk.X, pady=2)
+
+        self.approve_btn_frame = tk.Frame(self.approve_btn_row, bd=0, highlightthickness=0)
+        self.approve_btn_frame.grid(row=0, column=1, sticky="e")
+
+        self.approve_btn_pulse_frame = tk.Frame(
+            self.approve_btn_frame,
+            bd=0,
+            highlightthickness=1
+        )
+        self.approve_btn_pulse_frame.pack(anchor=tk.E)
+
+        self.approve_btn = ttk.Button(
+            self.approve_btn_pulse_frame,
+            text="ZATWIERDŹ ETAP AUTOANOTACJI",
+            command=self._approve_annotation_stage,
+            state=tk.DISABLED
+        )
+        self.approve_btn.pack(fill=tk.X)
 
         # Podpinanie systemu pomocy pod lokalną konsolę
         HELP.bind_help(row_in, "tab1_input")
@@ -384,36 +400,15 @@ class AnnotationTab:
 
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
-        console_bg = palette.get("console_bg", "#252526")
-        console_fg = palette.get("console_fg", "#f3f3f3")
-        console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
         panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
 
         try:
-            self.log_text.configure(
-                bg=console_bg,
-                fg=console_fg,
-                insertbackground=console_fg,
-                highlightthickness=1,
-                highlightbackground=console_border,
-                highlightcolor=console_border
-            )
+            self.app.style_text_widget(self.log_text, role="console")
         except Exception:
             pass
 
         try:
-            self.preview_listbox.configure(
-                bg=palette.get("field", "#1a1a1a"),
-                fg=palette.get("fg", "#f3f3f3"),
-                selectbackground=palette.get("accent", "#3498db"),
-                selectforeground=palette.get("accent_text", "#ffffff"),
-                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
-                highlightthickness=1,
-                highlightbackground=panel_border,
-                highlightcolor=panel_border,
-                bd=0,
-                relief=tk.FLAT
-            )
+            self.app.style_listbox_widget(self.preview_listbox, bordercolor=panel_border)
 
             ok_color = palette.get("success", "#27ae60")
             err_color = palette.get("error", "#c0392b")
@@ -429,25 +424,52 @@ class AnnotationTab:
             pass
 
         try:
-            self.preview_canvas.configure(
-                bg=palette.get("panel", "#1e1e1e"),
-                highlightthickness=1,
-                highlightbackground=panel_border,
-                highlightcolor=panel_border,
-                bd=0,
-                relief=tk.FLAT
+            self.app.style_canvas_widget(
+                self.preview_canvas,
+                background=palette.get("panel", "#1e1e1e"),
+                bordercolor=panel_border
             )
         except Exception:
             pass
 
-        for frame_name in ("start_btn_pulse_frame", "approve_btn_pulse_frame"):
+        frame_backgrounds = {
+            "start_btn_frame": palette.get("panel", "#252526"),
+            "approve_btn_frame": palette.get("bg", "#1f1f1f"),
+        }
+        for frame_name, background in frame_backgrounds.items():
             frame = getattr(self, frame_name, None)
             if frame is None:
                 continue
             try:
-                self.app.style_guidance_frame(frame, background=palette.get("panel", "#252526"))
+                frame.configure(bg=background)
             except Exception:
                 pass
+
+        pulse_backgrounds = {
+            "start_btn_pulse_frame": palette.get("panel", "#252526"),
+            "approve_btn_pulse_frame": palette.get("bg", "#1f1f1f"),
+        }
+        for frame_name, background in pulse_backgrounds.items():
+            frame = getattr(self, frame_name, None)
+            if frame is None:
+                continue
+            try:
+                self.app.style_guidance_frame(frame, background=background)
+            except Exception:
+                pass
+
+    def _set_status_label_state(self, text: str, tone: str = "neutral"):
+        style_map = {
+            "neutral": "PanelStatusNeutral.TLabel",
+            "info": "PanelStatusInfo.TLabel",
+            "success": "PanelStatusSuccess.TLabel",
+            "warning": "PanelStatusWarning.TLabel",
+            "error": "PanelStatusError.TLabel",
+        }
+        self.status_label.config(
+            text=text,
+            style=style_map.get(str(tone or "").lower(), "PanelStatusNeutral.TLabel")
+        )
 
     def _set_annotation_process_log_visibility(self, visible: bool):
         if not hasattr(self, "annotation_log_frame"):
@@ -573,7 +595,7 @@ class AnnotationTab:
             pass
 
         try:
-            self.status_label.config(text="Gotowy do uruchomienia", foreground="gray")
+            self._set_status_label_state("Gotowy do uruchomienia", "neutral")
         except Exception:
             pass
 
@@ -890,7 +912,10 @@ class AnnotationTab:
 
     def _update_progress(self, pct, current, total, filename):
         self.progress['value'] = pct
-        self.status_label.config(text=f"Przetwarzanie {current}/{total} ({int(pct)}%)")
+        self._set_status_label_state(
+            f"Przetwarzanie {current}/{total} ({int(pct)}%)",
+            "info"
+        )
 
     def _finish(self, success, msg):
         self.is_processing = False
@@ -900,7 +925,7 @@ class AnnotationTab:
         self.progress['value'] = 100 if success else 0
         
         if success:
-            self.status_label.config(text="Zakończono pomyślnie!", foreground="#2ecc71")
+            self._set_status_label_state("Zakończono pomyślnie!", "success")
 
             try:
                 from ..campaign_manager import CAMPAIGN
@@ -922,7 +947,7 @@ class AnnotationTab:
 
             messagebox.showinfo("Koniec", msg)
         else:
-            self.status_label.config(text="Przerwano / Błąd", foreground="#e74c3c")
+            self._set_status_label_state("Przerwano / Błąd", "error")
             messagebox.showerror("Zatrzymano", msg)
 
     def _approve_annotation_stage(self):
@@ -987,4 +1012,4 @@ class AnnotationTab:
         self.is_processing = False
         if self.annotator and hasattr(self.annotator, 'stop'):
             self.annotator.stop()
-        self.status_label.config(text="Zatrzymywanie...", foreground="#e67e22")
+        self._set_status_label_state("Zatrzymywanie...", "warning")

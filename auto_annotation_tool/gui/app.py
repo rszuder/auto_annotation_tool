@@ -159,6 +159,12 @@ class AutoAnnotationApp:
         self.theme_var = tk.StringVar(master=root, value=self.current_theme_key)
         self.menu_bar_frame = None
         self.menu_theme_badge = None
+        self._menu_dropdown = None
+        self._menu_dropdown_owner = None
+        self._menu_outside_click_bind_id = None
+        self._menu_escape_bind_id = None
+        self.tabs = {}
+        self._closing_in_progress = False
 
         self.style = ttk.Style()
         self._setup_style(self.current_theme_key)
@@ -198,7 +204,6 @@ class AutoAnnotationApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
         
-        self.tabs = {}
         self._create_tabs()
         self._apply_theme_to_tabs()
 
@@ -459,6 +464,132 @@ class AutoAnnotationApp:
                     apply_theme()
         except Exception:
             pass
+
+    def style_native_scrollbar(self, scrollbar, background: str = None, troughcolor: str = None, bordercolor: str = None):
+        if scrollbar is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        bg = background or palette.get("panel_alt", "#2d2d30")
+        trough = troughcolor or palette.get("panel", palette.get("bg", "#1e1e1e"))
+        border = bordercolor or palette.get("border", "#3c3c3c")
+        active_bg = palette.get("button_hover", bg)
+
+        options = {
+            "bg": bg,
+            "activebackground": active_bg,
+            "troughcolor": trough,
+            "highlightbackground": border,
+            "highlightcolor": border,
+            "highlightthickness": 1,
+            "bd": 0,
+            "borderwidth": 0,
+            "relief": tk.FLAT,
+            "activerelief": tk.FLAT,
+            "elementborderwidth": 1,
+            "width": 12,
+        }
+
+        for option_name, option_value in options.items():
+            try:
+                scrollbar.configure(**{option_name: option_value})
+            except Exception:
+                pass
+
+    def style_text_widget(self, widget, role: str = "default"):
+        if widget is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        role_key = str(role or "default").strip().lower()
+
+        if role_key == "console":
+            bg = palette.get("console_bg", "#252526")
+            fg = palette.get("console_fg", "#f3f3f3")
+            border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        elif role_key == "doc":
+            bg = palette.get("doc_bg", "#1f1f1f")
+            fg = palette.get("doc_fg", "#f3f3f3")
+            border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        else:
+            bg = palette.get("field", "#1a1a1a")
+            fg = palette.get("fg", "#f3f3f3")
+            border = palette.get("border", "#3c3c3c")
+
+        options = {
+            "bg": bg,
+            "fg": fg,
+            "insertbackground": fg,
+            "bd": 0,
+            "relief": tk.FLAT,
+            "highlightthickness": 1,
+            "highlightbackground": border,
+            "highlightcolor": border,
+        }
+
+        for option_name, option_value in options.items():
+            try:
+                widget.configure(**{option_name: option_value})
+            except Exception:
+                pass
+
+        scrollbar = getattr(widget, "vbar", None)
+        if scrollbar is not None:
+            self.style_native_scrollbar(
+                scrollbar,
+                background=palette.get("panel_alt", "#2d2d30"),
+                troughcolor=bg,
+                bordercolor=border
+            )
+
+    def style_listbox_widget(self, widget, bordercolor: str = None):
+        if widget is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        options = {
+            "bg": palette.get("field", "#1a1a1a"),
+            "fg": palette.get("fg", "#f3f3f3"),
+            "selectbackground": palette.get("accent", "#3498db"),
+            "selectforeground": palette.get("accent_text", "#ffffff"),
+            "disabledforeground": palette.get("muted_dim", "#9a9a9a"),
+            "highlightthickness": 1,
+            "highlightbackground": border,
+            "highlightcolor": border,
+            "bd": 0,
+            "relief": tk.FLAT,
+        }
+
+        for option_name, option_value in options.items():
+            try:
+                widget.configure(**{option_name: option_value})
+            except Exception:
+                pass
+
+    def style_canvas_widget(self, widget, background: str = None, bordercolor: str = None):
+        if widget is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        bg = background or palette.get("panel", "#252526")
+        border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        options = {
+            "bg": bg,
+            "highlightthickness": 1,
+            "highlightbackground": border,
+            "highlightcolor": border,
+            "bd": 0,
+            "relief": tk.FLAT,
+        }
+
+        for option_name, option_value in options.items():
+            try:
+                widget.configure(**{option_name: option_value})
+            except Exception:
+                pass
 
     def style_dialog_window(self, dialog, title: str = "", geometry: str = None, parent=None):
         palette = self.palette
@@ -838,6 +969,77 @@ class AutoAnnotationApp:
             )
             safe_configure('TLabel', background=palette["bg"], foreground=palette["fg"], padding=2)
             safe_configure(
+                'Info.TLabel',
+                background=palette["bg"],
+                foreground=palette.get("info", palette["accent"]),
+                padding=2
+            )
+            safe_configure(
+                'Muted.TLabel',
+                background=palette["bg"],
+                foreground=palette["muted"],
+                padding=2
+            )
+            safe_configure(
+                'PanelInfo.TLabel',
+                background=palette["panel"],
+                foreground=palette.get("info", palette["accent"]),
+                padding=2
+            )
+            safe_configure(
+                'PanelSuccess.TLabel',
+                background=palette["panel"],
+                foreground=palette["success"],
+                padding=2
+            )
+            safe_configure(
+                'PanelError.TLabel',
+                background=palette["panel"],
+                foreground=palette["error"],
+                padding=2
+            )
+            safe_configure(
+                'PanelMuted.TLabel',
+                background=palette["panel"],
+                foreground=palette["muted"],
+                padding=2
+            )
+            safe_configure(
+                'PanelStatusNeutral.TLabel',
+                background=palette["panel"],
+                foreground=palette["muted"],
+                padding=2,
+                font=('Segoe UI', 10, 'bold')
+            )
+            safe_configure(
+                'PanelStatusInfo.TLabel',
+                background=palette["panel"],
+                foreground=palette.get("info", palette["accent"]),
+                padding=2,
+                font=('Segoe UI', 10, 'bold')
+            )
+            safe_configure(
+                'PanelStatusSuccess.TLabel',
+                background=palette["panel"],
+                foreground=palette["success"],
+                padding=2,
+                font=('Segoe UI', 10, 'bold')
+            )
+            safe_configure(
+                'PanelStatusWarning.TLabel',
+                background=palette["panel"],
+                foreground=palette["warning"],
+                padding=2,
+                font=('Segoe UI', 10, 'bold')
+            )
+            safe_configure(
+                'PanelStatusError.TLabel',
+                background=palette["panel"],
+                foreground=palette["error"],
+                padding=2,
+                font=('Segoe UI', 10, 'bold')
+            )
+            safe_configure(
                 'TLabelframe',
                 background=palette["panel"],
                 bordercolor=palette.get("panel_border", palette["border"]),
@@ -1188,12 +1390,22 @@ class AutoAnnotationApp:
                 bordercolor=palette["border"],
                 arrowcolor=palette["fg"]
             )
+            safe_map(
+                'Vertical.TScrollbar',
+                background=[('active', palette.get("button_hover", palette["panel_alt"]))],
+                arrowcolor=[('active', palette["fg"])]
+            )
             safe_configure(
                 'Horizontal.TScrollbar',
                 background=palette["panel_alt"],
                 troughcolor=palette["bg"],
                 bordercolor=palette["border"],
                 arrowcolor=palette["fg"]
+            )
+            safe_map(
+                'Horizontal.TScrollbar',
+                background=[('active', palette.get("button_hover", palette["panel_alt"]))],
+                arrowcolor=[('active', palette["fg"])]
             )
         except: pass
 
@@ -1233,6 +1445,7 @@ class AutoAnnotationApp:
 
             active_project = CAMPAIGN.get_active_project_name()
             if not active_project:
+                self._refresh_menu_badge()
                 self.root.title(base_title)
                 return
 
@@ -1243,8 +1456,10 @@ class AutoAnnotationApp:
             if created_label:
                 title += f" | Utworzono: {created_label}"
 
+            self._refresh_menu_badge()
             self.root.title(title)
         except Exception:
+            self._refresh_menu_badge()
             self.root.title(base_title)
     
     def _create_tabs(self):
@@ -1287,6 +1502,8 @@ class AutoAnnotationApp:
     def _create_menu(self):
         palette = self.palette
 
+        self._close_menu_dropdown()
+
         try:
             self.root.config(menu="")
         except Exception:
@@ -1317,57 +1534,93 @@ class AutoAnnotationApp:
         left = tk.Frame(self.menu_bar_frame, bg=palette["panel"])
         left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=4)
 
-        def make_menu_button(label: str):
-            btn = tk.Menubutton(
-                left,
+        def make_menu_button(label: str, items_factory, min_width: int = 220):
+            shell = tk.Frame(left, bg=palette["panel"], bd=0, highlightthickness=0)
+            shell.pack(side=tk.LEFT, padx=(0, 4), pady=0)
+
+            btn = tk.Button(
+                shell,
                 text=label,
                 bg=palette["panel"],
                 fg=palette["fg"],
-                activebackground=palette["accent"],
-                activeforeground="#ffffff",
+                activebackground=palette["panel"],
+                activeforeground=palette["fg"],
                 relief=tk.FLAT,
                 bd=0,
                 padx=10,
-                pady=5,
+                pady=4,
                 font=("Segoe UI", 10, "bold"),
                 highlightthickness=0,
-                direction="below"
+                command=lambda: self._toggle_menu_dropdown(btn, items_factory(), min_width=min_width)
             )
-            menu = tk.Menu(
-                btn,
-                tearoff=0,
+            btn.pack(side=tk.TOP, fill=tk.X)
+
+            underline = tk.Frame(
+                shell,
                 bg=palette["panel"],
-                fg=palette["fg"],
-                activebackground=palette["accent"],
-                activeforeground="#ffffff",
-                relief=tk.FLAT,
-                bd=0
+                height=2,
+                bd=0,
+                highlightthickness=0
             )
-            btn.configure(menu=menu)
-            btn.pack(side=tk.LEFT, padx=(0, 4))
-            return btn, menu
+            underline.pack(side=tk.TOP, fill=tk.X, padx=4)
 
-        file_btn, file_menu = make_menu_button("Plik")
-        file_menu.add_command(label="Wyjście", command=self._on_closing)
+            def _set_hover_line(active: bool):
+                try:
+                    underline.configure(bg=(palette["accent"] if active else palette["panel"]))
+                except Exception:
+                    pass
 
-        theme_btn, theme_menu = make_menu_button("Styl")
-        for theme_key, theme_data in self.themes.items():
-            theme_menu.add_radiobutton(
-                label=theme_data["label"],
-                variable=self.theme_var,
-                value=theme_key,
-                command=lambda value=theme_key: self.set_theme(value)
-            )
+            def _sync_hover_on_enter(_event=None):
+                _set_hover_line(True)
 
-        app_btn, app_menu = make_menu_button("Pomoc")
-        app_menu.add_command(label=f"Wersja: {CONFIG.VERSION}", command=self.show_about_dialog)
-        app_menu.add_command(label=f"Autor: {APP_AUTHOR}", command=self.show_about_dialog)
-        app_menu.add_separator()
-        app_menu.add_command(label="O programie", command=self.show_about_dialog)
+            def _sync_hover_on_leave(_event=None):
+                _set_hover_line(False)
+
+            for widget in (shell, btn):
+                try:
+                    widget.bind("<Enter>", _sync_hover_on_enter, add="+")
+                    widget.bind("<Leave>", _sync_hover_on_leave, add="+")
+                except Exception:
+                    pass
+
+            return btn
+
+        make_menu_button(
+            "Plik",
+            lambda: [
+                {"kind": "command", "label": "Wyjście", "command": self._on_closing},
+            ],
+            min_width=180
+        )
+
+        make_menu_button(
+            "Styl",
+            lambda: [
+                {
+                    "kind": "radio",
+                    "label": theme_data["label"],
+                    "selected": (theme_key == self.current_theme_key),
+                    "command": (lambda value=theme_key: self.set_theme(value)),
+                }
+                for theme_key, theme_data in self.themes.items()
+            ],
+            min_width=240
+        )
+
+        make_menu_button(
+            "Pomoc",
+            lambda: [
+                {"kind": "command", "label": f"Wersja: {CONFIG.VERSION}", "command": self.show_about_dialog},
+                {"kind": "command", "label": f"Autor: {APP_AUTHOR}", "command": self.show_about_dialog},
+                {"kind": "separator"},
+                {"kind": "command", "label": "O programie", "command": self.show_about_dialog},
+            ],
+            min_width=220
+        )
 
         self.menu_theme_badge = tk.Label(
             self.menu_bar_frame,
-            text=f"Styl: {self.current_theme_name}",
+            text=self._get_menu_badge_text(),
             bg=palette["panel"],
             fg=palette["muted"],
             font=("Segoe UI", 9, "bold"),
@@ -1375,6 +1628,179 @@ class AutoAnnotationApp:
             pady=6
         )
         self.menu_theme_badge.pack(side=tk.RIGHT)
+
+    def _get_menu_badge_text(self) -> str:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_project = (CAMPAIGN.get_active_project_name() or "").strip()
+        except Exception:
+            active_project = ""
+
+        if active_project:
+            return f"Projekt: {active_project}"
+        return "Projekt: tryb swobodny"
+
+    def _refresh_menu_badge(self):
+        badge = getattr(self, "menu_theme_badge", None)
+        if badge is None:
+            return
+
+        try:
+            badge.configure(text=self._get_menu_badge_text())
+        except Exception:
+            pass
+
+    def _widget_contains_point(self, widget, x_root: int, y_root: int) -> bool:
+        if widget is None:
+            return False
+
+        try:
+            wx = widget.winfo_rootx()
+            wy = widget.winfo_rooty()
+            return wx <= x_root < (wx + widget.winfo_width()) and wy <= y_root < (wy + widget.winfo_height())
+        except Exception:
+            return False
+
+    def _close_menu_dropdown(self, event=None):
+        bind_id = getattr(self, "_menu_outside_click_bind_id", None)
+        if bind_id:
+            try:
+                self.root.unbind("<ButtonPress-1>", bind_id)
+            except Exception:
+                pass
+        self._menu_outside_click_bind_id = None
+
+        bind_id = getattr(self, "_menu_escape_bind_id", None)
+        if bind_id:
+            try:
+                self.root.unbind("<Escape>", bind_id)
+            except Exception:
+                pass
+        self._menu_escape_bind_id = None
+
+        popup = getattr(self, "_menu_dropdown", None)
+        self._menu_dropdown = None
+        self._menu_dropdown_owner = None
+
+        if popup is not None:
+            try:
+                if popup.winfo_exists():
+                    popup.destroy()
+            except Exception:
+                pass
+
+    def _toggle_menu_dropdown(self, owner_widget, items, min_width: int = 220):
+        current_owner = getattr(self, "_menu_dropdown_owner", None)
+        current_popup = getattr(self, "_menu_dropdown", None)
+        if current_popup is not None and current_owner is owner_widget:
+            self._close_menu_dropdown()
+            return
+
+        self._open_menu_dropdown(owner_widget, items, min_width=min_width)
+
+    def _open_menu_dropdown(self, owner_widget, items, min_width: int = 220):
+        self._close_menu_dropdown()
+
+        palette = self.palette
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        popup.configure(bg=palette["bg"])
+
+        shell = tk.Frame(
+            popup,
+            bg=palette["panel"],
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette.get("panel_border", palette["border"]),
+            highlightcolor=palette.get("panel_border", palette["border"])
+        )
+        shell.pack(fill=tk.BOTH, expand=True)
+
+        body = tk.Frame(shell, bg=palette["panel"])
+        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        def close_then_call(command):
+            self._close_menu_dropdown()
+            if callable(command):
+                self.root.after(0, command)
+
+        def make_item_row(item):
+            kind = item.get("kind", "command")
+            if kind == "separator":
+                sep = tk.Frame(body, bg=palette.get("panel_border", palette["border"]), height=1, bd=0, highlightthickness=0)
+                sep.pack(fill=tk.X, padx=6, pady=4)
+                return
+
+            is_selected = bool(item.get("selected"))
+            prefix = "✓  " if is_selected else "   "
+            text = f"{prefix}{item.get('label', '').strip()}"
+
+            row = tk.Button(
+                body,
+                text=text,
+                anchor="w",
+                justify=tk.LEFT,
+                bg=palette["panel"],
+                fg=(palette["accent"] if is_selected else palette["fg"]),
+                activebackground=palette.get("surface_info", palette.get("button_hover", palette["panel_alt"])),
+                activeforeground=palette["fg"],
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+                padx=12,
+                pady=7,
+                font=("Segoe UI", 10, "bold" if is_selected else "normal"),
+                command=lambda cmd=item.get("command"): close_then_call(cmd)
+            )
+            row.pack(fill=tk.X)
+
+        for item in items:
+            make_item_row(item)
+
+        popup.update_idletasks()
+
+        popup_width = max(min_width, shell.winfo_reqwidth())
+        popup_height = shell.winfo_reqheight()
+
+        try:
+            self.root.update_idletasks()
+            self.menu_bar_frame.update_idletasks()
+            root_y = self.root.winfo_rooty()
+            menu_bar_bottom = root_y + self.menu_bar_frame.winfo_y() + self.menu_bar_frame.winfo_height()
+            x = owner_widget.winfo_rootx()
+        except Exception:
+            x = owner_widget.winfo_rootx()
+            menu_bar_bottom = owner_widget.winfo_rooty() + owner_widget.winfo_height()
+
+        y = menu_bar_bottom + 6
+
+        screen_w = popup.winfo_screenwidth()
+        screen_h = popup.winfo_screenheight()
+        x = max(8, min(x, screen_w - popup_width - 8))
+        y = max(8, min(y, screen_h - popup_height - 8))
+
+        popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
+        popup.lift()
+
+        self._menu_dropdown = popup
+        self._menu_dropdown_owner = owner_widget
+
+        def handle_outside_click(event):
+            if self._widget_contains_point(popup, event.x_root, event.y_root):
+                return
+            if self._widget_contains_point(owner_widget, event.x_root, event.y_root):
+                return
+            self._close_menu_dropdown()
+
+        try:
+            self._menu_outside_click_bind_id = self.root.bind("<ButtonPress-1>", handle_outside_click, add="+")
+        except Exception:
+            self._menu_outside_click_bind_id = None
+
+        try:
+            self._menu_escape_bind_id = self.root.bind("<Escape>", self._close_menu_dropdown, add="+")
+        except Exception:
+            self._menu_escape_bind_id = None
     
     def update_status(self, message: str, icon: str = "info"):
         """Aktualizuje główny panel wskazówek (zapobiega migotaniu)."""
@@ -1531,14 +1957,99 @@ class AutoAnnotationApp:
 
     
     def _on_closing(self):
-        if self.is_processing:
-            if not messagebox.askokcancel("Zamknij", "Przetwarzanie w toku. Na pewno zamknąć?"):
-                return
-        for handler in logger.handlers[:]:
-            try: handler.close(); logger.removeHandler(handler)
-            except: pass
-        for tab_name, tab in self.tabs.items():
-            if hasattr(tab, 'annotator') and tab.annotator:
-                try: tab.annotator.stop(); tab.annotator.unload_models()
-                except: pass
-        self.root.destroy()
+        if getattr(self, "_closing_in_progress", False):
+            return
+
+        self._closing_in_progress = True
+
+        try:
+            busy = bool(getattr(self, "is_processing", False))
+            for tab in getattr(self, "tabs", {}).values():
+                try:
+                    if getattr(tab, "is_processing", False):
+                        busy = True
+                        break
+                    trainer = getattr(tab, "trainer", None)
+                    if trainer is not None and getattr(trainer, "is_training", False):
+                        busy = True
+                        break
+                except Exception:
+                    pass
+
+            if busy:
+                if not messagebox.askokcancel("Zamknij", "Przetwarzanie w toku. Na pewno zamknąć?"):
+                    self._closing_in_progress = False
+                    return
+
+            for tab_name, tab in getattr(self, "tabs", {}).items():
+                try:
+                    if hasattr(tab, "is_processing"):
+                        tab.is_processing = False
+                except Exception:
+                    pass
+
+                try:
+                    stop_event = getattr(tab, "fast_test_stop", None)
+                    if stop_event is not None:
+                        stop_event.set()
+                except Exception:
+                    pass
+
+                try:
+                    trainer = getattr(tab, "trainer", None)
+                    if trainer is not None and hasattr(trainer, "stop_training"):
+                        trainer.stop_training()
+                except Exception:
+                    pass
+
+                try:
+                    annotator = getattr(tab, "annotator", None)
+                    if annotator:
+                        annotator.stop()
+                        annotator.unload_models()
+                except Exception:
+                    pass
+
+            for widget in list(self.root.winfo_children()):
+                try:
+                    if isinstance(widget, tk.Toplevel):
+                        try:
+                            widget.grab_release()
+                        except Exception:
+                            pass
+                        widget.destroy()
+                except Exception:
+                    pass
+
+            try:
+                self.root.grab_release()
+            except Exception:
+                pass
+
+            for handler in logger.handlers[:]:
+                try:
+                    handler.close()
+                    logger.removeHandler(handler)
+                except Exception:
+                    pass
+
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                pass
+
+            try:
+                self.root.quit()
+            except Exception:
+                pass
+
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self._closing_in_progress = False
+            except Exception:
+                self._closing_in_progress = False
