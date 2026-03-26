@@ -65,7 +65,7 @@ class PlateAnnotator(BaseAnnotator):
             logger.info(f"Ładowanie modelu tablic: {self.model_path}")
             self.model = YOLO(str(self.model_path))
             
-            # Sprawdź czy to model POSE
+            # Sprawdź, czy model zwraca keypointy.
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'kpt_shape'):
                 self.is_pose_model = True
                 kpt_shape = self.model.model.kpt_shape
@@ -73,7 +73,7 @@ class PlateAnnotator(BaseAnnotator):
             else:
                 logger.warning("⚠️ Model nie jest typu POSE - użyję bbox jako polygon")
             
-            # Załaduj OCR
+            # Załaduj OCR, jeśli jest włączony.
             if self.enable_ocr:
                 try:
                     logger.info("Ładowanie engine OCR...")
@@ -164,14 +164,14 @@ class PlateAnnotator(BaseAnnotator):
             return None, 0.0, {}
         
         try:
-            # Preprocess
+            # Przygotuj obraz dla OCR.
             processed = self.ocr_engine.preprocess_plate(
                 plate_image,
                 enhance_contrast=True,
                 enhance_sharpness=True
             )
             
-            # OCR z detalami
+            # Wykonaj OCR wraz z metadanymi walidacji.
             result = self.ocr_engine.recognize(processed, return_details=True)
             
             if result is None:
@@ -179,18 +179,18 @@ class PlateAnnotator(BaseAnnotator):
             
             text, ocr_conf, validation = result
             
-            # Przygotuj atrybuty
+            # Zapisz atrybuty pomocnicze OCR.
             attributes = {
                 'format': validation.format.value,
                 'ocr_confidence': f"{ocr_conf:.2f}",
                 'is_valid': str(validation.is_valid),
             }
             
-            # Jeśli valid, zwróć znormalizowany tekst
+            # Dla poprawnego formatu zwróć tekst po normalizacji.
             if validation.is_valid:
                 return validation.text, ocr_conf, attributes
             else:
-                # Jeśli invalid, zwróć oryginał z ostrzeżeniem
+                # Dla niepewnego formatu zwróć surowy wynik z obniżoną pewnością.
                 logger.warning(f"⚠️ Tablica ma nieznany format: {text}")
                 return text, ocr_conf * 0.7, attributes  # Obniż confidence
         
@@ -201,7 +201,6 @@ class PlateAnnotator(BaseAnnotator):
     def process_image(self, image_path: Path) -> ImageAnnotation:
         """Wykrywa tablice + rozpoznaje znaki."""
         
-        # ✅ SPRAWDZENIE FLAGI ZATRZYMANIA
         if self.is_stopped():
             return ImageAnnotation(
                 filename=image_path.name,
@@ -220,7 +219,6 @@ class PlateAnnotator(BaseAnnotator):
         )
         
         try:
-            # Załaduj obraz
             if not CV2_AVAILABLE:
                 annotation.status = AnnotationStatus.ERROR
                 annotation.status_message = "OpenCV niedostępny"
@@ -232,7 +230,6 @@ class PlateAnnotator(BaseAnnotator):
                 annotation.status_message = "Nie można załadować obrazu"
                 return annotation
             
-            # Detekcja YOLO
             results = self.model(
                 str(image_path),
                 conf=self.confidence,
@@ -249,12 +246,10 @@ class PlateAnnotator(BaseAnnotator):
             boxes = result.boxes.xyxy.cpu().numpy()
             confs = result.boxes.conf.cpu().numpy()
             
-            # Keypoints
             keypoints = None
             if self.is_pose_model and hasattr(result, 'keypoints') and result.keypoints is not None:
                 keypoints = result.keypoints.data.cpu().numpy()
             
-            # Przetwórz każdą tablicę
             for i, (box, conf) in enumerate(zip(boxes, confs)):
                 x1, y1, x2, y2 = map(float, box)
                 
@@ -264,7 +259,7 @@ class PlateAnnotator(BaseAnnotator):
                 ocr_conf = 0.0
                 ocr_attrs = {}
                 
-                # Pobierz keypoints jako polygon
+                # Zbuduj poligon z keypointów, jeśli model je zwraca.
                 if keypoints is not None and i < len(keypoints):
                     kpts = keypoints[i]
                     kpts_list = [(float(kp[0]), float(kp[1]), float(kp[2])) for kp in kpts]
@@ -272,19 +267,19 @@ class PlateAnnotator(BaseAnnotator):
                     if len(kpts) >= 4:
                         corners = [(float(kpts[j][0]), float(kpts[j][1])) for j in range(4)]
                         
-                        # Walidacja punktów
+                        # Odrzuć punkty poza granicami obrazu.
                         valid = all(0 <= p[0] <= width and 0 <= p[1] <= height for p in corners)
                         
                         if valid:
                             polygon = self._sort_corners_clockwise(corners)
                 
-                # Fallback: polygon z bbox
+                # W razie braku keypointów użyj prostokąta z bboxa.
                 if polygon is None:
                     polygon = [
                         (x1, y1), (x2, y1), (x2, y2), (x1, y2)
                     ]
                 
-                # ✅ OCR - ekstraktuj i rozpoznaj
+                # Wytnij tablicę i uruchom OCR.
                 if self.enable_ocr and self.ocr_engine and self.ocr_engine.is_loaded:
                     plate_region = self._extract_plate_region(image, polygon)
                     
@@ -294,16 +289,15 @@ class PlateAnnotator(BaseAnnotator):
                         if ocr_text:
                             logger.debug(f"🔤 OCR: {ocr_text} (conf: {ocr_conf:.2f})")
                 
-                # Dodaj detection
                 detection = Detection(
                     label="plate",
                     confidence=float(conf),
                     bbox=(x1, y1, x2, y2),
                     keypoints=kpts_list,
                     polygon=polygon,
-                    text=ocr_text,  # ✅ TEKST Z OCR
+                    text=ocr_text,
                     text_confidence=ocr_conf,
-                    attributes=ocr_attrs  # ✅ ATRYBUTY (format, itp)
+                    attributes=ocr_attrs
                 )
                 
                 annotation.detections.append(detection)

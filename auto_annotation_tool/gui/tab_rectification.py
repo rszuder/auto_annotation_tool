@@ -267,7 +267,7 @@ class RectificationTab:
 
         pts = plates[idx]
         
-        # ✅ NOWE: Napraw poligon (kokarda)
+        # Uporządkuj kolejność punktów przed rektyfikacją.
         pts = PolygonValidator.fix_polygon(pts)
         
         try:
@@ -338,7 +338,7 @@ class RectificationTab:
                         pts_raw = poly.get("points", "").replace('\n', '').replace(' ', '')
                         pts = [tuple(map(float, p.split(","))) for p in pts_raw.split(";") if "," in p]
                         if len(pts) >= 4:
-                            # ✅ NOWE: Napraw poligon podczas wczytywania
+                            # Uporządkuj poligon odczytany z XML.
                             pts = PolygonValidator.fix_polygon(pts[:4])
                             plates.append(pts)
                 
@@ -349,7 +349,7 @@ class RectificationTab:
                             xtl, ytl = float(box.get("xtl")), float(box.get("ytl"))
                             xbr, ybr = float(box.get("xbr")), float(box.get("ybr"))
                             pts = [(xtl, ytl), (xbr, ytl), (xbr, ybr), (xtl, ybr)]
-                            # ✅ NOWE: Napraw tutaj też
+                            # Uporządkuj prostokąt zbudowany z bboxa.
                             pts = PolygonValidator.fix_polygon(pts)
                             plates.append(pts)
 

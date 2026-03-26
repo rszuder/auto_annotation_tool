@@ -126,7 +126,6 @@ class Config:
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
     DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
 
-    # ✅ ZMIANA: Podstruktura dla modeli
     DIR_6_MODELS_BASE: Path          = DIR_6_MODELS / "base"
     DIR_6_MODELS_TRAINED: Path       = DIR_6_MODELS / "trained"
     DIR_6_MODELS_PLATES: Path        = DIR_6_MODELS_TRAINED / "plates_pose"
@@ -134,7 +133,7 @@ class Config:
     
     DIR_7_RANKINGS: Path    = WORKSPACE_DIR / "7_rankings"
 
-    # Właściwości zachowujące wsteczną kompatybilność ze starym kodem GUI
+    # Aliasy używane przez warstwę GUI.
     @property
     def DEFAULT_OUTPUT_DIR(self) -> str: return str(self.DIR_2_AUTO_ANN)
     
@@ -163,7 +162,7 @@ class Config:
             self.DIR_6_MODELS_PLATES, 
             self.DIR_6_MODELS_CHARS,
             self.DIR_7_RANKINGS, 
-            self.DIR_9_PROJECTS,  # ✅ ZMIANA
+            self.DIR_9_PROJECTS,
             
         ]
         

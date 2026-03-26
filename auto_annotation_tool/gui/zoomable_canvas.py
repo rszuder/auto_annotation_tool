@@ -134,7 +134,7 @@ class ZoomableCanvas(tk.Canvas):
         if new_width <= 0 or new_height <= 0:
             return
         
-        # ✅ ZMIANA: Zmiana z LANCZOS na BILINEAR przyspiesza zoom kilkudziesięciokrotnie, likwidując zacinanie UI.
+        # BILINEAR zapewnia płynniejszy zoom niż LANCZOS w interaktywnym podglądzie.
         scaled = self.original_image.resize(
             (new_width, new_height),
             Image.Resampling.BILINEAR
@@ -166,8 +166,7 @@ class ZoomableCanvas(tk.Canvas):
             help_text = "[Scroll: Zoom] [Drag: Pan] [R: Reset] [I: Ukryj]"
             vy_help = self.canvasy(30)
 
-            # ✅ ZMIANA: Zamiast "cienia", robimy pełny "Outline" (Obrys) w 8 kierunkach!
-            # Gruby, czarny obrys zagwarantuje 100% czytelność na KAŻDYM kolorze tła.
+            # Rysuj obrys tekstu w ośmiu kierunkach, aby zachować czytelność na dowolnym tle.
             offsets = [(-2,-2), (0,-2), (2,-2), (-2,0), (2,0), (-2,2), (0,2), (2,2)]
             
             # 1. Rysujemy czarną ramkę dla informacji o Zoomie

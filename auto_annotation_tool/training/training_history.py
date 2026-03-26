@@ -39,7 +39,7 @@ class TrainingRun:
     batch_size: int = 16
     img_size: int = 640
     device: str = "auto"
-    lr0: float = 0.01  # ✅ ZMIANA: Dodano Learning Rate do historii
+    lr0: float = 0.01
     
     # Postęp
     current_epoch: int = 0

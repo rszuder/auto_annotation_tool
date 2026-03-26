@@ -20,7 +20,6 @@ class ModelRankingEntry:
     model_path: str
     date_evaluated: str
     
-    # DODANE POLE KATEGORII
     task_type: str = "Tablice (Pose)" 
     
     total_images: int = 0

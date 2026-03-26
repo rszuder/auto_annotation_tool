@@ -24,7 +24,6 @@ class BaseAnnotator(ABC):
         self.device = device if device != "auto" else ("cuda" if CUDA_AVAILABLE else "cpu")
         self.report = AnnotationReport()
         
-        # ✅ Flaga przerwania
         self._stop_event = threading.Event()
     
     @abstractmethod
@@ -42,18 +41,15 @@ class BaseAnnotator(ABC):
         """Przetwarza pojedynczy obraz."""
         pass
     
-    # ✅ Nowa metoda stop()
     def stop(self):
         """Zatrzymuje przetwarzanie."""
         logger.info("⏹️ Sygnał zatrzymania wysłany do annotatora")
         self._stop_event.set()
     
-    # ✅ Metoda sprawdzająca czy trzeba przerwać
     def is_stopped(self) -> bool:
         """Sprawdza czy przetwarzanie zostało zatrzymane."""
         return self._stop_event.is_set()
     
-    # ✅ Reset flagi (do ponownego użycia)
     def reset_stop(self):
         """Resetuje flagę zatrzymania."""
         self._stop_event.clear()
@@ -66,7 +62,6 @@ class BaseAnnotator(ABC):
         self.report = AnnotationReport()
         annotations = []
         
-        # ✅ Reset flagi na starcie
         self.reset_stop()
         
         image_files = get_image_files(images_dir)
@@ -78,7 +73,6 @@ class BaseAnnotator(ABC):
         logger.info(f"Przetwarzanie {len(image_files)} obrazów...")
         
         for i, img_path in enumerate(image_files):
-            # ✅ Sprawdzenie flagi zatrzymania
             if self.is_stopped():
                 logger.warning(f"⏹️ Przetwarzanie przerwane na obrazie {i+1}/{len(image_files)}")
                 break
