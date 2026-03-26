@@ -38,7 +38,7 @@ class CVATCharacterExporter:
                 image_el.set("id", str(idx))
                 image_el.set("name", f"{plate_id}.jpg")
                 
-                # ✅ ZMIANA: Pobieramy PRAWDZIWE wymiary wyciętej tablicy z dysku
+                # Odczytaj rzeczywiste wymiary wyciętej tablicy z obrazu.
                 w, h = 256, 64 # Wartości domyślne w razie awarii
                 
                 # metadata_path to np. Workspace/3_cropped_characters/run_XXX/metadata.json

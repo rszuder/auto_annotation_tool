@@ -127,7 +127,7 @@ class PlateRectifier:
             blur = cv2.GaussianBlur(warped, (0, 0), 3)
             warped = cv2.addWeighted(warped, 1.0 + sharpen, blur, -sharpen, 0)
 
-        # ✅ ZMIANA: Wymuszenie poziomej orientacji tablicy (zabezpieczenie przed pionowymi zdjęciami)
+        # Wymuś poziomą orientację rektyfikowanej tablicy.
         h_out, w_out = warped.shape[:2]
         if h_out > w_out * 1.1:  # Jeśli tablica jest ewidentnie pionowa (wysokość większa od szerokości)
             # Kładziemy tablicę na płasko

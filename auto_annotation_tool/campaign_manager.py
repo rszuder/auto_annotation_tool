@@ -28,9 +28,9 @@ class CampaignManager:
             "folder_name": f"{clean_name}_{proj_id}",
             "created_at": datetime.now().isoformat(),
             "current_iteration": 1,
-            "current_step": 1, # ✅ ZMIANA: Zapisujemy, na którym kroku jesteśmy!
-            "step2_status": "pending",   # ✅ ZMIANA: pending / generated / approved
-            "step2_staging_run": "",     # ✅ ZMIANA: ścieżka do ostatniego runa autoanotacji w stagingu
+            "current_step": 1,
+            "step2_status": "pending",
+            "step2_staging_run": "",
             "best_vehicle_model": "",
             "best_plate_model": "",
             "best_char_model": "",
@@ -52,7 +52,6 @@ class CampaignManager:
             except Exception as e:
                 logger.error(f"Błąd czytania rejestru kampanii: {e}")
                 
-        # ZMIANA: Zaczynamy z całkowicie pustym rejestrem
         return {
             "active_project": "",
             "projects": {}
@@ -72,7 +71,7 @@ class CampaignManager:
         return list(self.state["projects"].keys())
 
     def get_active_project_name(self) -> str:
-        # ✅ ZMIANA: zwracamy aktywny projekt tylko jeśli istnieje w rejestrze
+        # Zwracaj aktywny projekt tylko wtedy, gdy nadal istnieje w rejestrze.
         act = self.state.get("active_project", "")
         if not act:
             return ""
@@ -86,7 +85,7 @@ class CampaignManager:
             self.save_state()
 
     def clear_active_project(self):
-        """✅ ZMIANA: wyjście z aktywnego projektu i przejście w tryb swobodny."""
+        """Czyści aktywny projekt i przełącza aplikację do trybu swobodnego."""
         self.state["active_project"] = ""
         self.save_state()
 
@@ -102,7 +101,7 @@ class CampaignManager:
         
         self.save_state()
 
-        # ✅ ZMIANA: budujemy pełne drzewo projektu w 9_projects
+        # Buduj pełne drzewo katalogów projektu.
         root = self.get_project_root_dir(name)
         for p in [
             root / "1_raw_images",
@@ -122,7 +121,7 @@ class CampaignManager:
         if name not in self.state["projects"]:
             return False
 
-        # ✅ ZMIANA: kasujemy cały katalog projektu
+        # Usuń cały katalog projektu z dysku.
         root = self.get_project_root_dir(name)
         try:
             if root.exists():
@@ -133,8 +132,7 @@ class CampaignManager:
         del self.state["projects"][name]
 
         if self.state.get("active_project") == name:
-            remaining = list(self.state["projects"].keys())
-            self.state["active_project"] = remaining[0] if remaining else ""
+            self.state["active_project"] = ""
 
         self.save_state()
         return True
@@ -149,6 +147,14 @@ class CampaignManager:
         data = self._get_active_data()
         return data.get("folder_name", "UNNAMED_PROJECT")
 
+    def get_project_created_at(self, name: str = None) -> str:
+        project_name = (name or self.get_active_project_name() or "").strip()
+        if not project_name:
+            return ""
+
+        project_data = self.state.get("projects", {}).get(project_name, {})
+        return str(project_data.get("created_at", "") or "").strip()
+
     def get_current_iteration_num(self) -> int:
         return self._get_active_data().get("current_iteration", 1)
         
@@ -162,7 +168,7 @@ class CampaignManager:
         self.save_state()
 
     def set_step2_generated(self, staging_run_path: str):
-        """✅ ZMIANA: krok 2 został wykonany, ale jeszcze nie zatwierdzony."""
+        """Zapisuje informację, że krok 2 został wykonany, ale niezatwierdzony."""
         act = self.get_active_project_name()
         if not act:
             return
@@ -171,7 +177,7 @@ class CampaignManager:
         self.save_state()
 
     def approve_step2(self):
-        """✅ ZMIANA: krok 2 został zatwierdzony."""
+        """Oznacza krok 2 jako zatwierdzony."""
         act = self.get_active_project_name()
         if not act:
             return
@@ -200,7 +206,7 @@ class CampaignManager:
         return self.state["projects"][act].get("step2_staging_run", "")
     
     def set_step3_needs_rework(self):
-        """✅ ZMIANA: Krok 3 nie zakończył się sukcesem i wymaga poprawy."""
+        """Oznacza krok 3 jako wymagający poprawy."""
         act = self.get_active_project_name()
         if not act:
             return
@@ -208,7 +214,7 @@ class CampaignManager:
         self.save_state()
 
     def approve_step3(self):
-        """✅ ZMIANA: Krok 3 zakończył się sukcesem."""
+        """Oznacza krok 3 jako zakończony powodzeniem."""
         act = self.get_active_project_name()
         if not act:
             return
@@ -216,7 +222,7 @@ class CampaignManager:
         self.save_state()
 
     def reset_step3(self):
-        """✅ ZMIANA: reset stanu Kroku 3."""
+        """Resetuje stan kroku 3."""
         act = self.get_active_project_name()
         if not act:
             return
@@ -303,7 +309,7 @@ class CampaignManager:
         current = self.state["projects"][act].get("current_iteration", 1)
         self.state["projects"][act]["current_iteration"] = current + 1
         self.state["projects"][act]["current_step"] = 1
-        # ✅ ZMIANA: reset stanu zatwierdzania Autoanotacji dla nowej iteracji
+        # Nowa iteracja zaczyna się od pełnego resetu stanów etapów zależnych od danych wejściowych.
         self.state["projects"][act]["step2_status"] = "pending"
         self.state["projects"][act]["step2_staging_run"] = ""
         self.state["projects"][act]["step3_status"] = "pending"
@@ -324,13 +330,12 @@ class CampaignManager:
         if not act or act not in self.state.get("projects", {}): return ""
         key = f"best_{model_type}_model"
         return self.state["projects"][act].get(key, "")
-    # ✅ ZMIANA: standaryzowane katalogi wewnątrz projektu
     def get_project_root_dir(self, project_name: str) -> Path:
         folder_name = self.state["projects"][project_name]["folder_name"]
         return Path(CONFIG.DIR_9_PROJECTS) / folder_name
 
     def get_active_project_root_dir(self) -> Path | None:
-        act = self.get_active_project_name()  # ✅ ZMIANA: safe
+        act = self.get_active_project_name()
         if not act:
             return None
         return self.get_project_root_dir(act)
@@ -355,8 +360,8 @@ class CampaignManager:
 
     def get_staging_dir(self, key: str):
         """
-        ✅ ZMIANA: katalogi tymczasowe projektu.
-        Obecnie obsługujemy staging dla autoanotacji.
+        Zwraca katalog tymczasowy aktywnego projektu.
+        Obecnie wykorzystywany jest staging dla autoanotacji.
         """
         root = self.get_active_project_root_dir()
         if root is None:

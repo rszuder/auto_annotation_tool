@@ -12,7 +12,7 @@ from typing import Optional, Callable, Dict, Tuple
 from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE, AVAILABLE_POSE_MODELS
 from ..utils import cleanup_gpu_memory, safe_load_yaml
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
-from .training_report import TrainingReportGenerator  # <- NOWE
+from .training_report import TrainingReportGenerator
 
 if YOLO_AVAILABLE:
     from ultralytics import YOLO
@@ -68,7 +68,7 @@ class YOLOPoseTrainer:
         try:
             config = safe_load_yaml(yaml_file)
             
-            # ✅ ZMIANA: kpt_shape jest OPCJONALNE (Zależne od tego, czy uczymy Pose czy Detect)
+            # Dataset detekcyjny nie musi definiować kpt_shape.
             if "kpt_shape" in config:
                 stats["kpt_shape"] = config["kpt_shape"]
                 
@@ -143,7 +143,7 @@ class YOLOPoseTrainer:
                 batch_size=batch_size,
                 img_size=img_size,
                 device=device,
-                lr0=lr0  # ✅ DODANO LR
+                lr0=lr0
             )
 
         self.is_training = True
@@ -183,7 +183,7 @@ class YOLOPoseTrainer:
                 "batch": batch_size,
                 "imgsz": img_size,
                 "device": 0 if device == "auto" and CUDA_AVAILABLE else device,
-                "lr0": lr0,  # ✅ DODANO LR do opcji uczenia Ultralytics!
+                "lr0": lr0,
                 "project": run.output_dir,
                 "name": "train",
                 "exist_ok": True,
@@ -192,8 +192,8 @@ class YOLOPoseTrainer:
                 "save": True,
                 "save_period": 10,
                 "patience": 50,
-                "plots": True,   # <- to tworzy results.png, PR_curve.png itd.
-                "workers": 0  # ✅ ZMIANA: Zablokowanie Multiprocessingu w Windows (BARDZO WAŻNE!)
+                "plots": True,
+                "workers": 0
             }
 
             def on_train_epoch_end(trainer):
@@ -221,7 +221,7 @@ class YOLOPoseTrainer:
 
             self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
             logger.info("Rozpoczynam trening...")
-            # ✅ ZMIANA: Wznawianie treningu wymaga flagi resume=True bez innych parametrów
+            # Ultralytics oczekuje samej flagi resume=True przy wznawianiu treningu.
             if is_resuming:
                 self.model.train(resume=True)
             else:
@@ -239,7 +239,7 @@ class YOLOPoseTrainer:
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=epochs
             )
-            # ✅ ZMIANA: Eksport best.pt i aktualizacja Kampanii nie mogą wywalić całego treningu
+            # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
             try:
                 if best_weights.exists():
                     import shutil
@@ -248,15 +248,15 @@ class YOLOPoseTrainer:
                     final_map = float(self.history.get_run(run.id).best_map50) * 100
                     is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
 
-                    # ✅ ZMIANA: katalog modeli aktywnego projektu
+                    # Zapisz model w katalogu modeli aktywnego projektu.
                     project_models_dir = CAMPAIGN.get_dir("models")
                     if project_models_dir is None:
-                        # fallback bezpieczeństwa
+                        # Fallback do globalnego katalogu modeli.
                         project_models_dir = Path(CONFIG.DIR_6_MODELS)
 
                     project_models_dir = Path(project_models_dir)
 
-                    # ✅ ZMIANA: porządek w modelach projektu
+                    # Uporządkuj modele według typu zadania.
                     if is_pose:
                         target_dir = project_models_dir / "pose"
                         task_tag = "plate"
