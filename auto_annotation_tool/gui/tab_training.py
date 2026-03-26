@@ -675,8 +675,6 @@ class TrainingTab:
 
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
-        console_bg = palette.get("console_bg", "#252526")
-        console_fg = palette.get("console_fg", "#f3f3f3")
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
 
         for widget_name in ("step4_builder_log_text", "train_log_console"):
@@ -684,43 +682,20 @@ class TrainingTab:
             if widget is None:
                 continue
             try:
-                widget.configure(
-                    bg=console_bg,
-                    fg=console_fg,
-                    insertbackground=console_fg,
-                    bd=0,
-                    relief=tk.FLAT,
-                    highlightthickness=1,
-                    highlightbackground=console_border,
-                    highlightcolor=console_border
-                )
+                self.app.style_text_widget(widget, role="console")
             except Exception:
                 pass
 
         try:
-            self.plots_list.configure(
-                bg=palette.get("field", "#1a1a1a"),
-                fg=palette.get("fg", "#f3f3f3"),
-                selectbackground=palette.get("accent", "#3498db"),
-                selectforeground=palette.get("accent_text", "#ffffff"),
-                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
-                highlightthickness=1,
-                highlightbackground=console_border,
-                highlightcolor=console_border,
-                bd=0,
-                relief=tk.FLAT
-            )
+            self.app.style_listbox_widget(self.plots_list, bordercolor=console_border)
         except Exception:
             pass
 
         try:
-            self.plot_canvas.configure(
-                bg=palette.get("panel", "#252526"),
-                highlightthickness=1,
-                highlightbackground=console_border,
-                highlightcolor=console_border,
-                bd=0,
-                relief=tk.FLAT
+            self.app.style_canvas_widget(
+                self.plot_canvas,
+                background=palette.get("panel", "#252526"),
+                bordercolor=console_border
             )
         except Exception:
             pass

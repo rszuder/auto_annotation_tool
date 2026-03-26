@@ -71,26 +71,12 @@ class HelpTab:
         widget.tag_configure("NOTE", foreground=palette.get("muted", "#c7c7c7"), font=("Segoe UI", 10))
 
     def apply_theme(self):
-        palette = getattr(self.app, "palette", {})
-        doc_bg = palette.get("doc_bg", "#1f1f1f")
-        doc_fg = palette.get("doc_fg", "#f3f3f3")
-        border = palette.get("console_border", palette.get("border", "#3c3c3c"))
-
         for widget_name in ("t1", "t2"):
             widget = getattr(self, widget_name, None)
             if widget is None:
                 continue
             try:
-                widget.configure(
-                    bg=doc_bg,
-                    fg=doc_fg,
-                    insertbackground=doc_fg,
-                    bd=0,
-                    relief=tk.FLAT,
-                    highlightthickness=1,
-                    highlightbackground=border,
-                    highlightcolor=border
-                )
+                self.app.style_text_widget(widget, role="doc")
                 self._setup_tags(widget)
             except Exception:
                 pass

@@ -255,10 +255,7 @@ class CharacterAnnotationTab:
         bar = self._ascii_progress_bar(downloaded, total, width=24)
 
         try:
-            self.test_status_lbl.config(
-                text=f"Pobieranie modelu: {label} {pct:.1f}%",
-                foreground="#e67e22"
-            )
+            self._set_test_status(f"Pobieranie modelu: {label} {pct:.1f}%", "warning")
         except Exception:
             pass
 
@@ -395,9 +392,9 @@ class CharacterAnnotationTab:
                 else:
                     unknown += 1
 
-            self.preview_info_lbl.config(
-                text=f"Wczytano tablic: {len(self._listbox_pid_by_index)} | {perfect} | {needs_fix} | ⚪ {unknown}",
-                foreground="#2980b9"
+            self._set_preview_info(
+                f"Wczytano tablic: {len(self._listbox_pid_by_index)} | {perfect} | {needs_fix} | ⚪ {unknown}",
+                "info"
             )
         except Exception as e:
             logger.debug(f"Nie udało się odświeżyć preview_info_lbl: {e}")
@@ -635,10 +632,7 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.preview_info_lbl.config(
-                text="Brak wczytanych danych",
-                foreground="#2980b9"
-            )
+            self._set_preview_info("Brak wczytanych danych", "muted")
         except Exception:
             pass
 
@@ -666,10 +660,7 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.test_status_lbl.config(
-                text="Gotowy do testów",
-                foreground="#2ecc71"
-            )
+            self._set_test_status("Gotowy do testów", "neutral")
         except Exception:
             pass
 
@@ -686,10 +677,7 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.ext_status.config(
-                text="Gotowy",
-                foreground="#2ecc71"
-            )
+            self._set_extraction_status("Gotowy", "neutral")
         except Exception:
             pass
 
@@ -719,18 +707,12 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.winner_name_lbl.config(
-                text="BRAK DANYCH Z TURNIEJU",
-                foreground="gray"
-            )
+            self._set_winner_name("BRAK DANYCH Z TURNIEJU", "neutral")
         except Exception:
             pass
 
         try:
-            self.winner_acc_lbl.config(
-                text="Skuteczność detekcji OCR: 0.0%",
-                foreground="red"
-            )
+            self._set_winner_acc("Skuteczność detekcji OCR: 0.0%", "error")
         except Exception:
             pass
 
@@ -761,64 +743,111 @@ class CharacterAnnotationTab:
 
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
-        console_bg = palette.get("console_bg", "#252526")
-        console_fg = palette.get("console_fg", "#f3f3f3")
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
-        muted = palette.get("muted", "#c7c7c7")
-        success = palette.get("success", "#27ae60")
-        error = palette.get("error", "#c0392b")
 
         for widget_name in ("ext_log", "test_log_text", "export_console", "import_console"):
             widget = getattr(self, widget_name, None)
             if widget is None:
                 continue
             try:
-                widget.configure(
-                    bg=console_bg,
-                    fg=console_fg,
-                    insertbackground=console_fg,
-                    bd=0,
-                    relief=tk.FLAT,
-                    highlightthickness=1,
-                    highlightbackground=console_border,
-                    highlightcolor=console_border
-                )
+                self.app.style_text_widget(widget, role="console")
             except Exception:
                 pass
 
         try:
-            self.plates_listbox.configure(
-                bg=palette.get("field", "#1a1a1a"),
-                fg=palette.get("fg", "#f3f3f3"),
-                selectbackground=palette.get("accent", "#3498db"),
-                selectforeground=palette.get("accent_text", "#ffffff"),
-                disabledforeground=palette.get("muted_dim", "#9a9a9a"),
-                highlightthickness=1,
-                highlightbackground=console_border,
-                highlightcolor=console_border,
-                bd=0,
-                relief=tk.FLAT
-            )
+            self.app.style_listbox_widget(self.plates_listbox, bordercolor=console_border)
             for idx, pid in enumerate(getattr(self, "_listbox_pid_by_index", [])):
                 status = str(self.preview_metadata.get(pid, {}).get("status", "unknown")).strip().lower()
                 self._apply_plate_listbox_row_style(idx, status)
         except Exception:
             pass
 
-        for label_name, color in (
-            ("cvat_option1_title_lbl", error),
-            ("cvat_option2_title_lbl", success),
-            ("cvat_option1_desc_lbl", muted),
-            ("cvat_option2_desc_lbl", muted),
-            ("cvat_import_desc_lbl", muted),
+        try:
+            self.app.style_canvas_widget(
+                self.preview_canvas,
+                background=palette.get("panel", "#1e1e1e"),
+                bordercolor=console_border
+            )
+        except Exception:
+            pass
+
+        for frame_name in (
+            "btn_to_detect_frame",
+            "btn_run_detection_frame",
+            "btn_run_detection_pulse_frame",
+            "btn_to_dataset_frame",
+            "btn_to_dataset_pulse_frame",
+            "btn_finish_step3_frame",
+            "btn_finish_step3_pulse_frame",
+        ):
+            frame = getattr(self, frame_name, None)
+            if frame is None:
+                continue
+            try:
+                frame.configure(bg=palette.get("bg", "#1f1f1f"))
+            except Exception:
+                pass
+
+        for label_name, style_name in (
+            ("cvat_option1_title_lbl", "PanelStatusError.TLabel"),
+            ("cvat_option2_title_lbl", "PanelStatusSuccess.TLabel"),
+            ("cvat_option1_desc_lbl", "PanelMuted.TLabel"),
+            ("cvat_option2_desc_lbl", "PanelMuted.TLabel"),
+            ("cvat_import_desc_lbl", "PanelMuted.TLabel"),
         ):
             label = getattr(self, label_name, None)
             if label is None:
                 continue
             try:
-                label.configure(foreground=color)
+                label.configure(style=style_name)
             except Exception:
                 pass
+
+    def _panel_style_name(self, tone: str = "neutral", emphasis: bool = False) -> str:
+        tone_key = str(tone or "").strip().lower()
+        if emphasis:
+            return {
+                "neutral": "PanelStatusNeutral.TLabel",
+                "info": "PanelStatusInfo.TLabel",
+                "success": "PanelStatusSuccess.TLabel",
+                "warning": "PanelStatusWarning.TLabel",
+                "error": "PanelStatusError.TLabel",
+                "muted": "PanelStatusNeutral.TLabel",
+            }.get(tone_key, "PanelStatusNeutral.TLabel")
+
+        return {
+            "neutral": "PanelMuted.TLabel",
+            "muted": "PanelMuted.TLabel",
+            "info": "PanelInfo.TLabel",
+            "success": "PanelSuccess.TLabel",
+            "warning": "PanelStatusWarning.TLabel",
+            "error": "PanelError.TLabel",
+        }.get(tone_key, "PanelMuted.TLabel")
+
+    def _set_themed_label_state(self, widget, text: str | None = None, tone: str = "neutral", emphasis: bool = False):
+        if widget is None:
+            return
+
+        config_kwargs = {"style": self._panel_style_name(tone=tone, emphasis=emphasis)}
+        if text is not None:
+            config_kwargs["text"] = text
+
+        widget.config(**config_kwargs)
+
+    def _set_extraction_status(self, text: str, tone: str = "neutral"):
+        self._set_themed_label_state(getattr(self, "ext_status", None), text=text, tone=tone, emphasis=True)
+
+    def _set_test_status(self, text: str, tone: str = "neutral"):
+        self._set_themed_label_state(getattr(self, "test_status_lbl", None), text=text, tone=tone, emphasis=True)
+
+    def _set_preview_info(self, text: str, tone: str = "info"):
+        self._set_themed_label_state(getattr(self, "preview_info_lbl", None), text=text, tone=tone, emphasis=False)
+
+    def _set_winner_name(self, text: str, tone: str = "neutral"):
+        self._set_themed_label_state(getattr(self, "winner_name_lbl", None), text=text, tone=tone, emphasis=True)
+
+    def _set_winner_acc(self, text: str, tone: str = "muted"):
+        self._set_themed_label_state(getattr(self, "winner_acc_lbl", None), text=text, tone=tone, emphasis=False)
 
     def _get_campaign_char_model_path(self) -> str:
         """
@@ -891,10 +920,7 @@ class CharacterAnnotationTab:
         size = (self.yolo_model_size_var.get() or "").strip().lower()
 
         if hasattr(self, "test_status_lbl"):
-            self.test_status_lbl.config(
-                text=f"Wybrana konfiguracja: YOLOv{version}{size}",
-                foreground="#2980b9"
-            )
+            self._set_test_status(f"Wybrana konfiguracja: YOLOv{version}{size}", "info")
 
     def _set_widget_state(self, widget, state: str):
         if widget is None:
@@ -1583,10 +1609,7 @@ class CharacterAnnotationTab:
             pass
 
         try:
-            self.test_status_lbl.config(
-                text="Gotowy do testów",
-                foreground="#2ecc71"
-            )
+            self._set_test_status("Gotowy do testów", "neutral")
         except Exception:
             pass
 
@@ -1987,44 +2010,32 @@ class CharacterAnnotationTab:
             if is_ocr:
                 self._update_winner_label()
             elif is_yolo:
-                self.winner_name_lbl.config(
-                    text="Brak rankingu OCR",
-                    foreground="gray"
-                )
-                self.winner_acc_lbl.config(
-                    text="Tryb YOLO nie bierze udziału w turnieju OCR",
-                    foreground="gray"
-                )
+                self._set_winner_name("Brak rankingu OCR", "neutral")
+                self._set_winner_acc("Tryb YOLO nie bierze udziału w turnieju OCR", "muted")
             else:  # BOTH
-                self.winner_name_lbl.config(
-                    text="Brak rankingu OCR",
-                    foreground="gray"
-                )
-                self.winner_acc_lbl.config(
-                    text="Tryb hybrydowy nie ustala zwycięzcy turnieju OCR",
-                    foreground="gray"
-                )
+                self._set_winner_name("Brak rankingu OCR", "neutral")
+                self._set_winner_acc("Tryb hybrydowy nie ustala zwycięzcy turnieju OCR", "muted")
 
         # Status dolny ma pokazywać, co użytkownik może teraz zrobić
         if hasattr(self, "test_status_lbl"):
             if is_yolo:
                 version = (self.yolo_model_version_var.get() or "").strip()
                 size = (self.yolo_model_size_var.get() or "").strip().lower()
-                self.test_status_lbl.config(
-                    text=f"Tryb YOLO: wybierz konfigurację i użyj 'Uruchom detekcję' (YOLOv{version}{size})",
-                    foreground="#7f8c8d"
+                self._set_test_status(
+                    f"Tryb YOLO: wybierz konfigurację i użyj 'Uruchom detekcję' (YOLOv{version}{size})",
+                    "muted"
                 )
             elif is_hybrid:
                 version = (self.yolo_model_version_var.get() or "").strip()
                 size = (self.yolo_model_size_var.get() or "").strip().lower()
-                self.test_status_lbl.config(
-                    text=f"Tryb hybrydowy: uruchom wspólną detekcję (YOLOv{version}{size} + OCR)",
-                    foreground="#2980b9"
+                self._set_test_status(
+                    f"Tryb hybrydowy: uruchom wspólną detekcję (YOLOv{version}{size} + OCR)",
+                    "info"
                 )
             else:
-                self.test_status_lbl.config(
-                    text="Tryb OCR: możesz uruchomić detekcję lub turniej presetów OCR",
-                    foreground="#2ecc71"
+                self._set_test_status(
+                    "Tryb OCR: możesz uruchomić detekcję lub turniej presetów OCR",
+                    "success"
                 )
 
     def _get_available_devices(self):
@@ -2296,7 +2307,11 @@ class CharacterAnnotationTab:
 
         self.ext_progress = ttk.Progressbar(lf_run, maximum=100)
         self.ext_progress.pack(fill=tk.X, pady=(15, 5))
-        self.ext_status = ttk.Label(lf_run, text="Gotowy", foreground="#2ecc71", font=("Segoe UI", 10, "bold"))
+        self.ext_status = ttk.Label(
+            lf_run,
+            text="Gotowy",
+            style="PanelStatusNeutral.TLabel"
+        )
         self.ext_status.pack(anchor=tk.W)
 
         lf_logs = ttk.LabelFrame(right, text=" Terminal procesu ", padding=10)
@@ -2366,6 +2381,7 @@ class CharacterAnnotationTab:
         self.btn_extract.config(state=tk.DISABLED)
         self.btn_ext_stop.config(state=tk.NORMAL)
         self.is_processing = True
+        self._set_extraction_status("Start wycinania...", "info")
 
         def worker():
             try:
@@ -2418,13 +2434,14 @@ class CharacterAnnotationTab:
                     self.frame.after(
                         0,
                         lambda c=processed, t=total: (
-                            self.ext_status.config(text=f"{c}/{t} obrazów...")
+                            self._set_extraction_status(f"{c}/{t} obrazów...", "info")
                             if session_token == self._project_reset_token else None
                         )
                     )
 
                 generator.save_metadata()
                 if self.is_processing and session_token == self._project_reset_token:
+                    self.frame.after(0, lambda: self._set_extraction_status("Wycinanie zakończone", "success"))
                     self.frame.after(0, lambda: self._load_preview_data(quiet=True))
                     self.frame.after(0, self.unlock_detection_subtab)
                     self.frame.after(0, lambda: messagebox.showinfo(
@@ -2433,6 +2450,7 @@ class CharacterAnnotationTab:
                     ))
             except Exception as e:
                 if session_token == self._project_reset_token:
+                    self.frame.after(0, lambda: self._set_extraction_status("Błąd wycinania", "error"))
                     self._log(self.ext_log, f"\n❌ BŁĄD: {e}\n", "ERROR")
             finally:
                 if session_token == self._project_reset_token:
@@ -2597,7 +2615,7 @@ class CharacterAnnotationTab:
         ttk.Label(
             self.yolo_panel,
             text="Model YOLO z Wizarda / iteracji:",
-            foreground="gray"
+            style="Muted.TLabel"
         ).pack(anchor=tk.W, pady=(5, 0))
 
         self.yolo_model_row = ttk.Frame(self.yolo_panel)
@@ -2642,8 +2660,7 @@ class CharacterAnnotationTab:
         self.winner_name_lbl = ttk.Label(
             leader_block,
             text="BRAK DANYCH",
-            font=("Segoe UI", 11, "bold"),
-            foreground="gray",
+            style="PanelStatusNeutral.TLabel",
             width=30,
             anchor="w",
             justify="left",
@@ -2653,14 +2670,14 @@ class CharacterAnnotationTab:
 
         ttk.Label(
             leader_block,
-            text="Skuteczność najlepszego presetu:",
-            font=("Segoe UI", 9, "bold")
+            text="Status rankingu OCR:",
+            style="PanelMuted.TLabel"
         ).pack(anchor=tk.W, pady=(0, 2))
 
         self.winner_acc_lbl = ttk.Label(
-            self.actions_lf,
+            leader_block,
             text="0.0%",
-            font=("Segoe UI", 10),
+            style="PanelMuted.TLabel",
             width=30,
             anchor="w",
             justify="left",
@@ -2689,8 +2706,7 @@ class CharacterAnnotationTab:
         self.test_status_lbl = ttk.Label(
             actions_block,
             text="Gotowy do testów",
-            foreground="#2ecc71",
-            font=("Segoe UI", 9, "bold"),
+            style="PanelStatusNeutral.TLabel",
             width=30,
             anchor="w",
             justify="left",
@@ -2725,8 +2741,7 @@ class CharacterAnnotationTab:
         self.preview_info_lbl = ttk.Label(
             package_lf,
             text="Wczytano tablic: 0",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#2980b9",
+            style="PanelInfo.TLabel",
             justify="left",
             wraplength=360
         )
@@ -2745,7 +2760,7 @@ class CharacterAnnotationTab:
         ttk.Label(
             detection_log_tools,
             text="Terminal procesu jest dostępny na żądanie użytkownika.",
-            foreground="gray"
+            style="Muted.TLabel"
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         self.detection_log_frame = ttk.LabelFrame(content_frame, text=" Terminal procesu ", padding=10)
@@ -2787,7 +2802,7 @@ class CharacterAnnotationTab:
         self.btn_run_detection_pulse_frame = tk.Frame(
             self.btn_run_detection_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=0
         )
         self.btn_run_detection_pulse_frame.pack(anchor=tk.W)
 
@@ -2805,7 +2820,7 @@ class CharacterAnnotationTab:
         self.btn_to_dataset_pulse_frame = tk.Frame(
             self.btn_to_dataset_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=0
         )
         self.btn_to_dataset_pulse_frame.pack(anchor=tk.E)
 
@@ -2881,11 +2896,11 @@ class CharacterAnnotationTab:
         best_preset_data, best_acc = self._get_best_preset()
         if best_preset_data and best_preset_data.get("name"):
             name = best_preset_data.get("name")
-            self.winner_name_lbl.config(text=f"Lider: {name.upper()} .json", foreground="green")
-            self.winner_acc_lbl.config(text=f" Skuteczność najlepszego presetu: {best_acc:.1f}% ", foreground="green")
+            self._set_winner_name(f"Lider: {name.upper()} .json", "success")
+            self._set_winner_acc(f" Skuteczność najlepszego presetu: {best_acc:.1f}% ", "success")
         else:
-            self.winner_name_lbl.config(text="BRAK DANYCH Z TURNIEJU", foreground="gray")
-            self.winner_acc_lbl.config(text="Skuteczność detekcji OCR: 0.0%", foreground="red")
+            self._set_winner_name("BRAK DANYCH Z TURNIEJU", "neutral")
+            self._set_winner_acc("Skuteczność detekcji OCR: 0.0%", "error")
 
     # =========================================================
     # Preview load + render
@@ -2903,7 +2918,7 @@ class CharacterAnnotationTab:
             if not quiet:
                 messagebox.showerror("Brak pliku", f"Nie znaleziono metadata.json w folderze:\n{out_dir}")
             try:
-                self.preview_info_lbl.config(text="Brak wczytanych danych", foreground="red")
+                self._set_preview_info("Brak wczytanych danych", "error")
             except Exception:
                 pass
             return
@@ -3239,7 +3254,7 @@ class CharacterAnnotationTab:
 
         self.test_log_text.delete(1.0, tk.END)
         self._lock_ui_for_testing()
-        self.test_status_lbl.config(text="Start detekcji...", foreground="#2980b9")
+        self._set_test_status("Start detekcji...", "info")
         self.test_progress.config(value=0)
 
         self.fast_test_stop.clear()
@@ -3354,9 +3369,9 @@ class CharacterAnnotationTab:
                     self.frame.after(
                         0,
                         lambda c=idx + 1, t=total: (
-                            self.test_status_lbl.config(
-                                text=f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
-                                foreground="#e67e22"
+                            self._set_test_status(
+                                f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
+                                "warning"
                             )
                             if session_token == self._project_reset_token else None
                         )
@@ -3409,32 +3424,14 @@ class CharacterAnnotationTab:
                             method_name = (self.detection_method_var.get() or "OCR").upper().strip()
 
                             if method_name == "OCR":
-                                self.winner_name_lbl.config(
-                                    text="Brak zwycięzcy turnieju",
-                                    foreground="gray"
-                                )
-                                self.winner_acc_lbl.config(
-                                    text="Uruchom turniej presetów OCR",
-                                    foreground="gray"
-                                )
+                                self._set_winner_name("Brak zwycięzcy turnieju", "neutral")
+                                self._set_winner_acc("Uruchom turniej presetów OCR", "muted")
                             elif method_name == "YOLO":
-                                self.winner_name_lbl.config(
-                                    text="Brak rankingu OCR",
-                                    foreground="gray"
-                                )
-                                self.winner_acc_lbl.config(
-                                    text="Tryb YOLO nie bierze udziału w turnieju OCR",
-                                    foreground="gray"
-                                )
+                                self._set_winner_name("Brak rankingu OCR", "neutral")
+                                self._set_winner_acc("Tryb YOLO nie bierze udziału w turnieju OCR", "muted")
                             else:  # BOTH
-                                self.winner_name_lbl.config(
-                                    text="Brak rankingu OCR",
-                                    foreground="gray"
-                                )
-                                self.winner_acc_lbl.config(
-                                    text="Tryb hybrydowy nie ustala zwycięzcy turnieju OCR",
-                                    foreground="gray"
-                                )
+                                self._set_winner_name("Brak rankingu OCR", "neutral")
+                                self._set_winner_acc("Tryb hybrydowy nie ustala zwycięzcy turnieju OCR", "muted")
                         except Exception:
                             pass
 
@@ -3448,9 +3445,9 @@ class CharacterAnnotationTab:
                             pass
 
                         self.test_progress.config(value=100)
-                        self.test_status_lbl.config(
-                            text=f"Zakończono detekcję — skuteczność {acc:.1f}%",
-                            foreground="#2ecc71"
+                        self._set_test_status(
+                            f"Zakończono detekcję — skuteczność {acc:.1f}%",
+                            "success"
                         )
 
                         # 7. odblokuj dalszy krok
@@ -3461,10 +3458,7 @@ class CharacterAnnotationTab:
 
                     except Exception as e:
                         logger.error(f"Błąd finalize() po Szybkim Teście: {e}")
-                        self.test_status_lbl.config(
-                            text="Błąd odświeżania UI",
-                            foreground="#c0392b"
-                        )
+                        self._set_test_status("Błąd odświeżania UI", "error")
 
                     finally:
                         self._unlock_ui_after_testing()
@@ -3491,14 +3485,13 @@ class CharacterAnnotationTab:
         self.cvat_option1_title_lbl = ttk.Label(
             cvat_f,
             text="OPCJA 1: Ręczna poprawa błędów",
-            font=("Segoe UI", 10, "bold"),
-            foreground=palette.get("error", "#c0392b")
+            style="PanelStatusError.TLabel"
         )
         self.cvat_option1_title_lbl.pack(anchor=tk.W)
         self.cvat_option1_desc_lbl = ttk.Label(
             export_lf,
             text="Eksport do CVAT obejmuje wyłącznie tablice oznaczone jako błędne (czerwone).",
-            foreground=palette.get("muted", "gray"),
+            style="PanelMuted.TLabel",
             wraplength=320,
             justify=tk.LEFT
         )
@@ -3516,14 +3509,13 @@ class CharacterAnnotationTab:
         self.cvat_option2_title_lbl = ttk.Label(
             yolo_f,
             text="OPCJA 2: Budowa datasetu (active learning)",
-            font=("Segoe UI", 10, "bold"),
-            foreground=palette.get("success", "#27ae60")
+            style="PanelStatusSuccess.TLabel"
         )
         self.cvat_option2_title_lbl.pack(anchor=tk.W)
         self.cvat_option2_desc_lbl = ttk.Label(
             yolo_f,
             text="Zbiera perfekcyjne tablice i buduje dataset YOLO.",
-            foreground=palette.get("muted", "gray"),
+            style="PanelMuted.TLabel",
             wraplength=320,
             justify=tk.LEFT
         )
@@ -3560,7 +3552,7 @@ class CharacterAnnotationTab:
                 "Zaimportowane dane zostaną dołączone do puli treningowej modelu znaków. "
                 "Wskaż plik *.xml z poprawkami."
             ),
-            foreground=palette.get("muted", "gray"),
+            style="PanelMuted.TLabel",
             wraplength=320,
             justify=tk.LEFT
         )
@@ -3611,7 +3603,7 @@ class CharacterAnnotationTab:
         self.btn_finish_step3_pulse_frame = tk.Frame(
             self.btn_finish_step3_frame,
             bd=0,
-            highlightthickness=4
+            highlightthickness=0
         )
         self.btn_finish_step3_pulse_frame.pack(anchor=tk.E)
 
@@ -4013,10 +4005,7 @@ class CharacterAnnotationTab:
                         self.unlock_dataset_subtab()
 
                     self.test_progress.config(value=100)
-                    self.test_status_lbl.config(
-                        text="Turniej Zakończony!",
-                        foreground="#2ecc72"
-                    )
+                    self._set_test_status("Turniej Zakończony!", "success")
                     self._unlock_ui_after_testing()
 
                 self.frame.after(0, finalize)

@@ -28,6 +28,7 @@ class CampaignTab:
         self.right_panel = None
         self._model_status_title_labels = []
         self.project_listbox = None
+        self.project_list_host = None
         self.project_list_status_lbl = None
         self.project_list_status_labels = []
         self._project_name_by_index = []
@@ -262,12 +263,14 @@ class CampaignTab:
 
         list_host = tk.Frame(
             browser_lf,
-            bg=palette.get("panel", "#252526"),
-            bd=1,
+            bg=palette.get("field", "#1a1a1a"),
+            bd=0,
             highlightthickness=1,
-            highlightbackground=palette.get("border", "#3c3c3c")
+            highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c"))
         )
         list_host.pack(fill=tk.X, expand=False)
+        self.project_list_host = list_host
 
         scroll = ttk.Scrollbar(list_host, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -378,6 +381,16 @@ class CampaignTab:
             pass
 
         try:
+            if self.project_list_host is not None:
+                self.project_list_host.config(
+                    bg=palette.get("field", "#1a1a1a"),
+                    highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c"))
+                )
+        except Exception:
+            pass
+
+        try:
             if self.project_listbox is not None:
                 self.project_listbox.config(
                     bg=palette.get("field", "#1a1a1a"),
@@ -403,12 +416,19 @@ class CampaignTab:
                     pass
 
         for item in getattr(self, "roadmap_ui_elements", []):
+            self._set_roadmap_card_border(item)
             try:
-                item["lbl_title"].config(bg=panel)
+                item["lbl_title"].config(
+                    bg=item["content_frame"].cget("bg"),
+                    fg=fg
+                )
             except Exception:
                 pass
             try:
-                item["lbl_desc"].config(bg=panel)
+                item["lbl_desc"].config(
+                    bg=item["content_frame"].cget("bg"),
+                    fg=muted
+                )
             except Exception:
                 pass
 
@@ -428,7 +448,14 @@ class CampaignTab:
         self.app.style_dialog_window(dialog, title=title, geometry="460x300", parent=self.frame)
         palette = self.app.palette
 
-        shell = tk.Frame(dialog, bg=palette["bg"], bd=1, highlightthickness=1, highlightbackground=palette["border"])
+        shell = tk.Frame(
+            dialog,
+            bg=palette["bg"],
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette.get("panel_border", palette["border"]),
+            highlightcolor=palette.get("panel_border", palette["border"])
+        )
         shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
         body = tk.Frame(shell, bg=palette["panel"])
@@ -467,7 +494,8 @@ class CampaignTab:
             activestyle="none",
             bd=0,
             highlightthickness=1,
-            highlightbackground=palette["border"],
+            highlightbackground=palette.get("panel_border", palette["border"]),
+            highlightcolor=palette.get("panel_border", palette["border"]),
             yscrollcommand=scroll.set,
         )
         project_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -525,13 +553,100 @@ class CampaignTab:
     # ROADMAP UI
     # ======================================================
 
+    def _set_roadmap_note(self, item, text="", tone="muted"):
+        palette = getattr(self.app, "palette", {})
+        lbl_desc = item.get("lbl_desc")
+        if lbl_desc is None:
+            return
+
+        note_text = (text or "").strip()
+        tone_key = str(tone or "muted").strip().lower()
+        note_color = {
+            "muted": palette.get("muted", "#c7c7c7"),
+            "info": palette.get("accent", "#2980b9"),
+            "success": palette.get("success", "#27ae60"),
+            "warning": palette.get("warning", "#d35400"),
+            "error": palette.get("error", "#c0392b"),
+        }.get(tone_key, palette.get("muted", "#c7c7c7"))
+
+        try:
+            lbl_desc.config(text=note_text, fg=note_color)
+        except Exception:
+            return
+
+        if note_text:
+            if not item.get("note_visible"):
+                lbl_desc.pack(anchor=tk.W, pady=(4, 0))
+                item["note_visible"] = True
+        else:
+            if item.get("note_visible"):
+                lbl_desc.pack_forget()
+            item["note_visible"] = False
+
+    def _get_roadmap_neutral_border_color(self):
+        palette = getattr(self.app, "palette", {})
+        theme_key = str(getattr(self.app, "current_theme_key", "") or "").lower()
+        if theme_key.startswith("dark"):
+            return palette.get("button_hover", palette.get("panel_alt", palette.get("panel_border", palette.get("border", "#3c3c3c"))))
+        return palette.get("panel_border", palette.get("border", "#c8c8c8"))
+
+    def _set_roadmap_card_border(self, item, color=None):
+        palette = getattr(self.app, "palette", {})
+        shell = item.get("shell")
+        if shell is None:
+            return
+
+        card_bg = palette.get("surface_info", palette.get("panel", "#252526")) if color else palette.get("panel", "#252526")
+        border_color = color or self._get_roadmap_neutral_border_color()
+        try:
+            shell.config(
+                bg=border_color,
+                highlightthickness=0
+            )
+        except Exception:
+            pass
+        for key in ("content_frame", "frame", "text_frame", "extra_actions_frame"):
+            widget = item.get(key)
+            if widget is None:
+                continue
+            try:
+                widget.config(bg=card_bg)
+            except Exception:
+                pass
+        for key in ("lbl_title", "lbl_desc"):
+            widget = item.get(key)
+            if widget is None:
+                continue
+            try:
+                widget.config(bg=card_bg)
+            except Exception:
+                pass
+
     def _build_roadmap_step(self, parent, step_num, title, desc, btn_text, command):
         palette = getattr(self.app, "palette", {})
+        card_bg = palette.get("panel", "#252526")
+        neutral_border = self._get_roadmap_neutral_border_color()
 
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=10)
+        shell = tk.Frame(
+            parent,
+            bg=neutral_border,
+            bd=0,
+            highlightthickness=0
+        )
+        shell.pack(fill=tk.X, pady=(0, 6))
 
-        text_f = ttk.Frame(f)
+        content = tk.Frame(
+            shell,
+            bg=card_bg,
+            padx=10,
+            pady=8
+        )
+        content.pack(fill=tk.X, padx=1, pady=1)
+
+        main_row = tk.Frame(content, bg=card_bg)
+        main_row.pack(fill=tk.X)
+
+        text_f = tk.Frame(main_row, bg=card_bg)
         text_f.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         lbl_title = tk.Label(
@@ -539,38 +654,39 @@ class CampaignTab:
             text=title,
             font=("Segoe UI", 12, "bold"),
             fg=palette.get("fg", "#f3f3f3"),
-            bg=palette.get("panel", "#252526")
+            bg=card_bg
         )
         lbl_title.pack(anchor=tk.W)
 
         lbl_desc = tk.Label(
             text_f,
-            text=desc,
+            text="",
             fg=palette.get("muted", "#b8b8b8"),
-            bg=palette.get("panel", "#252526"),
+            bg=card_bg,
             justify=tk.LEFT,
             wraplength=520
         )
-        lbl_desc.pack(anchor=tk.W)
 
-        btn = ttk.Button(f, text=btn_text, command=command, width=25)
-        btn.pack(side=tk.RIGHT, padx=10)
+        btn = ttk.Button(main_row, text=btn_text, command=command, width=25)
+        btn.pack(side=tk.RIGHT, padx=(10, 0))
 
         # Kontener na dodatkowe akcje naprawcze kroku.
-        extra_actions_frame = ttk.Frame(parent)
-        extra_actions_frame.pack(fill=tk.X, pady=(0, 5))
-
-        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        extra_actions_frame = tk.Frame(content, bg=card_bg)
 
         self.roadmap_ui_elements.append({
             "step_num": step_num,
-            "frame": f,
+            "frame": main_row,
+            "shell": shell,
+            "content_frame": content,
+            "text_frame": text_f,
             "original_title": title,
+            "default_desc": desc,
             "orig_btn_text": btn_text,
             "lbl_title": lbl_title,
             "lbl_desc": lbl_desc,
             "btn": btn,
-            "extra_actions_frame": extra_actions_frame
+            "extra_actions_frame": extra_actions_frame,
+            "note_visible": False
         })
 
     def _rebuild_roadmap_ui(self):
@@ -613,6 +729,8 @@ class CampaignTab:
         for item in self.roadmap_ui_elements:
             help_key = f"camp_step{item['step_num']}"
             for widget in (
+                item.get("shell"),
+                item.get("content_frame"),
                 item.get("frame"),
                 item.get("lbl_title"),
                 item.get("lbl_desc"),
@@ -624,19 +742,23 @@ class CampaignTab:
     def _render_step3_rework_actions(self, frame):
         """Renderuje dodatkowe akcje naprawcze dla kroku 3."""
         palette = getattr(self.app, "palette", {})
+        card_bg = str(frame.cget("bg") or palette.get("panel", "#252526"))
 
         for w in frame.winfo_children():
             w.destroy()
+
+        frame.configure(bg=card_bg)
+        frame.pack(fill=tk.X, pady=(6, 0))
 
         tk.Label(
             frame,
             text="Dostępne ścieżki naprawcze:",
             fg=palette.get("warning", "#d35400"),
-            bg=palette.get("panel", "#252526"),
+            bg=card_bg,
             font=("Segoe UI", 9, "bold")
-        ).pack(anchor=tk.W, pady=(0, 4))
+        ).pack(anchor=tk.W, pady=(0, 3))
 
-        btn_row = ttk.Frame(frame)
+        btn_row = tk.Frame(frame, bg=card_bg)
         btn_row.pack(anchor=tk.W)
 
         btn_auto = ttk.Button(
@@ -762,14 +884,16 @@ class CampaignTab:
 
             # Prawy panel wygaszony
             for item in self.roadmap_ui_elements:
+                self._set_roadmap_card_border(item)
                 item["lbl_title"].config(text=f"🔒 {item['original_title']}", fg=muted_dim)
-                item["lbl_desc"].config(fg=muted_dim)
+                self._set_roadmap_note(item, "")
                 item["btn"].config(text="Zablokowane", style="TButton", state="disabled")
 
                 extra_frame = item.get("extra_actions_frame")
                 if extra_frame:
                     for w in extra_frame.winfo_children():
                         w.destroy()
+                    extra_frame.pack_forget()
 
             self.app.update_campaign_tab_access()
             self.frame.update_idletasks()
@@ -850,10 +974,12 @@ class CampaignTab:
             if extra_frame:
                 for w in extra_frame.winfo_children():
                     w.destroy()
+                extra_frame.pack_forget()
 
             if s < curr_step:
+                self._set_roadmap_card_border(item)
                 item["lbl_title"].config(text=f"✅ {title}", fg=success)
-                item["lbl_desc"].config(fg=muted)
+                self._set_roadmap_note(item, "")
 
                 if s == 1:
                     btn.config(text="Wykonano", style="TButton", state="disabled")
@@ -861,30 +987,33 @@ class CampaignTab:
                     btn.config(text="Wykonano", style="TButton", state="disabled")
 
             elif s == curr_step:
+                self._set_roadmap_card_border(item, accent)
                 item["lbl_title"].config(text=f"🔵 {title}", fg=accent)
 
                 if s == 2 and step2_status == "generated":
-                    item["lbl_desc"].config(
-                        text=(
-                            "Autoanotacja została wykonana, ale etap NIE został jeszcze zatwierdzony.\n"
-                            "Przejdź do Zakładki Autoanotacja, sprawdź wynik i kliknij „Zatwierdź etap autoanotacji”."
+                    self._set_roadmap_note(
+                        item,
+                        (
+                            "Autoanotacja została wykonana, ale etap nie został jeszcze zatwierdzony.\n"
+                            "Przejdź do zakładki Autoanotacja, sprawdź wynik i kliknij „Zatwierdź etap autoanotacji”."
                         ),
-                        fg=warning
+                        "warning"
                     )
 
                 elif s == 3 and step3_status == "needs_rework":
-                    item["lbl_desc"].config(
-                        text=(
+                    self._set_roadmap_note(
+                        item,
+                        (
                             "Nie udało się zbudować paczki YOLO z tablic perfect.\n"
-                            "Wróć do Autoanotacji albo popraw OCR w Zakładce Znaków.\n"
+                            "Wróć do Autoanotacji albo popraw OCR w zakładce Znaki.\n"
                             "Trening pozostaje zablokowany do czasu powodzenia tego etapu."
                         ),
-                        fg=warning
+                        "warning"
                     )
                     self._render_step3_rework_actions(extra_frame)
 
                 else:
-                    item["lbl_desc"].config(fg=fg)
+                    self._set_roadmap_note(item, "")
 
                 if s == 1:
                     btn.config(
@@ -896,8 +1025,9 @@ class CampaignTab:
                     btn.config(text=orig_btn_txt, style="Accent.TButton", state="normal")
 
             else:
+                self._set_roadmap_card_border(item)
                 item["lbl_title"].config(text=f"⚪ {title}", fg=muted)
-                item["lbl_desc"].config(fg=muted_dim)
+                self._set_roadmap_note(item, "")
                 btn.config(text=orig_btn_txt, style="TButton", state="disabled")
 
         self._update_main_tabs_highlight(curr_step=curr_step, has_project=True)
