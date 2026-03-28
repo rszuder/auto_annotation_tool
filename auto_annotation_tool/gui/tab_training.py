@@ -514,6 +514,11 @@ class TrainingTab:
             pass
 
         try:
+            self._set_split_feedback_visibility(False)
+        except Exception:
+            pass
+
+        try:
             self.step4_builder_log_text.configure(state=tk.NORMAL)
             self.step4_builder_log_text.delete(1.0, tk.END)
             self.step4_builder_log_text.configure(state=tk.DISABLED)
@@ -571,12 +576,7 @@ class TrainingTab:
         self._set_training_ui_idle_state()
 
         try:
-            self.btn_toggle_step4_log.configure(text="Pokaż terminal")
-        except Exception:
-            pass
-
-        try:
-            self.step4_builder_log_frame.pack_forget()
+            self._set_step4_builder_log_visibility(False)
         except Exception:
             pass
 
@@ -647,18 +647,46 @@ class TrainingTab:
         except Exception:
             pass
 
-    def _toggle_step4_builder_log(self):
+    def _set_step4_builder_log_visibility(self, visible: bool):
         if not hasattr(self, "step4_builder_log_frame"):
             return
 
-        self._step4_builder_log_visible = not getattr(self, "_step4_builder_log_visible", False)
+        self._step4_builder_log_visible = bool(visible)
 
         if self._step4_builder_log_visible:
-            self.step4_builder_log_frame.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
-            self.btn_toggle_step4_log.configure(text="Ukryj terminal")
+            self.step4_builder_log_frame.pack(
+                fill=tk.BOTH,
+                expand=True,
+                pady=(8, 0),
+                before=self.step4_builder_nav
+            )
+            try:
+                self.btn_toggle_step4_log.grid_remove()
+            except Exception:
+                pass
         else:
             self.step4_builder_log_frame.pack_forget()
-            self.btn_toggle_step4_log.configure(text="Pokaż terminal")
+            try:
+                self.btn_toggle_step4_log.grid()
+            except Exception:
+                pass
+
+    def _toggle_step4_builder_log(self):
+        self._set_step4_builder_log_visibility(
+            not getattr(self, "_step4_builder_log_visible", False)
+        )
+
+    def _set_split_feedback_visibility(self, visible: bool):
+        if not hasattr(self, "split_feedback_frame"):
+            return
+
+        if visible:
+            self.split_feedback_frame.pack(
+                fill=tk.X,
+                after=self.btn_step4_split_frame
+            )
+        else:
+            self.split_feedback_frame.pack_forget()
 
     def _set_step4_process_console_text(self, message: str):
         if not hasattr(self, "train_log_console"):
@@ -672,6 +700,95 @@ class TrainingTab:
             self.train_log_console.config(state=tk.DISABLED)
         except Exception:
             pass
+
+    def _sync_train_left_scrollregion(self, event=None):
+        canvas = getattr(self, "train_left_canvas", None)
+        if canvas is None:
+            return
+
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_train_left_canvas_width(self, event=None):
+        canvas = getattr(self, "train_left_canvas", None)
+        if canvas is None:
+            return
+
+        try:
+            width = max(50, int(canvas.winfo_width()))
+            canvas.itemconfigure(self.train_left_content_window, width=width)
+        except Exception:
+            pass
+
+    def _widget_contains_point(self, widget, x_root: int, y_root: int) -> bool:
+        if widget is None:
+            return False
+        try:
+            wx = int(widget.winfo_rootx())
+            wy = int(widget.winfo_rooty())
+            return wx <= x_root < (wx + int(widget.winfo_width())) and wy <= y_root < (wy + int(widget.winfo_height()))
+        except Exception:
+            return False
+
+    def _mousewheel_units(self, event) -> int:
+        event_num = getattr(event, "num", None)
+        if event_num == 4:
+            return -1
+        if event_num == 5:
+            return 1
+
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        if abs(delta) >= 120:
+            units = -int(delta / 120)
+        else:
+            units = -1 if delta > 0 else 1
+        return units if units != 0 else (-1 if delta > 0 else 1)
+
+    def _train_left_canvas_overflows(self) -> bool:
+        canvas = getattr(self, "train_left_canvas", None)
+        if canvas is None:
+            return False
+
+        try:
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return False
+            content_height = int(bbox[3]) - int(bbox[1])
+            viewport_height = int(canvas.winfo_height())
+            return content_height > viewport_height + 1
+        except Exception:
+            return False
+
+    def _on_train_left_global_mousewheel(self, event):
+        canvas = getattr(self, "train_left_canvas", None)
+        if canvas is None:
+            return None
+
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+        except Exception:
+            return None
+
+        if not self._widget_contains_point(canvas, x_root, y_root):
+            return None
+
+        if not self._train_left_canvas_overflows():
+            return None
+
+        try:
+            canvas.yview_scroll(units, "units")
+        except Exception:
+            return "break"
+        return "break"
 
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
@@ -697,6 +814,16 @@ class TrainingTab:
                 background=palette.get("panel", "#252526"),
                 bordercolor=console_border
             )
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "train_left_canvas"):
+                self.train_left_canvas.configure(
+                    bg=palette.get("panel", "#252526"),
+                    highlightbackground=console_border,
+                    highlightcolor=console_border
+                )
         except Exception:
             pass
 
@@ -994,7 +1121,7 @@ class TrainingTab:
             )
             self.btn_choose_plate.configure(state=tk.NORMAL)
             self.btn_choose_char.configure(state=tk.NORMAL)
-            self.ds_mode_waiting_frame.pack(fill=tk.BOTH, expand=True)
+            self.ds_mode_waiting_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(
                 text="Dalej: najpierw wybierz tor",
                 state=tk.DISABLED
@@ -1009,7 +1136,7 @@ class TrainingTab:
             )
             self.btn_choose_plate.configure(state=tk.DISABLED)
             self.btn_choose_char.configure(state=tk.NORMAL)
-            self.ds_creator_frame.pack(fill=tk.BOTH, expand=True)
+            self.ds_creator_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(text="Dalej: Trening i analiza modelu tablic")
         else:
             self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
@@ -1019,7 +1146,7 @@ class TrainingTab:
             )
             self.btn_choose_plate.configure(state=tk.NORMAL)
             self.btn_choose_char.configure(state=tk.DISABLED)
-            self.ds_split_frame.pack(fill=tk.BOTH, expand=True)
+            self.ds_split_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(text="Dalej: Trening i analiza modelu znaków")
 
     def _step4_dataset_go_next(self):
@@ -1462,7 +1589,7 @@ class TrainingTab:
         root.pack(fill=tk.BOTH, expand=True)
 
         top = ttk.Frame(root)
-        top.pack(fill=tk.BOTH, expand=True)
+        top.pack(fill=tk.X, expand=False)
 
         self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=1)
         self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
@@ -1513,7 +1640,7 @@ class TrainingTab:
         ).pack(anchor=tk.W)
 
         right = ttk.Frame(top)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         header = ttk.LabelFrame(right, text=" Aktywny tor ", padding=10)
         header.pack(fill=tk.X)
@@ -1535,7 +1662,7 @@ class TrainingTab:
         ).pack(anchor=tk.W, pady=(6, 0))
 
         self.ds_mode_host = ttk.Frame(right)
-        self.ds_mode_host.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.ds_mode_host.pack(fill=tk.X, expand=False, pady=(8, 0))
 
         self.ds_mode_waiting_frame = ttk.LabelFrame(
             self.ds_mode_host,
@@ -1567,17 +1694,17 @@ class TrainingTab:
         self._build_creator_ui()
         self._build_splitter_ui()
 
-        tools = ttk.Frame(root)
-        tools.pack(fill=tk.X, pady=(8, 0))
+        self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Terminal procesu ", padding=6)
+        self.step4_builder_log_toolbar = ttk.Frame(self.step4_builder_log_frame)
+        self.step4_builder_log_toolbar.pack(fill=tk.X, pady=(0, 6))
 
-        self.btn_toggle_step4_log = ttk.Button(
-            tools,
-            text="Pokaż terminal",
+        self.btn_hide_step4_log = ttk.Button(
+            self.step4_builder_log_toolbar,
+            text="Ukryj terminal",
             command=self._toggle_step4_builder_log
         )
-        self.btn_toggle_step4_log.pack(side=tk.LEFT)
+        self.btn_hide_step4_log.pack(side=tk.LEFT)
 
-        self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Terminal procesu ", padding=6)
         self.step4_builder_log_text = scrolledtext.ScrolledText(
             self.step4_builder_log_frame,
             wrap=tk.WORD,
@@ -1587,18 +1714,29 @@ class TrainingTab:
         self.step4_builder_log_text.pack(fill=tk.BOTH, expand=True)
         self.step4_builder_log_text.configure(state=tk.DISABLED)
 
-        nav = ttk.Frame(root)
-        nav.pack(fill=tk.X, pady=(8, 0))
+        self.step4_builder_nav = ttk.Frame(root)
+        self.step4_builder_nav.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.step4_builder_nav.grid_columnconfigure(0, weight=0)
+        self.step4_builder_nav.grid_columnconfigure(1, weight=0)
+        self.step4_builder_nav.grid_columnconfigure(2, weight=1)
+        self.step4_builder_nav.grid_columnconfigure(3, weight=0)
 
         self.btn_step4_back = ttk.Button(
-            nav,
+            self.step4_builder_nav,
             text="Wstecz",
             command=self._step4_dataset_go_back
         )
-        self.btn_step4_back.pack(side=tk.LEFT)
+        self.btn_step4_back.grid(row=0, column=0, sticky="w")
 
-        self.btn_step4_next_frame = tk.Frame(nav, bd=0, highlightthickness=0)
-        self.btn_step4_next_frame.pack(side=tk.RIGHT)
+        self.btn_toggle_step4_log = ttk.Button(
+            self.step4_builder_nav,
+            text="Pokaż terminal",
+            command=self._toggle_step4_builder_log
+        )
+        self.btn_toggle_step4_log.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        self.btn_step4_next_frame = tk.Frame(self.step4_builder_nav, bd=0, highlightthickness=0)
+        self.btn_step4_next_frame.grid(row=0, column=3, sticky="e", padx=(10, 0))
 
         self.btn_step4_next_pulse_frame = tk.Frame(
             self.btn_step4_next_frame,
@@ -1618,6 +1756,7 @@ class TrainingTab:
         HELP.bind_help(self.btn_choose_plate, "tr_route_plate")
         HELP.bind_help(self.btn_choose_char, "tr_route_char")
         HELP.bind_help(self.btn_toggle_step4_log, "tr_builder_log")
+        HELP.bind_help(self.btn_hide_step4_log, "tr_builder_log")
         HELP.bind_help(self.btn_step4_next, "tr_builder_next")
 
         initial_mode = self.get_campaign_training_target()
@@ -1627,6 +1766,7 @@ class TrainingTab:
         self._step4_builder_log_visible = False
         self._step4_route_selected = True
         self._step4_train_unlocked = True
+        self._set_step4_builder_log_visibility(False)
         self._set_step4_dataset_mode(initial_mode)
 
     def _build_creator_ui(self):
@@ -1706,17 +1846,17 @@ class TrainingTab:
         ratios = ttk.Frame(f); ratios.pack(fill=tk.X, pady=10)
         ttk.Label(ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
         self.train_pct = tk.DoubleVar(value=80.0)
-        ttk.Scale(ratios, from_=50, to=95, variable=self.train_pct, command=lambda e: self._update_ratio_labels()).grid(row=0, column=1, sticky=tk.EW, padx=5)
+        ttk.Scale(ratios, from_=50, to=90, variable=self.train_pct, command=lambda e: self._update_ratio_labels()).grid(row=0, column=1, sticky=tk.EW, padx=5)
         self.train_lbl = ttk.Label(ratios, text="80%"); self.train_lbl.grid(row=0, column=2, sticky=tk.W)
 
         ttk.Label(ratios, text="Val %").grid(row=1, column=0, sticky=tk.W)
-        self.val_pct = tk.DoubleVar(value=20.0)
+        self.val_pct = tk.DoubleVar(value=10.0)
         ttk.Scale(ratios, from_=5, to=50, variable=self.val_pct, command=lambda e: self._update_ratio_labels()).grid(row=1, column=1, sticky=tk.EW, padx=5)
-        self.val_lbl = ttk.Label(ratios, text="20%"); self.val_lbl.grid(row=1, column=2, sticky=tk.W)
+        self.val_lbl = ttk.Label(ratios, text="10%"); self.val_lbl.grid(row=1, column=2, sticky=tk.W)
 
-        self.use_test = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ratios, text="Wydziel też zbiór testowy", variable=self.use_test, command=self._update_ratio_labels).grid(row=2, column=0, columnspan=2, sticky=tk.W)
-        self.test_lbl = ttk.Label(ratios, text="Test: 0%"); self.test_lbl.grid(row=2, column=2, sticky=tk.W)
+        ttk.Label(ratios, text="Test %").grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(ratios, text="liczony automatycznie").grid(row=2, column=1, sticky=tk.W, padx=5)
+        self.test_lbl = ttk.Label(ratios, text="Test: 10%"); self.test_lbl.grid(row=2, column=2, sticky=tk.W)
         ratios.columnconfigure(1, weight=1)
 
         self.btn_step4_split_frame = tk.Frame(f, bd=0, highlightthickness=0)
@@ -1738,15 +1878,18 @@ class TrainingTab:
         self.btn_step4_split.pack()
         
         self.split_progress_var = tk.DoubleVar(value=0.0)
-        self.split_progress = ttk.Progressbar(f, variable=self.split_progress_var, maximum=100)
+        self.split_feedback_frame = ttk.Frame(f)
+        self.split_progress = ttk.Progressbar(self.split_feedback_frame, variable=self.split_progress_var, maximum=100)
         self.split_progress.pack(fill=tk.X, pady=2)
-        self.split_status = ttk.Label(f, text="Gotowy")
+        self.split_status = ttk.Label(self.split_feedback_frame, text="Gotowy")
         self.split_status.pack(anchor=tk.W)
+        self._set_split_feedback_visibility(False)
 
         # Powiązania pomocy dla splitu datasetu.
         HELP.bind_help(row1, "tr_split_src")
         HELP.bind_help(ratios, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_split, "tr_split_btn")
+        self._update_ratio_labels()
 
     def _build_train_tab(self):
         root = ttk.Frame(self.tab_train, padding=5)
@@ -1762,7 +1905,41 @@ class TrainingTab:
         self.train_pane.add(self.left, weight=0)
         self.train_pane.add(self.right, weight=1)
 
-        settings_col = ttk.Frame(self.left)
+        self.left.grid_rowconfigure(0, weight=1)
+        self.left.grid_columnconfigure(0, weight=1)
+
+        self.train_left_scroll_host = ttk.Frame(self.left)
+        self.train_left_scroll_host.grid(row=0, column=0, sticky="nsew")
+        self.train_left_scroll_host.grid_rowconfigure(0, weight=1)
+        self.train_left_scroll_host.grid_columnconfigure(0, weight=1)
+
+        self.train_left_canvas = tk.Canvas(
+            self.train_left_scroll_host,
+            bg="#252526",
+            bd=0,
+            highlightthickness=0
+        )
+        self.train_left_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.train_left_scrollbar = ttk.Scrollbar(
+            self.train_left_scroll_host,
+            orient=tk.VERTICAL,
+            command=self.train_left_canvas.yview
+        )
+        self.train_left_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.train_left_canvas.configure(yscrollcommand=self.train_left_scrollbar.set)
+
+        self.train_left_content = ttk.Frame(self.train_left_canvas)
+        self.train_left_content.grid_columnconfigure(0, weight=1)
+        self.train_left_content_window = self.train_left_canvas.create_window(
+            (0, 0),
+            window=self.train_left_content,
+            anchor="nw"
+        )
+        self.train_left_content.bind("<Configure>", self._sync_train_left_scrollregion, add="+")
+        self.train_left_canvas.bind("<Configure>", self._sync_train_left_canvas_width, add="+")
+
+        settings_col = ttk.Frame(self.train_left_content)
         settings_col.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
@@ -2026,6 +2203,12 @@ class TrainingTab:
         HELP.bind_help(self.btn_step4_train_back, "tr_train_back")
         HELP.bind_help(self.btn_step4_finish, "tr_train_finish")
 
+        self.frame.after_idle(self._sync_train_left_scrollregion)
+        self.frame.after_idle(self._sync_train_left_canvas_width)
+        self.frame.bind_all("<MouseWheel>", self._on_train_left_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_train_left_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_train_left_global_mousewheel, add="+")
+
     def _build_plots_ui(self):
         self.plots_pane = ttk.PanedWindow(self.plots_tab, orient=tk.HORIZONTAL)
         self.plots_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -2195,11 +2378,12 @@ class TrainingTab:
     def _update_ratio_labels(self):
         train = float(self.train_pct.get())
         val = float(self.val_pct.get())
-        test = max(0.0, 100.0 - train - val) if self.use_test.get() else 0.0
-        if self.use_test.get() and train + val > 100.0:
-            val = max(5.0, 100.0 - train)
+        max_train_plus_val = 95.0
+        if train + val > max_train_plus_val:
+            val = max(5.0, max_train_plus_val - train)
             self.val_pct.set(val)
-            test = max(0.0, 100.0 - train - val)
+
+        test = max(5.0, 100.0 - train - val)
         self.train_lbl.configure(text=f"{train:.0f}%")
         self.val_lbl.configure(text=f"{val:.0f}%")
         self.test_lbl.configure(text=f"Test: {test:.0f}%")
@@ -2246,19 +2430,11 @@ class TrainingTab:
 
         train = float(self.train_pct.get()) / 100.0
         val = float(self.val_pct.get()) / 100.0
-
-        if self.use_test.get():
-            ratios = {
-                "train": train,
-                "val": val,
-                "test": max(0.0, 1.0 - train - val)
-            }
-        else:
-            denom = max(0.0001, train + val)
-            ratios = {
-                "train": train / denom,
-                "val": val / denom
-            }
+        ratios = {
+            "train": train,
+            "val": val,
+            "test": max(0.0, 1.0 - train - val)
+        }
 
         self.ds_progress_var.set(0)
         self.ds_status.configure(text="Rozpoczynam budowę datasetu...", foreground="black")
@@ -2318,22 +2494,15 @@ class TrainingTab:
 
         # Pokaż użytkownikowi docelową ścieżkę splitu.
         self.split_out_var.set(str(out))
+        self._set_split_feedback_visibility(True)
 
         train = float(self.train_pct.get()) / 100.0
         val = float(self.val_pct.get()) / 100.0
-
-        if self.use_test.get():
-            ratios = {
-                "train": train,
-                "val": val,
-                "test": max(0.0, 1.0 - train - val)
-            }
-        else:
-            denom = max(0.0001, train + val)
-            ratios = {
-                "train": train / denom,
-                "val": val / denom
-            }
+        ratios = {
+            "train": train,
+            "val": val,
+            "test": max(0.0, 1.0 - train - val)
+        }
 
         self.split_progress_var.set(0)
         self.split_status.config(text="Rozpoczynam podział...", foreground="black")

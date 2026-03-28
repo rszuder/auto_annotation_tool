@@ -18,7 +18,7 @@ import cv2
 from PIL import Image, ImageTk
 from .zoomable_canvas import ZoomableCanvas
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, AVAILABLE_POSE_MODELS
+from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS
 from ..icons import IconManager
 from ..annotators import VehicleAnnotator, PlateAnnotator, CombinedAnnotator
 from ..exporters import CVATExporter, ReportGenerator
@@ -43,13 +43,15 @@ class AnnotationTab:
         
         self.mode_var = tk.StringVar(value="C: Pojazdy + tablice")
         self.vehicle_model_var = tk.StringVar()
-        self.plate_model_var = tk.StringVar()
+        self.character_model_var = tk.StringVar()
         self.vehicle_custom_var = tk.StringVar()
         self.plate_custom_var = tk.StringVar()
+        self.character_custom_var = tk.StringVar()
         self.device_var = tk.StringVar(value="auto")
         self.conf_var = tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE)
         self._campaign_paths_locked = False
         self._annotation_log_visible = False
+        self._character_model_options = {}
         self.project_paths_info_var = tk.StringVar(value="")
         self.project_paths_rel_var = tk.StringVar(value="")
         # Domyślnie podpowiadaj katalog wejściowy z workspace.
@@ -57,11 +59,15 @@ class AnnotationTab:
         self.output_dir_var = tk.StringVar(value=str(Path(CONFIG.DEFAULT_OUTPUT_DIR)))
 
         self._create_widgets()
+        self._refresh_device_options()
         self._update_model_lists()
         self._on_mode_change()
 
+    def _auto_device_label(self) -> str:
+        return "auto (prefer GPU/CUDA, fallback CPU)"
+
     def _get_available_devices(self):
-        devices = ["auto", "cpu"]
+        devices = [self._auto_device_label(), "cpu"]
         try:
             import torch
             if torch.cuda.is_available():
@@ -71,8 +77,40 @@ class AnnotationTab:
         except: pass
         return devices
 
+    def _normalize_selected_device(self, raw_value: str | None = None, devices=None) -> str:
+        available = list(devices or self._get_available_devices())
+        current = str(raw_value if raw_value is not None else self.device_var.get() or "").strip()
+        current_lower = current.lower()
+
+        if not current or current_lower.startswith("auto"):
+            return available[0] if available else "auto"
+        if current_lower.startswith("cpu"):
+            return "cpu"
+        if current_lower.startswith("cuda:"):
+            prefix = current.split()[0]
+            for option in available:
+                if option.startswith(prefix):
+                    return option
+
+        return current if current in available else (available[0] if available else "auto")
+
+    def _refresh_device_options(self):
+        devices = self._get_available_devices()
+        if hasattr(self, "device_combo"):
+            try:
+                self.device_combo.configure(values=devices)
+            except Exception:
+                pass
+
+        normalized = self._normalize_selected_device(devices=devices)
+        if normalized:
+            self.device_var.set(normalized)
+
+        self._update_device_hint()
+
     def _device_to_ultralytics(self, device_str: str):
-        if not device_str or device_str == "auto":
+        raw = str(device_str or "").strip().lower()
+        if not raw or raw.startswith("auto"):
             try:
                 import torch
                 if torch.cuda.is_available():
@@ -81,16 +119,51 @@ class AnnotationTab:
                 pass
             return "cpu"
 
-        if device_str == "cpu":
+        if raw.startswith("cpu"):
             return "cpu"
 
-        if device_str.startswith("cuda:"):
+        if raw.startswith("cuda:"):
             try:
-                return int(device_str.split(":")[1].split()[0])
+                return int(str(device_str).split(":")[1].split()[0])
             except Exception:
                 return 0
 
         return "cpu"
+
+    def _update_device_hint(self, event=None):
+        label = getattr(self, "device_hint_lbl", None)
+        if label is None:
+            return
+
+        devices = self._get_available_devices()
+        normalized = self._normalize_selected_device(devices=devices)
+        current = str(self.device_var.get() or "").strip()
+        if normalized != current:
+            self.device_var.set(normalized)
+            current = normalized
+
+        palette = getattr(self.app, "palette", {})
+        gpu_devices = [item for item in devices if item.startswith("cuda:")]
+        current_lower = current.lower()
+
+        if current_lower.startswith("auto"):
+            if gpu_devices:
+                text = "Auto preferuje GPU/CUDA, a przy braku akceleracji przejdzie na CPU."
+                fg = palette.get("info", "#3498db")
+            else:
+                text = "Auto: brak CUDA, wiec autoanotacja uruchomi sie na CPU."
+                fg = palette.get("warning", "#f39c12")
+        elif current_lower.startswith("cpu"):
+            text = "CPU wymusza prace bez akceleracji GPU."
+            fg = palette.get("muted", "#9a9a9a")
+        else:
+            text = "Wybrana karta GPU zostanie uzyta do inferencji YOLO."
+            fg = palette.get("success", "#27ae60")
+
+        try:
+            label.configure(text=text, foreground=fg)
+        except Exception:
+            pass
 
     def _create_widgets(self):
         pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
@@ -117,24 +190,30 @@ class AnnotationTab:
         self.input_dir_browse_btn = ttk.Button(row_in, text="Wybierz", command=self._select_input_dir)
         self.input_dir_browse_btn.pack(side=tk.RIGHT, padx=(5,0))
 
-        self.project_paths_info_lbl = ttk.Label(
+        self.project_paths_info_lbl = tk.Label(
             paths_lf,
             textvariable=self.project_paths_info_var,
-            style="PanelInfo.TLabel",
             font=("Segoe UI", 9, "bold"),
             wraplength=360,
-            justify=tk.LEFT
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.project_paths_info_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._set_inline_label_state(self.project_paths_info_lbl, tone="info", emphasis=True)
 
-        self.project_paths_rel_lbl = ttk.Label(
+        self.project_paths_rel_lbl = tk.Label(
             paths_lf,
             textvariable=self.project_paths_rel_var,
-            style="PanelMuted.TLabel",
             wraplength=360,
-            justify=tk.LEFT
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.project_paths_rel_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 10))
+        self._set_inline_label_state(self.project_paths_rel_lbl, tone="muted", emphasis=False)
 
         ttk.Label(paths_lf, text="Katalog docelowy (tworzony automatycznie):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         row_out = ttk.Frame(paths_lf)
@@ -178,12 +257,16 @@ class AnnotationTab:
 
         self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
         self.progress.pack(fill=tk.X, pady=(15, 5))
-        self.status_label = ttk.Label(
+        self.status_label = tk.Label(
             actions_lf,
             text="Gotowy",
-            style="PanelStatusNeutral.TLabel"
+            anchor="w",
+            font=("Segoe UI", 10, "bold"),
+            bd=0,
+            highlightthickness=0
         )
         self.status_label.pack(anchor=tk.W)
+        self._set_inline_label_state(self.status_label, text="Gotowy", tone="neutral", emphasis=True)
 
         # --- ŚRODKOWA KOLUMNA (PODGLĄD + TERMINAL PROCESU) ---
         preview_host = ttk.Frame(center_frame)
@@ -244,7 +327,7 @@ class AnnotationTab:
         settings_lf.pack(fill=tk.BOTH, expand=True)
 
         self.approve_btn_row = ttk.Frame(right_frame)
-        self.approve_btn_row.pack(fill=tk.X, pady=(8, 0))
+        self.approve_btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
         self.approve_btn_row.columnconfigure(0, weight=1)
 
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
@@ -263,15 +346,38 @@ class AnnotationTab:
         ttk.Button(self.veh_custom_row, text="Wybierz", command=self._select_vehicle_custom).pack(side=tk.RIGHT, padx=(5,0))
         self.veh_custom_row.pack(fill=tk.X, pady=(5,0))
 
-        self.pla_frame = ttk.LabelFrame(settings_lf, text=" Model Tablic (Pose) ", padding=10)
+        self.pla_frame = ttk.LabelFrame(settings_lf, text=" Model Tablic (.pt / Pose) ", padding=10)
         self.pla_frame.pack(fill=tk.X, pady=(0, 10))
-        self.plate_combo = ttk.Combobox(self.pla_frame, textvariable=self.plate_model_var, state="readonly")
-        self.plate_combo.pack(fill=tk.X, pady=2)
-        self.plate_combo.bind("<<ComboboxSelected>>", self._on_plate_model_change)
+        ttk.Label(
+            self.pla_frame,
+            text="Wskaz wytrenowany model YOLO Pose (.pt) dla detekcji tablic.",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 4))
         self.pla_custom_row = ttk.Frame(self.pla_frame)
-        ttk.Entry(self.pla_custom_row, textvariable=self.plate_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(self.pla_custom_row, text="Wybierz", command=self._select_plate_custom).pack(side=tk.RIGHT, padx=(5,0))
-        self.pla_custom_row.pack(fill=tk.X, pady=(5,0))
+        self.pla_custom_row.pack(fill=tk.X, pady=2)
+        self.plate_path_entry = ttk.Entry(self.pla_custom_row, textvariable=self.plate_custom_var)
+        self.plate_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.plate_browse_btn = ttk.Button(self.pla_custom_row, text="Wybierz", command=self._select_plate_custom)
+        self.plate_browse_btn.pack(side=tk.RIGHT, padx=(5,0))
+
+        self.char_frame = ttk.LabelFrame(settings_lf, text=" Model Znakow (YOLO / Z3) ", padding=10)
+        self.char_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(
+            self.char_frame,
+            text="Opcjonalny model dla kroku Z3 / kampanii.",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 4))
+        self.character_combo = ttk.Combobox(self.char_frame, textvariable=self.character_model_var, state="readonly")
+        self.character_combo.pack(fill=tk.X, pady=2)
+        self.character_combo.bind("<<ComboboxSelected>>", self._on_character_model_change)
+        self.char_custom_row = ttk.Frame(self.char_frame)
+        ttk.Entry(self.char_custom_row, textvariable=self.character_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(self.char_custom_row, text="Wybierz", command=self._select_character_custom).pack(side=tk.RIGHT, padx=(5,0))
+        self.char_custom_row.pack(fill=tk.X, pady=(5,0))
 
         param_frame = ttk.LabelFrame(settings_lf, text=" Parametry ", padding=10)
         param_frame.pack(fill=tk.X, pady=(0, 10))
@@ -288,6 +394,17 @@ class AnnotationTab:
         ttk.Label(param_frame, text="Urządzenie (Device):").pack(anchor=tk.W, pady=(10, 0))
         self.device_combo = ttk.Combobox(param_frame, textvariable=self.device_var, values=self._get_available_devices(), state="readonly")
         self.device_combo.pack(fill=tk.X, pady=2)
+        self.device_combo.bind("<<ComboboxSelected>>", self._update_device_hint, add="+")
+
+        self.device_hint_lbl = ttk.Label(
+            param_frame,
+            text="",
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=320,
+            justify=tk.LEFT
+        )
+        self.device_hint_lbl.pack(fill=tk.X, pady=(0, 4))
 
         self.approve_btn_frame = tk.Frame(self.approve_btn_row, bd=0, highlightthickness=0)
         self.approve_btn_frame.grid(row=0, column=1, sticky="e")
@@ -312,7 +429,10 @@ class AnnotationTab:
         HELP.bind_help(row_out, "tab1_output")
         HELP.bind_help(self.mode_combo, "tab1_mode")
         HELP.bind_help(self.vehicle_combo, "tab1_model_veh")
-        HELP.bind_help(self.plate_combo, "tab1_model_pla")
+        HELP.bind_help(self.pla_frame, "tab1_model_pla")
+        HELP.bind_help(self.plate_path_entry, "tab1_model_pla")
+        HELP.bind_help(self.plate_browse_btn, "tab1_model_pla")
+        HELP.bind_help(self.character_combo, "tab1_model_char")
         HELP.bind_help(row_conf, "tab1_conf") 
         HELP.bind_help(self.device_combo, "tab1_device")
         HELP.bind_help(self.start_btn, "tab1_start")
@@ -321,7 +441,7 @@ class AnnotationTab:
         HELP.bind_help(self.preview_listbox, "tab1_preview_list")
         HELP.bind_help(self.preview_canvas, "tab1_preview_canvas")
         HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
-        HELP.bind_help(self.pla_custom_row, "tab1_custom_model")        
+        HELP.bind_help(self.char_custom_row, "tab1_custom_model")
 
     def _on_mode_change(self, event=None):
         mode = self.mode_var.get()
@@ -333,23 +453,19 @@ class AnnotationTab:
             self.veh_custom_row.pack_forget()
 
         if "B:" in mode or "C:" in mode:
-            self.plate_combo.config(state="readonly")
-            self._on_plate_model_change()
+            self._set_plate_model_controls_state(True)
         else:
-            self.plate_combo.config(state=tk.DISABLED)
-            self.pla_custom_row.pack_forget()
+            self._set_plate_model_controls_state(False)
 
     def _update_model_lists(self):
         if YOLO_AVAILABLE:
             v_keys = sorted(list(AVAILABLE_DETECT_MODELS.keys()))
             self.vehicle_combo['values'] = v_keys + ["Custom"]
-            if not self.vehicle_model_var.get() and v_keys: 
-                self.vehicle_model_var.set(v_keys[0])
-            
-            p_keys = sorted(list(AVAILABLE_POSE_MODELS.keys()))
-            self.plate_combo['values'] = p_keys + ["Custom"]
-            if not self.plate_model_var.get() and p_keys: 
-                self.plate_model_var.set("yolo11s-pose" if "yolo11s-pose" in p_keys else p_keys[0])
+            if not self.vehicle_model_var.get() and v_keys:
+                preferred_vehicle = "yolo11s" if "yolo11s" in v_keys else v_keys[0]
+                self.vehicle_model_var.set(preferred_vehicle)
+
+        self._refresh_character_model_choices()
 
     def _on_vehicle_model_change(self, event=None):
         if self.vehicle_model_var.get() == "Custom" and str(self.vehicle_combo.cget("state")) != "disabled":
@@ -357,11 +473,154 @@ class AnnotationTab:
         else:
             self.veh_custom_row.pack_forget()
 
-    def _on_plate_model_change(self, event=None):
-        if self.plate_model_var.get() == "Custom" and str(self.plate_combo.cget("state")) != "disabled":
-            self.pla_custom_row.pack(fill=tk.X, pady=(5,0))
+    def _set_plate_model_controls_state(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+
+        for widget in (
+            getattr(self, "plate_path_entry", None),
+            getattr(self, "plate_browse_btn", None),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+
+    def _get_bound_character_model_path(self) -> str:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            model_path = CAMPAIGN.get_global_model("char")
+            if model_path and Path(model_path).exists():
+                return str(Path(model_path))
+        except Exception:
+            pass
+
+        try:
+            tab_char = getattr(self.app, "tabs", {}).get("characters")
+            if tab_char is not None:
+                model_path = (tab_char.yolo_model_path_var.get() or "").strip()
+                if model_path and model_path != "Brak modelu znakow w projekcie" and Path(model_path).exists():
+                    return str(Path(model_path))
+        except Exception:
+            pass
+
+        return ""
+
+    def _collect_character_model_candidates(self, active_path: str = ""):
+        candidates = []
+        chars_dir = Path(CONFIG.DIR_6_MODELS_CHARS)
+        if chars_dir.exists():
+            candidates.extend(
+                sorted(
+                    chars_dir.rglob("*.pt"),
+                    key=lambda p: (str(p.parent).lower(), p.name.lower())
+                )
+            )
+
+        if active_path:
+            active_model = Path(active_path)
+            if active_model.exists() and active_model not in candidates:
+                candidates.append(active_model)
+
+        return candidates
+
+    def _refresh_character_model_choices(self):
+        current_path = (self._get_selected_character_model_path() or "").strip()
+        if not current_path:
+            current_path = self._get_bound_character_model_path()
+
+        options = {"Brak / OCR": ""}
+        for model_path in self._collect_character_model_candidates(current_path):
+            label = model_path.name
+            if label in options:
+                label = f"{model_path.parent.name}/{model_path.name}"
+            if label in options:
+                label = str(model_path)
+            options[label] = str(model_path)
+
+        options["Custom"] = "__custom__"
+        self._character_model_options = options
+        self.character_combo["values"] = list(options.keys())
+
+        if current_path:
+            for label, model_path in options.items():
+                if model_path == current_path:
+                    self.character_model_var.set(label)
+                    break
+            else:
+                self.character_model_var.set("Custom")
+                self.character_custom_var.set(current_path)
+        elif not self.character_model_var.get() or self.character_model_var.get() not in options:
+            self.character_model_var.set("Brak / OCR")
+
+        self._on_character_model_change(propagate=False)
+
+    def _get_selected_character_model_path(self) -> str:
+        selected = (self.character_model_var.get() or "").strip()
+        if selected == "Custom":
+            return (self.character_custom_var.get() or "").strip()
+        return self._character_model_options.get(selected, "")
+
+    def _apply_character_model_selection(self):
+        selected_path = (self._get_selected_character_model_path() or "").strip()
+        effective_path = selected_path if selected_path and Path(selected_path).exists() else ""
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_global_model("char", effective_path)
+                try:
+                    campaign_tab = getattr(self.app, "tabs", {}).get("campaign")
+                    if campaign_tab is not None:
+                        campaign_tab._refresh_dashboard()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            tab_char = getattr(self.app, "tabs", {}).get("characters")
+            if tab_char is not None:
+                tab_char.yolo_model_path_var.set(effective_path)
+
+                if effective_path:
+                    try:
+                        version, size = tab_char._infer_yolo_arch_from_model_path(effective_path)
+                        if version in {"8", "11", "26"}:
+                            tab_char.yolo_model_version_var.set(version)
+                        if size in {"n", "s", "m", "l", "x"}:
+                            tab_char.yolo_model_size_var.set(size)
+                    except Exception:
+                        pass
+
+                try:
+                    tab_char._sync_yolo_model_binding()
+                except Exception:
+                    pass
+
+                try:
+                    tab_char._update_yolo_visibility()
+                except Exception:
+                    pass
+
+                try:
+                    tab_char._force_save_all()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_character_model_change(self, event=None, propagate=True):
+        if self.character_model_var.get() == "Custom" and str(self.character_combo.cget("state")) != "disabled":
+            self.char_custom_row.pack(fill=tk.X, pady=(5,0))
         else:
-            self.pla_custom_row.pack_forget()
+            self.char_custom_row.pack_forget()
+            if self.character_model_var.get() != "Custom":
+                self.character_custom_var.set("")
+
+        if propagate:
+            self._apply_character_model_selection()
 
     # Własne modele wybieramy domyślnie z katalogu modeli.
     def _select_vehicle_custom(self):
@@ -371,6 +630,13 @@ class AnnotationTab:
     def _select_plate_custom(self):
         p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.plate_custom_var.set(p)
+
+    def _select_character_custom(self):
+        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
+        if p:
+            self.character_custom_var.set(p)
+            self.character_model_var.set("Custom")
+            self._on_character_model_change()
 
     def _select_input_dir(self):
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
@@ -432,6 +698,11 @@ class AnnotationTab:
         except Exception:
             pass
 
+        try:
+            self._update_device_hint()
+        except Exception:
+            pass
+
         frame_backgrounds = {
             "start_btn_frame": palette.get("panel", "#252526"),
             "approve_btn_frame": palette.get("bg", "#1f1f1f"),
@@ -458,18 +729,104 @@ class AnnotationTab:
             except Exception:
                 pass
 
-    def _set_status_label_state(self, text: str, tone: str = "neutral"):
-        style_map = {
-            "neutral": "PanelStatusNeutral.TLabel",
-            "info": "PanelStatusInfo.TLabel",
-            "success": "PanelStatusSuccess.TLabel",
-            "warning": "PanelStatusWarning.TLabel",
-            "error": "PanelStatusError.TLabel",
+        inline_label_defaults = {
+            "project_paths_info_lbl": ("info", True),
+            "project_paths_rel_lbl": ("muted", False),
+            "status_label": ("neutral", True),
         }
-        self.status_label.config(
-            text=text,
-            style=style_map.get(str(tone or "").lower(), "PanelStatusNeutral.TLabel")
-        )
+        for label_name, (default_tone, default_emphasis) in inline_label_defaults.items():
+            label = getattr(self, label_name, None)
+            if label is None or not isinstance(label, tk.Label):
+                continue
+            try:
+                text_value = label.cget("text")
+                try:
+                    if label.cget("textvariable"):
+                        text_value = None
+                except Exception:
+                    pass
+                self._set_inline_label_state(
+                    label,
+                    text=text_value,
+                    tone=getattr(label, "_inline_tone", default_tone),
+                    emphasis=getattr(label, "_inline_emphasis", default_emphasis),
+                )
+            except Exception:
+                pass
+
+    def _set_inline_label_state(self, widget, text: str | None = None, tone: str = "neutral", emphasis: bool = False) -> bool:
+        if widget is None or not isinstance(widget, tk.Label):
+            return False
+
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("bg", "#1f1f1f")
+
+        try:
+            parent = widget.nametowidget(widget.winfo_parent())
+        except Exception:
+            parent = None
+
+        for candidate in (parent, widget):
+            if candidate is None:
+                continue
+            try:
+                bg_candidate = candidate.cget("bg")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+            try:
+                bg_candidate = candidate.cget("background")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+            try:
+                bg_candidate = ttk.Style().lookup(candidate.winfo_class(), "background")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+
+        tone_key = str(tone or "").strip().lower()
+        fg = {
+            "default": palette.get("fg", "#f3f3f3"),
+            "neutral": palette.get("muted", "#9a9a9a"),
+            "muted": palette.get("muted", "#9a9a9a"),
+            "info": palette.get("info", palette.get("accent", "#4aa3ff")),
+            "success": palette.get("success", "#2ecc71"),
+            "warning": palette.get("warning", "#f39c12"),
+            "error": palette.get("error", "#e74c3c"),
+        }.get(tone_key, palette.get("muted", "#9a9a9a"))
+
+        config_kwargs = {
+            "bg": bg,
+            "fg": fg,
+        }
+        if text is not None:
+            config_kwargs["text"] = text
+
+        widget._inline_tone = tone_key
+        widget._inline_emphasis = bool(emphasis)
+        widget.config(**config_kwargs)
+        return True
+
+    def _set_status_label_state(self, text: str, tone: str = "neutral"):
+        if not self._set_inline_label_state(self.status_label, text=text, tone=tone, emphasis=True):
+            style_map = {
+                "neutral": "PanelStatusNeutral.TLabel",
+                "info": "PanelStatusInfo.TLabel",
+                "success": "PanelStatusSuccess.TLabel",
+                "warning": "PanelStatusWarning.TLabel",
+                "error": "PanelStatusError.TLabel",
+            }
+            self.status_label.config(
+                text=text,
+                style=style_map.get(str(tone or "").lower(), "PanelStatusNeutral.TLabel")
+            )
 
     def _set_annotation_process_log_visibility(self, visible: bool):
         if not hasattr(self, "annotation_log_frame"):
@@ -500,10 +857,9 @@ class AnnotationTab:
                 if not validate_model_file(Path(p))[0]: raise ValueError("Model pojazdów jest uszkodzony!")
         
         if "B:" in mode or "C:" in mode:
-            if self.plate_model_var.get() == "Custom":
-                p = self.plate_custom_var.get()
-                if not p or not Path(p).exists(): raise ValueError("Nie znaleziono własnego modelu tablic!")
-                if not validate_model_file(Path(p))[0]: raise ValueError("Model tablic jest uszkodzony!")
+            p = (self.plate_custom_var.get() or "").strip()
+            if not p or not Path(p).exists(): raise ValueError("Wskaż wytrenowany model tablic (.pt)!")
+            if not validate_model_file(Path(p))[0]: raise ValueError("Model tablic jest uszkodzony!")
 
     def clear_campaign_context(self):
         """
@@ -515,17 +871,25 @@ class AnnotationTab:
 
         self.mode_var.set("C: Pojazdy + tablice")
         self.device_var.set("auto")
+        try:
+            self._refresh_device_options()
+        except Exception:
+            pass
 
         try:
             if YOLO_AVAILABLE:
                 v_keys = sorted(list(AVAILABLE_DETECT_MODELS.keys()))
-                p_keys = sorted(list(AVAILABLE_POSE_MODELS.keys()))
 
                 if v_keys:
-                    self.vehicle_model_var.set(v_keys[0])
+                    preferred_vehicle = "yolo11s" if "yolo11s" in v_keys else v_keys[0]
+                    self.vehicle_model_var.set(preferred_vehicle)
+        except Exception:
+            pass
 
-                if p_keys:
-                    self.plate_model_var.set("yolo11s-pose" if "yolo11s-pose" in p_keys else p_keys[0])
+        try:
+            self.character_model_var.set("Brak / OCR")
+            self.character_custom_var.set("")
+            self._refresh_character_model_choices()
         except Exception:
             pass
 
@@ -545,12 +909,17 @@ class AnnotationTab:
             pass
 
         try:
+            self._refresh_device_options()
+        except Exception:
+            pass
+
+        try:
             self._on_vehicle_model_change()
         except Exception:
             pass
 
         try:
-            self._on_plate_model_change()
+            self._set_plate_model_controls_state("B:" in self.mode_var.get() or "C:" in self.mode_var.get())
         except Exception:
             pass
 
@@ -714,8 +1083,11 @@ class AnnotationTab:
         self.input_dir_var.set(str(input_dir))
         self.output_dir_var.set(str(output_dir))
         self.mode_var.set("C: Pojazdy + tablice")
+        self.character_model_var.set("Brak / OCR")
+        self.character_custom_var.set("")
         self._on_mode_change()
         self._set_campaign_paths_lock_state(True)
+        self._refresh_character_model_choices()
         self._pulse_action_frame("start_btn_pulse_frame")
 
     def _get_model_path(self, model_type: str) -> Path:
@@ -723,8 +1095,7 @@ class AnnotationTab:
             if self.vehicle_model_var.get() == "Custom": return Path(self.vehicle_custom_var.get())
             else: return Path(CONFIG.DEFAULT_MODELS_DIR) / AVAILABLE_DETECT_MODELS[self.vehicle_model_var.get()]["file"]
         else:
-            if self.plate_model_var.get() == "Custom": return Path(self.plate_custom_var.get())
-            else: return Path(CONFIG.DEFAULT_MODELS_DIR) / AVAILABLE_POSE_MODELS[self.plate_model_var.get()]["file"]
+            return Path(self.plate_custom_var.get())
 
     def _start_annotation(self):
         in_d = self.input_dir_var.get().strip()
@@ -735,8 +1106,9 @@ class AnnotationTab:
             self._validate_models()
             mode_text = self.mode_var.get()
             conf = self.conf_var.get()
-            raw_dev = self.device_var.get().split()[0].lower()
-            dev = self._device_to_ultralytics(raw_dev)
+            selected_device = self._normalize_selected_device()
+            self.device_var.set(selected_device)
+            dev = self._device_to_ultralytics(selected_device)
             
             v_p = self._get_model_path("vehicle") if ("A:" in mode_text or "C:" in mode_text) else None
             p_p = self._get_model_path("plate") if ("B:" in mode_text or "C:" in mode_text) else None
@@ -776,6 +1148,7 @@ class AnnotationTab:
             logger.info("="*50)
             logger.info("ROZPOCZĘTO AUTOANOTACJĘ OBRAZÓW (YOLO)")
             logger.info("="*50)
+            logger.info(f"Urzadzenie Z2: {selected_device} -> runtime={dev}")
             
             threading.Thread(target=self._process_thread, args=(Path(in_d), Path(self.output_dir_var.get())), daemon=True).start()
             
