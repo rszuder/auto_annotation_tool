@@ -390,6 +390,38 @@ AVAILABLE_DETECT_MODELS = {
         "params": "56.9M",
         "description": "Najwyższa dokładność v11"
     },
+
+    # YOLOv26
+    "yolo26n": {
+        "name": "YOLOv26 Nano (COCO)",
+        "file": "yolo26n.pt",
+        "params": "2.8M",
+        "description": "Nano v26, bardzo szybki"
+    },
+    "yolo26s": {
+        "name": "YOLOv26 Small (COCO)",
+        "file": "yolo26s.pt",
+        "params": "9.8M",
+        "description": "Small v26, rekomendowany dla pojazdow"
+    },
+    "yolo26m": {
+        "name": "YOLOv26 Medium (COCO)",
+        "file": "yolo26m.pt",
+        "params": "21.5M",
+        "description": "Medium v26, wyzsza dokladnosc dla pojazdow"
+    },
+    "yolo26l": {
+        "name": "YOLOv26 Large (COCO)",
+        "file": "yolo26l.pt",
+        "params": "28.4M",
+        "description": "Large v26, wysoka dokladnosc"
+    },
+    "yolo26x": {
+        "name": "YOLOv26 XLarge (COCO)",
+        "file": "yolo26x.pt",
+        "params": "62.1M",
+        "description": "XLarge v26, najwyzsza precyzja detect"
+    },
 }
 
 # ============================================================================

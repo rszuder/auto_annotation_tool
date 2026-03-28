@@ -10,7 +10,7 @@ Logicznie podzielona na:
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import threading
 import xml.etree.ElementTree as ET
 import json
@@ -88,6 +88,8 @@ class CharacterAnnotationTab:
         self.fast_test_running = False
         self._project_reset_token = 0
         self._detection_log_visible = False
+        self._source_binding_after_id = None
+        self._source_binding_sync_in_progress = False
 
         # presets (global; later can be project-scoped)
         self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
@@ -110,6 +112,10 @@ class CharacterAnnotationTab:
         self.yolo_model_version_var = tk.StringVar(value=get_val("char_yolo_version", "11"))
         self.yolo_device_var = tk.StringVar(value=get_val("char_yolo_device", "auto"))
         self.yolo_model_size_var = tk.StringVar(value=get_val("char_yolo_size", "s"))
+        self.yolo_conf_var = tk.DoubleVar(value=float(get_val("char_yolo_conf", 0.25)))
+        self.yolo_iou_var = tk.DoubleVar(value=float(get_val("char_yolo_iou", 0.45)))
+        self.yolo_overlap_var = tk.DoubleVar(value=float(get_val("char_yolo_overlap", 0.70)))
+        self.yolo_agnostic_nms_var = tk.BooleanVar(value=bool(get_val("char_yolo_agnostic_nms", False)))
         self.preview_dir_var = tk.StringVar(value=get_val("char_preview_dir", ""))
 
         self.ocr_conf_var = tk.DoubleVar(value=float(get_val("char_ocr_conf", 0.25)))
@@ -130,10 +136,12 @@ class CharacterAnnotationTab:
         self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
 
         self._create_widgets()
+        self._bind_source_path_watchers()
   
         self._update_step3_source_path_lock()
         self._update_preview_path_lock()
         self.reset_subtab_flow()
+        self._schedule_source_binding_refresh(delay_ms=0)
 
         if not CAMPAIGN.get_active_project_name():
             self._clear_project_bound_session_values(clear_ui=True)
@@ -314,6 +322,58 @@ class CharacterAnnotationTab:
 
         prepared.sort(key=lambda item: (item[0], item[1]))
         return [rec for _, _, rec in prepared]
+
+    def _get_preview_box_records(self, data: dict):
+        canonical_chars = self._sort_character_records_by_x(data.get("characters", []))
+        yolo_raw = self._sort_character_records_by_x(data.get("yolo_detections", []))
+        method_name = (self.detection_method_var.get() or "OCR").upper().strip()
+
+        if method_name == "YOLO" and yolo_raw:
+            return yolo_raw, "yolo"
+
+        if method_name == "YOLO":
+            yolo_from_canonical = [
+                rec for rec in canonical_chars
+                if isinstance(rec, dict) and str(rec.get("method", "")).strip().lower() == "yolo"
+            ]
+            if yolo_from_canonical:
+                return self._sort_character_records_by_x(yolo_from_canonical), "yolo"
+
+        return canonical_chars, "canonical"
+
+    def _get_preview_box_palette(self, index: int):
+        palettes = [
+            ("#ff6b6b", "#ffc1c1", "#ffe9e9"),
+            ("#4ecdc4", "#a6f4ef", "#e8fffd"),
+            ("#ffd166", "#ffe29a", "#fff7db"),
+            ("#6c5ce7", "#c8bfff", "#f0edff"),
+            ("#00b894", "#7ee6ca", "#ebfff8"),
+            ("#0984e3", "#74b9ff", "#ecf7ff"),
+            ("#e17055", "#fab1a0", "#fff1ec"),
+            ("#a29bfe", "#d6d1ff", "#f5f4ff"),
+            ("#e84393", "#ffb0d5", "#fff0f7"),
+            ("#2d98da", "#8fd0ff", "#eef8ff"),
+        ]
+        return palettes[index % len(palettes)]
+
+    def _get_yolo_runtime_settings(self):
+        conf = float(self.yolo_conf_var.get())
+        iou = float(self.yolo_iou_var.get())
+        overlap = float(self.yolo_overlap_var.get())
+
+        if not (0.0 <= conf <= 1.0):
+            raise ValueError("Próg confidence YOLO musi być w zakresie 0.00-1.00.")
+        if not (0.01 <= iou <= 0.99):
+            raise ValueError("Próg NMS IoU musi być w zakresie 0.01-0.99.")
+        if not (0.0 <= overlap <= 1.0):
+            raise ValueError("Próg nakładania boxów musi być w zakresie 0.00-1.00.")
+
+        return {
+            "conf": conf,
+            "iou": iou,
+            "overlap": overlap,
+            "agnostic_nms": bool(self.yolo_agnostic_nms_var.get()),
+        }
 
 
     def _characters_to_text(self, chars) -> str:
@@ -564,7 +624,15 @@ class CharacterAnnotationTab:
                 self.btn_toggle_detection_log.config(text="Ukryj terminal")
             else:
                 self.detection_log_frame.grid_remove()
+                self.btn_toggle_detection_log.config(text="Pokaz terminal")
                 self.btn_toggle_detection_log.config(text="Pokaż terminal")
+        except Exception:
+            pass
+
+        try:
+            self.btn_toggle_detection_log.config(
+                text="Ukryj terminal" if self._detection_log_visible else "Pokaz terminal"
+            )
         except Exception:
             pass
 
@@ -656,6 +724,7 @@ class CharacterAnnotationTab:
 
         try:
             self.test_progress.config(value=0)
+            self._set_test_progress_counter()
         except Exception:
             pass
 
@@ -771,6 +840,16 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            if hasattr(self, "detect_right_canvas"):
+                self.detect_right_canvas.configure(
+                    bg=palette.get("panel", "#252526"),
+                    highlightbackground=console_border,
+                    highlightcolor=console_border
+                )
+        except Exception:
+            pass
+
         for frame_name in (
             "btn_to_detect_frame",
             "btn_run_detection_frame",
@@ -796,12 +875,130 @@ class CharacterAnnotationTab:
             ("cvat_import_desc_lbl", "PanelMuted.TLabel"),
         ):
             label = getattr(self, label_name, None)
-            if label is None:
+            if label is None or isinstance(label, tk.Label):
                 continue
             try:
                 label.configure(style=style_name)
             except Exception:
                 pass
+
+        inline_label_defaults = {
+            "ext_status": ("neutral", True),
+            "source_binding_status_lbl": ("warning", False),
+            "test_status_lbl": ("neutral", True),
+            "test_progress_count_lbl": ("muted", True),
+            "winner_name_lbl": ("neutral", True),
+            "winner_acc_lbl": ("muted", False),
+            "preview_info_lbl": ("info", False),
+            "footer_test_status_lbl": ("neutral", True),
+            "cvat_option1_title_lbl": ("error", True),
+            "cvat_option2_title_lbl": ("success", True),
+            "cvat_option1_desc_lbl": ("muted", False),
+            "cvat_option2_desc_lbl": ("muted", False),
+            "cvat_import_title_lbl": ("default", True),
+            "cvat_import_desc_lbl": ("muted", False),
+        }
+
+        for label_name, (default_tone, default_emphasis) in inline_label_defaults.items():
+            label = getattr(self, label_name, None)
+            if label is None or not isinstance(label, tk.Label):
+                continue
+            try:
+                self._set_inline_status_label_state(
+                    label,
+                    text=label.cget("text"),
+                    tone=getattr(label, "_inline_status_tone", default_tone),
+                    emphasis=getattr(label, "_inline_status_emphasis", default_emphasis),
+                )
+            except Exception:
+                pass
+
+    def _sync_detect_right_scrollregion(self, event=None):
+        if not hasattr(self, "detect_right_canvas") or self.detect_right_canvas is None:
+            return
+
+        try:
+            self.detect_right_canvas.configure(scrollregion=self.detect_right_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_detect_right_canvas_width(self, event=None):
+        if not hasattr(self, "detect_right_canvas") or self.detect_right_canvas is None:
+            return
+
+        try:
+            width = max(50, int(self.detect_right_canvas.winfo_width()))
+            self.detect_right_canvas.itemconfigure(self.detect_right_content_window, width=width)
+        except Exception:
+            pass
+
+    def _widget_contains_point(self, widget, x_root: int, y_root: int) -> bool:
+        if widget is None:
+            return False
+        try:
+            wx = int(widget.winfo_rootx())
+            wy = int(widget.winfo_rooty())
+            return wx <= x_root < (wx + int(widget.winfo_width())) and wy <= y_root < (wy + int(widget.winfo_height()))
+        except Exception:
+            return False
+
+    def _mousewheel_units(self, event) -> int:
+        event_num = getattr(event, "num", None)
+        if event_num == 4:
+            return -1
+        if event_num == 5:
+            return 1
+
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        if abs(delta) >= 120:
+            units = -int(delta / 120)
+        else:
+            units = -1 if delta > 0 else 1
+        return units if units != 0 else (-1 if delta > 0 else 1)
+
+    def _detect_right_canvas_overflows(self) -> bool:
+        canvas = getattr(self, "detect_right_canvas", None)
+        if canvas is None:
+            return False
+
+        try:
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return False
+            content_height = int(bbox[3]) - int(bbox[1])
+            viewport_height = int(canvas.winfo_height())
+            return content_height > viewport_height + 1
+        except Exception:
+            return False
+
+    def _on_detect_right_global_mousewheel(self, event):
+        canvas = getattr(self, "detect_right_canvas", None)
+        if canvas is None:
+            return None
+
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+        except Exception:
+            return None
+
+        if not self._widget_contains_point(canvas, x_root, y_root):
+            return None
+
+        if not self._detect_right_canvas_overflows():
+            return None
+
+        try:
+            canvas.yview_scroll(units, "units")
+        except Exception:
+            return "break"
+        return "break"
 
     def _panel_style_name(self, tone: str = "neutral", emphasis: bool = False) -> str:
         tone_key = str(tone or "").strip().lower()
@@ -834,20 +1031,126 @@ class CharacterAnnotationTab:
 
         widget.config(**config_kwargs)
 
+    def _set_inline_status_label_state(self, widget, text: str | None = None, tone: str = "neutral", emphasis: bool = False) -> bool:
+        if widget is None or not isinstance(widget, tk.Label):
+            return False
+
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("bg", "#1f1f1f")
+        try:
+            parent = widget.nametowidget(widget.winfo_parent())
+        except Exception:
+            parent = None
+
+        for candidate in (parent, widget):
+            if candidate is None:
+                continue
+            try:
+                bg_candidate = candidate.cget("bg")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+            try:
+                bg_candidate = candidate.cget("background")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+            try:
+                style_name = candidate.winfo_class()
+                bg_candidate = ttk.Style().lookup(style_name, "background")
+                if bg_candidate:
+                    bg = bg_candidate
+                    break
+            except Exception:
+                pass
+
+        tone_key = str(tone or "").strip().lower()
+        fg = {
+            "default": palette.get("fg", "#f3f3f3"),
+            "neutral": palette.get("muted", "#9a9a9a"),
+            "muted": palette.get("muted", "#9a9a9a"),
+            "info": palette.get("info", palette.get("accent", "#4aa3ff")),
+            "success": palette.get("success", "#2ecc71"),
+            "warning": palette.get("warning", "#f39c12"),
+            "error": palette.get("error", "#e74c3c"),
+        }.get(tone_key, palette.get("muted", "#9a9a9a"))
+
+        config_kwargs = {
+            "bg": bg,
+            "fg": fg,
+            "font": ("Segoe UI", 10, "bold") if emphasis else ("Segoe UI", 9),
+        }
+        if text is not None:
+            config_kwargs["text"] = text
+
+        widget._inline_status_tone = tone_key
+        widget._inline_status_emphasis = bool(emphasis)
+        widget.config(**config_kwargs)
+        return True
+
     def _set_extraction_status(self, text: str, tone: str = "neutral"):
-        self._set_themed_label_state(getattr(self, "ext_status", None), text=text, tone=tone, emphasis=True)
+        label = getattr(self, "ext_status", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=True):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
+
+    def _set_source_binding_status(self, text: str, tone: str = "warning"):
+        label = getattr(self, "source_binding_status_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
 
     def _set_test_status(self, text: str, tone: str = "neutral"):
-        self._set_themed_label_state(getattr(self, "test_status_lbl", None), text=text, tone=tone, emphasis=True)
+        label = getattr(self, "test_status_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=True):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
+
+    def _set_test_progress_counter(self, current: int | None = None, total: int | None = None):
+        label = getattr(self, "test_progress_count_lbl", None)
+        if label is None:
+            return
+
+        if current is None or total is None or total <= 0:
+            text = ""
+            tone = "muted"
+        else:
+            current = max(0, min(int(current), int(total)))
+            text = f"{current}/{int(total)}"
+            tone = "info" if current < int(total) else "success"
+
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=True):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
+
+    def _update_detection_progress_ui(self, current: int, total: int, session_token=None):
+        if session_token is not None and session_token != self._project_reset_token:
+            return
+
+        pct = ((max(0, int(current)) / max(1, int(total))) * 100.0) if total else 0.0
+
+        try:
+            self.test_progress.config(value=pct)
+        except Exception:
+            pass
+
+        self._set_test_progress_counter(current, total)
+        self._set_test_status("Detekcja w toku", "warning")
 
     def _set_preview_info(self, text: str, tone: str = "info"):
-        self._set_themed_label_state(getattr(self, "preview_info_lbl", None), text=text, tone=tone, emphasis=False)
+        label = getattr(self, "preview_info_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
 
     def _set_winner_name(self, text: str, tone: str = "neutral"):
-        self._set_themed_label_state(getattr(self, "winner_name_lbl", None), text=text, tone=tone, emphasis=True)
+        label = getattr(self, "winner_name_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=True):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
 
     def _set_winner_acc(self, text: str, tone: str = "muted"):
-        self._set_themed_label_state(getattr(self, "winner_acc_lbl", None), text=text, tone=tone, emphasis=False)
+        label = getattr(self, "winner_acc_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
 
     def _get_campaign_char_model_path(self) -> str:
         """
@@ -958,6 +1261,387 @@ class CharacterAnnotationTab:
                 widget.config(state=button_state)
             except Exception as e:
                 logger.debug(f"Nie udało się ustawić stanu {attr_name}: {e}")
+
+    def _bind_source_path_watchers(self):
+        if getattr(self, "_source_binding_watchers_bound", False):
+            return
+
+        self._source_binding_watchers_bound = True
+        for var in (self.xml_path_var, self.images_dir_var):
+            try:
+                var.trace_add("write", self._on_source_path_var_changed)
+            except Exception as e:
+                logger.debug(f"Nie udało się podpiąć watcherów źródeł Z3/PZ1: {e}")
+
+    def _on_source_path_var_changed(self, *_args):
+        if getattr(self, "_source_binding_sync_in_progress", False):
+            return
+        self._schedule_source_binding_refresh()
+
+    def _schedule_source_binding_refresh(self, delay_ms: int = 150):
+        if not hasattr(self, "frame") or self.frame is None:
+            return
+
+        pending = getattr(self, "_source_binding_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+
+        self._source_binding_after_id = self.frame.after(delay_ms, self._refresh_source_binding_status)
+
+    def _normalize_xml_image_relpath(self, raw_name: str) -> str:
+        raw = str(raw_name or "").strip().replace("\\", "/")
+        while raw.startswith("./"):
+            raw = raw[2:]
+
+        parts = [part for part in PurePosixPath(raw).parts if part not in ("", ".")]
+        return "/".join(parts)
+
+    def _xml_relpath_to_path(self, rel_path: str) -> Path:
+        parts = [part for part in PurePosixPath(rel_path).parts if part not in ("", ".")]
+        return Path(*parts) if parts else Path()
+
+    def _read_xml_image_names(self, xml_path: Path) -> list[str]:
+        tree = ET.parse(xml_path)
+        names = []
+
+        for image_el in tree.getroot().findall(".//image"):
+            normalized = self._normalize_xml_image_relpath(image_el.get("name") or "")
+            if normalized:
+                names.append(normalized)
+
+        return list(dict.fromkeys(names))
+
+    def _evaluate_images_dir_for_xml(self, images_dir: Path, xml_image_names: list[str]) -> dict:
+        matched = 0
+        missing = []
+
+        for rel_name in xml_image_names:
+            candidate = images_dir / self._xml_relpath_to_path(rel_name)
+            if candidate.exists() and candidate.is_file():
+                matched += 1
+            else:
+                missing.append(rel_name)
+
+        return {
+            "images_dir": images_dir,
+            "total": len(xml_image_names),
+            "matched": matched,
+            "missing_count": len(missing),
+            "missing": missing,
+        }
+
+    def _summarize_missing_xml_images(self, missing: list[str], limit: int = 3) -> str:
+        if not missing:
+            return ""
+
+        preview = ", ".join(missing[:limit])
+        if len(missing) > limit:
+            preview += ", ..."
+        return f"Brakuje {len(missing)} plików z XML, np. {preview}."
+
+    def _is_path_within(self, path: Path, root: Path) -> bool:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except Exception:
+            return False
+
+    def _get_preferred_source_roots(self) -> list[Path]:
+        roots = []
+
+        try:
+            campaign_raw = CAMPAIGN.get_dir("raw")
+            if campaign_raw:
+                roots.append(Path(campaign_raw))
+        except Exception:
+            pass
+
+        try:
+            roots.append(Path(CONFIG.DIR_1_RAW))
+        except Exception:
+            pass
+
+        unique = []
+        seen = set()
+        for root in roots:
+            try:
+                resolved = str(root.resolve())
+            except Exception:
+                resolved = str(root)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if root.exists() and root.is_dir():
+                unique.append(root)
+
+        return unique
+
+    def _is_recommended_images_dir(self, images_dir: Path) -> bool:
+        for root in self._get_preferred_source_roots():
+            if self._is_path_within(images_dir, root):
+                return True
+        return False
+
+    def _derive_candidate_root_for_match(self, found_file: Path, xml_rel_name: str) -> Path | None:
+        parts = [part for part in PurePosixPath(xml_rel_name).parts if part not in ("", ".")]
+        if not parts:
+            return None
+
+        ascend_levels = len(parts) - 1
+        parents = found_file.parents
+        if ascend_levels >= len(parents):
+            return None
+
+        candidate_root = parents[ascend_levels]
+        try:
+            candidate_target = (candidate_root / self._xml_relpath_to_path(xml_rel_name)).resolve()
+            if candidate_target != found_file.resolve():
+                return None
+        except Exception:
+            return None
+
+        return candidate_root
+
+    def _find_matching_images_dir_for_xml(self, xml_image_names: list[str]) -> dict | None:
+        if not xml_image_names:
+            return None
+
+        search_roots = self._get_preferred_source_roots()
+        if not search_roots:
+            return None
+
+        sample_names = xml_image_names[: min(24, len(xml_image_names))]
+        sample_by_basename = {}
+        for rel_name in sample_names:
+            sample_by_basename.setdefault(PurePosixPath(rel_name).name, []).append(rel_name)
+
+        candidate_hits = {}
+
+        for search_root in search_roots:
+            try:
+                for file_path in search_root.rglob("*"):
+                    if not file_path.is_file():
+                        continue
+
+                    candidate_rel_names = sample_by_basename.get(file_path.name)
+                    if not candidate_rel_names:
+                        continue
+
+                    for rel_name in candidate_rel_names:
+                        candidate_root = self._derive_candidate_root_for_match(file_path, rel_name)
+                        if candidate_root is None:
+                            continue
+
+                        try:
+                            key = str(candidate_root.resolve())
+                        except Exception:
+                            key = str(candidate_root)
+
+                        entry = candidate_hits.setdefault(
+                            key,
+                            {
+                                "images_dir": candidate_root,
+                                "sample_hits": set(),
+                            },
+                        )
+                        entry["sample_hits"].add(rel_name)
+            except Exception as e:
+                logger.debug(f"Nie udało się przeskanować {search_root} podczas auto-odnajdywania paczki obrazów: {e}")
+
+        if not candidate_hits:
+            return None
+
+        ranked_candidates = sorted(
+            candidate_hits.values(),
+            key=lambda item: (len(item["sample_hits"]), -len(str(item["images_dir"]))),
+            reverse=True,
+        )
+
+        best_match = None
+        best_score = None
+
+        for candidate in ranked_candidates[:8]:
+            stats = self._evaluate_images_dir_for_xml(candidate["images_dir"], xml_image_names)
+            stats["sample_hits"] = len(candidate["sample_hits"])
+            score = (stats["matched"], -stats["missing_count"], stats["sample_hits"])
+
+            if best_match is None or score > best_score:
+                best_match = stats
+                best_score = score
+
+        return best_match
+
+    def _refresh_source_binding_status(self, allow_autofind: bool = True) -> dict:
+        self._source_binding_after_id = None
+
+        xml_raw = (self.xml_path_var.get() or "").strip()
+        images_raw = (self.images_dir_var.get() or "").strip()
+        base_note = "Plik annotations.xml i paczka obrazów są nierozerwalnie powiązane."
+
+        result = {
+            "ok": False,
+            "tone": "warning",
+            "message": "",
+            "matched": 0,
+            "total": 0,
+            "missing_count": 0,
+        }
+
+        if not xml_raw:
+            result["message"] = (
+                f"{base_note} Wskaż annotations.xml, a system spróbuje odnaleźć właściwą paczkę w "
+                "Workspace/1_raw_images/."
+            )
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        xml_path = Path(xml_raw)
+        if not xml_path.exists():
+            result["tone"] = "error"
+            result["message"] = (
+                f"Nie znaleziono pliku annotations.xml. {base_note} Wskaż poprawny XML wygenerowany dla tej samej paczki."
+            )
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        try:
+            xml_image_names = self._read_xml_image_names(xml_path)
+        except Exception as e:
+            result["tone"] = "error"
+            result["message"] = f"Nie mogę odczytać annotations.xml: {e}"
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        if not xml_image_names:
+            result["tone"] = "error"
+            result["message"] = (
+                "Ten plik XML nie zawiera listy obrazów, więc nie da się powiązać go z paczką źródłową."
+            )
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        current_images_dir = Path(images_raw) if images_raw else None
+        current_stats = None
+
+        if current_images_dir and current_images_dir.exists() and current_images_dir.is_dir():
+            current_stats = self._evaluate_images_dir_for_xml(current_images_dir, xml_image_names)
+        elif current_images_dir:
+            result["tone"] = "error"
+            result["message"] = (
+                f"Nie znaleziono wskazanej paczki obrazów: {current_images_dir}. {base_note}"
+            )
+
+        best_candidate = None
+        need_autofind = allow_autofind and (
+            current_stats is None or current_stats["matched"] < current_stats["total"]
+        )
+
+        if need_autofind:
+            best_candidate = self._find_matching_images_dir_for_xml(xml_image_names)
+            if best_candidate and best_candidate["matched"] == best_candidate["total"]:
+                candidate_dir = Path(best_candidate["images_dir"])
+                same_as_current = False
+                if current_images_dir:
+                    try:
+                        same_as_current = candidate_dir.resolve() == current_images_dir.resolve()
+                    except Exception:
+                        same_as_current = candidate_dir == current_images_dir
+
+                if not same_as_current:
+                    self._source_binding_sync_in_progress = True
+                    try:
+                        self.images_dir_var.set(str(candidate_dir))
+                    finally:
+                        self._source_binding_sync_in_progress = False
+                    try:
+                        self._force_save_all()
+                    except Exception:
+                        pass
+
+                current_images_dir = candidate_dir
+                current_stats = best_candidate
+                result["auto_found"] = True
+
+        if current_stats and current_stats["matched"] == current_stats["total"]:
+            recommended = self._is_recommended_images_dir(Path(current_stats["images_dir"]))
+            result.update(
+                {
+                    "ok": True,
+                    "tone": "success" if recommended else "warning",
+                    "matched": current_stats["matched"],
+                    "total": current_stats["total"],
+                    "missing_count": 0,
+                }
+            )
+
+            if result.get("auto_found"):
+                result["message"] = (
+                    f"Powiązanie potwierdzone. Auto-odnaleziono paczkę obrazów: "
+                    f"{current_stats['matched']}/{current_stats['total']} plików z XML w "
+                    f"{current_stats['images_dir']}."
+                )
+            elif recommended:
+                result["message"] = (
+                    f"Powiązanie potwierdzone: {current_stats['matched']}/{current_stats['total']} plików z XML "
+                    f"znaleziono w tej paczce obrazów."
+                )
+            else:
+                result["message"] = (
+                    f"Powiązanie XML-paczka jest poprawne ({current_stats['matched']}/{current_stats['total']}), "
+                    f"ale źródła są poza Workspace/1_raw_images/. To działa w trybie swobodnym, lecz nie jest zalecane."
+                )
+
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        if current_stats:
+            missing_hint = self._summarize_missing_xml_images(current_stats["missing"])
+            result.update(
+                {
+                    "matched": current_stats["matched"],
+                    "total": current_stats["total"],
+                    "missing_count": current_stats["missing_count"],
+                    "tone": "error",
+                }
+            )
+            result["message"] = (
+                f"Wybrana paczka obrazów nie pasuje do tego XML: znaleziono "
+                f"{current_stats['matched']}/{current_stats['total']} wymaganych plików. {missing_hint}"
+            ).strip()
+
+            if best_candidate and best_candidate["matched"] > current_stats["matched"]:
+                result["message"] += (
+                    f" Najlepszy kandydat w Workspace/1_raw_images/ daje "
+                    f"{best_candidate['matched']}/{best_candidate['total']} dopasowań."
+                )
+
+            self._set_source_binding_status(result["message"], result["tone"])
+            return result
+
+        if best_candidate and best_candidate["matched"] > 0:
+            result.update(
+                {
+                    "matched": best_candidate["matched"],
+                    "total": best_candidate["total"],
+                    "missing_count": best_candidate["missing_count"],
+                    "tone": "warning",
+                    "message": (
+                        f"Nie udało się jednoznacznie potwierdzić paczki obrazów. Najlepszy kandydat w "
+                        f"Workspace/1_raw_images/ zawiera {best_candidate['matched']}/{best_candidate['total']} plików z XML."
+                    ),
+                }
+            )
+        elif not images_raw:
+            result["message"] = (
+                f"{base_note} Wskaż paczkę obrazów, na których wykonano anotacje. "
+                "Jeśli leży w Workspace/1_raw_images/, system odnajdzie ją automatycznie."
+            )
+
+        self._set_source_binding_status(result["message"], result["tone"])
+        return result
 
     def _count_preview_statuses(self):
         perfect = 0
@@ -1605,6 +2289,7 @@ class CharacterAnnotationTab:
         # wyczyść stan ostatniego testu
         try:
             self.test_progress.config(value=0)
+            self._set_test_progress_counter()
         except Exception:
             pass
 
@@ -1904,6 +2589,10 @@ class CharacterAnnotationTab:
                 ("char_yolo_device", self.yolo_device_var),
                 ("char_yolo_size", self.yolo_model_size_var),
                 ("char_yolo_version", self.yolo_model_version_var),
+                ("char_yolo_conf", self.yolo_conf_var),
+                ("char_yolo_iou", self.yolo_iou_var),
+                ("char_yolo_overlap", self.yolo_overlap_var),
+                ("char_yolo_agnostic_nms", self.yolo_agnostic_nms_var),
                 ("char_ocr_conf", self.ocr_conf_var),
                 ("char_smart_export", self.smart_export_var),
                 ("char_prep_angle", self.prep_angle_var),
@@ -1977,6 +2666,20 @@ class CharacterAnnotationTab:
                 "readonly" if (is_yolo or is_hybrid) else "disabled"
             )
 
+        for attr_name in ("yolo_conf_spin", "yolo_iou_spin", "yolo_overlap_spin"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                self._set_widget_state(
+                    widget,
+                    "normal" if (is_yolo or is_hybrid) else "disabled"
+                )
+
+        if hasattr(self, "yolo_agnostic_nms_chk"):
+            self._set_widget_state(
+                self.yolo_agnostic_nms_chk,
+                "normal" if (is_yolo or is_hybrid) else "disabled"
+            )
+
         # w trybie kampanii ścieżka modelu jest sterowana z Wizarda
         path_locked = bool(getattr(self, "_step3_linear_mode", False))
 
@@ -2038,28 +2741,104 @@ class CharacterAnnotationTab:
                     "success"
                 )
 
+    def _auto_device_label(self) -> str:
+        return "auto (prefer GPU/CUDA, fallback CPU)"
+
     def _get_available_devices(self):
-        devices = ["auto", "cpu"]
+        devices = [self._auto_device_label(), "cpu"]
         try:
             import torch
             if torch.cuda.is_available():
                 for i in range(torch.cuda.device_count()):
-                    devices.append(f"cuda:{i}")
+                    name = torch.cuda.get_device_name(i)
+                    devices.append(f"cuda:{i} ({name})")
         except Exception:
             pass
         return devices
 
-    def _device_to_ultralytics(self, s: str):
-        if s == "auto":
-            return "auto"
-        if s == "cpu":
+    def _normalize_selected_device(self, raw_value: str | None = None, devices=None) -> str:
+        available = list(devices or self._get_available_devices())
+        current = str(raw_value if raw_value is not None else self.yolo_device_var.get() or "").strip()
+        current_lower = current.lower()
+
+        if not current or current_lower.startswith("auto"):
+            return available[0] if available else "auto"
+        if current_lower.startswith("cpu"):
             return "cpu"
-        if s.startswith("cuda:"):
+        if current_lower.startswith("cuda:"):
+            prefix = current.split()[0]
+            for option in available:
+                if option.startswith(prefix):
+                    return option
+
+        return current if current in available else (available[0] if available else "auto")
+
+    def _refresh_device_options(self):
+        devices = self._get_available_devices()
+        if hasattr(self, "det_device_combo"):
             try:
-                return int(s.split(":")[1].split()[0])
+                self.det_device_combo.configure(values=devices)
+            except Exception:
+                pass
+
+        normalized = self._normalize_selected_device(devices=devices)
+        if normalized:
+            self.yolo_device_var.set(normalized)
+
+        self._update_device_hint()
+
+    def _device_to_ultralytics(self, s: str):
+        raw = str(s or "").strip().lower()
+        if not raw or raw.startswith("auto"):
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return 0
+            except Exception:
+                pass
+            return "cpu"
+        if raw.startswith("cpu"):
+            return "cpu"
+        if raw.startswith("cuda:"):
+            try:
+                return int(str(s).split(":")[1].split()[0])
             except Exception:
                 return 0
-        return "auto"
+        return "cpu"
+
+    def _device_to_ocr(self, s: str) -> str:
+        return "cuda" if self._device_to_ultralytics(s) != "cpu" else "cpu"
+
+    def _update_device_hint(self, event=None):
+        label = getattr(self, "det_device_hint_lbl", None)
+        if label is None:
+            return
+
+        devices = self._get_available_devices()
+        normalized = self._normalize_selected_device(devices=devices)
+        current = str(self.yolo_device_var.get() or "").strip()
+        if normalized != current:
+            self.yolo_device_var.set(normalized)
+            current = normalized
+
+        gpu_devices = [item for item in devices if item.startswith("cuda:")]
+        current_lower = current.lower()
+
+        if current_lower.startswith("auto"):
+            if gpu_devices:
+                text = f"Auto najpierw sprobuje akceleracji na {gpu_devices[0]}. Gdy GPU/CUDA nie bedzie dostepne, system spadnie do CPU."
+                tone = "info"
+            else:
+                text = "Auto nie wykrylo karty CUDA, wiec zostanie uzyty CPU."
+                tone = "warning"
+        elif current_lower.startswith("cpu"):
+            text = "CPU wymusza prace bez akceleracji GPU. To wolniejsze, ale przewidywalne."
+            tone = "muted"
+        else:
+            text = f"Wybrana karta: {current}. YOLO i OCR sprobuja uzyc tej akceleracji."
+            tone = "success"
+
+        self._set_themed_label_state(label, text=text, tone=tone)
     
     def _set_button_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
         btn = self._resolve_guidance_button(frame_attr)
@@ -2123,7 +2902,7 @@ class CharacterAnnotationTab:
     def _pick_xml_file(self):
         p = filedialog.askopenfilename(
             initialdir=str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()),
-            title="Wybierz annotations.xml",
+            title="Wybierz annotations.xml dla tej samej paczki obrazów",
             filetypes=[("XML", "*.xml")]
         )
         if p:
@@ -2132,7 +2911,7 @@ class CharacterAnnotationTab:
     def _pick_images_dir(self):
         p = filedialog.askdirectory(
             initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()),
-            title="Wybierz folder z obrazami pojazdów"
+            title="Wybierz paczkę obrazów powiązaną z annotations.xml"
         )
         if p:
             self.images_dir_var.set(p)
@@ -2269,7 +3048,11 @@ class CharacterAnnotationTab:
         lf_paths = ttk.LabelFrame(left, text=" Ścieżki do źródła ", padding=15)
         lf_paths.pack(fill=tk.X, pady=(0, 15))
 
-        ttk.Label(lf_paths, text="annotations.xml (z Zakładki Autoanotacja):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(
+            lf_paths,
+            text="annotations.xml (musi pochodzić z tej samej paczki obrazów):",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
         row_xml = ttk.Frame(lf_paths)
         row_xml.pack(fill=tk.X, pady=(0, 10))
         self.xml_path_entry = ttk.Entry(row_xml, textvariable=self.xml_path_var)
@@ -2282,7 +3065,11 @@ class CharacterAnnotationTab:
         )
         self.xml_path_browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-        ttk.Label(lf_paths, text="Folder ze zdjęciami aut (źródło):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(
+            lf_paths,
+            text="Paczka obrazów źródłowych powiązana z XML:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor=tk.W, pady=(0, 2))
         row_img = ttk.Frame(lf_paths)
         row_img.pack(fill=tk.X, pady=(0, 10))
 
@@ -2296,6 +3083,25 @@ class CharacterAnnotationTab:
         )
         self.images_dir_browse_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
+        self.source_binding_status_lbl = tk.Label(
+            lf_paths,
+            text=(
+                "Plik annotations.xml i paczka obrazów są nierozerwalnie powiązane. "
+                "System może automatycznie odnaleźć paczkę w Workspace/1_raw_images/."
+            ),
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=430,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.source_binding_status_lbl.pack(fill=tk.X, pady=(0, 6))
+        self._set_source_binding_status(
+            "Plik annotations.xml i paczka obrazów są nierozerwalnie powiązane. "
+            "System może automatycznie odnaleźć paczkę w Workspace/1_raw_images/.",
+            "warning",
+        )
+
         lf_run = ttk.LabelFrame(left, text=" Wycinanie Tablic ", padding=15)
         lf_run.pack(fill=tk.X)
 
@@ -2307,12 +3113,15 @@ class CharacterAnnotationTab:
 
         self.ext_progress = ttk.Progressbar(lf_run, maximum=100)
         self.ext_progress.pack(fill=tk.X, pady=(15, 5))
-        self.ext_status = ttk.Label(
+        self.ext_status = tk.Label(
             lf_run,
             text="Gotowy",
-            style="PanelStatusNeutral.TLabel"
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.ext_status.pack(anchor=tk.W)
+        self._set_inline_status_label_state(self.ext_status, text="Gotowy", tone="neutral", emphasis=True)
 
         lf_logs = ttk.LabelFrame(right, text=" Terminal procesu ", padding=10)
         lf_logs.pack(fill=tk.BOTH, expand=True)
@@ -2348,12 +3157,19 @@ class CharacterAnnotationTab:
 
     def _run_extraction(self):
         self._force_save_all()
+        validation = self._refresh_source_binding_status(allow_autofind=True)
+        if not validation.get("ok"):
+            return messagebox.showerror("Niezgodne źródła Z3/PZ1", validation.get("message", "Źródła wejściowe są niepoprawne."))
+
         xml_path = Path(self.xml_path_var.get().strip())
         images_dir = Path(self.images_dir_var.get().strip())
         session_token = self._project_reset_token
 
         if not xml_path.exists() or not images_dir.exists():
-            return messagebox.showerror("Błąd", "Brak plików wejściowych!")
+            return messagebox.showerror(
+                "Błąd",
+                "Brak plików wejściowych. annotations.xml i paczka obrazów muszą pochodzić z tego samego zestawu."
+            )
 
         import datetime
         base_out_dir = Path(getattr(self, "_campaign_chars_dir", str(CONFIG.DIR_3_CHARS)))
@@ -2521,12 +3337,42 @@ class CharacterAnnotationTab:
         self.plates_listbox.config(yscrollcommand=scroll.set)
         self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
 
-        right_panel.grid_rowconfigure(0, weight=0)
-        right_panel.grid_rowconfigure(1, weight=1)
-        right_panel.grid_rowconfigure(2, weight=0)
+        right_panel.grid_rowconfigure(0, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
 
-        set_lf = ttk.LabelFrame(right_panel, text=" Konfiguracja Rozpoznawania ", padding=8)
+        palette = getattr(self.app, "palette", {})
+        self.detect_right_scroll_host = ttk.Frame(right_panel)
+        self.detect_right_scroll_host.grid(row=0, column=0, sticky="nsew")
+        self.detect_right_scroll_host.grid_rowconfigure(0, weight=1)
+        self.detect_right_scroll_host.grid_columnconfigure(0, weight=1)
+
+        self.detect_right_canvas = tk.Canvas(
+            self.detect_right_scroll_host,
+            bg=palette.get("panel", "#252526"),
+            bd=0,
+            highlightthickness=0
+        )
+        self.detect_right_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.detect_right_scrollbar = ttk.Scrollbar(
+            self.detect_right_scroll_host,
+            orient=tk.VERTICAL,
+            command=self.detect_right_canvas.yview
+        )
+        self.detect_right_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.detect_right_canvas.configure(yscrollcommand=self.detect_right_scrollbar.set)
+
+        self.detect_right_content = ttk.Frame(self.detect_right_canvas)
+        self.detect_right_content.grid_columnconfigure(0, weight=1)
+        self.detect_right_content_window = self.detect_right_canvas.create_window(
+            (0, 0),
+            window=self.detect_right_content,
+            anchor="nw"
+        )
+        self.detect_right_content.bind("<Configure>", self._sync_detect_right_scrollregion, add="+")
+        self.detect_right_canvas.bind("<Configure>", self._sync_detect_right_canvas_width, add="+")
+
+        set_lf = ttk.LabelFrame(self.detect_right_content, text=" Konfiguracja Rozpoznawania ", padding=8)
         set_lf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         row_meth = ttk.Frame(set_lf)
@@ -2551,7 +3397,7 @@ class CharacterAnnotationTab:
         self.det_device_row = ttk.Frame(set_lf)
         self.det_device_row.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(self.det_device_row, text="Karta (Device):").pack(side=tk.LEFT)
+        ttk.Label(self.det_device_row, text="Urzadzenie obliczen:").pack(side=tk.LEFT)
 
         self.det_device_combo = ttk.Combobox(
             self.det_device_row,
@@ -2561,6 +3407,17 @@ class CharacterAnnotationTab:
             width=12
         )
         self.det_device_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+        self.det_device_combo.bind("<<ComboboxSelected>>", self._update_device_hint, add="+")
+
+        self.det_device_hint_lbl = ttk.Label(
+            set_lf,
+            text="",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        )
+        self.det_device_hint_lbl.pack(fill=tk.X, pady=(0, 8))
+        self._refresh_device_options()
 
         self.yolo_panel = ttk.Frame(set_lf)
 
@@ -2635,9 +3492,106 @@ class CharacterAnnotationTab:
         )
         self.det_yolo_model_browse_btn.pack(side=tk.RIGHT)
 
+        self.yolo_tuning_lf = ttk.LabelFrame(self.yolo_panel, text=" Strojenie YOLO ", padding=8)
+        self.yolo_tuning_lf.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Te progi pomagają odsiać słabe boxy i usuwać duplikaty na jednym znaku.",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.yolo_conf_row = ttk.Frame(self.yolo_tuning_lf)
+        self.yolo_conf_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(self.yolo_conf_row, text="Confidence:").pack(side=tk.LEFT)
+        self.yolo_conf_spin = ttk.Spinbox(
+            self.yolo_conf_row,
+            from_=0.0,
+            to=1.0,
+            increment=0.05,
+            textvariable=self.yolo_conf_var,
+            width=8
+        )
+        self.yolo_conf_spin.pack(side=tk.RIGHT, padx=(6, 0))
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Wyzej: mniej slabych i falszywych boxow, ale mozna zgubic trudne znaki. Nizej: wiecej trafien, ale rosnie ryzyko dubli i szumu.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.yolo_iou_row = ttk.Frame(self.yolo_tuning_lf)
+        self.yolo_iou_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(self.yolo_iou_row, text="NMS IoU:").pack(side=tk.LEFT)
+        self.yolo_iou_spin = ttk.Spinbox(
+            self.yolo_iou_row,
+            from_=0.01,
+            to=0.99,
+            increment=0.05,
+            textvariable=self.yolo_iou_var,
+            width=8
+        )
+        self.yolo_iou_spin.pack(side=tk.RIGHT, padx=(6, 0))
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Nizej: NMS agresywniej scala podobne ramki i mocniej wycina duble. Wyzej: zostawia wiecej zblizonych boxow, co pomaga przy ciasnych znakach, ale moze dublowac.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.yolo_overlap_row = ttk.Frame(self.yolo_tuning_lf)
+        self.yolo_overlap_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(self.yolo_overlap_row, text="Nakladanie boxow:").pack(side=tk.LEFT)
+        self.yolo_overlap_spin = ttk.Spinbox(
+            self.yolo_overlap_row,
+            from_=0.0,
+            to=1.0,
+            increment=0.05,
+            textvariable=self.yolo_overlap_var,
+            width=8
+        )
+        self.yolo_overlap_spin.pack(side=tk.RIGHT, padx=(6, 0))
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Nizej: system szybciej uzna dwa boxy za ten sam znak i odrzuci slabszy. Wyzej: dwa boxy musza sie mocniej pokrywac, wiec wiecej dubli moze zostac.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Prog liczony jako wspolna czesc powierzchni mniejszego boxa dla dwoch detekcji.",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        self.yolo_agnostic_nms_chk = ttk.Checkbutton(
+            self.yolo_tuning_lf,
+            text="Class-agnostic NMS",
+            variable=self.yolo_agnostic_nms_var
+        )
+        self.yolo_agnostic_nms_chk.pack(anchor=tk.W)
+
+        ttk.Label(
+            self.yolo_tuning_lf,
+            text="Wlacz, gdy ten sam znak dostaje kilka klas naraz, np. B i 8. Wylacz, gdy model zbyt mocno skleja sasiednie, podobne znaki.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(4, 0))
+
         self._update_yolo_visibility()
 
-        self.actions_lf = ttk.LabelFrame(right_panel, text=" Panel OCR ", padding=8)
+        self.actions_lf = ttk.LabelFrame(self.detect_right_content, text=" Panel OCR ", padding=8)
         self.actions_lf.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
 
         ocr_top_row = ttk.Frame(self.actions_lf)
@@ -2657,16 +3611,18 @@ class CharacterAnnotationTab:
             font=("Segoe UI", 9, "bold")
         ).pack(anchor=tk.W, pady=(0, 2))
 
-        self.winner_name_lbl = ttk.Label(
+        self.winner_name_lbl = tk.Label(
             leader_block,
             text="BRAK DANYCH",
-            style="PanelStatusNeutral.TLabel",
             width=30,
             anchor="w",
             justify="left",
-            wraplength=340
+            wraplength=340,
+            bd=0,
+            highlightthickness=0
         )
         self.winner_name_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+        self._set_inline_status_label_state(self.winner_name_lbl, text="BRAK DANYCH", tone="neutral", emphasis=True)
 
         ttk.Label(
             leader_block,
@@ -2674,16 +3630,18 @@ class CharacterAnnotationTab:
             style="PanelMuted.TLabel"
         ).pack(anchor=tk.W, pady=(0, 2))
 
-        self.winner_acc_lbl = ttk.Label(
+        self.winner_acc_lbl = tk.Label(
             leader_block,
             text="0.0%",
-            style="PanelMuted.TLabel",
             width=30,
             anchor="w",
             justify="left",
-            wraplength=340
+            wraplength=340,
+            bd=0,
+            highlightthickness=0
         )
         self.winner_acc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+        self._set_inline_status_label_state(self.winner_acc_lbl, text="0.0%", tone="muted", emphasis=False)
 
         self.btn_ocr_lab = ttk.Button(
             actions_block,
@@ -2700,9 +3658,6 @@ class CharacterAnnotationTab:
         )
         self.btn_rank_presets.pack(fill=tk.X, ipady=3, pady=(0, 6))
 
-        self.test_progress = ttk.Progressbar(actions_block, maximum=100)
-        self.test_progress.pack(fill=tk.X, pady=(2, 4))
-
         self.test_status_lbl = ttk.Label(
             actions_block,
             text="Gotowy do testów",
@@ -2713,8 +3668,10 @@ class CharacterAnnotationTab:
             wraplength=340
         )
         self.test_status_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._set_inline_status_label_state(self.test_status_lbl, text="Gotowy do testow", tone="neutral", emphasis=True)
+        self.test_status_lbl.pack_forget()
 
-        package_lf = ttk.LabelFrame(right_panel, text=" Paczka do analizy ", padding=8)
+        package_lf = ttk.LabelFrame(self.detect_right_content, text=" Paczka do analizy ", padding=8)
         package_lf.grid(row=2, column=0, sticky="ew")
         package_lf.grid_columnconfigure(0, weight=1)
 
@@ -2738,14 +3695,17 @@ class CharacterAnnotationTab:
         )
         self.preview_dir_browse_btn.grid(row=2, column=0, sticky="w", pady=(6, 4))
 
-        self.preview_info_lbl = ttk.Label(
+        self.preview_info_lbl = tk.Label(
             package_lf,
             text="Wczytano tablic: 0",
-            style="PanelInfo.TLabel",
             justify="left",
-            wraplength=360
+            wraplength=360,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.preview_info_lbl.grid(row=3, column=0, sticky="w")
+        self._set_inline_status_label_state(self.preview_info_lbl, text="Wczytano tablic: 0", tone="info", emphasis=False)
 
         detection_log_tools = ttk.Frame(content_frame)
         detection_log_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -2781,13 +3741,15 @@ class CharacterAnnotationTab:
             pass
 
         self._set_detection_process_log_visibility(False)
+        detection_log_tools.grid_remove()
 
-        footer_nav = ttk.Frame(parent)
-        footer_nav.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        footer_nav = ttk.Frame(content_frame)
+        footer_nav.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         footer_nav.grid_columnconfigure(0, weight=0)
         footer_nav.grid_columnconfigure(1, weight=0)
-        footer_nav.grid_columnconfigure(2, weight=1)
-        footer_nav.grid_columnconfigure(3, weight=0)
+        footer_nav.grid_columnconfigure(2, weight=0)
+        footer_nav.grid_columnconfigure(3, weight=1)
+        footer_nav.grid_columnconfigure(4, weight=0)
 
         self.btn_back_to_extract = ttk.Button(
             footer_nav,
@@ -2797,7 +3759,7 @@ class CharacterAnnotationTab:
         self.btn_back_to_extract.grid(row=0, column=0, sticky="w")
 
         self.btn_run_detection_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
-        self.btn_run_detection_frame.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.btn_run_detection_frame.grid(row=0, column=2, sticky="w", padx=(10, 0))
 
         self.btn_run_detection_pulse_frame = tk.Frame(
             self.btn_run_detection_frame,
@@ -2812,10 +3774,63 @@ class CharacterAnnotationTab:
             command=self._run_detection_stage,
             style="Accent.TButton"
         )
-        self.btn_run_detection.pack()
+        self.btn_run_detection.pack(fill=tk.X)
+
+        self.detect_run_status_frame = ttk.Frame(footer_nav)
+        self.detect_run_status_frame.grid(row=0, column=3, sticky="ew", padx=(12, 0))
+        self.detect_run_status_frame.grid_columnconfigure(0, weight=1)
+        self.detect_run_status_frame.grid_columnconfigure(1, weight=0)
+
+        self.test_status_lbl = tk.Label(
+            self.detect_run_status_frame,
+            text="Gotowy do testÄ‚Ĺ‚w",
+            anchor="w",
+            justify="left",
+            wraplength=460,
+            bd=0,
+            highlightthickness=0
+        )
+        self.test_status_lbl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self._set_inline_status_label_state(self.test_status_lbl, text="Gotowy do testow", tone="neutral", emphasis=True)
+
+        self.test_progress = ttk.Progressbar(self.detect_run_status_frame, maximum=100, length=260)
+        self.test_progress.grid(row=1, column=0, sticky="ew")
+
+        self.test_progress_count_lbl = tk.Label(
+            self.detect_run_status_frame,
+            text="",
+            anchor="e",
+            width=9,
+            bd=0,
+            highlightthickness=0
+        )
+        self.test_progress_count_lbl.grid(row=1, column=1, sticky="e", padx=(8, 0))
+        self._set_inline_status_label_state(self.test_progress_count_lbl, text="", tone="muted", emphasis=True)
+
+        self.footer_test_status_lbl = tk.Label(
+            footer_nav,
+            text="Gotowy do testĂłw",
+            anchor="w",
+            justify="left",
+            wraplength=460,
+            bd=0,
+            highlightthickness=0
+        )
+        self.footer_test_status_lbl.grid(row=1, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=(4, 0))
+        self._set_inline_status_label_state(self.footer_test_status_lbl, text="Gotowy do testow", tone="neutral", emphasis=True)
+        self.footer_test_status_lbl.grid_remove()
+        self._set_test_progress_counter()
+
+        self.btn_toggle_detection_log = ttk.Button(
+            footer_nav,
+            text="PokaĹĽ terminal",
+            command=self._toggle_detection_process_log
+        )
+        self.btn_toggle_detection_log.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.btn_toggle_detection_log.configure(text="Pokaz terminal")
 
         self.btn_to_dataset_frame = tk.Frame(footer_nav, bd=0, highlightthickness=0)
-        self.btn_to_dataset_frame.grid(row=0, column=3, sticky="e")
+        self.btn_to_dataset_frame.grid(row=0, column=4, sticky="e", padx=(10, 0))
 
         self.btn_to_dataset_pulse_frame = tk.Frame(
             self.btn_to_dataset_frame,
@@ -2838,14 +3853,22 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.btn_run_detection, "t2_fast_test")
         HELP.bind_help(self.btn_rank_presets, "t2_rank")
         HELP.bind_help(self.det_method_combo, "t2_method")
+        HELP.bind_help(self.det_device_combo, "t2_device")
         HELP.bind_help(self.btn_ocr_lab, "t2_lab_btn")
         HELP.bind_help(self.yolo_model_row, "t2_yolo_model")
+        HELP.bind_help(self.yolo_tuning_lf, "t2_yolo_tuning")
         HELP.bind_help(self.btn_toggle_detection_log, "t2_cut_logs")
         HELP.bind_help(self.plates_listbox, "t2_listbox")
         HELP.bind_help(self.preview_canvas, "t2_canvas")
         HELP.bind_help(self.preview_dir_entry, "t2_preview_run")
         HELP.bind_help(self.preview_dir_browse_btn, "t2_preview_run")
         HELP.bind_help(self.preview_info_lbl, "t2_preview_info")
+
+        self.frame.after_idle(self._sync_detect_right_scrollregion)
+        self.frame.after_idle(self._sync_detect_right_canvas_width)
+        self.frame.bind_all("<MouseWheel>", self._on_detect_right_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_detect_right_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_detect_right_global_mousewheel, add="+")
 
     def _run_detection_stage(self):
         method = (self.detection_method_var.get() or "OCR").upper().strip()
@@ -2869,6 +3892,12 @@ class CharacterAnnotationTab:
                 return
 
             try:
+                yolo_runtime = self._get_yolo_runtime_settings()
+            except Exception as e:
+                messagebox.showwarning("Bledne parametry YOLO", str(e))
+                return
+
+            try:
                 resolved_model = self._ensure_yolo_model_available()
                 self.yolo_model_path_var.set(resolved_model)
 
@@ -2880,6 +3909,23 @@ class CharacterAnnotationTab:
                 self._log(
                     self.test_log_text,
                     f"[INFO] Model gotowy do użycia: {resolved_model}",
+                    "INFO"
+                )
+                self._log(
+                    self.test_log_text,
+                    "[INFO] Urzadzenie: "
+                    f"{self._normalize_selected_device()} | "
+                    f"YOLO={self._device_to_ultralytics(self.yolo_device_var.get())} | "
+                    f"OCR={self._device_to_ocr(self.yolo_device_var.get())}",
+                    "INFO"
+                )
+                self._log(
+                    self.test_log_text,
+                    "[INFO] Parametry YOLO: "
+                    f"conf={yolo_runtime['conf']:.2f}, "
+                    f"nms_iou={yolo_runtime['iou']:.2f}, "
+                    f"overlap={yolo_runtime['overlap']:.2f}, "
+                    f"agnostic_nms={yolo_runtime['agnostic_nms']}",
                     "INFO"
                 )
             except Exception as e:
@@ -2952,6 +3998,15 @@ class CharacterAnnotationTab:
                         if sorted_chars != d.get("characters", []):
                             d["characters"] = sorted_chars
                             changed = True
+                    if "yolo_detections" in d:
+                        if not isinstance(d.get("yolo_detections"), list):
+                            d["yolo_detections"] = []
+                            changed = True
+                        else:
+                            sorted_yolo = self._sort_character_records_by_x(d.get("yolo_detections", []))
+                            if sorted_yolo != d.get("yolo_detections", []):
+                                d["yolo_detections"] = sorted_yolo
+                                changed = True
 
                 if changed:
                     self._atomic_write_json(meta_path, loaded)
@@ -3023,6 +4078,7 @@ class CharacterAnnotationTab:
         pid = pid_map[idx]
         data = self.preview_metadata.get(pid, {})
         clean_chars = self._sort_character_records_by_x(data.get("characters", []))
+        box_chars, box_source = self._get_preview_box_records(data)
         display_text = self._format_plate_listbox_label(pid, data)
 
         # Jeśli tekst listy jest nieaktualny, zsynchronizuj go z bieżącym metadata.
@@ -3089,26 +4145,58 @@ class CharacterAnnotationTab:
             self.preview_canvas.create_image(x_off, y_off, anchor=tk.NW, image=self._current_photo)
 
             image_bottom_y = y_off + new_h
+            if box_source == "yolo":
+                self.preview_canvas.create_text(
+                    x_off + 10,
+                    y_off + 10,
+                    text="Podglad boxow YOLO do anotacji",
+                    fill="#ffb27a",
+                    font=("Segoe UI", 9, "bold"),
+                    anchor=tk.NW
+                )
 
             # rysowanie bboxów + znaków
-            for c in clean_chars:
-                x1, y1, x2, y2 = c.get("bbox", [0, 0, 0, 0])
+            for box_idx, c in enumerate(box_chars):
+                if not isinstance(c, dict):
+                    continue
+
+                bbox = c.get("bbox", [0, 0, 0, 0])
+                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    continue
+
+                x1, y1, x2, y2 = bbox[:4]
                 cx1, cy1 = (float(x1) * SCALE) + x_off, (float(y1) * SCALE) + y_off
                 cx2, cy2 = (float(x2) * SCALE) + x_off, (float(y2) * SCALE) + y_off
 
                 center_x = cx1 + (cx2 - cx1) / 2
+                is_yolo_box = box_source == "yolo" or str(c.get("method", "")).strip().lower() == "yolo"
+                box_color, guide_color, char_fill = self._get_preview_box_palette(box_idx)
 
                 self.preview_canvas.create_rectangle(
                     cx1, cy1, cx2, cy2,
-                    outline="#00ff00",
+                    outline=box_color,
                     width=2
                 )
+
+                if is_yolo_box:
+                    try:
+                        conf_text = f"{float(c.get('confidence', 0.0)):.2f}"
+                        self.preview_canvas.create_text(
+                            cx1 + 3,
+                            max(y_off + 4, cy1 - 4),
+                            text=conf_text,
+                            fill=guide_color,
+                            font=("Consolas", 9, "bold"),
+                            anchor=tk.SW
+                        )
+                    except Exception:
+                        pass
 
                 text_anchor_y = image_bottom_y + 35
                 self.preview_canvas.create_line(
                     center_x, cy2,
                     center_x, text_anchor_y - 20,
-                    fill="#2ecc71",
+                    fill=guide_color,
                     dash=(2, 2)
                 )
 
@@ -3123,7 +4211,7 @@ class CharacterAnnotationTab:
                 self.preview_canvas.create_text(
                     center_x, text_anchor_y,
                     text=char_text,
-                    fill="#f1c40f",
+                    fill=char_fill,
                     font=("Segoe UI", 18, "bold"),
                     anchor=tk.CENTER
                 )
@@ -3256,6 +4344,7 @@ class CharacterAnnotationTab:
         self._lock_ui_for_testing()
         self._set_test_status("Start detekcji...", "info")
         self.test_progress.config(value=0)
+        self._set_test_progress_counter(0, len(self.preview_plate_ids))
 
         self.fast_test_stop.clear()
         self.fast_test_running = True
@@ -3284,9 +4373,9 @@ class CharacterAnnotationTab:
         ocr_engine = None
         if method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
             try:
-                use_gpu = self.yolo_device_var.get().split()[0].lower().startswith("cuda")
+                ocr_device = self._device_to_ocr(self.yolo_device_var.get())
                 ocr_engine = PlateOCR(
-                    device="cuda" if use_gpu else "cpu",
+                    device=ocr_device,
                     confidence_threshold=self.ocr_conf_var.get()
                 )
                 ocr_engine.custom_prep_params = prep_params
@@ -3294,12 +4383,34 @@ class CharacterAnnotationTab:
                 self._log(self.test_log_text, f"Błąd OCR Engine: {e}", "ERROR")
                 ocr_engine = None
 
-        detector = CharacterDetector(method=method, ocr_engine=ocr_engine, yolo_model=yolo_model)
+        try:
+            yolo_runtime = self._get_yolo_runtime_settings()
+        except Exception as e:
+            self._log(self.test_log_text, f"Błąd parametrów YOLO: {e}", "ERROR")
+            yolo_runtime = {
+                "conf": 0.25,
+                "iou": 0.45,
+                "overlap": 0.70,
+                "agnostic_nms": False,
+            }
+
+        detector = CharacterDetector(
+            method=method,
+            ocr_engine=ocr_engine,
+            yolo_model=yolo_model,
+            yolo_device=self._device_to_ultralytics(self.yolo_device_var.get()),
+            yolo_confidence=yolo_runtime["conf"],
+            yolo_iou=yolo_runtime["iou"],
+            yolo_agnostic_nms=yolo_runtime["agnostic_nms"],
+            yolo_overlap_threshold=yolo_runtime["overlap"],
+        )
 
         def worker():
             local_meta = dict(self.preview_metadata) if isinstance(self.preview_metadata, dict) else {}
             total = len(self.preview_plate_ids)
             stat_perfect = 0
+            yolo_raw_total = 0
+            yolo_filtered_total = 0
 
             try:
                 for idx, pid in enumerate(self.preview_plate_ids):
@@ -3330,11 +4441,22 @@ class CharacterAnnotationTab:
                         "confidence": float(c.confidence),
                         "method": str(c.method),
                     } for c in chars]
+                    yolo_clean = [{
+                        "character": str(c.character),
+                        "bbox": [float(x) for x in c.bbox],
+                        "confidence": float(c.confidence),
+                        "method": str(c.method),
+                    } for c in getattr(detector, "last_yolo_detections", [])]
+
+                    yolo_raw_total += len(getattr(detector, "last_yolo_raw_detections", []))
+                    yolo_filtered_total += len(getattr(detector, "last_yolo_detections", []))
 
                     # WAŻNE: sortujemy znaki po X PRZED zapisem do metadata
                     c_clean = self._sort_character_records_by_x(c_clean)
+                    yolo_clean = self._sort_character_records_by_x(yolo_clean)
 
                     local_meta[pid]["characters"] = c_clean
+                    local_meta[pid]["yolo_detections"] = yolo_clean
 
                     if c_clean:
                         txt = "".join(str(c.get("character", "")) for c in c_clean)
@@ -3360,21 +4482,7 @@ class CharacterAnnotationTab:
 
                     self.frame.after(
                         0,
-                        lambda p=((idx + 1) / max(1, total)) * 100: (
-                            self.test_progress.config(value=p)
-                            if session_token == self._project_reset_token else None
-                        )
-                    )
-
-                    self.frame.after(
-                        0,
-                        lambda c=idx + 1, t=total: (
-                            self._set_test_status(
-                                f"Detekcja {self._ascii_progress_bar(c, t)} {c}/{t}",
-                                "warning"
-                            )
-                            if session_token == self._project_reset_token else None
-                        )
+                        lambda c=idx + 1, t=total, token=session_token: self._update_detection_progress_ui(c, t, token)
                     )
 
                 if session_token != self._project_reset_token:
@@ -3392,6 +4500,13 @@ class CharacterAnnotationTab:
                     f"\n[DIAG] Tablice z wykrytymi znakami: {plates_with_chars}/{total}",
                     "INFO"
                 )
+
+                if method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
+                    self._log(
+                        self.test_log_text,
+                        f"[DIAG] YOLO boxy: raw={yolo_raw_total}, po filtracji={yolo_filtered_total}",
+                        "INFO"
+                    )
 
                 acc = (stat_perfect / total * 100) if total > 0 else 0
                 self._log(
@@ -3445,6 +4560,7 @@ class CharacterAnnotationTab:
                             pass
 
                         self.test_progress.config(value=100)
+                        self._set_test_progress_counter(total, total)
                         self._set_test_status(
                             f"Zakończono detekcję — skuteczność {acc:.1f}%",
                             "success"
@@ -3482,20 +4598,27 @@ class CharacterAnnotationTab:
 
         cvat_f = ttk.Frame(export_lf)
         cvat_f.pack(fill=tk.X, pady=(5, 5))
-        self.cvat_option1_title_lbl = ttk.Label(
+        self.cvat_option1_title_lbl = tk.Label(
             cvat_f,
             text="OPCJA 1: Ręczna poprawa błędów",
-            style="PanelStatusError.TLabel"
+            anchor="w",
+            justify="left",
+            bd=0,
+            highlightthickness=0
         )
         self.cvat_option1_title_lbl.pack(anchor=tk.W)
-        self.cvat_option1_desc_lbl = ttk.Label(
+        self._set_inline_status_label_state(self.cvat_option1_title_lbl, tone="error", emphasis=True)
+        self.cvat_option1_desc_lbl = tk.Label(
             export_lf,
             text="Eksport do CVAT obejmuje wyłącznie tablice oznaczone jako błędne (czerwone).",
-            style="PanelMuted.TLabel",
             wraplength=320,
-            justify=tk.LEFT
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.cvat_option1_desc_lbl.pack(anchor=tk.W, pady=(0, 8))
+        self._set_inline_status_label_state(self.cvat_option1_desc_lbl, tone="muted", emphasis=False)
 
 
 
@@ -3506,20 +4629,27 @@ class CharacterAnnotationTab:
 
         yolo_f = ttk.Frame(export_lf)
         yolo_f.pack(fill=tk.X, pady=(0, 5))
-        self.cvat_option2_title_lbl = ttk.Label(
+        self.cvat_option2_title_lbl = tk.Label(
             yolo_f,
             text="OPCJA 2: Budowa datasetu (active learning)",
-            style="PanelStatusSuccess.TLabel"
+            anchor="w",
+            justify="left",
+            bd=0,
+            highlightthickness=0
         )
         self.cvat_option2_title_lbl.pack(anchor=tk.W)
-        self.cvat_option2_desc_lbl = ttk.Label(
+        self._set_inline_status_label_state(self.cvat_option2_title_lbl, tone="success", emphasis=True)
+        self.cvat_option2_desc_lbl = tk.Label(
             yolo_f,
             text="Zbiera perfekcyjne tablice i buduje dataset YOLO.",
-            style="PanelMuted.TLabel",
             wraplength=320,
-            justify=tk.LEFT
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.cvat_option2_desc_lbl.pack(anchor=tk.W, pady=(2, 8))
+        self._set_inline_status_label_state(self.cvat_option2_desc_lbl, tone="muted", emphasis=False)
 
         btn_yolo = ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton")
         btn_yolo.pack(fill=tk.X, ipady=4)
@@ -3543,8 +4673,17 @@ class CharacterAnnotationTab:
         import_lf = ttk.LabelFrame(pane, text=" Import poprawek znaków z CVAT ", padding=15)
         pane.add(import_lf, weight=1)
 
-        ttk.Label(import_lf, text="Importuj poprawki znaków z CVAT", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
-        self.cvat_import_desc_lbl = ttk.Label(
+        self.cvat_import_title_lbl = tk.Label(
+            import_lf,
+            text="Importuj poprawki znaków z CVAT",
+            anchor="w",
+            justify="left",
+            bd=0,
+            highlightthickness=0
+        )
+        self.cvat_import_title_lbl.pack(anchor=tk.W)
+        self._set_inline_status_label_state(self.cvat_import_title_lbl, tone="default", emphasis=True)
+        self.cvat_import_desc_lbl = tk.Label(
             import_lf,
             text=(
                 "Ten import służy wyłącznie do wczytywania ręcznie poprawionych "
@@ -3552,11 +4691,14 @@ class CharacterAnnotationTab:
                 "Zaimportowane dane zostaną dołączone do puli treningowej modelu znaków. "
                 "Wskaż plik *.xml z poprawkami."
             ),
-            style="PanelMuted.TLabel",
             wraplength=320,
-            justify=tk.LEFT
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
         )
         self.cvat_import_desc_lbl.pack(anchor=tk.W, pady=(2, 8))
+        self._set_inline_status_label_state(self.cvat_import_desc_lbl, tone="muted", emphasis=False)
 
         row2 = ttk.Frame(import_lf)
         row2.pack(fill=tk.X, pady=5)
@@ -3892,6 +5034,7 @@ class CharacterAnnotationTab:
 
         self.test_log_text.delete(1.0, tk.END)
         self._lock_ui_for_testing()
+        self._set_test_progress_counter()
         self._log(self.test_log_text, "=======================================================", "HEADER")
         self._log(self.test_log_text, "ROZPOCZYNAM TURNIEJ PRESETÓW", "HEADER")
 
@@ -3910,7 +5053,7 @@ class CharacterAnnotationTab:
                     except Exception:
                         pass
 
-                ocr_engine = PlateOCR(device='cuda' if self.yolo_device_var.get().startswith("cuda") else 'cpu')
+                ocr_engine = PlateOCR(device=self._device_to_ocr(self.yolo_device_var.get()))
                 detector = CharacterDetector(method=DetectionMethod.OCR, ocr_engine=ocr_engine)
 
                 results_table = []
