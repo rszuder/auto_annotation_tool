@@ -64,6 +64,12 @@ class CharacterDetector:
         yolo_iou: float = 0.45,
         yolo_agnostic_nms: bool = False,
         yolo_overlap_threshold: float = 0.70,
+        yolo_sequence_center_y_tolerance: float = 0.60,
+        yolo_sequence_min_height_ratio: float = 0.55,
+        yolo_sequence_max_height_ratio: float = 1.80,
+        yolo_sequence_max_width_ratio: float = 2.60,
+        yolo_sequence_soft_overlap: float = 0.18,
+        yolo_sequence_hard_overlap: float = 0.30,
     ):
         self.method = method
         self.ocr_engine = ocr_engine
@@ -73,14 +79,22 @@ class CharacterDetector:
         self.yolo_iou = float(yolo_iou)
         self.yolo_agnostic_nms = bool(yolo_agnostic_nms)
         self.yolo_overlap_threshold = float(yolo_overlap_threshold)
+        self.yolo_sequence_center_y_tolerance = float(yolo_sequence_center_y_tolerance)
+        self.yolo_sequence_min_height_ratio = float(yolo_sequence_min_height_ratio)
+        self.yolo_sequence_max_height_ratio = float(yolo_sequence_max_height_ratio)
+        self.yolo_sequence_max_width_ratio = float(yolo_sequence_max_width_ratio)
+        self.yolo_sequence_soft_overlap = float(yolo_sequence_soft_overlap)
+        self.yolo_sequence_hard_overlap = float(yolo_sequence_hard_overlap)
         self.last_ocr_detections: List[CharacterDetection] = []
         self.last_yolo_raw_detections: List[CharacterDetection] = []
+        self.last_yolo_nms_detections: List[CharacterDetection] = []
         self.last_yolo_detections: List[CharacterDetection] = []
     
     def detect(self, plate_image: np.ndarray) -> List[CharacterDetection]:
         detections = []
         self.last_ocr_detections = []
         self.last_yolo_raw_detections = []
+        self.last_yolo_nms_detections = []
         self.last_yolo_detections = []
 
         if self.method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
@@ -202,7 +216,9 @@ class CharacterDetector:
                 det = CharacterDetection(character=class_name.upper(), bbox=(x1, y1, x2, y2), confidence=float(conf), method="yolo")
                 detections.append(det)
             self.last_yolo_raw_detections = list(detections)
-            return self._suppress_overlapping_yolo_detections(detections)
+            deduplicated = self._suppress_overlapping_yolo_detections(detections)
+            self.last_yolo_nms_detections = list(deduplicated)
+            return self._filter_yolo_sequence_consistency(deduplicated)
         except Exception as e:
             logger.error(f"Błąd YOLO detection na znakach: {e}")
             return []
@@ -308,4 +324,157 @@ class CharacterDetector:
                 filtered.append(candidate)
 
         filtered.sort(key=lambda det: float(det.bbox[0]))
+        return filtered
+
+    def _detection_width(self, det: CharacterDetection) -> float:
+        return max(1.0, float(det.bbox[2]) - float(det.bbox[0]))
+
+    def _detection_height(self, det: CharacterDetection) -> float:
+        return max(1.0, float(det.bbox[3]) - float(det.bbox[1]))
+
+    def _detection_center_y(self, det: CharacterDetection) -> float:
+        return (float(det.bbox[1]) + float(det.bbox[3])) / 2.0
+
+    def _build_sequence_reference_stats(self, detections: List[CharacterDetection]) -> dict:
+        if not detections:
+            return {
+                "median_width": 1.0,
+                "median_height": 1.0,
+                "median_center_y": 0.0,
+            }
+
+        widths = np.array([self._detection_width(det) for det in detections], dtype=float)
+        heights = np.array([self._detection_height(det) for det in detections], dtype=float)
+        centers_y = np.array([self._detection_center_y(det) for det in detections], dtype=float)
+
+        return {
+            "median_width": max(1.0, float(np.median(widths))),
+            "median_height": max(1.0, float(np.median(heights))),
+            "median_center_y": float(np.median(centers_y)),
+        }
+
+    def _is_sequence_geometry_outlier(
+        self,
+        det: CharacterDetection,
+        stats: dict
+    ) -> bool:
+        width = self._detection_width(det)
+        height = self._detection_height(det)
+        center_y = self._detection_center_y(det)
+
+        median_width = max(1.0, float(stats.get("median_width", 1.0)))
+        median_height = max(1.0, float(stats.get("median_height", 1.0)))
+        median_center_y = float(stats.get("median_center_y", center_y))
+
+        width_ratio = width / median_width
+        height_ratio = height / median_height
+        center_y_offset = abs(center_y - median_center_y) / median_height
+
+        if center_y_offset > self.yolo_sequence_center_y_tolerance:
+            return True
+        if height_ratio < self.yolo_sequence_min_height_ratio or height_ratio > self.yolo_sequence_max_height_ratio:
+            return True
+        if width_ratio > self.yolo_sequence_max_width_ratio:
+            return True
+        if width_ratio < 0.12 and float(det.confidence) < 0.60:
+            return True
+
+        return False
+
+    def _sequence_candidate_score(self, det: CharacterDetection, stats: dict) -> float:
+        confidence = float(det.confidence)
+        width = self._detection_width(det)
+        height = self._detection_height(det)
+        center_y = self._detection_center_y(det)
+
+        median_width = max(1.0, float(stats.get("median_width", 1.0)))
+        median_height = max(1.0, float(stats.get("median_height", 1.0)))
+        median_center_y = float(stats.get("median_center_y", center_y))
+
+        center_penalty = min(1.5, abs(center_y - median_center_y) / median_height)
+        height_penalty = min(1.5, abs(height - median_height) / median_height)
+
+        width_ratio = width / median_width
+        width_penalty = 0.0
+        if width_ratio > 1.90:
+            width_penalty += min(1.5, width_ratio - 1.90)
+        if width_ratio < 0.18:
+            width_penalty += min(1.0, (0.18 - width_ratio) / 0.18)
+
+        return confidence - (0.20 * center_penalty) - (0.12 * height_penalty) - (0.06 * width_penalty)
+
+    def _sequence_neighbor_overlap_ratio(
+        self,
+        left: CharacterDetection,
+        right: CharacterDetection
+    ) -> float:
+        overlap = float(left.bbox[2]) - float(right.bbox[0])
+        if overlap <= 0.0:
+            return 0.0
+
+        min_width = max(1.0, min(self._detection_width(left), self._detection_width(right)))
+        return overlap / min_width
+
+    def _looks_like_sequence_conflict(
+        self,
+        left: CharacterDetection,
+        right: CharacterDetection,
+        stats: dict
+    ) -> bool:
+        overlap_ratio = self._sequence_neighbor_overlap_ratio(left, right)
+        if overlap_ratio <= 0.0:
+            return False
+
+        median_height = max(1.0, float(stats.get("median_height", 1.0)))
+        center_y_gap = abs(self._detection_center_y(left) - self._detection_center_y(right)) / median_height
+
+        left_height = self._detection_height(left)
+        right_height = self._detection_height(right)
+        height_similarity = min(left_height, right_height) / max(left_height, right_height)
+
+        if overlap_ratio >= self.yolo_sequence_hard_overlap:
+            return True
+
+        return (
+            overlap_ratio >= self.yolo_sequence_soft_overlap
+            and center_y_gap <= self.yolo_sequence_center_y_tolerance
+            and height_similarity >= self.yolo_sequence_min_height_ratio
+        )
+
+    def _filter_yolo_sequence_consistency(self, detections: List[CharacterDetection]) -> List[CharacterDetection]:
+        if len(detections) <= 1:
+            return detections
+
+        ordered = sorted(detections, key=lambda det: float(det.bbox[0]))
+        initial_stats = self._build_sequence_reference_stats(ordered)
+
+        geometry_filtered = [
+            det for det in ordered
+            if not self._is_sequence_geometry_outlier(det, initial_stats)
+        ]
+
+        if len(geometry_filtered) <= 1:
+            return geometry_filtered
+
+        stats = self._build_sequence_reference_stats(geometry_filtered)
+        filtered: List[CharacterDetection] = []
+
+        for candidate in geometry_filtered:
+            candidate_kept = True
+
+            while filtered and self._looks_like_sequence_conflict(filtered[-1], candidate, stats):
+                prev = filtered[-1]
+                prev_score = self._sequence_candidate_score(prev, stats)
+                candidate_score = self._sequence_candidate_score(candidate, stats)
+
+                if candidate_score > prev_score + 1e-6:
+                    filtered.pop()
+                    continue
+
+                candidate_kept = False
+                break
+
+            if candidate_kept:
+                filtered.append(candidate)
+
         return filtered

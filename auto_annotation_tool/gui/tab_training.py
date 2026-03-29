@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -136,6 +136,84 @@ class TrainingTab:
         if self._campaign_runs_dir:
             return Path(self._campaign_runs_dir)
         return Path(CONFIG.DEFAULT_TRAINING_DIR)
+
+    def _format_workspace_relative_path(self, path_like) -> str:
+        try:
+            path = Path(path_like).resolve()
+            workspace = Path(CONFIG.WORKSPACE_DIR).resolve()
+            rel = path.relative_to(workspace)
+            rel_posix = PurePosixPath(rel.as_posix())
+            return str(PurePosixPath("Workspace") / rel_posix)
+        except Exception:
+            try:
+                return Path(path_like).as_posix()
+            except Exception:
+                return str(path_like)
+
+    def _get_training_dataset_hint_text(self) -> str:
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        workspace_dir = self._format_workspace_relative_path(CONFIG.DIR_4_DATASETS)
+
+        if campaign_active:
+            preferred_dir = self._format_workspace_relative_path(self._get_datasets_base_dir())
+            return (
+                "Tryb projektu: to pole zwykle uzupelnia kampania. Jesli wskazujesz dataset recznie, "
+                "wybierz katalog zawierajacy plik data.yaml oraz foldery images/ i labels/.\n"
+                f"Najczesciej bedzie to katalog projektu albo jego datasetowy odpowiednik: {preferred_dir}"
+            )
+
+        return (
+            "Tryb swobodny: wskazujesz tutaj gotowy katalog datasetu YOLO, a nie plik modelu.\n"
+            "data.yaml to plik konfiguracyjny YOLO, ktory opisuje splity train/val/test oraz klasy modelu.\n"
+            "Skad go wziac: utworz dataset w Z4/PZ1. Dla toru znakow plik powstaje po splicie datasetu, "
+            "a dla toru tablic po budowie datasetu z XML CVAT.\n"
+            f"W sztywnym drzewie Workspace szukaj go przede wszystkim w: {workspace_dir}\n"
+            "Tutaj wybierz caly folder datasetu, w ktorym lezy data.yaml oraz podfoldery images/ i labels/."
+        )
+
+    def _update_training_dataset_hint(self):
+        label = getattr(self, "train_dataset_hint_lbl", None)
+        if label is None:
+            return
+
+        try:
+            label.configure(text=self._get_training_dataset_hint_text())
+        except Exception:
+            pass
+
+        self._update_training_dataset_hint_wraplength()
+
+    def _update_training_dataset_hint_wraplength(self, event=None):
+        label = getattr(self, "train_dataset_hint_lbl", None)
+        if label is None:
+            return
+
+        width = 0
+        try:
+            width = int(label.winfo_width())
+        except Exception:
+            width = 0
+
+        if width <= 1:
+            try:
+                inset = max(0, int(getattr(self, "_train_left_content_inset", 0)))
+                width = int(self.train_left_canvas.winfo_width()) - (4 * inset)
+            except Exception:
+                width = 0
+
+        target = max(120, width - 2)
+        try:
+            current = int(float(label.cget("wraplength")))
+        except Exception:
+            current = 0
+
+        if abs(current - target) <= 2:
+            return
+
+        try:
+            label.configure(wraplength=target)
+        except Exception:
+            pass
     
             #=====================================
     def set_campaign_context(self, runs_dir=None, datasets_dir=None):
@@ -611,6 +689,11 @@ class TrainingTab:
             pass
 
         try:
+            self._update_training_dataset_hint()
+        except Exception:
+            pass
+
+        try:
             if require_route_selection:
                 self._guide_step4_route_selection()
             else:
@@ -717,8 +800,15 @@ class TrainingTab:
             return
 
         try:
-            width = max(50, int(canvas.winfo_width()))
+            inset = max(0, int(getattr(self, "_train_left_content_inset", 0)))
+            width = max(50, int(canvas.winfo_width()) - (2 * inset))
+            canvas.coords(self.train_left_content_window, inset, 0)
             canvas.itemconfigure(self.train_left_content_window, width=width)
+        except Exception:
+            pass
+
+        try:
+            self._update_training_dataset_hint_wraplength()
         except Exception:
             pass
 
@@ -1229,6 +1319,11 @@ class TrainingTab:
                 self.step4_train_nav.grid()
             else:
                 self.step4_train_nav.grid_remove()
+        except Exception:
+            pass
+
+        try:
+            self._update_training_dataset_hint()
         except Exception:
             pass
 
@@ -1929,10 +2024,11 @@ class TrainingTab:
         self.train_left_scrollbar.grid(row=0, column=1, sticky="ns")
         self.train_left_canvas.configure(yscrollcommand=self.train_left_scrollbar.set)
 
+        self._train_left_content_inset = 12
         self.train_left_content = ttk.Frame(self.train_left_canvas)
         self.train_left_content.grid_columnconfigure(0, weight=1)
         self.train_left_content_window = self.train_left_canvas.create_window(
-            (0, 0),
+            (self._train_left_content_inset, 0),
             window=self.train_left_content,
             anchor="nw"
         )
@@ -1940,7 +2036,7 @@ class TrainingTab:
         self.train_left_canvas.bind("<Configure>", self._sync_train_left_canvas_width, add="+")
 
         settings_col = ttk.Frame(self.train_left_content)
-        settings_col.pack(fill=tk.BOTH, expand=True)
+        settings_col.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
 
         ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
         self.name_var = tk.StringVar()
@@ -1954,6 +2050,25 @@ class TrainingTab:
         ds_row.pack(fill=tk.X, pady=2)
         ttk.Entry(ds_row, textvariable=self.dataset_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(ds_row, text="Wybierz", command=lambda: self._pick_dir(self.dataset_var)).pack(side=tk.LEFT, padx=5)
+
+        self.train_dataset_hint_box = ttk.Frame(
+            settings_col,
+            padding=(self._train_left_content_inset, 8, self._train_left_content_inset, 8)
+        )
+        self.train_dataset_hint_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+
+        self.train_dataset_hint_lbl = ttk.Label(
+            self.train_dataset_hint_box,
+            text="",
+            style="Muted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=320
+        )
+        self.train_dataset_hint_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_dataset_hint_box.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
+        self.train_dataset_hint_lbl.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
+        self._update_training_dataset_hint()
 
         ttk.Label(settings_col, text="Architektura (model bazowy):").pack(anchor=tk.W, pady=(8, 0))
         self.base_model_var = tk.StringVar()
@@ -2184,6 +2299,7 @@ class TrainingTab:
         self._refresh_step4_campaign_navigation_ui()
 
         HELP.bind_help(ds_row, "tr_train_ds")
+        HELP.bind_help(self.train_dataset_hint_lbl, "tr_train_ds")
         HELP.bind_help(self.base_combo, "tr_train_base")
         
         try:
