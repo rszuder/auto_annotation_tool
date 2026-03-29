@@ -1532,11 +1532,11 @@ class AutoAnnotationApp:
             pass
 
         left = tk.Frame(self.menu_bar_frame, bg=palette["panel"])
-        left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=4)
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=1)
 
         def make_menu_button(label: str, items_factory, min_width: int = 220):
             shell = tk.Frame(left, bg=palette["panel"], bd=0, highlightthickness=0)
-            shell.pack(side=tk.LEFT, padx=(0, 4), pady=0)
+            shell.pack(side=tk.LEFT, padx=(0, 2), pady=0)
 
             btn = tk.Button(
                 shell,
@@ -1547,9 +1547,9 @@ class AutoAnnotationApp:
                 activeforeground=palette["fg"],
                 relief=tk.FLAT,
                 bd=0,
-                padx=10,
-                pady=4,
-                font=("Segoe UI", 10, "bold"),
+                padx=8,
+                pady=2,
+                font=("Segoe UI", 9, "normal"),
                 highlightthickness=0,
                 command=lambda: self._toggle_menu_dropdown(btn, items_factory(), min_width=min_width)
             )
@@ -1558,11 +1558,11 @@ class AutoAnnotationApp:
             underline = tk.Frame(
                 shell,
                 bg=palette["panel"],
-                height=2,
+                height=1,
                 bd=0,
                 highlightthickness=0
             )
-            underline.pack(side=tk.TOP, fill=tk.X, padx=4)
+            underline.pack(side=tk.TOP, fill=tk.X, padx=3)
 
             def _set_hover_line(active: bool):
                 try:
@@ -1623,9 +1623,9 @@ class AutoAnnotationApp:
             text=self._get_menu_badge_text(),
             bg=palette["panel"],
             fg=palette["muted"],
-            font=("Segoe UI", 9, "bold"),
-            padx=12,
-            pady=6
+            font=("Segoe UI", 8, "normal"),
+            padx=8,
+            pady=3
         )
         self.menu_theme_badge.pack(side=tk.RIGHT)
 

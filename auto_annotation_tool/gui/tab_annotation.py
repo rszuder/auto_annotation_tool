@@ -165,6 +165,30 @@ class AnnotationTab:
         except Exception:
             pass
 
+    def _sync_right_panel_scrollregion(self, event=None):
+        canvas = getattr(self, "right_settings_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_right_panel_canvas_width(self, event=None):
+        canvas = getattr(self, "right_settings_canvas", None)
+        window_id = getattr(self, "_right_settings_window_id", None)
+        if canvas is None or window_id is None:
+            return
+
+        width = getattr(event, "width", 0) or canvas.winfo_width()
+        if width <= 1:
+            return
+
+        try:
+            canvas.itemconfigure(window_id, width=width)
+        except Exception:
+            pass
+
     def _create_widgets(self):
         pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
         pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
@@ -323,11 +347,34 @@ class AnnotationTab:
         self._set_annotation_process_log_visibility(False)
 
         # --- PRAWA KOLUMNA ---
-        settings_lf = ttk.LabelFrame(right_frame, text=" Konfiguracja Detekcji ", padding=15)
+        right_scroll_host = ttk.Frame(right_frame)
+        right_scroll_host.pack(fill=tk.BOTH, expand=True)
+
+        self.right_settings_canvas = tk.Canvas(right_scroll_host, highlightthickness=0, bd=0)
+        self.right_settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.right_settings_scrollbar = ttk.Scrollbar(
+            right_scroll_host,
+            orient=tk.VERTICAL,
+            command=self.right_settings_canvas.yview
+        )
+        self.right_settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_settings_canvas.configure(yscrollcommand=self.right_settings_scrollbar.set)
+
+        self.right_settings_content = ttk.Frame(self.right_settings_canvas)
+        self._right_settings_window_id = self.right_settings_canvas.create_window(
+            (0, 0),
+            window=self.right_settings_content,
+            anchor="nw"
+        )
+        self.right_settings_content.bind("<Configure>", self._sync_right_panel_scrollregion)
+        self.right_settings_canvas.bind("<Configure>", self._sync_right_panel_canvas_width)
+
+        settings_lf = ttk.LabelFrame(self.right_settings_content, text=" Konfiguracja Detekcji ", padding=15)
         settings_lf.pack(fill=tk.BOTH, expand=True)
 
         self.approve_btn_row = ttk.Frame(right_frame)
-        self.approve_btn_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.approve_btn_row.pack(fill=tk.X, pady=(8, 0))
         self.approve_btn_row.columnconfigure(0, weight=1)
 
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
@@ -442,6 +489,8 @@ class AnnotationTab:
         HELP.bind_help(self.preview_canvas, "tab1_preview_canvas")
         HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
         HELP.bind_help(self.char_custom_row, "tab1_custom_model")
+        self.frame.after_idle(self._sync_right_panel_canvas_width)
+        self.frame.after_idle(self._sync_right_panel_scrollregion)
 
     def _on_mode_change(self, event=None):
         mode = self.mode_var.get()
@@ -643,6 +692,9 @@ class AnnotationTab:
         if p: self.input_dir_var.set(p)
 
     def _redirect_logs(self):
+        if getattr(self, "_annotation_log_handlers_attached", False):
+            return
+
         class TextHandler(logging.Handler):
             def __init__(self, widget):
                 super().__init__()
@@ -658,11 +710,24 @@ class AnnotationTab:
                     if self.widget.winfo_exists():
                         self.widget.insert(tk.END, msg + "\n")
                         self.widget.see(tk.END)
+                        self.widget.update_idletasks()
                 except: pass
-                
-        handler = TextHandler(self.log_text)
-        handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', '%H:%M:%S'))
-        logger.addHandler(handler)
+                 
+        formatter = logging.Formatter('%(asctime)s | %(message)s', '%H:%M:%S')
+
+        self._annotation_app_log_handler = TextHandler(self.log_text)
+        self._annotation_app_log_handler.setFormatter(formatter)
+        logger.addHandler(self._annotation_app_log_handler)
+
+        try:
+            self._annotation_ultralytics_log_handler = TextHandler(self.log_text)
+            self._annotation_ultralytics_log_handler.setFormatter(formatter)
+            self._annotation_ultralytics_logger = logging.getLogger("ultralytics")
+            self._annotation_ultralytics_logger.addHandler(self._annotation_ultralytics_log_handler)
+        except Exception:
+            pass
+
+        self._annotation_log_handlers_attached = True
 
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
@@ -693,6 +758,15 @@ class AnnotationTab:
             self.app.style_canvas_widget(
                 self.preview_canvas,
                 background=palette.get("panel", "#1e1e1e"),
+                bordercolor=panel_border
+            )
+        except Exception:
+            pass
+
+        try:
+            self.app.style_canvas_widget(
+                self.right_settings_canvas,
+                background=palette.get("bg", "#1f1f1f"),
                 bordercolor=panel_border
             )
         except Exception:
@@ -1097,6 +1171,88 @@ class AnnotationTab:
         else:
             return Path(self.plate_custom_var.get())
 
+    def _collect_pending_model_downloads(self, mode_text: str):
+        pending = []
+
+        if ("A:" in mode_text or "C:" in mode_text) and self.vehicle_model_var.get() != "Custom":
+            model_key = (self.vehicle_model_var.get() or "").strip()
+            model_info = AVAILABLE_DETECT_MODELS.get(model_key, {})
+            target_path = self._get_model_path("vehicle")
+
+            if model_info and target_path and not Path(target_path).exists():
+                pending.append(
+                    {
+                        "role": "pojazdy",
+                        "label": model_info.get("name", model_key or "model pojazdów"),
+                        "asset_name": model_info.get("file", Path(target_path).name),
+                        "target_path": Path(target_path),
+                    }
+                )
+
+        return pending
+
+    def _confirm_and_download_missing_models(self, pending_downloads) -> bool:
+        if not pending_downloads:
+            return True
+
+        details = "\n".join(
+            f"- {item['label']} -> {item['target_path']}"
+            for item in pending_downloads
+        )
+
+        consent = messagebox.askyesno(
+            "Pobieranie modelu z sieci",
+            (
+                "Brakuje lokalnych modeli potrzebnych do uruchomienia Z2.\n\n"
+                f"{details}\n\n"
+                "Aplikacja może pobrać te pliki z internetu dopiero po Twojej zgodzie.\n"
+                "Jeśli się zgodzisz, przebieg pobierania będzie logowany w terminalu procesu w Z2.\n"
+                "Możesz go obserwować przyciskiem 'Pokaż terminal'.\n\n"
+                "Czy chcesz pobrać brakujące modele teraz?"
+            ),
+            parent=self.frame.winfo_toplevel()
+        )
+
+        if not consent:
+            logger.warning("Uruchomienie Z2 anulowane: użytkownik nie wyraził zgody na pobranie brakujących modeli.")
+            self._set_status_label_state("Anulowano: brak zgody na pobranie modelu", "warning")
+            return False
+
+        self._set_annotation_process_log_visibility(True)
+        self._set_status_label_state("Pobieranie modeli: szczegóły w terminalu procesu", "info")
+        logger.info("Użytkownik wyraził zgodę na pobranie brakujących modeli dla Z2.")
+        logger.info("Postęp pobierania jest widoczny w terminalu procesu Z2.")
+        logger.info("Jeśli terminal był zwinięty, został właśnie otwarty do podglądu pobierania.")
+
+        from ultralytics.utils.downloads import attempt_download_asset
+
+        for item in pending_downloads:
+            target_path = Path(item["target_path"])
+            asset_name = str(item.get("asset_name") or target_path.name)
+            label = str(item.get("label") or target_path.name)
+
+            logger.info(f"Rozpoczynam pobieranie modelu: {label}")
+            logger.info(f"Docelowa ścieżka modelu: {target_path}")
+
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                raise RuntimeError(f"Nie udało się przygotować katalogu dla modelu {label}: {e}") from e
+
+            try:
+                downloaded_path = Path(
+                    attempt_download_asset(str(target_path.parent / asset_name))
+                )
+            except Exception as e:
+                raise RuntimeError(f"Nie udało się pobrać modelu {label}: {e}") from e
+
+            if not downloaded_path.exists():
+                raise RuntimeError(f"Pobieranie modelu {label} nie zakończyło się utworzeniem pliku.")
+
+            logger.info(f"Pobieranie zakończone: {downloaded_path}")
+
+        return True
+
     def _start_annotation(self):
         in_d = self.input_dir_var.get().strip()
         if not in_d or not Path(in_d).exists():
@@ -1109,6 +1265,10 @@ class AnnotationTab:
             selected_device = self._normalize_selected_device()
             self.device_var.set(selected_device)
             dev = self._device_to_ultralytics(selected_device)
+
+            pending_downloads = self._collect_pending_model_downloads(mode_text)
+            if not self._confirm_and_download_missing_models(pending_downloads):
+                return
             
             v_p = self._get_model_path("vehicle") if ("A:" in mode_text or "C:" in mode_text) else None
             p_p = self._get_model_path("plate") if ("B:" in mode_text or "C:" in mode_text) else None

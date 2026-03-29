@@ -15,14 +15,13 @@ import threading
 import xml.etree.ElementTree as ET
 import json
 import cv2
-import requests
 import os
 import shutil
 
 from ..config import CONFIG, logger
 from ..campaign_manager import CAMPAIGN
 from ..icons import IconManager
-from ..character_recognition import PlateGenerator, CharacterDetector, DetectionMethod
+from ..character_recognition import PlateGenerator, CharacterDetector, CharacterDetection, DetectionMethod
 from ..ocr import PlateOCR
 from ..data_models import ImageAnnotation, Detection
 from .help_manager import HELP
@@ -38,25 +37,23 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-YOLO_REMOTE_URLS = {
-    "yolo8n.pt":  "TU_WPISZ_URL",
-    "yolo8s.pt":  "TU_WPISZ_URL",
-    "yolo8m.pt":  "TU_WPISZ_URL",
-    "yolo8l.pt":  "TU_WPISZ_URL",
-    "yolo8x.pt":  "TU_WPISZ_URL",
+PREVIEW_BOX_MODE_OPTIONS = [
+    ("AUTO", "Auto (wg metody)"),
+    ("FINAL", "Wynik koncowy"),
+    ("YOLO_FILTERED", "YOLO po filtrze sekwencji"),
+    ("YOLO_NMS", "YOLO po NMS"),
+    ("YOLO_RAW", "YOLO surowe"),
+]
+PREVIEW_BOX_MODE_LABELS = {key: label for key, label in PREVIEW_BOX_MODE_OPTIONS}
+PREVIEW_BOX_MODE_BY_LABEL = {label: key for key, label in PREVIEW_BOX_MODE_OPTIONS}
 
-    "yolo11n.pt": "TU_WPISZ_URL",
-    "yolo11s.pt": "TU_WPISZ_URL",
-    "yolo11m.pt": "TU_WPISZ_URL",
-    "yolo11l.pt": "TU_WPISZ_URL",
-    "yolo11x.pt": "TU_WPISZ_URL",
-
-    "yolo26n.pt": "TU_WPISZ_URL",
-    "yolo26s.pt": "TU_WPISZ_URL",
-    "yolo26m.pt": "TU_WPISZ_URL",
-    "yolo26l.pt": "TU_WPISZ_URL",
-    "yolo26x.pt": "TU_WPISZ_URL",
-}
+PERFECT_STRATEGY_BUCKETS = [
+    ("ocr_exact", "OCR exact"),
+    ("yolo_exact", "YOLO exact"),
+    ("ocr_yolo_rescue", "OCR + YOLO rescue"),
+    ("other_perfect", "Manual / inne perfect"),
+]
+PERFECT_STRATEGY_LABELS = {key: label for key, label in PERFECT_STRATEGY_BUCKETS}
 
 
 class CharacterAnnotationTab:
@@ -76,6 +73,8 @@ class CharacterAnnotationTab:
         self._listbox_pid_by_index = []
         self._current_photo = None
         self._reloading_preview = False
+        self.preview_box_mode_rows = []
+        self.gold_export_filter_rows = []
 
 
 
@@ -104,22 +103,36 @@ class CharacterAnnotationTab:
             val = self.local_session.get(key, default)
             return val if val != "" else default
 
+        saved_preview_box_mode = str(get_val("char_preview_box_mode", "AUTO") or "AUTO").strip()
+        saved_preview_box_mode = PREVIEW_BOX_MODE_LABELS.get(saved_preview_box_mode.upper(), saved_preview_box_mode)
+        if saved_preview_box_mode not in PREVIEW_BOX_MODE_BY_LABEL:
+            saved_preview_box_mode = PREVIEW_BOX_MODE_LABELS["AUTO"]
+
         # vars
         self.detection_method_var = tk.StringVar(value=get_val("char_det_method", "OCR"))
         self.xml_path_var = tk.StringVar(value=get_val("char_xml_path", ""))
         self.images_dir_var = tk.StringVar(value=get_val("char_images_dir", ""))
         self.yolo_model_path_var = tk.StringVar(value=get_val("char_yolo_model", ""))
-        self.yolo_model_version_var = tk.StringVar(value=get_val("char_yolo_version", "11"))
         self.yolo_device_var = tk.StringVar(value=get_val("char_yolo_device", "auto"))
-        self.yolo_model_size_var = tk.StringVar(value=get_val("char_yolo_size", "s"))
         self.yolo_conf_var = tk.DoubleVar(value=float(get_val("char_yolo_conf", 0.25)))
         self.yolo_iou_var = tk.DoubleVar(value=float(get_val("char_yolo_iou", 0.45)))
         self.yolo_overlap_var = tk.DoubleVar(value=float(get_val("char_yolo_overlap", 0.70)))
         self.yolo_agnostic_nms_var = tk.BooleanVar(value=bool(get_val("char_yolo_agnostic_nms", False)))
+        self.yolo_seq_center_y_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_center_y", 0.60)))
+        self.yolo_seq_min_h_ratio_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_min_h_ratio", 0.55)))
+        self.yolo_seq_max_h_ratio_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_max_h_ratio", 1.80)))
+        self.yolo_seq_max_w_ratio_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_max_w_ratio", 2.60)))
+        self.yolo_seq_soft_overlap_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_soft_overlap", 0.18)))
+        self.yolo_seq_hard_overlap_var = tk.DoubleVar(value=float(get_val("char_yolo_seq_hard_overlap", 0.30)))
         self.preview_dir_var = tk.StringVar(value=get_val("char_preview_dir", ""))
+        self.preview_box_mode_var = tk.StringVar(value=saved_preview_box_mode)
 
         self.ocr_conf_var = tk.DoubleVar(value=float(get_val("char_ocr_conf", 0.25)))
         self.smart_export_var = tk.BooleanVar(value=get_val("char_smart_export", True))
+        self.gold_include_ocr_exact_var = tk.BooleanVar(value=bool(get_val("char_gold_include_ocr_exact", True)))
+        self.gold_include_yolo_exact_var = tk.BooleanVar(value=bool(get_val("char_gold_include_yolo_exact", True)))
+        self.gold_include_ocr_yolo_rescue_var = tk.BooleanVar(value=bool(get_val("char_gold_include_ocr_yolo_rescue", True)))
+        self.gold_include_other_perfect_var = tk.BooleanVar(value=bool(get_val("char_gold_include_other_perfect", True)))
 
         # lab params
         self.prep_angle_var = tk.DoubleVar(value=float(get_val("char_prep_angle", 0.0)))
@@ -134,6 +147,14 @@ class CharacterAnnotationTab:
         self.prep_erode_var = tk.IntVar(value=int(get_val("char_prep_erode", 0)))
         self.do_clahe_var = tk.BooleanVar(value=get_val("char_do_clahe", True))
         self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
+        self.preview_box_mode_var.trace_add("write", self._on_preview_box_mode_var_write)
+        for filter_var in (
+            self.gold_include_ocr_exact_var,
+            self.gold_include_yolo_exact_var,
+            self.gold_include_ocr_yolo_rescue_var,
+            self.gold_include_other_perfect_var,
+        ):
+            filter_var.trace_add("write", self._on_gold_export_filter_var_write)
 
         self._create_widgets()
         self._bind_source_path_watchers()
@@ -251,66 +272,6 @@ class CharacterAnnotationTab:
             logger.debug(f"Nie udało się przywrócić preview paczki projektu: {e}")
             return False
     
-    def _ascii_progress_bar(self, current: int, total: int, width: int = 24) -> str:
-        total = max(1, total)
-        current = max(0, min(current, total))
-        filled = int(round((current / total) * width))
-        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-
-    def _log_download_progress(self, label: str, downloaded: int, total: int):
-        pct = (downloaded / total * 100.0) if total > 0 else 0.0
-        bar = self._ascii_progress_bar(downloaded, total, width=24)
-
-        try:
-            self._set_test_status(f"Pobieranie modelu: {label} {pct:.1f}%", "warning")
-        except Exception:
-            pass
-
-        self._log(
-            self.test_log_text,
-            f"[DOWNLOAD] {label} {bar} {pct:.1f}% ({downloaded}/{total} B)",
-            "INFO"
-        )
-
-
-    def _download_file_with_progress(self, url: str, dst_path: Path, label: str):
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self._log(self.test_log_text, f"[INFO] Rozpoczynam pobieranie modelu: {label}", "INFO")
-        self._log(self.test_log_text, f"[INFO] Źródło: {url}", "INFO")
-
-        with requests.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("Content-Length", "0") or "0")
-
-            downloaded = 0
-            last_logged_pct = -1
-
-            with open(dst_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 256):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    downloaded += len(chunk)
-
-                    pct = int(downloaded / total * 100) if total > 0 else -1
-                    if total > 0 and pct >= last_logged_pct + 5:
-                        last_logged_pct = pct
-                        self.frame.after(
-                            0,
-                            lambda d=downloaded, t=total, lbl=label: self._log_download_progress(lbl, d, t)
-                        )
-
-        self._log(self.test_log_text, f"[SUCCESS] Pobieranie zakończone: {dst_path}", "SUCCESS")
-    
-    def _ascii_progress_bar(self, current: int, total: int, width: int = 24) -> str:
-        total = max(1, total)
-        current = max(0, min(current, total))
-        filled = int(round((current / total) * width))
-        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-
     def _sort_character_records_by_x(self, chars):
         if not isinstance(chars, list):
             return []
@@ -323,23 +284,392 @@ class CharacterAnnotationTab:
         prepared.sort(key=lambda item: (item[0], item[1]))
         return [rec for _, _, rec in prepared]
 
-    def _get_preview_box_records(self, data: dict):
+    def _get_perfect_strategy_bucket(self, data: dict) -> str:
+        if not isinstance(data, dict):
+            return "other_perfect"
+
+        raw_strategy = str(data.get("fusion_strategy", "") or "").strip().lower()
+        if raw_strategy in ("ocr_exact", "ocr_only"):
+            return "ocr_exact"
+        if raw_strategy in ("yolo_exact", "yolo_only"):
+            return "yolo_exact"
+        if raw_strategy == "ocr_yolo_rescue":
+            return "ocr_yolo_rescue"
+
+        return "other_perfect"
+
+    def _empty_perfect_strategy_counts(self):
+        return {key: 0 for key, _ in PERFECT_STRATEGY_BUCKETS}
+
+    def _format_perfect_strategy_counts(self, counts: dict) -> str:
+        safe_counts = counts if isinstance(counts, dict) else {}
+        parts = [
+            f"{label}: {int(safe_counts.get(key, 0))}"
+            for key, label in PERFECT_STRATEGY_BUCKETS
+        ]
+        return "Perfect wg strategii: " + " | ".join(parts)
+
+    def _get_selected_gold_export_strategy_buckets(self):
+        selected = set()
+        if bool(getattr(self, "gold_include_ocr_exact_var", None).get() if hasattr(self, "gold_include_ocr_exact_var") else True):
+            selected.add("ocr_exact")
+        if bool(getattr(self, "gold_include_yolo_exact_var", None).get() if hasattr(self, "gold_include_yolo_exact_var") else True):
+            selected.add("yolo_exact")
+        if bool(getattr(self, "gold_include_ocr_yolo_rescue_var", None).get() if hasattr(self, "gold_include_ocr_yolo_rescue_var") else True):
+            selected.add("ocr_yolo_rescue")
+        if bool(getattr(self, "gold_include_other_perfect_var", None).get() if hasattr(self, "gold_include_other_perfect_var") else True):
+            selected.add("other_perfect")
+        return selected
+
+    def _format_selected_gold_export_strategy_labels(self) -> str:
+        selected = self._get_selected_gold_export_strategy_buckets()
+        labels = [label for key, label in PERFECT_STRATEGY_BUCKETS if key in selected]
+        return ", ".join(labels) if labels else "brak"
+
+    def _count_statuses_in_metadata_mapping(self, metadata_map):
+        perfect = 0
+        needs_fix = 0
+        unknown = 0
+        strategy_counts = self._empty_perfect_strategy_counts()
+
+        for _, data in (metadata_map or {}).items():
+            if not isinstance(data, dict):
+                unknown += 1
+                continue
+
+            status = str(data.get("status", "unknown")).strip().lower()
+            if status == "perfect":
+                perfect += 1
+                strategy_counts[self._get_perfect_strategy_bucket(data)] += 1
+            elif status == "needs_fix":
+                needs_fix += 1
+            else:
+                unknown += 1
+
+        return {
+            "perfect": perfect,
+            "needs_fix": needs_fix,
+            "unknown": unknown,
+            "total": perfect + needs_fix + unknown,
+            "strategy_counts": strategy_counts,
+        }
+
+    def _char_record_bbox(self, rec):
+        bbox = None
+
+        if isinstance(rec, dict):
+            bbox = rec.get("bbox")
+        else:
+            try:
+                bbox = getattr(rec, "bbox", None)
+            except Exception:
+                bbox = None
+
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            return None
+
+        try:
+            return tuple(float(v) for v in bbox[:4])
+        except Exception:
+            return None
+
+    def _char_record_width(self, rec) -> float:
+        bbox = self._char_record_bbox(rec)
+        if not bbox:
+            return 0.0
+        return max(0.0, float(bbox[2]) - float(bbox[0]))
+
+    def _char_record_confidence(self, rec) -> float:
+        if isinstance(rec, dict):
+            try:
+                return float(rec.get("confidence", 0.0))
+            except Exception:
+                return 0.0
+
+        try:
+            return float(getattr(rec, "confidence", 0.0))
+        except Exception:
+            return 0.0
+
+    def _clone_character_detection(self, rec, character=None, method=None):
+        symbol, _ = self._char_record_to_symbol_and_x(rec)
+        bbox = self._char_record_bbox(rec) or (0.0, 0.0, 1.0, 1.0)
+        confidence = self._char_record_confidence(rec)
+
+        return CharacterDetection(
+            character=str(character if character is not None else symbol or ""),
+            bbox=tuple(float(v) for v in bbox[:4]),
+            confidence=float(confidence),
+            method=str(method if method is not None else getattr(rec, "method", "ocr") if not isinstance(rec, dict) else rec.get("method", "ocr")),
+        )
+
+    def _levenshtein_distance(self, left: str, right: str) -> int:
+        left = str(left or "")
+        right = str(right or "")
+
+        if left == right:
+            return 0
+        if not left:
+            return len(right)
+        if not right:
+            return len(left)
+
+        previous = list(range(len(right) + 1))
+        for i, left_char in enumerate(left, start=1):
+            current = [i]
+            for j, right_char in enumerate(right, start=1):
+                cost = 0 if left_char == right_char else 1
+                current.append(
+                    min(
+                        previous[j] + 1,
+                        current[j - 1] + 1,
+                        previous[j - 1] + cost,
+                    )
+                )
+            previous = current
+
+        return previous[-1]
+
+    def _best_text_distance(self, candidate_text: str, true_texts) -> int:
+        normalized = [str(item or "").strip().upper() for item in (true_texts or []) if str(item or "").strip()]
+        if not normalized:
+            return 10 ** 9
+
+        candidate = str(candidate_text or "").strip().upper()
+        return min(self._levenshtein_distance(candidate, truth) for truth in normalized)
+
+    def _pick_best_true_text(self, candidate_text: str, true_texts, same_length_only: bool = False) -> str:
+        normalized = [str(item or "").strip().upper() for item in (true_texts or []) if str(item or "").strip()]
+        if same_length_only:
+            normalized = [item for item in normalized if len(item) == len(str(candidate_text or ""))]
+
+        if not normalized:
+            return ""
+
+        candidate = str(candidate_text or "").strip().upper()
+        return min(
+            normalized,
+            key=lambda item: (
+                self._levenshtein_distance(candidate, item),
+                abs(len(candidate) - len(item)),
+                item,
+            )
+        )
+
+    def _get_text_mismatch_positions(self, candidate_text: str, expected_text: str):
+        candidate = str(candidate_text or "").strip().upper()
+        expected = str(expected_text or "").strip().upper()
+
+        if not candidate or not expected or len(candidate) != len(expected):
+            return []
+
+        return [idx for idx, (left, right) in enumerate(zip(candidate, expected)) if left != right]
+
+    def _find_best_yolo_rescue_index(self, slot_index: int, expected_char: str, ocr_detections, yolo_detections, used_indices):
+        if slot_index < 0 or slot_index >= len(ocr_detections):
+            return None
+
+        expected_char = str(expected_char or "").strip().upper()
+        if not expected_char:
+            return None
+
+        _, slot_center_x = self._char_record_to_symbol_and_x(ocr_detections[slot_index], fallback_index=slot_index)
+        ocr_width = max(1.0, self._char_record_width(ocr_detections[slot_index]))
+        all_ocr_widths = [self._char_record_width(det) for det in ocr_detections if self._char_record_width(det) > 0.0]
+        if all_ocr_widths:
+            sorted_widths = sorted(all_ocr_widths)
+            median_width = float(sorted_widths[len(sorted_widths) // 2])
+        else:
+            median_width = ocr_width
+
+        allowed_gap = max(6.0, ocr_width * 0.85, median_width * 0.75)
+
+        if slot_index < len(yolo_detections) and slot_index not in used_indices:
+            aligned_det = yolo_detections[slot_index]
+            aligned_char, aligned_center_x = self._char_record_to_symbol_and_x(aligned_det, fallback_index=slot_index)
+            if str(aligned_char or "").strip().upper() == expected_char:
+                if abs(aligned_center_x - slot_center_x) <= allowed_gap * 1.35:
+                    return slot_index
+
+        best_index = None
+        best_score = None
+
+        for idx, det in enumerate(yolo_detections):
+            if idx in used_indices:
+                continue
+
+            det_char, det_center_x = self._char_record_to_symbol_and_x(det, fallback_index=idx)
+            if str(det_char or "").strip().upper() != expected_char:
+                continue
+
+            center_gap = abs(float(det_center_x) - float(slot_center_x))
+            if center_gap > allowed_gap * 1.35:
+                continue
+
+            score = (
+                (center_gap / allowed_gap)
+                + (0.12 * abs(idx - slot_index))
+                - min(0.20, self._char_record_confidence(det) * 0.10)
+            )
+
+            if best_score is None or score < best_score:
+                best_index = idx
+                best_score = score
+
+        return best_index
+
+    def _repair_ocr_with_yolo_boxes(self, ocr_detections, yolo_detections, true_texts):
+        ordered_ocr = self._sort_character_records_by_x(list(ocr_detections or []))
+        ordered_yolo = self._sort_character_records_by_x(list(yolo_detections or []))
+
+        if not ordered_ocr or not ordered_yolo:
+            return None, None
+
+        ocr_text = self._characters_to_text(ordered_ocr)
+        expected_text = self._pick_best_true_text(ocr_text, true_texts, same_length_only=True)
+        if not expected_text:
+            return None, None
+
+        mismatch_positions = self._get_text_mismatch_positions(ocr_text, expected_text)
+        if not mismatch_positions or len(mismatch_positions) > 2:
+            return None, None
+
+        repaired = [self._clone_character_detection(det) for det in ordered_ocr]
+        used_yolo_indices = set()
+
+        for slot_index in mismatch_positions:
+            rescue_index = self._find_best_yolo_rescue_index(
+                slot_index,
+                expected_text[slot_index],
+                ordered_ocr,
+                ordered_yolo,
+                used_yolo_indices,
+            )
+            if rescue_index is None:
+                return None, None
+
+            used_yolo_indices.add(rescue_index)
+            repaired[slot_index] = self._clone_character_detection(
+                ordered_yolo[rescue_index],
+                character=expected_text[slot_index],
+                method="yolo",
+            )
+
+        repaired = self._sort_character_records_by_x(repaired)
+        repaired_text = self._characters_to_text(repaired)
+        if repaired_text != expected_text:
+            return None, None
+
+        details = {
+            "ocr_text": ocr_text,
+            "yolo_text": self._characters_to_text(ordered_yolo),
+            "expected_text": expected_text,
+            "mismatch_positions": list(mismatch_positions),
+        }
+        return repaired, details
+
+    def _resolve_canonical_detections(self, method, combined_detections, ocr_detections, yolo_detections, true_texts):
+        ordered_combined = self._sort_character_records_by_x(list(combined_detections or []))
+        ordered_ocr = self._sort_character_records_by_x(list(ocr_detections or []))
+        ordered_yolo = self._sort_character_records_by_x(list(yolo_detections or []))
+        normalized_truths = [
+            str(item or "").strip().upper()
+            for item in (true_texts or [])
+            if str(item or "").strip()
+        ]
+
+        if method == DetectionMethod.OCR:
+            return ordered_ocr or ordered_combined, "ocr_only", None
+
+        if method == DetectionMethod.YOLO:
+            return ordered_yolo or ordered_combined, "yolo_only", None
+
+        if normalized_truths:
+            ocr_text = self._characters_to_text(ordered_ocr)
+            yolo_text = self._characters_to_text(ordered_yolo)
+
+            if ocr_text and ocr_text in normalized_truths:
+                return ordered_ocr, "ocr_exact", {"final_text": ocr_text}
+
+            if yolo_text and yolo_text in normalized_truths:
+                return ordered_yolo, "yolo_exact", {"final_text": yolo_text}
+
+            rescued, rescue_details = self._repair_ocr_with_yolo_boxes(ordered_ocr, ordered_yolo, normalized_truths)
+            if rescued:
+                return rescued, "ocr_yolo_rescue", rescue_details
+
+            best_source = ordered_ocr or ordered_yolo or ordered_combined
+            best_strategy = "ocr_fallback" if ordered_ocr else ("yolo_fallback" if ordered_yolo else "both_combined")
+            best_distance = self._best_text_distance(self._characters_to_text(best_source), normalized_truths)
+
+            for candidate_source, candidate_strategy in (
+                (ordered_yolo, "yolo_fallback"),
+                (ordered_combined, "both_combined"),
+            ):
+                if not candidate_source:
+                    continue
+
+                candidate_distance = self._best_text_distance(self._characters_to_text(candidate_source), normalized_truths)
+                if candidate_distance < best_distance:
+                    best_source = candidate_source
+                    best_strategy = candidate_strategy
+                    best_distance = candidate_distance
+
+            return best_source, best_strategy, {"distance": best_distance}
+
+        return ordered_combined, "both_combined_no_gt", None
+
+    def _get_preview_box_mode_key(self) -> str:
+        raw_value = str((getattr(self, "preview_box_mode_var", None).get() if hasattr(self, "preview_box_mode_var") else "AUTO") or "AUTO").strip()
+        if not raw_value:
+            return "AUTO"
+
+        direct_key = raw_value.upper()
+        if direct_key in PREVIEW_BOX_MODE_LABELS:
+            return direct_key
+
+        return PREVIEW_BOX_MODE_BY_LABEL.get(raw_value, "AUTO")
+
+    def _get_preview_box_mode_label(self, key=None) -> str:
+        resolved_key = (key or self._get_preview_box_mode_key() or "AUTO").upper().strip()
+        return PREVIEW_BOX_MODE_LABELS.get(resolved_key, PREVIEW_BOX_MODE_LABELS["AUTO"])
+
+    def _get_preview_box_variants(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            data = {}
         canonical_chars = self._sort_character_records_by_x(data.get("characters", []))
-        yolo_raw = self._sort_character_records_by_x(data.get("yolo_detections", []))
-        method_name = (self.detection_method_var.get() or "OCR").upper().strip()
+        yolo_filtered = self._sort_character_records_by_x(data.get("yolo_detections", []))
+        yolo_nms = self._sort_character_records_by_x(data.get("yolo_nms_detections", []))
+        yolo_raw = self._sort_character_records_by_x(data.get("yolo_raw_detections", []))
 
-        if method_name == "YOLO" and yolo_raw:
-            return yolo_raw, "yolo"
-
-        if method_name == "YOLO":
+        if not yolo_filtered:
             yolo_from_canonical = [
                 rec for rec in canonical_chars
                 if isinstance(rec, dict) and str(rec.get("method", "")).strip().lower() == "yolo"
             ]
-            if yolo_from_canonical:
-                return self._sort_character_records_by_x(yolo_from_canonical), "yolo"
+            yolo_filtered = self._sort_character_records_by_x(yolo_from_canonical)
 
-        return canonical_chars, "canonical"
+        return {
+            "FINAL": canonical_chars,
+            "YOLO_FILTERED": yolo_filtered,
+            "YOLO_NMS": yolo_nms,
+            "YOLO_RAW": yolo_raw,
+        }
+
+    def _get_preview_box_records(self, data: dict):
+        variants = self._get_preview_box_variants(data)
+        method_name = (self.detection_method_var.get() or "OCR").upper().strip()
+        mode_key = self._get_preview_box_mode_key()
+
+        if mode_key == "AUTO":
+            if method_name == "YOLO":
+                for candidate_key in ("YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"):
+                    candidate_records = variants.get(candidate_key, [])
+                    if candidate_records:
+                        return candidate_records, candidate_key
+            return variants.get("FINAL", []), "FINAL"
+
+        return variants.get(mode_key, []), mode_key
 
     def _get_preview_box_palette(self, index: int):
         palettes = [
@@ -356,10 +686,207 @@ class CharacterAnnotationTab:
         ]
         return palettes[index % len(palettes)]
 
+    def _on_preview_box_mode_var_write(self, *_args):
+        self._apply_preview_mode_radio_style()
+
+    def _on_gold_export_filter_var_write(self, *_args):
+        self._apply_gold_export_filter_check_style()
+
+    def _draw_selection_indicator(self, canvas, kind: str, selected: bool, background: str):
+        if canvas is None:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        outline = palette.get("border", "#5a5a5a")
+        accent = palette.get("accent", "#4ecdc4")
+        success = palette.get("success", "#4ec9b0")
+
+        try:
+            canvas.configure(bg=background)
+            canvas.delete("all")
+        except Exception:
+            return
+
+        if kind == "radio":
+            canvas.create_oval(2, 2, 14, 14, outline=outline, width=2, fill=background)
+            if selected:
+                canvas.create_oval(5, 5, 11, 11, outline=success, width=1, fill=success)
+            else:
+                canvas.create_oval(5, 5, 11, 11, outline=background, width=1, fill=background)
+            return
+
+        canvas.create_rectangle(2, 2, 14, 14, outline=(success if selected else outline), width=2, fill=background)
+        if selected:
+            canvas.create_line(
+                4, 8, 7, 11, 12, 5,
+                fill=success,
+                width=2,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND
+            )
+
+    def _set_selection_row_hover(self, row_info: dict, hovered: bool):
+        if not isinstance(row_info, dict):
+            return
+        row_info["hovered"] = bool(hovered)
+        self._refresh_selection_row(row_info)
+
+    def _refresh_selection_row(self, row_info: dict):
+        if not isinstance(row_info, dict):
+            return
+
+        frame = row_info.get("frame")
+        label = row_info.get("label")
+        indicator = row_info.get("indicator")
+        if frame is None or label is None or indicator is None:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", palette.get("bg", "#252526"))
+        hover_bg = palette.get("surface_info", palette.get("button_hover", palette.get("panel_alt", "#2d2d30")))
+        fg = palette.get("fg", "#f3f3f3")
+        muted_fg = palette.get("muted_dim", palette.get("muted", "#a0a0a0"))
+        selected = bool(row_info.get("selected_getter", lambda: False)())
+        enabled = bool(row_info.get("enabled", True))
+        hovered = bool(row_info.get("hovered", False))
+        row_bg = hover_bg if hovered else panel_bg
+        row_fg = fg if enabled else muted_fg
+
+        try:
+            frame.configure(bg=row_bg)
+        except Exception:
+            pass
+        try:
+            label.configure(bg=row_bg, fg=row_fg)
+        except Exception:
+            pass
+
+        self._draw_selection_indicator(indicator, row_info.get("kind", "radio"), selected, row_bg)
+
+    def _apply_preview_mode_radio_style(self):
+        for row_info in getattr(self, "preview_box_mode_rows", []):
+            self._refresh_selection_row(row_info)
+
+    def _apply_gold_export_filter_check_style(self):
+        for row_info in getattr(self, "gold_export_filter_rows", []):
+            self._refresh_selection_row(row_info)
+
+    def _apply_plates_legend_style(self):
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("panel", palette.get("bg", "#252526"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted_fg = palette.get("muted", "#a0a0a0")
+        success_fg = palette.get("success", "#2ecc71")
+        error_fg = palette.get("error", "#e74c3c")
+
+        frame = getattr(self, "plates_legend_frame", None)
+        if frame is not None:
+            try:
+                frame.configure(bg=bg)
+            except Exception:
+                pass
+
+        label_configs = (
+            ("plates_legend_perfect_dot_lbl", {"bg": bg, "fg": success_fg, "font": ("Segoe UI", 11, "bold")}),
+            ("plates_legend_perfect_text_lbl", {"bg": bg, "fg": fg, "font": ("Segoe UI", 9, "bold")}),
+            ("plates_legend_sep_lbl", {"bg": bg, "fg": muted_fg, "font": ("Segoe UI", 9)}),
+            ("plates_legend_error_dot_lbl", {"bg": bg, "fg": error_fg, "font": ("Segoe UI", 11, "bold")}),
+            ("plates_legend_error_text_lbl", {"bg": bg, "fg": fg, "font": ("Segoe UI", 9, "bold")}),
+        )
+        for name, config in label_configs:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(**config)
+            except Exception:
+                pass
+
+    def _draw_preview_canvas_info_overlay(
+        self,
+        canvas,
+        canvas_width: int,
+        plate_id: str,
+        data: dict,
+        box_source: str,
+        shown_count: int,
+        yolo_raw_count: int,
+        yolo_nms_count: int,
+        yolo_filtered_count: int,
+        has_boxes: bool,
+    ):
+        if canvas is None:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        panel_border = palette.get("border", "#3c3c3c")
+        info_fg = palette.get("info", palette.get("accent", "#4aa3ff"))
+        title_fg = palette.get("fg", "#f3f3f3")
+        muted_fg = palette.get("muted", "#b0b0b0")
+        success_fg = palette.get("success", "#2ecc71")
+        error_fg = palette.get("error", "#e74c3c")
+        warning_fg = palette.get("warning", "#f4c27a")
+
+        status = str((data or {}).get("status", "unknown") or "unknown").strip().lower()
+        status_text = {
+            "perfect": "Perfect",
+            "needs_fix": "Błędy",
+        }.get(status, "Nieocenione")
+        status_color = {
+            "perfect": success_fg,
+            "needs_fix": error_fg,
+        }.get(status, muted_fg)
+
+        final_text = self._characters_to_text((data or {}).get("characters", []))
+        final_text = final_text if final_text else "brak"
+        mode_label = self._get_preview_box_mode_label(box_source)
+        bar_height = 24
+        canvas.create_rectangle(
+            0,
+            0,
+            max(40, int(canvas_width)),
+            bar_height,
+            fill=panel_bg,
+            outline=panel_border,
+            width=1
+        )
+
+        line_text = (
+            f"Wynik: [{final_text}] | ID: {plate_id} | Widok: {mode_label} | "
+            f"Boxy: {int(shown_count)} | YOLO raw/nms/filtr: "
+            f"{int(yolo_raw_count)}/{int(yolo_nms_count)}/{int(yolo_filtered_count)}"
+        )
+        if not has_boxes:
+            line_text += " | Brak boxów dla widoku"
+
+        canvas.create_text(
+            10,
+            bar_height // 2 + 1,
+            text=line_text,
+            fill=(warning_fg if not has_boxes else info_fg),
+            font=("Segoe UI", 9),
+            anchor=tk.W
+        )
+        canvas.create_text(
+            max(20, int(canvas_width) - 10),
+            bar_height // 2 + 1,
+            text=status_text,
+            fill=status_color,
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.E
+        )
+
     def _get_yolo_runtime_settings(self):
         conf = float(self.yolo_conf_var.get())
         iou = float(self.yolo_iou_var.get())
         overlap = float(self.yolo_overlap_var.get())
+        seq_center_y = float(self.yolo_seq_center_y_var.get())
+        seq_min_h = float(self.yolo_seq_min_h_ratio_var.get())
+        seq_max_h = float(self.yolo_seq_max_h_ratio_var.get())
+        seq_max_w = float(self.yolo_seq_max_w_ratio_var.get())
+        seq_soft_overlap = float(self.yolo_seq_soft_overlap_var.get())
+        seq_hard_overlap = float(self.yolo_seq_hard_overlap_var.get())
 
         if not (0.0 <= conf <= 1.0):
             raise ValueError("Próg confidence YOLO musi być w zakresie 0.00-1.00.")
@@ -367,12 +894,34 @@ class CharacterAnnotationTab:
             raise ValueError("Próg NMS IoU musi być w zakresie 0.01-0.99.")
         if not (0.0 <= overlap <= 1.0):
             raise ValueError("Próg nakładania boxów musi być w zakresie 0.00-1.00.")
+        if not (0.10 <= seq_center_y <= 1.50):
+            raise ValueError("Tolerancja osi Y dla filtra sekwencji musi być w zakresie 0.10-1.50.")
+        if not (0.20 <= seq_min_h <= 1.00):
+            raise ValueError("Minimalna zgodnosc wysokosci znaku musi byc w zakresie 0.20-1.00.")
+        if not (1.00 <= seq_max_h <= 3.50):
+            raise ValueError("Maksymalna wysokosc znaku wzgledem mediany musi byc w zakresie 1.00-3.50.")
+        if seq_min_h >= seq_max_h:
+            raise ValueError("Minimalna zgodnosc wysokosci musi byc mniejsza od maksymalnej wysokosci wzgledem mediany.")
+        if not (1.00 <= seq_max_w <= 4.50):
+            raise ValueError("Maksymalna szerokosc znaku wzgledem mediany musi byc w zakresie 1.00-4.50.")
+        if not (0.0 <= seq_soft_overlap <= 1.0):
+            raise ValueError("Miekki prog konfliktu nakladania musi byc w zakresie 0.00-1.00.")
+        if not (0.0 <= seq_hard_overlap <= 1.0):
+            raise ValueError("Twardy prog konfliktu nakladania musi byc w zakresie 0.00-1.00.")
+        if seq_soft_overlap > seq_hard_overlap:
+            raise ValueError("Miekki prog konfliktu nie moze byc wiekszy od twardego progu konfliktu.")
 
         return {
             "conf": conf,
             "iou": iou,
             "overlap": overlap,
             "agnostic_nms": bool(self.yolo_agnostic_nms_var.get()),
+            "seq_center_y": seq_center_y,
+            "seq_min_h": seq_min_h,
+            "seq_max_h": seq_max_h,
+            "seq_max_w": seq_max_w,
+            "seq_soft_overlap": seq_soft_overlap,
+            "seq_hard_overlap": seq_hard_overlap,
         }
 
 
@@ -436,28 +985,57 @@ class CharacterAnnotationTab:
 
     def _update_preview_info_label(self):
         try:
-            perfect = 0
-            needs_fix = 0
-            unknown = 0
-
-            for pid in self._listbox_pid_by_index:
-                status = str(
-                    self.preview_metadata.get(pid, {}).get("status", "unknown")
-                ).strip().lower()
-
-                if status == "perfect":
-                    perfect += 1
-                elif status == "needs_fix":
-                    needs_fix += 1
-                else:
-                    unknown += 1
-
+            counts = self._count_preview_statuses()
             self._set_preview_info(
-                f"Wczytano tablic: {len(self._listbox_pid_by_index)} | {perfect} | {needs_fix} | ⚪ {unknown}",
+                f"Wczytano tablic: {counts['total']} | 🟢 {counts['perfect']} | 🔴 {counts['needs_fix']} | ⚪ {counts['unknown']}",
                 "info"
             )
+            self._set_preview_fusion_info(
+                self._format_perfect_strategy_counts(counts.get("strategy_counts", {})),
+                "muted"
+            )
+            self._refresh_gold_export_scope_label()
         except Exception as e:
             logger.debug(f"Nie udało się odświeżyć preview_info_lbl: {e}")
+
+    def _update_preview_box_info_label(
+        self,
+        plate_id=None,
+        mode_key=None,
+        shown_count=None,
+        yolo_raw_count=None,
+        yolo_nms_count=None,
+        yolo_filtered_count=None,
+    ):
+        if not plate_id:
+            self._set_preview_box_info("Tryb boxow: brak zaznaczonej tablicy", "muted")
+            return
+
+        label = self._get_preview_box_mode_label(mode_key)
+        details = [f"{plate_id}", label]
+
+        if shown_count is not None:
+            details.append(f"pokazano: {int(shown_count)}")
+
+        yolo_parts = []
+        if yolo_raw_count is not None:
+            yolo_parts.append(f"raw={int(yolo_raw_count)}")
+        if yolo_nms_count is not None:
+            yolo_parts.append(f"nms={int(yolo_nms_count)}")
+        if yolo_filtered_count is not None:
+            yolo_parts.append(f"filtr={int(yolo_filtered_count)}")
+        if yolo_parts:
+            details.append("YOLO: " + ", ".join(yolo_parts))
+
+        tone = "info" if shown_count else "warning"
+        self._set_preview_box_info(" | ".join(details), tone)
+
+    def _on_preview_box_mode_change(self, event=None):
+        try:
+            self._save_local_setting("char_preview_box_mode", self._get_preview_box_mode_key())
+        except Exception:
+            pass
+        self._on_preview_select(None)
 
     def _rebuild_preview_listbox(self, preserve_selection: bool = True):
         selected_pid = None
@@ -507,6 +1085,15 @@ class CharacterAnnotationTab:
                     pass
 
             self._update_preview_info_label()
+
+            try:
+                self.plates_listbox.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.frame.update_idletasks()
+            except Exception:
+                pass
 
         finally:
             self._reloading_preview = False
@@ -705,6 +1292,11 @@ class CharacterAnnotationTab:
             pass
 
         try:
+            self._set_preview_box_info("Tryb boxow: brak wczytanych danych", "muted")
+        except Exception:
+            pass
+
+        try:
             self.test_log_text.configure(state=tk.NORMAL)
             self.test_log_text.delete("1.0", tk.END)
             self.test_log_text.configure(state=tk.DISABLED)
@@ -813,6 +1405,9 @@ class CharacterAnnotationTab:
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        self._apply_preview_mode_radio_style()
+        self._apply_gold_export_filter_check_style()
+        self._apply_plates_legend_style()
 
         for widget_name in ("ext_log", "test_log_text", "export_console", "import_console"):
             widget = getattr(self, widget_name, None)
@@ -890,6 +1485,8 @@ class CharacterAnnotationTab:
             "winner_name_lbl": ("neutral", True),
             "winner_acc_lbl": ("muted", False),
             "preview_info_lbl": ("info", False),
+            "preview_fusion_info_lbl": ("muted", False),
+            "preview_box_mode_info_lbl": ("muted", False),
             "footer_test_status_lbl": ("neutral", True),
             "cvat_option1_title_lbl": ("error", True),
             "cvat_option2_title_lbl": ("success", True),
@@ -897,6 +1494,7 @@ class CharacterAnnotationTab:
             "cvat_option2_desc_lbl": ("muted", False),
             "cvat_import_title_lbl": ("default", True),
             "cvat_import_desc_lbl": ("muted", False),
+            "gold_export_scope_lbl": ("muted", False),
         }
 
         for label_name, (default_tone, default_emphasis) in inline_label_defaults.items():
@@ -1104,8 +1702,9 @@ class CharacterAnnotationTab:
 
     def _set_test_status(self, text: str, tone: str = "neutral"):
         label = getattr(self, "test_status_lbl", None)
-        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=True):
-            self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
+        fixed_tone = "neutral"
+        if not self._set_inline_status_label_state(label, text=text, tone=fixed_tone, emphasis=True):
+            self._set_themed_label_state(label, text=text, tone=fixed_tone, emphasis=True)
 
     def _set_test_progress_counter(self, current: int | None = None, total: int | None = None):
         label = getattr(self, "test_progress_count_lbl", None)
@@ -1141,6 +1740,50 @@ class CharacterAnnotationTab:
         label = getattr(self, "preview_info_lbl", None)
         if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
             self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
+
+    def _set_preview_fusion_info(self, text: str, tone: str = "muted"):
+        label = getattr(self, "preview_fusion_info_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
+
+    def _set_preview_box_info(self, text: str, tone: str = "muted"):
+        label = getattr(self, "preview_box_mode_info_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
+
+    def _set_gold_export_scope_info(self, text: str, tone: str = "muted"):
+        label = getattr(self, "gold_export_scope_lbl", None)
+        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
+
+    def _refresh_gold_export_scope_label(self):
+        selected = self._get_selected_gold_export_strategy_buckets()
+        if not selected:
+            self._set_gold_export_scope_info("Do eksportu gold packa nie wybrano żadnej strategii.", "warning")
+            return
+
+        counts = self._count_preview_statuses()
+        selected_labels = self._format_selected_gold_export_strategy_labels()
+        selected_count = sum(
+            int(counts.get("strategy_counts", {}).get(bucket, 0))
+            for bucket in selected
+        )
+
+        self._set_gold_export_scope_info(
+            f"Do gold packa: {selected_labels} | perfect w biezacej paczce: {selected_count}",
+            "muted"
+        )
+
+    def _on_gold_export_filter_change(self):
+        try:
+            self._save_local_setting("char_gold_include_ocr_exact", bool(self.gold_include_ocr_exact_var.get()))
+            self._save_local_setting("char_gold_include_yolo_exact", bool(self.gold_include_yolo_exact_var.get()))
+            self._save_local_setting("char_gold_include_ocr_yolo_rescue", bool(self.gold_include_ocr_yolo_rescue_var.get()))
+            self._save_local_setting("char_gold_include_other_perfect", bool(self.gold_include_other_perfect_var.get()))
+        except Exception:
+            pass
+
+        self._refresh_gold_export_scope_label()
 
     def _set_winner_name(self, text: str, tone: str = "neutral"):
         label = getattr(self, "winner_name_lbl", None)
@@ -1214,17 +1857,6 @@ class CharacterAnnotationTab:
         version = match.group(1)
         size = match.group(2)
         return version, size
-    def _on_yolo_arch_change(self, event=None):
-        """
-        Reaguje na zmianę wydania / rozmiaru YOLO.
-        Nie nadpisuje panelu zwycięzcy turnieju OCR.
-        """
-        version = (self.yolo_model_version_var.get() or "").strip()
-        size = (self.yolo_model_size_var.get() or "").strip().lower()
-
-        if hasattr(self, "test_status_lbl"):
-            self._set_test_status(f"Wybrana konfiguracja: YOLOv{version}{size}", "info")
-
     def _set_widget_state(self, widget, state: str):
         if widget is None:
             return
@@ -1644,29 +2276,7 @@ class CharacterAnnotationTab:
         return result
 
     def _count_preview_statuses(self):
-        perfect = 0
-        needs_fix = 0
-        unknown = 0
-
-        for _, data in self.preview_metadata.items():
-            if not isinstance(data, dict):
-                unknown += 1
-                continue
-
-            status = str(data.get("status", "unknown")).strip().lower()
-            if status == "perfect":
-                perfect += 1
-            elif status == "needs_fix":
-                needs_fix += 1
-            else:
-                unknown += 1
-
-        return {
-            "perfect": perfect,
-            "needs_fix": needs_fix,
-            "unknown": unknown,
-            "total": perfect + needs_fix + unknown,
-        }
+        return self._count_statuses_in_metadata_mapping(self.preview_metadata)
 
 
     def _get_step3_summary_dir(self) -> Path:
@@ -1778,6 +2388,8 @@ class CharacterAnnotationTab:
             "needs_fix_count": counts["needs_fix"],
             "unknown_count": counts["unknown"],
             "total_count": counts["total"],
+            "perfect_strategy_counts": counts.get("strategy_counts", self._empty_perfect_strategy_counts()),
+            "selected_gold_export_strategies": sorted(self._get_selected_gold_export_strategy_buckets()),
             "note": note,
         }
 
@@ -2582,19 +3194,44 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+    def _prune_legacy_yolo_arch_session_keys(self):
+        legacy_keys = ("char_yolo_size", "char_yolo_version")
+        removed = False
+        for key in legacy_keys:
+            if key in self.local_session:
+                self.local_session.pop(key, None)
+                removed = True
+
+        if not removed:
+            return
+
+        try:
+            with open(self.session_file, "w", encoding="utf-8") as f:
+                json.dump(self.local_session, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
     def _force_save_all(self):
         try:
             always_saved = [
                 ("char_det_method", self.detection_method_var),
                 ("char_yolo_device", self.yolo_device_var),
-                ("char_yolo_size", self.yolo_model_size_var),
-                ("char_yolo_version", self.yolo_model_version_var),
                 ("char_yolo_conf", self.yolo_conf_var),
                 ("char_yolo_iou", self.yolo_iou_var),
                 ("char_yolo_overlap", self.yolo_overlap_var),
                 ("char_yolo_agnostic_nms", self.yolo_agnostic_nms_var),
+                ("char_yolo_seq_center_y", self.yolo_seq_center_y_var),
+                ("char_yolo_seq_min_h_ratio", self.yolo_seq_min_h_ratio_var),
+                ("char_yolo_seq_max_h_ratio", self.yolo_seq_max_h_ratio_var),
+                ("char_yolo_seq_max_w_ratio", self.yolo_seq_max_w_ratio_var),
+                ("char_yolo_seq_soft_overlap", self.yolo_seq_soft_overlap_var),
+                ("char_yolo_seq_hard_overlap", self.yolo_seq_hard_overlap_var),
                 ("char_ocr_conf", self.ocr_conf_var),
                 ("char_smart_export", self.smart_export_var),
+                ("char_gold_include_ocr_exact", self.gold_include_ocr_exact_var),
+                ("char_gold_include_yolo_exact", self.gold_include_yolo_exact_var),
+                ("char_gold_include_ocr_yolo_rescue", self.gold_include_ocr_yolo_rescue_var),
+                ("char_gold_include_other_perfect", self.gold_include_other_perfect_var),
                 ("char_prep_angle", self.prep_angle_var),
                 ("char_prep_height", self.prep_height_var),
                 ("char_prep_padding", self.prep_padding_var),
@@ -2611,6 +3248,10 @@ class CharacterAnnotationTab:
 
             for k, var in always_saved:
                 self._save_local_setting(k, var.get())
+
+            self._prune_legacy_yolo_arch_session_keys()
+
+            self._save_local_setting("char_preview_box_mode", self._get_preview_box_mode_key())
 
             # ścieżki wejściowe zapisujemy tylko poza liniowym workflow kampanii
             if not getattr(self, "_step3_linear_mode", False):
@@ -2653,20 +3294,17 @@ class CharacterAnnotationTab:
         else:
             self.yolo_panel.pack_forget()
 
-        # comboboxy architektury YOLO aktywne tylko dla YOLO/BOTH
-        if hasattr(self, "yolo_version_combo"):
-            self._set_widget_state(
-                self.yolo_version_combo,
-                "readonly" if (is_yolo or is_hybrid) else "disabled"
-            )
-
-        if hasattr(self, "yolo_size_combo"):
-            self._set_widget_state(
-                self.yolo_size_combo,
-                "readonly" if (is_yolo or is_hybrid) else "disabled"
-            )
-
-        for attr_name in ("yolo_conf_spin", "yolo_iou_spin", "yolo_overlap_spin"):
+        for attr_name in (
+            "yolo_conf_spin",
+            "yolo_iou_spin",
+            "yolo_overlap_spin",
+            "yolo_seq_center_y_scale",
+            "yolo_seq_min_h_scale",
+            "yolo_seq_max_h_scale",
+            "yolo_seq_max_w_scale",
+            "yolo_seq_soft_overlap_scale",
+            "yolo_seq_hard_overlap_scale",
+        ):
             widget = getattr(self, attr_name, None)
             if widget is not None:
                 self._set_widget_state(
@@ -2702,44 +3340,39 @@ class CharacterAnnotationTab:
         if hasattr(self, "btn_ocr_lab"):
             self._set_widget_state(self.btn_ocr_lab, "disabled" if is_yolo else "normal")
 
-        # Turniej presetów OCR:
+        # Turniej presetow OCR:
         # - tylko dla czystego OCR
         if hasattr(self, "btn_rank_presets"):
             self._set_widget_state(self.btn_rank_presets, "normal" if is_ocr else "disabled")
 
-        # Panel zwycięzcy rankingu dotyczy wyłącznie rankingu OCR.
-        # YOLO i HYBRYDA nie mogą podszywać się pod "zwycięzcę turnieju".
+        # Panel zwyciezcy rankingu dotyczy wylacznie rankingu OCR.
         if hasattr(self, "winner_name_lbl") and hasattr(self, "winner_acc_lbl"):
             if is_ocr:
                 self._update_winner_label()
             elif is_yolo:
                 self._set_winner_name("Brak rankingu OCR", "neutral")
-                self._set_winner_acc("Tryb YOLO nie bierze udziału w turnieju OCR", "muted")
+                self._set_winner_acc("Tryb YOLO nie bierze udzialu w turnieju OCR", "muted")
             else:  # BOTH
                 self._set_winner_name("Brak rankingu OCR", "neutral")
-                self._set_winner_acc("Tryb hybrydowy nie ustala zwycięzcy turnieju OCR", "muted")
+                self._set_winner_acc("Tryb hybrydowy nie ustala zwyciezcy turnieju OCR", "muted")
 
-        # Status dolny ma pokazywać, co użytkownik może teraz zrobić
         if hasattr(self, "test_status_lbl"):
             if is_yolo:
-                version = (self.yolo_model_version_var.get() or "").strip()
-                size = (self.yolo_model_size_var.get() or "").strip().lower()
                 self._set_test_status(
-                    f"Tryb YOLO: wybierz konfigurację i użyj 'Uruchom detekcję' (YOLOv{version}{size})",
+                    "Tryb YOLO: wskaz wytrenowany model znakow .pt i uzyj 'Uruchom detekcje'",
                     "muted"
                 )
             elif is_hybrid:
-                version = (self.yolo_model_version_var.get() or "").strip()
-                size = (self.yolo_model_size_var.get() or "").strip().lower()
                 self._set_test_status(
-                    f"Tryb hybrydowy: uruchom wspólną detekcję (YOLOv{version}{size} + OCR)",
+                    "Tryb hybrydowy: uruchom wspolna detekcje (wytrenowany YOLO znakow + OCR)",
                     "info"
                 )
             else:
                 self._set_test_status(
-                    "Tryb OCR: możesz uruchomić detekcję lub turniej presetów OCR",
+                    "Tryb OCR: mozesz uruchomic detekcje lub turniej presetow OCR",
                     "success"
                 )
+            return
 
     def _auto_device_label(self) -> str:
         return "auto (prefer GPU/CUDA, fallback CPU)"
@@ -2851,50 +3484,37 @@ class CharacterAnnotationTab:
             logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
 
     def _ensure_yolo_model_available(self) -> str:
-        """
-        Zwraca lokalną ścieżkę do modelu YOLO.
-        Jeśli model ma być pobrany z sieci, robi to jawnie z logowaniem postępu.
-        """
-        # 1. jeśli mamy realny lokalny model projektu / free mode, użyj go
-        effective_model = self._get_effective_yolo_model_path()
-        if effective_model and Path(effective_model).exists():
-            self._log(self.test_log_text, f"[INFO] Używam lokalnego modelu: {effective_model}", "INFO")
-            return str(Path(effective_model))
-
-        # 2. fallback: model wbudowany wybrany z combo
-        filename = self._get_selected_builtin_yolo_filename()
-        if not filename:
-            raise RuntimeError("Nie udało się ustalić nazwy modelu YOLO z wybranego wydania i rozmiaru.")
-
-        url = YOLO_REMOTE_URLS.get(filename)
-        if not url:
-            raise RuntimeError(f"Brak skonfigurowanego URL dla modelu {filename}")
-
-        models_dir = Path(self.session_dir) / "downloaded_models"
-        dst_path = models_dir / filename
-
-        if dst_path.exists():
-            self._log(self.test_log_text, f"[INFO] Model już istnieje lokalnie: {dst_path}", "INFO")
-            return str(dst_path)
-
-        self._download_file_with_progress(url, dst_path, filename)
-        return str(dst_path)
+        """Zachowane dla kompatybilnosci wstecznej; deleguje do checkpoint-only resolvera."""
+        return self._ensure_yolo_model_checkpoint()
 
     # =========================================================
     # Resolvers
     # =========================================================
 
-    def _get_selected_builtin_yolo_filename(self) -> str:
-        version = (self.yolo_model_version_var.get() or "").strip()
-        size = (self.yolo_model_size_var.get() or "").strip().lower()
+    def _ensure_yolo_model_checkpoint(self) -> str:
+        """
+        Zwraca ścieżkę do wytrenowanego checkpointu YOLO znaków.
+        Z3/PZ2 nie korzysta z niewytrenowanych wariantów architektury.
+        """
+        effective_model = self._get_effective_yolo_model_path()
+        if effective_model and Path(effective_model).exists():
+            model_path = Path(effective_model)
+            if model_path.suffix.lower() != ".pt":
+                raise RuntimeError("Model YOLO znaków musi mieć rozszerzenie .pt.")
+            self._log(self.test_log_text, f"[INFO] Używam lokalnego modelu: {model_path}", "INFO")
+            return str(model_path)
 
-        if version not in {"8", "11", "26"}:
-            return ""
-        if size not in {"n", "s", "m", "l", "x"}:
-            return ""
+        if getattr(self, "_step3_linear_mode", False):
+            raise RuntimeError(
+                "Brak wytrenowanego modelu znaków przypiętego do projektu. "
+                "Najpierw przygotuj i wytrenuj model w Z4."
+            )
 
-        return f"yolo{version}{size}.pt"
-    
+        raise RuntimeError(
+            "Wskaż wytrenowany model YOLO znaków (.pt). "
+            "W Z3/PZ2 nie korzystamy z niewytrenowanych wariantów architektury."
+        )
+
     # =========================================================
     # Pickers
     # =========================================================
@@ -3321,21 +3941,89 @@ class CharacterAnnotationTab:
 
         list_lf = ttk.LabelFrame(left_panel, text=" Lista tablic (🟢 Perfekt | 🔴 Błędy) ", padding=8)
         list_lf.grid(row=1, column=0, sticky="nsew")
-        list_lf.grid_rowconfigure(0, weight=1)
+        list_lf.grid_rowconfigure(1, weight=1)
         list_lf.grid_columnconfigure(0, weight=1)
+        try:
+            list_lf.configure(text=" Lista tablic ")
+        except Exception:
+            pass
+
+        self.plates_legend_frame = tk.Frame(list_lf, bd=0, highlightthickness=0)
+        self.plates_legend_frame.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+        self.plates_legend_perfect_dot_lbl = tk.Label(self.plates_legend_frame, text="●", bd=0, highlightthickness=0)
+        self.plates_legend_perfect_dot_lbl.pack(side=tk.LEFT)
+        self.plates_legend_perfect_text_lbl = tk.Label(self.plates_legend_frame, text="Perfect", bd=0, highlightthickness=0)
+        self.plates_legend_perfect_text_lbl.pack(side=tk.LEFT, padx=(4, 10))
+        self.plates_legend_sep_lbl = tk.Label(self.plates_legend_frame, text="|", bd=0, highlightthickness=0)
+        self.plates_legend_sep_lbl.pack(side=tk.LEFT, padx=(0, 10))
+        self.plates_legend_error_dot_lbl = tk.Label(self.plates_legend_frame, text="●", bd=0, highlightthickness=0)
+        self.plates_legend_error_dot_lbl.pack(side=tk.LEFT)
+        self.plates_legend_error_text_lbl = tk.Label(self.plates_legend_frame, text="Błędy", bd=0, highlightthickness=0)
+        self.plates_legend_error_text_lbl.pack(side=tk.LEFT, padx=(4, 0))
+        self._apply_plates_legend_style()
 
         self.plates_listbox = tk.Listbox(
             list_lf,
             font=("Consolas", 10),
-            selectbackground="#3498db"
+            selectbackground="#3498db",
+            exportselection=False
         )
-        self.plates_listbox.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=0)
+        self.plates_listbox.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=0)
 
         scroll = ttk.Scrollbar(list_lf, command=self.plates_listbox.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=1, column=1, sticky="ns")
 
         self.plates_listbox.config(yscrollcommand=scroll.set)
         self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
+
+        self.preview_mode_lf = ttk.LabelFrame(list_lf, text=" Pokaż boxy ", padding=6)
+        self.preview_mode_lf.grid(row=1, column=2, sticky="ns", padx=(8, 0))
+
+        self.preview_box_mode_rows = []
+        for mode_key, mode_label in PREVIEW_BOX_MODE_OPTIONS:
+            row = tk.Frame(self.preview_mode_lf, bd=0, highlightthickness=0, cursor="hand2")
+            row.pack(anchor=tk.W, fill=tk.X, pady=(0, 4))
+            indicator = tk.Canvas(
+                row,
+                width=16,
+                height=16,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2"
+            )
+            indicator.pack(side=tk.LEFT, padx=(0, 6))
+            label = tk.Label(
+                row,
+                text=mode_label,
+                anchor="w",
+                justify=tk.LEFT,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2"
+            )
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            def _select_preview_mode(_event=None, target_label=mode_label):
+                self.preview_box_mode_var.set(target_label)
+                self._on_preview_box_mode_change()
+
+            for widget in (row, indicator, label):
+                widget.bind("<Button-1>", _select_preview_mode)
+
+            row_info = {
+                "kind": "radio",
+                "frame": row,
+                "indicator": indicator,
+                "label": label,
+                "selected_getter": (lambda target_label=mode_label: self.preview_box_mode_var.get() == target_label),
+                "hovered": False,
+            }
+            for widget in (row, indicator, label):
+                widget.bind("<Enter>", lambda _event, info=row_info: self._set_selection_row_hover(info, True))
+                widget.bind("<Leave>", lambda _event, info=row_info: self._set_selection_row_hover(info, False))
+            self.preview_box_mode_rows.append(row_info)
+        self._apply_preview_mode_radio_style()
 
         right_panel.grid_rowconfigure(0, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
@@ -3373,7 +4061,7 @@ class CharacterAnnotationTab:
         self.detect_right_canvas.bind("<Configure>", self._sync_detect_right_canvas_width, add="+")
 
         set_lf = ttk.LabelFrame(self.detect_right_content, text=" Konfiguracja Rozpoznawania ", padding=8)
-        set_lf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        set_lf.grid(row=2, column=0, sticky="ew")
 
         row_meth = ttk.Frame(set_lf)
         row_meth.pack(fill=tk.X, pady=(0, 5))
@@ -3423,55 +4111,7 @@ class CharacterAnnotationTab:
 
         ttk.Label(
             self.yolo_panel,
-            text="Wydanie YOLO:",
-            font=("Segoe UI", 9, "bold")
-        ).pack(anchor=tk.W, pady=(5, 0))
-
-        self.yolo_version_row = ttk.Frame(self.yolo_panel)
-        self.yolo_version_row.pack(fill=tk.X, pady=(0, 8))
-
-        ttk.Label(
-            self.yolo_version_row,
-            text="Wybierz rodzinę modelu:"
-        ).pack(side=tk.LEFT)
-
-        self.yolo_version_combo = ttk.Combobox(
-            self.yolo_version_row,
-            textvariable=self.yolo_model_version_var,
-            values=["8", "11", "26"],
-            state="readonly",
-            width=10
-        )
-        self.yolo_version_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-        self.yolo_version_combo.bind("<<ComboboxSelected>>", self._on_yolo_arch_change)
-
-        ttk.Label(
-            self.yolo_panel,
-            text="Rozmiar modelu:",
-            font=("Segoe UI", 9, "bold")
-        ).pack(anchor=tk.W, pady=(5, 0))
-
-        self.yolo_size_row = ttk.Frame(self.yolo_panel)
-        self.yolo_size_row.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(
-            self.yolo_size_row,
-            text="Wybierz wariant modelu:"
-        ).pack(side=tk.LEFT)
-
-        self.yolo_size_combo = ttk.Combobox(
-            self.yolo_size_row,
-            textvariable=self.yolo_model_size_var,
-            values=["n", "s", "m", "l", "x"],
-            state="readonly",
-            width=10
-        )
-        self.yolo_size_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-        self.yolo_size_combo.bind("<<ComboboxSelected>>", self._on_yolo_arch_change)
-
-        ttk.Label(
-            self.yolo_panel,
-            text="Model YOLO z Wizarda / iteracji:",
+            text="Wytrenowany model YOLO znakow (.pt):",
             style="Muted.TLabel"
         ).pack(anchor=tk.W, pady=(5, 0))
 
@@ -3494,6 +4134,33 @@ class CharacterAnnotationTab:
 
         self.yolo_tuning_lf = ttk.LabelFrame(self.yolo_panel, text=" Strojenie YOLO ", padding=8)
         self.yolo_tuning_lf.pack(fill=tk.X, pady=(10, 0))
+
+        def add_yolo_scale(attr_name, parent, label_text, variable, from_, to_, digits=2):
+            row = ttk.Frame(parent)
+            row.pack(fill=tk.X, pady=(0, 4))
+
+            ttk.Label(row, text=label_text).pack(side=tk.LEFT)
+
+            scale = ttk.Scale(row, from_=from_, to=to_, variable=variable)
+            scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
+            setattr(self, attr_name, scale)
+
+            value_lbl = ttk.Label(row, width=6, anchor="e")
+            value_lbl.pack(side=tk.RIGHT)
+
+            fmt = "{:." + str(int(digits)) + "f}"
+
+            def refresh_value(*_args):
+                try:
+                    value_lbl.config(text=fmt.format(float(variable.get())))
+                except Exception:
+                    value_lbl.config(text=str(variable.get()))
+
+            try:
+                variable.trace_add("write", refresh_value)
+            except Exception:
+                pass
+            refresh_value()
 
         ttk.Label(
             self.yolo_tuning_lf,
@@ -3589,6 +4256,71 @@ class CharacterAnnotationTab:
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(4, 0))
 
+        self.yolo_seq_lf = ttk.LabelFrame(self.yolo_tuning_lf, text=" Filtr sekwencji znakow ", padding=8)
+        self.yolo_seq_lf.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Po klasycznym NMS system dodatkowo sprawdza, czy boxy ukladaja sie w wiarygodna sekwencje znakow na tablicy.",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_center_y_scale", self.yolo_seq_lf, "Tolerancja osi Y:", self.yolo_seq_center_y_var, 0.10, 1.50, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: znaki musza lezec blizej jednej linii. Wyzej: filtr jest bardziej wyrozumialy dla krzywych lub nierownych tablic.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_min_h_scale", self.yolo_seq_lf, "Min. zgodnosc wysokosci:", self.yolo_seq_min_h_ratio_var, 0.20, 1.00, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: latwiej przepuscic male lub uszkodzone boxy. Wyzej: filtr mocniej odrzuca znaki o wyraznie innej wysokosci.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_max_h_scale", self.yolo_seq_lf, "Max. wysokosc wzgledem mediany:", self.yolo_seq_max_h_ratio_var, 1.00, 3.50, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: szybciej wylatuja podejrzanie wysokie boxy. Wyzej: latwiej zostawic znaki z duzym marginesem lub przeskalowaniem.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_max_w_scale", self.yolo_seq_lf, "Max. szerokosc wzgledem mediany:", self.yolo_seq_max_w_ratio_var, 1.00, 4.50, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: system mocniej odcina szerokie smieci lub zlane znaki. Wyzej: zostawia wiecej nietypowych, szerokich liter.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_soft_overlap_scale", self.yolo_seq_lf, "Miekki konflikt nakladania:", self.yolo_seq_soft_overlap_var, 0.00, 1.00, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: nawet lekkie wchodzenie jednego boxa w drugi uruchamia rywalizacje sasiednich znakow. Wyzej: filtr rzadziej uznaje konflikt.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        add_yolo_scale("yolo_seq_hard_overlap_scale", self.yolo_seq_lf, "Twardy konflikt nakladania:", self.yolo_seq_hard_overlap_var, 0.00, 1.00, digits=2)
+        ttk.Label(
+            self.yolo_seq_lf,
+            text="Nizej: mocno nachodzace boxy sa szybciej traktowane jako dubel lub blad. Wyzej: system dluzej toleruje ciezkie nakladanie sasiednich znakow.",
+            style="PanelMuted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 2))
+
         self._update_yolo_visibility()
 
         self.actions_lf = ttk.LabelFrame(self.detect_right_content, text=" Panel OCR ", padding=8)
@@ -3671,15 +4403,20 @@ class CharacterAnnotationTab:
         self._set_inline_status_label_state(self.test_status_lbl, text="Gotowy do testow", tone="neutral", emphasis=True)
         self.test_status_lbl.pack_forget()
 
-        package_lf = ttk.LabelFrame(self.detect_right_content, text=" Paczka do analizy ", padding=8)
-        package_lf.grid(row=2, column=0, sticky="ew")
+        package_lf = ttk.LabelFrame(self.detect_right_content, text=" Źródło paczki tablic ", padding=8)
+        package_lf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         package_lf.grid_columnconfigure(0, weight=1)
+        try:
+            package_lf.configure(text=" Folder wyciętych tablic ")
+        except Exception:
+            pass
 
-        ttk.Label(
+        self.preview_dir_hint_lbl = ttk.Label(
             package_lf,
-            text="Folder run_XXX:",
+            text="Domyślnie: Workspace/3_cropped_characters/run_XXX_*",
             font=("Segoe UI", 9, "bold")
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        )
+        self.preview_dir_hint_lbl.grid(row=0, column=0, sticky="w", pady=(0, 4))
 
         self.preview_dir_entry = ttk.Entry(
             package_lf,
@@ -3694,6 +4431,15 @@ class CharacterAnnotationTab:
             command=self._pick_and_load_preview_dir
         )
         self.preview_dir_browse_btn.grid(row=2, column=0, sticky="w", pady=(6, 4))
+        try:
+            self.preview_dir_browse_btn.configure(text="Wskaż inną paczkę tablic")
+        except Exception:
+            pass
+
+        try:
+            self.preview_dir_browse_btn.configure(text="Wskaż folder")
+        except Exception:
+            pass
 
         self.preview_info_lbl = tk.Label(
             package_lf,
@@ -3706,6 +4452,40 @@ class CharacterAnnotationTab:
         )
         self.preview_info_lbl.grid(row=3, column=0, sticky="w")
         self._set_inline_status_label_state(self.preview_info_lbl, text="Wczytano tablic: 0", tone="info", emphasis=False)
+
+        self.preview_fusion_info_lbl = tk.Label(
+            package_lf,
+            text=self._format_perfect_strategy_counts(self._empty_perfect_strategy_counts()),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
+        )
+        self.preview_fusion_info_lbl.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self._set_inline_status_label_state(
+            self.preview_fusion_info_lbl,
+            text=self._format_perfect_strategy_counts(self._empty_perfect_strategy_counts()),
+            tone="muted",
+            emphasis=False
+        )
+
+        self.preview_box_mode_info_lbl = tk.Label(
+            package_lf,
+            text="Tryb boxow: brak zaznaczonej tablicy",
+            justify="left",
+            wraplength=360,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
+        )
+        self.preview_box_mode_info_lbl.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self._set_inline_status_label_state(
+            self.preview_box_mode_info_lbl,
+            text="Tryb boxow: brak zaznaczonej tablicy",
+            tone="muted",
+            emphasis=False
+        )
 
         detection_log_tools = ttk.Frame(content_frame)
         detection_log_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -3786,11 +4566,10 @@ class CharacterAnnotationTab:
             text="Gotowy do testÄ‚Ĺ‚w",
             anchor="w",
             justify="left",
-            wraplength=460,
             bd=0,
             highlightthickness=0
         )
-        self.test_status_lbl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.test_status_lbl.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self._set_inline_status_label_state(self.test_status_lbl, text="Gotowy do testow", tone="neutral", emphasis=True)
 
         self.test_progress = ttk.Progressbar(self.detect_run_status_frame, maximum=100, length=260)
@@ -3860,9 +4639,12 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.btn_toggle_detection_log, "t2_cut_logs")
         HELP.bind_help(self.plates_listbox, "t2_listbox")
         HELP.bind_help(self.preview_canvas, "t2_canvas")
+        HELP.bind_help(self.preview_dir_hint_lbl, "t2_preview_run")
         HELP.bind_help(self.preview_dir_entry, "t2_preview_run")
         HELP.bind_help(self.preview_dir_browse_btn, "t2_preview_run")
+        HELP.bind_help(self.preview_mode_lf, "t2_preview_mode")
         HELP.bind_help(self.preview_info_lbl, "t2_preview_info")
+        HELP.bind_help(self.preview_fusion_info_lbl, "t2_preview_info")
 
         self.frame.after_idle(self._sync_detect_right_scrollregion)
         self.frame.after_idle(self._sync_detect_right_canvas_width)
@@ -3874,23 +4656,6 @@ class CharacterAnnotationTab:
         method = (self.detection_method_var.get() or "OCR").upper().strip()
 
         if method in ("YOLO", "BOTH"):
-            version = (self.yolo_model_version_var.get() or "").strip()
-            size = (self.yolo_model_size_var.get() or "").strip().lower()
-
-            if version not in {"8", "11", "26"}:
-                messagebox.showwarning(
-                    "Brak wydania modelu",
-                    "Wybierz wydanie YOLO: 8, 11 albo 26."
-                )
-                return
-
-            if size not in {"n", "s", "m", "l", "x"}:
-                messagebox.showwarning(
-                    "Brak rozmiaru modelu",
-                    "Wybierz rozmiar modelu YOLO: n / s / m / l / x."
-                )
-                return
-
             try:
                 yolo_runtime = self._get_yolo_runtime_settings()
             except Exception as e:
@@ -3898,12 +4663,15 @@ class CharacterAnnotationTab:
                 return
 
             try:
-                resolved_model = self._ensure_yolo_model_available()
+                resolved_model = self._ensure_yolo_model_checkpoint()
                 self.yolo_model_path_var.set(resolved_model)
+                version, size = self._infer_yolo_arch_from_model_path(resolved_model)
+                model_name = Path(resolved_model).name
+                model_desc = f"{model_name} (YOLOv{version}{size})" if version and size else model_name
 
                 self._log(
                     self.test_log_text,
-                    f"[INFO] Wybrana konfiguracja: YOLOv{version}{size}",
+                    f"[INFO] Model detekcji znakow: {model_desc}",
                     "INFO"
                 )
                 self._log(
@@ -3925,7 +4693,13 @@ class CharacterAnnotationTab:
                     f"conf={yolo_runtime['conf']:.2f}, "
                     f"nms_iou={yolo_runtime['iou']:.2f}, "
                     f"overlap={yolo_runtime['overlap']:.2f}, "
-                    f"agnostic_nms={yolo_runtime['agnostic_nms']}",
+                    f"agnostic_nms={yolo_runtime['agnostic_nms']}, "
+                    f"seq_y={yolo_runtime['seq_center_y']:.2f}, "
+                    f"seq_h_min={yolo_runtime['seq_min_h']:.2f}, "
+                    f"seq_h_max={yolo_runtime['seq_max_h']:.2f}, "
+                    f"seq_w_max={yolo_runtime['seq_max_w']:.2f}, "
+                    f"seq_soft={yolo_runtime['seq_soft_overlap']:.2f}, "
+                    f"seq_hard={yolo_runtime['seq_hard_overlap']:.2f}",
                     "INFO"
                 )
             except Exception as e:
@@ -3965,6 +4739,7 @@ class CharacterAnnotationTab:
                 messagebox.showerror("Brak pliku", f"Nie znaleziono metadata.json w folderze:\n{out_dir}")
             try:
                 self._set_preview_info("Brak wczytanych danych", "error")
+                self._set_preview_box_info("Tryb boxow: brak wczytanych danych", "muted")
             except Exception:
                 pass
             return
@@ -3998,15 +4773,17 @@ class CharacterAnnotationTab:
                         if sorted_chars != d.get("characters", []):
                             d["characters"] = sorted_chars
                             changed = True
-                    if "yolo_detections" in d:
-                        if not isinstance(d.get("yolo_detections"), list):
-                            d["yolo_detections"] = []
+                    for yolo_key in ("yolo_detections", "yolo_nms_detections", "yolo_raw_detections"):
+                        if yolo_key not in d:
+                            continue
+                        if not isinstance(d.get(yolo_key), list):
+                            d[yolo_key] = []
                             changed = True
-                        else:
-                            sorted_yolo = self._sort_character_records_by_x(d.get("yolo_detections", []))
-                            if sorted_yolo != d.get("yolo_detections", []):
-                                d["yolo_detections"] = sorted_yolo
-                                changed = True
+                            continue
+                        sorted_yolo = self._sort_character_records_by_x(d.get(yolo_key, []))
+                        if sorted_yolo != d.get(yolo_key, []):
+                            d[yolo_key] = sorted_yolo
+                            changed = True
 
                 if changed:
                     self._atomic_write_json(meta_path, loaded)
@@ -4062,23 +4839,50 @@ class CharacterAnnotationTab:
         if getattr(self, "_reloading_preview", False):
             return
 
+        pid_map = getattr(self, "_listbox_pid_by_index", [])
         sel = self.plates_listbox.curselection()
         if not sel:
-            return
+            try:
+                active_idx = int(self.plates_listbox.index(tk.ACTIVE))
+            except Exception:
+                active_idx = -1
+
+            if 0 <= active_idx < len(pid_map):
+                try:
+                    self.plates_listbox.selection_clear(0, tk.END)
+                    self.plates_listbox.selection_set(active_idx)
+                    self.plates_listbox.activate(active_idx)
+                    self.plates_listbox.see(active_idx)
+                except Exception:
+                    pass
+                sel = (active_idx,)
+            else:
+                self._update_preview_box_info_label()
+                return
 
         try:
             idx = int(sel[0])
         except Exception:
             return
 
-        pid_map = getattr(self, "_listbox_pid_by_index", [])
         if not (0 <= idx < len(pid_map)):
             return
 
         pid = pid_map[idx]
         data = self.preview_metadata.get(pid, {})
-        clean_chars = self._sort_character_records_by_x(data.get("characters", []))
         box_chars, box_source = self._get_preview_box_records(data)
+        yolo_variants = self._get_preview_box_variants(data)
+        yolo_raw_count = len(yolo_variants.get("YOLO_RAW", []))
+        yolo_nms_count = len(yolo_variants.get("YOLO_NMS", []))
+        yolo_filtered_count = len(yolo_variants.get("YOLO_FILTERED", []))
+        self._update_preview_box_info_label(
+            plate_id=pid,
+            mode_key=box_source,
+            shown_count=len(box_chars),
+            yolo_raw_count=yolo_raw_count,
+            yolo_nms_count=yolo_nms_count,
+            yolo_filtered_count=yolo_filtered_count,
+        )
         display_text = self._format_plate_listbox_label(pid, data)
 
         # Jeśli tekst listy jest nieaktualny, zsynchronizuj go z bieżącym metadata.
@@ -4115,6 +4919,7 @@ class CharacterAnnotationTab:
 
         self.preview_canvas.delete("all")
         if not img_path.exists():
+            self._set_preview_box_info(f"{pid} | {self._get_preview_box_mode_label(box_source)} | brak obrazu podgladu", "error")
             return
 
         try:
@@ -4125,7 +4930,7 @@ class CharacterAnnotationTab:
             c_h = max(50, self.preview_canvas.winfo_height())
 
             margin_x = max(84, int(c_w * 0.18))
-            margin_y_top = max(24, int(c_h * 0.06))
+            margin_y_top = max(32, int(c_h * 0.08))
             margin_y_bottom = max(96, int(c_h * 0.20))
 
             usable_w = max(80, min(c_w - margin_x, int(c_w * 0.78)))
@@ -4145,15 +4950,18 @@ class CharacterAnnotationTab:
             self.preview_canvas.create_image(x_off, y_off, anchor=tk.NW, image=self._current_photo)
 
             image_bottom_y = y_off + new_h
-            if box_source == "yolo":
-                self.preview_canvas.create_text(
-                    x_off + 10,
-                    y_off + 10,
-                    text="Podglad boxow YOLO do anotacji",
-                    fill="#ffb27a",
-                    font=("Segoe UI", 9, "bold"),
-                    anchor=tk.NW
-                )
+            self._draw_preview_canvas_info_overlay(
+                self.preview_canvas,
+                c_w,
+                plate_id=pid,
+                data=data,
+                box_source=box_source,
+                shown_count=len(box_chars),
+                yolo_raw_count=yolo_raw_count,
+                yolo_nms_count=yolo_nms_count,
+                yolo_filtered_count=yolo_filtered_count,
+                has_boxes=bool(box_chars),
+            )
 
             # rysowanie bboxów + znaków
             for box_idx, c in enumerate(box_chars):
@@ -4169,7 +4977,7 @@ class CharacterAnnotationTab:
                 cx2, cy2 = (float(x2) * SCALE) + x_off, (float(y2) * SCALE) + y_off
 
                 center_x = cx1 + (cx2 - cx1) / 2
-                is_yolo_box = box_source == "yolo" or str(c.get("method", "")).strip().lower() == "yolo"
+                is_yolo_box = str(box_source).upper().startswith("YOLO") or str(c.get("method", "")).strip().lower() == "yolo"
                 box_color, guide_color, char_fill = self._get_preview_box_palette(box_idx)
 
                 self.preview_canvas.create_rectangle(
@@ -4392,6 +5200,12 @@ class CharacterAnnotationTab:
                 "iou": 0.45,
                 "overlap": 0.70,
                 "agnostic_nms": False,
+                "seq_center_y": 0.60,
+                "seq_min_h": 0.55,
+                "seq_max_h": 1.80,
+                "seq_max_w": 2.60,
+                "seq_soft_overlap": 0.18,
+                "seq_hard_overlap": 0.30,
             }
 
         detector = CharacterDetector(
@@ -4403,6 +5217,12 @@ class CharacterAnnotationTab:
             yolo_iou=yolo_runtime["iou"],
             yolo_agnostic_nms=yolo_runtime["agnostic_nms"],
             yolo_overlap_threshold=yolo_runtime["overlap"],
+            yolo_sequence_center_y_tolerance=yolo_runtime["seq_center_y"],
+            yolo_sequence_min_height_ratio=yolo_runtime["seq_min_h"],
+            yolo_sequence_max_height_ratio=yolo_runtime["seq_max_h"],
+            yolo_sequence_max_width_ratio=yolo_runtime["seq_max_w"],
+            yolo_sequence_soft_overlap=yolo_runtime["seq_soft_overlap"],
+            yolo_sequence_hard_overlap=yolo_runtime["seq_hard_overlap"],
         )
 
         def worker():
@@ -4410,6 +5230,7 @@ class CharacterAnnotationTab:
             total = len(self.preview_plate_ids)
             stat_perfect = 0
             yolo_raw_total = 0
+            yolo_nms_total = 0
             yolo_filtered_total = 0
 
             try:
@@ -4435,6 +5256,16 @@ class CharacterAnnotationTab:
                     if session_token != self._project_reset_token:
                         break
 
+                    ocr_chars = self._sort_character_records_by_x(list(getattr(detector, "last_ocr_detections", [])))
+                    yolo_chars = self._sort_character_records_by_x(list(getattr(detector, "last_yolo_detections", [])))
+                    chars, fusion_strategy, fusion_details = self._resolve_canonical_detections(
+                        method,
+                        chars,
+                        ocr_chars,
+                        yolo_chars,
+                        true_texts,
+                    )
+
                     c_clean = [{
                         "character": str(c.character),
                         "bbox": [float(x) for x in c.bbox],
@@ -4447,16 +5278,55 @@ class CharacterAnnotationTab:
                         "confidence": float(c.confidence),
                         "method": str(c.method),
                     } for c in getattr(detector, "last_yolo_detections", [])]
+                    yolo_nms_clean = [{
+                        "character": str(c.character),
+                        "bbox": [float(x) for x in c.bbox],
+                        "confidence": float(c.confidence),
+                        "method": str(c.method),
+                    } for c in getattr(detector, "last_yolo_nms_detections", [])]
+                    yolo_raw_clean = [{
+                        "character": str(c.character),
+                        "bbox": [float(x) for x in c.bbox],
+                        "confidence": float(c.confidence),
+                        "method": str(c.method),
+                    } for c in getattr(detector, "last_yolo_raw_detections", [])]
 
                     yolo_raw_total += len(getattr(detector, "last_yolo_raw_detections", []))
+                    yolo_nms_total += len(getattr(detector, "last_yolo_nms_detections", []))
                     yolo_filtered_total += len(getattr(detector, "last_yolo_detections", []))
 
                     # WAŻNE: sortujemy znaki po X PRZED zapisem do metadata
                     c_clean = self._sort_character_records_by_x(c_clean)
                     yolo_clean = self._sort_character_records_by_x(yolo_clean)
+                    yolo_nms_clean = self._sort_character_records_by_x(yolo_nms_clean)
+                    yolo_raw_clean = self._sort_character_records_by_x(yolo_raw_clean)
 
                     local_meta[pid]["characters"] = c_clean
                     local_meta[pid]["yolo_detections"] = yolo_clean
+                    local_meta[pid]["yolo_nms_detections"] = yolo_nms_clean
+                    local_meta[pid]["yolo_raw_detections"] = yolo_raw_clean
+                    local_meta[pid]["fusion_strategy"] = str(fusion_strategy or "")
+                    if isinstance(fusion_details, dict) and fusion_details:
+                        local_meta[pid]["fusion_details"] = fusion_details
+                    else:
+                        local_meta[pid].pop("fusion_details", None)
+
+                    if fusion_strategy == "yolo_exact":
+                        self._log(
+                            self.test_log_text,
+                            f"[HYBRID] {pid}: YOLO trafilo idealnie i przejelo finalne boxy.",
+                            "INFO"
+                        )
+                    elif fusion_strategy == "ocr_yolo_rescue":
+                        repaired_text = self._characters_to_text(c_clean)
+                        ocr_text = ""
+                        if isinstance(fusion_details, dict):
+                            ocr_text = str(fusion_details.get("ocr_text", "") or "")
+                        self._log(
+                            self.test_log_text,
+                            f"[HYBRID] {pid}: OCR=[{ocr_text}] -> naprawa YOLO -> [{repaired_text}]",
+                            "INFO"
+                        )
 
                     if c_clean:
                         txt = "".join(str(c.get("character", "")) for c in c_clean)
@@ -4504,9 +5374,20 @@ class CharacterAnnotationTab:
                 if method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
                     self._log(
                         self.test_log_text,
-                        f"[DIAG] YOLO boxy: raw={yolo_raw_total}, po filtracji={yolo_filtered_total}",
+                        f"[DIAG] YOLO boxy: raw={yolo_raw_total}, po NMS={yolo_nms_total}, po filtracji={yolo_filtered_total}",
                         "INFO"
                     )
+
+                strategy_counts = self._count_statuses_in_metadata_mapping(local_meta).get("strategy_counts", {})
+                self._log(
+                    self.test_log_text,
+                    "[DIAG] Perfect wg strategii: "
+                    f"OCR={int(strategy_counts.get('ocr_exact', 0))}, "
+                    f"YOLO={int(strategy_counts.get('yolo_exact', 0))}, "
+                    f"rescue={int(strategy_counts.get('ocr_yolo_rescue', 0))}, "
+                    f"inne={int(strategy_counts.get('other_perfect', 0))}",
+                    "INFO"
+                )
 
                 acc = (stat_perfect / total * 100) if total > 0 else 0
                 self._log(
@@ -4526,6 +5407,13 @@ class CharacterAnnotationTab:
                     try:
                         self.fast_test_running = False
                         self.fast_test_stop.clear()
+
+                        # Lista musi byc aktywna przed przebudowa, inaczej repaint potrafi opoznic sie
+                        # do chwili kolejnej interakcji myszą lub klawiaturą.
+                        try:
+                            self.plates_listbox.config(state=tk.NORMAL)
+                        except Exception:
+                            pass
 
                         # Odśwież listę i preview na podstawie aktualnego metadata.
                         self._apply_preview_metadata_update(local_meta, preserve_selection=True)
@@ -4565,6 +5453,11 @@ class CharacterAnnotationTab:
                             f"Zakończono detekcję — skuteczność {acc:.1f}%",
                             "success"
                         )
+
+                        try:
+                            self.frame.update_idletasks()
+                        except Exception:
+                            pass
 
                         # 7. odblokuj dalszy krok
                         self.unlock_dataset_subtab()
@@ -4651,6 +5544,77 @@ class CharacterAnnotationTab:
         self.cvat_option2_desc_lbl.pack(anchor=tk.W, pady=(2, 8))
         self._set_inline_status_label_state(self.cvat_option2_desc_lbl, tone="muted", emphasis=False)
 
+        self.gold_export_filters_lf = ttk.LabelFrame(yolo_f, text=" Źródła perfect do gold packa ", padding=8)
+        self.gold_export_filters_lf.pack(fill=tk.X, pady=(0, 8))
+
+        self.gold_export_filter_rows = []
+        for filter_label, filter_var in (
+            (PERFECT_STRATEGY_LABELS["ocr_exact"], self.gold_include_ocr_exact_var),
+            (PERFECT_STRATEGY_LABELS["yolo_exact"], self.gold_include_yolo_exact_var),
+            (PERFECT_STRATEGY_LABELS["ocr_yolo_rescue"], self.gold_include_ocr_yolo_rescue_var),
+            (PERFECT_STRATEGY_LABELS["other_perfect"], self.gold_include_other_perfect_var),
+        ):
+            row = tk.Frame(self.gold_export_filters_lf, bd=0, highlightthickness=0, cursor="hand2")
+            row.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+            indicator = tk.Canvas(
+                row,
+                width=16,
+                height=16,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2"
+            )
+            indicator.pack(side=tk.LEFT, padx=(0, 6))
+            label = tk.Label(
+                row,
+                text=filter_label,
+                anchor="w",
+                justify=tk.LEFT,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2"
+            )
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            def _toggle_gold_filter(_event=None, target_var=filter_var):
+                target_var.set(not bool(target_var.get()))
+                self._on_gold_export_filter_change()
+
+            for widget in (row, indicator, label):
+                widget.bind("<Button-1>", _toggle_gold_filter)
+
+            row_info = {
+                "kind": "check",
+                "frame": row,
+                "indicator": indicator,
+                "label": label,
+                "selected_getter": (lambda target_var=filter_var: bool(target_var.get())),
+                "hovered": False,
+            }
+            for widget in (row, indicator, label):
+                widget.bind("<Enter>", lambda _event, info=row_info: self._set_selection_row_hover(info, True))
+                widget.bind("<Leave>", lambda _event, info=row_info: self._set_selection_row_hover(info, False))
+            self.gold_export_filter_rows.append(row_info)
+        self._apply_gold_export_filter_check_style()
+
+        self.gold_export_scope_lbl = tk.Label(
+            self.gold_export_filters_lf,
+            text="Do gold packa: OCR exact, YOLO exact, OCR + YOLO rescue, Manual / inne perfect",
+            justify="left",
+            wraplength=320,
+            anchor="w",
+            bd=0,
+            highlightthickness=0
+        )
+        self.gold_export_scope_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+        self._set_inline_status_label_state(
+            self.gold_export_scope_lbl,
+            text="Do gold packa: OCR exact, YOLO exact, OCR + YOLO rescue, Manual / inne perfect",
+            tone="muted",
+            emphasis=False
+        )
+        self._refresh_gold_export_scope_label()
+
         btn_yolo = ttk.Button(yolo_f, text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO", command=self._run_yolo_gold_export, style="Accent.TButton")
         btn_yolo.pack(fill=tk.X, ipady=4)
 
@@ -4728,6 +5692,7 @@ class CharacterAnnotationTab:
         
         HELP.bind_help(btn_cvat, "btn_export_cvat")
         HELP.bind_help(btn_yolo, "btn_export_yolo")
+        HELP.bind_help(self.gold_export_filters_lf, "btn_export_yolo")
         HELP.bind_help(btn_import, "btn_import_cvat")
 
         nav = ttk.Frame(parent)
@@ -4832,7 +5797,21 @@ class CharacterAnnotationTab:
             self._set_console_text(self.export_console, f"❌ BŁĄD EKSPORTU CVAT:\n{e}")
 
     def _run_yolo_gold_export(self):
-        self._set_console_text(self.export_console, "⌛ Zbieranie idealnych tablic...")
+        selected_buckets = self._get_selected_gold_export_strategy_buckets()
+        selected_labels = self._format_selected_gold_export_strategy_labels()
+
+        if not selected_buckets:
+            self._set_console_text(
+                self.export_console,
+                "❌ Nie wybrano żadnej strategii perfect do eksportu gold packa.\n\n"
+                "Zaznacz co najmniej jedną z opcji: OCR exact, YOLO exact, OCR + YOLO rescue lub Manual / inne perfect."
+            )
+            return
+
+        self._set_console_text(
+            self.export_console,
+            f"⌛ Zbieranie idealnych tablic...\nFiltr strategii: {selected_labels}"
+        )
 
         base_chars_dir = Path(getattr(self, "_campaign_chars_dir", str(CONFIG.DIR_3_CHARS)))
 
@@ -4849,6 +5828,8 @@ class CharacterAnnotationTab:
 
             char_map = {c: i for i, c in enumerate("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
             copied, seen = 0, set()
+            total_strategy_counts = self._empty_perfect_strategy_counts()
+            copied_strategy_counts = self._empty_perfect_strategy_counts()
 
             meta_candidates = []
             for meta in base_chars_dir.rglob("metadata.json"):
@@ -4864,6 +5845,11 @@ class CharacterAnnotationTab:
                     metadata = json.load(f)
 
                 for pid, data in {k: v for k, v in metadata.items() if v.get("status") == "perfect"}.items():
+                    strategy_bucket = self._get_perfect_strategy_bucket(data)
+                    total_strategy_counts[strategy_bucket] += 1
+                    if strategy_bucket not in selected_buckets:
+                        continue
+
                     uk = f"{data.get('source_image', 'u')}_{int(data.get('source_bbox', [0])[0]//10) if data.get('source_bbox') else 0}"
                     if uk in seen:
                         continue
@@ -4895,15 +5881,18 @@ class CharacterAnnotationTab:
 
                     (lbl_out / f"{new_pid}.txt").write_text("\n".join(txt), encoding="utf-8")
                     copied += 1
+                    copied_strategy_counts[strategy_bucket] += 1
 
             if copied == 0:
                 msg = (
                     "❌ NIE UDAŁO SIĘ UTWORZYĆ DATASETU YOLO.\n\n"
-                    "Powód: w bieżącym projekcie nie znaleziono ani jednej tablicy ze statusem 🟢 perfect.\n\n"
+                    f"Powód: po filtrze strategii ({selected_labels}) nie znaleziono ani jednej tablicy ze statusem 🟢 perfect.\n\n"
+                    f"Dostępne perfect wg strategii:\n{self._format_perfect_strategy_counts(total_strategy_counts)}\n\n"
                     "CO DALEJ:\n"
-                    "1. Możesz wrócić do pz2 i poprawić OCR / Laboratorium.\n"
-                    "2. Możesz wykonać eksport do CVAT i później zaimportować poprawki.\n"
-                    "3. Możesz też wrócić do wizarda i skorzystać z trybów naprawczych."
+                    "1. Możesz rozszerzyć zaznaczone strategie w pz3.\n"
+                    "2. Możesz wrócić do pz2 i poprawić OCR / Laboratorium.\n"
+                    "3. Możesz wykonać eksport do CVAT i później zaimportować poprawki.\n"
+                    "4. Możesz też wrócić do wizarda i skorzystać z trybów naprawczych."
                 )
                 self._set_console_text(self.export_console, msg)
 
@@ -4933,7 +5922,18 @@ class CharacterAnnotationTab:
                 yaml_content += f"  {class_id}: '{char}'\n"
             (yolo_out / "data.yaml").write_text(yaml_content, encoding="utf-8")
 
-            self._set_console_text(self.export_console, f"✅ Dataset YOLO gotowy: {yolo_out}")
+            self._set_console_text(
+                self.export_console,
+                f"✅ Dataset YOLO gotowy: {yolo_out}\n"
+                f"Filtr strategii: {selected_labels}\n"
+                f"Wyeksportowano: {copied}\n"
+                f"{self._format_perfect_strategy_counts(copied_strategy_counts)}"
+            )
+            self._log(
+                self.export_console,
+                f"[INFO] Dostępne perfect wg strategii przed filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
+                "INFO"
+            )
             try:
                 self._update_step3_finish_button_state()
                 self._set_button_emphasis("btn_finish_step3_frame", True)
