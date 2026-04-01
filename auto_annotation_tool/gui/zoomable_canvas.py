@@ -193,6 +193,35 @@ class ZoomableCanvas(tk.Canvas):
     def reset_view(self):
         """Reset widoku (zoom + pan)."""
         self._on_reset_view(None)
+
+    def fit_to_view(self):
+        """Dopasuj cały obraz do aktualnego rozmiaru canvasa i wycentruj go."""
+        if self.original_image is None:
+            return
+
+        self.update_idletasks()
+        canvas_width = max(1, int(self.winfo_width()))
+        canvas_height = max(1, int(self.winfo_height()))
+
+        if canvas_width <= 1 or canvas_height <= 1:
+            self.after(25, self.fit_to_view)
+            return
+
+        scale_x = canvas_width / max(1, self.original_image.width)
+        scale_y = canvas_height / max(1, self.original_image.height)
+        fitted_zoom = min(scale_x, scale_y)
+        self.zoom_level = max(self.min_zoom, min(self.max_zoom, fitted_zoom))
+
+        scaled_width = int(self.original_image.width * self.zoom_level)
+        scaled_height = int(self.original_image.height * self.zoom_level)
+
+        self.pan_data = {
+            'x': max(0, (canvas_width - scaled_width) // 2),
+            'y': max(0, (canvas_height - scaled_height) // 2),
+            'press_x': None,
+            'press_y': None
+        }
+        self._update_display()
         
     def update_image_preserve_zoom(self, pil_image):
         """

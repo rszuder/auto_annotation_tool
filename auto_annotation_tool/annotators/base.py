@@ -56,7 +56,7 @@ class BaseAnnotator(ABC):
     
     def process_directory(self,
                           images_dir: Path,
-                          progress_callback: Optional[Callable[[int, int, str], None]] = None
+                          progress_callback: Optional[Callable[..., None]] = None
                           ) -> Tuple[List[ImageAnnotation], AnnotationReport]:
         """Przetwarza wszystkie obrazy w folderze."""
         self.report = AnnotationReport()
@@ -77,12 +77,15 @@ class BaseAnnotator(ABC):
                 logger.warning(f"⏹️ Przetwarzanie przerwane na obrazie {i+1}/{len(image_files)}")
                 break
             
-            if progress_callback:
-                progress_callback(i + 1, len(image_files), img_path.name)
-            
             ann = self.process_image(img_path)
             annotations.append(ann)
             self.report.add_result(ann)
+
+            if progress_callback:
+                try:
+                    progress_callback(i + 1, len(image_files), img_path.name, self.report.successful)
+                except TypeError:
+                    progress_callback(i + 1, len(image_files), img_path.name)
         
         logger.info(f"Zakończono: {self.report.successful}/{self.report.total_images} udanych")
         

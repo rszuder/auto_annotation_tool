@@ -13,6 +13,7 @@ from datetime import datetime
 
 from ..config import CONFIG, logger, TK_AVAILABLE, SESSION
 from ..icons import IconManager
+from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 # Importy zakładek
 from .tab_annotation import AnnotationTab
@@ -163,6 +164,11 @@ class AutoAnnotationApp:
         self._menu_dropdown_owner = None
         self._menu_outside_click_bind_id = None
         self._menu_escape_bind_id = None
+        self._help_scroll_ctrl_down = False
+        self._help_scroll_alt_down = False
+        self._help_panel_default_height = 2
+        self._help_panel_expanded = False
+        self._help_panel_apply_in_progress = False
         self.tabs = {}
         self._closing_in_progress = False
 
@@ -196,13 +202,16 @@ class AutoAnnotationApp:
         self.status_text.pack(fill=tk.X, padx=10, pady=6)
         self.status_text.insert(tk.END, self.default_status_message)
         self.status_text.config(state=tk.DISABLED)
+        self.status_text.bind("<Configure>", self._on_help_panel_text_configure, add="+")
+        self._bind_help_panel_shortcuts()
+        self._apply_help_panel_visual_state()
         
         # Podpinamy globalny menedżer pomocy
         HELP.status_updater = self.update_status
         
         # 2. Tworzenie Notatnika z zakładkami
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 0))
         
         self._create_tabs()
         self._apply_theme_to_tabs()
@@ -440,12 +449,7 @@ class AutoAnnotationApp:
             pass
 
         try:
-            self.info_panel_frame.configure(bg="#050505")
-            self.status_text.configure(
-                bg="#050505",
-                fg="#f7f7f7",
-                insertbackground="#f7f7f7"
-            )
+            self._apply_help_panel_visual_state()
         except Exception:
             pass
 
@@ -470,10 +474,14 @@ class AutoAnnotationApp:
             return
 
         palette = getattr(self, "palette", {})
-        bg = background or palette.get("panel_alt", "#2d2d30")
+        bg = background or blend_hex_colors(
+            palette.get("accent_hover", palette.get("accent", "#0e639c")),
+            palette.get("accent_text", "#ffffff"),
+            0.30,
+        )
         trough = troughcolor or palette.get("panel", palette.get("bg", "#1e1e1e"))
-        border = bordercolor or palette.get("border", "#3c3c3c")
-        active_bg = palette.get("button_hover", bg)
+        border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        active_bg = blend_hex_colors(bg, palette.get("accent_text", "#ffffff"), 0.18)
 
         options = {
             "bg": bg,
@@ -481,13 +489,13 @@ class AutoAnnotationApp:
             "troughcolor": trough,
             "highlightbackground": border,
             "highlightcolor": border,
-            "highlightthickness": 1,
+            "highlightthickness": 0,
             "bd": 0,
             "borderwidth": 0,
             "relief": tk.FLAT,
             "activerelief": tk.FLAT,
-            "elementborderwidth": 1,
-            "width": 12,
+            "elementborderwidth": 0,
+            "width": 8,
         }
 
         for option_name, option_value in options.items():
@@ -533,14 +541,26 @@ class AutoAnnotationApp:
             except Exception:
                 pass
 
-        scrollbar = getattr(widget, "vbar", None)
-        if scrollbar is not None:
-            self.style_native_scrollbar(
-                scrollbar,
-                background=palette.get("panel_alt", "#2d2d30"),
-                troughcolor=bg,
-                bordercolor=border
-            )
+        seen_scrollbars: set[int] = set()
+        for attr_name in ("vbar", "web_vbar"):
+            scrollbar = getattr(widget, attr_name, None)
+            if scrollbar is None:
+                continue
+
+            scrollbar_id = id(scrollbar)
+            if scrollbar_id in seen_scrollbars:
+                continue
+            seen_scrollbars.add(scrollbar_id)
+
+            if isinstance(scrollbar, WebSlimScrollbar):
+                self.style_web_scrollbar(scrollbar, track_color=bg)
+            else:
+                self.style_native_scrollbar(
+                    scrollbar,
+                    background=palette.get("panel_alt", "#2d2d30"),
+                    troughcolor=bg,
+                    bordercolor=border
+                )
 
     def style_listbox_widget(self, widget, bordercolor: str = None):
         if widget is None:
@@ -568,6 +588,28 @@ class AutoAnnotationApp:
             except Exception:
                 pass
 
+    def style_web_scrollbar(self, scrollbar, track_color: str = None):
+        if scrollbar is None or not isinstance(scrollbar, WebSlimScrollbar):
+            return
+
+        palette = getattr(self, "palette", {})
+        track = track_color or palette.get("panel", palette.get("bg", "#1e1e1e"))
+        thumb = blend_hex_colors(
+            palette.get("accent_hover", palette.get("accent", "#0e639c")),
+            palette.get("accent_text", "#ffffff"),
+            0.30,
+        )
+        thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+
+        try:
+            scrollbar.configure_style(
+                track_color=track,
+                thumb_color=thumb,
+                thumb_hover_color=thumb_hover,
+            )
+        except Exception:
+            pass
+
     def style_canvas_widget(self, widget, background: str = None, bordercolor: str = None):
         if widget is None:
             return
@@ -590,6 +632,294 @@ class AutoAnnotationApp:
                 widget.configure(**{option_name: option_value})
             except Exception:
                 pass
+
+    def _get_scale_colors(self, background: str = None) -> tuple[str, str, str, str, str]:
+        palette = getattr(self, "palette", {})
+        bg = background or palette.get("panel", palette.get("bg", "#252526"))
+        success = palette.get("success", "#4ec9b0")
+        track = blend_hex_colors(success, bg, 0.45)
+        thumb = success
+        thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+        # Keep disabled sliders visually consistent with enabled ones; the non-interactive
+        # state is conveyed by behavior, not by washing out the green marker.
+        thumb_disabled = thumb
+        return bg, track, thumb, thumb_hover, thumb_disabled
+
+    @staticmethod
+    def _paint_scale_track_image(image, color: str):
+        if image is None:
+            return
+        try:
+            image.blank()
+            image.put(str(color), to=(0, 0, int(image.width()), int(image.height())))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _paint_scale_thumb_image(image, fill_color: str, outline_color: str = None):
+        if image is None:
+            return
+
+        try:
+            image.blank()
+            width = int(image.width())
+            height = int(image.height())
+            cx = (width - 1) / 2.0
+            cy = (height - 1) / 2.0
+            radius = max(2.0, (min(width, height) / 2.0) - 1.0)
+            outline_threshold = radius - 1.15
+
+            for y in range(height):
+                for x in range(width):
+                    dist = ((float(x) - cx) ** 2 + (float(y) - cy) ** 2) ** 0.5
+                    if dist > radius:
+                        continue
+                    color = outline_color if outline_color and dist >= outline_threshold else fill_color
+                    image.put(str(color), to=(x, y, x + 1, y + 1))
+        except Exception:
+            pass
+
+    def _ensure_horizontal_scale_style_assets(self, background: str = None):
+        if not hasattr(self, "_horizontal_scale_style_assets"):
+            self._horizontal_scale_style_assets = {}
+
+        assets = self._horizontal_scale_style_assets
+        if not assets:
+            assets["track"] = tk.PhotoImage(master=self.root, width=16, height=4)
+            assets["thumb"] = tk.PhotoImage(master=self.root, width=14, height=14)
+            assets["thumb_active"] = tk.PhotoImage(master=self.root, width=14, height=14)
+            assets["thumb_disabled"] = tk.PhotoImage(master=self.root, width=14, height=14)
+
+            try:
+                self.style.element_create(
+                    "Green.Horizontal.Scale.trough",
+                    "image",
+                    assets["track"],
+                    border=0,
+                    sticky="ew",
+                )
+            except Exception:
+                pass
+
+            try:
+                self.style.element_create(
+                    "Green.Horizontal.Scale.slider",
+                    "image",
+                    assets["thumb"],
+                    ("active", assets["thumb_active"]),
+                    ("pressed", assets["thumb_active"]),
+                    ("disabled", assets["thumb_disabled"]),
+                    border=0,
+                    sticky="",
+                )
+            except Exception:
+                pass
+
+        bg, track, thumb, thumb_hover, thumb_disabled = self._get_scale_colors(background)
+        thumb_outline = blend_hex_colors(thumb, bg, 0.35)
+        thumb_disabled_outline = blend_hex_colors(thumb_disabled, bg, 0.45)
+
+        self._paint_scale_track_image(assets.get("track"), track)
+        self._paint_scale_thumb_image(assets.get("thumb"), thumb, thumb_outline)
+        self._paint_scale_thumb_image(assets.get("thumb_active"), thumb_hover, thumb_outline)
+        self._paint_scale_thumb_image(assets.get("thumb_disabled"), thumb_disabled, thumb_disabled_outline)
+
+        try:
+            self.style.layout(
+                "Horizontal.TScale",
+                [
+                    (
+                        "Green.Horizontal.Scale.trough",
+                        {
+                            "sticky": "ew",
+                            "children": [
+                                ("Green.Horizontal.Scale.slider", {"side": "left", "sticky": ""})
+                            ],
+                        },
+                    )
+                ],
+            )
+        except Exception:
+            pass
+
+        try:
+            self.style.configure(
+                "Horizontal.TScale",
+                background=bg,
+                borderwidth=0,
+                relief=tk.FLAT,
+                sliderlength=14,
+                troughcolor=track,
+                lightcolor=track,
+                darkcolor=track,
+            )
+        except Exception:
+            pass
+
+        try:
+            self.style.map(
+                "Horizontal.TScale",
+                background=[
+                    ("disabled", bg),
+                    ("active", bg),
+                ],
+                troughcolor=[
+                    ("disabled", track),
+                    ("active", track),
+                ],
+                lightcolor=[
+                    ("disabled", track),
+                    ("active", track),
+                ],
+                darkcolor=[
+                    ("disabled", track),
+                    ("active", track),
+                ],
+            )
+        except Exception:
+            pass
+
+    def style_classic_scale_widget(self, widget, background: str = None):
+        if widget is None:
+            return
+
+        bg, track, thumb, thumb_hover, thumb_disabled = self._get_scale_colors(background)
+        is_disabled = False
+        try:
+            is_disabled = str(widget.cget("state") or "").lower() == "disabled"
+        except Exception:
+            is_disabled = False
+
+        thumb_color = thumb_disabled if is_disabled else thumb
+        active_thumb = thumb_disabled if is_disabled else thumb_hover
+
+        options = {
+            "bg": bg,
+            "troughcolor": track,
+            "activebackground": active_thumb,
+            "highlightbackground": bg,
+            "highlightcolor": bg,
+            "highlightthickness": 0,
+            "bd": 0,
+            "relief": tk.FLAT,
+            "sliderrelief": tk.FLAT,
+            "sliderlength": 14,
+            "width": 4,
+            "fg": thumb_color,
+        }
+
+        for option_name, option_value in options.items():
+            try:
+                widget.configure(**{option_name: option_value})
+            except Exception:
+                pass
+
+    def _get_panel_label_style(self, style_name: str | None) -> str | None:
+        style_name = str(style_name or "").strip()
+        if style_name.startswith("Panel"):
+            return style_name
+
+        mapping = {
+            "": "Panel.TLabel",
+            "TLabel": "Panel.TLabel",
+            "Muted.TLabel": "PanelMuted.TLabel",
+            "Info.TLabel": "PanelInfo.TLabel",
+        }
+        return mapping.get(style_name)
+
+    def _get_panel_control_style(self, class_name: str, style_name: str | None) -> str | None:
+        current_style = str(style_name or "").strip()
+        if current_style.startswith("Panel"):
+            return current_style
+
+        mappings = {
+            "TCheckbutton": {
+                "": "Panel.TCheckbutton",
+                "TCheckbutton": "Panel.TCheckbutton",
+            },
+            "TRadiobutton": {
+                "": "Panel.TRadiobutton",
+                "TRadiobutton": "Panel.TRadiobutton",
+            },
+        }
+        return mappings.get(str(class_name or "").strip(), {}).get(current_style)
+
+    def style_panel_surface(self, root, background: str = None):
+        if root is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        bg = background or palette.get("panel", "#252526")
+        visited: set[int] = set()
+
+        def walk(widget):
+            if widget is None:
+                return
+
+            widget_id = id(widget)
+            if widget_id in visited:
+                return
+            visited.add(widget_id)
+
+            try:
+                class_name = str(widget.winfo_class())
+            except Exception:
+                class_name = ""
+
+            if isinstance(widget, WebSlimScrollbar):
+                self.style_web_scrollbar(widget, track_color=bg)
+            elif class_name == "TScale":
+                try:
+                    widget.configure(cursor="hand2", takefocus=0)
+                except Exception:
+                    pass
+            elif class_name == "Scale":
+                self.style_classic_scale_widget(widget, background=bg)
+            elif class_name == "TFrame":
+                try:
+                    current_style = str(widget.cget("style") or "").strip()
+                except Exception:
+                    current_style = ""
+                if current_style in ("", "TFrame"):
+                    try:
+                        widget.configure(style="Panel.TFrame")
+                    except Exception:
+                        pass
+            elif class_name == "TLabel":
+                try:
+                    current_style = str(widget.cget("style") or "").strip()
+                except Exception:
+                    current_style = ""
+                target_style = self._get_panel_label_style(current_style)
+                if target_style and target_style != current_style:
+                    try:
+                        widget.configure(style=target_style)
+                    except Exception:
+                        pass
+            elif class_name in {"TCheckbutton", "TRadiobutton"}:
+                try:
+                    current_style = str(widget.cget("style") or "").strip()
+                except Exception:
+                    current_style = ""
+                target_style = self._get_panel_control_style(class_name, current_style)
+                if target_style and target_style != current_style:
+                    try:
+                        widget.configure(style=target_style)
+                    except Exception:
+                        pass
+            elif class_name == "Frame":
+                try:
+                    widget.configure(bg=bg)
+                except Exception:
+                    pass
+
+            try:
+                for child in widget.winfo_children():
+                    walk(child)
+            except Exception:
+                pass
+
+        walk(root)
 
     def style_dialog_window(self, dialog, title: str = "", geometry: str = None, parent=None):
         palette = self.palette
@@ -958,6 +1288,7 @@ class AutoAnnotationApp:
                 font=('Segoe UI', 10)
             )
             safe_configure('TFrame', background=palette["bg"])
+            safe_configure('Panel.TFrame', background=palette["panel"])
             safe_configure(
                 'Card.TFrame',
                 background=palette["panel"],
@@ -968,6 +1299,96 @@ class AutoAnnotationApp:
                 relief=tk.SOLID
             )
             safe_configure('TLabel', background=palette["bg"], foreground=palette["fg"], padding=2)
+            safe_configure(
+                'Panel.TLabel',
+                background=palette["panel"],
+                foreground=palette["fg"],
+                padding=2
+            )
+            safe_configure(
+                'TCheckbutton',
+                background=palette["bg"],
+                foreground=palette["fg"],
+                focuscolor=palette["bg"],
+                indicatorcolor=palette["field"],
+            )
+            safe_map(
+                'TCheckbutton',
+                background=[
+                    ('active', palette["bg"]),
+                    ('disabled', palette["bg"]),
+                ],
+                foreground=[('disabled', palette["muted_dim"])],
+                indicatorcolor=[
+                    ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                    ('active', palette["field"]),
+                    ('!selected', palette["field"]),
+                    ('disabled', palette["panel_alt"]),
+                ]
+            )
+            safe_configure(
+                'Panel.TCheckbutton',
+                background=palette["panel"],
+                foreground=palette["fg"],
+                focuscolor=palette["panel"],
+                indicatorcolor=palette["field"],
+            )
+            safe_map(
+                'Panel.TCheckbutton',
+                background=[
+                    ('active', palette["panel"]),
+                    ('disabled', palette["panel"]),
+                ],
+                foreground=[('disabled', palette["muted_dim"])],
+                indicatorcolor=[
+                    ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                    ('active', palette["field"]),
+                    ('!selected', palette["field"]),
+                    ('disabled', palette["panel_alt"]),
+                ]
+            )
+            safe_configure(
+                'TRadiobutton',
+                background=palette["bg"],
+                foreground=palette["fg"],
+                focuscolor=palette["bg"],
+                indicatorcolor=palette["field"],
+            )
+            safe_map(
+                'TRadiobutton',
+                background=[
+                    ('active', palette["bg"]),
+                    ('disabled', palette["bg"]),
+                ],
+                foreground=[('disabled', palette["muted_dim"])],
+                indicatorcolor=[
+                    ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                    ('active', palette["field"]),
+                    ('!selected', palette["field"]),
+                    ('disabled', palette["panel_alt"]),
+                ]
+            )
+            safe_configure(
+                'Panel.TRadiobutton',
+                background=palette["panel"],
+                foreground=palette["fg"],
+                focuscolor=palette["panel"],
+                indicatorcolor=palette["field"],
+            )
+            safe_map(
+                'Panel.TRadiobutton',
+                background=[
+                    ('active', palette["panel"]),
+                    ('disabled', palette["panel"]),
+                ],
+                foreground=[('disabled', palette["muted_dim"])],
+                indicatorcolor=[
+                    ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                    ('active', palette["field"]),
+                    ('!selected', palette["field"]),
+                    ('disabled', palette["panel_alt"]),
+                ]
+            )
             safe_configure(
                 'Info.TLabel',
                 background=palette["bg"],
@@ -1055,6 +1476,14 @@ class AutoAnnotationApp:
                 font=('Segoe UI', 10, 'bold')
             )
             safe_configure(
+                'AccentPanel.Horizontal.TSeparator',
+                background=palette.get("surface_info", palette.get("accent", "#0e639c")),
+                troughcolor=palette.get("panel", "#252526"),
+                bordercolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
+                lightcolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
+                darkcolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
+            )
+            safe_configure(
                 'TNotebook',
                 background=palette["panel"],
                 borderwidth=1,
@@ -1072,8 +1501,8 @@ class AutoAnnotationApp:
                 lightcolor=palette.get("panel_border", palette["border"]),
                 darkcolor=palette.get("panel_border", palette["border"]),
                 relief=tk.SOLID,
-                padding=[15, 8],
-                font=('Segoe UI', 10, 'bold')
+                padding=[12, 5],
+                font=('Segoe UI', 9, 'normal')
             )
             safe_map(
                 'TNotebook.Tab',
@@ -1103,9 +1532,9 @@ class AutoAnnotationApp:
                     ('active', palette.get("panel_border", palette["border"]))
                 ],
                 padding=[
-                    ('disabled', [15, 8]),
-                    ('selected', [15, 8]),
-                    ('active', [15, 8])
+                    ('disabled', [12, 5]),
+                    ('selected', [12, 5]),
+                    ('active', [12, 5])
                 ],
                 expand=[
                     ('disabled', [0, 0, 0, 0]),
@@ -1317,10 +1746,18 @@ class AutoAnnotationApp:
             safe_map(
                 'TEntry',
                 fieldbackground=[
-                    ('readonly', palette["panel_alt"]),
+                    ('readonly', palette["field"]),
                     ('disabled', palette["panel"])
                 ],
                 foreground=[
+                    ('readonly', palette["fg"]),
+                    ('disabled', palette["muted_dim"])
+                ],
+                selectbackground=[
+                    ('readonly', palette["field"]),
+                    ('disabled', palette["panel"])
+                ],
+                selectforeground=[
                     ('readonly', palette["fg"]),
                     ('disabled', palette["muted_dim"])
                 ]
@@ -1383,6 +1820,7 @@ class AutoAnnotationApp:
                 lightcolor=palette["accent"],
                 darkcolor=palette["accent"]
             )
+            self._ensure_horizontal_scale_style_assets(background=palette.get("panel", palette["bg"]))
             safe_configure(
                 'Vertical.TScrollbar',
                 background=palette["panel_alt"],
@@ -1413,7 +1851,7 @@ class AutoAnnotationApp:
         labels = {
             "campaign": "[Z1] Wizard",
             "annotation": "[Z2] Autoanotacja kształtu tablic",
-            "characters": "[Z3] Znaki na tablicach",
+            "characters": "[Z3] Autoanotacja znaków tablic",
             "training": "[Z4] Trening i analiza",
             "help": "[Z5] Instrukcja i architektura",
         }
@@ -1661,6 +2099,140 @@ class AutoAnnotationApp:
         except Exception:
             return False
 
+    def _bind_help_panel_shortcuts(self):
+        modifier_bindings = (
+            ("<KeyPress-Control_L>", lambda _e: self._set_help_scroll_modifier_state("ctrl", True)),
+            ("<KeyPress-Control_R>", lambda _e: self._set_help_scroll_modifier_state("ctrl", True)),
+            ("<KeyRelease-Control_L>", lambda _e: self._set_help_scroll_modifier_state("ctrl", False)),
+            ("<KeyRelease-Control_R>", lambda _e: self._set_help_scroll_modifier_state("ctrl", False)),
+            ("<KeyPress-Alt_L>", lambda _e: self._set_help_scroll_modifier_state("alt", True)),
+            ("<KeyPress-Alt_R>", lambda _e: self._set_help_scroll_modifier_state("alt", True)),
+            ("<KeyRelease-Alt_L>", lambda _e: self._set_help_scroll_modifier_state("alt", False)),
+            ("<KeyRelease-Alt_R>", lambda _e: self._set_help_scroll_modifier_state("alt", False)),
+        )
+        for sequence, handler in modifier_bindings:
+            try:
+                self.root.bind_all(sequence, handler, add="+")
+            except Exception:
+                pass
+
+        try:
+            self.root.bind("<FocusOut>", self._reset_help_scroll_modifier_state, add="+")
+        except Exception:
+            pass
+
+    def _set_help_scroll_modifier_state(self, modifier: str, pressed: bool):
+        if modifier == "ctrl":
+            self._help_scroll_ctrl_down = bool(pressed)
+        elif modifier == "alt":
+            self._help_scroll_alt_down = bool(pressed)
+        self._apply_help_panel_visual_state()
+
+    def _reset_help_scroll_modifier_state(self, event=None):
+        self._help_scroll_ctrl_down = False
+        self._help_scroll_alt_down = False
+        self._apply_help_panel_visual_state()
+
+    @staticmethod
+    def _get_help_scroll_modifiers_from_event(event=None):
+        if event is None or not hasattr(event, "state"):
+            return False, False, False
+
+        state = int(getattr(event, "state", 0) or 0)
+        ctrl_mask = 0x0004
+        alt_masks = (0x0008, 0x0080)
+        ctrl_down = bool(state & ctrl_mask)
+        alt_down = any(state & mask for mask in alt_masks)
+        return ctrl_down, alt_down, True
+
+    def is_help_scroll_override_active(self, event=None) -> bool:
+        event_ctrl_down, event_alt_down, has_event_state = self._get_help_scroll_modifiers_from_event(event)
+        tracked_ctrl_down = bool(getattr(self, "_help_scroll_ctrl_down", False))
+        tracked_alt_down = bool(getattr(self, "_help_scroll_alt_down", False))
+
+        if has_event_state:
+            # Gdy event mówi, że oba modyfikatory są puszczone, natychmiast oddaj kontrolę panelom.
+            if not event_ctrl_down and not event_alt_down:
+                self._reset_help_scroll_modifier_state()
+                return False
+
+            # Ctrl z eventu jest zwykle wiarygodny; Alt bywa mniej stabilny przy kółku myszy,
+            # więc dopuszczamy fallback do zapamiętanego stanu klawisza.
+            effective_ctrl_down = bool(event_ctrl_down)
+            effective_alt_down = bool(event_alt_down or tracked_alt_down)
+
+            self._help_scroll_ctrl_down = bool(event_ctrl_down or tracked_ctrl_down)
+            self._help_scroll_alt_down = bool(event_alt_down or tracked_alt_down)
+            return bool(effective_ctrl_down and effective_alt_down)
+
+        return bool(tracked_ctrl_down and tracked_alt_down)
+
+    def _count_help_panel_display_lines(self) -> int:
+        widget = getattr(self, "status_text", None)
+        if widget is None:
+            return int(getattr(self, "_help_panel_default_height", 2) or 2)
+
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            counted = widget.count("1.0", "end-1c", "displaylines")
+            if counted:
+                return max(int(self._help_panel_default_height), int(counted[0]) + 1)
+        except Exception:
+            pass
+
+        try:
+            return max(
+                int(self._help_panel_default_height),
+                int(float(str(widget.index("end-1c")).split(".")[0])) + 1,
+            )
+        except Exception:
+            return int(getattr(self, "_help_panel_default_height", 2) or 2)
+
+    def _apply_help_panel_visual_state(self):
+        widget = getattr(self, "status_text", None)
+        frame = getattr(self, "info_panel_frame", None)
+        if widget is None or frame is None or bool(getattr(self, "_help_panel_apply_in_progress", False)):
+            return
+
+        self._help_panel_apply_in_progress = True
+        expanded = bool(self._help_scroll_ctrl_down and self._help_scroll_alt_down)
+        self._help_panel_expanded = expanded
+
+        panel_bg = "navy" if expanded else "#050505"
+        text_fg = "#f7f7f7"
+        target_height = self._count_help_panel_display_lines() if expanded else int(self._help_panel_default_height)
+        try:
+            try:
+                frame.configure(bg=panel_bg)
+            except Exception:
+                pass
+
+            try:
+                widget.configure(
+                    bg=panel_bg,
+                    fg=text_fg,
+                    insertbackground=text_fg,
+                    height=max(int(self._help_panel_default_height), int(target_height)),
+                )
+                widget.yview_moveto(0.0)
+            except Exception:
+                pass
+        finally:
+            self._help_panel_apply_in_progress = False
+
+    def _on_help_panel_text_configure(self, event=None):
+        if bool(getattr(self, "_help_panel_expanded", False)) and not bool(getattr(self, "_help_panel_apply_in_progress", False)):
+            self._apply_help_panel_visual_state()
+
+    def handle_help_panel_scroll_override(self, event=None):
+        if not self.is_help_scroll_override_active(event):
+            return None
+        return "break"
+
     def _close_menu_dropdown(self, event=None):
         bind_id = getattr(self, "_menu_outside_click_bind_id", None)
         if bind_id:
@@ -1826,9 +2398,14 @@ class AutoAnnotationApp:
                 self.status_text.config(state=tk.NORMAL)
                 self.status_text.delete(1.0, tk.END)
                 self.status_text.insert(tk.END, new_text)
+                self.status_text.yview_moveto(0.0)
                 self.status_text.config(state=tk.DISABLED)
                 self.root.update_idletasks()
         except Exception: pass
+        try:
+            self._apply_help_panel_visual_state()
+        except Exception:
+            pass
     
     def set_processing(self, processing: bool):
         self.is_processing = processing

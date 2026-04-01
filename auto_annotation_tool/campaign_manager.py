@@ -21,6 +21,51 @@ class CampaignManager:
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
         self.state = self._load_state()
 
+    @staticmethod
+    def _iter_project_workspace_dirs(root: Path) -> list[Path]:
+        auto_ann_root = root / "2_auto_annotations"
+        datasets_root = root / "4_training_datasets"
+        runs_root = root / "5_training_runs"
+        models_root = root / "6_models"
+        models_base_root = models_root / "base"
+        models_trained_root = models_root / "trained"
+        rankings_root = root / "7_rankings"
+
+        return [
+            root / "1_raw_images",
+            auto_ann_root,
+            auto_ann_root / "plates",
+            auto_ann_root / "chars",
+            root / "3_cropped_characters",
+            datasets_root,
+            datasets_root / "plates",
+            datasets_root / "chars",
+            datasets_root / "vehicles",
+            runs_root,
+            runs_root / "plates",
+            runs_root / "chars",
+            runs_root / "vehicles",
+            models_root,
+            models_base_root,
+            models_base_root / "pose",
+            models_base_root / "detect",
+            models_trained_root,
+            models_trained_root / "plates",
+            models_trained_root / "chars",
+            models_trained_root / "vehicles",
+            rankings_root,
+            rankings_root / "plates",
+            rankings_root / "chars",
+            rankings_root / "vehicles",
+            root / "8_ocr_presets",
+            root / "_campaign_state",
+            root / "_campaign_state" / "ingest",
+        ]
+
+    def _ensure_project_workspace_tree(self, root: Path) -> None:
+        for path in self._iter_project_workspace_dirs(root):
+            path.mkdir(parents=True, exist_ok=True)
+
     def _get_project_default_fields(self) -> Dict[str, Any]:
         return {
             "master_pool_dir": "",
@@ -152,18 +197,7 @@ class CampaignManager:
 
         # Buduj pełne drzewo katalogów projektu.
         root = self.get_project_root_dir(name)
-        for p in [
-            root / "1_raw_images",
-            root / "2_auto_annotations",
-            root / "3_cropped_characters",
-            root / "4_training_datasets",
-            root / "5_training_runs",
-            root / "6_models",
-            root / "7_rankings",
-            root / "8_ocr_presets",
-            root / "_campaign_state" / "ingest",
-        ]:
-            p.mkdir(parents=True, exist_ok=True)
+        self._ensure_project_workspace_tree(root)
 
         return True
 
@@ -405,7 +439,9 @@ class CampaignManager:
         return self.state["projects"][act].get(key, "")
     def get_project_root_dir(self, project_name: str) -> Path:
         folder_name = self.state["projects"][project_name]["folder_name"]
-        return Path(CONFIG.DIR_9_PROJECTS) / folder_name
+        root = Path(CONFIG.DIR_9_PROJECTS) / folder_name
+        self._ensure_project_workspace_tree(root)
+        return root
 
     def get_project_state_dir(self, project_name: str = None) -> Path | None:
         project_name = self._resolve_project_name(project_name)

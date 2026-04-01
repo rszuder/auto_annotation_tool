@@ -15,6 +15,7 @@ from ..validators import (
     validate_cvat_xml, validate_coco_file
 )
 from ..utils import get_image_size
+from .web_slim_scrollbar import WebSlimScrollbar
 
 
 class ValidationTab:
@@ -54,7 +55,7 @@ class ValidationTab:
         
         # TextBox na wynik z pełnym expandem
         self.ds_result = tk.Text(ds_frame, wrap=tk.WORD)
-        ds_scroll = ttk.Scrollbar(ds_frame, orient=tk.VERTICAL, command=self.ds_result.yview)
+        ds_scroll = WebSlimScrollbar(ds_frame, orient=tk.VERTICAL, command=self.ds_result.yview)
         self.ds_result.configure(yscrollcommand=ds_scroll.set)
         self.ds_result.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
         ds_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0,10))
@@ -77,7 +78,7 @@ class ValidationTab:
         self.model_btn.pack(pady=5)
         
         self.model_result = tk.Text(model_frame, wrap=tk.WORD)
-        model_scroll = ttk.Scrollbar(model_frame, orient=tk.VERTICAL, command=self.model_result.yview)
+        model_scroll = WebSlimScrollbar(model_frame, orient=tk.VERTICAL, command=self.model_result.yview)
         self.model_result.configure(yscrollcommand=model_scroll.set)
         self.model_result.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
         model_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0,10))
@@ -100,7 +101,7 @@ class ValidationTab:
         self.cvat_btn.pack(pady=5)
         
         self.cvat_result = tk.Text(cvat_frame, wrap=tk.WORD)
-        cvat_scroll = ttk.Scrollbar(cvat_frame, orient=tk.VERTICAL, command=self.cvat_result.yview)
+        cvat_scroll = WebSlimScrollbar(cvat_frame, orient=tk.VERTICAL, command=self.cvat_result.yview)
         self.cvat_result.configure(yscrollcommand=cvat_scroll.set)
         self.cvat_result.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
         cvat_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0,10))
@@ -111,6 +112,23 @@ class ValidationTab:
         
         ttk.Button(tools_frame, text="Szybko sprawdź rozdzielczość obrazu", 
                    command=self._check_image_size).pack(side=tk.LEFT, padx=5)
+
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+
+        try:
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
+        for widget_name in ("ds_result", "model_result", "cvat_result"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                self.app.style_text_widget(widget)
+            except Exception:
+                pass
     
     def _select_file_or_dir(self, var: tk.StringVar, filter_: str):
         if filter_ == "dataset":

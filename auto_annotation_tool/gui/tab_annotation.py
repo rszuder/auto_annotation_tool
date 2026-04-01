@@ -5,8 +5,10 @@ Zakładka: Autoanotacja - Główne przetwarzanie YOLO (pojazdy + tablice)
 Układ 3-kolumnowy z interaktywną przeglądarką na Canvasie.
 """
 
+import json
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+import tkinter.font as tkfont
+from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from typing import Optional
 import datetime
@@ -20,11 +22,95 @@ from .zoomable_canvas import ZoomableCanvas
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS
 from ..icons import IconManager
-from ..annotators import VehicleAnnotator, PlateAnnotator, CombinedAnnotator
+from ..annotators import PlateAnnotator, CombinedAnnotator
 from ..exporters import CVATExporter, ReportGenerator
+from ..training import DatasetCreator
 from ..utils import count_images_in_directory, format_duration
 from ..validators import validate_model_file
 from .help_manager import HELP
+from .web_slim_scrollbar import WebSlimScrollbar
+
+
+class SlimProgressBar(tk.Canvas):
+    def __init__(
+        self,
+        master,
+        *,
+        maximum: float = 100.0,
+        value: float = 0.0,
+        thickness: int = 2,
+        trough_color: str = "#3c3c3c",
+        fill_color: str = "#0e639c",
+        **kwargs,
+    ):
+        canvas_height = max(int(kwargs.pop("height", thickness + 4)), int(thickness) + 4)
+        bg = kwargs.pop("bg", kwargs.pop("background", trough_color))
+        super().__init__(
+            master,
+            height=canvas_height,
+            bg=bg,
+            bd=0,
+            highlightthickness=0,
+            **kwargs,
+        )
+        self._maximum = max(1.0, float(maximum))
+        self._value = 0.0
+        self._thickness = max(1, int(thickness))
+        self._trough_color = str(trough_color)
+        self._fill_color = str(fill_color)
+        self._trough_id = self.create_line(0, 0, 0, 0, capstyle=tk.ROUND)
+        self._fill_id = self.create_line(0, 0, 0, 0, capstyle=tk.ROUND)
+        self.bind("<Configure>", lambda _event: self._redraw(), add="+")
+        self.configure(value=value)
+
+    def _redraw(self):
+        width = max(1.0, float(self.winfo_width()))
+        height = max(1.0, float(self.winfo_height()))
+        center_y = height / 2.0
+        half_thickness = max(0.5, float(self._thickness) / 2.0)
+        left = half_thickness + 1.0
+        right = max(left, width - half_thickness - 1.0)
+        ratio = max(0.0, min(1.0, float(self._value) / max(1.0, float(self._maximum))))
+        fill_right = left + ((right - left) * ratio)
+
+        self.coords(self._trough_id, left, center_y, right, center_y)
+        self.coords(self._fill_id, left, center_y, max(left, fill_right), center_y)
+        self.itemconfigure(self._trough_id, fill=self._trough_color, width=self._thickness)
+        self.itemconfigure(self._fill_id, fill=self._fill_color, width=self._thickness)
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf is not None and not isinstance(cnf, dict):
+            return super().configure(cnf, **kwargs)
+
+        merged = {}
+        if isinstance(cnf, dict):
+            merged.update(cnf)
+        merged.update(kwargs)
+
+        if "maximum" in merged:
+            self._maximum = max(1.0, float(merged.pop("maximum")))
+        if "value" in merged:
+            self._value = max(0.0, float(merged.pop("value")))
+        if "thickness" in merged:
+            self._thickness = max(1, int(merged.pop("thickness")))
+            merged.setdefault("height", self._thickness + 4)
+        if "trough_color" in merged:
+            self._trough_color = str(merged.pop("trough_color"))
+        if "fill_color" in merged:
+            self._fill_color = str(merged.pop("fill_color"))
+
+        background = merged.pop("background", None)
+        bg = merged.pop("bg", None)
+        resolved_bg = background if background is not None else bg
+        if resolved_bg is not None:
+            super().configure(bg=resolved_bg)
+
+        result = super().configure(**merged) if merged else None
+        self._redraw()
+        return result
+
+    config = configure
+
 
 class AnnotationTab:
     def __init__(self, parent, app):
@@ -34,6 +120,7 @@ class AnnotationTab:
         self.frame = ttk.Frame(parent)
         
         self.annotator = None
+        self.dataset_creator = DatasetCreator()
         self.is_processing = False
         self.start_time = None
         
@@ -52,11 +139,22 @@ class AnnotationTab:
         self._campaign_paths_locked = False
         self._annotation_log_visible = False
         self._character_model_options = {}
+        self._left_section_separators = []
+        self._left_title_underlines = []
+        self._left_path_button_width = 15
+        self._left_path_action_minsize = 140
         self.project_paths_info_var = tk.StringVar(value="")
         self.project_paths_rel_var = tk.StringVar(value="")
+        self.plate_dataset_run_var = tk.StringVar(value="")
+        self.plate_dataset_images_var = tk.StringVar(value="")
+        self.plate_dataset_out_var = tk.StringVar(value="")
+        self.plate_train_pct = tk.DoubleVar(value=80.0)
+        self.plate_val_pct = tk.DoubleVar(value=10.0)
+        self.plate_export_progress_var = tk.DoubleVar(value=0.0)
+        self.progress_counts_var = tk.StringVar(value="udane/przer./całość: 0/0/0")
         # Domyślnie podpowiadaj katalog wejściowy z workspace.
         self.input_dir_var = tk.StringVar(value=str(Path(CONFIG.DIR_1_RAW).absolute()))
-        self.output_dir_var = tk.StringVar(value=str(Path(CONFIG.DEFAULT_OUTPUT_DIR)))
+        self.output_dir_var = tk.StringVar(value=str(Path(CONFIG.get_auto_annotations_dir("plate"))))
 
         self._create_widgets()
         self._refresh_device_options()
@@ -189,6 +287,318 @@ class AnnotationTab:
         except Exception:
             pass
 
+    def _sync_left_panel_scrollregion(self, event=None):
+        canvas = getattr(self, "left_settings_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_left_panel_canvas_width(self, event=None):
+        canvas = getattr(self, "left_settings_canvas", None)
+        window_id = getattr(self, "_left_settings_window_id", None)
+        if canvas is None or window_id is None:
+            return
+
+        width = getattr(event, "width", 0) or canvas.winfo_width()
+        if width <= 1:
+            return
+
+        try:
+            canvas.itemconfigure(window_id, width=width)
+        except Exception:
+            pass
+
+    def _widget_contains_point(self, widget, x_root: int, y_root: int) -> bool:
+        if widget is None:
+            return False
+        try:
+            wx = int(widget.winfo_rootx())
+            wy = int(widget.winfo_rooty())
+            return wx <= x_root < (wx + int(widget.winfo_width())) and wy <= y_root < (wy + int(widget.winfo_height()))
+        except Exception:
+            return False
+
+    def _mousewheel_units(self, event) -> int:
+        event_num = getattr(event, "num", None)
+        if event_num == 4:
+            return -1
+        if event_num == 5:
+            return 1
+
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        if abs(delta) >= 120:
+            units = -int(delta / 120)
+        else:
+            units = -1 if delta > 0 else 1
+        return units if units != 0 else (-1 if delta > 0 else 1)
+
+    def _panel_canvas_overflows(self, canvas) -> bool:
+        if canvas is None:
+            return False
+
+        try:
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return False
+            content_height = int(bbox[3]) - int(bbox[1])
+            viewport_height = int(canvas.winfo_height())
+            return content_height > viewport_height + 1
+        except Exception:
+            return False
+
+    def _scroll_panel_canvas_if_targeted(self, canvas, event):
+        try:
+            if callable(getattr(self.app, "handle_help_panel_scroll_override", None)):
+                result = self.app.handle_help_panel_scroll_override(event)
+                if result == "break":
+                    return "break"
+        except Exception:
+            pass
+
+        if canvas is None:
+            return None
+
+        units = self._mousewheel_units(event)
+        if units == 0:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+        except Exception:
+            return None
+
+        if not self._widget_contains_point(canvas, x_root, y_root):
+            return None
+
+        if not self._panel_canvas_overflows(canvas):
+            return None
+
+        try:
+            canvas.yview_scroll(units, "units")
+        except Exception:
+            return "break"
+        return "break"
+
+    def _on_left_panel_global_mousewheel(self, event):
+        return self._scroll_panel_canvas_if_targeted(
+            getattr(self, "left_settings_canvas", None),
+            event
+        )
+
+    def _on_right_panel_global_mousewheel(self, event):
+        return self._scroll_panel_canvas_if_targeted(
+            getattr(self, "right_settings_canvas", None),
+            event
+        )
+
+    def _restore_scroll_canvas_focus(self, canvas):
+        if canvas is None:
+            return
+        try:
+            canvas.focus_set()
+        except Exception:
+            pass
+
+    def _redirect_child_mousewheel_to_canvas(self, event, canvas):
+        try:
+            if callable(getattr(self.app, "handle_help_panel_scroll_override", None)):
+                result = self.app.handle_help_panel_scroll_override(event)
+                if result == "break":
+                    return "break"
+        except Exception:
+            pass
+
+        if canvas is None:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+        except Exception:
+            return None
+
+        if not self._widget_contains_point(canvas, x_root, y_root):
+            return None
+
+        units = self._mousewheel_units(event)
+        if units != 0 and self._panel_canvas_overflows(canvas):
+            try:
+                canvas.yview_scroll(units, "units")
+            except Exception:
+                return "break"
+
+        self._restore_scroll_canvas_focus(canvas)
+        return "break"
+
+    def _bind_scroll_canvas_children(self, root, canvas):
+        if root is None or canvas is None:
+            return
+
+        release_focus_classes = {
+            "TButton",
+            "Button",
+            "TCheckbutton",
+            "Checkbutton",
+            "TRadiobutton",
+            "Radiobutton",
+            "TScale",
+            "Scale",
+            "TCombobox",
+            "Spinbox",
+        }
+
+        def _walk(widget):
+            try:
+                widget.bind("<MouseWheel>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                widget.bind("<Button-4>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                widget.bind("<Button-5>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+            except Exception:
+                pass
+
+            try:
+                class_name = str(widget.winfo_class())
+            except Exception:
+                class_name = ""
+
+            if class_name in release_focus_classes:
+                try:
+                    widget.configure(takefocus=0)
+                except Exception:
+                    pass
+                try:
+                    widget.bind("<ButtonRelease-1>", lambda _e, c=canvas: self._restore_scroll_canvas_focus(c), add="+")
+                except Exception:
+                    pass
+                if class_name == "TCombobox":
+                    try:
+                        widget.bind("<<ComboboxSelected>>", lambda _e, c=canvas: self._restore_scroll_canvas_focus(c), add="+")
+                    except Exception:
+                        pass
+
+            for child in widget.winfo_children():
+                _walk(child)
+
+        _walk(root)
+
+    def _build_left_section_separator(self, parent, pady=(0, 0)):
+        if parent is None:
+            return None
+
+        palette = getattr(self.app, "palette", {})
+        host = tk.Frame(
+            parent,
+            height=4,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel", "#252526"),
+        )
+        host.pack(fill=tk.X, pady=pady)
+        host.pack_propagate(False)
+
+        accent_line = tk.Frame(
+            host,
+            height=1,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("surface_info", palette.get("accent", "#0e639c")),
+        )
+        accent_line.pack(fill=tk.X, side=tk.TOP)
+
+        shadow_line = tk.Frame(
+            host,
+            height=1,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        )
+        shadow_line.pack(fill=tk.X, side=tk.TOP, pady=(1, 0))
+
+        self._left_section_separators.append(
+            {
+                "host": host,
+                "accent": accent_line,
+                "shadow": shadow_line,
+            }
+        )
+        return host
+
+    def _build_left_title_underline(self, parent, label_widget, pady=(2, 4)):
+        if parent is None or label_widget is None:
+            return None
+
+        palette = getattr(self.app, "palette", {})
+        host = tk.Frame(
+            parent,
+            height=4,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel", "#252526"),
+        )
+        host.pack(fill=tk.X, pady=pady)
+        host.pack_propagate(False)
+
+        line_width = 120
+        try:
+            label_font = tkfont.Font(font=label_widget.cget("font"))
+            label_text = str(label_widget.cget("text") or "").strip()
+            if label_text:
+                line_width = max(72, min(280, label_font.measure(label_text) + 6))
+        except Exception:
+            pass
+
+        accent_line = tk.Frame(
+            host,
+            width=line_width,
+            height=1,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("success", palette.get("accent", "#0e639c")),
+        )
+        accent_line.pack(anchor=tk.W)
+
+        self._left_title_underlines.append(
+            {
+                "host": host,
+                "accent": accent_line,
+            }
+        )
+        return host
+
+    def _build_left_path_row(
+        self,
+        parent,
+        textvariable,
+        *,
+        state: str = "normal",
+        button_text: str | None = None,
+        button_command=None,
+    ):
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill=tk.X, pady=(2, 8))
+        row.columnconfigure(0, weight=1)
+        row.columnconfigure(1, minsize=int(getattr(self, "_left_path_action_minsize", 140)))
+
+        entry = ttk.Entry(row, textvariable=textvariable, state=state)
+        entry.grid(row=0, column=0, sticky="ew")
+
+        button = None
+        if button_text and button_command is not None:
+            button = ttk.Button(
+                row,
+                text=button_text,
+                width=int(getattr(self, "_left_path_button_width", 15)),
+                command=button_command,
+            )
+            button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        return row, entry, button
+
     def _create_widgets(self):
         pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
         pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
@@ -202,33 +612,69 @@ class AnnotationTab:
         pane.add(right_frame, weight=2)
 
         # --- LEWA KOLUMNA ---
-        paths_lf = ttk.LabelFrame(left_frame, text=" Ścieżki danych ", padding=15)
-        paths_lf.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(paths_lf, text="Folder wejściowy (obrazy):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        row_in = ttk.Frame(paths_lf)
-        row_in.pack(fill=tk.X, pady=(0, 6))
+        left_scroll_host = ttk.Frame(left_frame, style="Panel.TFrame")
+        left_scroll_host.pack(fill=tk.BOTH, expand=True)
 
-        self.input_dir_entry = ttk.Entry(row_in, textvariable=self.input_dir_var)
-        self.input_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.left_settings_canvas = tk.Canvas(left_scroll_host, highlightthickness=0, bd=0)
+        self.left_settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.input_dir_browse_btn = ttk.Button(row_in, text="Wybierz", command=self._select_input_dir)
-        self.input_dir_browse_btn.pack(side=tk.RIGHT, padx=(5,0))
+        self.left_settings_scrollbar = WebSlimScrollbar(
+            left_scroll_host,
+            command=self.left_settings_canvas.yview
+        )
+        self.left_settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.left_settings_canvas.configure(yscrollcommand=self.left_settings_scrollbar.set)
+
+        self.left_settings_content = ttk.Frame(self.left_settings_canvas, style="Panel.TFrame")
+        self._left_settings_window_id = self.left_settings_canvas.create_window(
+            (0, 0),
+            window=self.left_settings_content,
+            anchor="nw"
+        )
+        self.left_settings_content.bind("<Configure>", self._sync_left_panel_scrollregion)
+        self.left_settings_canvas.bind("<Configure>", self._sync_left_panel_canvas_width)
+
+        settings_col = ttk.Frame(self.left_settings_content, style="Panel.TFrame")
+        settings_col.pack(fill=tk.X, expand=True, padx=12, pady=(14, 20))
+
+        source_section = ttk.Frame(settings_col, style="Panel.TFrame")
+        source_section.pack(fill=tk.X)
+        self.sources_title_lbl = ttk.Label(
+            source_section,
+            text="Źródło obrazów i folder wyników Z2",
+            style="Panel.TLabel"
+        )
+        self.sources_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._build_left_title_underline(source_section, self.sources_title_lbl, pady=(2, 4))
+
+        self.input_dir_title_lbl = ttk.Label(
+            source_section,
+            text="Wybierz folder obrazów do autoanotacji",
+            style="Panel.TLabel"
+        )
+        self.input_dir_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        row_in, self.input_dir_entry, self.input_dir_browse_btn = self._build_left_path_row(
+            source_section,
+            self.input_dir_var,
+            button_text="Wybierz",
+            button_command=self._select_input_dir,
+        )
 
         self.project_paths_info_lbl = tk.Label(
-            paths_lf,
+            source_section,
             textvariable=self.project_paths_info_var,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 9),
             wraplength=360,
             justify=tk.LEFT,
             anchor="w",
             bd=0,
             highlightthickness=0
         )
-        self.project_paths_info_lbl.pack(anchor=tk.W, fill=tk.X)
-        self._set_inline_label_state(self.project_paths_info_lbl, tone="info", emphasis=True)
+        self.project_paths_info_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+        self._set_inline_label_state(self.project_paths_info_lbl, tone="muted", emphasis=False)
 
         self.project_paths_rel_lbl = tk.Label(
-            paths_lf,
+            source_section,
             textvariable=self.project_paths_rel_var,
             wraplength=360,
             justify=tk.LEFT,
@@ -239,16 +685,32 @@ class AnnotationTab:
         self.project_paths_rel_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 10))
         self._set_inline_label_state(self.project_paths_rel_lbl, tone="muted", emphasis=False)
 
-        ttk.Label(paths_lf, text="Katalog docelowy (tworzony automatycznie):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        row_out = ttk.Frame(paths_lf)
-        row_out.pack(fill=tk.X, pady=(0, 5))
-        self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN)))
-        ttk.Entry(row_out, textvariable=self.output_dir_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.output_dir_title_lbl = ttk.Label(
+            source_section,
+            text="Folder wyników Z2 (tu powstają foldery run_XXX):",
+            style="Panel.TLabel"
+        )
+        self.output_dir_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.output_dir_var.set(str(Path(CONFIG.get_auto_annotations_dir("plate"))))
+        row_out, self.output_dir_entry, _ = self._build_left_path_row(
+            source_section,
+            self.output_dir_var,
+            state="readonly",
+        )
 
-        actions_lf = ttk.LabelFrame(left_frame, text=" Przetwarzanie YOLO ", padding=15)
+        self._build_left_section_separator(settings_col, pady=(16, 20))
+
+        actions_lf = ttk.Frame(settings_col, style="Panel.TFrame")
         actions_lf.pack(fill=tk.X)
+        self.run_title_lbl = ttk.Label(
+            actions_lf,
+            text="Etap 1: Utwórz run autoanotacji tablic",
+            style="Panel.TLabel"
+        )
+        self.run_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._build_left_title_underline(actions_lf, self.run_title_lbl, pady=(2, 4))
 
-        self.start_btn_row = ttk.Frame(actions_lf)
+        self.start_btn_row = ttk.Frame(actions_lf, style="Panel.TFrame")
         self.start_btn_row.pack(fill=tk.X, pady=(5, 0))
         self.start_btn_row.columnconfigure(0, weight=3)
         self.start_btn_row.columnconfigure(1, weight=2)
@@ -265,7 +727,7 @@ class AnnotationTab:
 
         self.start_btn = ttk.Button(
             self.start_btn_pulse_frame,
-            text="STARTUJ – AUTOANOTACJĘ",
+            text="STARTUJ AUTOANOTACJĘ",
             command=self._start_annotation,
             style="Accent.TButton"
         )
@@ -279,18 +741,165 @@ class AnnotationTab:
         )
         self.stop_btn.grid(row=0, column=1, sticky="ew")
 
-        self.progress = ttk.Progressbar(actions_lf, mode='determinate', maximum=100)
-        self.progress.pack(fill=tk.X, pady=(15, 5))
+        progress_info_row = ttk.Frame(actions_lf, style="Panel.TFrame")
+        progress_info_row.pack(fill=tk.X, pady=(10, 4))
+
         self.status_label = tk.Label(
-            actions_lf,
+            progress_info_row,
             text="Gotowy",
             anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9),
             bd=0,
             highlightthickness=0
         )
-        self.status_label.pack(anchor=tk.W)
+        self.status_label.pack(side=tk.LEFT, anchor=tk.W)
         self._set_inline_label_state(self.status_label, text="Gotowy", tone="neutral", emphasis=True)
+
+        self.progress_counts_lbl = tk.Label(
+            progress_info_row,
+            textvariable=self.progress_counts_var,
+            anchor="e",
+            font=("Segoe UI", 9),
+            bd=0,
+            highlightthickness=0
+        )
+        self.progress_counts_lbl.pack(side=tk.RIGHT, anchor=tk.E)
+        self._set_inline_label_state(self.progress_counts_lbl, tone="muted", emphasis=False)
+
+        self.progress = SlimProgressBar(
+            actions_lf,
+            maximum=100,
+            value=0,
+            thickness=2
+        )
+        self.progress.pack(fill=tk.X, pady=(0, 2))
+        self._set_progress_counters(0, 0, 0)
+
+        self._build_left_section_separator(settings_col, pady=(18, 20))
+
+        export_lf = ttk.Frame(settings_col, style="Panel.TFrame")
+        export_lf.pack(fill=tk.X)
+        self.export_title_lbl = ttk.Label(
+            export_lf,
+            text="Etap 2: Z istniejącego runu zbuduj dataset YOLO Pose",
+            style="Panel.TLabel"
+        )
+        self.export_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._build_left_title_underline(export_lf, self.export_title_lbl, pady=(2, 4))
+
+        run_row = ttk.Frame(export_lf, style="Panel.TFrame")
+        run_row.pack(fill=tk.X, pady=(0, 4))
+        self.plate_dataset_run_title_lbl = ttk.Label(
+            run_row,
+            text="Run autoanotacji tablic (produkt przycisku Start):",
+            style="Panel.TLabel"
+        )
+        self.plate_dataset_run_title_lbl.pack(anchor=tk.W)
+        run_input, self.plate_dataset_run_entry, self.plate_dataset_run_btn = self._build_left_path_row(
+            run_row,
+            self.plate_dataset_run_var,
+            button_text="Wskaż inny run",
+            button_command=self._select_plate_dataset_run_dir,
+        )
+
+        img_row = ttk.Frame(export_lf, style="Panel.TFrame")
+        img_row.pack(fill=tk.X, pady=(0, 4))
+        self.plate_dataset_images_title_lbl = ttk.Label(
+            img_row,
+            text="Folder źródłowych obrazów dla wybranego runu:",
+            style="Panel.TLabel"
+        )
+        self.plate_dataset_images_title_lbl.pack(anchor=tk.W)
+        img_input, self.plate_dataset_images_entry, self.plate_dataset_images_btn = self._build_left_path_row(
+            img_row,
+            self.plate_dataset_images_var,
+            button_text="Wskaż obrazy",
+            button_command=self._select_plate_dataset_images_dir,
+        )
+
+        out_row = ttk.Frame(export_lf, style="Panel.TFrame")
+        out_row.pack(fill=tk.X, pady=(0, 8))
+        self.plate_dataset_out_title_lbl = ttk.Label(
+            out_row,
+            text="Docelowy katalog datasetu YOLO Pose:",
+            style="Panel.TLabel"
+        )
+        self.plate_dataset_out_title_lbl.pack(anchor=tk.W)
+        out_input, self.plate_dataset_out_entry, _ = self._build_left_path_row(
+            out_row,
+            self.plate_dataset_out_var,
+            state="readonly",
+        )
+
+        split_lf = ttk.Frame(export_lf, style="Panel.TFrame")
+        split_lf.pack(fill=tk.X, pady=(0, 8))
+        self.split_title_lbl = ttk.Label(split_lf, text="Split treningowy", style="Panel.TLabel")
+        self.split_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._build_left_title_underline(split_lf, self.split_title_lbl, pady=(2, 4))
+
+        split_grid = ttk.Frame(split_lf, style="Panel.TFrame")
+        split_grid.pack(fill=tk.X)
+
+        ttk.Label(split_grid, text="Train %", style="Panel.TLabel").grid(row=0, column=0, sticky=tk.W)
+        ttk.Scale(
+            split_grid,
+            from_=50,
+            to=90,
+            variable=self.plate_train_pct,
+            command=lambda e: self._update_plate_dataset_ratio_labels()
+        ).grid(row=0, column=1, sticky=tk.EW, padx=5)
+        self.plate_train_lbl = ttk.Label(split_grid, text="80%", style="Panel.TLabel")
+        self.plate_train_lbl.grid(row=0, column=2, sticky=tk.W)
+
+        ttk.Label(split_grid, text="Val %", style="Panel.TLabel").grid(row=1, column=0, sticky=tk.W)
+        ttk.Scale(
+            split_grid,
+            from_=5,
+            to=40,
+            variable=self.plate_val_pct,
+            command=lambda e: self._update_plate_dataset_ratio_labels()
+        ).grid(row=1, column=1, sticky=tk.EW, padx=5)
+        self.plate_val_lbl = ttk.Label(split_grid, text="10%", style="Panel.TLabel")
+        self.plate_val_lbl.grid(row=1, column=2, sticky=tk.W)
+
+        ttk.Label(split_grid, text="Test %", style="Panel.TLabel").grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(split_grid, text="liczony automatycznie", style="PanelMuted.TLabel").grid(row=2, column=1, sticky=tk.W, padx=5)
+        self.plate_test_lbl = ttk.Label(split_grid, text="Test: 10%", style="Panel.TLabel")
+        self.plate_test_lbl.grid(row=2, column=2, sticky=tk.W)
+        split_grid.columnconfigure(1, weight=1)
+
+        self.export_plate_dataset_btn = ttk.Button(
+            export_lf,
+            text="WYEKSPORTUJ DATASET TABLIC",
+            command=self._start_plate_dataset_export
+        )
+        self.export_plate_dataset_btn.pack(fill=tk.X)
+
+        self.plate_export_progress = ttk.Progressbar(
+            export_lf,
+            variable=self.plate_export_progress_var,
+            maximum=100
+        )
+        self.plate_export_progress.pack(fill=tk.X, pady=(8, 4))
+
+        self.plate_export_status_lbl = tk.Label(
+            export_lf,
+            text="Wskaż run i obrazy do eksportu datasetu.",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=360,
+            bd=0,
+            highlightthickness=0
+        )
+        self.plate_export_status_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._set_inline_label_state(
+            self.plate_export_status_lbl,
+            tone="muted",
+            emphasis=False
+        )
+
+        self._update_plate_dataset_ratio_labels()
+        self._refresh_plate_dataset_export_sources()
 
         # --- ŚRODKOWA KOLUMNA (PODGLĄD + TERMINAL PROCESU) ---
         preview_host = ttk.Frame(center_frame)
@@ -305,7 +914,7 @@ class AnnotationTab:
         list_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_listbox = tk.Listbox(list_frame, font=("Consolas", 9), selectbackground="#3498db")
         self.preview_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll = ttk.Scrollbar(list_frame, command=self.preview_listbox.yview)
+        scroll = WebSlimScrollbar(list_frame, command=self.preview_listbox.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_listbox.config(yscrollcommand=scroll.set)
         self.preview_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
@@ -334,15 +943,30 @@ class AnnotationTab:
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         self.annotation_log_frame = ttk.LabelFrame(center_frame, text=" Terminal procesu ", padding=6)
-        self.log_text = scrolledtext.ScrolledText(
-            self.annotation_log_frame,
+        self.annotation_log_host = ttk.Frame(self.annotation_log_frame, style="Panel.TFrame")
+        self.annotation_log_host.pack(fill=tk.BOTH, expand=True)
+
+        self.log_text = tk.Text(
+            self.annotation_log_host,
             wrap=tk.WORD,
             font=("Consolas", 9),
             bg="#161616",
             fg="#f3f3f3",
-            insertbackground="#f3f3f3"
+            insertbackground="#f3f3f3",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.annotation_log_scrollbar = WebSlimScrollbar(
+            self.annotation_log_host,
+            orient=tk.VERTICAL,
+            command=self.log_text.yview,
+            auto_hide=False,
+        )
+        self.annotation_log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.configure(yscrollcommand=self.annotation_log_scrollbar.set)
+        self.log_text.web_vbar = self.annotation_log_scrollbar
         self._redirect_logs()
         self._set_annotation_process_log_visibility(False)
 
@@ -353,9 +977,8 @@ class AnnotationTab:
         self.right_settings_canvas = tk.Canvas(right_scroll_host, highlightthickness=0, bd=0)
         self.right_settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.right_settings_scrollbar = ttk.Scrollbar(
+        self.right_settings_scrollbar = WebSlimScrollbar(
             right_scroll_host,
-            orient=tk.VERTICAL,
             command=self.right_settings_canvas.yview
         )
         self.right_settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -378,7 +1001,7 @@ class AnnotationTab:
         self.approve_btn_row.columnconfigure(0, weight=1)
 
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
-        modes = ["A: Tylko pojazdy", "B: Tylko tablice", "C: Pojazdy + tablice"]
+        modes = ["B: Tylko tablice", "C: Pojazdy + tablice"]
         self.mode_combo = ttk.Combobox(settings_lf, textvariable=self.mode_var, values=modes, state="readonly")
         self.mode_combo.pack(fill=tk.X, pady=(0, 15))
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
@@ -395,36 +1018,12 @@ class AnnotationTab:
 
         self.pla_frame = ttk.LabelFrame(settings_lf, text=" Model Tablic (.pt / Pose) ", padding=10)
         self.pla_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(
-            self.pla_frame,
-            text="Wskaz wytrenowany model YOLO Pose (.pt) dla detekcji tablic.",
-            style="Muted.TLabel",
-            wraplength=320,
-            justify=tk.LEFT
-        ).pack(anchor=tk.W, pady=(0, 4))
         self.pla_custom_row = ttk.Frame(self.pla_frame)
         self.pla_custom_row.pack(fill=tk.X, pady=2)
         self.plate_path_entry = ttk.Entry(self.pla_custom_row, textvariable=self.plate_custom_var)
         self.plate_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.plate_browse_btn = ttk.Button(self.pla_custom_row, text="Wybierz", command=self._select_plate_custom)
         self.plate_browse_btn.pack(side=tk.RIGHT, padx=(5,0))
-
-        self.char_frame = ttk.LabelFrame(settings_lf, text=" Model Znakow (YOLO / Z3) ", padding=10)
-        self.char_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(
-            self.char_frame,
-            text="Opcjonalny model dla kroku Z3 / kampanii.",
-            style="Muted.TLabel",
-            wraplength=320,
-            justify=tk.LEFT
-        ).pack(anchor=tk.W, pady=(0, 4))
-        self.character_combo = ttk.Combobox(self.char_frame, textvariable=self.character_model_var, state="readonly")
-        self.character_combo.pack(fill=tk.X, pady=2)
-        self.character_combo.bind("<<ComboboxSelected>>", self._on_character_model_change)
-        self.char_custom_row = ttk.Frame(self.char_frame)
-        ttk.Entry(self.char_custom_row, textvariable=self.character_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(self.char_custom_row, text="Wybierz", command=self._select_character_custom).pack(side=tk.RIGHT, padx=(5,0))
-        self.char_custom_row.pack(fill=tk.X, pady=(5,0))
 
         param_frame = ttk.LabelFrame(settings_lf, text=" Parametry ", padding=10)
         param_frame.pack(fill=tk.X, pady=(0, 10))
@@ -472,14 +1071,25 @@ class AnnotationTab:
         self.approve_btn.pack(fill=tk.X)
 
         # Podpinanie systemu pomocy pod lokalną konsolę
+        HELP.bind_help(self.input_dir_title_lbl, "tab1_input")
         HELP.bind_help(row_in, "tab1_input")
+        HELP.bind_help(self.output_dir_title_lbl, "tab1_output")
         HELP.bind_help(row_out, "tab1_output")
+        HELP.bind_help(self.run_title_lbl, "tab1_start")
         HELP.bind_help(self.mode_combo, "tab1_mode")
         HELP.bind_help(self.vehicle_combo, "tab1_model_veh")
         HELP.bind_help(self.pla_frame, "tab1_model_pla")
         HELP.bind_help(self.plate_path_entry, "tab1_model_pla")
+        HELP.bind_help(self.export_title_lbl, "tab1_dataset_export")
+        HELP.bind_help(self.plate_dataset_run_title_lbl, "tab1_dataset_run")
+        HELP.bind_help(run_row, "tab1_dataset_run")
+        HELP.bind_help(self.plate_dataset_images_title_lbl, "tab1_dataset_images")
+        HELP.bind_help(img_row, "tab1_dataset_images")
+        HELP.bind_help(self.plate_dataset_out_title_lbl, "tab1_dataset_export")
+        HELP.bind_help(self.split_title_lbl, "tab1_dataset_split")
+        HELP.bind_help(split_lf, "tab1_dataset_split")
+        HELP.bind_help(self.export_plate_dataset_btn, "tab1_dataset_export")
         HELP.bind_help(self.plate_browse_btn, "tab1_model_pla")
-        HELP.bind_help(self.character_combo, "tab1_model_char")
         HELP.bind_help(row_conf, "tab1_conf") 
         HELP.bind_help(self.device_combo, "tab1_device")
         HELP.bind_help(self.start_btn, "tab1_start")
@@ -488,20 +1098,53 @@ class AnnotationTab:
         HELP.bind_help(self.preview_listbox, "tab1_preview_list")
         HELP.bind_help(self.preview_canvas, "tab1_preview_canvas")
         HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
-        HELP.bind_help(self.char_custom_row, "tab1_custom_model")
+        self._bind_scroll_canvas_children(self.left_settings_content, self.left_settings_canvas)
+        self._bind_scroll_canvas_children(self.right_settings_content, self.right_settings_canvas)
+        self.frame.after_idle(self._sync_left_panel_canvas_width)
+        self.frame.after_idle(self._sync_left_panel_scrollregion)
         self.frame.after_idle(self._sync_right_panel_canvas_width)
         self.frame.after_idle(self._sync_right_panel_scrollregion)
+        self.frame.bind_all("<MouseWheel>", self._on_left_panel_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_left_panel_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_left_panel_global_mousewheel, add="+")
+        self.frame.bind_all("<MouseWheel>", self._on_right_panel_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_right_panel_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_right_panel_global_mousewheel, add="+")
+
+    def _normalize_mode_value(self, mode: str | None = None) -> str:
+        raw = str(mode if mode is not None else self.mode_var.get() or "").strip()
+        if raw.startswith("B:"):
+            return "B: Tylko tablice"
+        return "C: Pojazdy + tablice"
+
+    def _mode_uses_vehicle(self, mode: str | None = None) -> bool:
+        return self._normalize_mode_value(mode).startswith("C:")
+
+    def _mode_uses_plate(self, mode: str | None = None) -> bool:
+        normalized = self._normalize_mode_value(mode)
+        return normalized.startswith("B:") or normalized.startswith("C:")
+
+    def _set_progress_counters(self, successful: int, current: int, total: int):
+        try:
+            self.progress_counts_var.set(
+                f"udane/przer./całość: {int(successful)}/{int(current)}/{int(total)}"
+            )
+        except Exception:
+            pass
 
     def _on_mode_change(self, event=None):
-        mode = self.mode_var.get()
-        if "A:" in mode or "C:" in mode:
+        mode = self._normalize_mode_value()
+        if mode != self.mode_var.get():
+            self.mode_var.set(mode)
+
+        if self._mode_uses_vehicle(mode):
             self.vehicle_combo.config(state="readonly")
             self._on_vehicle_model_change() 
         else:
             self.vehicle_combo.config(state=tk.DISABLED)
             self.veh_custom_row.pack_forget()
 
-        if "B:" in mode or "C:" in mode:
+        if self._mode_uses_plate(mode):
             self._set_plate_model_controls_state(True)
         else:
             self._set_plate_model_controls_state(False)
@@ -514,7 +1157,8 @@ class AnnotationTab:
                 preferred_vehicle = "yolo11s" if "yolo11s" in v_keys else v_keys[0]
                 self.vehicle_model_var.set(preferred_vehicle)
 
-        self._refresh_character_model_choices()
+        if hasattr(self, "character_combo"):
+            self._refresh_character_model_choices()
 
     def _on_vehicle_model_change(self, event=None):
         if self.vehicle_model_var.get() == "Custom" and str(self.vehicle_combo.cget("state")) != "disabled":
@@ -558,8 +1202,9 @@ class AnnotationTab:
 
     def _collect_character_model_candidates(self, active_path: str = ""):
         candidates = []
-        chars_dir = Path(CONFIG.DIR_6_MODELS_CHARS)
-        if chars_dir.exists():
+        for chars_dir in CONFIG.get_model_search_dirs("char"):
+            if not chars_dir.exists():
+                continue
             candidates.extend(
                 sorted(
                     chars_dir.rglob("*.pt"),
@@ -572,9 +1217,21 @@ class AnnotationTab:
             if active_model.exists() and active_model not in candidates:
                 candidates.append(active_model)
 
-        return candidates
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+
+        return unique
 
     def _refresh_character_model_choices(self):
+        if not hasattr(self, "character_combo"):
+            return
+
         current_path = (self._get_selected_character_model_path() or "").strip()
         if not current_path:
             current_path = self._get_bound_character_model_path()
@@ -612,6 +1269,9 @@ class AnnotationTab:
         return self._character_model_options.get(selected, "")
 
     def _apply_character_model_selection(self):
+        if not hasattr(self, "character_combo"):
+            return
+
         selected_path = (self._get_selected_character_model_path() or "").strip()
         effective_path = selected_path if selected_path and Path(selected_path).exists() else ""
 
@@ -661,6 +1321,9 @@ class AnnotationTab:
             pass
 
     def _on_character_model_change(self, event=None, propagate=True):
+        if not hasattr(self, "char_custom_row"):
+            return
+
         if self.character_model_var.get() == "Custom" and str(self.character_combo.cget("state")) != "disabled":
             self.char_custom_row.pack(fill=tk.X, pady=(5,0))
         else:
@@ -673,15 +1336,24 @@ class AnnotationTab:
 
     # Własne modele wybieramy domyślnie z katalogu modeli.
     def _select_vehicle_custom(self):
-        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
+        initial_dir = CONFIG.get_trained_models_dir("vehicle")
+        if not initial_dir.exists():
+            initial_dir = CONFIG.DIR_6_MODELS
+        p = filedialog.askopenfilename(initialdir=str(Path(initial_dir).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.vehicle_custom_var.set(p)
 
     def _select_plate_custom(self):
-        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
+        initial_dir = CONFIG.get_trained_models_dir("plate")
+        if not initial_dir.exists():
+            initial_dir = CONFIG.DIR_6_MODELS
+        p = filedialog.askopenfilename(initialdir=str(Path(initial_dir).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p: self.plate_custom_var.set(p)
 
     def _select_character_custom(self):
-        p = filedialog.askopenfilename(initialdir=str(Path(CONFIG.DIR_6_MODELS).absolute()), filetypes=[("YOLO Model", "*.pt")])
+        initial_dir = CONFIG.get_trained_models_dir("char")
+        if not initial_dir.exists():
+            initial_dir = CONFIG.DIR_6_MODELS
+        p = filedialog.askopenfilename(initialdir=str(Path(initial_dir).absolute()), filetypes=[("YOLO Model", "*.pt")])
         if p:
             self.character_custom_var.set(p)
             self.character_model_var.set("Custom")
@@ -690,6 +1362,304 @@ class AnnotationTab:
     def _select_input_dir(self):
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
         if p: self.input_dir_var.set(p)
+
+    def _format_workspace_relative_path(self, path_like) -> str:
+        try:
+            path = Path(path_like).resolve()
+            workspace = Path(CONFIG.WORKSPACE_DIR).resolve()
+            rel = path.relative_to(workspace)
+            return str(Path("Workspace") / rel)
+        except Exception:
+            try:
+                return str(Path(path_like))
+            except Exception:
+                return str(path_like)
+
+    def _annotation_run_manifest_path(self, run_dir: Path) -> Path:
+        return Path(run_dir) / "run_manifest.json"
+
+    def _write_annotation_run_manifest(self, run_dir: Path, input_dir: Path):
+        manifest_path = self._annotation_run_manifest_path(run_dir)
+        payload = {
+            "input_dir": str(Path(input_dir).resolve()),
+            "run_dir": str(Path(run_dir).resolve()),
+            "mode": str(self.mode_var.get() or "").strip(),
+            "device": str(self.device_var.get() or "").strip(),
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+
+    def _load_annotation_run_manifest(self, run_dir: Path) -> dict:
+        manifest_path = self._annotation_run_manifest_path(run_dir)
+        if not manifest_path.exists():
+            return {}
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _find_latest_annotation_run_dir(self, base_dir: Path | None = None) -> Path | None:
+        try:
+            root = Path(base_dir or self.output_dir_var.get().strip() or CONFIG.get_auto_annotations_dir("plate"))
+        except Exception:
+            root = Path(CONFIG.get_auto_annotations_dir("plate"))
+
+        try:
+            if not root.exists() or not root.is_dir():
+                return None
+        except Exception:
+            return None
+
+        candidates = []
+        try:
+            for path in root.rglob("run_*"):
+                if not path.is_dir():
+                    continue
+                if not (path / "annotations.xml").exists():
+                    continue
+                try:
+                    stamp = path.stat().st_mtime
+                except Exception:
+                    stamp = 0
+                candidates.append((stamp, path.name, path))
+        except Exception:
+            return None
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def _plate_dataset_output_preview(self, run_dir: Path | None = None) -> str:
+        run_name = run_dir.name if isinstance(run_dir, Path) else "run_xxx"
+        return str(CONFIG.get_datasets_dir("plate") / f"Plates_Z2_{run_name}_[DATA_I_CZAS]")
+
+    def _set_plate_export_status(self, text: str, tone: str = "muted"):
+        self._set_inline_label_state(
+            self.plate_export_status_lbl,
+            text=text,
+            tone=tone,
+            emphasis=False
+        )
+
+    def _load_plate_dataset_context_from_run(self, run_dir: Path, force_images_update: bool = False):
+        if run_dir is None:
+            return
+
+        try:
+            self.plate_dataset_run_var.set(str(run_dir))
+        except Exception:
+            pass
+
+        self.plate_dataset_out_var.set(self._plate_dataset_output_preview(run_dir))
+
+        current_images = Path(self.plate_dataset_images_var.get().strip()) if self.plate_dataset_images_var.get().strip() else None
+        current_valid = bool(current_images and current_images.exists())
+
+        if current_valid and not force_images_update:
+            return
+
+        manifest = self._load_annotation_run_manifest(run_dir)
+        input_dir = str(manifest.get("input_dir") or "").strip()
+        if input_dir and Path(input_dir).exists():
+            self.plate_dataset_images_var.set(input_dir)
+            return
+
+        if getattr(self, "current_input_dir", None):
+            try:
+                current_input = Path(self.current_input_dir)
+                if current_input.exists():
+                    self.plate_dataset_images_var.set(str(current_input))
+            except Exception:
+                pass
+
+    def _refresh_plate_dataset_export_sources(self):
+        run_dir = None
+        run_value = str(self.plate_dataset_run_var.get() or "").strip()
+        if run_value:
+            candidate = Path(run_value)
+            if candidate.exists() and candidate.is_dir():
+                run_dir = candidate
+
+        if run_dir is None and getattr(self, "last_staging_run_dir", None):
+            candidate = Path(self.last_staging_run_dir)
+            if candidate.exists() and candidate.is_dir():
+                run_dir = candidate
+
+        if run_dir is None:
+            run_dir = self._find_latest_annotation_run_dir()
+
+        if run_dir is not None:
+            self._load_plate_dataset_context_from_run(run_dir)
+            xml_path = run_dir / "annotations.xml"
+            images_text = str(self.plate_dataset_images_var.get() or "").strip()
+            if xml_path.exists():
+                if images_text and Path(images_text).exists():
+                    self._set_plate_export_status(
+                        f"Gotowe do eksportu datasetu: {run_dir.name} + obrazy z {self._format_workspace_relative_path(images_text)}.",
+                        "info"
+                    )
+                else:
+                    self._set_plate_export_status(
+                        "Wybrano run Z2, ale trzeba jeszcze wskazać folder źródłowych obrazów dla tego runu.",
+                        "warning"
+                    )
+            else:
+                self._set_plate_export_status(
+                    "Wybrany folder run nie zawiera pliku annotations.xml.",
+                    "error"
+                )
+            return
+
+        self.plate_dataset_out_var.set(self._plate_dataset_output_preview())
+        self._set_plate_export_status(
+            "Brak runu Z2. Najpierw uruchom Start, aby utworzyć nowy run autoanotacji, albo wskaż istniejący folder run ręcznie.",
+            "muted"
+        )
+
+    def _select_plate_dataset_run_dir(self):
+        initialdir = self.plate_dataset_run_var.get().strip() or self.output_dir_var.get().strip() or str(CONFIG.get_auto_annotations_dir("plate"))
+        path = filedialog.askdirectory(initialdir=initialdir)
+        if not path:
+            return
+
+        run_dir = Path(path)
+        self._load_plate_dataset_context_from_run(run_dir, force_images_update=True)
+        self._refresh_plate_dataset_export_sources()
+
+    def _select_plate_dataset_images_dir(self):
+        initialdir = self.plate_dataset_images_var.get().strip() or self.input_dir_var.get().strip() or str(CONFIG.DIR_1_RAW)
+        path = filedialog.askdirectory(initialdir=initialdir)
+        if not path:
+            return
+
+        self.plate_dataset_images_var.set(path)
+        self._refresh_plate_dataset_export_sources()
+
+    def _update_plate_dataset_ratio_labels(self):
+        train = float(self.plate_train_pct.get())
+        val = float(self.plate_val_pct.get())
+        max_train_plus_val = 95.0
+        if train + val > max_train_plus_val:
+            val = max(5.0, max_train_plus_val - train)
+            self.plate_val_pct.set(val)
+
+        test = max(5.0, 100.0 - train - val)
+        self.plate_train_lbl.configure(text=f"{train:.0f}%")
+        self.plate_val_lbl.configure(text=f"{val:.0f}%")
+        self.plate_test_lbl.configure(text=f"Test: {test:.0f}%")
+
+    def _start_plate_dataset_export(self):
+        run_dir_value = str(self.plate_dataset_run_var.get() or "").strip()
+        images_dir_value = str(self.plate_dataset_images_var.get() or "").strip()
+
+        if not run_dir_value:
+            return messagebox.showerror("Brak runu", "Wskaz folder run Z2 zawierajacy annotations.xml.")
+        if not images_dir_value:
+            return messagebox.showerror("Brak obrazow", "Wskaz folder obrazow, na ktorych powstal wybrany run.")
+
+        run_dir = Path(run_dir_value)
+        images_dir = Path(images_dir_value)
+        xml_path = run_dir / "annotations.xml"
+
+        if not run_dir.exists() or not run_dir.is_dir():
+            return messagebox.showerror("Bledny run", "Wybrany folder run nie istnieje.")
+        if not xml_path.exists():
+            return messagebox.showerror("Brak XML", "Wybrany folder run nie zawiera pliku annotations.xml.")
+        if not images_dir.exists() or not images_dir.is_dir():
+            return messagebox.showerror("Brak obrazow", "Wybrany folder obrazow nie istnieje.")
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = CONFIG.get_datasets_dir("plate") / f"Plates_Z2_{run_dir.name}_{timestamp}"
+        self.plate_dataset_out_var.set(str(out_dir))
+        self.plate_export_progress_var.set(0.0)
+        self.export_plate_dataset_btn.configure(state=tk.DISABLED)
+        self._set_plate_export_status("Rozpoczynam eksport datasetu YOLO Pose...", "info")
+
+        train = float(self.plate_train_pct.get()) / 100.0
+        val = float(self.plate_val_pct.get()) / 100.0
+        ratios = {
+            "train": train,
+            "val": val,
+            "test": max(0.0, 1.0 - train - val)
+        }
+
+        def worker():
+            try:
+                logger.info("=" * 50)
+                logger.info("START EKSPORTU DATASETU TABLIC (Z2 -> YOLO Pose)")
+                logger.info("=" * 50)
+                logger.info(f"Run: {run_dir}")
+                logger.info(f"Obrazy: {images_dir}")
+                logger.info(f"Output: {out_dir}")
+
+                self.dataset_creator.annotations = []
+                ok, msg, _ = self.dataset_creator.parse_cvat_xml(xml_path)
+                if not ok:
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showerror("Bledny XML", msg)
+                    )
+                    self.frame.after(0, lambda: self._set_plate_export_status(msg, "error"))
+                    return
+
+                def prog(current, total, image_name):
+                    pct = (current / total) * 100 if total > 0 else 0
+                    self.frame.after(0, lambda: self.plate_export_progress_var.set(pct))
+                    self.frame.after(
+                        0,
+                        lambda: self._set_plate_export_status(
+                            f"Eksport datasetu: {current}/{total} obrazow... ({image_name})",
+                            "info"
+                        )
+                    )
+
+                ok, msg, _ = self.dataset_creator.create_dataset(images_dir, out_dir, ratios, prog)
+                if not ok:
+                    self.frame.after(0, lambda: messagebox.showerror("Blad eksportu", msg))
+                    self.frame.after(0, lambda: self._set_plate_export_status(msg, "error"))
+                    return
+
+                logger.info(f"[OK] Dataset YOLO Pose gotowy: {out_dir}")
+
+                def finish_success():
+                    self.plate_export_progress_var.set(100.0)
+                    self._set_plate_export_status(
+                        f"Dataset gotowy: {self._format_workspace_relative_path(out_dir)}",
+                        "success"
+                    )
+                    training_tab = getattr(getattr(self, "app", None), "tabs", {}).get("training")
+                    if training_tab is not None and hasattr(training_tab, "dataset_var"):
+                        try:
+                            training_tab.dataset_var.set(str(out_dir))
+                            if hasattr(training_tab, "_update_training_dataset_hint"):
+                                training_tab._update_training_dataset_hint()
+                        except Exception:
+                            pass
+                    messagebox.showinfo(
+                        "Sukces",
+                        f"Dataset YOLO Pose zostal utworzony poprawnie.\n\n{out_dir}"
+                    )
+
+                self.frame.after(0, finish_success)
+            except Exception as e:
+                logger.error(f"Blad eksportu datasetu tablic: {e}")
+                self.frame.after(0, lambda err=str(e): messagebox.showerror("Krytyczny blad", err))
+                self.frame.after(
+                    0,
+                    lambda err=str(e): self._set_plate_export_status(
+                        f"Krytyczny blad eksportu: {err}",
+                        "error"
+                    )
+                )
+            finally:
+                self.frame.after(0, lambda: self.export_plate_dataset_btn.configure(state=tk.NORMAL))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _redirect_logs(self):
         if getattr(self, "_annotation_log_handlers_attached", False):
@@ -734,6 +1704,11 @@ class AnnotationTab:
         panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
 
         try:
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
+        try:
             self.app.style_text_widget(self.log_text, role="console")
         except Exception:
             pass
@@ -765,8 +1740,17 @@ class AnnotationTab:
 
         try:
             self.app.style_canvas_widget(
+                self.left_settings_canvas,
+                background=palette.get("panel", "#252526"),
+                bordercolor=panel_border
+            )
+        except Exception:
+            pass
+
+        try:
+            self.app.style_canvas_widget(
                 self.right_settings_canvas,
-                background=palette.get("bg", "#1f1f1f"),
+                background=palette.get("panel", "#252526"),
                 bordercolor=panel_border
             )
         except Exception:
@@ -777,9 +1761,47 @@ class AnnotationTab:
         except Exception:
             pass
 
+        try:
+            self.progress.configure(
+                trough_color=palette.get("border", "#3c3c3c"),
+                fill_color=palette.get("accent", "#0e639c"),
+                bg=palette.get("panel", "#252526"),
+            )
+        except Exception:
+            pass
+
+        for line in getattr(self, "_left_section_separators", []):
+            if not isinstance(line, dict):
+                continue
+            try:
+                host = line.get("host")
+                accent = line.get("accent")
+                shadow = line.get("shadow")
+                if host is not None:
+                    host.configure(bg=palette.get("panel", "#252526"))
+                if accent is not None:
+                    accent.configure(bg=palette.get("surface_info", palette.get("accent", "#0e639c")))
+                if shadow is not None:
+                    shadow.configure(bg=panel_border)
+            except Exception:
+                pass
+
+        for line in getattr(self, "_left_title_underlines", []):
+            if not isinstance(line, dict):
+                continue
+            try:
+                host = line.get("host")
+                accent = line.get("accent")
+                if host is not None:
+                    host.configure(bg=palette.get("panel", "#252526"))
+                if accent is not None:
+                    accent.configure(bg=palette.get("success", palette.get("accent", "#0e639c")))
+            except Exception:
+                pass
+
         frame_backgrounds = {
             "start_btn_frame": palette.get("panel", "#252526"),
-            "approve_btn_frame": palette.get("bg", "#1f1f1f"),
+            "approve_btn_frame": palette.get("panel", "#252526"),
         }
         for frame_name, background in frame_backgrounds.items():
             frame = getattr(self, frame_name, None)
@@ -792,7 +1814,7 @@ class AnnotationTab:
 
         pulse_backgrounds = {
             "start_btn_pulse_frame": palette.get("panel", "#252526"),
-            "approve_btn_pulse_frame": palette.get("bg", "#1f1f1f"),
+            "approve_btn_pulse_frame": palette.get("panel", "#252526"),
         }
         for frame_name, background in pulse_backgrounds.items():
             frame = getattr(self, frame_name, None)
@@ -804,9 +1826,11 @@ class AnnotationTab:
                 pass
 
         inline_label_defaults = {
-            "project_paths_info_lbl": ("info", True),
+            "project_paths_info_lbl": ("muted", False),
             "project_paths_rel_lbl": ("muted", False),
             "status_label": ("neutral", True),
+            "progress_counts_lbl": ("muted", False),
+            "plate_export_status_lbl": ("muted", False),
         }
         for label_name, (default_tone, default_emphasis) in inline_label_defaults.items():
             label = getattr(self, label_name, None)
@@ -855,6 +1879,15 @@ class AnnotationTab:
                 if bg_candidate:
                     bg = bg_candidate
                     break
+            except Exception:
+                pass
+            try:
+                style_name = str(candidate.cget("style") or "").strip()
+                if style_name:
+                    bg_candidate = self.app.style.lookup(style_name, "background")
+                    if bg_candidate:
+                        bg = bg_candidate
+                        break
             except Exception:
                 pass
             try:
@@ -923,14 +1956,14 @@ class AnnotationTab:
         )
 
     def _validate_models(self):
-        mode = self.mode_var.get()
-        if "A:" in mode or "C:" in mode:
+        mode = self._normalize_mode_value()
+        if self._mode_uses_vehicle(mode):
             if self.vehicle_model_var.get() == "Custom":
                 p = self.vehicle_custom_var.get()
                 if not p or not Path(p).exists(): raise ValueError("Nie znaleziono własnego modelu pojazdów!")
                 if not validate_model_file(Path(p))[0]: raise ValueError("Model pojazdów jest uszkodzony!")
         
-        if "B:" in mode or "C:" in mode:
+        if self._mode_uses_plate(mode):
             p = (self.plate_custom_var.get() or "").strip()
             if not p or not Path(p).exists(): raise ValueError("Wskaż wytrenowany model tablic (.pt)!")
             if not validate_model_file(Path(p))[0]: raise ValueError("Model tablic jest uszkodzony!")
@@ -941,7 +1974,7 @@ class AnnotationTab:
         i czyści wszystkie artefakty poprzedniego projektu z UI.
         """
         self.input_dir_var.set(str(Path(CONFIG.DIR_1_RAW).absolute()))
-        self.output_dir_var.set(str(Path(CONFIG.DIR_2_AUTO_ANN).absolute()))
+        self.output_dir_var.set(str(Path(CONFIG.get_auto_annotations_dir("plate")).absolute()))
 
         self.mode_var.set("C: Pojazdy + tablice")
         self.device_var.set("auto")
@@ -993,7 +2026,7 @@ class AnnotationTab:
             pass
 
         try:
-            self._set_plate_model_controls_state("B:" in self.mode_var.get() or "C:" in self.mode_var.get())
+            self._set_plate_model_controls_state(self._mode_uses_plate())
         except Exception:
             pass
 
@@ -1033,12 +2066,17 @@ class AnnotationTab:
             pass
 
         try:
-            self.progress["value"] = 0
+            self.progress.configure(value=0)
         except Exception:
             pass
 
         try:
             self._set_status_label_state("Gotowy do uruchomienia", "neutral")
+        except Exception:
+            pass
+
+        try:
+            self._set_progress_counters(0, 0, 0)
         except Exception:
             pass
 
@@ -1090,6 +2128,12 @@ class AnnotationTab:
             self.input_dir_browse_btn.configure(state=(tk.DISABLED if locked else tk.NORMAL))
         except Exception:
             pass
+
+        if locked:
+            try:
+                self.input_dir_entry.selection_clear()
+            except Exception:
+                pass
 
         if locked:
             self.project_paths_info_var.set(
@@ -1161,20 +2205,21 @@ class AnnotationTab:
         self.character_custom_var.set("")
         self._on_mode_change()
         self._set_campaign_paths_lock_state(True)
-        self._refresh_character_model_choices()
+        if hasattr(self, "character_combo"):
+            self._refresh_character_model_choices()
         self._pulse_action_frame("start_btn_pulse_frame")
 
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
             if self.vehicle_model_var.get() == "Custom": return Path(self.vehicle_custom_var.get())
-            else: return Path(CONFIG.DEFAULT_MODELS_DIR) / AVAILABLE_DETECT_MODELS[self.vehicle_model_var.get()]["file"]
+            else: return CONFIG.get_base_models_dir("vehicle") / AVAILABLE_DETECT_MODELS[self.vehicle_model_var.get()]["file"]
         else:
             return Path(self.plate_custom_var.get())
 
     def _collect_pending_model_downloads(self, mode_text: str):
         pending = []
 
-        if ("A:" in mode_text or "C:" in mode_text) and self.vehicle_model_var.get() != "Custom":
+        if self._mode_uses_vehicle(mode_text) and self.vehicle_model_var.get() != "Custom":
             model_key = (self.vehicle_model_var.get() or "").strip()
             model_info = AVAILABLE_DETECT_MODELS.get(model_key, {})
             target_path = self._get_model_path("vehicle")
@@ -1260,7 +2305,8 @@ class AnnotationTab:
         
         try:
             self._validate_models()
-            mode_text = self.mode_var.get()
+            mode_text = self._normalize_mode_value()
+            self.mode_var.set(mode_text)
             conf = self.conf_var.get()
             selected_device = self._normalize_selected_device()
             self.device_var.set(selected_device)
@@ -1270,16 +2316,17 @@ class AnnotationTab:
             if not self._confirm_and_download_missing_models(pending_downloads):
                 return
             
-            v_p = self._get_model_path("vehicle") if ("A:" in mode_text or "C:" in mode_text) else None
-            p_p = self._get_model_path("plate") if ("B:" in mode_text or "C:" in mode_text) else None
+            v_p = self._get_model_path("vehicle") if self._mode_uses_vehicle(mode_text) else None
+            p_p = self._get_model_path("plate") if self._mode_uses_plate(mode_text) else None
 
             if self.annotator is not None:
                 try: self.annotator.unload_models()
                 except: pass
 
-            if "A:" in mode_text: self.annotator = VehicleAnnotator(v_p, conf, dev)
-            elif "B:" in mode_text: self.annotator = PlateAnnotator(p_p, conf, dev)
-            else: self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
+            if self._mode_uses_vehicle(mode_text):
+                self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
+            else:
+                self.annotator = PlateAnnotator(p_p, conf, dev)
             
             success, msg = self.annotator.load_models()
             if not success: raise RuntimeError(f"Błąd silnika YOLO: {msg}")
@@ -1299,7 +2346,9 @@ class AnnotationTab:
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
             self.approve_btn.config(state=tk.DISABLED)
-            self.progress['value'] = 0
+            self.export_plate_dataset_btn.config(state=tk.DISABLED)
+            self.progress.configure(value=0)
+            self._set_progress_counters(0, 0, 0)
             
             self.preview_listbox.delete(0, tk.END)
             self.preview_canvas.delete("all")
@@ -1328,10 +2377,10 @@ class AnnotationTab:
                 
             self.start_time = datetime.datetime.now()
             
-            def prog_cb(current, total, filename):
+            def prog_cb(current, total, filename, successful=0):
                 if not self.is_processing: raise KeyboardInterrupt("Anulowano")
                 pct = (current / total) * 100 if total > 0 else 0
-                self.frame.after(0, lambda: self._update_progress(pct, current, total, filename))
+                self.frame.after(0, lambda: self._update_progress(pct, current, total, filename, successful))
             
             annotations, report = self.annotator.process_directory(in_dir, prog_cb)
             
@@ -1361,10 +2410,16 @@ class AnnotationTab:
             logger.info("Generowanie raportu statystycznego...")
             ReportGenerator.generate_text_report(report, run_dir / "report.txt")
 
+            try:
+                self._write_annotation_run_manifest(run_dir, in_dir)
+            except Exception as e:
+                logger.debug(f"Nie udało się zapisać manifestu runu Z2: {e}")
+
             elapsed = format_duration((datetime.datetime.now() - self.start_time).total_seconds())
 
             # Zachowaj ścieżkę do ostatniego runu w stagingu.
             self.last_staging_run_dir = run_dir
+            self.frame.after(0, self._refresh_plate_dataset_export_sources)
 
             message = f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
             logger.info(f"✅ {message}")
@@ -1443,8 +2498,9 @@ class AnnotationTab:
             
         except Exception as e: logger.error(f"Błąd rysowania podglądu YOLO: {e}")
 
-    def _update_progress(self, pct, current, total, filename):
-        self.progress['value'] = pct
+    def _update_progress(self, pct, current, total, filename, successful=0):
+        self.progress.configure(value=pct)
+        self._set_progress_counters(successful, current, total)
         self._set_status_label_state(
             f"Przetwarzanie {current}/{total} ({int(pct)}%)",
             "info"
@@ -1455,7 +2511,14 @@ class AnnotationTab:
         self.app.set_processing(False)
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.progress['value'] = 100 if success else 0
+        self.export_plate_dataset_btn.config(state=tk.NORMAL)
+        self.progress.configure(value=(100 if success else 0))
+        if success:
+            total = len(getattr(self, "current_annotations", []) or [])
+            successful = sum(1 for ann in (self.current_annotations or []) if getattr(ann, "is_successful", False))
+            self._set_progress_counters(successful, total, total)
+        else:
+            self._set_progress_counters(0, 0, 0)
         
         if success:
             self._set_status_label_state("Zakończono pomyślnie!", "success")

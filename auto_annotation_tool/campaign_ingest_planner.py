@@ -222,24 +222,31 @@ class CampaignIngestPlanner:
 
     def collect_project_training_balance(self, project_root: Path) -> dict[str, Any]:
         datasets_dir = project_root / "4_training_datasets"
+        chars_datasets_dir = datasets_dir / "chars"
         chars_dir = project_root / "3_cropped_characters"
 
-        merged_dir = datasets_dir / "char_merged_pool"
-        if self._looks_like_character_dataset(merged_dir):
-            result = self.collect_char_balance_from_dataset(merged_dir)
-            result["source_type"] = "merged_dataset"
-            return result
+        dataset_roots: list[Path] = []
+        for candidate in (chars_datasets_dir, datasets_dir):
+            if candidate.exists() and candidate.is_dir() and candidate not in dataset_roots:
+                dataset_roots.append(candidate)
+
+        for dataset_root in dataset_roots:
+            merged_dir = dataset_root / "char_merged_pool"
+            if self._looks_like_character_dataset(merged_dir):
+                result = self.collect_char_balance_from_dataset(merged_dir)
+                result["source_type"] = "merged_dataset"
+                return result
 
         dataset_candidates: list[Path] = []
-        if datasets_dir.exists() and datasets_dir.is_dir():
+        for dataset_root in dataset_roots:
             try:
-                dataset_candidates = [
+                dataset_candidates.extend(
                     path
-                    for path in datasets_dir.iterdir()
+                    for path in dataset_root.iterdir()
                     if path.is_dir() and self._looks_like_character_dataset(path)
-                ]
+                )
             except Exception:
-                dataset_candidates = []
+                continue
 
         if dataset_candidates:
             dataset_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)

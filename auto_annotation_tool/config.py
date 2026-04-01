@@ -126,12 +126,31 @@ class Config:
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
     DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
 
+    DIR_2_AUTO_ANN_PLATES: Path = DIR_2_AUTO_ANN / "plates"
+    DIR_2_AUTO_ANN_CHARS: Path = DIR_2_AUTO_ANN / "chars"
+
+    DIR_4_DATASETS_PLATES: Path = DIR_4_DATASETS / "plates"
+    DIR_4_DATASETS_CHARS: Path = DIR_4_DATASETS / "chars"
+    DIR_4_DATASETS_VEHICLES: Path = DIR_4_DATASETS / "vehicles"
+
+    DIR_5_RUNS_PLATES: Path = DIR_5_RUNS / "plates"
+    DIR_5_RUNS_CHARS: Path = DIR_5_RUNS / "chars"
+    DIR_5_RUNS_VEHICLES: Path = DIR_5_RUNS / "vehicles"
+
     DIR_6_MODELS_BASE: Path          = DIR_6_MODELS / "base"
     DIR_6_MODELS_TRAINED: Path       = DIR_6_MODELS / "trained"
     DIR_6_MODELS_PLATES: Path        = DIR_6_MODELS_TRAINED / "plates_pose"
     DIR_6_MODELS_CHARS: Path         = DIR_6_MODELS_TRAINED / "characters_ocr"
+    DIR_6_MODELS_BASE_POSE: Path     = DIR_6_MODELS_BASE / "pose"
+    DIR_6_MODELS_BASE_DETECT: Path   = DIR_6_MODELS_BASE / "detect"
+    DIR_6_MODELS_TRAINED_PLATES: Path = DIR_6_MODELS_TRAINED / "plates"
+    DIR_6_MODELS_TRAINED_CHARS: Path = DIR_6_MODELS_TRAINED / "chars"
+    DIR_6_MODELS_TRAINED_VEHICLES: Path = DIR_6_MODELS_TRAINED / "vehicles"
     
     DIR_7_RANKINGS: Path    = WORKSPACE_DIR / "7_rankings"
+    DIR_7_RANKINGS_PLATES: Path = DIR_7_RANKINGS / "plates"
+    DIR_7_RANKINGS_CHARS: Path = DIR_7_RANKINGS / "chars"
+    DIR_7_RANKINGS_VEHICLES: Path = DIR_7_RANKINGS / "vehicles"
 
     # Aliasy używane przez warstwę GUI.
     @property
@@ -149,19 +168,126 @@ class Config:
     @property
     def DEFAULT_RANKING_DIR(self) -> str: return str(self.DIR_7_RANKINGS)
 
+    def normalize_task_target(self, target: str | None = None) -> str:
+        raw = str(target or "").strip().lower()
+        if raw in {"plate", "plates", "pose", "tablica", "tablice", "lp"}:
+            return "plate"
+        if raw in {"char", "chars", "character", "characters", "ocr", "znak", "znaki"}:
+            return "char"
+        if raw in {"vehicle", "vehicles", "detect", "pojazd", "pojazdy", "car", "cars"}:
+            return "vehicle"
+        return "char"
+
+    def get_auto_annotations_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "char":
+            return self.DIR_2_AUTO_ANN_CHARS
+        return self.DIR_2_AUTO_ANN_PLATES
+
+    def get_datasets_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "plate":
+            return self.DIR_4_DATASETS_PLATES
+        if normalized == "vehicle":
+            return self.DIR_4_DATASETS_VEHICLES
+        return self.DIR_4_DATASETS_CHARS
+
+    def get_training_runs_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "plate":
+            return self.DIR_5_RUNS_PLATES
+        if normalized == "vehicle":
+            return self.DIR_5_RUNS_VEHICLES
+        return self.DIR_5_RUNS_CHARS
+
+    def get_ranking_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "plate":
+            return self.DIR_7_RANKINGS_PLATES
+        if normalized == "vehicle":
+            return self.DIR_7_RANKINGS_VEHICLES
+        return self.DIR_7_RANKINGS_CHARS
+
+    def get_trained_models_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "plate":
+            return self.DIR_6_MODELS_TRAINED_PLATES
+        if normalized == "vehicle":
+            return self.DIR_6_MODELS_TRAINED_VEHICLES
+        return self.DIR_6_MODELS_TRAINED_CHARS
+
+    def get_base_models_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        if normalized == "plate":
+            return self.DIR_6_MODELS_BASE_POSE
+        return self.DIR_6_MODELS_BASE_DETECT
+
+    def get_model_search_dirs(self, target: str | None = None) -> list[Path]:
+        normalized = self.normalize_task_target(target)
+        candidates: list[Path] = []
+
+        if normalized == "plate":
+            candidates.extend([
+                self.DIR_6_MODELS_TRAINED_PLATES,
+                self.DIR_6_MODELS_PLATES,
+                self.DIR_6_MODELS / "pose",
+                self.DIR_6_MODELS_BASE_POSE,
+            ])
+        elif normalized == "vehicle":
+            candidates.extend([
+                self.DIR_6_MODELS_TRAINED_VEHICLES,
+                self.DIR_6_MODELS / "detect",
+                self.DIR_6_MODELS_BASE_DETECT,
+            ])
+        else:
+            candidates.extend([
+                self.DIR_6_MODELS_TRAINED_CHARS,
+                self.DIR_6_MODELS_CHARS,
+                self.DIR_6_MODELS / "chars",
+                self.DIR_6_MODELS_BASE_DETECT,
+            ])
+
+        candidates.append(self.DIR_6_MODELS)
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
+
     def init_workspace(self):
         """Automatycznie buduje strukturę katalogów przy starcie aplikacji."""
         directories = [
             self.DIR_1_RAW, 
             self.DIR_2_AUTO_ANN, 
+            self.DIR_2_AUTO_ANN_PLATES,
+            self.DIR_2_AUTO_ANN_CHARS,
             self.DIR_3_CHARS,
             self.DIR_4_DATASETS, 
+            self.DIR_4_DATASETS_PLATES,
+            self.DIR_4_DATASETS_CHARS,
+            self.DIR_4_DATASETS_VEHICLES,
             self.DIR_5_RUNS, 
+            self.DIR_5_RUNS_PLATES,
+            self.DIR_5_RUNS_CHARS,
+            self.DIR_5_RUNS_VEHICLES,
             self.DIR_6_MODELS, 
             self.DIR_6_MODELS_BASE, 
+            self.DIR_6_MODELS_BASE_POSE,
+            self.DIR_6_MODELS_BASE_DETECT,
             self.DIR_6_MODELS_PLATES, 
             self.DIR_6_MODELS_CHARS,
+            self.DIR_6_MODELS_TRAINED_PLATES,
+            self.DIR_6_MODELS_TRAINED_CHARS,
+            self.DIR_6_MODELS_TRAINED_VEHICLES,
             self.DIR_7_RANKINGS, 
+            self.DIR_7_RANKINGS_PLATES,
+            self.DIR_7_RANKINGS_CHARS,
+            self.DIR_7_RANKINGS_VEHICLES,
             self.DIR_9_PROJECTS,
             
         ]
@@ -175,12 +301,12 @@ class Config:
             readme_text = (
                 "=== PRZEWODNIK PO PRZESTRZENI ROBOCZEJ (WORKSPACE) ===\n\n"
                 "1_raw_images         : Wrzuć tutaj swoje surowe, nieopisane zdjęcia pojazdów.\n"
-                "2_auto_annotations   : Tu trafiają wyniki z Zakładki nr 1 (Detekcja pojazdów i tablic).\n"
+                "2_auto_annotations   : Wyniki autoanotacji, uporządkowane dalej na plates/ oraz chars/.\n"
                 "3_cropped_characters : Tu lądują wycięte tablice i wyniki OCR z Zakładki nr 2.\n"
-                "4_training_datasets  : Wygenerowane, gotowe datasety YOLO (train/val/test) przed treningiem.\n"
-                "5_training_runs      : Logi, wykresy z uczenia i wagi zapisywane w trakcie treningu modelu.\n"
-                "6_models             : Skopiuj tutaj najlepsze wytrenowane pliki .pt, aby używać ich w programie.\n"
-                "7_rankings           : Zapisane raporty z testów i walidacji.\n"
+                "4_training_datasets  : Gotowe datasety YOLO, porządkowane na plates/, chars/ i vehicles/.\n"
+                "5_training_runs      : Logi i artefakty treningu, także rozdzielone na plates/, chars/ i vehicles/.\n"
+                "6_models             : Modele bazowe w base/, wytrenowane w trained/, dodatkowo rozdzielone według toru.\n"
+                "7_rankings           : Raporty z testów i walidacji, rozdzielone według typu modelu.\n"
             )
             readme_path.write_text(readme_text, encoding="utf-8")
 
