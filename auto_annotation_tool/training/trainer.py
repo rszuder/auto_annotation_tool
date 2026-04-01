@@ -256,17 +256,18 @@ class YOLOPoseTrainer:
 
                     project_models_dir = Path(project_models_dir)
 
-                    # Uporządkuj modele według typu zadania.
+                    # Uporządkuj modele według typu zadania w nowym drzewie trained/<target>.
+                    trained_root = project_models_dir / "trained"
                     if is_pose:
-                        target_dir = project_models_dir / "pose"
+                        target_dir = trained_root / "plates"
                         task_tag = "plate"
                     else:
                         ds_path = str(run.dataset_path).lower()
                         if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
-                            target_dir = project_models_dir / "chars"
+                            target_dir = trained_root / "chars"
                             task_tag = "char"
                         else:
-                            target_dir = project_models_dir / "detect"
+                            target_dir = trained_root / "vehicles"
                             task_tag = "vehicle"
 
                     target_dir.mkdir(parents=True, exist_ok=True)

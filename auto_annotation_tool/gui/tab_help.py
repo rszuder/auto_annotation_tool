@@ -5,9 +5,10 @@ Zakładka Z5: pomoc, instrukcje i architektura projektu.
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk
 
 from ..config import CONFIG
+from .web_slim_scrollbar import WebSlimScrollbar
 
 
 class HelpTab:
@@ -28,8 +29,10 @@ class HelpTab:
         instr_frame = ttk.Frame(self.notebook)
         self.notebook.add(instr_frame, text="[PZ1] Instrukcje")
 
-        self.t1 = scrolledtext.ScrolledText(
-            instr_frame,
+        instr_text_host = ttk.Frame(instr_frame)
+        instr_text_host.pack(fill=tk.BOTH, expand=True)
+        self.t1 = tk.Text(
+            instr_text_host,
             wrap=tk.WORD,
             bg=palette.get("doc_bg", "#1f1f1f"),
             fg=palette.get("doc_fg", "#f3f3f3"),
@@ -38,15 +41,27 @@ class HelpTab:
             padx=20,
             pady=20
         )
-        self.t1.pack(fill=tk.BOTH, expand=True)
+        self.t1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.t1_scrollbar = WebSlimScrollbar(
+            instr_text_host,
+            orient=tk.VERTICAL,
+            command=self.t1.yview,
+            auto_hide=False,
+        )
+        self.t1_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.t1.configure(yscrollcommand=self.t1_scrollbar.set)
+        self.t1.web_vbar = self.t1_scrollbar
         self._setup_tags(self.t1)
+        self.app.style_text_widget(self.t1, role="doc")
         self._fill_instructions(self.t1)
 
         arch_frame = ttk.Frame(self.notebook)
-        self.notebook.add(arch_frame, text="[PZ2] Architektura i tryby pracy")
+        self.notebook.add(arch_frame, text="[PZ2] Architektura i Workspace")
 
-        self.t2 = scrolledtext.ScrolledText(
-            arch_frame,
+        arch_text_host = ttk.Frame(arch_frame)
+        arch_text_host.pack(fill=tk.BOTH, expand=True)
+        self.t2 = tk.Text(
+            arch_text_host,
             wrap=tk.WORD,
             bg=palette.get("doc_bg", "#1f1f1f"),
             fg=palette.get("doc_fg", "#f3f3f3"),
@@ -55,8 +70,18 @@ class HelpTab:
             padx=20,
             pady=20
         )
-        self.t2.pack(fill=tk.BOTH, expand=True)
+        self.t2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.t2_scrollbar = WebSlimScrollbar(
+            arch_text_host,
+            orient=tk.VERTICAL,
+            command=self.t2.yview,
+            auto_hide=False,
+        )
+        self.t2_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.t2.configure(yscrollcommand=self.t2_scrollbar.set)
+        self.t2.web_vbar = self.t2_scrollbar
         self._setup_tags(self.t2)
+        self.app.style_text_widget(self.t2, role="doc")
         self._fill_architecture(self.t2)
 
     def _setup_tags(self, widget):
@@ -71,6 +96,12 @@ class HelpTab:
         widget.tag_configure("NOTE", foreground=palette.get("muted", "#c7c7c7"), font=("Segoe UI", 10))
 
     def apply_theme(self):
+        try:
+            palette = getattr(self.app, "palette", {})
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
         for widget_name in ("t1", "t2"):
             widget = getattr(self, widget_name, None)
             if widget is None:
@@ -84,18 +115,18 @@ class HelpTab:
     def _fill_instructions(self, t):
         t.config(state=tk.NORMAL)
 
-        t.insert(tk.END, "Przewodnik pracy z projektem ALPR\n", "H1")
+        t.insert(tk.END, "Przewodnik pracy z aplikacją ALPR\n", "H1")
         t.insert(
             tk.END,
-            "System prowadzi użytkownika przez kolejne etapy iteracji. W trybie projektu Wizard (Z1) "
-            "ustawia ścieżki, blokuje pola sterowane workflow i podpowiada kolejny ruch pulsowaniem.\n",
+            "Ta karta opisuje stabilny workflow narzędzi Z2-Z4 oraz zasady pracy na globalnym Workspace. "
+            "Szczegóły trybu kampanii i Wizarda zostały tutaj celowo pominięte, bo ten obszar jest obecnie przebudowywany.\n",
             ()
         )
 
         t.insert(tk.END, "\nZasada podstawowa\n", "H2")
-        t.insert(tk.END, "- W trybie projektu pracujesz liniowo: Z1 -> Z2 -> Z3 -> Z4.\n", "LIST")
-        t.insert(tk.END, "- W trybie swobodnym możesz korzystać z tych samych narzędzi bez Wizarda i na globalnym drzewie Workspace.\n", "LIST")
-        t.insert(tk.END, "- Jeżeli wrócisz do wcześniejszego etapu, wyższe etapy tracą ważność workflow i trzeba je ponownie domknąć.\n", "LIST")
+        t.insert(tk.END, "- Nazwa pliku wejściowego pełni rolę ground truth dla odczytu tablic i znaków.\n", "LIST")
+        t.insert(tk.END, "- Z2 tworzy run autoanotacji tablic, Z3 rozwija z niego materiał znakowy, a Z4 trenuje na gotowym datasecie YOLO.\n", "LIST")
+        t.insert(tk.END, "- Ta dokumentacja skupia się na aktualnym, stabilnym sposobie pracy bez opisu kampanii.\n", "LIST")
 
         t.insert(tk.END, "\nGround truth w nazwie pliku\n", "H2")
         t.insert(tk.END, "Program ocenia poprawność odczytu tablic na podstawie nazwy zdjęcia. Obowiązuje format:\n", ())
@@ -104,52 +135,51 @@ class HelpTab:
         t.insert(tk.END, "TAB1, TAB2, TAB3", "BOLD")
         t.insert(tk.END, " są prawdą referencyjną. OCR i detekcja znaków są porównywane z listą tablic wyciągniętą z nazwy pliku.\n", ())
 
-        t.insert(tk.END, "\nE1 / Z1: Dobór paczki zdjęć w Wizardzie\n", "H2")
-        t.insert(tk.END, "- Utwórz lub otwórz projekt w Z1.\n", "LIST")
-        t.insert(tk.END, "- Krok E1 przygotowuje folder iteracji i buduje paczkę wejściową z dużej puli źródłowej zdjęć.\n", "LIST")
-        t.insert(tk.END, "- Iteracje nie startują od zera na nowym zbiorze. Iteracja 2 bierze kolejną porcję z tej samej głównej puli, a nie dane z iteracji 1.\n", "LIST")
-        t.insert(tk.END, "- Karta E1 w Wizardzie rozwija własny panel. Po kliknięciu przycisku E1 otwierasz sekcję doboru paczki zdjęć bez opuszczania workflow.\n", "LIST")
-        t.insert(tk.END, "- W rozwiniętym panelu E1 ustawiasz główną pulę zdjęć, odświeżasz bilans znaków i możesz wygenerować propozycję kolejnej paczki.\n", "LIST")
-        t.insert(tk.END, "- Propozycję możesz skorygować ręcznie przed zatwierdzeniem. Jeśli wolisz, nadal możesz wskazać własny katalog i skopiować paczkę ręcznie.\n", "LIST")
-        t.insert(tk.END, "- Status E1 rozróżnia dwa stany: liczbę obrazów już skopiowanych do folderu iteracji oraz liczbę obrazów tylko w bieżącej propozycji. To nie jest to samo.\n", "LIST")
-        t.insert(tk.END, "- Samo pojawienie się obrazów w folderze iteracji nie odblokowuje E2. Paczkę E1 trzeba jawnie zatwierdzić.\n", "LIST")
-        t.insert(tk.END, "- Rozwinięcie panelu E1 czasowo ukrywa dalsze etapy, aby użytkownik mógł skupić się na doborze paczki bez szumu wizualnego.\n", "LIST")
+        t.insert(tk.END, "\nZ2: Autoanotacja tablic\n", "H2")
+        t.insert(tk.END, "- Wskazujesz folder wejściowy ze zdjęciami i uruchamiasz detekcję pojazdów oraz tablic.\n", "LIST")
+        t.insert(tk.END, "- Każdy start zapisuje nowy run w ", ())
+        t.insert(tk.END, "Workspace/2_auto_annotations/plates/", "CODE")
+        t.insert(tk.END, ". Taki run zawiera co najmniej ", ())
+        t.insert(tk.END, "annotations.xml", "CODE")
+        t.insert(tk.END, " oraz pliki pomocnicze.\n", ())
+        t.insert(tk.END, "- Po zakończeniu możesz obejrzeć wyniki na liście i podglądzie, a z istniejącego runu zbudować gotowy dataset tablic do treningu YOLO Pose.\n", "LIST")
 
-        t.insert(tk.END, "\nE2 / Z2: Autoanotacja\n", "H2")
-        t.insert(tk.END, "- W Z2 uruchamiasz detekcję pojazdów i tablic.\n", "LIST")
-        t.insert(tk.END, "- W trybie projektu ścieżki wejściowe i wyjściowe są podstawiane automatycznie z drzewa projektu.\n", "LIST")
-        t.insert(tk.END, "- Po pomyślnym runie sprawdzasz podgląd i zatwierdzasz etap. Dopiero wtedy Wizard odblokowuje E3.\n", "LIST")
-
-        t.insert(tk.END, "\nE3 / Z3: Wycinanie tablic i złota paczka\n", "H2")
-        t.insert(tk.END, "- [PZ1] Wycinanie tablic: system wycina tablice z oryginalnych obrazów i tworzy paczkę ", ())
+        t.insert(tk.END, "\nZ3: Wycinanie tablic, OCR i gold pack\n", "H2")
+        t.insert(tk.END, "- [PZ1] Wycinanie tablic wymaga zgodnej pary źródeł: ", ())
+        t.insert(tk.END, "annotations.xml", "CODE")
+        t.insert(tk.END, " oraz folderu oryginalnych obrazów, na których ten XML powstał.\n", ())
+        t.insert(tk.END, "- Wynikiem jest nowa paczka ", ())
         t.insert(tk.END, "run_XXX", "CODE")
+        t.insert(tk.END, " w ", ())
+        t.insert(tk.END, "Workspace/3_cropped_characters/", "CODE")
+        t.insert(tk.END, " z wyciętymi tablicami i plikiem ", ())
+        t.insert(tk.END, "metadata.json", "CODE")
         t.insert(tk.END, ".\n", ())
-        t.insert(tk.END, "- [PZ2] Wykrywanie znaków i analiza: po lewej masz podgląd tablicy i listę tablic, po prawej konfigurację i panel OCR.\n", "LIST")
-        t.insert(tk.END, "- Każdy run OCR może wyprodukować nową paczkę adnotacji. To celowe: różne presety potrafią odkryć różne tablice.\n", "LIST")
-        t.insert(tk.END, "- Lista tablic pokazuje wykryte znaki w nawiasach kwadratowych w kolejności osi X. Zielone wpisy oznaczają zgodność z ground truth, czerwone wymagają poprawy.\n", "LIST")
-        t.insert(tk.END, "- [PZ3] Integracje i dataset: eksportujesz błędne przypadki do CVAT, importujesz poprawki i budujesz gold pack YOLO bez duplikatów.\n", "LIST")
+        t.insert(tk.END, "- [PZ2] Wykrywanie znaków i analiza pozwala porównywać OCR, YOLO i tryb hybrydowy. Lista tablic pokazuje wynik oraz zgodność z ground truth.\n", "LIST")
+        t.insert(tk.END, "- [PZ3] Integracje i dataset służą do eksportu przypadków do CVAT, importu poprawek oraz budowy gold packa i datasetu znaków bez duplikatów.\n", "LIST")
 
-        t.insert(tk.END, "\nE4 / Z4: Trening i analiza\n", "H2")
-        t.insert(tk.END, "- [PZ1] Najpierw wybierasz tor: ", ())
-        t.insert(tk.END, "tablic", "BOLD")
-        t.insert(tk.END, " albo ", ())
-        t.insert(tk.END, "znaków", "BOLD")
-        t.insert(tk.END, ".\n", ())
-        t.insert(tk.END, "- Dla toru tablic tworzysz dataset z XML CVAT. Dla toru znaków dzielisz gotowy dataset na train/val.\n", "LIST")
-        t.insert(tk.END, "- Po utworzeniu datasetu przycisk Dalej odblokowuje [PZ2] Trening i analiza.\n", "LIST")
-        t.insert(tk.END, "- [PZ2] zawiera trening, historię runów, wykresy, walidację i ranking modeli.\n", "LIST")
-        t.insert(tk.END, "- Po udanym treningu Wizard pozwala zakończyć krok 4 i wrócić do kampanii.\n", "LIST")
+        t.insert(tk.END, "\nZ4: Trening i analiza\n", "H2")
+        t.insert(tk.END, "- W aktualnym workflow Z4 pracuje na gotowym datasecie YOLO. Najpierw wybierasz tor treningu: tablice albo znaki.\n", "LIST")
+        t.insert(tk.END, "- Dla tablic używasz datasetu YOLO Pose przygotowanego wcześniej w Z2.\n", "LIST")
+        t.insert(tk.END, "- Dla znaków używasz datasetu YOLO Detect przygotowanego wcześniej w Z3/PZ3.\n", "LIST")
+        t.insert(tk.END, "- Wskazujesz katalog datasetu z plikiem ", ())
+        t.insert(tk.END, "data.yaml", "CODE")
+        t.insert(tk.END, ", wybierasz model bazowy lub własny checkpoint ", ())
+        t.insert(tk.END, ".pt", "CODE")
+        t.insert(tk.END, ", ustawiasz parametry i uruchamiasz trening.\n", ())
+        t.insert(tk.END, "- Historia runów, wykresy, walidacja i ranking są odświeżane w obrębie wybranego toru treningu.\n", "LIST")
 
         t.insert(tk.END, "\nJak czytać UI\n", "H2")
-        t.insert(tk.END, "- Pulsowanie przycisku oznacza następny zalecany ruch w trybie projektu.\n", "LIST")
         t.insert(tk.END, "- Chowane terminale procesu służą do diagnostyki. Jeśli nie są potrzebne, można je zostawić schowane i pracować na czystym układzie.\n", "LIST")
         t.insert(tk.END, "- Dolny panel pomocy jest dynamiczny: przesunięcie myszy nad element powinno pokazać jego rolę w aktualnym workflow.\n", "LIST")
+        t.insert(tk.END, "- Gdy opis w dolnym panelu pomocy jest dłuższy, możesz przewijać go skrótem Ctrl + Alt + rolka myszy.\n", "LIST")
+        t.insert(tk.END, "- Zielone statusy zwykle oznaczają zgodność z ground truth albo poprawne zakończenie operacji, a czerwone wymagają korekty albo ręcznej weryfikacji.\n", "LIST")
 
-        t.insert(tk.END, "\nTryb swobodny\n", "H2")
+        t.insert(tk.END, "\nPoza zakresem tej wersji helpa\n", "H2")
         t.insert(
             tk.END,
-            "Tryb swobodny służy zaawansowanym użytkownikom. Korzysta z globalnego Workspace, "
-            "ale nadal może używać najlepszych modeli, presetów OCR i rankingów wypracowanych w projektach.\n",
+            "Opis kampanii, iteracji i Wizarda został tutaj świadomie pominięty. "
+            "W tej wersji pomocy dokumentujemy tylko te elementy, które są już stabilne po ostatnich zmianach.\n",
             ()
         )
 
@@ -158,87 +188,87 @@ class HelpTab:
     def _fill_architecture(self, t):
         t.config(state=tk.NORMAL)
 
-        t.insert(tk.END, "Architektura projektu i tryby pracy\n", "H1")
+        t.insert(tk.END, "Architektura danych i Workspace\n", "H1")
         t.insert(
             tk.END,
-            f"{CONFIG.APP_NAME} łączy dwa porządki pracy: sterowany projektowo workflow kampanii "
-            "oraz tryb swobodny dla zaawansowanych użytkowników.\n",
+            f"{CONFIG.APP_NAME} pracuje na wspólnej przestrzeni roboczej Workspace. "
+            "Poniższy opis dotyczy stabilnej struktury danych i przepływu artefaktów między Z2, Z3 i Z4.\n",
             ()
         )
 
-        t.insert(tk.END, "\nDwa tryby pracy\n", "H2")
-        t.insert(tk.END, "- Tryb projektu: Wizard steruje przejściami, ścieżkami i warunkami awansu między Z2, Z3 i Z4.\n", "LIST")
-        t.insert(tk.END, "- Tryb swobodny: użytkownik sam wybiera katalogi i narzędzia, pracując bez blokad workflow.\n", "LIST")
-        t.insert(tk.END, "- Wyjście z projektu nie może zostawiać śladów po kampanii w trybie swobodnym i odwrotnie.\n", "LIST")
+        t.insert(tk.END, "\nStabilny przepływ danych\n", "H2")
+        t.insert(tk.END, "- Z2 bierze surowe obrazy i zapisuje run autoanotacji tablic z plikiem annotations.xml.\n", "LIST")
+        t.insert(tk.END, "- Z3/PZ1 bierze annotations.xml oraz tę samą paczkę obrazów źródłowych i tworzy wycięte tablice.\n", "LIST")
+        t.insert(tk.END, "- Z3/PZ2 i Z3/PZ3 rozwijają materiał znakowy: OCR, YOLO, poprawki CVAT oraz gold pack i dataset znaków.\n", "LIST")
+        t.insert(tk.END, "- Z4 nie produkuje datasetu w głównym trybie pracy. Konsumuje gotowy dataset YOLO i zapisuje artefakty treningowe, walidacyjne oraz rankingowe.\n", "LIST")
 
         t.insert(tk.END, "\nGlobalne drzewo Workspace\n", "H2")
-        t.insert(tk.END, "Główne drzewo robocze służy jako wspólna baza dla całej aplikacji:\n", ())
-        t.insert(tk.END, "Workspace/\n", "CODE")
-        t.insert(tk.END, "  1_raw_images\n", "CODE")
-        t.insert(tk.END, "  2_auto_annotations\n", "CODE")
-        t.insert(tk.END, "  3_cropped_characters\n", "CODE")
-        t.insert(tk.END, "  4_training_datasets\n", "CODE")
-        t.insert(tk.END, "  5_training_runs\n", "CODE")
-        t.insert(tk.END, "  6_models\n", "CODE")
-        t.insert(tk.END, "  7_rankings\n", "CODE")
-        t.insert(tk.END, "  8_ocr_presets\n", "CODE")
-        t.insert(tk.END, "- To drzewo jest podstawą trybu swobodnego.\n", "LIST")
-        t.insert(tk.END, "- Najlepsze modele, rankingi i presety OCR mogą być wspólne dla wszystkich projektów.\n", "LIST")
-
-        t.insert(tk.END, "\nDrzewo projektu\n", "H2")
+        t.insert(tk.END, "Poniżej logiczna struktura katalogów aplikacji w formie zbliżonej do wyniku polecenia tree:\n", ())
         t.insert(
             tk.END,
-            "Każdy projekt ma własne drzewo o tej samej strukturze co Workspace. "
-            "W trybie projektu zakładki powinny pracować na ścieżkach projektowych, a nie globalnych.\n",
-            ()
+            "Workspace/\n"
+            "|-- 1_raw_images/\n"
+            "|-- 2_auto_annotations/\n"
+            "|   |-- chars/\n"
+            "|   `-- plates/\n"
+            "|-- 3_cropped_characters/\n"
+            "|-- 4_training_datasets/\n"
+            "|   |-- chars/\n"
+            "|   |-- plates/\n"
+            "|   `-- vehicles/\n"
+            "|-- 5_training_runs/\n"
+            "|   |-- chars/\n"
+            "|   |-- plates/\n"
+            "|   `-- vehicles/\n"
+            "|-- 6_models/\n"
+            "|   |-- base/\n"
+            "|   |   |-- detect/\n"
+            "|   |   `-- pose/\n"
+            "|   `-- trained/\n"
+            "|       |-- chars/\n"
+            "|       |-- plates/\n"
+            "|       `-- vehicles/\n"
+            "|-- 7_rankings/\n"
+            "|   |-- chars/\n"
+            "|   |-- plates/\n"
+            "|   `-- vehicles/\n"
+            "|-- 8_ocr_presets/\n"
+            "`-- 9_projects/\n",
+            "CODE"
         )
-        t.insert(tk.END, "- To rozwiązanie ogranicza mieszanie artefaktów między projektami.\n", "LIST")
-        t.insert(tk.END, "- Pozwala też wracać do projektów bez ręcznego składania ścieżek.\n", "LIST")
 
-        t.insert(tk.END, "\nIteracje i główna pula zdjęć\n", "H2")
-        t.insert(tk.END, "- Iteracja 1 pracuje na pierwszej porcji dużej puli zdjęć.\n", "LIST")
-        t.insert(tk.END, "- Iteracja 2 bierze kolejną porcję z tej samej puli, a nie kopiuje wyników iteracji 1.\n", "LIST")
-        t.insert(tk.END, "- Główna paczka wejściowa jest bazą projektu. Użytkownik może ją rozszerzać w trakcie kampanii, ale nazwy plików nadal pozostają ground truth dla całego systemu.\n", "LIST")
-        t.insert(tk.END, "- System powinien pamiętać, które obrazy z głównej puli zdjęć zostały już wykorzystane w poprzednich iteracjach, aby kolejne porcje nie powielały bez potrzeby tej samej wiedzy.\n", "LIST")
-        t.insert(tk.END, "- Dobór porcji do E1 nie powinien opierać się wyłącznie na ręcznej ocenie użytkownika. Rekomendowany jest tryb półautomatyczny: aplikacja proponuje paczkę zdjęć, a użytkownik może ją zaakceptować albo skorygować.\n", "LIST")
-        t.insert(tk.END, "- Systemowa propozycja paczki do E1 powinna być liczona na podstawie bilansu znaków 0-9 i A-Z w dotychczas zaakceptowanym materiale treningowym, a nie na podstawie surowej liczby obrazów.\n", "LIST")
-        t.insert(tk.END, "- Celem nie jest idealna równość co do sztuki, ale miękki balans: kolejne iteracje mają preferować obrazy zawierające znaki niedoreprezentowane w aktualnym zbiorze gold/manual.\n", "LIST")
-        t.insert(tk.END, "- Generator doboru paczki powinien łączyć pamięć użytych zdjęć, licznik znaków, usuwanie duplikatów i możliwość późniejszego dołożenia active learning.\n", "LIST")
+        t.insert(tk.END, "\nCo trafia do którego katalogu\n", "H2")
+        t.insert(tk.END, "- 1_raw_images: surowe paczki zdjęć wejściowych.\n", "LIST")
+        t.insert(tk.END, "- 2_auto_annotations: runy autoanotacji z Z2, przede wszystkim foldery wynikowe tablic z annotations.xml.\n", "LIST")
+        t.insert(tk.END, "- 3_cropped_characters: wycięte i wyprostowane tablice oraz metadata.json z Z3/PZ1.\n", "LIST")
+        t.insert(tk.END, "- 4_training_datasets: gotowe datasety YOLO z data.yaml oraz folderami images/ i labels/.\n", "LIST")
+        t.insert(tk.END, "- 5_training_runs: logi, wykresy, metryki i artefakty treningów uruchamianych w Z4.\n", "LIST")
+        t.insert(tk.END, "- 6_models: modele bazowe oraz checkpointy wytrenowane przez użytkownika.\n", "LIST")
+        t.insert(tk.END, "- 7_rankings: wyniki porównań i rankingów modeli.\n", "LIST")
+        t.insert(tk.END, "- 8_ocr_presets: zapisane presety Laboratorium OCR.\n", "LIST")
+        t.insert(tk.END, "- 9_projects: katalog techniczny na osobne przestrzenie projektowe.\n", "LIST")
 
-        t.insert(tk.END, "\nDobór paczki zdjęć do E1\n", "H2")
-        t.insert(tk.END, "- Kandydatami do doboru są nieużyte jeszcze obrazy z głównej puli zdjęć, których ground truth można odczytać z nazwy pliku.\n", "LIST")
-        t.insert(tk.END, "- Każdy kandydat powinien dostać ocenę przydatności zależną od tego, jak bardzo pomaga uzupełnić braki znaków w obecnym zbiorze treningowym.\n", "LIST")
-        t.insert(tk.END, "- Najwyższy priorytet mają obrazy zawierające znaki najrzadsze w dotychczasowej puli gold pack + importy ręczne.\n", "LIST")
-        t.insert(tk.END, "- Użytkownik nie powinien wybierać porcji całkowicie w ciemno. Najlepszy UX to: system tworzy pierwszy szkic paczki E1, a użytkownik może ręcznie usunąć lub dodać kilka obrazów przed zatwierdzeniem.\n", "LIST")
-        t.insert(tk.END, "- Jeśli folder iteracji zawiera już obrazy, E2 nadal pozostaje zablokowane do chwili jawnego zatwierdzenia tej paczki jako E1.\n", "LIST")
-        t.insert(tk.END, "- Histogram w panelu E1 pokazuje wszystkie znaki 0-9 i A-Z w aktualnej paczce E1. Wysokość słupka oznacza liczbę wystąpień danego znaku w nazwach tablic zdjęć należących do tej paczki.\n", "LIST")
-        t.insert(tk.END, "- Jeśli jeden znak dominuje na histogramie, warto rozważyć usunięcie części zdjęć z tym znakiem albo dołożenie obrazów z brakującymi znakami.\n", "LIST")
-        t.insert(tk.END, "- Lista zdjęć w E1 obsługuje zaznaczanie wielokrotne jak w Windows: Ctrl, Shift i selekcję grupową. Po zaznaczeniu kilku zdjęć zobaczysz łączny efekt ich usunięcia z paczki.\n", "LIST")
-
-        t.insert(tk.END, "\nPaczki OCR i gold pack\n", "H2")
-        t.insert(tk.END, "- Każdy run OCR może stworzyć kolejną paczkę adnotacji.\n", "LIST")
-        t.insert(tk.END, "- Różne presety mogą znaleźć różne tablice, dlatego paczek nie traktujemy jako duplikatów samych z siebie.\n", "LIST")
-        t.insert(tk.END, "- Celem etapu Z3 nie jest najładniejszy OCR sam w sobie, ale możliwie duża i czysta paczka znaków do treningu YOLO.\n", "LIST")
-        t.insert(tk.END, "- W architekturze hybrydowej OCR najlepiej pełni rolę czytania tekstu całej tablicy, a YOLO najlepiej pełni rolę geometrii znaków i boxów.\n", "LIST")
-        t.insert(tk.END, "- Najbardziej wartościowe przypadki to te, w których OCR trafia idealnie, YOLO trafia idealnie albo YOLO naprawia tylko 1-2 błędne znaki OCR bez rozluźniania kryterium ground truth.\n", "LIST")
-        t.insert(tk.END, "- Dlatego system rozróżnia strategie perfect, np. OCR exact, YOLO exact i OCR+YOLO rescue. Pozwala to śledzić, skąd naprawdę bierze się materiał do gold packa.\n", "LIST")
-        t.insert(tk.END, "- Priorytetem jest precision ponad recall: lepiej odrzucić niepewną tablicę do ręcznej poprawy niż wpuścić błędny znak do treningu modelu znaków.\n", "LIST")
-        t.insert(tk.END, "- Eksport gold packa zbiera materiał z wielu paczek, usuwa duplikaty i zostawia czyste złoto do treningu.\n", "LIST")
-        t.insert(tk.END, "- Eksport gold packa może też filtrować źródła perfect według strategii, aby osobno budować paczki OCR exact, YOLO exact, OCR+YOLO rescue albo materiał manualny.\n", "LIST")
-        t.insert(tk.END, "- Importy ręczne zgodne z formatem projektu mogą być dokładane w dowolnej iteracji. Po scaleniu z pulą gold zwiększają zasób wiedzy dla kolejnych iteracji.\n", "LIST")
-        t.insert(tk.END, "- To właśnie zaakceptowany materiał gold/manual powinien być podstawą liczenia balansu znaków dla następnego doboru paczki zdjęć, bo reprezentuje wiedzę realnie gotową do treningu.\n", "LIST")
-        t.insert(tk.END, "- Ten obieg tworzy pętlę active learning: większy czysty gold pack poprawia YOLO, lepszy YOLO poprawia hybrydę OCR+YOLO, a lepsza hybryda zwiększa kolejną paczkę gold.\n", "LIST")
+        t.insert(tk.END, "\nNajważniejsze zależności między etapami\n", "H2")
+        t.insert(tk.END, "- Dataset tablic do treningu powstaje z materiału Z2 i powinien być zgodny z torem YOLO Pose.\n", "LIST")
+        t.insert(tk.END, "- Dataset znaków do treningu powstaje z materiału Z3/PZ3 i powinien być zgodny z torem YOLO Detect.\n", "LIST")
+        t.insert(tk.END, "- Z4 sprawdza zgodność wybranego toru, datasetu i modelu bazowego przed startem treningu.\n", "LIST")
+        t.insert(tk.END, "- Najlepsze checkpointy, rankingi i presety OCR pozostają zasobami współdzielonymi na poziomie Workspace.\n", "LIST")
 
         t.insert(tk.END, "\nSingle source of truth\n", "H2")
-        t.insert(tk.END, "W runach wyciętych tablic kluczowym plikiem jest ", ())
+        t.insert(tk.END, "- Nazwa pliku obrazu jest źródłem prawdy dla tekstu tablic używanego w ocenie OCR i znaków.\n", "LIST")
+        t.insert(tk.END, "- W runach wyciętych tablic kluczowym plikiem jest ", ())
         t.insert(tk.END, "metadata.json", "CODE")
-        t.insert(tk.END, ". To on przechowuje status tablicy, znaki, ich kolejność po osi X i informacje potrzebne do eksportów, importów i podglądu.\n", ())
+        t.insert(tk.END, ", bo przechowuje status tablicy, znaki, kolejność po osi X i dane potrzebne do eksportów oraz importów.\n", ())
+        t.insert(tk.END, "- W treningu punktem wejścia do datasetu jest ", ())
+        t.insert(tk.END, "data.yaml", "CODE")
+        t.insert(tk.END, ", który opisuje splity train/val/test i listę klas YOLO.\n", ())
 
-        t.insert(tk.END, "\nCo warto zapamiętać\n", "H2")
-        t.insert(tk.END, "- Z1 to baza sterowania projektem.\n", "LIST")
-        t.insert(tk.END, "- Z2 dotyczy autoanotacji pojazdów i tablic.\n", "LIST")
-        t.insert(tk.END, "- Z3 dotyczy znaków na tablicach.\n", "LIST")
-        t.insert(tk.END, "- Z4 jest wspólną przestrzenią treningową dla toru tablic i toru znaków.\n", "LIST")
-        t.insert(tk.END, "- Pulsowanie, blokady i podpowiedzi nie są dekoracją. To część kontraktu UX całego workflow.\n", "LIST")
+        t.insert(tk.END, "\nPoza zakresem tej sekcji\n", "H2")
+        t.insert(
+            tk.END,
+            "Opis kampanii, iteracji projektu i reguł awansu między krokami został na razie wyłączony z dokumentacji Z5. "
+            "Ta karta opisuje tylko to, co jest obecnie stabilne i zgodne z implementacją.\n",
+            ()
+        )
 
         t.config(state=tk.DISABLED)

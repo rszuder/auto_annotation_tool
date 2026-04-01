@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zakładka Treningu: Budowa datasetu + trening YOLO + analiza modeli.
+Zakładka Treningu: trening YOLO + analiza modeli.
+
+W trybie swobodnym Z4 konsumuje gotowy dataset z Z2 lub Z3.
+Pomost datasetowy pozostaje tylko na potrzeby kampanii.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import webbrowser
 from pathlib import Path, PurePosixPath
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, YOLO_AVAILABLE, AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS, PIL_AVAILABLE, logger
@@ -22,6 +25,7 @@ from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, Dataset
 from ..ranking import ModelRanking, ModelRankingEntry
 from ..utils import safe_load_yaml
 from .help_manager import HELP
+from .web_slim_scrollbar import WebSlimScrollbar
 from .zoomable_canvas import ZoomableCanvas
 
 if PIL_AVAILABLE:
@@ -40,11 +44,11 @@ class TrainingTab:
 
         self.frame = ttk.Frame(parent)
 
-        self.trainer = YOLOPoseTrainer()
-        self.history: TrainingHistory = self.trainer.history
+        self.history = TrainingHistory(history_dir=Path(CONFIG.get_training_runs_dir("char")))
+        self.trainer = YOLOPoseTrainer(history=self.history)
         self.creator = DatasetCreator()
         self.splitter = DatasetSplitter()
-        self.ranking_engine = ModelRanking()
+        self.ranking_engine = ModelRanking(ranking_dir=Path(CONFIG.get_ranking_dir("plate")))
 
         self.current_run_id = None
         self._pending_campaign_model_type = None
@@ -64,7 +68,16 @@ class TrainingTab:
         self._plot_photo = None
         self._plot_img_id = None
         self._plot_original_path = None
-        
+        self._free_route_hover_mode = None
+        self._free_training_route_cards = {}
+        self._training_device_profiles = []
+        self._training_device_label_map = {}
+        self._training_auto_device_label = "Auto"
+        self._training_cpu_device_label = "CPU"
+        self._step4_ranking_tab_visible = False
+        self._train_left_wrap_targets = []
+        self._train_left_section_separators = []
+
         self.val_is_running = False
         self.rank_is_running = False
 
@@ -129,13 +142,100 @@ class TrainingTab:
         """Zwraca bazowy katalog datasetów dla aktywnego projektu albo globalny fallback."""
         if self._campaign_datasets_dir:
             return Path(self._campaign_datasets_dir)
-        return Path(CONFIG.DEFAULT_DATASETS_DIR)
+        target = getattr(self, "_step4_dataset_mode", getattr(self, "_campaign_training_target", "char"))
+        return Path(CONFIG.get_datasets_dir(target))
+
+    def _iter_dataset_search_roots(self, base_dir: Path | None = None) -> list[Path]:
+        root = Path(base_dir or self._get_datasets_base_dir())
+        candidates = [root, root / "plates", root / "chars", root / "vehicles"]
+        unique: list[Path] = []
+        seen: set[str] = set()
+
+        for candidate in candidates:
+            try:
+                resolved = str(candidate.resolve())
+            except Exception:
+                resolved = str(candidate)
+            if resolved in seen or not candidate.exists() or not candidate.is_dir():
+                continue
+            seen.add(resolved)
+            unique.append(candidate)
+
+        return unique
+
+    def _find_dataset_source_candidates(self, base_dir: Path | None = None) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        for search_root in self._iter_dataset_search_roots(base_dir):
+            try:
+                for path in search_root.iterdir():
+                    if not path.is_dir() or "_Split_" in path.name or not (path / "images").exists():
+                        continue
+                    key = str(path.resolve())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append(path)
+            except Exception:
+                continue
+
+        return candidates
+
+    def _find_ready_dataset_candidates(self, base_dir: Path | None = None) -> list[tuple[Path, str, float]]:
+        candidates: list[tuple[Path, str, float]] = []
+        seen: set[str] = set()
+
+        for search_root in self._iter_dataset_search_roots(base_dir):
+            try:
+                for path in search_root.iterdir():
+                    if not path.is_dir():
+                        continue
+
+                    yaml_path = path / "data.yaml"
+                    if not yaml_path.exists():
+                        continue
+
+                    key = str(path.resolve())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    target = self._infer_dataset_target(str(path)) or "char"
+                    candidates.append((path, target, path.stat().st_mtime))
+            except Exception:
+                continue
+
+        return candidates
 
     def _get_runs_base_dir(self) -> Path:
         """Zwraca bazowy katalog runów treningowych dla aktywnego projektu albo globalny fallback."""
         if self._campaign_runs_dir:
             return Path(self._campaign_runs_dir)
-        return Path(CONFIG.DEFAULT_TRAINING_DIR)
+        target = getattr(self, "_step4_dataset_mode", getattr(self, "_campaign_training_target", "char"))
+        return Path(CONFIG.get_training_runs_dir(target))
+
+    def _rebind_free_mode_training_storage(self, target: str | None = None, reload_history: bool = True):
+        if CAMPAIGN.get_active_project_name():
+            return
+
+        normalized_target = CONFIG.normalize_task_target(target or getattr(self, "_step4_dataset_mode", "char"))
+
+        runs_dir = Path(CONFIG.get_training_runs_dir(normalized_target))
+        self.history = TrainingHistory(history_dir=runs_dir)
+        self.trainer = YOLOPoseTrainer(history=self.history)
+        self._bind_trainer_callbacks()
+
+        if reload_history and hasattr(self, "tree"):
+            try:
+                self._load_history()
+            except Exception:
+                pass
+        if reload_history and hasattr(self, "rank_tree"):
+            try:
+                self._load_ranking()
+            except Exception:
+                pass
 
     def _format_workspace_relative_path(self, path_like) -> str:
         try:
@@ -152,7 +252,8 @@ class TrainingTab:
 
     def _get_training_dataset_hint_text(self) -> str:
         campaign_active = bool(CAMPAIGN.get_active_project_name())
-        workspace_dir = self._format_workspace_relative_path(CONFIG.DIR_4_DATASETS)
+        selected_target = self._get_selected_training_target()
+        workspace_dir = self._format_workspace_relative_path(CONFIG.get_datasets_dir(selected_target))
 
         if campaign_active:
             preferred_dir = self._format_workspace_relative_path(self._get_datasets_base_dir())
@@ -162,58 +263,541 @@ class TrainingTab:
                 f"Najczesciej bedzie to katalog projektu albo jego datasetowy odpowiednik: {preferred_dir}"
             )
 
+        if selected_target == "plate":
+            source_hint = "Dla toru tablic wskaż dataset YOLO Pose wyeksportowany w Z2."
+        else:
+            source_hint = "Dla toru znaków wskaż dataset YOLO Detect wyeksportowany w Z3/PZ3."
+
         return (
-            "Tryb swobodny: wskazujesz tutaj gotowy katalog datasetu YOLO, a nie plik modelu.\n"
+            "Tryb swobodny: najpierw wybierasz tor treningu, a tutaj wskazujesz gotowy katalog datasetu YOLO.\n"
             "data.yaml to plik konfiguracyjny YOLO, ktory opisuje splity train/val/test oraz klasy modelu.\n"
-            "Skad go wziac: utworz dataset w Z4/PZ1. Dla toru znakow plik powstaje po splicie datasetu, "
-            "a dla toru tablic po budowie datasetu z XML CVAT.\n"
+            f"{source_hint}\n"
             f"W sztywnym drzewie Workspace szukaj go przede wszystkim w: {workspace_dir}\n"
-            "Tutaj wybierz caly folder datasetu, w ktorym lezy data.yaml oraz podfoldery images/ i labels/."
+            "Tutaj wybierz caly folder datasetu, w ktorym lezy data.yaml oraz podfoldery images/ i labels/. "
+            "Jesli dataset nie pasuje do wybranego toru, start treningu zostanie zablokowany."
         )
+
+    def _get_preferred_models_dir(self, target: str | None = None) -> Path:
+        normalized_target = CONFIG.normalize_task_target(target or self._get_selected_training_target())
+
+        preferred = CONFIG.get_trained_models_dir(normalized_target)
+        return preferred if preferred.exists() else Path(CONFIG.DEFAULT_MODELS_DIR)
+
+    def _pick_base_custom_model(self):
+        self._pick_file(
+            self.base_custom_var,
+            "*.pt",
+            self._get_preferred_models_dir(self._get_selected_training_target())
+        )
+
+    def _get_selected_training_target(self) -> str:
+        if CAMPAIGN.get_active_project_name():
+            target = self.get_campaign_training_target()
+            return target if target in ("char", "plate") else "char"
+
+        target = CONFIG.normalize_task_target(getattr(self, "_step4_dataset_mode", "char"))
+        return target if target in ("char", "plate") else "char"
+
+    @staticmethod
+    def _extract_dataset_class_names(cfg: dict | None) -> list[str]:
+        if not isinstance(cfg, dict):
+            return []
+
+        names = cfg.get("names", [])
+        if isinstance(names, dict):
+            try:
+                ordered_keys = sorted(
+                    names.keys(),
+                    key=lambda item: int(item) if str(item).isdigit() else str(item)
+                )
+                names = [names[key] for key in ordered_keys]
+            except Exception:
+                names = list(names.values())
+        elif not isinstance(names, (list, tuple)):
+            names = []
+
+        return [str(name).strip() for name in names if str(name).strip()]
+
+    @staticmethod
+    def _looks_like_character_alphabet(class_names: list[str]) -> bool:
+        if len(class_names) < 8:
+            return False
+
+        import string
+
+        allowed = set(string.ascii_uppercase + string.digits)
+        for name in class_names:
+            token = str(name).strip().upper()
+            if len(token) != 1 or token not in allowed:
+                return False
+
+        return True
+
+    def _infer_detect_dataset_target(self, cfg: dict | None, path_like) -> str:
+        path_str = str(path_like or "").replace("\\", "/").lower()
+        vehicle_keywords = (
+            "vehicle", "vehicles", "pojazd", "pojazdy", "car", "cars", "truck", "trucks",
+            "bus", "buses", "motorcycle", "motorbike", "bike", "van", "pickup", "suv",
+            "samochod", "samochody"
+        )
+        char_keywords = (
+            "char", "chars", "character", "characters", "znak", "znaki", "litera", "litery"
+        )
+
+        class_names = self._extract_dataset_class_names(cfg)
+        joined_names = " ".join(name.lower() for name in class_names)
+
+        if any(keyword in path_str for keyword in vehicle_keywords):
+            return "vehicle"
+        if any(keyword in joined_names for keyword in vehicle_keywords):
+            return "vehicle"
+        if self._looks_like_character_alphabet(class_names):
+            return "char"
+        if any(keyword in path_str for keyword in char_keywords):
+            return "char"
+
+        return "char"
+
+    def _infer_dataset_target(self, dataset_value: str | None = None) -> str | None:
+        if dataset_value is None:
+            var = getattr(self, "dataset_var", None)
+            dataset_value = var.get() if var is not None else ""
+        dataset_value = str(dataset_value).strip()
+        if not dataset_value:
+            return None
+
+        dataset_path = Path(dataset_value)
+        yaml_path = dataset_path / "data.yaml" if dataset_path.is_dir() else dataset_path
+        cfg = None
+
+        if yaml_path.exists():
+            try:
+                cfg = safe_load_yaml(yaml_path)
+            except Exception:
+                cfg = None
+
+        if isinstance(cfg, dict) and "kpt_shape" in cfg:
+            return "plate"
+
+        return self._infer_detect_dataset_target(cfg, yaml_path if yaml_path.exists() else dataset_path)
+
+    def _get_effective_training_target(self) -> str:
+        if CAMPAIGN.get_active_project_name():
+            return self.get_campaign_training_target()
+
+        inferred = self._infer_dataset_target()
+        if inferred in ("char", "plate", "vehicle"):
+            return inferred
+
+        fallback = CONFIG.normalize_task_target(getattr(self, "_step4_dataset_mode", "char"))
+        return fallback if fallback in ("char", "plate", "vehicle") else "char"
+
+    @staticmethod
+    def _format_training_target_label(target: str) -> str:
+        normalized = CONFIG.normalize_task_target(target)
+        labels = {
+            "plate": "tablice (YOLO Pose)",
+            "char": "znaki tablic (YOLO Detect)",
+            "vehicle": "pojazdy (YOLO Detect)",
+        }
+        return labels.get(normalized, "znaki tablic (YOLO Detect)")
+
+    def _get_training_scope_hint_text(self) -> str:
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        selected_target = self._get_selected_training_target()
+        selected_label = self._format_training_target_label(selected_target)
+
+        if campaign_active:
+            return (
+                f"Aktywny tor kampanii: {selected_label}. "
+                "W kampanii Z4 pracuje na torze wybranym przez workflow projektu."
+            )
+
+        dataset_value = getattr(self, "dataset_var", None)
+        inferred_target = self._infer_dataset_target(dataset_value.get() if dataset_value is not None else "")
+        if inferred_target and inferred_target != selected_target:
+            inferred_label = self._format_training_target_label(inferred_target)
+            return (
+                f"Wybrany tor: {selected_label}. "
+                f"Uwaga: wskazany dataset wyglada na tor {inferred_label}. "
+                "To pole powinno byc zgodne z wyborem kart powyzej."
+            )
+
+        return (
+            f"Wybrany tor: {selected_label}. "
+            "Najpierw wybierz tor, potem dataset zgodny z tym wyborem, a na koncu model bazowy tego samego typu."
+        )
+
+    def _get_base_model_choices_for_mode(self, mode: str | None = None) -> list[str]:
+        normalized = CONFIG.normalize_task_target(mode or self._get_selected_training_target())
+        if normalized == "plate":
+            return list(AVAILABLE_POSE_MODELS.keys()) + ["Custom"]
+        return list(AVAILABLE_DETECT_MODELS.keys()) + ["Custom"]
+
+    def _get_default_base_model_for_mode(self, mode: str | None = None) -> str:
+        choices = self._get_base_model_choices_for_mode(mode)
+        for choice in choices:
+            if choice != "Custom":
+                return choice
+        return "Custom"
+
+    def _refresh_base_model_choices(self):
+        combo = getattr(self, "base_combo", None)
+        var = getattr(self, "base_model_var", None)
+        if combo is None or var is None:
+            return
+
+        choices = self._get_base_model_choices_for_mode()
+        current = str(var.get() or "").strip()
+
+        try:
+            combo.configure(values=choices)
+        except Exception:
+            pass
+
+        if current not in choices:
+            var.set(self._get_default_base_model_for_mode())
+
+        self._on_base_model_change()
+
+    def _pick_training_dataset_dir(self):
+        self._pick_dir(
+            self.dataset_var,
+            initialdir=str(CONFIG.get_datasets_dir(self._get_selected_training_target()))
+        )
+
+    def _get_ranking_models_default_dir(self) -> Path:
+        return self._get_preferred_models_dir("plate")
+
+    def _ensure_plate_ranking_engine(self):
+        ranking_dir = Path(CONFIG.get_ranking_dir("plate"))
+        current_dir = Path(getattr(self.ranking_engine, "ranking_dir", ranking_dir))
+        try:
+            same_dir = current_dir.resolve() == ranking_dir.resolve()
+        except Exception:
+            same_dir = current_dir == ranking_dir
+
+        if not same_dir:
+            self.ranking_engine = ModelRanking(ranking_dir=ranking_dir)
+
+    def _bind_training_route_card(self, widget, mode: str):
+        if widget is None:
+            return
+
+        try:
+            widget.configure(cursor="hand2")
+        except Exception:
+            pass
+
+        try:
+            widget.bind("<Button-1>", lambda _e, m=mode: self._set_step4_dataset_mode(m), add="+")
+            widget.bind("<Enter>", lambda _e, m=mode: self._set_training_route_card_hover(m, True), add="+")
+            widget.bind("<Leave>", lambda _e, m=mode: self._set_training_route_card_hover(m, False), add="+")
+        except Exception:
+            pass
+
+    def _set_training_route_card_hover(self, mode: str, enabled: bool):
+        self._free_route_hover_mode = mode if enabled else None
+        self._refresh_free_training_route_cards()
+
+    def _refresh_free_training_route_cards(self):
+        cards = getattr(self, "_free_training_route_cards", {})
+        if not cards:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        hover_bg = palette.get("button_hover", panel_alt)
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        accent = palette.get("accent", "#0e639c")
+        accent_text = palette.get("accent_text", "#ffffff")
+        success = palette.get("success", "#4ec9b0")
+        surface_info = palette.get("surface_info", hover_bg)
+        surface_success = palette.get("surface_success", hover_bg)
+
+        active_mode = self._get_selected_training_target()
+        hover_mode = getattr(self, "_free_route_hover_mode", None)
+
+        for mode, widgets in cards.items():
+            frame = widgets.get("frame")
+            title = widgets.get("title")
+            badge = widgets.get("badge")
+            desc = widgets.get("desc")
+            meta = widgets.get("meta")
+            if frame is None:
+                continue
+
+            is_active = mode == active_mode
+            is_hover = mode == hover_mode
+            if mode == "plate":
+                accent_color = accent
+                active_bg = surface_info
+            else:
+                accent_color = success
+                active_bg = surface_success
+
+            bg = active_bg if is_active else (hover_bg if is_hover else panel_alt)
+            frame_border = accent_color if is_active else border
+            title_fg = accent_color if is_active else fg
+            badge_bg = accent_color if is_active else panel_bg
+            badge_fg = accent_text if is_active else muted
+            desc_fg = fg if is_active else muted
+
+            try:
+                frame.configure(bg=bg, highlightbackground=frame_border, highlightcolor=frame_border)
+            except Exception:
+                pass
+            for label, color in ((title, title_fg), (desc, desc_fg), (meta, muted)):
+                try:
+                    if label is not None:
+                        label.configure(bg=bg, fg=color)
+                except Exception:
+                    pass
+            try:
+                if badge is not None:
+                    badge.configure(
+                        bg=badge_bg,
+                        fg=badge_fg,
+                        highlightbackground=frame_border,
+                        highlightcolor=frame_border
+                    )
+            except Exception:
+                pass
+
+        host = getattr(self, "free_training_route_host", None)
+        if host is not None:
+            try:
+                host.configure(text=("Co chcesz trenować?" if not CAMPAIGN.get_active_project_name() else "Wybrany tor treningu"))
+            except Exception:
+                pass
+
+    def _refresh_free_training_route_ui(self):
+        host = getattr(self, "free_training_route_host", None)
+        if host is None:
+            return
+
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        try:
+            if campaign_active:
+                host.pack_forget()
+            else:
+                host.pack(anchor=tk.W, fill=tk.X, pady=(0, 12), before=self.train_session_name_row)
+        except Exception:
+            pass
+
+        self._refresh_free_training_route_cards()
+
+    def _update_step4_notebook_mode(self):
+        if not hasattr(self, "main_nb"):
+            return
+
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        dataset_label = "[PZ1] Produkcja datasetu"
+        train_label = "[PZ2] Trening i analiza" if campaign_active else "[PZ1] Trening i analiza"
+
+        try:
+            self.main_nb.tab(self.tab_train, text=train_label)
+        except Exception:
+            pass
+
+        if campaign_active:
+            if not getattr(self, "_step4_dataset_tab_visible", False):
+                try:
+                    self.main_nb.insert(0, self.tab_dataset, text=dataset_label)
+                except Exception:
+                    try:
+                        self.main_nb.add(self.tab_dataset, text=dataset_label)
+                    except Exception:
+                        pass
+                self._step4_dataset_tab_visible = True
+            else:
+                try:
+                    self.main_nb.tab(self.tab_dataset, text=dataset_label)
+                except Exception:
+                    pass
+            return
+
+        if getattr(self, "_step4_dataset_tab_visible", False):
+            try:
+                self.main_nb.hide(self.tab_dataset)
+            except Exception:
+                pass
+            self._step4_dataset_tab_visible = False
+
+        try:
+            if str(self.main_nb.select()) != str(self.tab_train):
+                self.main_nb.select(self.tab_train)
+        except Exception:
+            pass
 
     def _update_training_dataset_hint(self):
         label = getattr(self, "train_dataset_hint_lbl", None)
-        if label is None:
-            return
+        if label is not None:
+            try:
+                label.configure(text=self._get_training_dataset_hint_text())
+            except Exception:
+                pass
 
+        scope_label = getattr(self, "train_scope_hint_lbl", None)
+        if scope_label is not None:
+            try:
+                scope_label.configure(text=self._get_training_scope_hint_text())
+            except Exception:
+                pass
+
+        self._update_training_dataset_hint_wraplength()
         try:
-            label.configure(text=self._get_training_dataset_hint_text())
+            self._refresh_training_device_hint()
         except Exception:
             pass
 
-        self._update_training_dataset_hint_wraplength()
+    def _register_train_left_wrap_target(
+        self,
+        widget,
+        *,
+        container=None,
+        padding: int = 20,
+        min_wrap: int = 140,
+    ):
+        if widget is None:
+            return
+
+        try:
+            self._train_left_wrap_targets.append(
+                {
+                    "widget": widget,
+                    "container": container,
+                    "padding": int(padding),
+                    "min_wrap": int(min_wrap),
+                }
+            )
+        except Exception:
+            return
+
+        for bind_target in (widget, container):
+            if bind_target is None:
+                continue
+            try:
+                bind_target.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
+            except Exception:
+                pass
+
+    def _build_train_left_separator(self, parent, pady=(0, 0)):
+        if parent is None:
+            return None
+
+        palette = getattr(self.app, "palette", {})
+        host = tk.Frame(
+            parent,
+            height=4,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel", "#252526"),
+        )
+        host.pack(fill=tk.X, pady=pady)
+        host.pack_propagate(False)
+
+        accent_line = tk.Frame(
+            host,
+            height=1,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("surface_info", palette.get("accent", "#0e639c")),
+        )
+        accent_line.pack(fill=tk.X, side=tk.TOP)
+
+        shadow_line = tk.Frame(
+            host,
+            height=1,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        )
+        shadow_line.pack(fill=tk.X, side=tk.TOP, pady=(1, 0))
+        try:
+            self._train_left_section_separators.append(
+                {
+                    "host": host,
+                    "accent": accent_line,
+                    "shadow": shadow_line,
+                }
+            )
+        except Exception:
+            pass
+        return host
 
     def _update_training_dataset_hint_wraplength(self, event=None):
         label = getattr(self, "train_dataset_hint_lbl", None)
-        if label is None:
+        scope_label = getattr(self, "train_scope_hint_lbl", None)
+        device_label = getattr(self, "train_device_hint_lbl", None)
+        extra_targets = getattr(self, "_train_left_wrap_targets", [])
+        if label is None and scope_label is None and device_label is None and not extra_targets:
             return
 
-        width = 0
+        base_width = 0
         try:
-            width = int(label.winfo_width())
+            inset = max(0, int(getattr(self, "_train_left_content_inset", 0)))
+            base_width = int(self.train_left_canvas.winfo_width()) - (2 * inset)
         except Exception:
-            width = 0
+            base_width = 0
 
-        if width <= 1:
+        specs = []
+        for widget in (label, scope_label, device_label):
+            if widget is not None:
+                specs.append((widget, None, 2, 120))
+
+        for spec in extra_targets:
+            specs.append(
+                (
+                    spec.get("widget"),
+                    spec.get("container"),
+                    int(spec.get("padding", 20)),
+                    int(spec.get("min_wrap", 140)),
+                )
+            )
+
+        seen: set[int] = set()
+        for widget, container, padding, min_wrap in specs:
+            if widget is None:
+                continue
+
+            widget_id = id(widget)
+            if widget_id in seen:
+                continue
+            seen.add(widget_id)
+
+            width = 0
             try:
-                inset = max(0, int(getattr(self, "_train_left_content_inset", 0)))
-                width = int(self.train_left_canvas.winfo_width()) - (4 * inset)
+                if container is not None:
+                    width = int(container.winfo_width())
             except Exception:
                 width = 0
 
-        target = max(120, width - 2)
-        try:
-            current = int(float(label.cget("wraplength")))
-        except Exception:
-            current = 0
+            if width <= 1:
+                try:
+                    width = int(widget.winfo_width())
+                except Exception:
+                    width = 0
 
-        if abs(current - target) <= 2:
-            return
+            if width <= 1:
+                width = base_width
 
-        try:
-            label.configure(wraplength=target)
-        except Exception:
-            pass
+            target = max(int(min_wrap), int(width) - int(padding))
+            try:
+                current = int(float(widget.cget("wraplength")))
+            except Exception:
+                current = 0
+
+            if abs(current - target) <= 2:
+                continue
+
+            try:
+                widget.configure(wraplength=target)
+            except Exception:
+                pass
     
             #=====================================
     def set_campaign_context(self, runs_dir=None, datasets_dir=None):
@@ -298,7 +882,7 @@ class TrainingTab:
             if datasets_dir is not None:
                 self.split_out_var.set(str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
             else:
-                self.split_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+                self.split_out_var.set(str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
         except Exception:
             pass
 
@@ -311,7 +895,7 @@ class TrainingTab:
             if datasets_dir is not None:
                 self.ds_out_var.set(str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]"))
             else:
-                self.ds_out_var.set(f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+                self.ds_out_var.set(str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
         except Exception:
             pass
 
@@ -326,38 +910,11 @@ class TrainingTab:
         current_iter_images = ""
 
         if datasets_dir is not None and datasets_dir.exists():
-            try:
-                source_candidates = [
-                    p for p in datasets_dir.iterdir()
-                    if p.is_dir()
-                    and "_Split_" not in p.name
-                    and (p / "images").exists()
-                ]
-                if source_candidates:
-                    latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
-            except Exception:
-                latest_source = None
+            source_candidates = self._find_dataset_source_candidates(datasets_dir)
+            if source_candidates:
+                latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
 
-            ready_candidates = []
-            try:
-                for p in datasets_dir.iterdir():
-                    if not p.is_dir():
-                        continue
-
-                    yaml_path = p / "data.yaml"
-                    if not yaml_path.exists():
-                        continue
-
-                    try:
-                        cfg = safe_load_yaml(yaml_path) or {}
-                    except Exception:
-                        continue
-
-                    is_pose = "kpt_shape" in cfg
-                    target = "plate" if is_pose else "char"
-                    ready_candidates.append((p, target, p.stat().st_mtime))
-            except Exception:
-                ready_candidates = []
+            ready_candidates = self._find_ready_dataset_candidates(datasets_dir)
 
             preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
             if preferred:
@@ -387,7 +944,8 @@ class TrainingTab:
         if latest_source is not None:
             try:
                 self.split_src_var.set(str(latest_source))
-                self.split_out_var.set(str(Path(self._campaign_datasets_dir) / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
+                split_base = latest_source.parent if latest_source.parent != datasets_dir else Path(self._campaign_datasets_dir)
+                self.split_out_var.set(str(split_base / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
             except Exception:
                 pass
 
@@ -434,12 +992,18 @@ class TrainingTab:
             pass
 
         try:
+            self._refresh_base_model_choices()
+        except Exception:
+            pass
+
+        try:
             self._refresh_step4_campaign_navigation_ui()
         except Exception:
             pass
 
         try:
-            self.main_nb.select(self.tab_dataset)
+            target_tab = self.tab_dataset if bool(CAMPAIGN.get_active_project_name()) else self.tab_train
+            self.main_nb.select(target_tab)
         except Exception:
             pass
 
@@ -456,9 +1020,7 @@ class TrainingTab:
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
 
-        self.history = TrainingHistory(history_dir=Path(CONFIG.DEFAULT_TRAINING_DIR))
-        self.trainer = YOLOPoseTrainer(history=self.history)
-        self._bind_trainer_callbacks()
+        self._rebind_free_mode_training_storage(target=self._step4_dataset_mode, reload_history=False)
 
         self._reset_step4_transient_ui(
             target="char",
@@ -489,12 +1051,12 @@ class TrainingTab:
         split_out_default = (
             str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
             if datasets_dir is not None
-            else f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"
+            else str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
         )
         ds_out_default = (
             str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]")
             if datasets_dir is not None
-            else f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]"
+            else str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]")
         )
 
         try:
@@ -634,7 +1196,7 @@ class TrainingTab:
             pass
 
         try:
-            self.rank_models_dir.set(str(Path(CONFIG.DEFAULT_MODELS_DIR)))
+            self.rank_models_dir.set(str(self._get_ranking_models_default_dir()))
         except Exception:
             pass
 
@@ -880,9 +1442,95 @@ class TrainingTab:
             return "break"
         return "break"
 
+    def _restore_scroll_canvas_focus(self, canvas):
+        if canvas is None:
+            return
+        try:
+            canvas.focus_set()
+        except Exception:
+            pass
+
+    def _redirect_child_mousewheel_to_canvas(self, event, canvas):
+        if canvas is None:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+        except Exception:
+            return None
+
+        if not self._widget_contains_point(canvas, x_root, y_root):
+            return None
+
+        units = self._mousewheel_units(event)
+        if units != 0 and self._train_left_canvas_overflows():
+            try:
+                canvas.yview_scroll(units, "units")
+            except Exception:
+                return "break"
+
+        self._restore_scroll_canvas_focus(canvas)
+        return "break"
+
+    def _bind_scroll_canvas_children(self, root, canvas):
+        if root is None or canvas is None:
+            return
+
+        release_focus_classes = {
+            "TButton",
+            "Button",
+            "TCheckbutton",
+            "Checkbutton",
+            "TRadiobutton",
+            "Radiobutton",
+            "TScale",
+            "Scale",
+            "TCombobox",
+            "Spinbox",
+        }
+
+        def _walk(widget):
+            try:
+                widget.bind("<MouseWheel>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                widget.bind("<Button-4>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                widget.bind("<Button-5>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+            except Exception:
+                pass
+
+            try:
+                class_name = str(widget.winfo_class())
+            except Exception:
+                class_name = ""
+
+            if class_name in release_focus_classes:
+                try:
+                    widget.configure(takefocus=0)
+                except Exception:
+                    pass
+                try:
+                    widget.bind("<ButtonRelease-1>", lambda _e, c=canvas: self._restore_scroll_canvas_focus(c), add="+")
+                except Exception:
+                    pass
+                if class_name == "TCombobox":
+                    try:
+                        widget.bind("<<ComboboxSelected>>", lambda _e, c=canvas: self._restore_scroll_canvas_focus(c), add="+")
+                    except Exception:
+                        pass
+
+            for child in widget.winfo_children():
+                _walk(child)
+
+        _walk(root)
+
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
 
         for widget_name in ("step4_builder_log_text", "train_log_console"):
             widget = getattr(self, widget_name, None)
@@ -922,6 +1570,7 @@ class TrainingTab:
             "btn_step4_next_pulse_frame",
             "btn_step4_create_pulse_frame",
             "btn_step4_split_pulse_frame",
+            "btn_step4_start_train_frame",
             "btn_step4_start_train_pulse_frame",
             "btn_step4_finish_pulse_frame",
         ):
@@ -933,6 +1582,48 @@ class TrainingTab:
                 self.app.style_guidance_frame(frame, background=bg)
             except Exception:
                 pass
+
+        try:
+            if hasattr(self, "free_training_route_host"):
+                self.free_training_route_host.configure(style="TLabelframe")
+        except Exception:
+            pass
+
+        try:
+            cards = getattr(self, "_free_training_route_cards", {})
+            for widgets in cards.values():
+                frame = widgets.get("frame")
+                if frame is not None:
+                    frame.configure(bg=palette.get("panel_alt", "#2d2d30"))
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "free_training_route_cards_row"):
+                self.free_training_route_cards_row.configure(bg=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
+        for line in getattr(self, "_train_left_section_separators", []):
+            if line is None:
+                continue
+            try:
+                if isinstance(line, dict):
+                    host = line.get("host")
+                    accent = line.get("accent")
+                    shadow = line.get("shadow")
+                    if host is not None:
+                        host.configure(bg=palette.get("panel", "#252526"))
+                    if accent is not None:
+                        accent.configure(bg=palette.get("surface_info", palette.get("accent", "#0e639c")))
+                    if shadow is not None:
+                        shadow.configure(bg=palette.get("panel_border", palette.get("border", "#3c3c3c")))
+                else:
+                    line.configure(bg=palette.get("surface_info", palette.get("accent", "#0e639c")))
+            except Exception:
+                pass
+
+        self._refresh_free_training_route_cards()
 
     def _set_step4_train_log_visibility(self, visible: bool):
         if not hasattr(self, "step4_train_log_frame"):
@@ -974,31 +1665,50 @@ class TrainingTab:
         except Exception:
             pass
 
-    def _sync_step4_analysis_nav_buttons(self, event=None):
-        if not hasattr(self, "right_nb"):
+    def _is_ranking_available_for_selected_target(self) -> bool:
+        return CONFIG.normalize_task_target(self._get_selected_training_target()) == "plate"
+
+    def _refresh_step4_analysis_tab_visibility(self):
+        if not hasattr(self, "right_nb") or not hasattr(self, "ranking_tab"):
+            return
+
+        ranking_enabled = self._is_ranking_available_for_selected_target()
+
+        if ranking_enabled:
+            if not getattr(self, "_step4_ranking_tab_visible", False):
+                try:
+                    self.right_nb.add(self.ranking_tab, text="Ranking")
+                except Exception:
+                    try:
+                        self.right_nb.insert("end", self.ranking_tab, text="Ranking")
+                    except Exception:
+                        pass
+                self._step4_ranking_tab_visible = True
+            else:
+                try:
+                    self.right_nb.tab(self.ranking_tab, text="Ranking", state="normal")
+                except Exception:
+                    pass
             return
 
         try:
-            selected = str(self.right_nb.select())
+            if str(self.right_nb.select()) == str(self.ranking_tab):
+                self.right_nb.select(self.hist_tab)
         except Exception:
-            selected = ""
+            pass
 
-        mapping = (
-            ("btn_step4_nav_hist", getattr(self, "hist_tab", None)),
-            ("btn_step4_nav_plots", getattr(self, "plots_tab", None)),
-            ("btn_step4_nav_val", getattr(self, "val_tab", None)),
-            ("btn_step4_nav_rank", getattr(self, "ranking_tab", None)),
-        )
-
-        for attr_name, tab_widget in mapping:
-            btn = getattr(self, attr_name, None)
-            if btn is None or tab_widget is None:
-                continue
-
+        if getattr(self, "_step4_ranking_tab_visible", False):
             try:
-                btn.configure(state=(tk.DISABLED if selected == str(tab_widget) else tk.NORMAL))
+                self.right_nb.hide(self.ranking_tab)
             except Exception:
                 pass
+            self._step4_ranking_tab_visible = False
+
+    def _sync_step4_analysis_nav_buttons(self, event=None):
+        try:
+            self._refresh_step4_analysis_tab_visibility()
+        except Exception:
+            pass
 
     def _resolve_step4_guidance_buttons(self, attr_name: str):
         if attr_name == "step4_route_panel_frame":
@@ -1165,8 +1875,26 @@ class TrainingTab:
         if campaign_active:
             self._step4_route_selected = True
             self._step4_train_unlocked = False
+        else:
+            self._rebind_free_mode_training_storage(target=mode)
+            try:
+                self.rank_models_dir.set(str(self._get_ranking_models_default_dir()))
+            except Exception:
+                pass
+        try:
+            self._refresh_base_model_choices()
+        except Exception:
+            pass
         self._refresh_step4_dataset_mode_ui()
         self._refresh_step4_campaign_navigation_ui()
+        try:
+            self._refresh_free_training_route_ui()
+        except Exception:
+            pass
+        try:
+            self._update_training_dataset_hint()
+        except Exception:
+            pass
 
         try:
             label = "tablic (YOLO Pose)" if mode == "plate" else "znaków (YOLO Detect)"
@@ -1181,6 +1909,16 @@ class TrainingTab:
                 pass
 
     def _refresh_step4_dataset_mode_ui(self):
+        try:
+            self._refresh_free_training_route_ui()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_analysis_tab_visibility()
+        except Exception:
+            pass
+
         if not hasattr(self, "ds_mode_host"):
             return
 
@@ -1291,7 +2029,18 @@ class TrainingTab:
         route_selected = bool(getattr(self, "_step4_route_selected", False))
 
         try:
-            self.main_nb.tab(self.tab_dataset, state="normal")
+            self._update_step4_notebook_mode()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_analysis_tab_visibility()
+        except Exception:
+            pass
+
+        try:
+            if campaign_active and getattr(self, "_step4_dataset_tab_visible", False):
+                self.main_nb.tab(self.tab_dataset, state="normal")
             self.main_nb.tab(
                 self.tab_train,
                 state=("normal" if (not campaign_active or train_unlocked) else "disabled")
@@ -1306,7 +2055,12 @@ class TrainingTab:
             pass
 
         try:
-            if campaign_active and not train_unlocked and str(self.main_nb.select()) == str(self.tab_train):
+            if (
+                campaign_active
+                and getattr(self, "_step4_dataset_tab_visible", False)
+                and not train_unlocked
+                and str(self.main_nb.select()) == str(self.tab_train)
+            ):
                 self.main_nb.select(self.tab_dataset)
         except Exception:
             pass
@@ -1615,22 +2369,235 @@ class TrainingTab:
             pass
 
     
-    def _get_available_devices(self):
-        devices = ["auto", "cpu"]
+    def _scan_training_cuda_devices(self) -> list[dict]:
+        devices: list[dict] = []
         try:
             import torch
-            if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()): devices.append(f"cuda:{i}")
-        except Exception: pass
+
+            if not torch.cuda.is_available():
+                return devices
+
+            for index in range(torch.cuda.device_count()):
+                name = f"CUDA:{index}"
+                total_memory_gb = 0.0
+                try:
+                    props = torch.cuda.get_device_properties(index)
+                    name = str(getattr(props, "name", name) or name)
+                    total_memory = float(getattr(props, "total_memory", 0) or 0)
+                    total_memory_gb = total_memory / (1024 ** 3) if total_memory > 0 else 0.0
+                except Exception:
+                    pass
+
+                devices.append(
+                    {
+                        "raw": f"cuda:{index}",
+                        "index": index,
+                        "name": name,
+                        "memory_gb": total_memory_gb,
+                    }
+                )
+        except Exception:
+            pass
         return devices
 
-    def _device_to_ultralytics(self, device_str: str):
-        if not device_str or device_str == "auto": return "auto"
-        if device_str == "cpu": return "cpu"
-        if device_str.startswith("cuda:"):
-            try: return int(device_str.split(":")[1].split()[0])
-            except: return 0
+    def _get_available_devices(self):
+        profiles = self._scan_training_cuda_devices()
+        self._training_device_profiles = profiles
+        self._training_device_label_map = {}
+
+        auto_label = "Auto - preferuj GPU CUDA, inaczej CPU" if profiles else "Auto - CPU (brak CUDA)"
+        cpu_label = "CPU - procesor"
+
+        self._training_auto_device_label = auto_label
+        self._training_cpu_device_label = cpu_label
+
+        labels = [auto_label, cpu_label]
+        self._training_device_label_map[auto_label] = "auto"
+        self._training_device_label_map[cpu_label] = "cpu"
+
+        for profile in profiles:
+            mem = float(profile.get("memory_gb", 0.0) or 0.0)
+            mem_text = f"{mem:.1f} GB VRAM" if mem > 0 else "VRAM ?"
+            label = f"GPU {profile['index']} - {profile['name']} ({mem_text})"
+            labels.append(label)
+            self._training_device_label_map[label] = str(profile["raw"])
+
+        return labels
+
+    def _normalize_training_device_choice(self, device_value: str | None = None) -> str:
+        value = str(device_value or "").strip()
+        if not value:
+            return self._training_auto_device_label
+        if value in self._training_device_label_map:
+            return value
+
+        raw = value.lower()
+        if raw == "auto":
+            return self._training_auto_device_label
+        if raw == "cpu":
+            return self._training_cpu_device_label
+
+        for label, mapped in self._training_device_label_map.items():
+            if str(mapped).lower() == raw:
+                return label
+
+        if raw.startswith("cuda:"):
+            try:
+                wanted_index = int(raw.split(":", 1)[1])
+            except Exception:
+                wanted_index = 0
+            for profile in self._training_device_profiles:
+                if int(profile.get("index", -1)) == wanted_index:
+                    for label, mapped in self._training_device_label_map.items():
+                        if mapped == profile.get("raw"):
+                            return label
+
+        return self._training_auto_device_label
+
+    def _get_selected_training_device_raw(self, device_value: str | None = None) -> str:
+        value = str(device_value if device_value is not None else self.device_var.get()).strip()
+        if not value:
+            return "auto"
+        if value in self._training_device_label_map:
+            return str(self._training_device_label_map.get(value, "auto"))
+
+        raw = value.lower()
+        if raw in {"auto", "cpu"} or raw.startswith("cuda:"):
+            return raw
         return "auto"
+
+    def _get_effective_training_device_profile(self, device_value: str | None = None) -> tuple[str, dict | None]:
+        profiles = self._training_device_profiles or self._scan_training_cuda_devices()
+        selected_raw = self._get_selected_training_device_raw(device_value)
+
+        if selected_raw == "auto":
+            if profiles:
+                return str(profiles[0].get("raw", "cuda:0")), profiles[0]
+            return "cpu", None
+
+        if selected_raw == "cpu":
+            return "cpu", None
+
+        for profile in profiles:
+            if str(profile.get("raw")) == selected_raw:
+                return selected_raw, profile
+
+        return "cpu", None
+
+    def _get_training_device_recommendation(self, device_value: str | None = None) -> dict:
+        target = self._get_selected_training_target()
+        effective_raw, profile = self._get_effective_training_device_profile(device_value)
+
+        if effective_raw == "cpu" or profile is None:
+            return {
+                "effective_raw": "cpu",
+                "device_name": "CPU",
+                "memory_gb": 0.0,
+                "epochs": 100,
+                "batch": 4 if target == "char" else 2,
+                "imgsz": 640,
+                "lr0": 0.01,
+                "note": (
+                    "CPU zadziala, ale trening bedzie wyraznie wolniejszy. "
+                    "Gdy brakuje czasu, lepiej poczekac na GPU CUDA."
+                ),
+            }
+
+        memory_gb = float(profile.get("memory_gb", 0.0) or 0.0)
+        if memory_gb <= 4.5:
+            batch = 8 if target == "char" else 4
+            imgsz = 640
+        elif memory_gb <= 6.5:
+            batch = 12 if target == "char" else 8
+            imgsz = 640 if target == "char" else 768
+        elif memory_gb <= 8.5:
+            batch = 16 if target == "char" else 12
+            imgsz = 768 if target == "char" else 960
+        elif memory_gb <= 12.5:
+            batch = 24 if target == "char" else 16
+            imgsz = 960
+        else:
+            batch = 32 if target == "char" else 24
+            imgsz = 960 if target == "char" else 1280
+
+        return {
+            "effective_raw": effective_raw,
+            "device_name": str(profile.get("name", effective_raw)),
+            "memory_gb": memory_gb,
+            "epochs": 100,
+            "batch": batch,
+            "imgsz": imgsz,
+            "lr0": 0.01,
+            "note": (
+                "To jest konserwatywny punkt startowy. "
+                "Jesli zabraknie VRAM, najpierw zmniejsz batch size, dopiero potem rozdzielczosc."
+            ),
+        }
+
+    def _build_training_device_hint_text(self) -> str:
+        selected_display = self._normalize_training_device_choice(
+            self.device_var.get() if hasattr(self, "device_var") else "auto"
+        )
+        selected_raw = self._get_selected_training_device_raw(selected_display)
+        recommendation = self._get_training_device_recommendation(selected_display)
+        selected_target = self._format_training_target_label(self._get_selected_training_target())
+
+        if selected_raw == "auto":
+            if recommendation["effective_raw"] == "cpu":
+                prefix = "AUTO uzyje CPU, bo nie wykryto GPU CUDA."
+            else:
+                prefix = (
+                    f"AUTO uzyje {recommendation['device_name']} "
+                    f"({recommendation['memory_gb']:.1f} GB VRAM)."
+                )
+        elif recommendation["effective_raw"] == "cpu":
+            prefix = "Wybrano trening na CPU."
+        else:
+            prefix = (
+                f"Wybrano {recommendation['device_name']} "
+                f"({recommendation['memory_gb']:.1f} GB VRAM)."
+            )
+
+        return (
+            f"{prefix} Tor: {selected_target}. "
+            f"Sugerowany start: epoki {recommendation['epochs']}, batch {recommendation['batch']}, "
+            f"rozdzielczosc {recommendation['imgsz']}, lr0 {recommendation['lr0']:.3f}. "
+            f"{recommendation['note']}"
+        )
+
+    def _refresh_training_device_hint(self):
+        combo = getattr(self, "device_combo", None)
+        if combo is not None:
+            try:
+                combo.configure(values=self._get_available_devices())
+            except Exception:
+                pass
+
+        if hasattr(self, "device_var"):
+            try:
+                normalized = self._normalize_training_device_choice(self.device_var.get())
+                if self.device_var.get() != normalized:
+                    self.device_var.set(normalized)
+            except Exception:
+                pass
+
+        label = getattr(self, "train_device_hint_lbl", None)
+        if label is not None:
+            try:
+                label.configure(text=self._build_training_device_hint_text())
+            except Exception:
+                pass
+
+    def _device_to_ultralytics(self, device_str: str):
+        effective_raw, _ = self._get_effective_training_device_profile(device_str)
+        if effective_raw == "cpu":
+            return "cpu"
+        if effective_raw.startswith("cuda:"):
+            try:
+                return int(effective_raw.split(":")[1].split()[0])
+            except Exception:
+                return 0
+        return "cpu"
 
     def _open_path(self, path: Path):
         try:
@@ -1666,7 +2633,7 @@ class TrainingTab:
 
         # Główny notatnik powyżej paska pomocy
         self.main_nb = ttk.Notebook(self.frame)
-        self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(0, 4))
 
         self.tab_dataset = ttk.Frame(self.main_nb)
         self.tab_train = ttk.Frame(self.main_nb)
@@ -1675,9 +2642,11 @@ class TrainingTab:
 
         self.main_nb.add(self.tab_dataset, text="[PZ1] Budowa datasetu")
         self.main_nb.add(self.tab_train, text="[PZ2] Trening i analiza")
+        self._step4_dataset_tab_visible = True
 
         self._build_dataset_tab()
         self._build_train_tab()
+        self._update_step4_notebook_mode()
 
     def _build_dataset_tab(self):
         root = ttk.Frame(self.tab_dataset, padding=8)
@@ -1800,13 +2769,28 @@ class TrainingTab:
         )
         self.btn_hide_step4_log.pack(side=tk.LEFT)
 
-        self.step4_builder_log_text = scrolledtext.ScrolledText(
-            self.step4_builder_log_frame,
+        self.step4_builder_log_host = ttk.Frame(self.step4_builder_log_frame, style="Panel.TFrame")
+        self.step4_builder_log_host.pack(fill=tk.BOTH, expand=True)
+
+        self.step4_builder_log_text = tk.Text(
+            self.step4_builder_log_host,
             wrap=tk.WORD,
             height=10,
-            font=("Consolas", 10)
+            font=("Consolas", 10),
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
         )
-        self.step4_builder_log_text.pack(fill=tk.BOTH, expand=True)
+        self.step4_builder_log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.step4_builder_log_scrollbar = WebSlimScrollbar(
+            self.step4_builder_log_host,
+            orient=tk.VERTICAL,
+            command=self.step4_builder_log_text.yview,
+            auto_hide=False,
+        )
+        self.step4_builder_log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.step4_builder_log_text.configure(yscrollcommand=self.step4_builder_log_scrollbar.set)
+        self.step4_builder_log_text.web_vbar = self.step4_builder_log_scrollbar
         self.step4_builder_log_text.configure(state=tk.DISABLED)
 
         self.step4_builder_nav = ttk.Frame(root)
@@ -1886,7 +2870,7 @@ class TrainingTab:
         row3 = ttk.Frame(f); row3.pack(fill=tk.X, pady=2)
         ttk.Label(row3, text="Zapis danych:").pack(side=tk.LEFT)
         # Ścieżka docelowa jest wyliczana automatycznie i pozostaje tylko do odczytu.
-        self.ds_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/Plates_CVAT_[DATA_I_CZAS]")
+        self.ds_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
         ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
         self.btn_step4_create_frame = tk.Frame(f, bd=0, highlightthickness=0)
@@ -1935,7 +2919,7 @@ class TrainingTab:
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
         ttk.Label(row2, text="Wynik podziału:").pack(side=tk.LEFT)
         # Ścieżka wyniku splitu jest wyliczana automatycznie i pozostaje tylko do odczytu.
-        self.split_out_var = tk.StringVar(value=f"{Path(CONFIG.DEFAULT_DATASETS_DIR)}/[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]")
+        self.split_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
         ttk.Entry(row2, textvariable=self.split_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
         ratios = ttk.Frame(f); ratios.pack(fill=tk.X, pady=10)
@@ -2003,7 +2987,7 @@ class TrainingTab:
         self.left.grid_rowconfigure(0, weight=1)
         self.left.grid_columnconfigure(0, weight=1)
 
-        self.train_left_scroll_host = ttk.Frame(self.left)
+        self.train_left_scroll_host = ttk.Frame(self.left, style="Panel.TFrame")
         self.train_left_scroll_host.grid(row=0, column=0, sticky="nsew")
         self.train_left_scroll_host.grid_rowconfigure(0, weight=1)
         self.train_left_scroll_host.grid_columnconfigure(0, weight=1)
@@ -2016,16 +3000,17 @@ class TrainingTab:
         )
         self.train_left_canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.train_left_scrollbar = ttk.Scrollbar(
+        self.train_left_scrollbar = WebSlimScrollbar(
             self.train_left_scroll_host,
-            orient=tk.VERTICAL,
             command=self.train_left_canvas.yview
         )
         self.train_left_scrollbar.grid(row=0, column=1, sticky="ns")
         self.train_left_canvas.configure(yscrollcommand=self.train_left_scrollbar.set)
 
-        self._train_left_content_inset = 12
-        self.train_left_content = ttk.Frame(self.train_left_canvas)
+        self._train_left_content_inset = 14
+        self._train_left_hint_inset = 10
+        self._train_left_section_gap = 12
+        self.train_left_content = ttk.Frame(self.train_left_canvas, style="Panel.TFrame")
         self.train_left_content.grid_columnconfigure(0, weight=1)
         self.train_left_content_window = self.train_left_canvas.create_window(
             (self._train_left_content_inset, 0),
@@ -2035,42 +3020,161 @@ class TrainingTab:
         self.train_left_content.bind("<Configure>", self._sync_train_left_scrollregion, add="+")
         self.train_left_canvas.bind("<Configure>", self._sync_train_left_canvas_width, add="+")
 
-        settings_col = ttk.Frame(self.train_left_content)
-        settings_col.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
+        self.train_left_settings_col = ttk.Frame(self.train_left_content, style="Panel.TFrame")
+        settings_col = self.train_left_settings_col
+        settings_col.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        ttk.Label(settings_col, text="Nazwa sesji treningowej:").pack(anchor=tk.W)
+        self.free_training_route_host = ttk.LabelFrame(settings_col, text=" Co chcesz trenować? ", padding=12)
+
+        route_intro = ttk.Label(
+            self.free_training_route_host,
+            text=(
+                "Najpierw wybierz tor treningu. Ten wybór ustala, jakiego datasetu oczekuje formularz "
+                "i jakiego typu model bazowy ma sens."
+            ),
+            style="PanelMuted.TLabel",
+            wraplength=360,
+            justify=tk.LEFT
+        )
+        route_intro.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+        self._register_train_left_wrap_target(
+            route_intro,
+            container=self.free_training_route_host,
+            padding=28,
+            min_wrap=220,
+        )
+
+        self.free_training_route_cards_row = tk.Frame(self.free_training_route_host, bd=0, highlightthickness=0)
+        self.free_training_route_cards_row.pack(fill=tk.X)
+        self.free_training_route_cards_row.grid_columnconfigure(0, weight=1)
+        self.free_training_route_cards_row.grid_columnconfigure(1, weight=1)
+
+        route_specs = (
+            (
+                "plate",
+                "Tablice",
+                "YOLO Pose",
+                "Trening tablic z keypointami i geometrią rogów.",
+                "Oczekiwany dataset: export z Z2",
+            ),
+            (
+                "char",
+                "Znaki tablic",
+                "YOLO Detect",
+                "Trening boxów znaków na wyciętych tablicach.",
+                "Oczekiwany dataset: gold pack z Z3/PZ3",
+            ),
+        )
+        self._free_training_route_cards = {}
+        for column, (mode, title_text, badge_text, desc_text, meta_text) in enumerate(route_specs):
+            card = tk.Frame(self.free_training_route_cards_row, bd=0, highlightthickness=1, padx=14, pady=12)
+            card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 6 if column == 0 else 0))
+
+            title = tk.Label(card, text=title_text, font=("Segoe UI Semibold", 11), anchor="w", bd=0, highlightthickness=0)
+            title.pack(anchor=tk.W)
+            badge = tk.Label(card, text=badge_text, font=("Segoe UI", 8, "bold"), padx=8, pady=2, bd=0, highlightthickness=1)
+            badge.pack(anchor=tk.W, pady=(8, 8))
+            desc = tk.Label(card, text=desc_text, justify=tk.LEFT, anchor="w", wraplength=140, bd=0, highlightthickness=0)
+            desc.pack(anchor=tk.W, fill=tk.X)
+            meta = tk.Label(card, text=meta_text, justify=tk.LEFT, anchor="w", wraplength=140, bd=0, highlightthickness=0)
+            meta.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+            self._register_train_left_wrap_target(desc, container=card, padding=30, min_wrap=120)
+            self._register_train_left_wrap_target(meta, container=card, padding=30, min_wrap=120)
+
+            for widget in (card, title, badge, desc, meta):
+                self._bind_training_route_card(widget, mode)
+
+            self._free_training_route_cards[mode] = {
+                "frame": card,
+                "title": title,
+                "badge": badge,
+                "desc": desc,
+                "meta": meta,
+            }
+            try:
+                HELP.bind_help(card, "tr_route_plate" if mode == "plate" else "tr_route_char")
+            except Exception:
+                pass
+
+        self.train_session_name_row = ttk.Frame(settings_col, style="Panel.TFrame")
+        self.train_session_name_row.pack(fill=tk.X, pady=(0, self._train_left_section_gap))
+        ttk.Label(self.train_session_name_row, text="Nazwa sesji treningowej:", style="Panel.TLabel").pack(anchor=tk.W, fill=tk.X)
         self.name_var = tk.StringVar()
-        ttk.Entry(settings_col, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
-        
+        ttk.Entry(self.train_session_name_row, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
+        self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
 
-
-        ttk.Label(settings_col, text="Gotowy dataset (katalog z plikiem data.yaml):").pack(anchor=tk.W, pady=(8, 0))
+        self.train_dataset_title_lbl = ttk.Label(settings_col, text="Dataset treningowy", style="Panel.TLabel")
+        self.train_dataset_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_dataset_caption_lbl = ttk.Label(
+            settings_col,
+            text=(
+                "Wskaz gotowy folder datasetu z plikiem data.yaml. "
+                "Dataset powstaje wczesniej w Z2 albo Z3/PZ3, a tutaj tylko go wybierasz do treningu."
+            ),
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.train_dataset_caption_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 6))
+        self._register_train_left_wrap_target(self.train_dataset_caption_lbl, padding=16, min_wrap=220)
         self.dataset_var = tk.StringVar()
-        ds_row = ttk.Frame(settings_col)
+        ds_row = ttk.Frame(settings_col, style="Panel.TFrame")
         ds_row.pack(fill=tk.X, pady=2)
         ttk.Entry(ds_row, textvariable=self.dataset_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(ds_row, text="Wybierz", command=lambda: self._pick_dir(self.dataset_var)).pack(side=tk.LEFT, padx=5)
-
-        self.train_dataset_hint_box = ttk.Frame(
-            settings_col,
-            padding=(self._train_left_content_inset, 8, self._train_left_content_inset, 8)
-        )
-        self.train_dataset_hint_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        ttk.Button(ds_row, text="Wybierz", command=self._pick_training_dataset_dir).pack(side=tk.LEFT, padx=(8, 0))
 
         self.train_dataset_hint_lbl = ttk.Label(
-            self.train_dataset_hint_box,
+            settings_col,
             text="",
-            style="Muted.TLabel",
+            style="PanelMuted.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
             wraplength=320
         )
-        self.train_dataset_hint_lbl.pack(anchor=tk.W, fill=tk.X)
-        self.train_dataset_hint_box.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
+        self.train_dataset_hint_lbl.pack(
+            anchor=tk.W,
+            fill=tk.X,
+            pady=(4, 8),
+        )
+        self._register_train_left_wrap_target(
+            self.train_dataset_hint_lbl,
+            padding=16,
+            min_wrap=220,
+        )
         self.train_dataset_hint_lbl.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
-        self._update_training_dataset_hint()
 
-        ttk.Label(settings_col, text="Architektura (model bazowy):").pack(anchor=tk.W, pady=(8, 0))
+        self.train_scope_hint_lbl = ttk.Label(
+            settings_col,
+            text="",
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.train_scope_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, self._train_left_section_gap))
+        self._register_train_left_wrap_target(self.train_scope_hint_lbl, padding=16, min_wrap=220)
+        self._update_training_dataset_hint()
+        self._refresh_free_training_route_ui()
+
+        self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
+
+        self.train_base_title_lbl = ttk.Label(settings_col, text="Model bazowy (.pt)", style="Panel.TLabel")
+        self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_base_caption_lbl = ttk.Label(
+            settings_col,
+            text=(
+                "Dla tablic wybieraj modele YOLO Pose. "
+                "Dla znakow tablic wybieraj modele YOLO Detect. "
+                "Mozesz tez wskazac wlasny checkpoint .pt do fine tuningu."
+            ),
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.train_base_caption_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 6))
+        self._register_train_left_wrap_target(self.train_base_caption_lbl, padding=16, min_wrap=220)
         self.base_model_var = tk.StringVar()
         
         base_values = list(AVAILABLE_DETECT_MODELS.keys()) + list(AVAILABLE_POSE_MODELS.keys()) + ["Custom"]
@@ -2082,15 +3186,19 @@ class TrainingTab:
 
         # Pozwól wskazać własny model do fine-tuningu z katalogu modeli.
         self.base_custom_var = tk.StringVar()
-        self.custom_row = ttk.Frame(settings_col)
+        self.custom_row = ttk.Frame(settings_col, style="Panel.TFrame")
         self.custom_row.pack(fill=tk.X, pady=2)
         
         self.base_custom_entry = ttk.Entry(self.custom_row, textvariable=self.base_custom_var, state=tk.DISABLED)
         self.base_custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        self.base_custom_btn = ttk.Button(self.custom_row, text="Wybierz .pt", state=tk.DISABLED, 
-                                          command=lambda: self._pick_file(self.base_custom_var, "*.pt", CONFIG.DIR_6_MODELS))
-        self.base_custom_btn.pack(side=tk.LEFT, padx=(5,0))
+        self.base_custom_btn = ttk.Button(
+            self.custom_row,
+            text="Wybierz .pt",
+            state=tk.DISABLED,
+            command=self._pick_base_custom_model
+        )
+        self.base_custom_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         def auto_name(*args):
             ds_name = Path(self.dataset_var.get()).name if self.dataset_var.get() else "UnknownDS"
@@ -2103,33 +3211,76 @@ class TrainingTab:
         self.dataset_var.trace_add("write", auto_name)
         self.base_model_var.trace_add("write", auto_name)
         self.base_custom_var.trace_add("write", auto_name)
+        self.dataset_var.trace_add("write", lambda *args: self._update_training_dataset_hint())
+        self._refresh_base_model_choices()
         auto_name() # Inicjalizacja pierwszego wpisu        
         
-        grid = ttk.Frame(settings_col)
-        grid.pack(fill=tk.X, pady=10)
-        ttk.Label(grid, text="Epoki:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self._build_train_left_separator(settings_col, pady=(self._train_left_section_gap, self._train_left_section_gap))
+
+        self.train_params_title_lbl = ttk.Label(settings_col, text="Parametry treningu YOLO", style="Panel.TLabel")
+        self.train_params_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_params_caption_lbl = ttk.Label(
+            settings_col,
+            text=(
+                "Zacznij od wartosci sugerowanych przez aplikacje. "
+                "Jesli zabraknie VRAM, najpierw zmniejsz batch size, dopiero potem rozdzielczosc."
+            ),
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.train_params_caption_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 6))
+        self._register_train_left_wrap_target(self.train_params_caption_lbl, padding=16, min_wrap=220)
+
+        grid = ttk.Frame(settings_col, style="Panel.TFrame")
+        grid.pack(fill=tk.X, pady=(0, 10))
+        grid.columnconfigure(0, weight=0)
+        grid.columnconfigure(1, weight=1)
+        ttk.Label(grid, text="Epoki:", style="Panel.TLabel").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.epochs_var = tk.IntVar(value=100)
         ttk.Spinbox(grid, from_=1, to=5000, textvariable=self.epochs_var, width=8).grid(row=0, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(grid, text="Batch Size:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(grid, text="Batch Size:", style="Panel.TLabel").grid(row=1, column=0, sticky=tk.W, pady=2)
         self.batch_var = tk.IntVar(value=16)
         ttk.Spinbox(grid, from_=1, to=256, textvariable=self.batch_var, width=8).grid(row=1, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(grid, text="Rozdzielczość (px):").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(grid, text="Rozdzielczość (px):", style="Panel.TLabel").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.imgsz_var = tk.IntVar(value=640)
         imgsz_spin = ttk.Spinbox(grid, from_=32, to=2048, increment=32, textvariable=self.imgsz_var, width=8)
         imgsz_spin.grid(row=2, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(grid, text="Learning Rate (lr0):").grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Label(grid, text="Learning Rate (lr0):", style="Panel.TLabel").grid(row=3, column=0, sticky=tk.W, pady=2)
         self.lr0_var = tk.DoubleVar(value=0.01)
         lr0_spin = ttk.Spinbox(grid, from_=0.0001, to=0.1, increment=0.001, format="%.4f", textvariable=self.lr0_var, width=8)
         lr0_spin.grid(row=3, column=1, sticky=tk.W, padx=5)
 
-        ttk.Label(grid, text="Device:").grid(row=4, column=0, sticky=tk.W, pady=2)
-        self.device_var = tk.StringVar(value="auto")
-        ttk.Combobox(grid, textvariable=self.device_var, values=self._get_available_devices(), state="readonly", width=15).grid(row=4, column=1, sticky=tk.W, padx=5)
+        ttk.Label(grid, text="Urzadzenie obliczeniowe:", style="Panel.TLabel").grid(row=4, column=0, sticky=tk.W, pady=2)
+        device_values = self._get_available_devices()
+        self.device_var = tk.StringVar(value=self._training_auto_device_label)
+        self.device_combo = ttk.Combobox(
+            grid,
+            textvariable=self.device_var,
+            values=device_values,
+            state="readonly",
+            width=1
+        )
+        self.device_combo.grid(row=4, column=1, sticky="ew", padx=5)
+        self.device_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_training_device_hint())
 
-        self.btn_step4_start_train_frame = tk.Frame(settings_col, bd=0, highlightthickness=0)
+        self.train_device_hint_lbl = ttk.Label(
+            settings_col,
+            text="",
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.train_device_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+        self._register_train_left_wrap_target(self.train_device_hint_lbl, padding=16, min_wrap=220)
+        self._refresh_training_device_hint()
+
+        self.btn_step4_start_train_frame = tk.Frame(settings_col, bd=0, highlightthickness=0, bg="#252526")
         self.btn_step4_start_train_frame.pack(fill=tk.X, pady=(15, 5))
 
         self.btn_step4_start_train_pulse_frame = tk.Frame(
@@ -2154,7 +3305,7 @@ class TrainingTab:
         self.train_progress = ttk.Progressbar(settings_col, variable=self.train_progress_var, maximum=100)
         self.train_progress.pack(fill=tk.X, pady=(15, 2))
         
-        self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 9))
+        self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 9), style="Panel.TLabel")
         self.train_progress_label.pack(anchor=tk.W)
 
         terminal_tools = ttk.Frame(root)
@@ -2181,14 +3332,30 @@ class TrainingTab:
             text=" Terminal procesu ",
             padding=6
         )
-        self.train_log_console = scrolledtext.ScrolledText(
-            self.step4_train_log_frame,
+        self.step4_train_log_console_host = ttk.Frame(self.step4_train_log_frame, style="Panel.TFrame")
+        self.step4_train_log_console_host.pack(fill=tk.BOTH, expand=True)
+
+        self.train_log_console = tk.Text(
+            self.step4_train_log_console_host,
             width=50,
             height=10,
             font=("Consolas", 10),
-            bg="#1e1e1e", fg="#ecf0f1", bd=2, relief="sunken"
+            bg="#1e1e1e",
+            fg="#ecf0f1",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
         )
-        self.train_log_console.pack(fill=tk.BOTH, expand=True)
+        self.train_log_console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.step4_train_log_scrollbar = WebSlimScrollbar(
+            self.step4_train_log_console_host,
+            orient=tk.VERTICAL,
+            command=self.train_log_console.yview,
+            auto_hide=False,
+        )
+        self.step4_train_log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.train_log_console.configure(yscrollcommand=self.step4_train_log_scrollbar.set)
+        self.train_log_console.web_vbar = self.step4_train_log_scrollbar
         self._set_step4_process_console_text(
             "Oczekuję na rozpoczęcie treningu lub walidacji...\n"
             "Terminal procesu jest gotowy na dane z Ultralytics.\n"
@@ -2206,6 +3373,7 @@ class TrainingTab:
         self.right_nb.add(self.plots_tab, text="Analiza (wykresy)")
         self.right_nb.add(self.val_tab, text="Walidacja")
         self.right_nb.add(self.ranking_tab, text="Ranking")
+        self._step4_ranking_tab_visible = True
         self.right_nb.bind("<<NotebookTabChanged>>", self._sync_step4_analysis_nav_buttons)
 
         hist_top = ttk.Frame(self.hist_tab)
@@ -2220,7 +3388,7 @@ class TrainingTab:
         self.tree.column("mAP50", width=80, stretch=False)
         self.tree.column("Czas", width=100, stretch=False)
 
-        yscroll = ttk.Scrollbar(hist_top, orient=tk.VERTICAL, command=self.tree.yview)
+        yscroll = WebSlimScrollbar(hist_top, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=yscroll.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2231,40 +3399,10 @@ class TrainingTab:
         ttk.Button(hist_btns, text="Usuń", command=self._delete_selected).pack(side=tk.LEFT)
         ttk.Button(hist_btns, text="Otwórz folder", command=self._open_run_folder).pack(side=tk.RIGHT)
 
-        self.step4_analysis_nav = ttk.Frame(self.right)
-        self.step4_analysis_nav.pack(fill=tk.X, pady=(8, 0))
-
-        self.btn_step4_nav_hist = ttk.Button(
-            self.step4_analysis_nav,
-            text="Historia",
-            command=lambda: self._select_step4_analysis_tab(self.hist_tab)
-        )
-        self.btn_step4_nav_hist.pack(side=tk.LEFT)
-
-        self.btn_step4_nav_plots = ttk.Button(
-            self.step4_analysis_nav,
-            text="Wykresy",
-            command=lambda: self._select_step4_analysis_tab(self.plots_tab)
-        )
-        self.btn_step4_nav_plots.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.btn_step4_nav_val = ttk.Button(
-            self.step4_analysis_nav,
-            text="Walidacja",
-            command=lambda: self._select_step4_analysis_tab(self.val_tab)
-        )
-        self.btn_step4_nav_val.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.btn_step4_nav_rank = ttk.Button(
-            self.step4_analysis_nav,
-            text="Ranking",
-            command=lambda: self._select_step4_analysis_tab(self.ranking_tab)
-        )
-        self.btn_step4_nav_rank.pack(side=tk.LEFT, padx=(6, 0))
-
         self._build_plots_ui()
         self._build_validation_panel(self.val_tab)
         self._build_ranking_panel(self.ranking_tab)
+        self._refresh_step4_analysis_tab_visibility()
         self._sync_step4_analysis_nav_buttons()
 
         self.step4_train_nav = ttk.Frame(root)
@@ -2301,6 +3439,9 @@ class TrainingTab:
         HELP.bind_help(ds_row, "tr_train_ds")
         HELP.bind_help(self.train_dataset_hint_lbl, "tr_train_ds")
         HELP.bind_help(self.base_combo, "tr_train_base")
+        HELP.bind_help(grid, "tr_train_params")
+        HELP.bind_help(self.device_combo, "tr_train_device")
+        HELP.bind_help(self.train_device_hint_lbl, "tr_train_device")
         
         try:
             HELP.bind_help(grid.grid_slaves(row=0, column=1)[0], "tr_train_ep") 
@@ -2315,11 +3456,12 @@ class TrainingTab:
         HELP.bind_help(self.plots_tab, "tr_train_plot")
         HELP.bind_help(self.custom_row, "tr_train_custom")
         HELP.bind_help(self.btn_toggle_step4_train_log, "tr_train_log")
-        HELP.bind_help(self.step4_analysis_nav, "tr_analysis_nav")
         HELP.bind_help(self.btn_step4_train_back, "tr_train_back")
         HELP.bind_help(self.btn_step4_finish, "tr_train_finish")
 
+        self._bind_scroll_canvas_children(self.train_left_content, self.train_left_canvas)
         self.frame.after_idle(self._sync_train_left_scrollregion)
+        self.frame.after_idle(self._update_training_dataset_hint_wraplength)
         self.frame.after_idle(self._sync_train_left_canvas_width)
         self.frame.bind_all("<MouseWheel>", self._on_train_left_global_mousewheel, add="+")
         self.frame.bind_all("<Button-4>", self._on_train_left_global_mousewheel, add="+")
@@ -2397,6 +3539,139 @@ class TrainingTab:
 
         HELP.bind_help(split_combo, "tr_val_split")
 
+        summary_box = ttk.LabelFrame(parent, text=" Ostatni wynik walidacji ", padding=8)
+        summary_box.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+
+        self.val_summary_title_var = tk.StringVar(
+            value="Po uruchomieniu walidacji najwazniejsze metryki pojawia sie tutaj."
+        )
+        self.val_summary_title_lbl = ttk.Label(
+            summary_box,
+            textvariable=self.val_summary_title_var,
+            style="Muted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360
+        )
+        self.val_summary_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+
+        summary_tree_host = ttk.Frame(summary_box)
+        summary_tree_host.pack(fill=tk.BOTH, expand=True)
+
+        self.val_metrics_tree = ttk.Treeview(
+            summary_tree_host,
+            columns=("metric", "value"),
+            show="headings",
+            height=8
+        )
+        self.val_metrics_tree.heading("metric", text="Metryka")
+        self.val_metrics_tree.heading("value", text="Wartosc")
+        self.val_metrics_tree.column("metric", width=210, anchor=tk.W)
+        self.val_metrics_tree.column("value", width=100, anchor=tk.CENTER, stretch=False)
+
+        val_tree_scroll = WebSlimScrollbar(
+            summary_tree_host,
+            command=self.val_metrics_tree.yview
+        )
+        self.val_metrics_tree.configure(yscrollcommand=val_tree_scroll.set)
+        self.val_metrics_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        val_tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    @staticmethod
+    def _format_validation_metric_name(raw_name: str) -> str:
+        raw = str(raw_name or "").strip()
+        mapping = {
+            "metrics/precision(B)": "Precision (boxy)",
+            "metrics/recall(B)": "Recall (boxy)",
+            "metrics/mAP50(B)": "mAP50 (boxy)",
+            "metrics/mAP50-95(B)": "mAP50-95 (boxy)",
+            "metrics/precision(P)": "Precision (punkty)",
+            "metrics/recall(P)": "Recall (punkty)",
+            "metrics/mAP50(P)": "mAP50 (punkty)",
+            "metrics/mAP50-95(P)": "mAP50-95 (punkty)",
+            "fitness": "Fitness",
+        }
+        if raw in mapping:
+            return mapping[raw]
+
+        pretty = raw.replace("metrics/", "").replace("(B)", " (boxy)").replace("(P)", " (punkty)")
+        pretty = pretty.replace("_", " ")
+        return pretty or "Metryka"
+
+    @staticmethod
+    def _format_validation_metric_value(value) -> str:
+        try:
+            return f"{float(value):.4f}"
+        except Exception:
+            return str(value)
+
+    def _extract_validation_metric_rows(self, metrics) -> list[tuple[str, str]]:
+        preferred_order = [
+            "metrics/precision(B)",
+            "metrics/recall(B)",
+            "metrics/mAP50(B)",
+            "metrics/mAP50-95(B)",
+            "metrics/precision(P)",
+            "metrics/recall(P)",
+            "metrics/mAP50(P)",
+            "metrics/mAP50-95(P)",
+            "fitness",
+        ]
+
+        results_dict = getattr(metrics, "results_dict", None)
+        if isinstance(results_dict, dict) and results_dict:
+            ordered_keys = [key for key in preferred_order if key in results_dict]
+            ordered_keys.extend(key for key in results_dict.keys() if key not in ordered_keys)
+            return [
+                (
+                    self._format_validation_metric_name(key),
+                    self._format_validation_metric_value(results_dict.get(key)),
+                )
+                for key in ordered_keys
+            ]
+
+        rows: list[tuple[str, str]] = []
+        if hasattr(metrics, "box"):
+            rows.extend(
+                [
+                    ("mAP50 (boxy)", self._format_validation_metric_value(getattr(metrics.box, "map50", 0))),
+                    ("mAP50-95 (boxy)", self._format_validation_metric_value(getattr(metrics.box, "map", 0))),
+                    ("Precision (boxy)", self._format_validation_metric_value(getattr(metrics.box, "mp", 0))),
+                    ("Recall (boxy)", self._format_validation_metric_value(getattr(metrics.box, "mr", 0))),
+                ]
+            )
+        if hasattr(metrics, "pose"):
+            rows.extend(
+                [
+                    ("mAP50 (punkty)", self._format_validation_metric_value(getattr(metrics.pose, "map50", 0))),
+                    ("mAP50-95 (punkty)", self._format_validation_metric_value(getattr(metrics.pose, "map", 0))),
+                ]
+            )
+        return rows
+
+    def _set_validation_summary(self, title: str, rows: list[tuple[str, str]] | None = None):
+        title_var = getattr(self, "val_summary_title_var", None)
+        if title_var is not None:
+            try:
+                title_var.set(str(title))
+            except Exception:
+                pass
+
+        tree = getattr(self, "val_metrics_tree", None)
+        if tree is None:
+            return
+
+        try:
+            tree.delete(*tree.get_children())
+        except Exception:
+            pass
+
+        for metric_name, metric_value in rows or []:
+            try:
+                tree.insert("", tk.END, values=(metric_name, metric_value))
+            except Exception:
+                continue
+
     def _build_ranking_panel(self, parent):
         ttk.Label(
             parent,
@@ -2414,22 +3689,25 @@ class TrainingTab:
         pane.add(left_f, weight=1)
         pane.add(right_f, weight=3)
 
-        ttk.Label(left_f, text="Kategoria testu:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0,5))
-        self.rank_category_var = tk.StringVar(value="Tablice (Pose)")
-        cat_combo = ttk.Combobox(left_f, textvariable=self.rank_category_var, 
-                                 values=["Pojazdy (Detect)", "Tablice (Pose)", "Znaki/Litery (Detect)"], 
-                                 state="readonly")
-        cat_combo.pack(fill=tk.X, pady=(0, 15))
-        cat_combo.bind("<<ComboboxSelected>>", lambda e: self._load_ranking())
+        ttk.Label(left_f, text="Obslugiwany ranking:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0,5))
+        self.rank_category_info_lbl = ttk.Label(
+            left_f,
+            text="Tablice (Pose, annotations.xml z CVAT)",
+            style="Muted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=220
+        )
+        self.rank_category_info_lbl.pack(fill=tk.X, pady=(0, 15))
 
         ttk.Label(left_f, text="Katalog z modelami (.pt):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
         row1 = ttk.Frame(left_f)
         row1.pack(fill=tk.X, pady=2)
-        self.rank_models_dir = tk.StringVar(value=str(Path(CONFIG.DEFAULT_MODELS_DIR)))
+        self.rank_models_dir = tk.StringVar(value=str(self._get_ranking_models_default_dir()))
         ttk.Entry(row1, textvariable=self.rank_models_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row1, text="Wyb", command=lambda: self._pick_dir(self.rank_models_dir)).pack(side=tk.RIGHT, padx=(2,0))
 
-        ttk.Label(left_f, text="Dataset z CVAT (Ground Truth):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(10,0))
+        ttk.Label(left_f, text="Folder z annotations.xml dla tablic:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(10,0))
         row2 = ttk.Frame(left_f)
         row2.pack(fill=tk.X, pady=2)
         self.rank_data_dir = tk.StringVar()
@@ -2467,12 +3745,13 @@ class TrainingTab:
         self.rank_tree.column("Precision", width=70, anchor=tk.CENTER)
         self.rank_tree.column("Recall", width=70, anchor=tk.CENTER)
 
-        yscroll = ttk.Scrollbar(right_f, orient=tk.VERTICAL, command=self.rank_tree.yview)
+        yscroll = WebSlimScrollbar(right_f, orient=tk.VERTICAL, command=self.rank_tree.yview)
+        self.rank_tree.configure(yscrollcommand=yscroll.set)
         self.rank_tree.configure(yscrollcommand=yscroll.set)
         self.rank_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        HELP.bind_help(cat_combo, "tr_rank_cat")
+        HELP.bind_help(self.rank_category_info_lbl, "tr_rank_cat")
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
 
     def _pick_file(self, var, ext, initialdir=None):
@@ -2685,8 +3964,22 @@ class TrainingTab:
             cfg = safe_load_yaml(yaml_path)
             is_pose_dataset = "kpt_shape" in cfg
 
-            # W kampanii trening detekcji znaków powinien promować model toru char.
             self._current_training_dataset_is_pose = bool(is_pose_dataset)
+            inferred_target = self._infer_dataset_target(ds) or ("plate" if is_pose_dataset else "char")
+            selected_target = self._get_selected_training_target()
+
+            if not CAMPAIGN.get_active_project_name():
+                if inferred_target != selected_target:
+                    selected_label = self._format_training_target_label(selected_target)
+                    inferred_label = self._format_training_target_label(inferred_target)
+                    return messagebox.showerror(
+                        "Niezgodny tor treningu",
+                        "Wybrany tor treningu nie pasuje do wskazanego datasetu.\n\n"
+                        f"Wybrany tor: {selected_label}\n"
+                        f"Rozpoznany dataset: {inferred_label}\n\n"
+                        "Zmien karte wyboru toru albo wskaz dataset zgodny z tym wyborem."
+                    )
+                self._rebind_free_mode_training_storage(target=selected_target)
 
             if CAMPAIGN.get_active_project_name() and not is_pose_dataset:
                 self._pending_campaign_model_type = "char"
@@ -2717,16 +4010,31 @@ class TrainingTab:
         if not is_pose_dataset and is_pose_model:
             return messagebox.showerror(
                 "Niezgodność typu treningu",
-                "Wybrany dataset jest typu DETECT (bboxy, np. znaki), ale model bazowy jest typu POSE.\n\n"
-                "Dla znaków wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
+                "Wybrany dataset jest typu DETECT, ale model bazowy jest typu POSE.\n\n"
+                "Dla znaków tablic wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
             )
 
         # Zapisz czytelny nagłówek sesji w terminalu procesu.
+        selected_device_display = self._normalize_training_device_choice(self.device_var.get())
+        effective_device_raw, effective_device_profile = self._get_effective_training_device_profile(selected_device_display)
+        if effective_device_profile is not None:
+            effective_device_desc = (
+                f"{effective_device_profile.get('name', effective_device_raw)} "
+                f"({float(effective_device_profile.get('memory_gb', 0.0) or 0.0):.1f} GB VRAM)"
+            )
+        else:
+            effective_device_desc = "CPU"
+
         self._append_train_log("=" * 70)
         self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
         self._append_train_log(f"Dataset: {ds}")
         self._append_train_log(f"Model bazowy: {base_model}")
-        self._append_train_log(f"Device: {device} | Epochs: {self.epochs_var.get()} | Batch: {self.batch_var.get()} | ImgSz: {self.imgsz_var.get()} | lr0: {self.lr0_var.get()}")
+        self._append_train_log(
+            f"Urzadzenie: {selected_device_display} -> {effective_device_desc} | backend Ultralytics: {device}"
+        )
+        self._append_train_log(
+            f"Epoki: {self.epochs_var.get()} | Batch: {self.batch_var.get()} | ImgSz: {self.imgsz_var.get()} | lr0: {self.lr0_var.get()}"
+        )
         self._append_train_log("=" * 70)
 
         run_id = self.trainer.start_training(
@@ -2851,9 +4159,40 @@ class TrainingTab:
         if run and Path(run.output_dir).exists():
             self._open_path(Path(run.output_dir))
 
+    def _autofill_validation_inputs_from_run(self, run):
+        if run is None:
+            return
+
+        model_candidates = []
+        for candidate in (
+            getattr(run, "best_weights", ""),
+            getattr(run, "last_weights", ""),
+        ):
+            candidate_str = str(candidate or "").strip()
+            if candidate_str:
+                model_candidates.append(Path(candidate_str))
+
+        selected_model = next((path for path in model_candidates if path.exists()), None)
+        if selected_model is not None and hasattr(self, "val_model_var"):
+            try:
+                self.val_model_var.set(str(selected_model))
+            except Exception:
+                pass
+
+        dataset_value = str(getattr(run, "dataset_path", "") or "").strip()
+        if dataset_value and hasattr(self, "val_data_var"):
+            dataset_path = Path(dataset_value)
+            if dataset_path.exists():
+                try:
+                    self.val_data_var.set(str(dataset_path))
+                except Exception:
+                    pass
+
     def _on_run_selected(self, event=None):
         run = self._selected_run()
         if not run: return
+
+        self._autofill_validation_inputs_from_run(run)
         
         run_dir = Path(run.output_dir)
         if not run_dir.exists(): return
@@ -2873,10 +4212,6 @@ class TrainingTab:
         sel = self.plots_list.curselection()
         if sel and self._plots_paths: self._show_plot(self._plots_paths[int(sel[0])])
 
-    def _change_zoom(self, factor):
-        self.zoom_var.set(max(0.1, min(float(self.zoom_var.get()) * factor, 8.0)))
-        if self._plot_original_path: self._show_plot(Path(self._plot_original_path))
-
     def _show_plot(self, path):
         """Wczytuje fizyczny obraz z folderu Ultralytics i przekazuje do płynnej nawigacji."""
         if not PIL_AVAILABLE: return
@@ -2887,13 +4222,10 @@ class TrainingTab:
             # ZoomableCanvas sam zarządza skalą i przesuwaniem obrazu.
             self.plot_canvas.set_image(img)
             
-            # Przy nowym obrazie wróć do domyślnego widoku.
-            self.plot_canvas.reset_view()
+            # Przy nowym obrazie pokaż cały wykres dopasowany do aktualnego okna.
+            self.plot_canvas.fit_to_view()
         except Exception as e: 
             logger.error(f"Nie udało się wyświetlić wykresu: {e}")
-
-    def _change_zoom(self, factor):
-        pass
 
     def _run_validation(self):
         if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak modułu YOLO!")
@@ -2911,6 +4243,10 @@ class TrainingTab:
         self.val_is_running = True
         self.btn_run_val.config(state=tk.DISABLED, text="Walidacja w toku...")
         self.val_status.config(text="Walidacja w toku...", foreground="#d35400")
+        self._set_validation_summary(
+            f"Trwa walidacja: {Path(model_path).name} | split: {self.val_split_var.get()}",
+            []
+        )
         self._set_step4_process_console_text(
             f"Inicjalizowanie silnika YOLO do ewaluacji...\n"
             f"Model: {Path(model_path).name}\n"
@@ -2921,6 +4257,7 @@ class TrainingTab:
             try:
                 model = YOLO(model_path)
                 metrics = model.val(data=data_path, split=self.val_split_var.get())
+                metric_rows = self._extract_validation_metric_rows(metrics)
                 
                 res = "\n=== OFICJALNE WYNIKI WALIDACJI YOLO ===\n"
                 
@@ -2943,11 +4280,25 @@ class TrainingTab:
                         
                 self._append_train_log(res.rstrip())
                 self._ui(lambda: self.val_status.config(text="Walidacja zakończona.", foreground="green"))
+                self._ui(
+                    lambda rows=metric_rows, model_name=Path(model_path).name, split_name=self.val_split_var.get():
+                    self._set_validation_summary(
+                        f"Walidacja zakonczona: {model_name} | split: {split_name}",
+                        rows,
+                    )
+                )
                 self._ui(lambda: messagebox.showinfo("Sukces", "Walidacja zakończona pomyślnie!"))
                 
             except Exception as e:
                 self._append_train_log(f"\nBŁĄD WALIDACJI:\n{e}")
                 self._ui(lambda: self.val_status.config(text="Błąd walidacji", foreground="red"))
+                self._ui(
+                    lambda err=str(e), model_name=Path(model_path).name:
+                    self._set_validation_summary(
+                        f"Walidacja nie powiodla sie: {model_name}",
+                        [("Blad", err)],
+                    )
+                )
                 logger.error(f"Validation error: {e}")
                 
             finally:
@@ -2957,15 +4308,11 @@ class TrainingTab:
         threading.Thread(target=worker, daemon=True).start()
 
     def _load_ranking(self):
+        self._ensure_plate_ranking_engine()
         entries = getattr(self.ranking_engine, 'entries', [])
         self.rank_tree.delete(*self.rank_tree.get_children())
-        
-        category = self.rank_category_var.get()
-        task_filter = "Tablice (Pose)"
-        if "Pojazdy" in category: task_filter = "Pojazdy (Detect)"
-        elif "Znaki" in category: task_filter = "Znaki/Litery (Detect)"
-        
-        filtered_entries = [e for e in entries if getattr(e, 'task_type', '') == task_filter]
+
+        filtered_entries = [e for e in entries if getattr(e, 'task_type', '') == "Tablice (Pose)"]
         filtered_entries.sort(key=lambda x: getattr(x, 'f1_score', 0), reverse=True)
 
         for i, rep in enumerate(filtered_entries):
@@ -2981,6 +4328,7 @@ class TrainingTab:
 
     def _run_ranking(self):
         if self.rank_is_running: return
+        self._ensure_plate_ranking_engine()
         models_dir = Path(self.rank_models_dir.get().strip())
         data_dir = Path(self.rank_data_dir.get().strip())
         
@@ -2991,12 +4339,8 @@ class TrainingTab:
         if not gt_xml.exists():
             return messagebox.showerror("Błąd", f"W folderze testowym brakuje pliku annotations.xml (Ground Truth):\n{gt_xml}")
 
-        category = self.rank_category_var.get()
         target_task = "Tablice (Pose)"
-        if "Pojazdy" in category: target_task = "Pojazdy (Detect)"
-        elif "Znaki" in category: target_task = "Znaki/Litery (Detect)"
-        
-        is_pose_task = ("Pose" in target_task)
+        is_pose_task = True
 
         self.rank_is_running = True
         self.btn_run_rank.config(state=tk.DISABLED, text="Testowanie modeli...")
@@ -3004,7 +4348,7 @@ class TrainingTab:
 
         def worker():
             from ..ranking.annotation_comparator import AnnotationComparator
-            from ..annotators import VehicleAnnotator, PlateAnnotator
+            from ..annotators import PlateAnnotator
             from ..data_models import ImageAnnotation, Detection
             
             try:
@@ -3031,8 +4375,7 @@ class TrainingTab:
                     if not self.rank_is_running: break
                     self._ui(lambda m=model_path.name: self.rank_status.config(text=f"Testowanie {m} ({idx+1}/{total_models})"))
                     
-                    if is_pose_task: annotator = PlateAnnotator(model_path, conf_thresh, device)
-                    else: annotator = VehicleAnnotator(model_path, conf_thresh, device)
+                    annotator = PlateAnnotator(model_path, conf_thresh, device)
                         
                     success, msg = annotator.load_models()
                     if not success: continue

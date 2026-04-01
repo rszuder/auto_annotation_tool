@@ -12,6 +12,7 @@ from ..config import CONFIG, logger
 from ..icons import IconManager
 from ..ranking import ModelRanking, AnnotationComparator
 from ..validators import validate_cvat_xml
+from .web_slim_scrollbar import WebSlimScrollbar
 
 
 class RankingTab:
@@ -88,7 +89,7 @@ class RankingTab:
             stretch = True if col == "Model" else False
             self.tree.column(col, width=120 if stretch else 90, stretch=stretch)
         
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = WebSlimScrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -106,10 +107,34 @@ class RankingTab:
         self.paned_window.add(bottom_frame, weight=1) # weight=1 - rozciąga się, ale słabiej niż tabela
         
         self.report_text = tk.Text(bottom_frame, wrap=tk.WORD, state=tk.DISABLED, height=6)
-        report_scroll = ttk.Scrollbar(bottom_frame, orient=tk.VERTICAL, command=self.report_text.yview)
+        report_scroll = WebSlimScrollbar(bottom_frame, orient=tk.VERTICAL, command=self.report_text.yview)
         self.report_text.configure(yscrollcommand=report_scroll.set)
         self.report_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         report_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
+        try:
+            self.app.style_text_widget(self.report_text)
+        except Exception:
+            pass
+
+        try:
+            self.tree.configure(style="Treeview")
+        except Exception:
+            pass
+
+        try:
+            self.report_text.configure(highlightbackground=border, highlightcolor=border)
+        except Exception:
+            pass
     
     def _select_model(self):
         file_path = filedialog.askopenfilename(title="Wybierz oceniany model .pt", filetypes=[("PyTorch models", "*.pt")])

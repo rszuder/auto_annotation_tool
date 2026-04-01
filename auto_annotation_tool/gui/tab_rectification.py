@@ -15,6 +15,7 @@ from tkinter import ttk, filedialog, messagebox
 from ..config import CONFIG, CV2_AVAILABLE, cv2, PIL_AVAILABLE, np, SESSION
 from ..icons import IconManager
 from ..rectification import PlateRectifier
+from .web_slim_scrollbar import WebSlimScrollbar
 from .zoomable_canvas import ZoomableCanvas
 
 if PIL_AVAILABLE:
@@ -28,7 +29,7 @@ class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
         self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.vscroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.vscroll = WebSlimScrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
         self.inner = ttk.Frame(self.canvas)
         self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         
@@ -99,6 +100,29 @@ class RectificationTab:
         
         # Zarejestruj callback do zapisania sesji przy zamknięciu
         self.frame.bind("<Destroy>", self._on_closing)
+
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+
+        try:
+            self.app.style_listbox_widget(self.listbox, bordercolor=border)
+        except Exception:
+            pass
+
+        for canvas_name in ("canvas_left", "canvas_right"):
+            widget = getattr(self, canvas_name, None)
+            if widget is None:
+                continue
+            try:
+                self.app.style_canvas_widget(widget, background=palette.get("panel", "#252526"), bordercolor=border)
+            except Exception:
+                pass
 
     def _get_safe_int(self, var: tk.IntVar, default: int = 0) -> int:
         try: return var.get()

@@ -16,6 +16,7 @@ from ..campaign_manager import CAMPAIGN
 from ..campaign_ingest_planner import CHAR_ALPHABET
 from ..icons import IconManager
 from .help_manager import HELP
+from .web_slim_scrollbar import WebSlimScrollbar
 
 
 class CampaignTab:
@@ -170,9 +171,8 @@ class CampaignTab:
         )
         self.left_panel_canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.left_panel_scrollbar = ttk.Scrollbar(
+        self.left_panel_scrollbar = WebSlimScrollbar(
             self.left_scroll_host,
-            orient=tk.VERTICAL,
             command=self.left_panel_canvas.yview
         )
         self.left_panel_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -243,9 +243,8 @@ class CampaignTab:
         )
         self.right_panel_canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.right_panel_scrollbar = ttk.Scrollbar(
+        self.right_panel_scrollbar = WebSlimScrollbar(
             self.right_scroll_host,
-            orient=tk.VERTICAL,
             command=self.right_panel_canvas.yview
         )
         self.right_panel_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -360,6 +359,14 @@ class CampaignTab:
             return False
 
     def _on_listbox_mousewheel(self, event, listbox):
+        try:
+            if callable(getattr(self.app, "handle_help_panel_scroll_override", None)):
+                result = self.app.handle_help_panel_scroll_override(event)
+                if result == "break":
+                    return "break"
+        except Exception:
+            pass
+
         units = self._mousewheel_units(event)
         if listbox is None or units == 0:
             return "break"
@@ -370,6 +377,14 @@ class CampaignTab:
         return "break"
 
     def _on_global_mousewheel(self, event):
+        try:
+            if callable(getattr(self.app, "handle_help_panel_scroll_override", None)):
+                result = self.app.handle_help_panel_scroll_override(event)
+                if result == "break":
+                    return "break"
+        except Exception:
+            pass
+
         units = self._mousewheel_units(event)
         if units == 0:
             return None
@@ -447,7 +462,7 @@ class CampaignTab:
         list_host.pack(fill=tk.X, expand=False)
         self.project_list_host = list_host
 
-        scroll = ttk.Scrollbar(list_host, orient=tk.VERTICAL)
+        scroll = WebSlimScrollbar(list_host, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.project_listbox = tk.Listbox(
@@ -701,7 +716,7 @@ class CampaignTab:
         list_host.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         self.ingest_plan_host = list_host
 
-        scroll = ttk.Scrollbar(list_host, orient=tk.VERTICAL)
+        scroll = WebSlimScrollbar(list_host, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.ingest_plan_listbox = tk.Listbox(
@@ -1866,6 +1881,11 @@ class CampaignTab:
         muted = palette.get("muted", "#c7c7c7")
 
         try:
+            self.app.style_panel_surface(self.frame, background=panel)
+        except Exception:
+            pass
+
+        try:
             self.lbl_title.config(bg=bg, fg=fg)
         except Exception:
             pass
@@ -2046,7 +2066,7 @@ class CampaignTab:
         list_frame = tk.Frame(body, bg=palette["panel"])
         list_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
-        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        scroll = WebSlimScrollbar(list_frame, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         project_list = tk.Listbox(
@@ -3442,13 +3462,26 @@ class CampaignTab:
             )
 
             datasets_dir = Path(datasets_dir)
+            dataset_search_roots = [datasets_dir]
+            for suffix in ("plates", "chars", "vehicles"):
+                candidate = datasets_dir / suffix
+                if candidate.exists() and candidate.is_dir():
+                    dataset_search_roots.append(candidate)
 
-            source_candidates = [
-                p for p in datasets_dir.iterdir()
-                if p.is_dir()
-                and "_Split_" not in p.name
-                and (p / "images").exists()
-            ]
+            source_candidates = []
+            seen_source_paths = set()
+            for search_root in dataset_search_roots:
+                try:
+                    for path in search_root.iterdir():
+                        if not path.is_dir() or "_Split_" in path.name or not (path / "images").exists():
+                            continue
+                        key = str(path.resolve())
+                        if key in seen_source_paths:
+                            continue
+                        seen_source_paths.add(key)
+                        source_candidates.append(path)
+                except Exception:
+                    continue
 
             latest_source = None
             if source_candidates:
@@ -3457,7 +3490,7 @@ class CampaignTab:
             if latest_source is not None:
                 tab_train.split_src_var.set(str(latest_source))
                 tab_train.split_out_var.set(
-                    str(datasets_dir / f"{latest_source.name}_Split_[DATA_I_CZAS]")
+                    str(latest_source.parent / f"{latest_source.name}_Split_[DATA_I_CZAS]")
                 )
             else:
                 tab_train.split_src_var.set("")

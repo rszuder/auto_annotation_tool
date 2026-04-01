@@ -1,12 +1,12 @@
 {
     "tab1_input":  {
-                       "full_help":  "Folder wejściowy dla Z2. W trybie projektu ścieżka jest podstawiana z aktywnej iteracji. W trybie swobodnym wskazujesz własny katalog zdjęć."
+                       "full_help":  "Folder wejściowy dla Z2. W trybie projektu ścieżka jest podstawiana z aktywnej iteracji. W trybie swobodnym wskazujesz własny katalog zdjęć. Domyślna ścieżka względna to Workspace/1_raw_images/."
                    },
     "tab1_output":  {
-                        "full_help":  "Katalog wynikowy autoanotacji. Program zapisuje tu plik annotations.xml i artefakty runu. W kampanii pole jest sterowane przez Wizard."
+                        "full_help":  "To nie jest pojedynczy wynik, tylko folder wyników Z2. Każde kliknięcie Start tworzy tu nowy folder run_XXX zawierający co najmniej annotations.xml, report.txt i manifest runu. W kampanii pole jest sterowane przez Wizard."
                     },
     "tab1_start":  {
-                       "full_help":  "Uruchamia autoanotację w Z2. System wykrywa pojazdy i tablice zgodnie z wybranym trybem pracy i aktualnymi modelami."
+                       "full_help":  "Uruchamia autoanotację w Z2. System wykrywa pojazdy i tablice zgodnie z wybranym trybem pracy i aktualnymi modelami, a wynik zapisuje jako nowy folder run_XXX w folderze wyników Z2. Sam Start nie tworzy jeszcze datasetu treningowego."
                    },
     "tab1_stop":  {
                       "full_help":  "Bezpiecznie zatrzymuje trwający run po domknięciu bieżącej operacji."
@@ -15,7 +15,7 @@
                       "full_help":  "Pokazuje lub ukrywa terminal procesu dla Z2. Terminal nie jest potrzebny do zwykłej pracy, ale pomaga diagnozować problemy i śledzić postęp."
                   },
     "tab1_mode":  {
-                      "full_help":  "Tryb detekcji w Z2. Tryb C jest najpełniejszy, bo najpierw wykrywa pojazdy, a potem szuka tablic w ich obrębie."
+                      "full_help":  "Tryb detekcji w Z2. Tryb B wykrywa same tablice, a tryb C najpierw wykrywa pojazdy, a potem szuka tablic w ich obrębie."
                   },
     "tab1_model_veh":  {
                            "full_help":  "Model YOLO Detect dla pojazdów. Możesz wybrać model domyślny albo własny model z folderu modeli."
@@ -41,14 +41,29 @@
     "tab1_preview_canvas":  {
                                 "full_help":  "Podgląd obrazu i wykryć dla zaznaczonego wpisu z listy. Tu najłatwiej sprawdzić, czy Z2 wykryła obiekty poprawnie."
                             },
+    "tab1_dataset_run":  {
+                             "full_help":  "Run autoanotacji tablic, z którego ma powstać dataset treningowy. To produkt przycisku Start w Z2. Folder powinien zawierać plik annotations.xml zapisany przez autoanotację tablic."
+                         },
+    "tab1_dataset_images":  {
+                                "full_help":  "Folder obrazów źródłowych odpowiadających wybranemu runowi Z2. Dataset YOLO Pose budowany jest z pary: annotations.xml z runu oraz oryginalne obrazy, na których wykonano autoanotację. Po nowym runie Z2 system próbuje uzupełnić to pole automatycznie z manifestu runu."
+                            },
+    "tab1_dataset_split":  {
+                               "full_help":  "Ustawia proporcje train/val/test dla datasetu tablic eksportowanego z Z2 do treningu YOLO Pose."
+                           },
+    "tab1_dataset_export":  {
+                                "full_help":  "Ta sekcja nie uruchamia autoanotacji. Buduje gotowy dataset treningowy tablic z istniejącego runu Z2, czyli z pary: folder run z annotations.xml oraz odpowiadający mu folder źródłowych obrazów. Po nowym runie Z2 pola źródeł zwykle uzupełniają się automatycznie ostatnim runem, ale możesz też wskazać starszy run ręcznie. Ten krok jest niezależny od samego Startu autoanotacji: najpierw musi istnieć run z annotations.xml, a dopiero potem można z niego zbudować dataset. Wynik trafia domyślnie do Workspace/4_training_datasets/plates/ i zawiera plik data.yaml oraz foldery images/ i labels/."
+                            },
+    "t2_sources":  {
+                       "full_help":  "Sekcja źródeł Z3/PZ1. Do wycinania tablic potrzebujesz zawsze dwóch zgodnych wejść: 1) pliku annotations.xml z anotacjami tablic oraz 2) folderu oryginalnych obrazów, na których te anotacje wykonano. To musi być dokładnie ta sama para źródeł. Jeśli paczka obrazów leży w Workspace/1_raw_images/, system spróbuje odnaleźć ją automatycznie."
+                   },
     "t2_xml":  {
-                   "full_help":  "Plik annotations.xml używany w Z3/PZ1 do wycinania tablic. Musi pochodzić z tej samej paczki obrazów, na której wykonano anotacje. W kampanii jest podstawiany automatycznie z poprzedniego etapu."
+                   "full_help":  "Plik annotations.xml używany w Z3/PZ1 do wycinania tablic. To pojedynczy plik XML z anotacjami tablic na obrazach źródłowych. Najczęściej pochodzi z runu Z2 albo z CVAT. Musi opisywać dokładnie tę samą paczkę obrazów, którą wskażesz niżej. W kampanii jest zwykle podstawiany automatycznie z poprzedniego etapu."
                },
     "t2_img":  {
-                   "full_help":  "Paczka oryginalnych obrazów dla Z3/PZ1. To dokładnie na tych obrazach wykonano anotacje zapisane w XML. Jeśli paczka leży w Workspace/1_raw_images, system spróbuje odnaleźć ją automatycznie. Inne lokalizacje działają tylko w trybie swobodnym i nie są zalecane."
+                   "full_help":  "Folder oryginalnych obrazów dla Z3/PZ1. To dokładnie te zdjęcia .jpg/.png, na których wykonano anotacje zapisane w XML. Najlepiej, aby paczka leżała w Workspace/1_raw_images/, bo wtedy system może spróbować odnaleźć ją automatycznie. Inne lokalizacje działają w trybie swobodnym, ale są mniej bezpieczne organizacyjnie."
                },
     "t2_cut_start":  {
-                         "full_help":  "Start wycinania tablic w Z3/PZ1. System uruchamia wycinanie tylko dla zgodnej pary: annotations.xml oraz paczki obrazów, na której ten XML bazuje. Wynik to paczka run_XXX z obrazami tablic i plikiem metadata.json."
+                         "full_help":  "Start wycinania tablic w Z3/PZ1. System uruchamia wycinanie tylko dla zgodnej pary: annotations.xml oraz folderu obrazów, na którym ten XML bazuje. Wynikiem jest nowy folder run_XXX w Workspace/3_cropped_characters/ z wyciętymi i zrektyfikowanymi tablicami oraz plikiem metadata.json. Tę paczkę wykorzystujesz potem w Z3/PZ2."
                      },
     "t2_cut_logs":  {
                         "full_help":  "Terminal procesu dla Z3. Pokazuje log wycinania, testów OCR, rankingów i importów, gdy potrzebujesz diagnostyki."
@@ -60,7 +75,7 @@
                        "full_help":  "Lista tablic w Z3/PZ2. Zielony wpis oznacza zgodność z ground truth, czerwony wymaga poprawy. Znaki w nawiasach kwadratowych są składane w kolejności osi X."
                    },
     "t2_canvas":  {
-                      "full_help":  "Canvas podglądu tablicy w Z3/PZ2. Pokazuje obraz tablicy oraz położenie znaków wykrytych przez OCR lub YOLO. W zależności od wybranego trybu możesz porównać wynik końcowy z surowymi boxami YOLO albo etapem po NMS."
+                      "full_help":  "Canvas podglądu tablicy w Z3/PZ2. Pokazuje obraz tablicy oraz położenie znaków wykrytych przez OCR lub YOLO. Górny pasek canvasa pokazuje w 2 liniach wynik końcowy i źródła boxów dla aktualnego widoku, a same boxy są oznaczane kolorami i badge: OCR, YOLO oraz RES dla YOLO rescue."
                   },
     "t2_preview_run":  {
                            "full_help":  "Folder wyciętych tablic analizowany w Z3/PZ2. Domyślnie system podpowiada produkt zakładki Z3/PZ1 zapisany względnie jako Workspace/3_cropped_characters/run_XXX_*/. Ten folder zawiera wycięte i zrektyfikowane tablice oraz metadata.json utworzone podczas wycinania. W trybie swobodnym możesz wskazać inny folder, ale powinien mieć tę samą strukturę."
@@ -75,13 +90,13 @@
                     "full_help":  "Widok szczegółów znaków. Jeśli jest dostępny w danym narzędziu, pokazuje pojedyncze znaki i informacje pomocnicze."
                 },
     "t2_fast_test":  {
-                         "full_help":  "Uruchamia test OCR dla aktywnej paczki. Wyniki są porównywane z ground truth zapisanym w nazwie zdjęcia."
+                         "full_help":  "Uruchamia test OCR/YOLO dla aktywnej paczki. Wyniki są porównywane z ground truth zapisanym w nazwie zdjęcia. Licznik po prawej stronie paska postępu pokazuje format perfect/przerobione/całość."
                      },
     "t2_rank":  {
                     "full_help":  "Porównuje zapisane presety OCR i wskazuje lidera skuteczności dla bieżącej paczki."
                 },
     "t2_method":  {
-                      "full_help":  "Wybiera metodę rozpoznawania znaków: OCR, YOLO albo tryb łączony. W kampanii wybór powinien odpowiadać aktualnemu torowi modeli."
+                      "full_help":  "Wybiera metodę rozpoznawania znaków: OCR, YOLO albo tryb łączony. W hybrydzie OCR dostarcza tekst, a YOLO może ratować błędne znaki i opcjonalnie poprawiać samą geometrię boxów przez przejęcie ich pozycji. W kampanii wybór powinien odpowiadać aktualnemu torowi modeli."
                   },
     "t2_device":  {
                       "full_help":  "Urządzenie obliczeń dla Z3/PZ2. Auto najpierw próbuje użyć akceleracji GPU/CUDA, a dopiero gdy jej nie ma, spada do CPU. Wpisy cuda pokazują wykrytą kartę, więc możesz świadomie wskazać konkretny GPU."
@@ -132,19 +147,19 @@
                             "full_help":  "Eksportuje dane do paczki CVAT. Używasz tego wtedy, gdy chcesz poprawić błędne tablice ręcznie."
                         },
     "btn_export_yolo":  {
-                            "full_help":  "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu. Możesz filtrować, które strategie perfect mają wejść do eksportu, np. OCR exact, YOLO exact, OCR+YOLO rescue albo materiał manualny. Ta zaakceptowana pula zasila też bilans znaków dla kolejnych iteracji doboru paczki zdjęć."
+                            "full_help":  "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu. Możesz filtrować, które strategie perfect mają wejść do eksportu, np. OCR exact, YOLO exact, OCR+YOLO rescue albo materiał manualny. Eksport może też opcjonalnie od razu podzielić paczkę na train/val/test, aby wynik był gotowym datasetem treningowym. Ta zaakceptowana pula zasila też bilans znaków dla kolejnych iteracji doboru paczki zdjęć."
                         },
     "btn_import_cvat":  {
                             "full_help":  "Importuje poprawki z CVAT z powrotem do metadata.json i aktualizuje statusy tablic. Poprawne importy mogą później zasilić wspólną pulę gold/manual i wpłynąć na dobór następnych porcji danych w E1."
                         },
     "tr_route_panel":  {
-                           "full_help":  "Panel wyboru toru w Z4/PZ1. Najpierw wybierasz, czy dana iteracja prowadzi tor tablic, czy tor znaków."
+                           "full_help":  "Panel wyboru toru w Z4. Najpierw wybierasz, czy chcesz trenować model tablic, czy model znaków tablic. Sam wybór toru nie tworzy datasetu; wskazuje tylko, jakiego typu dataset i model bazowy będą dalej oczekiwane."
                        },
     "tr_route_plate":  {
-                           "full_help":  "Tor tablic w Z4. Buduje dataset YOLO Pose z XML CVAT i folderu obrazów."
+                           "full_help":  "Tor tablic w Z4. Oznacza trening modelu tablic w trybie YOLO Pose. W trybie swobodnym oczekiwany jest gotowy dataset wyeksportowany wcześniej w Z2; ten kafel nie tworzy datasetu, tylko wybiera ścieżkę treningu."
                        },
     "tr_route_char":  {
-                          "full_help":  "Tor znaków w Z4. Dzieli gotowy dataset znaków na train/val i przygotowuje go do treningu YOLO Detect."
+                          "full_help":  "Tor znaków w Z4. Oznacza trening modelu znaków tablic w trybie YOLO Detect. W trybie swobodnym oczekiwany jest gotowy dataset wyeksportowany wcześniej w Z3/PZ3; ten kafel nie tworzy datasetu, tylko wybiera ścieżkę treningu."
                       },
     "tr_builder_log":  {
                            "full_help":  "Pokazuje lub ukrywa terminal procesu dla budowy datasetu w Z4/PZ1."
@@ -171,25 +186,31 @@
                         "full_help":  "Tworzy dataset tablic z XML CVAT i obrazów aktywnej iteracji."
                     },
     "tr_train_ds":  {
-                        "full_help":  "Gotowy dataset treningowy dla Z4/PZ2. Wskaż katalog zawierający plik data.yaml. data.yaml to plik konfiguracyjny YOLO opisujący splity train/val/test oraz klasy. W trybie swobodnym zwykle bierzesz go z datasetu przygotowanego w Z4/PZ1 i szukasz w sztywnym drzewie Workspace, przede wszystkim w katalogu Workspace/4_training_datasets/."
+                        "full_help":  "Gotowy dataset treningowy dla Z4. Wskaż caly katalog zawierający plik data.yaml oraz foldery images/ i labels/. data.yaml opisuje splity train/val/test i listę klas YOLO. W trybie swobodnym dataset nie powstaje tutaj: bierzesz go wcześniej z eksportu w Z2 albo Z3/PZ3. Jeśli dataset nie pasuje do wybranego toru treningu, start zostanie zablokowany."
                     },
     "tr_train_base":  {
-                          "full_help":  "Model bazowy do treningu. Może to być model domyślny albo własny checkpoint .pt."
+                          "full_help":  "Model bazowy do treningu albo fine-tuningu. Dla tablic wybieraj modele YOLO Pose, a dla znaków tablic zwykłe modele YOLO Detect. Możesz wskazać model domyślny albo własny checkpoint .pt. Typ modelu musi być zgodny z wybranym torem i z datasetem."
                       },
+    "tr_train_params":  {
+                            "full_help":  "Blok podstawowych parametrów startowych YOLO. Największy wpływ na szybkość, zużycie VRAM i jakość mają: liczba epok, batch size, rozdzielczość treningu, learning rate i urządzenie. Najbezpieczniej zaczynać od konserwatywnych ustawień sugerowanych pod wykryty sprzęt, a dopiero potem je zwiększać."
+                        },
     "tr_train_ep":  {
-                        "full_help":  "Liczba epok treningu. Więcej epok oznacza dłuższe uczenie, ale nie zawsze lepszy wynik."
+                        "full_help":  "Liczba epok treningu, czyli ile razy model przejdzie przez zbiór treningowy. Więcej epok wydłuża trening i może poprawić wynik, ale po pewnym czasie może też zacząć przeuczać model. Dla fine-tuningu sensowny start to zwykle około 80-150 epok, a potem decyzja na podstawie wykresów i walidacji."
                     },
     "tr_train_bs":  {
-                        "full_help":  "Batch size dla treningu. Jest związany z szybkością i zużyciem pamięci GPU."
+                        "full_help":  "Batch size to liczba obrazów przetwarzanych jednocześnie w jednej iteracji. Większy batch zwykle przyspiesza trening i stabilizuje uczenie, ale mocno zwiększa użycie VRAM. Jeśli pojawia się błąd braku pamięci GPU, najpierw zmniejsz batch size. Zbyt mały batch nadal działa, ale trening bywa wtedy wolniejszy i bardziej szumiący."
                     },
     "tr_train_imgsz":  {
-                           "full_help":  "Rozdzielczość treningu. Dla małych obiektów i liter ma duży wpływ na wynik."
+                           "full_help":  "Rozdzielczość treningu YOLO w pikselach. Większa rozdzielczość poprawia widoczność małych obiektów, takich jak znaki na tablicach, ale wyraźnie zwiększa czas treningu i zużycie VRAM. Jeśli brakuje pamięci, po batch size to właśnie imgsz jest drugim parametrem do obniżenia. Dla znaków i małych detali 640 to dobry punkt startowy, a wyższe wartości mają sens dopiero gdy sprzęt na to pozwala."
                        },
     "tr_train_lr0":  {
-                         "full_help":  "Początkowy learning rate treningu. Przy niestabilnym uczeniu zwykle warto go obniżyć."
+                         "full_help":  "Początkowy learning rate, czyli jak mocno model aktualizuje wagi na starcie treningu. Zbyt wysoki lr0 może powodować niestabilność, skaczące straty albo pogorszenie wyników. Zbyt niski lr0 spowalnia uczenie i model adaptuje się zbyt ostrożnie. Dla zwykłego fine-tuningu dobrym początkiem jest około 0.01, a gdy trening jest niestabilny warto zejść np. do 0.005 lub 0.002."
                      },
+    "tr_train_device":  {
+                            "full_help":  "Wybór urządzenia obliczeniowego. Tryb Auto w Z4 preferuje pierwsze dostępne GPU CUDA, a dopiero gdy go nie ma przechodzi na CPU. Lista pokazuje nazwę wykrytej karty i jej pamięć VRAM. Pod polem pojawia się też konserwatywna sugestia parametrów startowych YOLO dla wykrytego sprzętu, głównie batch size i rozdzielczości."
+                        },
     "tr_train_btn":  {
-                         "full_help":  "Start treningu w Z4/PZ2. Po zakończonym treningu system odświeża historię runów i może odblokować zakończenie kroku 4."
+                         "full_help":  "Uruchamia trening na wskazanym gotowym datasecie i wybranym modelu bazowym. Przed startem system sprawdza zgodność toru treningu, datasetu i typu modelu. Po treningu odświeżana jest historia runów, wykresy i artefakty zapisane w katalogu treningów odpowiednim dla wybranego toru."
                      },
     "tr_train_tree":  {
                           "full_help":  "Historia treningów. Pozwala wybierać runy i przeglądać ich stan oraz metryki."
@@ -207,10 +228,10 @@
                             "full_help":  "Przyciski szybkiej nawigacji po sekcjach Historia, Wykresy, Walidacja i Ranking w Z4/PZ2."
                         },
     "tr_train_back":  {
-                          "full_help":  "Powrót z Z4/PZ2 do wyboru toru i budowy datasetu w Z4/PZ1."
+                          "full_help":  "Powrót z Z4/PZ2 do poprzedniego etapu w kampanii. W trybie swobodnym ten element nie bierze udziału w workflow."
                       },
     "tr_train_finish":  {
-                            "full_help":  "Kończy krok 4 w kampanii i wraca do Z1 po udanym domknięciu workflow treningowego."
+                            "full_help":  "Zamyka krok 4 w kampanii po poprawnym zakończeniu workflow treningowego. W trybie swobodnym nie jest to główna akcja robocza."
                         },
     "tr_val_model":  {
                          "full_help":  "Model .pt używany do walidacji w Z4/PZ2."
