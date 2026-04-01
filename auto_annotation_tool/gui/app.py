@@ -1412,7 +1412,7 @@ class AutoAnnotationApp:
     def get_main_tab_label(self, tab_key: str) -> str:
         labels = {
             "campaign": "[Z1] Wizard",
-            "annotation": "[Z2] Autoanotacja",
+            "annotation": "[Z2] Autoanotacja kształtu tablic",
             "characters": "[Z3] Znaki na tablicach",
             "training": "[Z4] Trening i analiza",
             "help": "[Z5] Instrukcja i architektura",
