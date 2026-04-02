@@ -57,7 +57,7 @@
                        "full_help":  "Sekcja źródeł Z3/PZ1. Do wycinania tablic potrzebujesz zawsze dwóch zgodnych wejść: 1) pliku annotations.xml z anotacjami tablic oraz 2) folderu oryginalnych obrazów, na których te anotacje wykonano. To musi być dokładnie ta sama para źródeł. Jeśli paczka obrazów leży w Workspace/1_raw_images/, system spróbuje odnaleźć ją automatycznie."
                    },
     "t2_xml":  {
-                   "full_help":  "Plik annotations.xml używany w Z3/PZ1 do wycinania tablic. To pojedynczy plik XML z anotacjami tablic na obrazach źródłowych. Najczęściej pochodzi z runu Z2 albo z CVAT. Musi opisywać dokładnie tę samą paczkę obrazów, którą wskażesz niżej. W kampanii jest zwykle podstawiany automatycznie z poprzedniego etapu."
+                   "full_help":  "Wskaż plik określający współrzędne tablic na zdjeciach - produkt zakładki [Z2] lub edytora zewnętrznego CVAT."
                },
     "t2_img":  {
                    "full_help":  "Folder oryginalnych obrazów dla Z3/PZ1. To dokładnie te zdjęcia .jpg/.png, na których wykonano anotacje zapisane w XML. Najlepiej, aby paczka leżała w Workspace/1_raw_images/, bo wtedy system może spróbować odnaleźć ją automatycznie. Inne lokalizacje działają w trybie swobodnym, ale są mniej bezpieczne organizacyjnie."

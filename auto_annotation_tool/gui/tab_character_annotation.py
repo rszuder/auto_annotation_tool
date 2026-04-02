@@ -301,7 +301,8 @@ class CharacterAnnotationTab:
         self._update_step3_source_path_lock()
         self._update_preview_path_lock()
         self.reset_subtab_flow()
-        self._schedule_source_binding_refresh(delay_ms=0)
+        if (self.xml_path_var.get() or "").strip() or (self.images_dir_var.get() or "").strip():
+            self._schedule_source_binding_refresh(delay_ms=0)
 
         if not CAMPAIGN.get_active_project_name():
             self._clear_project_bound_session_values(clear_ui=True)
@@ -2969,6 +2970,14 @@ class CharacterAnnotationTab:
         self._apply_gold_export_split_check_style()
         self._apply_plates_legend_style()
         self._apply_preview_info_stats_style()
+        try:
+            status_label = getattr(self, "source_binding_status_lbl", None)
+            self._set_source_binding_status(
+                status_label.cget("text") if status_label is not None else "",
+                getattr(self, "_source_binding_status_tone", "success"),
+            )
+        except Exception:
+            pass
 
         for widget_name in ("ext_log", "test_log_text", "export_console", "import_console"):
             widget = getattr(self, widget_name, None)
@@ -3114,7 +3123,6 @@ class CharacterAnnotationTab:
 
         inline_label_defaults = {
             "ext_status": ("neutral", True),
-            "source_binding_status_lbl": ("warning", False),
             "test_status_lbl": ("neutral", False),
             "test_progress_count_lbl": ("muted", True),
             "winner_name_lbl": ("neutral", True),
@@ -3559,9 +3567,59 @@ class CharacterAnnotationTab:
             self._set_themed_label_state(label, text=text, tone=tone, emphasis=True)
 
     def _set_source_binding_status(self, text: str, tone: str = "warning"):
+        frame = getattr(self, "source_binding_status_frame", None)
+        title_label = getattr(self, "source_binding_status_title_lbl", None)
         label = getattr(self, "source_binding_status_lbl", None)
-        if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
-            self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
+        if frame is None or label is None:
+            return
+
+        has_text = bool(str(text or "").strip())
+        tone_key = str(tone or "").strip().lower()
+        palette = getattr(self.app, "palette", {})
+        base_bg = palette.get("panel_alt", palette.get("panel", "#252526"))
+        default_fg = palette.get("fg", "#f3f3f3")
+        self._source_binding_status_tone = tone_key
+
+        if tone_key == "error":
+            border_color = palette.get("error", "#e74c3c")
+            frame_bg = blend_hex_colors(border_color, base_bg, 0.84)
+            title_fg = border_color
+            text_fg = default_fg
+        else:
+            border_color = palette.get("success", "#2ecc71")
+            frame_bg = palette.get("surface_success", blend_hex_colors(border_color, base_bg, 0.84))
+            title_fg = border_color
+            text_fg = default_fg
+
+        try:
+            if has_text:
+                if not str(frame.winfo_manager()):
+                    frame.pack(fill=tk.X, pady=(0, 10))
+            else:
+                if str(frame.winfo_manager()):
+                    frame.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            frame.configure(bg=frame_bg, highlightbackground=border_color, highlightcolor=border_color)
+        except Exception:
+            pass
+        try:
+            if title_label is not None:
+                title_label.configure(bg=frame_bg, fg=title_fg)
+        except Exception:
+            pass
+        try:
+            label.configure(
+                text=text,
+                bg=frame_bg,
+                fg=text_fg,
+                font=("Segoe UI", 9),
+            )
+        except Exception:
+            if not self._set_inline_status_label_state(label, text=text, tone=tone, emphasis=False):
+                self._set_themed_label_state(label, text=text, tone=tone, emphasis=False)
 
     def _set_test_status(self, text: str, tone: str = "neutral"):
         label = getattr(self, "test_status_lbl", None)
@@ -4199,7 +4257,7 @@ class CharacterAnnotationTab:
             result.update(
                 {
                     "ok": True,
-                    "tone": "success" if recommended else "warning",
+                    "tone": "success",
                     "matched": current_stats["matched"],
                     "total": current_stats["total"],
                     "missing_count": 0,
@@ -5685,7 +5743,7 @@ class CharacterAnnotationTab:
         self.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 0))
 
         self.tab_extract = ttk.Frame(self.main_nb)
-        self.main_nb.add(self.tab_extract, text="[PZ1] Wycinanie tablic")
+        self.main_nb.add(self.tab_extract, text="[PZ1] Wyodrębnianie zaanotowanych tablic")
         self._build_extraction_tab(self.tab_extract)
 
         self.tab_detect = ttk.Frame(self.main_nb)
@@ -5755,7 +5813,7 @@ class CharacterAnnotationTab:
             add="+",
         )
 
-        lf_paths = ttk.LabelFrame(self.extract_left_content, text=" Źródła do wycinania tablic ", padding=15)
+        lf_paths = ttk.LabelFrame(self.extract_left_content, text=" Pliki źródłowe tablic do wyodrębnienia ", padding=15)
         lf_paths.pack(fill=tk.X, pady=(0, 15))
 
         self.extract_paths_intro_lbl = ttk.Label(
@@ -5773,7 +5831,7 @@ class CharacterAnnotationTab:
 
         ttk.Label(
             lf_paths,
-            text="Plik annotations.xml:",
+            text="Plik współrzędnych tablic annotations.xml:",
             font=("Segoe UI", 9, "bold")
         ).pack(anchor=tk.W, pady=(0, 2))
         row_xml = ttk.Frame(lf_paths)
@@ -5791,8 +5849,8 @@ class CharacterAnnotationTab:
         self.extract_xml_hint_lbl = ttk.Label(
             lf_paths,
             text=(
-                "To pojedynczy plik XML z anotacjami tablic. Najczęściej pochodzi z runu Z2 albo z CVAT. "
-                "Musi opisywać dokładnie te same obrazy, które wskażesz poniżej."
+                "Wskaż plik określający współrzędne tablic na zdjeciach - produkt zakładki [Z2] "
+                "lub edytora zewnętrznego CVAT."
             ),
             style="PanelMuted.TLabel",
             justify=tk.LEFT,
@@ -5831,40 +5889,43 @@ class CharacterAnnotationTab:
         )
         self.extract_images_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
-        self.source_binding_status_lbl = tk.Label(
+        self.source_binding_status_frame = tk.Frame(
             lf_paths,
-            text=(
-                "Plik annotations.xml i paczka obrazów są nierozerwalnie powiązane. "
-                "System może automatycznie odnaleźć paczkę w Workspace/1_raw_images/."
-            ),
+            bg="#153424",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#2ecc71",
+            highlightcolor="#2ecc71",
+        )
+        self.source_binding_status_title_lbl = tk.Label(
+            self.source_binding_status_frame,
+            text="Status źródeł",
             justify=tk.LEFT,
             anchor="w",
-            wraplength=430,
+            font=("Segoe UI", 9, "bold"),
+            bg="#153424",
+            fg="#86efac",
             bd=0,
             highlightthickness=0,
         )
-        self.source_binding_status_lbl.pack(fill=tk.X, pady=(0, 6))
-        self._set_source_binding_status(
-            "Plik annotations.xml i paczka obrazów są nierozerwalnie powiązane. "
-            "System może automatycznie odnaleźć paczkę w Workspace/1_raw_images/.",
-            "warning",
-        )
-
-        lf_run = ttk.LabelFrame(self.extract_left_content, text=" Wycinanie tablic ", padding=15)
-        lf_run.pack(fill=tk.X)
-
-        self.extract_result_hint_lbl = ttk.Label(
-            lf_run,
-            text=(
-                "Po kliknięciu Start powstanie nowy folder run_XXX w Workspace/3_cropped_characters/. "
-                "W środku znajdą się wycięte i zrektyfikowane tablice oraz plik metadata.json. "
-                "Ta paczka staje się później źródłem dla Z3/PZ2."
-            ),
-            style="PanelMuted.TLabel",
+        self.source_binding_status_title_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(8, 2))
+        self.source_binding_status_lbl = tk.Label(
+            self.source_binding_status_frame,
+            text="",
             justify=tk.LEFT,
+            anchor="w",
             wraplength=430,
+            bg="#153424",
+            fg="#dcfce7",
+            bd=0,
+            highlightthickness=0,
+            padx=10,
+            pady=0,
         )
-        self.extract_result_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+        self.source_binding_status_lbl.pack(fill=tk.X, padx=0, pady=(0, 8))
+
+        lf_run = ttk.LabelFrame(self.extract_left_content, text=" Wyodrębnij i rektyfikuj tablice ", padding=15)
+        lf_run.pack(fill=tk.X)
 
         self.btn_extract = ttk.Button(lf_run, text="START (Wytnij tablice z paczki)", command=self._run_extraction, style="Accent.TButton")
         self.btn_extract.pack(fill=tk.X, ipady=5)
@@ -5914,6 +5975,9 @@ class CharacterAnnotationTab:
         self.ext_log.web_vbar = self.ext_log_scrollbar
 
         HELP.bind_help(lf_paths, "t2_sources")
+        HELP.bind_help(self.source_binding_status_frame, "t2_sources")
+        HELP.bind_help(self.source_binding_status_title_lbl, "t2_sources")
+        HELP.bind_help(self.source_binding_status_lbl, "t2_sources")
         HELP.bind_help(row_xml, "t2_xml")
         HELP.bind_help(row_img, "t2_img")
         HELP.bind_help(self.btn_extract, "t2_cut_start")

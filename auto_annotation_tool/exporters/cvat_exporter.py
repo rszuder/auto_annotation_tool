@@ -163,7 +163,9 @@ class CVATExporter:
         """Dodaje <polygon>."""
         poly = ET.SubElement(parent, "polygon")
         poly.set("label", "plate")
-        poly.set("source", "auto")
+        manual_source = str(det.attributes.get("manual_source", "") or "").strip().lower()
+        manually_edited = str(det.attributes.get("manually_edited", "") or "").strip().lower() == "true"
+        poly.set("source", "manual" if manually_edited or manual_source else "auto")
         poly.set("occluded", "0")
         poly.set("z_order", "1")
         

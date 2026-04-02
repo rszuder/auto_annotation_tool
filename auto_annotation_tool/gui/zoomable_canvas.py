@@ -6,6 +6,7 @@ Zastosowanie: Podgląd w zakładce Prostowania Tablic.
 """
 
 import tkinter as tk
+from types import SimpleNamespace
 from PIL import Image, ImageTk
 
 
@@ -25,6 +26,8 @@ class ZoomableCanvas(tk.Canvas):
         self.original_image = None  # PIL Image
         self.photo_image = None     # ImageTk.PhotoImage
         self.image_id = None        # Canvas image ID
+        self.overlay_renderer = None
+        self.interaction_delegate = None
         
         # Pan'u - przesuwanie widoku
         self.pan_data = {
@@ -36,6 +39,7 @@ class ZoomableCanvas(tk.Canvas):
         
         # Flaga pokazania tekstu Info
         self.show_info = True
+        self.reset_shortcut_enabled = True
         
         # Bind'y zdarzeń - Zoom
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows
@@ -61,33 +65,173 @@ class ZoomableCanvas(tk.Canvas):
         self.zoom_level = 1.0
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
         self._update_display()
+
+    def set_overlay_renderer(self, renderer):
+        """Ustaw callback rysujący overlay po wyrenderowaniu obrazu."""
+        self.overlay_renderer = renderer
+        if self.original_image is not None:
+            self._update_display()
+
+    def set_interaction_delegate(self, delegate):
+        """Ustaw delegata przejmującego zdarzenia LPM przed domyślnym panem."""
+        self.interaction_delegate = delegate
+
+    def _delegate_interaction(self, action: str, event) -> bool:
+        delegate = getattr(self, "interaction_delegate", None)
+        if delegate is None:
+            return False
+
+        method = getattr(delegate, f"on_zoomable_canvas_{action}", None)
+        if not callable(method):
+            return False
+
+        try:
+            return bool(method(self, event))
+        except Exception:
+            return False
+
+    def _delegate_blocks_pan(self, event) -> bool:
+        return self._delegate_interaction("should_block_pan", event)
+
+    def _normalize_pointer_event(self, event):
+        raw_x = float(getattr(event, "x", 0.0) or 0.0)
+        raw_y = float(getattr(event, "y", 0.0) or 0.0)
+        norm_x = raw_x
+        norm_y = raw_y
+        corrected = False
+        norm_source = "raw"
+        root_x = 0.0
+        root_y = 0.0
+        event_local_x = None
+        event_local_y = None
+        pointer_local_x = None
+        pointer_local_y = None
+
+        try:
+            root_x = float(self.winfo_rootx())
+            root_y = float(self.winfo_rooty())
+        except Exception:
+            root_x = 0.0
+            root_y = 0.0
+
+        try:
+            if hasattr(event, "x_root") and hasattr(event, "y_root"):
+                event_local_x = float(getattr(event, "x_root", 0.0) or 0.0) - root_x
+                event_local_y = float(getattr(event, "y_root", 0.0) or 0.0) - root_y
+        except Exception:
+            event_local_x = None
+            event_local_y = None
+
+        try:
+            pointer_local_x = float(self.winfo_pointerx()) - root_x
+            pointer_local_y = float(self.winfo_pointery()) - root_y
+        except Exception:
+            pointer_local_x = None
+            pointer_local_y = None
+
+        if pointer_local_x is not None and pointer_local_y is not None:
+            if abs(pointer_local_x - raw_x) > 1.5 or abs(pointer_local_y - raw_y) > 1.5:
+                norm_x = pointer_local_x
+                norm_y = pointer_local_y
+                corrected = True
+                norm_source = "pointer"
+        elif event_local_x is not None and event_local_y is not None:
+            if abs(event_local_x - raw_x) > 1.5 or abs(event_local_y - raw_y) > 1.5:
+                norm_x = event_local_x
+                norm_y = event_local_y
+                corrected = True
+                norm_source = "event_root"
+
+        data = {}
+        try:
+            data.update(getattr(event, "__dict__", {}) or {})
+        except Exception:
+            pass
+
+        for attr in ("widget", "type", "state", "delta", "num", "x_root", "y_root"):
+            if attr not in data and hasattr(event, attr):
+                try:
+                    data[attr] = getattr(event, attr)
+                except Exception:
+                    pass
+
+        data["x"] = norm_x
+        data["y"] = norm_y
+        data["raw_x"] = raw_x
+        data["raw_y"] = raw_y
+        data["event_local_x"] = event_local_x
+        data["event_local_y"] = event_local_y
+        data["pointer_local_x"] = pointer_local_x
+        data["pointer_local_y"] = pointer_local_y
+        data["canvas_root_x"] = root_x
+        data["canvas_root_y"] = root_y
+        try:
+            data["canvas_x"] = float(self.canvasx(norm_x))
+            data["canvas_y"] = float(self.canvasy(norm_y))
+            data["canvas_offset_x"] = float(data["canvas_x"] - norm_x)
+            data["canvas_offset_y"] = float(data["canvas_y"] - norm_y)
+        except Exception:
+            data["canvas_x"] = norm_x
+            data["canvas_y"] = norm_y
+            data["canvas_offset_x"] = 0.0
+            data["canvas_offset_y"] = 0.0
+        data["norm_source"] = norm_source
+        data["normalized_from_root"] = corrected
+        return SimpleNamespace(**data)
     
     def _on_mousewheel(self, event):
         """Obsługa zoom'u kółkiem myszy."""
         if self.original_image is None:
             return
-        
-        # Określ kierunek
-        delta = event.delta if hasattr(event, 'delta') else (-event.num + 5) * 120
-        
-        if delta < 0:  # Scroll down
-            self.zoom_level /= self.zoom_step
-        else:  # Scroll up
-            self.zoom_level *= self.zoom_step
-        
-        # Ogranicz zoom
-        self.zoom_level = max(self.min_zoom, min(self.max_zoom, self.zoom_level))
-        
+
+        event = self._normalize_pointer_event(event)
+        anchor_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
+        anchor_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
+        img_x, img_y = self.canvas_to_image_coords(anchor_x, anchor_y, clamp=False)
+
+        raw_delta = event.delta if hasattr(event, 'delta') else (-event.num + 5) * 120
+        steps = max(1, int(abs(raw_delta) / 120)) if raw_delta else 1
+        zoom_factor = float(self.zoom_step) ** steps
+
+        if raw_delta < 0:
+            new_zoom = float(self.zoom_level) / zoom_factor
+        else:
+            new_zoom = float(self.zoom_level) * zoom_factor
+
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+        if abs(new_zoom - float(self.zoom_level)) < 1e-9:
+            return
+
+        self.zoom_level = new_zoom
+        self.pan_data['x'] = anchor_x - (float(img_x) * float(self.zoom_level))
+        self.pan_data['y'] = anchor_y - (float(img_y) * float(self.zoom_level))
         self._update_display()
+        self._delegate_interaction("zoom", event)
     
     def _on_pan_press(self, event):
         """Początek przeciągania (naciśnięcie LPM)."""
+        event = self._normalize_pointer_event(event)
+        if self._delegate_interaction("press", event):
+            return
+        if self._delegate_blocks_pan(event):
+            self.pan_data['press_x'] = None
+            self.pan_data['press_y'] = None
+            return
+
         self.pan_data['press_x'] = event.x
         self.pan_data['press_y'] = event.y
         self.config(cursor="hand2")
     
     def _on_pan_motion(self, event):
         """Przeciąganie widoku (ruch myszy z LPM)."""
+        event = self._normalize_pointer_event(event)
+        if self._delegate_interaction("drag", event):
+            return
+        if self._delegate_blocks_pan(event):
+            self.pan_data['press_x'] = None
+            self.pan_data['press_y'] = None
+            return
+
         if self.pan_data['press_x'] is None:
             return
         
@@ -107,12 +251,22 @@ class ZoomableCanvas(tk.Canvas):
     
     def _on_pan_release(self, event):
         """Koniec przeciągania (zwolnienie LPM)."""
+        event = self._normalize_pointer_event(event)
+        if self._delegate_interaction("release", event):
+            return
+        if self._delegate_blocks_pan(event):
+            self.pan_data['press_x'] = None
+            self.pan_data['press_y'] = None
+            return
+
         self.pan_data['press_x'] = None
         self.pan_data['press_y'] = None
         self.config(cursor=self.current_cursor)
     
     def _on_reset_view(self, event):
         """Reset zoom i pan (naciśnięcie Home lub R)."""
+        if event is not None and not bool(getattr(self, "reset_shortcut_enabled", True)):
+            return
         self.zoom_level = 1.0
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
         self._update_display()
@@ -156,8 +310,20 @@ class ZoomableCanvas(tk.Canvas):
         
         # Aktualizuj scroll region
         self.configure(scrollregion=self.bbox("all"))
-        
-        # Opcjonalnie: wyświetl info na canvas
+
+        self._draw_overlay()
+
+    def _draw_overlay(self):
+        if self.original_image is None:
+            return
+
+        renderer = getattr(self, "overlay_renderer", None)
+        if callable(renderer):
+            try:
+                renderer(self)
+            except Exception:
+                pass
+
         if self.show_info:
             vx = self.canvasx(10)
             vy = self.canvasy(10)
@@ -166,20 +332,28 @@ class ZoomableCanvas(tk.Canvas):
             help_text = "[Scroll: Zoom] [Drag: Pan] [R: Reset] [I: Ukryj]"
             vy_help = self.canvasy(30)
 
-            # Rysuj obrys tekstu w ośmiu kierunkach, aby zachować czytelność na dowolnym tle.
-            offsets = [(-2,-2), (0,-2), (2,-2), (-2,0), (2,0), (-2,2), (0,2), (2,2)]
+            offsets = [(-2, -2), (0, -2), (2, -2), (-2, 0), (2, 0), (-2, 2), (0, 2), (2, 2)]
             
-            # 1. Rysujemy czarną ramkę dla informacji o Zoomie
             for dx, dy in offsets:
                 self.create_text(vx + dx, vy + dy, text=info_text, fill="black", font=("Arial", 11, "bold"), anchor="nw", tags="info")
-            # Główny napis na wierzch (Zoom)
             self.create_text(vx, vy, text=info_text, fill="#f1c40f", font=("Arial", 11, "bold"), anchor="nw", tags="info")
             
-            # 2. Rysujemy czarną ramkę dla Pomocy
             for dx, dy in offsets:
                 self.create_text(vx + dx, vy_help + dy, text=help_text, fill="black", font=("Arial", 9, "bold"), anchor="nw", tags="info")
-            # Główny napis na wierzch (Pomoc)
             self.create_text(vx, vy_help, text=help_text, fill="white", font=("Arial", 9, "bold"), anchor="nw", tags="info")
+
+    def refresh_overlay_only(self):
+        """Przerysuj tylko overlay bez ponownego skalowania całego obrazu."""
+        if self.original_image is None:
+            return
+
+        if self.image_id is None or self.photo_image is None:
+            self._update_display()
+            return
+
+        self.delete("preview_overlay")
+        self.delete("info")
+        self._draw_overlay()
     
     def get_zoom_level(self):
         """Zwróć obecny poziom zoom'u."""
@@ -189,6 +363,75 @@ class ZoomableCanvas(tk.Canvas):
         """Ustaw poziom zoom'u bezpośrednio."""
         self.zoom_level = max(self.min_zoom, min(self.max_zoom, level))
         self._update_display()
+
+    def get_view_state(self):
+        """Zwróć bieżący stan widoku (zoom + pozycja obrazu)."""
+        state = {
+            "zoom_level": float(self.zoom_level),
+            "origin_x": float(self.pan_data.get('x', 0.0)),
+            "origin_y": float(self.pan_data.get('y', 0.0)),
+        }
+        try:
+            self.update_idletasks()
+            canvas_width = max(1.0, float(self.winfo_width()))
+            canvas_height = max(1.0, float(self.winfo_height()))
+            center_img_x, center_img_y = self.canvas_to_image_coords(canvas_width / 2.0, canvas_height / 2.0, clamp=False)
+            state["center_img_x"] = float(center_img_x)
+            state["center_img_y"] = float(center_img_y)
+            state["canvas_width"] = float(canvas_width)
+            state["canvas_height"] = float(canvas_height)
+        except Exception:
+            pass
+        return state
+
+    def set_view_state(self, view_state, redraw: bool = True):
+        """Ustaw kompletny stan widoku (zoom + pozycja obrazu)."""
+        if not isinstance(view_state, dict):
+            return False
+
+        try:
+            zoom_level = float(view_state.get("zoom_level", self.zoom_level))
+        except (TypeError, ValueError):
+            return False
+
+        self.zoom_level = max(self.min_zoom, min(self.max_zoom, zoom_level))
+        origin_x = float(self.pan_data.get('x', 0.0))
+        origin_y = float(self.pan_data.get('y', 0.0))
+        try:
+            if "center_img_x" in view_state and "center_img_y" in view_state:
+                self.update_idletasks()
+                canvas_width = max(1.0, float(self.winfo_width()))
+                canvas_height = max(1.0, float(self.winfo_height()))
+                center_img_x = float(view_state.get("center_img_x", 0.0))
+                center_img_y = float(view_state.get("center_img_y", 0.0))
+                origin_x = (canvas_width / 2.0) - (center_img_x * self.zoom_level)
+                origin_y = (canvas_height / 2.0) - (center_img_y * self.zoom_level)
+            else:
+                origin_x = float(view_state.get("origin_x", self.pan_data.get('x', 0.0)))
+                origin_y = float(view_state.get("origin_y", self.pan_data.get('y', 0.0)))
+        except (TypeError, ValueError):
+            return False
+
+        self.pan_data = {
+            'x': origin_x,
+            'y': origin_y,
+            'press_x': None,
+            'press_y': None
+        }
+        if redraw:
+            self._update_display()
+        return True
+
+    def set_view(self, zoom_level: float, origin_x: float, origin_y: float, redraw: bool = True):
+        """Ustaw zoom i origin obrazu w jednym kroku."""
+        return self.set_view_state(
+            {
+                "zoom_level": float(zoom_level),
+                "origin_x": float(origin_x),
+                "origin_y": float(origin_y),
+            },
+            redraw=redraw,
+        )
     
     def reset_view(self):
         """Reset widoku (zoom + pan)."""
@@ -232,3 +475,48 @@ class ZoomableCanvas(tk.Canvas):
         """
         self.original_image = pil_image
         self._update_display()
+
+    def get_image_origin(self):
+        """Zwróć pozycję lewego górnego rogu obrazu na canvasie."""
+        return float(self.pan_data.get('x', 0.0)), float(self.pan_data.get('y', 0.0))
+
+    def get_display_image_size(self):
+        """Zwróć rozmiar obrazu po uwzględnieniu bieżącego zoomu."""
+        if self.original_image is None:
+            return 0.0, 0.0
+        return (
+            float(self.original_image.width) * float(self.zoom_level),
+            float(self.original_image.height) * float(self.zoom_level),
+        )
+
+    def image_to_canvas_coords(self, x: float, y: float):
+        """Przelicz współrzędne obrazu na współrzędne canvasa."""
+        origin_x, origin_y = self.get_image_origin()
+        return (
+            origin_x + (float(x) * float(self.zoom_level)),
+            origin_y + (float(y) * float(self.zoom_level)),
+        )
+
+    def canvas_to_image_coords(self, x: float, y: float, clamp: bool = False):
+        """Przelicz współrzędne canvasa na współrzędne obrazu."""
+        origin_x, origin_y = self.get_image_origin()
+        if float(self.zoom_level) == 0.0:
+            img_x, img_y = 0.0, 0.0
+        else:
+            img_x = (float(x) - origin_x) / float(self.zoom_level)
+            img_y = (float(y) - origin_y) / float(self.zoom_level)
+
+        if clamp and self.original_image is not None:
+            img_x = min(max(0.0, img_x), max(0.0, float(self.original_image.width) - 1.0))
+            img_y = min(max(0.0, img_y), max(0.0, float(self.original_image.height) - 1.0))
+        return img_x, img_y
+
+    def point_is_inside_image(self, x: float, y: float) -> bool:
+        """Sprawdź, czy punkt canvasa leży na obszarze obrazu."""
+        if self.original_image is None:
+            return False
+        img_x, img_y = self.canvas_to_image_coords(x, y, clamp=False)
+        return (
+            0.0 <= img_x <= max(0.0, float(self.original_image.width) - 1.0)
+            and 0.0 <= img_y <= max(0.0, float(self.original_image.height) - 1.0)
+        )

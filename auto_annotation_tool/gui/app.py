@@ -166,9 +166,14 @@ class AutoAnnotationApp:
         self._menu_escape_bind_id = None
         self._help_scroll_ctrl_down = False
         self._help_scroll_alt_down = False
-        self._help_panel_default_height = 2
+        self._help_panel_default_height = 1
         self._help_panel_expanded = False
         self._help_panel_apply_in_progress = False
+        self._help_overlay_place_after_id = None
+        self._help_overlay_forced_visible = False
+        self._help_overlay_forced_text = ""
+        self._help_panel_message_prefix = "[HELP/CTRL+ALT]"
+        self._status_full_text = ""
         self.tabs = {}
         self._closing_in_progress = False
 
@@ -190,7 +195,7 @@ class AutoAnnotationApp:
         self.info_panel_frame.pack(side=tk.BOTTOM, fill=tk.X)
         
         self.status_text = tk.Text(
-            self.info_panel_frame, height=2, wrap=tk.WORD, 
+            self.info_panel_frame, height=1, wrap=tk.NONE, 
             bg="#050505",
             bd=0,
             relief=tk.FLAT,
@@ -199,15 +204,56 @@ class AutoAnnotationApp:
             insertbackground="#f7f7f7",
             highlightthickness=0
         )
-        self.status_text.pack(fill=tk.X, padx=10, pady=6)
-        self.status_text.insert(tk.END, self.default_status_message)
+        self.status_text.pack(fill=tk.X, padx=10, pady=4)
+        self.status_text.insert(tk.END, self._format_help_panel_message(self.default_status_message))
         self.status_text.config(state=tk.DISABLED)
         self.status_text.bind("<Configure>", self._on_help_panel_text_configure, add="+")
+        self.help_overlay_frame = tk.Frame(
+            root,
+            bg="#112235",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#4aa3ff",
+            highlightcolor="#4aa3ff"
+        )
+        self.help_overlay_title_lbl = tk.Label(
+            self.help_overlay_frame,
+            text="Rozwinieta pomoc  |  CTRL + ALT lub PPM",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 9, "bold"),
+            bg="#112235",
+            fg="#dcefff",
+            bd=0,
+            highlightthickness=0
+        )
+        self.help_overlay_title_lbl.pack(fill=tk.X, padx=12, pady=(10, 4))
+        self.help_overlay_text = tk.Message(
+            self.help_overlay_frame,
+            text=self._format_help_panel_message(self.default_status_message),
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 10),
+            bg="#112235",
+            fg="#f7f7f7",
+            width=560,
+            padx=0,
+            pady=0
+        )
+        self.help_overlay_text.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        for widget in (self.help_overlay_frame, self.help_overlay_title_lbl, self.help_overlay_text):
+            try:
+                widget.bind("<ButtonPress-1>", self._on_help_overlay_primary_click, add="+")
+            except Exception:
+                pass
+        self._status_full_text = self._format_help_panel_message(self.default_status_message)
         self._bind_help_panel_shortcuts()
         self._apply_help_panel_visual_state()
         
         # Podpinamy globalny menedżer pomocy
         HELP.status_updater = self.update_status
+        HELP.overlay_presenter = self.show_context_help_overlay
+        HELP.overlay_dismisser = self.hide_context_help_overlay
         
         # 2. Tworzenie Notatnika z zakładkami
         self.notebook = ttk.Notebook(root)
@@ -217,10 +263,11 @@ class AutoAnnotationApp:
         self._apply_theme_to_tabs()
 
         # główna blokada działa przez disabled tabs
-        self.notebook.bind("<<NotebookTabChanged>>", self._guard_campaign_navigation)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_main_notebook_tab_changed)
 
         # początkowa synchronizacja stanów zakładek
         self.update_campaign_tab_access()
+        self._restore_active_main_tab_preference()
 
         # Po starcie pokaż informację o aktywnym projekcie, jeśli aplikacja wznawia tryb kampanii.
         try:
@@ -253,6 +300,51 @@ class AutoAnnotationApp:
                 SESSION.save_session()
         except Exception:
             pass
+
+    def _is_free_mode_session_context(self) -> bool:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_project = CAMPAIGN.get_active_project_name()
+        except Exception:
+            active_project = None
+
+        return bool(self.campaign_free_mode) or not active_project
+
+    def _load_active_main_tab_preference(self) -> str:
+        try:
+            if not SESSION:
+                return "annotation"
+            saved = str(SESSION.get("ui", "active_main_tab", "annotation") or "").strip()
+            return saved if saved in self.tabs else "annotation"
+        except Exception:
+            return "annotation"
+
+    def _save_active_main_tab_preference(self, tab_key: str | None = None):
+        try:
+            if not SESSION or not self._is_free_mode_session_context():
+                return
+
+            selected_key = tab_key or self._get_selected_tab_key()
+            if not selected_key or selected_key not in self.tabs:
+                return
+
+            SESSION.set("ui", "active_main_tab", selected_key)
+            SESSION.save_session()
+        except Exception as e:
+            logger.debug(f"Nie udalo sie zapisac ostatniej zakladki: {e}")
+
+    def _restore_active_main_tab_preference(self):
+        if not self._is_free_mode_session_context():
+            return
+
+        tab_key = self._load_active_main_tab_preference()
+        if tab_key not in self.tabs:
+            return
+
+        try:
+            self.notebook.select(str(self.tabs[tab_key].frame))
+        except Exception as e:
+            logger.debug(f"Nie udalo sie przywrocic ostatniej zakladki: {e}")
 
     def _is_guided_style(self, style_name: str) -> bool:
         return style_name in {
@@ -2121,6 +2213,16 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
+        try:
+            self.root.bind_all("<ButtonPress-1>", self._dismiss_forced_help_overlay, add="+")
+        except Exception:
+            pass
+
+        try:
+            self.root.bind_all("<Escape>", self._dismiss_forced_help_overlay, add="+")
+        except Exception:
+            pass
+
     def _set_help_scroll_modifier_state(self, modifier: str, pressed: bool):
         if modifier == "ctrl":
             self._help_scroll_ctrl_down = bool(pressed)
@@ -2131,6 +2233,46 @@ class AutoAnnotationApp:
     def _reset_help_scroll_modifier_state(self, event=None):
         self._help_scroll_ctrl_down = False
         self._help_scroll_alt_down = False
+        self._apply_help_panel_visual_state()
+
+    def _dismiss_forced_help_overlay(self, event=None):
+        if bool(getattr(self, "_help_overlay_forced_visible", False)):
+            self.hide_context_help_overlay()
+            return "break"
+
+    def _on_help_overlay_primary_click(self, event=None):
+        if not bool(getattr(self, "_help_overlay_forced_visible", False)):
+            return None
+        self.hide_context_help_overlay()
+        return "break"
+
+    def show_context_help_overlay(self, message: str, icon: str = "help"):
+        formatted_message = self._format_help_panel_message(message, icon=icon)
+        self._status_full_text = formatted_message
+        self._help_overlay_forced_text = formatted_message
+        self._help_overlay_forced_visible = True
+        self._apply_help_panel_visual_state()
+        try:
+            self.help_overlay_frame.grab_set()
+        except Exception:
+            pass
+
+    def hide_context_help_overlay(self):
+        if not bool(getattr(self, "_help_overlay_forced_visible", False)):
+            return
+
+        self._help_overlay_forced_visible = False
+        self._help_overlay_forced_text = ""
+        try:
+            current_grab = self.root.grab_current()
+        except Exception:
+            current_grab = None
+
+        try:
+            if current_grab is self.help_overlay_frame:
+                self.help_overlay_frame.grab_release()
+        except Exception:
+            pass
         self._apply_help_panel_visual_state()
 
     @staticmethod
@@ -2167,10 +2309,34 @@ class AutoAnnotationApp:
 
         return bool(tracked_ctrl_down and tracked_alt_down)
 
-    def _count_help_panel_display_lines(self) -> int:
+    def _format_help_panel_message(self, message: str, icon: str | None = None) -> str:
+        base_prefix = str(getattr(self, "_help_panel_message_prefix", "[HELP/CTRL+ALT]")).strip()
+        clean_message = str(message or "").strip()
+        default_message = str(getattr(self, "default_status_message", "") or "").strip()
+
+        if not clean_message:
+            clean_message = default_message
+
+        if clean_message.startswith(base_prefix):
+            return clean_message
+
+        if clean_message == default_message or not icon:
+            return f"{base_prefix} {clean_message}".strip()
+
+        prefixes = {
+            "help": "[POMOC]",
+            "warning": "[UWAGA]",
+            "error": "[BLAD]",
+            "success": "[OK]",
+            "info": "[INFO]",
+        }
+        severity_prefix = prefixes.get(icon, "[INFO]").strip()
+        return f"{base_prefix} {severity_prefix} {clean_message}".strip()
+
+    def _get_help_strip_available_width(self) -> int:
         widget = getattr(self, "status_text", None)
         if widget is None:
-            return int(getattr(self, "_help_panel_default_height", 2) or 2)
+            return 320
 
         try:
             self.root.update_idletasks()
@@ -2178,33 +2344,172 @@ class AutoAnnotationApp:
             pass
 
         try:
-            counted = widget.count("1.0", "end-1c", "displaylines")
-            if counted:
-                return max(int(self._help_panel_default_height), int(counted[0]) + 1)
+            width = int(widget.winfo_width())
+        except Exception:
+            width = 0
+
+        return max(180, width - 24)
+
+    def _measure_help_text_width(self, text: str) -> int:
+        widget = getattr(self, "status_text", None)
+        if widget is None:
+            return len(str(text or "")) * 7
+
+        try:
+            font_obj = tkfont.Font(font=widget.cget("font"))
+        except Exception:
+            font_obj = tkfont.Font(self.root, family="Segoe UI", size=10)
+
+        return int(font_obj.measure(str(text or "")))
+
+    def _build_help_strip_text(self, text: str) -> str:
+        full_text = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+        if not full_text:
+            return ""
+
+        compact_prefix = str(getattr(self, "_help_panel_message_prefix", "[HELP/CTRL+ALT]")).strip()
+        hint_suffix = "..."
+        available_width = self._get_help_strip_available_width()
+        full_width = self._measure_help_text_width(full_text)
+        if full_width <= available_width:
+            return full_text
+
+        suffix = hint_suffix
+        suffix_width = self._measure_help_text_width(suffix)
+        if suffix_width >= available_width:
+            return compact_prefix
+
+        low = 0
+        high = len(full_text)
+        best = ""
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = full_text[:mid].rstrip() + suffix
+            if self._measure_help_text_width(candidate) <= available_width:
+                best = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        return best or compact_prefix
+
+    def _set_help_overlay_visible(self, visible: bool):
+        overlay = getattr(self, "help_overlay_frame", None)
+        if overlay is None:
+            return
+
+        if visible:
+            self._schedule_help_overlay_placement()
+        else:
+            try:
+                overlay.place_forget()
+            except Exception:
+                pass
+
+    def _schedule_help_overlay_placement(self):
+        pending = getattr(self, "_help_overlay_place_after_id", None)
+        if pending:
+            try:
+                self.root.after_cancel(pending)
+            except Exception:
+                pass
+        try:
+            self._help_overlay_place_after_id = self.root.after_idle(self._place_help_overlay)
+        except Exception:
+            self._help_overlay_place_after_id = None
+
+    def _place_help_overlay(self):
+        self._help_overlay_place_after_id = None
+        overlay = getattr(self, "help_overlay_frame", None)
+        message = getattr(self, "help_overlay_text", None)
+        info_panel = getattr(self, "info_panel_frame", None)
+        if overlay is None or message is None or info_panel is None:
+            return
+
+        if not bool(getattr(self, "_help_panel_expanded", False)):
+            try:
+                overlay.place_forget()
+            except Exception:
+                pass
+            return
+
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        root_w = max(640, int(self.root.winfo_width() or 0))
+        overlay_w = min(760, max(420, int(root_w * 0.52)))
+        wrap_w = max(320, overlay_w - 24)
+
+        try:
+            message.configure(width=wrap_w)
         except Exception:
             pass
 
         try:
-            return max(
-                int(self._help_panel_default_height),
-                int(float(str(widget.index("end-1c")).split(".")[0])) + 1,
-            )
+            overlay.update_idletasks()
         except Exception:
-            return int(getattr(self, "_help_panel_default_height", 2) or 2)
+            pass
+
+        try:
+            overlay_h = int(overlay.winfo_reqheight())
+        except Exception:
+            overlay_h = 180
+
+        try:
+            info_panel_h = int(info_panel.winfo_height() or 0)
+        except Exception:
+            info_panel_h = 0
+
+        x = max(12, int((root_w - overlay_w) / 2))
+        y = max(12, int(self.root.winfo_height() - info_panel_h - overlay_h - 14))
+
+        try:
+            overlay.place(x=x, y=y, width=overlay_w, height=overlay_h)
+            overlay.lift()
+        except Exception:
+            pass
+
+    def _render_help_panel_text(self):
+        widget = getattr(self, "status_text", None)
+        if widget is None:
+            return
+
+        display_text = self._build_help_strip_text(getattr(self, "_status_full_text", ""))
+        try:
+            current_text = widget.get("1.0", tk.END).strip()
+        except Exception:
+            current_text = None
+
+        try:
+            if current_text != display_text:
+                widget.config(state=tk.NORMAL)
+                widget.delete("1.0", tk.END)
+                widget.insert(tk.END, display_text)
+                widget.yview_moveto(0.0)
+                widget.config(state=tk.DISABLED)
+        except Exception:
+            pass
 
     def _apply_help_panel_visual_state(self):
         widget = getattr(self, "status_text", None)
         frame = getattr(self, "info_panel_frame", None)
-        if widget is None or frame is None or bool(getattr(self, "_help_panel_apply_in_progress", False)):
+        overlay = getattr(self, "help_overlay_frame", None)
+        overlay_title = getattr(self, "help_overlay_title_lbl", None)
+        overlay_text = getattr(self, "help_overlay_text", None)
+        if widget is None or frame is None or overlay is None or bool(getattr(self, "_help_panel_apply_in_progress", False)):
             return
 
         self._help_panel_apply_in_progress = True
-        expanded = bool(self._help_scroll_ctrl_down and self._help_scroll_alt_down)
+        expanded = bool(
+            (self._help_scroll_ctrl_down and self._help_scroll_alt_down)
+            or getattr(self, "_help_overlay_forced_visible", False)
+        )
         self._help_panel_expanded = expanded
 
-        panel_bg = "navy" if expanded else "#050505"
+        panel_bg = "#07111a" if expanded else "#050505"
         text_fg = "#f7f7f7"
-        target_height = self._count_help_panel_display_lines() if expanded else int(self._help_panel_default_height)
         try:
             try:
                 frame.configure(bg=panel_bg)
@@ -2216,17 +2521,59 @@ class AutoAnnotationApp:
                     bg=panel_bg,
                     fg=text_fg,
                     insertbackground=text_fg,
-                    height=max(int(self._help_panel_default_height), int(target_height)),
+                    height=max(1, int(self._help_panel_default_height)),
                 )
                 widget.yview_moveto(0.0)
             except Exception:
                 pass
+
+            try:
+                overlay.configure(
+                    bg="#112235",
+                    highlightbackground="#4aa3ff",
+                    highlightcolor="#4aa3ff",
+                )
+            except Exception:
+                pass
+
+            try:
+                if overlay_title is not None:
+                    overlay_title.configure(
+                        bg="#112235",
+                        fg="#dcefff",
+                        text="Rozwinieta pomoc  |  PPM lub ESC"
+                        if bool(getattr(self, "_help_overlay_forced_visible", False))
+                        else "Rozwinieta pomoc  |  CTRL + ALT lub PPM",
+                    )
+            except Exception:
+                pass
+
+            try:
+                if overlay_text is not None:
+                    overlay_body = str(
+                        getattr(self, "_help_overlay_forced_text", "")
+                        if bool(getattr(self, "_help_overlay_forced_visible", False))
+                        else (getattr(self, "_status_full_text", "") or self.default_status_message)
+                    )
+                    overlay_text.configure(
+                        bg="#112235",
+                        fg="#f7f7f7",
+                        text=overlay_body,
+                    )
+            except Exception:
+                pass
+
+            self._render_help_panel_text()
+            self._set_help_overlay_visible(expanded)
         finally:
             self._help_panel_apply_in_progress = False
 
     def _on_help_panel_text_configure(self, event=None):
-        if bool(getattr(self, "_help_panel_expanded", False)) and not bool(getattr(self, "_help_panel_apply_in_progress", False)):
-            self._apply_help_panel_visual_state()
+        if bool(getattr(self, "_help_panel_apply_in_progress", False)):
+            return
+        self._render_help_panel_text()
+        if bool(getattr(self, "_help_panel_expanded", False)):
+            self._schedule_help_overlay_placement()
 
     def handle_help_panel_scroll_override(self, event=None):
         if not self.is_help_scroll_override_active(event):
@@ -2376,32 +2723,14 @@ class AutoAnnotationApp:
     
     def update_status(self, message: str, icon: str = "info"):
         """Aktualizuje główny panel wskazówek (zapobiega migotaniu)."""
-        clean_message = str(message or "").strip()
-        if not clean_message:
-            clean_message = self.default_status_message
-
-        if clean_message == self.default_status_message:
-            new_text = clean_message
-        else:
-            prefixes = {
-                "help": "[POMOC]",
-                "warning": "[UWAGA]",
-                "error": "[BLAD]",
-                "success": "[OK]",
-                "info": "[INFO]",
-            }
-            prefix = prefixes.get(icon, "[INFO]")
-            new_text = f"{prefix} {clean_message}"
+        new_text = self._format_help_panel_message(message, icon=icon)
         try:
-            current_text = self.status_text.get(1.0, tk.END).strip()
-            if current_text != new_text.strip():
-                self.status_text.config(state=tk.NORMAL)
-                self.status_text.delete(1.0, tk.END)
-                self.status_text.insert(tk.END, new_text)
-                self.status_text.yview_moveto(0.0)
-                self.status_text.config(state=tk.DISABLED)
+            previous_text = str(getattr(self, "_status_full_text", "") or "")
+            self._status_full_text = new_text
+            if previous_text != new_text:
                 self.root.update_idletasks()
-        except Exception: pass
+        except Exception:
+            pass
         try:
             self._apply_help_panel_visual_state()
         except Exception:
@@ -2531,6 +2860,10 @@ class AutoAnnotationApp:
     def _guard_campaign_navigation(self, event=None):
         return
 
+    def _on_main_notebook_tab_changed(self, event=None):
+        self._guard_campaign_navigation(event)
+        self._save_active_main_tab_preference()
+
 
     
     def _on_closing(self):
@@ -2558,7 +2891,19 @@ class AutoAnnotationApp:
                     self._closing_in_progress = False
                     return
 
+            try:
+                self._save_active_main_tab_preference()
+            except Exception:
+                pass
+
             for tab_name, tab in getattr(self, "tabs", {}).items():
+                try:
+                    flush_session = getattr(tab, "flush_free_mode_session_state", None)
+                    if callable(flush_session):
+                        flush_session()
+                except Exception as e:
+                    logger.debug(f"Nie udalo sie zapisac stanu zakladki {tab_name}: {e}")
+
                 try:
                     if hasattr(tab, "is_processing"):
                         tab.is_processing = False
