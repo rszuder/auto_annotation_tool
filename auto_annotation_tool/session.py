@@ -58,11 +58,19 @@ class SessionManager:
             },
             "annotation": {
                 "images_dir": "",
+                "input_dir": "",
                 "output_dir": str(Path(default_output) / "annotations"),
+                "last_preview_run_dir": "",
+                "last_preview_index": -1,
+                "last_preview_filename": "",
             },
             "training": {
                 "dataset_dir": "",
                 "output_dir": str(Path(default_output) / "training"),
+            },
+            "ui": {
+                "theme": "dark_visual_cs",
+                "active_main_tab": "annotation",
             },
         }
     

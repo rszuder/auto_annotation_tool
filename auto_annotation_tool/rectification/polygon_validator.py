@@ -55,22 +55,27 @@ class PolygonValidator:
         """
         if len(points) != 4:
             return points
-        
+
+        # Sortowanie po samych sumach/różnicach współrzędnych potrafi zwrócić
+        # ten sam punkt dwa razy dla mocniej pochylonych czworokątów.
+        # Stabilniej jest ułożyć punkty cyklicznie wokół centroidu, a potem
+        # obrócić sekwencję tak, by zaczynała się od lewego górnego rogu.
         pts = np.array(points, dtype=np.float32)
-        
-        # Sortuj po sumie współrzędnych (top-left ma najmniejszą sumę)
-        s = pts.sum(axis=1)
-        
-        # Pobierz indeksy
-        tl = pts[np.argmin(s)]      # top-left (min suma)
-        br = pts[np.argmax(s)]      # bottom-right (max suma)
-        
-        # Różnica (top-right ma najniższe y dla wysokiej x)
-        diff = np.diff(pts, axis=1)
-        tr = pts[np.argmin(diff)]   # top-right
-        bl = pts[np.argmax(diff)]   # bottom-left
-        
-        return [tuple(p) for p in [tl, tr, br, bl]]
+        centroid = pts.mean(axis=0)
+        angles = np.arctan2(pts[:, 1] - centroid[1], pts[:, 0] - centroid[0])
+        ordered = pts[np.argsort(angles)]
+
+        # Start od punktu najbardziej zbliżonego do lewego górnego rogu.
+        start_idx = int(np.argmin(ordered[:, 0] + ordered[:, 1]))
+        ordered = np.roll(ordered, -start_idx, axis=0)
+
+        # Po ustawieniu startu w TL możliwe są jeszcze dwa kierunki:
+        # TL, TR, BR, BL albo TL, BL, BR, TR. Wyrównujemy do wariantu
+        # zgodnego z ruchem wskazówek zegara i stałą numeracją rogów.
+        if ordered[1][0] < ordered[-1][0]:
+            ordered = np.array([ordered[0], ordered[-1], ordered[-2], ordered[-3]], dtype=np.float32)
+
+        return [tuple(float(v) for v in p) for p in ordered]
     
     @staticmethod
     def is_valid_quad(points: List[Tuple[float, float]]) -> bool:
@@ -84,6 +89,10 @@ class PolygonValidator:
             True jeśli czworokąt jest prawidłowy
         """
         if len(points) != 4:
+            return False
+
+        unique_points = {(float(x), float(y)) for x, y in points}
+        if len(unique_points) != 4:
             return False
         
         pts = np.array(points, dtype=np.float32)
