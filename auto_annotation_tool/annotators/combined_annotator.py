@@ -203,10 +203,10 @@ class CombinedAnnotator(BaseAnnotator):
             
             if keypoints is not None and i < len(keypoints):
                 kpts = keypoints[i]
-                kpts_list = [(float(kp[0]), float(kp[1]), float(kp[2])) for kp in kpts]
+                kpts_list = self._normalize_keypoints(kpts)
                 
-                if len(kpts) >= 4:
-                    corners = [(float(kpts[j][0]), float(kpts[j][1])) for j in range(4)]
+                if len(kpts_list) >= 4:
+                    corners = [(float(kpts_list[j][0]), float(kpts_list[j][1])) for j in range(4)]
                     valid = all(0 <= p[0] <= width and 0 <= p[1] <= height for p in corners)
                     
                     if valid:

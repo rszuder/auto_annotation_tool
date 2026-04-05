@@ -33,6 +33,7 @@ class YOLOPoseTrainer:
         self.should_stop = False
 
         self.on_epoch_end: Optional[Callable[[int, Dict], None]] = None
+        self.on_batch_progress: Optional[Callable[[int, int, int, float], None]] = None
         self.on_training_end: Optional[Callable[[bool, str], None]] = None
         self.on_progress: Optional[Callable[[float, str], None]] = None
 
@@ -196,6 +197,31 @@ class YOLOPoseTrainer:
                 "workers": 0
             }
 
+            batch_state = {"epoch": -1, "batch": 0}
+
+            def on_train_epoch_start(trainer):
+                batch_state["epoch"] = int(getattr(trainer, "epoch", -1))
+                batch_state["batch"] = 0
+                total_batches = max(1, int(len(getattr(trainer, "train_loader", []) or [])))
+                if self.on_batch_progress:
+                    self.on_batch_progress(batch_state["epoch"] + 1, 0, total_batches, 0.0)
+
+            def on_train_batch_end(trainer):
+                current_epoch = int(getattr(trainer, "epoch", -1))
+                total_batches = max(1, int(len(getattr(trainer, "train_loader", []) or [])))
+                if batch_state["epoch"] != current_epoch:
+                    batch_state["epoch"] = current_epoch
+                    batch_state["batch"] = 0
+                batch_state["batch"] = min(total_batches, int(batch_state["batch"]) + 1)
+
+                if self.on_batch_progress:
+                    self.on_batch_progress(
+                        current_epoch + 1,
+                        int(batch_state["batch"]),
+                        total_batches,
+                        (float(batch_state["batch"]) / float(total_batches)) * 100.0,
+                    )
+
             def on_train_epoch_end(trainer):
                 if self.should_stop:
                     raise InterruptedError("Zatrzymano")
@@ -205,10 +231,21 @@ class YOLOPoseTrainer:
                     raise InterruptedError("Wstrzymano")
 
                 epoch = trainer.epoch + 1
+                raw_metrics = getattr(trainer, "metrics", {}) or {}
                 metrics = {
                     "loss": float(trainer.loss.item()) if hasattr(trainer, 'loss') else 0,
-                    "map50": float(trainer.metrics.get("metrics/mAP50(B)", 0)),
-                    "map50_95": float(trainer.metrics.get("metrics/mAP50-95(B)", 0)),
+                    "map50": float(raw_metrics.get("metrics/mAP50(B)", 0) or 0),
+                    "map50_95": float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0),
+                    "precision": float(raw_metrics.get("metrics/precision(B)", 0) or 0),
+                    "recall": float(raw_metrics.get("metrics/recall(B)", 0) or 0),
+                    "box_map50": float(raw_metrics.get("metrics/mAP50(B)", 0) or 0),
+                    "box_map50_95": float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0),
+                    "box_precision": float(raw_metrics.get("metrics/precision(B)", 0) or 0),
+                    "box_recall": float(raw_metrics.get("metrics/recall(B)", 0) or 0),
+                    "pose_map50": float(raw_metrics.get("metrics/mAP50(P)", 0) or 0),
+                    "pose_map50_95": float(raw_metrics.get("metrics/mAP50-95(P)", 0) or 0),
+                    "pose_precision": float(raw_metrics.get("metrics/precision(P)", 0) or 0),
+                    "pose_recall": float(raw_metrics.get("metrics/recall(P)", 0) or 0),
                 }
 
                 self.history.add_metrics(run.id, epoch, metrics)
@@ -219,6 +256,8 @@ class YOLOPoseTrainer:
                 if self.on_progress:
                     self.on_progress((epoch / epochs) * 100, f"Epoka {epoch}/{epochs}")
 
+            self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
+            self.model.add_callback("on_train_batch_end", on_train_batch_end)
             self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
             logger.info("Rozpoczynam trening...")
             # Ultralytics oczekuje samej flagi resume=True przy wznawianiu treningu.

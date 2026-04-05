@@ -54,6 +54,29 @@ class BaseAnnotator(ABC):
         """Resetuje flagę zatrzymania."""
         self._stop_event.clear()
     
+    def _normalize_keypoints(self, raw_keypoints) -> list[tuple[float, float, float]]:
+        """
+        Normalizuje wynik keypointow YOLO do postaci (x, y, conf).
+
+        Ultralytics potrafi zwracac keypointy jako (x, y) albo (x, y, conf).
+        """
+        normalized: list[tuple[float, float, float]] = []
+        if raw_keypoints is None:
+            return normalized
+
+        for kp in raw_keypoints:
+            try:
+                if len(kp) < 2:
+                    continue
+                x = float(kp[0])
+                y = float(kp[1])
+                conf = float(kp[2]) if len(kp) >= 3 else 1.0
+                normalized.append((x, y, conf))
+            except Exception:
+                continue
+
+        return normalized
+
     def process_directory(self,
                           images_dir: Path,
                           progress_callback: Optional[Callable[..., None]] = None

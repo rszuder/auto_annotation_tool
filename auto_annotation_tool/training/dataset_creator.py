@@ -4,13 +4,16 @@
 Tworzenie datasetu YOLO Pose z eksportu CVAT.
 """
 
+import json
 import shutil
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from dataclasses import dataclass
 
 from ..config import CONFIG, logger
+from ..utils import get_image_files
 
 
 @dataclass
@@ -105,6 +108,58 @@ class DatasetCreator:
     
     def __init__(self):
         self.annotations: List[PlateAnnotation] = []
+        self.xml_image_names: set[str] = set()
+        self.annotated_image_names: set[str] = set()
+
+    @staticmethod
+    def _allocate_split_counts(n_total: int, split_ratios: Dict[str, float]) -> Dict[str, int]:
+        ordered_splits = ["train", "val"]
+        if "test" in split_ratios:
+            ordered_splits.append("test")
+
+        counts = {split: 0 for split in ordered_splits}
+        required_splits = [split for split in ("train", "val") if split in counts]
+
+        if n_total < len(required_splits):
+            return {}
+
+        for split in required_splits:
+            counts[split] = 1
+
+        remaining = n_total - len(required_splits)
+        if remaining <= 0:
+            return counts
+
+        weights = {
+            split: max(0.0, float(split_ratios.get(split, 0.0) or 0.0))
+            for split in ordered_splits
+        }
+        weight_sum = sum(weights.values())
+        if weight_sum <= 0.0:
+            weights["train"] = 1.0
+            weight_sum = 1.0
+
+        exact = {
+            split: (weights[split] / weight_sum) * remaining
+            for split in ordered_splits
+        }
+        fractional_parts = []
+        allocated = 0
+        for split in ordered_splits:
+            extra = int(exact[split])
+            counts[split] += extra
+            allocated += extra
+            fractional_parts.append((exact[split] - extra, split))
+
+        leftover = remaining - allocated
+        fractional_parts.sort(key=lambda item: (item[0], -ordered_splits.index(item[1])), reverse=True)
+        for _fraction, split in fractional_parts:
+            if leftover <= 0:
+                break
+            counts[split] += 1
+            leftover -= 1
+
+        return counts
     
     @staticmethod
     def get_required_format() -> str:
@@ -122,10 +177,14 @@ class DatasetCreator:
             "images": 0,
             "plates": 0,
             "skipped": 0,
+            "annotated_images": 0,
+            "pending_xml_images": 0,
             "errors": []
         }
         
         self.annotations = []
+        self.xml_image_names = set()
+        self.annotated_image_names = set()
         
         if not xml_path.exists():
             return False, "Plik nie istnieje", stats
@@ -143,6 +202,7 @@ class DatasetCreator:
                     continue
                 
                 stats["images"] += 1
+                self.xml_image_names.add(img_name)
                 
                 for poly in image.findall('polygon'):
                     label = poly.get('label', '').lower()
@@ -169,6 +229,7 @@ class DatasetCreator:
                                 image_height=img_height,
                                 points=points
                             ))
+                            self.annotated_image_names.add(img_name)
                             stats["plates"] += 1
                         else:
                             stats["skipped"] += 1
@@ -180,6 +241,9 @@ class DatasetCreator:
             
             if stats["plates"] == 0:
                 return False, "Nie znaleziono tablic z 4 punktami", stats
+
+            stats["annotated_images"] = len(self.annotated_image_names)
+            stats["pending_xml_images"] = max(0, len(self.xml_image_names) - len(self.annotated_image_names))
             
             return True, f"Znaleziono {stats['plates']} tablic", stats
             
@@ -232,14 +296,16 @@ class DatasetCreator:
         random.shuffle(image_names)
         
         n_total = len(image_names)
-        n_train = int(n_total * split_ratios.get("train", 0.8))
-        n_val = int(n_total * split_ratios.get("val", 0.2))
-        
+        split_counts = self._allocate_split_counts(n_total, split_ratios)
+        if not split_counts:
+            return False, "Do treningu YOLO Pose potrzebne sa co najmniej 2 oznaczone obrazy, aby wypelnic train i val.", stats
+
         splits = {}
-        splits["train"] = set(image_names[:n_train])
-        splits["val"] = set(image_names[n_train:n_train + n_val])
-        if "test" in split_ratios:
-            splits["test"] = set(image_names[n_train + n_val:])
+        offset = 0
+        for split_name in split_counts.keys():
+            split_count = int(split_counts.get(split_name, 0) or 0)
+            splits[split_name] = set(image_names[offset:offset + split_count])
+            offset += split_count
         
         # Utwórz foldery
         output_dir = Path(output_dir)
@@ -292,6 +358,364 @@ class DatasetCreator:
         
         return True, f"Utworzono dataset: {stats['total']} obrazów", stats
     
+    def get_annotated_image_names(self) -> set[str]:
+        return set(self.annotated_image_names)
+
+    def get_pending_source_images(self, images_dir: Path) -> List[Path]:
+        images_dir = Path(images_dir)
+        annotated_names = self.get_annotated_image_names()
+        return [
+            image_path
+            for image_path in get_image_files(images_dir)
+            if image_path.name not in annotated_names
+        ]
+
+    @staticmethod
+    def _load_stage_manifest(manifest_path: Path) -> Dict:
+        if not manifest_path.exists():
+            return {}
+        try:
+            data = json.loads(manifest_path.read_text(encoding='utf-8'))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _save_stage_manifest(manifest_path: Path, payload: Dict) -> None:
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+
+    @staticmethod
+    def _path_key(path_like) -> str:
+        try:
+            return str(Path(path_like).resolve())
+        except Exception:
+            return str(Path(path_like))
+
+    @staticmethod
+    def _paths_equivalent(left, right) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except Exception:
+            return str(Path(left)) == str(Path(right))
+
+    @staticmethod
+    def _find_stage_entry_key_by_name(entries: Dict, stage_name: str) -> Optional[str]:
+        normalized = str(stage_name or "").strip()
+        if not normalized:
+            return None
+
+        for entry_key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("stage_name") or "").strip() == normalized:
+                return entry_key
+        return None
+
+    @staticmethod
+    def _allocate_stage_name(stage_images_dir: Path, preferred_name: str, reserved_names: set[str]) -> str:
+        preferred = str(preferred_name or "").strip() or "image.jpg"
+        stem = Path(preferred).stem or "image"
+        suffix = Path(preferred).suffix or ".jpg"
+        candidate = preferred
+        counter = 1
+        while candidate in reserved_names or (stage_images_dir / candidate).exists():
+            candidate = f"{stem}__{counter:03d}{suffix}"
+            counter += 1
+        return candidate
+
+    def sync_pending_stage(self, images_dir: Path, stage_dir: Path) -> Tuple[bool, str, Dict]:
+        images_dir = Path(images_dir)
+        stage_dir = Path(stage_dir)
+        stage_images_dir = stage_dir / "images"
+        manifest_path = stage_dir / "stage_manifest.json"
+
+        try:
+            stage_images_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return False, f"Nie udało się przygotować stage: {e}", {}
+
+        pending_paths = self.get_pending_source_images(images_dir)
+        source_dir_resolved = self._path_key(images_dir)
+        stage_images_dir_resolved = self._path_key(stage_images_dir)
+        source_is_stage = source_dir_resolved == stage_images_dir_resolved
+
+        manifest = self._load_stage_manifest(manifest_path)
+        entries = manifest.get("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+
+        pending_by_key = {
+            self._path_key(path): path
+            for path in pending_paths
+        }
+        pending_stage_names = {path.name for path in pending_paths}
+
+        removed = 0
+        added = 0
+        updated = 0
+
+        for source_key, entry in list(entries.items()):
+            if not isinstance(entry, dict):
+                entries.pop(source_key, None)
+                continue
+
+            stage_name = str(entry.get("stage_name") or "").strip()
+            if not stage_name:
+                entries.pop(source_key, None)
+                continue
+
+            target_path = stage_images_dir / stage_name
+            entry_source_dir = str(entry.get("source_dir") or "").strip()
+
+            if source_is_stage:
+                if stage_name in pending_stage_names:
+                    continue
+                try:
+                    if target_path.exists():
+                        target_path.unlink()
+                except Exception:
+                    pass
+                entries.pop(source_key, None)
+                removed += 1
+                continue
+
+            if entry_source_dir != source_dir_resolved:
+                continue
+            if source_key in pending_by_key:
+                continue
+
+            try:
+                if target_path.exists():
+                    target_path.unlink()
+            except Exception:
+                pass
+            entries.pop(source_key, None)
+            removed += 1
+
+        if source_is_stage:
+            for stage_image_path in get_image_files(stage_images_dir):
+                if stage_image_path.name in pending_stage_names:
+                    continue
+                try:
+                    stage_image_path.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+
+        reserved_names = {
+            str(entry.get("stage_name") or "").strip()
+            for entry in entries.values()
+            if isinstance(entry, dict) and str(entry.get("stage_name") or "").strip()
+        }
+
+        for source_key, source_path in pending_by_key.items():
+            source_in_stage = self._paths_equivalent(source_path.parent, stage_images_dir)
+            entry_key = source_key
+            entry = entries.get(entry_key) if isinstance(entries.get(entry_key), dict) else {}
+
+            if source_in_stage and not entry:
+                legacy_entry_key = self._find_stage_entry_key_by_name(entries, source_path.name)
+                if legacy_entry_key and legacy_entry_key != source_key:
+                    entry_key = legacy_entry_key
+                    entry = entries.get(entry_key) if isinstance(entries.get(entry_key), dict) else {}
+
+            previous_stage_name = str(entry.get("stage_name") or "").strip()
+            previous_target_path = stage_images_dir / previous_stage_name if previous_stage_name else None
+
+            if source_in_stage:
+                stage_name = source_path.name
+                if not entry:
+                    added += 1
+                else:
+                    updated += 1
+
+                if (
+                    previous_target_path is not None
+                    and previous_target_path.exists()
+                    and not self._paths_equivalent(previous_target_path, source_path)
+                ):
+                    try:
+                        previous_target_path.unlink()
+                    except Exception:
+                        pass
+            else:
+                stage_name = previous_stage_name
+                target_path = stage_images_dir / stage_name if stage_name else None
+
+                if not stage_name or target_path is None or not target_path.exists():
+                    stage_name = self._allocate_stage_name(stage_images_dir, source_path.name, reserved_names)
+                    target_path = stage_images_dir / stage_name
+                    added += 1
+                else:
+                    updated += 1
+
+                if not self._paths_equivalent(source_path, target_path):
+                    try:
+                        shutil.copy2(source_path, target_path)
+                    except Exception as e:
+                        return False, f"Nie udało się skopiować obrazu do stage: {e}", {}
+
+            if entry_key != source_key:
+                entries.pop(entry_key, None)
+
+            reserved_names.add(stage_name)
+            entries[source_key] = {
+                "stage_name": stage_name,
+                "image_name": source_path.name,
+                "source_dir": stage_images_dir_resolved if source_in_stage else source_dir_resolved,
+                "origin": "stage" if source_in_stage else "sync",
+                "last_synced_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+        stage_images = get_image_files(stage_images_dir)
+        payload = {
+            "stage_version": 1,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "source_dir": source_dir_resolved,
+            "annotated_images": len(self.get_annotated_image_names()),
+            "pending_images": len(pending_paths),
+            "stage_images_total": len(stage_images),
+            "entries": entries,
+        }
+
+        try:
+            self._save_stage_manifest(manifest_path, payload)
+        except Exception as e:
+            return False, f"Dataset gotowy, ale nie udało się zapisać manifestu stage: {e}", {}
+
+        stats = {
+            "stage_dir": str(stage_dir),
+            "stage_images_dir": str(stage_images_dir),
+            "pending_count": len(pending_paths),
+            "stage_images_total": len(stage_images),
+            "added": added,
+            "updated": updated,
+            "removed": removed,
+            "pending_images": [path.name for path in pending_paths],
+        }
+        return True, f"Zsynchronizowano stage ręcznej anotacji: {len(pending_paths)} oczekujących zdjęć.", stats
+
+    def add_images_to_stage(self, source_dir: Path, stage_dir: Path) -> Tuple[bool, str, Dict]:
+        source_dir = Path(source_dir)
+        stage_dir = Path(stage_dir)
+        stage_images_dir = stage_dir / "images"
+        manifest_path = stage_dir / "stage_manifest.json"
+
+        if not source_dir.exists() or not source_dir.is_dir():
+            return False, "Wybrany folder ze zdjęciami nie istnieje.", {}
+
+        source_images = get_image_files(source_dir)
+        if not source_images:
+            return False, "W wybranym folderze nie ma obrazów do dodania.", {}
+
+        try:
+            stage_images_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return False, f"Nie udało się przygotować stage: {e}", {}
+
+        manifest = self._load_stage_manifest(manifest_path)
+        entries = manifest.get("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+
+        stage_images_dir_resolved = self._path_key(stage_images_dir)
+        source_dir_resolved = self._path_key(source_dir)
+        reserved_names = {
+            str(entry.get("stage_name") or "").strip()
+            for entry in entries.values()
+            if isinstance(entry, dict) and str(entry.get("stage_name") or "").strip()
+        }
+        existing_by_imported_from = {}
+        for entry_key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            imported_from_path = str(entry.get("imported_from_path") or "").strip()
+            if imported_from_path:
+                existing_by_imported_from[imported_from_path] = entry_key
+
+        added = 0
+        updated = 0
+
+        for source_path in source_images:
+            import_key = self._path_key(source_path)
+            source_in_stage = self._paths_equivalent(source_path.parent, stage_images_dir)
+
+            if source_in_stage:
+                stage_name = source_path.name
+                target_path = source_path
+                stage_key = self._path_key(target_path)
+                entry_key = stage_key
+                entry = entries.get(entry_key) if isinstance(entries.get(entry_key), dict) else {}
+                if not entry:
+                    added += 1
+                else:
+                    updated += 1
+            else:
+                entry_key = existing_by_imported_from.get(import_key)
+                entry = entries.get(entry_key) if entry_key and isinstance(entries.get(entry_key), dict) else {}
+                stage_name = str(entry.get("stage_name") or "").strip()
+                target_path = stage_images_dir / stage_name if stage_name else None
+
+                if not stage_name or target_path is None or not target_path.exists():
+                    stage_name = self._allocate_stage_name(stage_images_dir, source_path.name, reserved_names)
+                    target_path = stage_images_dir / stage_name
+                    added += 1
+                else:
+                    updated += 1
+
+                if not self._paths_equivalent(source_path, target_path):
+                    try:
+                        shutil.copy2(source_path, target_path)
+                    except Exception as e:
+                        return False, f"Nie udało się dodać obrazu do stage: {e}", {}
+
+                stage_key = self._path_key(target_path)
+
+            if entry_key and entry_key != stage_key:
+                entries.pop(entry_key, None)
+
+            reserved_names.add(stage_name)
+            entries[stage_key] = {
+                "stage_name": stage_name,
+                "image_name": source_path.name,
+                "source_dir": stage_images_dir_resolved,
+                "origin": "manual",
+                "imported_from_dir": source_dir_resolved if not source_in_stage else stage_images_dir_resolved,
+                "imported_from_path": import_key,
+                "last_synced_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            existing_by_imported_from[import_key] = stage_key
+
+        stage_images = get_image_files(stage_images_dir)
+        payload = {
+            "stage_version": 1,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "source_dir": stage_images_dir_resolved,
+            "annotated_images": int(manifest.get("annotated_images", 0) or 0),
+            "pending_images": len(stage_images),
+            "stage_images_total": len(stage_images),
+            "entries": entries,
+        }
+
+        try:
+            self._save_stage_manifest(manifest_path, payload)
+        except Exception as e:
+            return False, f"Nie udało się zapisać manifestu stage: {e}", {}
+
+        stats = {
+            "stage_dir": str(stage_dir),
+            "stage_images_dir": str(stage_images_dir),
+            "added": added,
+            "updated": updated,
+            "stage_images_total": len(stage_images),
+        }
+        return True, f"Dodano obrazy do stage: {len(source_images)} plików.", stats
+
     def _create_data_yaml(self, output_dir: Path):
         """Tworzy przenośny plik data.yaml (bez ścieżek absolutnych)."""
         content = f"""# YOLO Pose Dataset - License Plates

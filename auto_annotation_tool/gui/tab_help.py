@@ -18,7 +18,15 @@ class HelpTab:
         self.parent = parent
         self.app = app
         self.frame = ttk.Frame(parent)
+        self._startup_ui_ready = False
         self._create_widgets()
+        self.frame.after_idle(self._mark_startup_ui_ready)
+
+    def _mark_startup_ui_ready(self):
+        self._startup_ui_ready = True
+
+    def is_startup_ui_ready(self) -> bool:
+        return bool(getattr(self, "_startup_ui_ready", False))
 
     def _create_widgets(self):
         palette = getattr(self.app, "palette", {})

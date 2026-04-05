@@ -3,13 +3,13 @@
 """
 Główna aplikacja GUI.
 """
-print("DEBUG_LOADED_APP_PY:", __file__)
 
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
 from datetime import datetime
+import time
 
 from ..config import CONFIG, logger, TK_AVAILABLE, SESSION
 from ..icons import IconManager
@@ -42,16 +42,16 @@ THEME_DEFINITIONS = {
             "fg": "#f3f3f3",
             "muted": "#c7c7c7",
             "muted_dim": "#9a9a9a",
-            "accent": "#0e639c",
-            "accent_hover": "#1177bb",
-            "accent_selected": "#094771",
+            "accent": "#63c7ff",
+            "accent_hover": "#89d7ff",
+            "accent_selected": "#2c607d",
             "button_hover": "#37373d",
             "tab_disabled_bg": "#1e1e1e",
             "tab_disabled_fg": "#6f6f6f",
             "success": "#4ec9b0",
             "warning": "#d7ba7d",
             "error": "#f48771",
-            "surface_info": "#2a3947",
+            "surface_info": "#213a4d",
             "surface_success": "#1f3320",
             "surface_warning": "#3a2323",
             "guide": "#f0b44c",
@@ -79,16 +79,16 @@ THEME_DEFINITIONS = {
             "fg": "#f5f5f5",
             "muted": "#d0d0d0",
             "muted_dim": "#9b9b9b",
-            "accent": "#3a7bd5",
-            "accent_hover": "#4f8de3",
-            "accent_selected": "#2d5ea3",
+            "accent": "#66b4ff",
+            "accent_hover": "#8ac7ff",
+            "accent_selected": "#355f86",
             "button_hover": "#3a3c43",
             "tab_disabled_bg": "#202124",
             "tab_disabled_fg": "#76797f",
             "success": "#62d2a2",
             "warning": "#e3c27a",
             "error": "#ff8e72",
-            "surface_info": "#253445",
+            "surface_info": "#2b3f54",
             "surface_success": "#22362c",
             "surface_warning": "#3b2f1e",
             "guide": "#f3c96b",
@@ -176,21 +176,44 @@ class AutoAnnotationApp:
         self._status_full_text = ""
         self.tabs = {}
         self._closing_in_progress = False
+        self.startup_overlay_frame = None
+        self.startup_overlay_card = None
+        self.startup_overlay_title_lbl = None
+        self.startup_overlay_status_lbl = None
+        self.startup_overlay_progress = None
+        self.startup_overlay_window = None
+        self.startup_overlay_shown_at = None
+        self.startup_progress_var = tk.DoubleVar(master=root, value=0.0)
+        self.startup_status_var = tk.StringVar(master=root, value="Przygotowanie aplikacji...")
+        self._startup_finalize_after_id = None
+        self._startup_finalize_attempts = 0
+        self._startup_ready_streak = 0
+        self._startup_tabs_present_since = None
+        self._startup_tabs_prewarmed = False
+        self._startup_progress_peak = 0.0
+        self._main_window_hidden_for_startup = False
+        self._main_window_revealed = False
 
         self.style = ttk.Style()
         self._setup_style(self.current_theme_key)
+        self._prepare_main_window_for_startup()
+        self._show_startup_overlay()
+        self._set_startup_progress(8, "Uruchamianie interfejsu...")
         self.is_processing = False
         # Lokalna flaga aktywnego trybu kampanii.
         self.campaign_mode_active = False
         # Ręczne wyjście z projektu ma pierwszeństwo nad automatycznym trybem kampanii.
         self.campaign_free_mode = False
     
+        self._set_startup_progress(16, "Budowanie menu...")
         self._create_menu()
+        self._set_startup_progress(24, "Konfiguracja okien dialogowych...")
         self._install_themed_dialog_hooks()
 
         self.default_status_message = HELP.default_message
         
         # Panel pomocy musi powstać przed notebookiem, aby poprawnie zakotwiczyć go na dole okna.
+        self._set_startup_progress(34, "Inicjalizacja panelu pomocy...")
         self.info_panel_frame = tk.Frame(root, bg="#050505", bd=0, highlightthickness=0)
         self.info_panel_frame.pack(side=tk.BOTTOM, fill=tk.X)
         
@@ -256,10 +279,12 @@ class AutoAnnotationApp:
         HELP.overlay_dismisser = self.hide_context_help_overlay
         
         # 2. Tworzenie Notatnika z zakładkami
+        self._set_startup_progress(48, "Tworzenie struktury zakładek...")
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 0))
         
-        self._create_tabs()
+        self._create_tabs(progress_callback=self._set_startup_progress)
+        self._set_startup_progress(92, "Nakładanie motywu...")
         self._apply_theme_to_tabs()
 
         # główna blokada działa przez disabled tabs
@@ -274,6 +299,13 @@ class AutoAnnotationApp:
             from ..campaign_manager import CAMPAIGN
             active_proj = CAMPAIGN.get_active_project_name()
             if active_proj:
+                try:
+                    annotation_tab = getattr(self, "tabs", {}).get("annotation")
+                    if annotation_tab is not None and hasattr(annotation_tab, "restore_campaign_context_from_project"):
+                        annotation_tab.restore_campaign_context_from_project()
+                except Exception as restore_err:
+                    logger.debug(f"Nie udalo sie przywrocic kontekstu Z2 dla aktywnego projektu po starcie: {restore_err}")
+
                 self.update_status(
                     f"Aktywny projekt: {active_proj}. Aplikacja działa w trybie kampanii — aby wrócić do trybu swobodnego, użyj „Wyjdź z projektu” w Wizardzie.",
                     "warning"
@@ -281,7 +313,550 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
-        logger.info("GUI zainicjalizowane pomyślnie")
+        self._schedule_startup_finalize()
+
+    def _raise_startup_overlay(self):
+        overlay_window = getattr(self, "startup_overlay_window", None)
+        overlay = getattr(self, "startup_overlay_frame", None)
+        card = getattr(self, "startup_overlay_card", None)
+        if overlay is None:
+            return
+
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        if overlay_window is not None:
+            try:
+                splash_w = max(380, min(560, int(card.winfo_reqwidth() or 460)))
+                splash_h = max(112, min(180, int(card.winfo_reqheight() or 132)))
+                screen_w = max(1, int(self.root.winfo_screenwidth() or 1))
+                screen_h = max(1, int(self.root.winfo_screenheight() or 1))
+                pos_x = max(0, int((screen_w - splash_w) / 2))
+                pos_y = max(0, int((screen_h - splash_h) / 2))
+                overlay_window.geometry(f"{splash_w}x{splash_h}+{pos_x}+{pos_y}")
+                overlay_window.lift()
+                overlay_window.attributes("-topmost", True)
+            except Exception:
+                pass
+        else:
+            try:
+                overlay.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                pass
+
+            try:
+                overlay.lift()
+            except Exception:
+                pass
+
+            for widget_name in ("menu_bar_frame", "notebook", "info_panel_frame", "help_overlay_frame"):
+                widget = getattr(self, widget_name, None)
+                if widget is None:
+                    continue
+                try:
+                    overlay.lift(widget)
+                except Exception:
+                    pass
+
+        if card is not None:
+            try:
+                card.lift()
+            except Exception:
+                pass
+
+    def _flush_startup_overlay(self):
+        self._raise_startup_overlay()
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
+        self._raise_startup_overlay()
+
+    def _consume_startup_overlay_event(self, event=None):
+        return "break"
+
+    def _prepare_main_window_for_startup(self):
+        try:
+            self.root.withdraw()
+            self._main_window_hidden_for_startup = True
+            self._main_window_revealed = False
+        except Exception:
+            self._main_window_hidden_for_startup = False
+            self._main_window_revealed = False
+
+    def _reveal_main_window_after_startup(self):
+        if bool(getattr(self, "_main_window_revealed", False)):
+            return
+
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
+
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            try:
+                self.root.attributes("-fullscreen", True)
+            except Exception:
+                pass
+
+        try:
+            self.root.lift()
+        except Exception:
+            pass
+
+        try:
+            self.root.focus_force()
+        except Exception:
+            try:
+                self.root.focus_set()
+            except Exception:
+                pass
+
+        self._main_window_hidden_for_startup = False
+        self._main_window_revealed = True
+
+    def _show_startup_overlay(self):
+        if self.startup_overlay_frame is not None:
+            return
+
+        palette = self.palette
+        self.startup_overlay_shown_at = time.monotonic()
+        self._startup_progress_peak = 0.0
+        overlay_parent = self.root
+
+        try:
+            overlay_window = tk.Toplevel(self.root)
+            overlay_window.withdraw()
+            overlay_window.overrideredirect(True)
+            try:
+                overlay_window.attributes("-topmost", True)
+            except Exception:
+                pass
+            try:
+                overlay_window.resizable(False, False)
+            except Exception:
+                pass
+            overlay_window.configure(bg=palette.get("bg", "#1e1e1e"))
+            self.startup_overlay_window = overlay_window
+            overlay_parent = overlay_window
+        except Exception:
+            self.startup_overlay_window = None
+            overlay_parent = self.root
+
+        self.startup_overlay_frame = tk.Frame(
+            overlay_parent,
+            bg=palette.get("bg", "#1e1e1e"),
+            bd=0,
+            highlightthickness=0,
+        )
+        self.startup_overlay_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.startup_overlay_card = tk.Frame(
+            self.startup_overlay_frame,
+            bg=palette.get("panel", "#252526"),
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            padx=18,
+            pady=16,
+        )
+        self.startup_overlay_card.pack(fill=tk.BOTH, expand=True)
+
+        self.startup_overlay_title_lbl = tk.Label(
+            self.startup_overlay_card,
+            text="Ładowanie danych aplikacji",
+            font=("Segoe UI", 11, "bold"),
+            fg=palette.get("fg", "#f3f3f3"),
+            bg=palette.get("panel", "#252526"),
+            anchor="w",
+        )
+        self.startup_overlay_title_lbl.pack(fill=tk.X, pady=(0, 8))
+
+        self.startup_overlay_progress = ttk.Progressbar(
+            self.startup_overlay_card,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            variable=self.startup_progress_var,
+            length=420,
+            style="Horizontal.TProgressbar",
+        )
+        self.startup_overlay_progress.pack(fill=tk.X)
+
+        self.startup_overlay_status_lbl = tk.Label(
+            self.startup_overlay_card,
+            textvariable=self.startup_status_var,
+            font=("Segoe UI", 9),
+            fg=palette.get("muted", "#c7c7c7"),
+            bg=palette.get("panel", "#252526"),
+            anchor="w",
+        )
+        self.startup_overlay_status_lbl.pack(fill=tk.X, pady=(8, 0))
+
+        for widget in (
+            self.startup_overlay_card,
+            self.startup_overlay_title_lbl,
+            self.startup_overlay_status_lbl,
+            self.startup_overlay_progress,
+        ):
+            if widget is None:
+                continue
+            for sequence in (
+                "<ButtonPress-1>",
+                "<ButtonRelease-1>",
+                "<Double-Button-1>",
+                "<MouseWheel>",
+                "<Button-4>",
+                "<Button-5>",
+                "<KeyPress>",
+                "<KeyRelease>",
+                "<Tab>",
+            ):
+                try:
+                    widget.bind(sequence, self._consume_startup_overlay_event, add="+")
+                except Exception:
+                    pass
+
+        if self.startup_overlay_window is not None:
+            try:
+                self._raise_startup_overlay()
+                self.startup_overlay_window.deiconify()
+            except Exception:
+                pass
+        else:
+            try:
+                self.startup_overlay_frame.lift()
+                self.startup_overlay_card.lift()
+            except Exception:
+                pass
+        try:
+            self.root.after_idle(self._raise_startup_overlay)
+        except Exception:
+            pass
+        try:
+            if self.startup_overlay_window is not None:
+                self.startup_overlay_window.grab_set()
+            else:
+                self.startup_overlay_frame.grab_set()
+        except Exception:
+            pass
+        try:
+            if self.startup_overlay_window is not None:
+                self.startup_overlay_window.focus_force()
+            else:
+                self.startup_overlay_frame.focus_force()
+        except Exception:
+            try:
+                if self.startup_overlay_window is not None:
+                    self.startup_overlay_window.focus_set()
+                else:
+                    self.startup_overlay_frame.focus_set()
+            except Exception:
+                pass
+        self._flush_startup_overlay()
+
+    def _set_startup_progress(self, value: int | float, message: str = None):
+        if self.startup_overlay_frame is None:
+            return
+        try:
+            requested = max(0.0, min(100.0, float(value or 0.0)))
+            peak = max(float(getattr(self, "_startup_progress_peak", 0.0) or 0.0), requested)
+            self._startup_progress_peak = peak
+            self.startup_progress_var.set(peak)
+        except Exception:
+            pass
+        if message is not None:
+            try:
+                self.startup_status_var.set(str(message))
+            except Exception:
+                pass
+        self._flush_startup_overlay()
+
+    def _hide_startup_overlay(self):
+        overlay_window = getattr(self, "startup_overlay_window", None)
+        overlay = getattr(self, "startup_overlay_frame", None)
+        if overlay is None and overlay_window is None:
+            return
+        try:
+            if overlay_window is not None:
+                overlay_window.grab_release()
+            elif overlay is not None:
+                overlay.grab_release()
+        except Exception:
+            pass
+        try:
+            if overlay_window is not None:
+                overlay_window.destroy()
+            elif overlay is not None:
+                overlay.destroy()
+        except Exception:
+            pass
+        self.startup_overlay_window = None
+        self.startup_overlay_frame = None
+        self.startup_overlay_card = None
+        self.startup_overlay_title_lbl = None
+        self.startup_overlay_status_lbl = None
+        self.startup_overlay_progress = None
+
+    def _wait_for_startup_marker(self, *, delay_ms: int = 0, timeout_ms: int = 4000) -> bool:
+        flag = {"done": False}
+
+        def mark_done():
+            flag["done"] = True
+
+        try:
+            if delay_ms > 0:
+                self.root.after(int(delay_ms), mark_done)
+            else:
+                self.root.after_idle(mark_done)
+        except Exception:
+            return False
+
+        deadline = time.monotonic() + max(0.1, float(timeout_ms) / 1000.0)
+        while not flag["done"] and time.monotonic() < deadline:
+            try:
+                self.root.update_idletasks()
+                self.root.update()
+            except Exception:
+                break
+
+        return bool(flag["done"])
+
+    def _drain_startup_pending_events(self):
+        if self.startup_overlay_frame is None:
+            return
+
+        # Najpierw opróżnij bieżące after_idle z konstruktorów zakładek,
+        # a potem poczekaj na krótkie after(...) używane podczas startu.
+        for _ in range(3):
+            self._wait_for_startup_marker(delay_ms=0, timeout_ms=1500)
+
+        for _ in range(2):
+            self._wait_for_startup_marker(delay_ms=160, timeout_ms=2500)
+            self._wait_for_startup_marker(delay_ms=0, timeout_ms=1500)
+
+    def _get_expected_startup_tab_keys(self) -> list[str]:
+        expected = ["campaign", "annotation", "characters", "training"]
+        if HelpTab:
+            expected.append("help")
+        return expected
+
+    def _startup_tabs_ready(self) -> tuple[bool, list[str]]:
+        expected = self._get_expected_startup_tab_keys()
+        missing = [key for key in expected if key not in self.tabs]
+        if missing:
+            return False, missing
+
+        try:
+            notebook_tabs = list(self.notebook.tabs()) if getattr(self, "notebook", None) is not None else []
+        except Exception:
+            notebook_tabs = []
+
+        if len(notebook_tabs) < len(expected):
+            return False, []
+
+        try:
+            notebook_width = int(
+                (self.notebook.winfo_reqwidth() if self._main_window_hidden_for_startup else self.notebook.winfo_width()) or 0
+            )
+            notebook_height = int(
+                (self.notebook.winfo_reqheight() if self._main_window_hidden_for_startup else self.notebook.winfo_height()) or 0
+            )
+            if notebook_width < 120 or notebook_height < 120:
+                return False, []
+        except Exception:
+            return False, []
+
+        try:
+            root_width = int((self.root.winfo_reqwidth() if self._main_window_hidden_for_startup else self.root.winfo_width()) or 0)
+            root_height = int((self.root.winfo_reqheight() if self._main_window_hidden_for_startup else self.root.winfo_height()) or 0)
+            if root_width < 240 or root_height < 180:
+                return False, []
+        except Exception:
+            return False, []
+
+        for key in expected:
+            try:
+                frame = getattr(self.tabs.get(key), "frame", None)
+                if frame is None or str(frame) not in notebook_tabs:
+                    return False, [key]
+                if not bool(frame.winfo_exists()):
+                    return False, [key]
+                tab_obj = self.tabs.get(key)
+                if tab_obj is not None:
+                    startup_ready_getter = getattr(tab_obj, "is_startup_ui_ready", None)
+                    if callable(startup_ready_getter):
+                        try:
+                            if not bool(startup_ready_getter()):
+                                return False, [key]
+                        except Exception:
+                            return False, [key]
+                try:
+                    if frame.winfo_reqwidth() <= 1 or frame.winfo_reqheight() <= 1:
+                        return False, [key]
+                except Exception:
+                    return False, [key]
+            except Exception:
+                return False, [key]
+
+        return True, []
+
+    def _prewarm_startup_tabs(self):
+        if bool(getattr(self, "_startup_tabs_prewarmed", False)):
+            return
+
+        notebook = getattr(self, "notebook", None)
+        if notebook is None:
+            return
+
+        expected = self._get_expected_startup_tab_keys()
+        try:
+            original_widget = str(notebook.select() or "")
+        except Exception:
+            original_widget = ""
+
+        state_by_widget = {}
+        try:
+            for key in expected:
+                tab = self.tabs.get(key)
+                frame = getattr(tab, "frame", None)
+                if frame is None:
+                    continue
+
+                widget_name = str(frame)
+                try:
+                    state_by_widget[widget_name] = str(notebook.tab(widget_name, "state") or "normal")
+                except Exception:
+                    state_by_widget[widget_name] = "normal"
+
+                try:
+                    if state_by_widget[widget_name] == "disabled":
+                        notebook.tab(widget_name, state="normal")
+                except Exception:
+                    pass
+
+                try:
+                    notebook.select(widget_name)
+                except Exception:
+                    continue
+
+                try:
+                    self.root.update_idletasks()
+                except Exception:
+                    pass
+
+                self._wait_for_startup_marker(delay_ms=90, timeout_ms=2000)
+
+                try:
+                    self.root.update_idletasks()
+                except Exception:
+                    pass
+        finally:
+            for widget_name, state in state_by_widget.items():
+                try:
+                    notebook.tab(widget_name, state=state)
+                except Exception:
+                    pass
+
+            if original_widget:
+                try:
+                    notebook.select(original_widget)
+                except Exception:
+                    pass
+
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                pass
+
+        self._startup_tabs_prewarmed = True
+
+    def _schedule_startup_finalize(self, delay_ms: int = 0):
+        pending = getattr(self, "_startup_finalize_after_id", None)
+        if pending:
+            try:
+                self.root.after_cancel(pending)
+            except Exception:
+                pass
+        if int(delay_ms or 0) == 0 and self._startup_finalize_attempts == 0:
+            self._startup_ready_streak = 0
+            self._startup_tabs_present_since = None
+            self._startup_tabs_prewarmed = False
+        try:
+            self._startup_finalize_after_id = self.root.after(
+                max(0, int(delay_ms)),
+                self._finalize_startup_after_tabs_ready
+            )
+        except Exception:
+            self._startup_finalize_after_id = None
+            self._finalize_startup_after_tabs_ready()
+
+    def _finalize_startup_after_tabs_ready(self):
+        self._startup_finalize_after_id = None
+        if self.startup_overlay_frame is None:
+            return
+
+        self._startup_finalize_attempts += 1
+        self._set_startup_progress(96, "Finalizacja inicjalizacji zakładek...")
+        self._drain_startup_pending_events()
+
+        ready, missing = self._startup_tabs_ready()
+        if ready:
+            if not bool(getattr(self, "_startup_tabs_prewarmed", False)):
+                self._set_startup_progress(97, "Domykam renderowanie zakładek...")
+                self._prewarm_startup_tabs()
+                self._startup_ready_streak = 0
+                self._startup_tabs_present_since = time.monotonic()
+                self._schedule_startup_finalize(350)
+                return
+
+            now = time.monotonic()
+            if self._startup_tabs_present_since is None:
+                self._startup_tabs_present_since = now
+            self._startup_ready_streak += 1
+            settled_for = now - float(self._startup_tabs_present_since or now)
+            shown_for = now - float(getattr(self, "startup_overlay_shown_at", now) or now)
+            if self._startup_ready_streak >= 5 and settled_for >= 1.8 and shown_for >= 2.5:
+                self._set_startup_progress(100, "Ładowanie danych zakończone")
+                self._reveal_main_window_after_startup()
+                self._hide_startup_overlay()
+                logger.info("GUI zainicjalizowane pomyślnie")
+                return
+            self._set_startup_progress(97, "Domykam renderowanie zakładek...")
+            self._schedule_startup_finalize(250)
+            return
+
+        self._startup_ready_streak = 0
+        self._startup_tabs_present_since = None
+
+        if self._startup_finalize_attempts < 120:
+            if missing:
+                self._set_startup_progress(
+                    96,
+                    "Czekam na pełne załadowanie zakładek: " + ", ".join(missing)
+                )
+            else:
+                self._set_startup_progress(96, "Czekam na pełne załadowanie zakładek...")
+            self._schedule_startup_finalize(200)
+            return
+
+        missing_text = ", ".join(missing) if missing else "nieustalony stan notebooka"
+        self._set_startup_progress(
+            96,
+            f"Błąd ładowania zakładek: {missing_text}. Overlay pozostaje aktywny."
+        )
+        logger.error(f"Startup GUI nie domknął wszystkich zakładek: {missing_text}")
 
     def _load_theme_preference(self) -> str:
         try:
@@ -1992,19 +2567,28 @@ class AutoAnnotationApp:
             self._refresh_menu_badge()
             self.root.title(base_title)
     
-    def _create_tabs(self):
+    def _create_tabs(self, progress_callback=None):
+        def _progress(value, message):
+            if callable(progress_callback):
+                try:
+                    progress_callback(value, message)
+                except Exception:
+                    pass
         try:
             try:
+                _progress(56, "Ładowanie zakładki Z1...")
                 self.tabs['campaign'] = CampaignTab(self.notebook, self)
                 self.notebook.add(self.tabs['campaign'].frame, text=self.get_main_tab_label("campaign"))
 
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki Kampanii: {e}")
 
+            _progress(66, "Ładowanie zakładki Z2...")
             self.tabs['annotation'] = AnnotationTab(self.notebook, self)
             self.notebook.add(self.tabs['annotation'].frame, text=self.get_main_tab_label("annotation"))
             
             try:
+                _progress(76, "Ładowanie zakładki Z3...")
                 self.tabs['characters'] = CharacterAnnotationTab(self.notebook, self)
                 self.notebook.add(
                     self.tabs['characters'].frame,
@@ -2016,12 +2600,14 @@ class AutoAnnotationApp:
 
             
             try:
+                _progress(84, "Ładowanie zakładki Z4...")
                 self.tabs['training'] = TrainingTab(self.notebook, self)
                 self.notebook.add(self.tabs['training'].frame, text=self.get_main_tab_label("training"))
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki TRENING: {e}")
 
             if HelpTab:
+                _progress(89, "Ładowanie zakładki Z5...")
                 self.tabs['help'] = HelpTab(self.notebook, self)
                 self.notebook.add(self.tabs['help'].frame, text=self.get_main_tab_label("help"))
 
