@@ -5,6 +5,7 @@ Canvas z obsługą zoom'u i pan'u dla podglądu obrazów.
 Zastosowanie: Podgląd w zakładce Prostowania Tablic.
 """
 
+import math
 import tkinter as tk
 from types import SimpleNamespace
 from PIL import Image, ImageTk
@@ -28,6 +29,8 @@ class ZoomableCanvas(tk.Canvas):
         self.image_id = None        # Canvas image ID
         self.overlay_renderer = None
         self.interaction_delegate = None
+        self._render_region = None
+        self._pan_buffered_move_active = False
         
         # Pan'u - przesuwanie widoku
         self.pan_data = {
@@ -58,6 +61,121 @@ class ZoomableCanvas(tk.Canvas):
         
         # Kursor
         self.current_cursor = "arrow"
+
+    def _get_canvas_size(self):
+        return (
+            max(1, int(self.winfo_width() or 1)),
+            max(1, int(self.winfo_height() or 1)),
+        )
+
+    def _get_full_image_size(self):
+        if self.original_image is None:
+            return 0.0, 0.0
+        return (
+            max(1.0, float(self.original_image.width) * float(self.zoom_level)),
+            max(1.0, float(self.original_image.height) * float(self.zoom_level)),
+        )
+
+    def _clamp_origin(self, origin_x: float, origin_y: float):
+        if self.original_image is None:
+            return float(origin_x), float(origin_y)
+
+        canvas_width, canvas_height = self._get_canvas_size()
+        full_width, full_height = self._get_full_image_size()
+        clamped_x = float(origin_x)
+        clamped_y = float(origin_y)
+
+        if full_width <= float(canvas_width):
+            clamped_x = (float(canvas_width) - full_width) / 2.0
+        else:
+            min_x = float(canvas_width) - full_width
+            clamped_x = min(0.0, max(min_x, clamped_x))
+
+        if full_height <= float(canvas_height):
+            clamped_y = (float(canvas_height) - full_height) / 2.0
+        else:
+            min_y = float(canvas_height) - full_height
+            clamped_y = min(0.0, max(min_y, clamped_y))
+
+        return clamped_x, clamped_y
+
+    def _apply_clamped_pan(self):
+        clamped_x, clamped_y = self._clamp_origin(
+            float(self.pan_data.get('x', 0.0)),
+            float(self.pan_data.get('y', 0.0)),
+        )
+        self.pan_data = {
+            'x': float(clamped_x),
+            'y': float(clamped_y),
+            'press_x': self.pan_data.get('press_x'),
+            'press_y': self.pan_data.get('press_y'),
+        }
+        return float(clamped_x), float(clamped_y)
+
+    def _get_exact_visible_image_bounds(self):
+        if self.original_image is None:
+            return None
+
+        canvas_width, canvas_height = self._get_canvas_size()
+        zoom = max(1e-9, float(self.zoom_level))
+        origin_x = float(self.pan_data.get('x', 0.0))
+        origin_y = float(self.pan_data.get('y', 0.0))
+        image_width = int(self.original_image.width)
+        image_height = int(self.original_image.height)
+
+        visible_left = max(0.0, (0.0 - origin_x) / zoom)
+        visible_top = max(0.0, (0.0 - origin_y) / zoom)
+        visible_right = min(float(image_width), (float(canvas_width) - origin_x) / zoom)
+        visible_bottom = min(float(image_height), (float(canvas_height) - origin_y) / zoom)
+
+        if visible_right <= visible_left or visible_bottom <= visible_top:
+            return None
+
+        return (
+            float(visible_left),
+            float(visible_top),
+            float(visible_right),
+            float(visible_bottom),
+        )
+
+    def _get_visible_image_region(self):
+        if self.original_image is None:
+            return None
+
+        canvas_width, canvas_height = self._get_canvas_size()
+        zoom = max(1e-9, float(self.zoom_level))
+        origin_x = float(self.pan_data.get('x', 0.0))
+        origin_y = float(self.pan_data.get('y', 0.0))
+        image_width = int(self.original_image.width)
+        image_height = int(self.original_image.height)
+
+        exact_bounds = self._get_exact_visible_image_bounds()
+        if exact_bounds is None:
+            return None
+
+        visible_left, visible_top, visible_right, visible_bottom = exact_bounds
+
+        buffer_canvas_x = min(max(64.0, float(canvas_width) * 0.35), 240.0)
+        buffer_canvas_y = min(max(64.0, float(canvas_height) * 0.35), 240.0)
+        buffer_img_x = buffer_canvas_x / zoom
+        buffer_img_y = buffer_canvas_y / zoom
+
+        crop_left = max(0, int(math.floor(visible_left - buffer_img_x)))
+        crop_top = max(0, int(math.floor(visible_top - buffer_img_y)))
+        crop_right = min(image_width, int(math.ceil(visible_right + buffer_img_x)))
+        crop_bottom = min(image_height, int(math.ceil(visible_bottom + buffer_img_y)))
+
+        if crop_right <= crop_left or crop_bottom <= crop_top:
+            return None
+
+        return {
+            "crop_box": (crop_left, crop_top, crop_right, crop_bottom),
+            "draw_x": origin_x + (float(crop_left) * zoom),
+            "draw_y": origin_y + (float(crop_top) * zoom),
+            "draw_width": max(1, int(math.ceil((crop_right - crop_left) * zoom))),
+            "draw_height": max(1, int(math.ceil((crop_bottom - crop_top) * zoom))),
+            "visible_bounds": exact_bounds,
+        }
     
     def set_image(self, pil_image):
         """Ustaw nowy obraz (PIL.Image) i wyczyść zoom/pan."""
@@ -65,6 +183,24 @@ class ZoomableCanvas(tk.Canvas):
         self.zoom_level = 1.0
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
         self._update_display()
+
+    def clear_image(self):
+        """Wyczysc aktualny obraz i zresetuj stan widoku."""
+        self.original_image = None
+        self.photo_image = None
+        self.image_id = None
+        self._render_region = None
+        self._pan_buffered_move_active = False
+        self.zoom_level = 1.0
+        self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
+        try:
+            self.delete("all")
+        except Exception:
+            pass
+        try:
+            self.configure(scrollregion=(0, 0, 0, 0))
+        except Exception:
+            pass
 
     def set_overlay_renderer(self, renderer):
         """Ustaw callback rysujący overlay po wyrenderowaniu obrazu."""
@@ -205,6 +341,7 @@ class ZoomableCanvas(tk.Canvas):
         self.zoom_level = new_zoom
         self.pan_data['x'] = anchor_x - (float(img_x) * float(self.zoom_level))
         self.pan_data['y'] = anchor_y - (float(img_y) * float(self.zoom_level))
+        self._apply_clamped_pan()
         self._update_display()
         self._delegate_interaction("zoom", event)
     
@@ -235,19 +372,26 @@ class ZoomableCanvas(tk.Canvas):
         if self.pan_data['press_x'] is None:
             return
         
-        # Oblicz deltę
-        dx = event.x - self.pan_data['press_x']
-        dy = event.y - self.pan_data['press_y']
-        
-        # Aktualizuj pan
-        self.pan_data['x'] += dx
-        self.pan_data['y'] += dy
-        
+        # Oblicz deltę i przytnij ruch tak, aby obraz nie wypadal poza viewport.
+        dx = float(event.x - self.pan_data['press_x'])
+        dy = float(event.y - self.pan_data['press_y'])
+        previous_x = float(self.pan_data.get('x', 0.0))
+        previous_y = float(self.pan_data.get('y', 0.0))
+        next_x, next_y = self._clamp_origin(previous_x + dx, previous_y + dy)
+        applied_dx = float(next_x - previous_x)
+        applied_dy = float(next_y - previous_y)
+        self.pan_data['x'] = float(next_x)
+        self.pan_data['y'] = float(next_y)
+
         # Aktualizuj pozycję
         self.pan_data['press_x'] = event.x
         self.pan_data['press_y'] = event.y
-        
-        self._update_display()
+
+        if abs(applied_dx) < 1e-9 and abs(applied_dy) < 1e-9:
+            return
+
+        if not self._apply_buffered_pan_move(applied_dx, applied_dy):
+            self._update_display()
     
     def _on_pan_release(self, event):
         """Koniec przeciągania (zwolnienie LPM)."""
@@ -262,6 +406,8 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data['press_x'] = None
         self.pan_data['press_y'] = None
         self.config(cursor=self.current_cursor)
+        if self._pan_buffered_move_active:
+            self._update_display()
     
     def _on_reset_view(self, event):
         """Reset zoom i pan (naciśnięcie Home lub R)."""
@@ -280,6 +426,8 @@ class ZoomableCanvas(tk.Canvas):
         """Aktualizuj canvas z nowym zoom'em i pan'em."""
         if self.original_image is None:
             return
+        self._update_display_visible_region()
+        return
         
         # Skaluj obraz
         new_width = int(self.original_image.width * self.zoom_level)
@@ -312,6 +460,106 @@ class ZoomableCanvas(tk.Canvas):
         self.configure(scrollregion=self.bbox("all"))
 
         self._draw_overlay()
+
+    def _update_display_visible_region(self):
+        """Renderuj tylko widoczny fragment obrazu zamiast skalowac calosc."""
+        if self.original_image is None:
+            return
+
+        self._apply_clamped_pan()
+
+        visible_region = self._get_visible_image_region()
+        full_width, full_height = self._get_full_image_size()
+        origin_x = float(self.pan_data.get('x', 0.0))
+        origin_y = float(self.pan_data.get('y', 0.0))
+
+        self.delete("all")
+        self.photo_image = None
+        self.image_id = None
+        self._render_region = None
+        self._pan_buffered_move_active = False
+
+        if visible_region is not None:
+            crop_box = visible_region["crop_box"]
+            cropped = self.original_image.crop(crop_box)
+            scaled = cropped.resize(
+                (int(visible_region["draw_width"]), int(visible_region["draw_height"])),
+                Image.Resampling.BILINEAR
+            )
+            self.photo_image = ImageTk.PhotoImage(scaled)
+            self.image_id = self.create_image(
+                float(visible_region["draw_x"]),
+                float(visible_region["draw_y"]),
+                image=self.photo_image,
+                anchor="nw"
+            )
+            self._render_region = {
+                "crop_box": tuple(crop_box),
+                "draw_x": float(visible_region["draw_x"]),
+                "draw_y": float(visible_region["draw_y"]),
+                "draw_width": int(visible_region["draw_width"]),
+                "draw_height": int(visible_region["draw_height"]),
+                "zoom_level": float(self.zoom_level),
+            }
+
+        self.configure(
+            scrollregion=(
+                origin_x,
+                origin_y,
+                origin_x + full_width,
+                origin_y + full_height,
+            )
+        )
+        self._draw_overlay()
+
+    def _can_reuse_buffered_pan(self):
+        region = self._render_region if isinstance(self._render_region, dict) else None
+        if region is None or self.image_id is None or self.photo_image is None:
+            return False
+
+        if abs(float(region.get("zoom_level", 0.0)) - float(self.zoom_level)) > 1e-9:
+            return False
+
+        exact_bounds = self._get_exact_visible_image_bounds()
+        if exact_bounds is None:
+            return False
+
+        crop_left, crop_top, crop_right, crop_bottom = [float(v) for v in region.get("crop_box", (0, 0, 0, 0))]
+        visible_left, visible_top, visible_right, visible_bottom = exact_bounds
+        return (
+            crop_left <= visible_left
+            and crop_top <= visible_top
+            and crop_right >= visible_right
+            and crop_bottom >= visible_bottom
+        )
+
+    def _apply_buffered_pan_move(self, dx: float, dy: float) -> bool:
+        if not self._can_reuse_buffered_pan():
+            return False
+
+        try:
+            self.move("all", float(dx), float(dy))
+        except Exception:
+            return False
+
+        if isinstance(self._render_region, dict):
+            self._render_region["draw_x"] = float(self._render_region.get("draw_x", 0.0)) + float(dx)
+            self._render_region["draw_y"] = float(self._render_region.get("draw_y", 0.0)) + float(dy)
+
+        full_width = max(1.0, float(self.original_image.width) * float(self.zoom_level))
+        full_height = max(1.0, float(self.original_image.height) * float(self.zoom_level))
+        origin_x = float(self.pan_data.get('x', 0.0))
+        origin_y = float(self.pan_data.get('y', 0.0))
+        self.configure(
+            scrollregion=(
+                origin_x,
+                origin_y,
+                origin_x + full_width,
+                origin_y + full_height,
+            )
+        )
+        self._pan_buffered_move_active = True
+        return True
 
     def _draw_overlay(self):
         if self.original_image is None:
@@ -418,6 +666,7 @@ class ZoomableCanvas(tk.Canvas):
             'press_x': None,
             'press_y': None
         }
+        self._apply_clamped_pan()
         if redraw:
             self._update_display()
         return True
@@ -455,15 +704,16 @@ class ZoomableCanvas(tk.Canvas):
         fitted_zoom = min(scale_x, scale_y)
         self.zoom_level = max(self.min_zoom, min(self.max_zoom, fitted_zoom))
 
-        scaled_width = int(self.original_image.width * self.zoom_level)
-        scaled_height = int(self.original_image.height * self.zoom_level)
+        scaled_width = float(self.original_image.width) * float(self.zoom_level)
+        scaled_height = float(self.original_image.height) * float(self.zoom_level)
 
         self.pan_data = {
-            'x': max(0, (canvas_width - scaled_width) // 2),
-            'y': max(0, (canvas_height - scaled_height) // 2),
+            'x': (float(canvas_width) - scaled_width) / 2.0,
+            'y': (float(canvas_height) - scaled_height) / 2.0,
             'press_x': None,
             'press_y': None
         }
+        self._apply_clamped_pan()
         self._update_display()
         
     def update_image_preserve_zoom(self, pil_image):
@@ -474,6 +724,7 @@ class ZoomableCanvas(tk.Canvas):
             pil_image: Nowy obraz (PIL.Image)
         """
         self.original_image = pil_image
+        self._apply_clamped_pan()
         self._update_display()
 
     def get_image_origin(self):

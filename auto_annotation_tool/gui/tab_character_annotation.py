@@ -163,6 +163,7 @@ class CharacterAnnotationTab:
         self.app = app
         self.icon_manager = IconManager
         self.frame = ttk.Frame(parent)
+        self._startup_ui_ready = False
 
         # core state
         self.is_processing = False
@@ -310,8 +311,15 @@ class CharacterAnnotationTab:
 
         self._update_yolo_visibility()
         self.app.root.bind("<Destroy>", self._on_app_close, add="+")
+        self.frame.after(180, self._mark_startup_ui_ready)
         if self.preview_dir_var.get().strip():
             self.frame.after(100, lambda: self._load_preview_data(quiet=True))
+
+    def _mark_startup_ui_ready(self):
+        self._startup_ui_ready = True
+
+    def is_startup_ui_ready(self) -> bool:
+        return bool(getattr(self, "_startup_ui_ready", False))
 
     # =========================================================
     # Small helpers

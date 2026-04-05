@@ -7,6 +7,7 @@ Układ 3-kolumnowy z interaktywną przeglądarką na Canvasie.
 
 import json
 from collections import deque
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 import xml.etree.ElementTree as ET
@@ -17,6 +18,7 @@ import datetime
 import threading
 import logging
 import math
+import shutil
 import time
 import numpy as np
 
@@ -26,12 +28,12 @@ from .zoomable_canvas import ZoomableCanvas
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SESSION
 from ..icons import IconManager
-from ..annotators import PlateAnnotator, CombinedAnnotator
+from ..annotators import PlateAnnotator, CombinedAnnotator, VehicleAnnotator
 from ..exporters import CVATExporter, ReportGenerator
 from ..training import DatasetCreator
-from ..utils import count_images_in_directory, format_duration
+from ..utils import count_images_in_directory, format_duration, get_image_files, get_image_size
 from ..validators import validate_model_file
-from ..data_models import Detection, AnnotationStatus, ImageAnnotation
+from ..data_models import Detection, AnnotationStatus, ImageAnnotation, AnnotationReport
 from ..rectification.polygon_validator import PolygonValidator
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
@@ -124,6 +126,7 @@ class AnnotationTab:
         self.app = app
         self.icon = IconManager
         self.frame = ttk.Frame(parent)
+        self._startup_ui_ready = False
         session_state = self._load_free_mode_session_snapshot()
 
         self.annotator = None
@@ -131,6 +134,7 @@ class AnnotationTab:
         self.is_processing = False
         self.start_time = None
         self._free_mode_session_restore_in_progress = False
+        self._campaign_project_restore_in_progress = False
         self._free_mode_session_save_after_id = None
         
         # Zmienne do przeglądarki
@@ -142,6 +146,7 @@ class AnnotationTab:
         self._preview_session_restore_index = None
         self._preview_session_restore_filename = ""
         self._preview_selected_plate_by_image = {}
+        self._preview_selected_vehicle_by_image = {}
         self._preview_drag_state = None
         self._preview_pending_vertex_hit = None
         self._preview_corner_drag_modifier_down = False
@@ -157,12 +162,20 @@ class AnnotationTab:
         self._preview_fullscreen_restore_window_state = "normal"
         self._preview_fullscreen_restore_geometry = ""
         self._preview_polygon_focus_restore_state = None
+        self._preview_focus_target = None
+        self._preview_force_fit_after_resize = False
         self._preview_debug_enabled = False
         self._preview_debug_events = deque(maxlen=8)
         self._preview_debug_last_drag_update_at = 0.0
         self._preview_debug_log_path = Path(CONFIG.WORKSPACE_DIR) / "z2_debug.log"
+        self._preview_layout_restore_after_ids = []
+        self._main_pane_layout_after_id = None
+        self._main_pane_layout_initialized = False
+        self._current_run_manual_template = False
+        self._current_run_manual_vehicle_assist = False
         self.preview_edit_status_var = tk.StringVar(value="Po zakończeniu autoanotacji tutaj poprawisz rogi tablic.")
         self.preview_debug_var = tk.StringVar(value="DEBUG Z2 | oczekiwanie na zdarzenia")
+        self.preview_fullscreen_hint_var = tk.StringVar(value="")
 
         self.mode_var = tk.StringVar(value=session_state["mode"])
         self.vehicle_model_var = tk.StringVar(value=session_state["vehicle_model"])
@@ -191,12 +204,27 @@ class AnnotationTab:
         # Domyślnie podpowiadaj katalog wejściowy z workspace.
         self.input_dir_var = tk.StringVar(value=session_state["input_dir"])
         self.output_dir_var = tk.StringVar(value=session_state["output_dir"])
+        self.manual_xml_template_var = tk.BooleanVar(value=bool(session_state["manual_xml_template"]))
+        self.manual_vehicle_assist_var = tk.BooleanVar(value=bool(session_state["manual_vehicle_assist"]))
+        self.manual_xml_template_hint_var = tk.StringVar(value="")
+        self.manual_vehicle_assist_hint_var = tk.StringVar(value="")
+        self.manual_stage_dir_var = tk.StringVar(value="")
+        self.manual_stage_status_var = tk.StringVar(value="")
+        self.approve_gate_hint_var = tk.StringVar(value="")
+        self.detection_mode_hint_var = tk.StringVar(value="")
         last_preview_run_dir = str(session_state["last_preview_run_dir"] or "").strip()
         self.last_staging_run_dir = Path(last_preview_run_dir) if last_preview_run_dir else None
 
         self._create_widgets()
         self._apply_free_mode_session_snapshot(session_state, restore_preview=True)
         self._bind_free_mode_session_observers()
+        self.frame.after_idle(self._mark_startup_ui_ready)
+
+    def _mark_startup_ui_ready(self):
+        self._startup_ui_ready = True
+
+    def is_startup_ui_ready(self) -> bool:
+        return bool(getattr(self, "_startup_ui_ready", False))
 
     def _auto_device_label(self) -> str:
         return "auto (prefer GPU/CUDA, fallback CPU)"
@@ -316,6 +344,8 @@ class AnnotationTab:
             "plate_dataset_images": "",
             "plate_train_pct": 80.0,
             "plate_val_pct": 10.0,
+            "manual_xml_template": False,
+            "manual_vehicle_assist": False,
             "last_preview_run_dir": "",
             "last_preview_index": -1,
             "last_preview_filename": "",
@@ -329,6 +359,46 @@ class AnnotationTab:
             active_project = None
 
         return bool(getattr(self.app, "campaign_free_mode", False)) or not active_project
+
+    def _get_campaign_annotation_state_path(self, project_name: str | None = None) -> Path | None:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            state_dir = CAMPAIGN.get_project_state_dir(project_name)
+        except Exception:
+            state_dir = None
+
+        if state_dir is None:
+            return None
+
+        return Path(state_dir) / "annotation_ui_state.json"
+
+    @staticmethod
+    def _paths_equivalent(left, right) -> bool:
+        if not left or not right:
+            return False
+
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except Exception:
+            return str(Path(left)) == str(Path(right))
+
+    @staticmethod
+    def _path_is_within(candidate, root) -> bool:
+        if not candidate or not root:
+            return False
+
+        try:
+            candidate_path = Path(candidate).resolve()
+            root_path = Path(root).resolve()
+        except Exception:
+            return False
+
+        try:
+            candidate_path.relative_to(root_path)
+            return True
+        except Exception:
+            return False
 
     def _get_annotation_session_text(
         self,
@@ -381,6 +451,24 @@ class AnnotationTab:
         except (TypeError, ValueError):
             return int(default)
 
+    def _get_annotation_session_bool(self, key: str, default: bool) -> bool:
+        value = default
+        if SESSION:
+            try:
+                value = SESSION.get("annotation", key, default)
+            except Exception:
+                value = default
+
+        if isinstance(value, bool):
+            return value
+
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
+
     def _load_free_mode_session_snapshot(self) -> dict:
         defaults = self._annotation_session_defaults()
         return {
@@ -398,6 +486,8 @@ class AnnotationTab:
             "plate_dataset_images": self._get_annotation_session_text("plate_dataset_images", defaults["plate_dataset_images"], allow_empty=True),
             "plate_train_pct": self._get_annotation_session_float("plate_train_pct", defaults["plate_train_pct"]),
             "plate_val_pct": self._get_annotation_session_float("plate_val_pct", defaults["plate_val_pct"]),
+            "manual_xml_template": self._get_annotation_session_bool("manual_xml_template", defaults["manual_xml_template"]),
+            "manual_vehicle_assist": self._get_annotation_session_bool("manual_vehicle_assist", defaults["manual_vehicle_assist"]),
             "last_preview_run_dir": self._get_annotation_session_text("last_preview_run_dir", defaults["last_preview_run_dir"], allow_empty=True),
             "last_preview_index": self._get_annotation_session_int("last_preview_index", defaults["last_preview_index"]),
             "last_preview_filename": self._get_annotation_session_text("last_preview_filename", defaults["last_preview_filename"], allow_empty=True),
@@ -434,6 +524,8 @@ class AnnotationTab:
             "plate_dataset_images": str(self.plate_dataset_images_var.get() or "").strip(),
             "plate_train_pct": float(self.plate_train_pct.get()),
             "plate_val_pct": float(self.plate_val_pct.get()),
+            "manual_xml_template": bool(self.manual_xml_template_var.get()),
+            "manual_vehicle_assist": bool(self.manual_vehicle_assist_var.get()),
             "last_preview_run_dir": run_dir_value,
             "last_preview_index": (
                 int(self.current_preview_index)
@@ -442,6 +534,512 @@ class AnnotationTab:
             ),
             "last_preview_filename": str(getattr(selected_ann, "filename", "") or "").strip(),
         }
+
+    def _collect_campaign_project_snapshot(self) -> dict:
+        selected_ann = self._get_preview_annotation()
+        run_dir_value = ""
+        for candidate in (
+            getattr(self, "current_annotation_run_dir", None),
+            getattr(self, "last_staging_run_dir", None),
+            str(self.plate_dataset_run_var.get() or "").strip(),
+        ):
+            if not candidate:
+                continue
+            try:
+                run_dir_value = str(Path(candidate))
+                break
+            except Exception:
+                continue
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_project = CAMPAIGN.get_active_project_name()
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            active_project = ""
+            iteration_num = 1
+
+        return {
+            "project": str(active_project or "").strip(),
+            "iteration": int(iteration_num),
+            "input_dir": str(self.input_dir_var.get() or "").strip(),
+            "output_dir": str(self.output_dir_var.get() or "").strip(),
+            "mode": self._normalize_mode_value(),
+            "vehicle_model": str(self.vehicle_model_var.get() or "").strip(),
+            "vehicle_custom": str(self.vehicle_custom_var.get() or "").strip(),
+            "plate_custom": str(self.plate_custom_var.get() or "").strip(),
+            "character_model": str(self.character_model_var.get() or "").strip(),
+            "character_custom": str(self.character_custom_var.get() or "").strip(),
+            "device": str(self.device_var.get() or "").strip(),
+            "conf": float(self.conf_var.get()),
+            "plate_dataset_run": str(self.plate_dataset_run_var.get() or "").strip(),
+            "plate_dataset_images": str(self.plate_dataset_images_var.get() or "").strip(),
+            "plate_train_pct": float(self.plate_train_pct.get()),
+            "plate_val_pct": float(self.plate_val_pct.get()),
+            "manual_xml_template": bool(self.manual_xml_template_var.get()),
+            "manual_vehicle_assist": bool(self.manual_vehicle_assist_var.get()),
+            "last_preview_run_dir": run_dir_value,
+            "last_preview_index": (
+                int(self.current_preview_index)
+                if self.current_preview_index is not None
+                else -1
+            ),
+            "last_preview_filename": str(getattr(selected_ann, "filename", "") or "").strip(),
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _load_campaign_project_snapshot(self) -> dict:
+        snapshot_path = self._get_campaign_annotation_state_path()
+        if snapshot_path is None or not snapshot_path.exists():
+            return {}
+
+        try:
+            loaded = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _save_campaign_project_snapshot(self) -> bool:
+        snapshot_path = self._get_campaign_annotation_state_path()
+        if snapshot_path is None:
+            return False
+
+        try:
+            payload = self._collect_campaign_project_snapshot()
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"Nie udalo sie zapisac projektowego stanu Z2: {e}")
+            return False
+
+    def reset_campaign_iteration_route_state(self, new_target: str | None = None) -> dict:
+        result = {
+            "removed_runs": 0,
+            "removed_snapshot": False,
+            "removed_stage": False,
+        }
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+            if not active_project:
+                return result
+
+            target = str(new_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+            if target not in {"plate", "char"}:
+                target = "plate"
+
+            pending = getattr(self, "_free_mode_session_save_after_id", None)
+            if pending:
+                try:
+                    self.frame.after_cancel(pending)
+                except Exception:
+                    pass
+            self._free_mode_session_save_after_id = None
+
+            candidate_inputs: list[Path] = []
+            iteration_raw_dir = CAMPAIGN.get_iteration_raw_dir()
+            if iteration_raw_dir is not None:
+                candidate_inputs.append(Path(iteration_raw_dir))
+
+            raw_root = CAMPAIGN.get_dir("raw")
+            if raw_root is not None:
+                iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+                raw_iter_dir = Path(raw_root) / f"Iteracja_{iter_num:03d}"
+                candidate_inputs.append(raw_iter_dir if raw_iter_dir.exists() else Path(raw_root))
+
+            try:
+                candidate_inputs.append(self._get_manual_plate_stage_images_dir())
+            except Exception:
+                pass
+
+            stored_manual_source = {}
+            try:
+                stored_manual_source = CAMPAIGN.get_last_plate_manual_source()
+            except Exception:
+                stored_manual_source = {}
+
+            manual_run_keep = set()
+            for candidate in (
+                str(stored_manual_source.get("source_run_path") or "").strip(),
+                str(stored_manual_source.get("source_xml_path") or "").strip(),
+            ):
+                if not candidate:
+                    continue
+                try:
+                    manual_path = Path(candidate)
+                    if manual_path.suffix.lower() == ".xml":
+                        manual_path = manual_path.parent
+                    manual_run_keep.add(str(manual_path.resolve()))
+                except Exception:
+                    try:
+                        manual_run_keep.add(str(Path(candidate)))
+                    except Exception:
+                        pass
+
+            explicit_run_dirs = set()
+            for candidate in (
+                str(CAMPAIGN.get_step2_staging_run() or "").strip(),
+                str(getattr(self, "current_annotation_run_dir", "") or "").strip(),
+                str(getattr(self, "last_staging_run_dir", "") or "").strip(),
+                str(self.plate_dataset_run_var.get() or "").strip(),
+            ):
+                if not candidate:
+                    continue
+                try:
+                    explicit_run_dirs.add(str(Path(candidate).resolve()))
+                except Exception:
+                    explicit_run_dirs.add(str(Path(candidate)))
+
+            search_roots = []
+            for root_candidate in (CAMPAIGN.get_staging_dir("auto_ann"), CAMPAIGN.get_dir("auto_ann")):
+                if root_candidate is not None:
+                    search_roots.append(Path(root_candidate))
+
+            visited = set()
+            for root in search_roots:
+                try:
+                    if not root.exists() or not root.is_dir():
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    run_paths = list(root.rglob("run_*"))
+                except Exception:
+                    continue
+
+                for run_dir in run_paths:
+                    try:
+                        if not run_dir.is_dir():
+                            continue
+                        run_key = str(run_dir.resolve())
+                    except Exception:
+                        try:
+                            run_key = str(Path(run_dir))
+                        except Exception:
+                            continue
+
+                    if run_key in visited:
+                        continue
+                    visited.add(run_key)
+
+                    manifest = {}
+                    remove_run = run_key in explicit_run_dirs
+                    if not remove_run:
+                        manifest = self._load_annotation_run_manifest(run_dir)
+                        manifest_input = str(manifest.get("input_dir") or "").strip()
+                        if manifest_input:
+                            remove_run = any(
+                                self._paths_equivalent(manifest_input, candidate_input)
+                                for candidate_input in candidate_inputs
+                            )
+
+                    if not remove_run or not self._path_is_within(run_dir, root):
+                        continue
+
+                    if run_key in manual_run_keep or self._annotation_run_manifest_has_manual_value(manifest):
+                        continue
+
+                    try:
+                        shutil.rmtree(run_dir)
+                        result["removed_runs"] += 1
+                    except Exception as e:
+                        logger.debug(f"Nie udalo sie usunac runu po zmianie toru E2 ({run_dir}): {e}")
+
+            stage_root = CAMPAIGN.get_staging_dir("plate_stage")
+            stage_dir = self._get_manual_plate_stage_dir()
+            try:
+                if (
+                    stage_root is not None
+                    and stage_dir.exists()
+                    and self._path_is_within(stage_dir, stage_root)
+                ):
+                    shutil.rmtree(stage_dir)
+                    result["removed_stage"] = True
+            except Exception as e:
+                logger.debug(f"Nie udalo sie wyczyscic stage po zmianie toru E2: {e}")
+
+            snapshot_path = self._get_campaign_annotation_state_path(active_project)
+            try:
+                if snapshot_path is not None and snapshot_path.exists():
+                    snapshot_path.unlink()
+                    result["removed_snapshot"] = True
+            except Exception as e:
+                logger.debug(f"Nie udalo sie usunac snapshotu Z2 po zmianie toru E2: {e}")
+
+            self._preview_session_restore_index = -1
+            self._preview_session_restore_filename = ""
+
+            auto_out = CAMPAIGN.get_staging_dir("auto_ann")
+            if raw_root is not None and auto_out is not None:
+                iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+                input_dir = Path(raw_root) / f"Iteracja_{iter_num:03d}"
+                if not input_dir.exists():
+                    input_dir = Path(raw_root)
+
+                self.apply_campaign_context(
+                    input_dir,
+                    Path(auto_out),
+                    manual_template=(target == "plate"),
+                    mode_text="C: Pojazdy + tablice",
+                    restore_project_state=False,
+                )
+                self.flush_free_mode_session_state()
+        except Exception as e:
+            logger.debug(f"Nie udalo sie zresetowac stanu iteracji po zmianie toru E2: {e}")
+
+        return result
+
+    @staticmethod
+    def _dir_has_images(path_like) -> bool:
+        if not path_like:
+            return False
+
+        try:
+            return bool(get_image_files(Path(path_like)))
+        except Exception:
+            return False
+
+    def _get_campaign_auto_annotation_bootstrap(self, iteration_target: str | None = None) -> dict:
+        bootstrap = {
+            "input_dir": None,
+            "input_source": "raw",
+            "manual_template": False,
+            "plate_model_path": "",
+            "restore_run_dir": None,
+        }
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if not CAMPAIGN.get_active_project_name():
+                return bootstrap
+
+            target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+            raw_dir = CAMPAIGN.get_dir("raw")
+            if raw_dir is None:
+                return bootstrap
+
+            iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+            raw_root = Path(raw_dir)
+            iter_dir = raw_root / f"Iteracja_{iter_num:03d}"
+            default_input = iter_dir if iter_dir.exists() else raw_root
+            auto_dir = CAMPAIGN.get_dir("auto_ann")
+
+            plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
+            plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
+
+            bootstrap["input_dir"] = default_input
+            bootstrap["plate_model_path"] = plate_model_path if plate_model_ready else ""
+            bootstrap["manual_template"] = bool(target == "plate" and not plate_model_ready)
+
+            manual_source_run = self._find_reused_manual_source_run(default_input)
+            if manual_source_run is not None and (manual_source_run / "annotations.xml").exists():
+                bootstrap["restore_run_dir"] = manual_source_run
+                bootstrap["input_source"] = "manual_source_run"
+
+            reuse_source_input = None
+            try:
+                ingest_manifest = CAMPAIGN.load_ingest_manifest(iter_num)
+            except Exception:
+                ingest_manifest = {}
+
+            if isinstance(ingest_manifest, dict):
+                selection_mode = str(ingest_manifest.get("selection_mode") or "").strip().lower()
+                try:
+                    reused_from_iteration = int(ingest_manifest.get("reused_from_iteration", 0) or 0)
+                except (TypeError, ValueError):
+                    reused_from_iteration = 0
+
+                if selection_mode == "iteration_reuse" and reused_from_iteration > 0:
+                    reuse_source_input = CAMPAIGN.get_iteration_raw_dir(reused_from_iteration)
+
+            if reuse_source_input is not None and auto_dir is not None:
+                reuse_source_input = Path(reuse_source_input)
+                manual_reuse_run = self._find_reused_manual_source_run(reuse_source_input)
+                if manual_reuse_run is not None and (manual_reuse_run / "annotations.xml").exists():
+                    bootstrap["restore_run_dir"] = manual_reuse_run
+                    bootstrap["input_source"] = "reused_manual_source_run"
+                else:
+                    training_source_run = self._find_reused_training_source_run(reuse_source_input)
+                    if training_source_run is not None and (training_source_run / "annotations.xml").exists():
+                        bootstrap["restore_run_dir"] = training_source_run
+                        bootstrap["input_source"] = "reused_training_source_run"
+                    else:
+                        reuse_run = self._find_latest_annotation_run_for_input(
+                            reuse_source_input,
+                            [Path(auto_dir)],
+                        )
+                        if reuse_run is not None and (reuse_run / "annotations.xml").exists():
+                            bootstrap["restore_run_dir"] = reuse_run
+                            bootstrap["input_source"] = "reused_iteration_run"
+
+            if target != "plate":
+                return bootstrap
+
+            if self._dir_has_images(default_input):
+                return bootstrap
+
+            current_stage = self._get_manual_plate_stage_images_dir()
+            if self._dir_has_images(current_stage):
+                bootstrap["input_dir"] = current_stage
+                bootstrap["input_source"] = "stage_current_iteration"
+                return bootstrap
+
+            if iter_num > 1:
+                prev_stage = self._get_manual_plate_stage_dir().parent / f"Iteracja_{iter_num - 1:03d}" / "images"
+                if self._dir_has_images(prev_stage):
+                    bootstrap["input_dir"] = prev_stage
+                    bootstrap["input_source"] = "stage_previous_iteration"
+                    return bootstrap
+
+            latest_run = None
+            if auto_dir is not None:
+                latest_run = self._find_latest_annotation_run_dir(Path(auto_dir))
+
+            if latest_run is None:
+                return bootstrap
+
+            manifest = self._load_annotation_run_manifest(latest_run)
+            manifest_input = str(manifest.get("input_dir") or "").strip()
+            if manifest_input and self._dir_has_images(manifest_input):
+                bootstrap["input_dir"] = Path(manifest_input)
+                bootstrap["input_source"] = "latest_approved_run"
+                bootstrap["restore_run_dir"] = latest_run
+                return bootstrap
+
+            if (latest_run / "annotations.xml").exists():
+                bootstrap["input_source"] = "latest_approved_run"
+                bootstrap["restore_run_dir"] = latest_run
+        except Exception as e:
+            logger.debug(f"Nie udalo sie zbudowac bootstrapu Z2 dla kampanii: {e}")
+
+        return bootstrap
+
+    def _restore_preview_from_annotation_run(self, run_dir: Path | None) -> bool:
+        if run_dir is None:
+            return False
+
+        try:
+            run_dir = Path(run_dir)
+        except Exception:
+            return False
+
+        xml_path = run_dir / "annotations.xml"
+        if not run_dir.exists() or not run_dir.is_dir() or not xml_path.exists():
+            return False
+
+        try:
+            self._load_plate_dataset_context_from_run(run_dir, force_images_update=True)
+            self._restore_preview_from_session_run()
+            self._refresh_plate_dataset_export_sources()
+            return True
+        except Exception as e:
+            logger.debug(f"Nie udalo sie przywrocic podgladu Z2 z runu {run_dir}: {e}")
+            return False
+
+    def _apply_campaign_project_snapshot(self, session_state: dict | None = None, restore_preview: bool = True) -> bool:
+        state = dict(session_state or self._load_campaign_project_snapshot())
+        if not state:
+            return False
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            return False
+
+        if active_project and str(state.get("project", "") or "").strip() not in {"", active_project}:
+            return False
+
+        try:
+            saved_iteration = int(state.get("iteration", current_iteration))
+        except (TypeError, ValueError):
+            saved_iteration = current_iteration
+        if saved_iteration != current_iteration:
+            return False
+
+        current_input = str(self.input_dir_var.get() or "").strip()
+        snapshot_input = str(state.get("input_dir") or "").strip()
+        snapshot_uses_stage = bool(snapshot_input and self._is_manual_plate_stage_input(snapshot_input))
+        if current_input and snapshot_input and not self._paths_equivalent(snapshot_input, current_input):
+            if not snapshot_uses_stage:
+                return False
+            try:
+                if not Path(snapshot_input).exists():
+                    return False
+            except Exception:
+                return False
+
+        self._campaign_project_restore_in_progress = True
+        try:
+            if snapshot_uses_stage:
+                self.input_dir_var.set(snapshot_input)
+            self.mode_var.set(self._normalize_mode_value(state.get("mode")))
+            self.vehicle_model_var.set(str(state.get("vehicle_model") or "").strip())
+            self.vehicle_custom_var.set(str(state.get("vehicle_custom") or "").strip())
+            self.plate_custom_var.set(str(state.get("plate_custom") or "").strip())
+            self.character_model_var.set(str(state.get("character_model") or "Brak / OCR").strip() or "Brak / OCR")
+            self.character_custom_var.set(str(state.get("character_custom") or "").strip())
+            self.device_var.set(str(state.get("device") or "auto").strip() or "auto")
+            self.conf_var.set(float(state.get("conf", CONFIG.DEFAULT_CONFIDENCE)))
+            self.plate_dataset_run_var.set(str(state.get("plate_dataset_run") or "").strip())
+            self.plate_dataset_images_var.set(str(state.get("plate_dataset_images") or "").strip())
+            self.plate_train_pct.set(float(state.get("plate_train_pct", 80.0)))
+            self.plate_val_pct.set(float(state.get("plate_val_pct", 10.0)))
+            self.manual_xml_template_var.set(bool(state.get("manual_xml_template", False)))
+            self.manual_vehicle_assist_var.set(bool(state.get("manual_vehicle_assist", False)))
+
+            last_preview_run_dir = str(state.get("last_preview_run_dir") or "").strip()
+            self.last_staging_run_dir = Path(last_preview_run_dir) if last_preview_run_dir else None
+            try:
+                self._preview_session_restore_index = int(state.get("last_preview_index", -1))
+            except (TypeError, ValueError):
+                self._preview_session_restore_index = -1
+            self._preview_session_restore_filename = str(state.get("last_preview_filename") or "").strip()
+
+            self._refresh_device_options()
+            self._update_model_lists()
+
+            if hasattr(self, "vehicle_combo"):
+                try:
+                    vehicle_values = list(self.vehicle_combo["values"])
+                except Exception:
+                    vehicle_values = []
+                current_vehicle = str(self.vehicle_model_var.get() or "").strip()
+                if vehicle_values and current_vehicle not in vehicle_values:
+                    preferred_vehicle = "yolo11s" if "yolo11s" in vehicle_values else vehicle_values[0]
+                    self.vehicle_model_var.set(preferred_vehicle)
+
+            if hasattr(self, "character_combo"):
+                self._refresh_character_model_choices()
+
+            self._on_mode_change()
+            self._on_vehicle_model_change()
+            self._update_manual_xml_template_ui()
+            self._update_plate_dataset_ratio_labels()
+            self._refresh_plate_dataset_export_sources()
+            self._set_campaign_paths_lock_state(True)
+
+            input_dir_value = str(self.input_dir_var.get() or "").strip()
+            self.current_input_dir = Path(input_dir_value) if input_dir_value else None
+
+            if restore_preview:
+                self._restore_preview_from_session_run()
+            self._refresh_step2_action_states()
+        finally:
+            self._campaign_project_restore_in_progress = False
+
+        return True
 
     def _bind_free_mode_session_observers(self):
         observed_vars = (
@@ -459,6 +1057,8 @@ class AnnotationTab:
             self.plate_dataset_images_var,
             self.plate_train_pct,
             self.plate_val_pct,
+            self.manual_xml_template_var,
+            self.manual_vehicle_assist_var,
         )
         for var in observed_vars:
             try:
@@ -470,8 +1070,19 @@ class AnnotationTab:
         self._queue_free_mode_session_save()
 
     def _queue_free_mode_session_save(self):
-        if self._free_mode_session_restore_in_progress or not SESSION or not self._is_free_mode_session_context():
+        if self._free_mode_session_restore_in_progress or self._campaign_project_restore_in_progress:
             return
+
+        if self._is_free_mode_session_context():
+            if not SESSION:
+                return
+        else:
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if not CAMPAIGN.get_active_project_name():
+                    return
+            except Exception:
+                return
 
         pending = getattr(self, "_free_mode_session_save_after_id", None)
         if pending:
@@ -494,17 +1105,24 @@ class AnnotationTab:
                 pass
         self._free_mode_session_save_after_id = None
 
-        if self._free_mode_session_restore_in_progress or not SESSION or not self._is_free_mode_session_context():
+        if self._free_mode_session_restore_in_progress or self._campaign_project_restore_in_progress:
             return
 
-        try:
-            snapshot = self._collect_free_mode_session_snapshot()
-            SESSION.set("annotation", "images_dir", snapshot["input_dir"])
-            for key, value in snapshot.items():
-                SESSION.set("annotation", key, value)
-            SESSION.save_session()
-        except Exception as e:
-            logger.debug(f"Nie udalo sie zapisac stanu Z2: {e}")
+        if self._is_free_mode_session_context():
+            if not SESSION:
+                return
+
+            try:
+                snapshot = self._collect_free_mode_session_snapshot()
+                SESSION.set("annotation", "images_dir", snapshot["input_dir"])
+                for key, value in snapshot.items():
+                    SESSION.set("annotation", key, value)
+                SESSION.save_session()
+            except Exception as e:
+                logger.debug(f"Nie udalo sie zapisac stanu Z2: {e}")
+            return
+
+        self._save_campaign_project_snapshot()
 
     def _apply_free_mode_session_snapshot(self, session_state: dict | None = None, restore_preview: bool = True):
         state = dict(session_state or self._load_free_mode_session_snapshot())
@@ -524,6 +1142,8 @@ class AnnotationTab:
             self.plate_dataset_images_var.set(str(state.get("plate_dataset_images") or "").strip())
             self.plate_train_pct.set(float(state.get("plate_train_pct", 80.0)))
             self.plate_val_pct.set(float(state.get("plate_val_pct", 10.0)))
+            self.manual_xml_template_var.set(bool(state.get("manual_xml_template", False)))
+            self.manual_vehicle_assist_var.set(bool(state.get("manual_vehicle_assist", False)))
 
             last_preview_run_dir = str(state.get("last_preview_run_dir") or "").strip()
             self.last_staging_run_dir = Path(last_preview_run_dir) if last_preview_run_dir else None
@@ -552,7 +1172,7 @@ class AnnotationTab:
 
             self._on_mode_change()
             self._on_vehicle_model_change()
-            self._set_plate_model_controls_state(self._mode_uses_plate())
+            self._update_manual_xml_template_ui()
             self._update_plate_dataset_ratio_labels()
             self._refresh_plate_dataset_export_sources()
             self._set_campaign_paths_lock_state(False)
@@ -562,6 +1182,7 @@ class AnnotationTab:
 
             if restore_preview:
                 self._restore_preview_from_session_run()
+            self._refresh_step2_action_states()
         finally:
             self._free_mode_session_restore_in_progress = False
 
@@ -673,7 +1294,11 @@ class AnnotationTab:
                     width=width,
                     height=height,
                     detections=detections,
-                    status=AnnotationStatus.SUCCESS,
+                    status=(
+                        AnnotationStatus.SUCCESS
+                        if any(str(det.label or "").lower() in {"plate", "vehicle"} for det in detections)
+                        else AnnotationStatus.NO_PLATE
+                    ),
                 )
             )
 
@@ -699,30 +1324,6 @@ class AnnotationTab:
             return
 
         manifest = self._load_annotation_run_manifest(run_dir)
-        image_dir_candidates = []
-        manifest_input_dir = str(manifest.get("input_dir") or "").strip()
-        if manifest_input_dir:
-            image_dir_candidates.append(Path(manifest_input_dir))
-
-        for raw_value in (
-            str(self.plate_dataset_images_var.get() or "").strip(),
-            str(self.input_dir_var.get() or "").strip(),
-        ):
-            if raw_value:
-                image_dir_candidates.append(Path(raw_value))
-
-        image_dir = None
-        for candidate in image_dir_candidates:
-            try:
-                if candidate.exists() and candidate.is_dir():
-                    image_dir = candidate
-                    break
-            except Exception:
-                continue
-
-        if image_dir is None:
-            return
-
         try:
             annotations = self._parse_cvat_preview_annotations(xml_path)
         except Exception as e:
@@ -732,9 +1333,66 @@ class AnnotationTab:
         if not annotations:
             return
 
+        image_dir_candidates = []
+        seen_candidates = set()
+        for raw_value in (
+            str(self.input_dir_var.get() or "").strip(),
+            str(self.plate_dataset_images_var.get() or "").strip(),
+            str(manifest.get("input_dir") or "").strip(),
+        ):
+            if not raw_value:
+                continue
+            try:
+                candidate = Path(raw_value)
+                candidate_key = str(candidate.resolve())
+            except Exception:
+                candidate = Path(raw_value)
+                candidate_key = str(candidate)
+            if candidate_key in seen_candidates:
+                continue
+            seen_candidates.add(candidate_key)
+            image_dir_candidates.append(candidate)
+
+        image_dir = None
+        fallback_dir = None
+        best_match_count = -1
+        sample_filenames = [
+            str(getattr(ann, "filename", "") or "").strip()
+            for ann in annotations
+            if str(getattr(ann, "filename", "") or "").strip()
+        ][:25]
+
+        for candidate in image_dir_candidates:
+            try:
+                if not candidate.exists() or not candidate.is_dir():
+                    continue
+            except Exception:
+                continue
+
+            if fallback_dir is None:
+                fallback_dir = candidate
+
+            match_count = 0
+            for filename in sample_filenames:
+                try:
+                    if (candidate / Path(filename)).exists():
+                        match_count += 1
+                except Exception:
+                    continue
+
+            if match_count > best_match_count:
+                best_match_count = match_count
+                image_dir = candidate
+
+        if image_dir is None:
+            image_dir = fallback_dir
+        if image_dir is None:
+            return
+
         self._clear_preview_editor_state(clear_dirty=True)
         self.current_annotations = annotations
         self.current_input_dir = image_dir
+        self.plate_dataset_images_var.set(str(image_dir))
         self.current_annotation_run_dir = run_dir
         self.current_annotation_xml_path = xml_path
         self.last_staging_run_dir = run_dir
@@ -749,6 +1407,20 @@ class AnnotationTab:
             saved_idx = getattr(self, "_preview_session_restore_index", None)
             if isinstance(saved_idx, int) and 0 <= int(saved_idx) < len(annotations):
                 restore_idx = int(saved_idx)
+        if restore_idx is None:
+            manifest_restore_filename = str(manifest.get("resume_preview_filename") or "").strip()
+            if manifest_restore_filename:
+                for idx, ann in enumerate(annotations):
+                    if str(getattr(ann, "filename", "") or "") == manifest_restore_filename:
+                        restore_idx = idx
+                        break
+        if restore_idx is None:
+            try:
+                manifest_restore_idx = int(manifest.get("resume_preview_index", -1))
+            except (TypeError, ValueError):
+                manifest_restore_idx = -1
+            if 0 <= manifest_restore_idx < len(annotations):
+                restore_idx = manifest_restore_idx
         if restore_idx is None and annotations:
             restore_idx = 0
 
@@ -760,6 +1432,7 @@ class AnnotationTab:
             else ""
         )
         self._refresh_preview_list(preserve_selection=True, render_current=True)
+        self._refresh_step2_action_states()
         self._update_preview_edit_status("Przywrocono ostatni run Z2 z poprzedniej sesji.")
 
     def _sync_right_panel_scrollregion(self, event=None):
@@ -785,6 +1458,7 @@ class AnnotationTab:
             canvas.itemconfigure(window_id, width=width)
         except Exception:
             pass
+        self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=40)
 
     def _sync_left_panel_scrollregion(self, event=None):
         canvas = getattr(self, "left_settings_canvas", None)
@@ -807,6 +1481,144 @@ class AnnotationTab:
 
         try:
             canvas.itemconfigure(window_id, width=width)
+        except Exception:
+            pass
+        self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=40)
+
+    def _get_main_pane_width_limits(self) -> tuple[int, int]:
+        left_content_req = 0
+        right_content_req = 0
+        approve_req = 0
+        left_scrollbar_req = 10
+        right_scrollbar_req = 10
+
+        try:
+            left_content_req = int(getattr(self, "left_settings_content", None).winfo_reqwidth() or 0)
+        except Exception:
+            left_content_req = 0
+        try:
+            right_content_req = int(getattr(self, "right_settings_content", None).winfo_reqwidth() or 0)
+        except Exception:
+            right_content_req = 0
+        try:
+            approve_req = int(getattr(self, "approve_btn_row", None).winfo_reqwidth() or 0)
+        except Exception:
+            approve_req = 0
+        try:
+            left_scrollbar_req = int(getattr(self, "left_settings_scrollbar", None).winfo_reqwidth() or 10)
+        except Exception:
+            left_scrollbar_req = 10
+        try:
+            right_scrollbar_req = int(getattr(self, "right_settings_scrollbar", None).winfo_reqwidth() or 10)
+        except Exception:
+            right_scrollbar_req = 10
+
+        right_content_req = max(int(right_content_req), int(approve_req))
+        left_min = max(400, min(560, left_content_req + left_scrollbar_req + 20))
+        right_min = max(280, min(380, right_content_req + right_scrollbar_req + 16))
+        return int(left_min), int(right_min)
+
+    def _schedule_main_pane_layout_refresh(self, *, force_defaults: bool = False, delay_ms: int = 0):
+        pending = getattr(self, "_main_pane_layout_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+            self._main_pane_layout_after_id = None
+
+        def _run():
+            self._main_pane_layout_after_id = None
+            self._apply_main_pane_layout(force_defaults=force_defaults)
+
+        try:
+            self._main_pane_layout_after_id = self.frame.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            _run()
+
+    def _apply_main_pane_layout(self, *, force_defaults: bool = False):
+        pane = getattr(self, "main_pane", None)
+        if pane is None:
+            return
+
+        try:
+            pane.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            if not self._pane_has_child(pane, self.main_left_frame):
+                return
+            if not self._pane_has_child(pane, self.main_center_frame):
+                return
+            if not self._pane_has_child(pane, self.main_right_frame):
+                return
+        except Exception:
+            return
+
+        try:
+            total_width = int(pane.winfo_width() or pane.winfo_reqwidth() or 0)
+        except Exception:
+            total_width = 0
+        if total_width <= 0:
+            return
+
+        left_min, right_min = self._get_main_pane_width_limits()
+        available_center = max(220, total_width - left_min - right_min)
+        center_min = min(640, available_center)
+
+        max_left = max(left_min, total_width - right_min - center_min)
+        max_second = max(left_min + center_min, total_width - right_min)
+
+        try:
+            current_left = int(pane.sashpos(0) or 0)
+        except Exception:
+            current_left = left_min
+        try:
+            current_second = int(pane.sashpos(1) or 0)
+        except Exception:
+            current_second = max(left_min + center_min, total_width - right_min)
+
+        default_left = min(max_left, max(left_min, min(int(total_width * 0.29), 420)))
+        default_right_width = max(right_min, min(int(total_width * 0.16), 290))
+        default_second = max(default_left + center_min, total_width - default_right_width)
+        default_second = min(default_second, max_second)
+
+        desired_left = default_left if force_defaults or not self._main_pane_layout_initialized else current_left
+        desired_second = default_second if force_defaults or not self._main_pane_layout_initialized else current_second
+
+        desired_left = max(left_min, min(int(desired_left), max_left))
+        desired_second = max(desired_left + center_min, int(desired_second))
+        desired_second = min(desired_second, max_second)
+
+        try:
+            pane.sashpos(0, int(desired_left))
+            pane.sashpos(1, int(desired_second))
+            self._main_pane_layout_initialized = True
+        except Exception:
+            pass
+
+    def _on_main_pane_configure(self, event=None):
+        self._schedule_main_pane_layout_refresh(force_defaults=not bool(getattr(self, "_main_pane_layout_initialized", False)))
+
+    def _on_main_pane_drag_motion(self, event=None):
+        self._schedule_main_pane_layout_refresh(force_defaults=False)
+
+    def _on_main_pane_drag_release(self, event=None):
+        self._schedule_main_pane_layout_refresh(force_defaults=False)
+
+    def _sync_approve_hint_wraplength(self, event=None):
+        label = getattr(self, "approve_gate_hint_lbl", None)
+        host = getattr(self, "approve_btn_row", None)
+        if label is None or host is None:
+            return
+
+        width = getattr(event, "width", 0) or host.winfo_width()
+        if width <= 1:
+            return
+
+        try:
+            label.configure(wraplength=max(220, int(width) - 34))
         except Exception:
             pass
 
@@ -1135,8 +1947,11 @@ class AnnotationTab:
         self.main_right_frame = right_frame
 
         pane.add(left_frame, weight=2)
-        pane.add(center_frame, weight=4) # Środek ma więcej miejsca na zdjęcia
-        pane.add(right_frame, weight=2)
+        pane.add(center_frame, weight=6)
+        pane.add(right_frame, weight=1)
+        pane.bind("<Configure>", self._on_main_pane_configure, add="+")
+        pane.bind("<B1-Motion>", self._on_main_pane_drag_motion, add="+")
+        pane.bind("<ButtonRelease-1>", self._on_main_pane_drag_release, add="+")
 
         # --- LEWA KOLUMNA ---
         left_scroll_host = ttk.Frame(left_frame, style="Panel.TFrame")
@@ -1231,11 +2046,47 @@ class AnnotationTab:
         actions_lf.pack(fill=tk.X)
         self.run_title_lbl = ttk.Label(
             actions_lf,
-            text="Etap 1: Utwórz run autoanotacji tablic",
+            text="Krok 1: Utwórz run autoanotacji tablic",
             style="Panel.TLabel"
         )
         self.run_title_lbl.pack(anchor=tk.W, fill=tk.X)
         self._build_left_title_underline(actions_lf, self.run_title_lbl, pady=(2, 4))
+
+        self.manual_xml_template_check = ttk.Checkbutton(
+            actions_lf,
+            text="Utwórz pusty XML do ręcznej anotacji tablic",
+            variable=self.manual_xml_template_var,
+            command=self._update_manual_xml_template_ui
+        )
+        self.manual_xml_template_check.pack(anchor=tk.W, pady=(2, 2))
+
+        self.manual_vehicle_assist_check = ttk.Checkbutton(
+            actions_lf,
+            text="Wstepnie autoanotuj same pojazdy (bez tablic)",
+            variable=self.manual_vehicle_assist_var,
+            command=self._update_manual_xml_template_ui
+        )
+
+        self.manual_vehicle_assist_hint_lbl = tk.Label(
+            actions_lf,
+            textvariable=self.manual_vehicle_assist_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=340,
+            bd=0,
+            highlightthickness=0
+        )
+
+        self.manual_xml_template_hint_lbl = tk.Label(
+            actions_lf,
+            textvariable=self.manual_xml_template_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=360,
+            bd=0,
+            highlightthickness=0
+        )
+        self.manual_xml_template_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
 
         self.start_btn_row = ttk.Frame(actions_lf, style="Panel.TFrame")
         self.start_btn_row.pack(fill=tk.X, pady=(5, 0))
@@ -1312,13 +2163,82 @@ class AnnotationTab:
             highlightthickness=0
         )
 
-        self._build_left_section_separator(settings_col, pady=(18, 20))
+        self.manual_stage_section = ttk.Frame(settings_col, style="Panel.TFrame")
+        self.manual_stage_section.pack(fill=tk.X)
+        self.manual_stage_title_lbl = ttk.Label(
+            self.manual_stage_section,
+            text="Stage oczekujacych recznej anotacji",
+            style="Panel.TLabel"
+        )
+        self.manual_stage_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._build_left_title_underline(self.manual_stage_section, self.manual_stage_title_lbl, pady=(2, 4))
+
+        self.manual_stage_help_lbl = tk.Label(
+            self.manual_stage_section,
+            text=(
+                "Stage to pomocnicza kolejka zdjec odlozonych na kolejna iteracje. "
+                "Po eksporcie datasetu trafia tu nieoznaczona czesc paczki, a recznie mozesz "
+                "tez dolozyc nowe zdjecia bez mieszania ich z juz oznaczonym zbiorem."
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=360,
+            bd=0,
+            highlightthickness=0
+        )
+        self.manual_stage_help_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
+        self._set_inline_label_state(self.manual_stage_help_lbl, tone="info", emphasis=False)
+
+        self.manual_stage_path_title_lbl = ttk.Label(
+            self.manual_stage_section,
+            text="Folder stage (kolejna pula do anotacji):",
+            style="Panel.TLabel"
+        )
+        self.manual_stage_path_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        _, self.manual_stage_path_entry, _ = self._build_left_path_row(
+            self.manual_stage_section,
+            self.manual_stage_dir_var,
+            state="readonly",
+        )
+
+        self.manual_stage_status_lbl = tk.Label(
+            self.manual_stage_section,
+            textvariable=self.manual_stage_status_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=360,
+            bd=0,
+            highlightthickness=0
+        )
+        self.manual_stage_status_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+        self._set_inline_label_state(self.manual_stage_status_lbl, tone="muted", emphasis=False)
+
+        self.manual_stage_buttons_row = ttk.Frame(self.manual_stage_section, style="Panel.TFrame")
+        self.manual_stage_buttons_row.pack(fill=tk.X, pady=(0, 2))
+        self.manual_stage_buttons_row.columnconfigure(0, weight=1)
+        self.manual_stage_buttons_row.columnconfigure(1, weight=1)
+
+        self.manual_stage_use_btn = ttk.Button(
+            self.manual_stage_buttons_row,
+            text="Uzyj stage jako wejscia Z2",
+            command=self._use_manual_plate_stage_as_input,
+        )
+        self.manual_stage_use_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self.manual_stage_add_btn = ttk.Button(
+            self.manual_stage_buttons_row,
+            text="Dodaj zdjecia do stage",
+            command=self._add_images_to_manual_plate_stage,
+        )
+        self.manual_stage_add_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.manual_stage_separator = self._build_left_section_separator(settings_col, pady=(18, 20))
 
         export_lf = ttk.Frame(settings_col, style="Panel.TFrame")
         export_lf.pack(fill=tk.X)
         self.export_title_lbl = ttk.Label(
             export_lf,
-            text="Etap 2: Z istniejącego runu zbuduj dataset YOLO Pose",
+            text="Krok 2: Z istniejącego runu zbuduj dataset YOLO Pose",
             style="Panel.TLabel"
         )
         self.export_title_lbl.pack(anchor=tk.W, fill=tk.X)
@@ -1505,6 +2425,17 @@ class AnnotationTab:
         )
         self.preview_fullscreen_btn.pack(side=tk.LEFT, padx=(10, 0))
 
+        self.preview_fullscreen_hint_lbl = tk.Label(
+            preview_lf,
+            textvariable=self.preview_fullscreen_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=780,
+            bd=0,
+            highlightthickness=0
+        )
+        self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="info", emphasis=False)
+
         self.preview_save_btn = ttk.Button(
             preview_tools,
             text="Zapisz (Ctrl+S)",
@@ -1515,7 +2446,6 @@ class AnnotationTab:
 
         preview_hint_frame = ttk.Frame(preview_lf)
         self.preview_hint_frame = preview_hint_frame
-        preview_hint_frame.pack(fill=tk.X, pady=(0, 8))
         self.preview_controls_canvas = tk.Canvas(
             preview_hint_frame,
             height=84,
@@ -1537,6 +2467,7 @@ class AnnotationTab:
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas.show_info = False
         self.preview_canvas.reset_shortcut_enabled = False
+        self.preview_canvas.max_zoom = 12.0
         self.preview_canvas.set_overlay_renderer(self._draw_annotation_preview_overlay)
         self.preview_canvas.set_interaction_delegate(self)
         self.preview_canvas.bind("<Button-1>", lambda _e: self.preview_canvas.focus_set(), add="+")
@@ -1649,15 +2580,47 @@ class AnnotationTab:
         settings_lf = ttk.LabelFrame(self.right_settings_content, text=" Konfiguracja Detekcji ", padding=15)
         settings_lf.pack(fill=tk.BOTH, expand=True)
 
-        self.approve_btn_row = ttk.Frame(right_frame)
+        self.approve_btn_row = ttk.LabelFrame(right_frame, text=" Zatwierdzenie E2 ", padding=10)
         self.approve_btn_row.pack(fill=tk.X, pady=(8, 0))
-        self.approve_btn_row.columnconfigure(0, weight=1)
+        self.approve_btn_row.bind("<Configure>", self._sync_approve_hint_wraplength, add="+")
+
+        self.approve_hint_box = tk.Frame(
+            self.approve_btn_row,
+            bd=0,
+            highlightthickness=1
+        )
+        self.approve_hint_box.pack(fill=tk.X, pady=(0, 10))
+
+        self.approve_gate_hint_lbl = tk.Label(
+            self.approve_hint_box,
+            textvariable=self.approve_gate_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=320,
+            bd=0,
+            highlightthickness=0,
+            padx=10,
+            pady=8
+        )
+        self.approve_gate_hint_lbl.pack(fill=tk.X)
+        self._set_inline_label_state(self.approve_gate_hint_lbl, tone="muted", emphasis=False)
+        self._set_approve_hint_box_state("muted")
 
         ttk.Label(settings_lf, text="Tryb pracy:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
         modes = ["B: Tylko tablice", "C: Pojazdy + tablice"]
         self.mode_combo = ttk.Combobox(settings_lf, textvariable=self.mode_var, values=modes, state="readonly")
-        self.mode_combo.pack(fill=tk.X, pady=(0, 15))
+        self.mode_combo.pack(fill=tk.X, pady=(0, 4))
         self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_change)
+        self.mode_hint_lbl = tk.Label(
+            settings_lf,
+            textvariable=self.detection_mode_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.mode_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 12))
 
         self.veh_frame = ttk.LabelFrame(settings_lf, text=" Model Pojazdów (Detect) ", padding=10)
         self.veh_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1706,18 +2669,18 @@ class AnnotationTab:
         self.device_hint_lbl.pack(fill=tk.X, pady=(0, 4))
 
         self.approve_btn_frame = tk.Frame(self.approve_btn_row, bd=0, highlightthickness=0)
-        self.approve_btn_frame.grid(row=0, column=1, sticky="e")
+        self.approve_btn_frame.pack(fill=tk.X)
 
         self.approve_btn_pulse_frame = tk.Frame(
             self.approve_btn_frame,
             bd=0,
             highlightthickness=1
         )
-        self.approve_btn_pulse_frame.pack(anchor=tk.E)
+        self.approve_btn_pulse_frame.pack(fill=tk.X)
 
         self.approve_btn = ttk.Button(
             self.approve_btn_pulse_frame,
-            text="ZATWIERDŹ ETAP AUTOANOTACJI",
+            text="ZATWIERDŹ KROK AUTOANOTACJI",
             command=self._approve_annotation_stage,
             state=tk.DISABLED
         )
@@ -1742,6 +2705,14 @@ class AnnotationTab:
         HELP.bind_help(self.split_title_lbl, "tab1_dataset_split")
         HELP.bind_help(split_lf, "tab1_dataset_split")
         HELP.bind_help(self.export_plate_dataset_btn, "tab1_dataset_export")
+        HELP.bind_help(self.manual_stage_section, "tab1_stage")
+        HELP.bind_help(self.manual_stage_title_lbl, "tab1_stage")
+        HELP.bind_help(self.manual_stage_help_lbl, "tab1_stage")
+        HELP.bind_help(self.manual_stage_path_title_lbl, "tab1_stage")
+        HELP.bind_help(self.manual_stage_path_entry, "tab1_stage")
+        HELP.bind_help(self.manual_stage_status_lbl, "tab1_stage")
+        HELP.bind_help(self.manual_stage_use_btn, "tab1_stage_use")
+        HELP.bind_help(self.manual_stage_add_btn, "tab1_stage_add")
         HELP.bind_help(self.plate_browse_btn, "tab1_model_pla")
         HELP.bind_help(row_conf, "tab1_conf") 
         HELP.bind_help(self.device_combo, "tab1_device")
@@ -1751,12 +2722,15 @@ class AnnotationTab:
         HELP.bind_help(self.preview_listbox, "tab1_preview_list")
         HELP.bind_help(self.preview_canvas, "tab1_preview_canvas")
         HELP.bind_help(self.veh_custom_row, "tab1_custom_model")
+        HELP.bind_help(self.approve_btn, "tab1_approve")
         self._bind_scroll_canvas_children(self.left_settings_content, self.left_settings_canvas)
         self._bind_scroll_canvas_children(self.right_settings_content, self.right_settings_canvas)
         self.frame.after_idle(self._sync_left_panel_canvas_width)
         self.frame.after_idle(self._sync_left_panel_scrollregion)
         self.frame.after_idle(self._sync_right_panel_canvas_width)
         self.frame.after_idle(self._sync_right_panel_scrollregion)
+        self.frame.after_idle(self._sync_approve_hint_wraplength)
+        self.frame.after_idle(lambda: self._schedule_main_pane_layout_refresh(force_defaults=True))
         self.frame.bind_all("<MouseWheel>", self._on_left_panel_global_mousewheel, add="+")
         self.frame.bind_all("<Button-4>", self._on_left_panel_global_mousewheel, add="+")
         self.frame.bind_all("<Button-5>", self._on_left_panel_global_mousewheel, add="+")
@@ -1777,6 +2751,55 @@ class AnnotationTab:
         normalized = self._normalize_mode_value(mode)
         return normalized.startswith("B:") or normalized.startswith("C:")
 
+    def _vehicle_model_controls_enabled(self, mode: str | None = None) -> bool:
+        if self._manual_xml_template_enabled():
+            return True
+        return self._mode_uses_vehicle(mode)
+
+    def _plate_model_controls_enabled(self, mode: str | None = None) -> bool:
+        if self._manual_xml_template_enabled():
+            return False
+        return self._mode_uses_plate(mode)
+
+    def _refresh_detection_configuration_ui(self):
+        mode = self._normalize_mode_value()
+        manual_enabled = self._manual_xml_template_enabled()
+        vehicle_assist_enabled = self._manual_vehicle_assist_enabled()
+
+        if hasattr(self, "mode_combo"):
+            try:
+                self.mode_combo.configure(state="disabled" if manual_enabled else "readonly")
+            except Exception:
+                pass
+
+        if hasattr(self, "mode_hint_lbl"):
+            if manual_enabled:
+                if vehicle_assist_enabled:
+                    self.detection_mode_hint_var.set(
+                        "Przy recznej anotacji wybor B/C jest ignorowany. Z2 uzyje zapamietanego modelu YOLO pojazdow tylko do utworzenia nowego XML z boxami pojazdow."
+                    )
+                else:
+                    self.detection_mode_hint_var.set(
+                        "Przy recznej anotacji wybor B/C jest ignorowany. Z2 zapamietuje wybrane YOLO pojazdow, ale wykorzysta je dopiero po wlaczeniu wstepnego boxowania pojazdow."
+                    )
+                self._set_inline_label_state(self.mode_hint_lbl, tone="info", emphasis=False)
+            else:
+                self.detection_mode_hint_var.set(
+                    "Tryb B/C decyduje, czy Z2 ma uzyc tylko modelu tablic, czy modelu pojazdow i tablic."
+                )
+                self._set_inline_label_state(self.mode_hint_lbl, tone="muted", emphasis=False)
+
+        if hasattr(self, "vehicle_combo"):
+            try:
+                self.vehicle_combo.config(
+                    state="readonly" if self._vehicle_model_controls_enabled(mode) else "disabled"
+                )
+            except Exception:
+                pass
+
+        self._on_vehicle_model_change()
+        self._set_plate_model_controls_state(self._plate_model_controls_enabled(mode))
+
     def _set_progress_counters(self, successful: int, current: int, total: int):
         try:
             self.progress_counts_var.set(
@@ -1789,18 +2812,7 @@ class AnnotationTab:
         mode = self._normalize_mode_value()
         if mode != self.mode_var.get():
             self.mode_var.set(mode)
-
-        if self._mode_uses_vehicle(mode):
-            self.vehicle_combo.config(state="readonly")
-            self._on_vehicle_model_change() 
-        else:
-            self.vehicle_combo.config(state=tk.DISABLED)
-            self.veh_custom_row.pack_forget()
-
-        if self._mode_uses_plate(mode):
-            self._set_plate_model_controls_state(True)
-        else:
-            self._set_plate_model_controls_state(False)
+        self._refresh_detection_configuration_ui()
 
     def _update_model_lists(self):
         if YOLO_AVAILABLE:
@@ -2014,7 +3026,8 @@ class AnnotationTab:
 
     def _select_input_dir(self):
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
-        if p: self.input_dir_var.set(p)
+        if p:
+            self._switch_annotation_input_dir(Path(p), show_hint=False)
 
     def _format_workspace_relative_path(self, path_like) -> str:
         try:
@@ -2038,6 +3051,17 @@ class AnnotationTab:
             "run_dir": str(Path(run_dir).resolve()),
             "mode": str(self.mode_var.get() or "").strip(),
             "device": str(self.device_var.get() or "").strip(),
+            "annotation_run_type": (
+                "manual_template" if getattr(self, "_current_run_manual_template", False) else "auto_annotation"
+            ),
+            "manual_xml_template": bool(getattr(self, "_current_run_manual_template", False)),
+            "manual_vehicle_assist": bool(getattr(self, "_current_run_manual_vehicle_assist", False)),
+            "has_manual_edits": False,
+            "last_manual_edit_at": "",
+            "last_manual_edit_kind": "",
+            "resume_preview_index": -1,
+            "resume_preview_filename": "",
+            "resume_preview_saved_at": "",
             "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         }
         manifest_path.write_text(
@@ -2053,6 +3077,392 @@ class AnnotationTab:
             return json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
+
+    def _update_annotation_run_manifest(self, run_dir: Path, **fields) -> bool:
+        try:
+            run_dir = Path(run_dir)
+        except Exception:
+            return False
+
+        manifest = self._load_annotation_run_manifest(run_dir)
+        if not isinstance(manifest, dict):
+            manifest = {}
+
+        for key, value in fields.items():
+            manifest[key] = value
+
+        try:
+            self._annotation_run_manifest_path(run_dir).write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except Exception:
+            return False
+
+    def _collect_preview_resume_manifest_fields(self) -> dict:
+        selected_ann = self._get_preview_annotation()
+        return {
+            "resume_preview_index": (
+                int(self.current_preview_index)
+                if self.current_preview_index is not None
+                else -1
+            ),
+            "resume_preview_filename": str(getattr(selected_ann, "filename", "") or "").strip(),
+            "resume_preview_saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _remember_annotation_run_resume_state(self, run_dir: Path | None = None) -> bool:
+        candidate = run_dir
+        if candidate is None:
+            candidate = getattr(self, "current_annotation_run_dir", None)
+        if candidate is None:
+            candidate = getattr(self, "last_staging_run_dir", None)
+        if candidate is None:
+            run_dir_value = str(self.plate_dataset_run_var.get() or "").strip()
+            candidate = Path(run_dir_value) if run_dir_value else None
+
+        if candidate is None:
+            return False
+
+        try:
+            candidate = Path(candidate)
+        except Exception:
+            return False
+
+        if not candidate.exists() or not candidate.is_dir():
+            return False
+
+        return self._update_annotation_run_manifest(
+            candidate,
+            **self._collect_preview_resume_manifest_fields(),
+        )
+
+    @staticmethod
+    def _annotation_run_manifest_has_manual_value(manifest: dict | None) -> bool:
+        if not isinstance(manifest, dict):
+            return False
+
+        if bool(manifest.get("has_manual_edits", False)):
+            return True
+
+        if bool(manifest.get("manual_xml_template", False)):
+            return True
+
+        annotation_run_type = str(manifest.get("annotation_run_type") or "").strip().lower()
+        return annotation_run_type == "manual_template"
+
+    def _remember_campaign_manual_plate_source(
+        self,
+        run_dir: Path | None = None,
+        xml_path: Path | None = None,
+        input_dir: Path | None = None,
+    ) -> None:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if not CAMPAIGN.get_active_project_name():
+                return
+        except Exception:
+            return
+
+        source_run = Path(run_dir) if run_dir is not None else None
+        source_xml = Path(xml_path) if xml_path is not None else None
+        source_input = Path(input_dir) if input_dir is not None else None
+
+        if source_xml is None and source_run is not None:
+            source_xml = source_run / "annotations.xml"
+        if source_run is None and source_xml is not None:
+            source_run = source_xml.parent
+        if source_input is None and getattr(self, "current_input_dir", None) is not None:
+            try:
+                source_input = Path(self.current_input_dir)
+            except Exception:
+                source_input = None
+
+        try:
+            CAMPAIGN.set_last_plate_manual_source(
+                source_run_path=(str(source_run.resolve()) if source_run is not None and source_run.exists() else str(source_run or "")),
+                source_xml_path=(str(source_xml.resolve()) if source_xml is not None and source_xml.exists() else str(source_xml or "")),
+                source_input_path=(str(source_input.resolve()) if source_input is not None and source_input.exists() else str(source_input or "")),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _plate_dataset_source_manifest_path(dataset_dir: Path) -> Path:
+        return Path(dataset_dir) / "dataset_source_manifest.json"
+
+    def _load_plate_dataset_source_manifest(self, dataset_dir: Path) -> dict:
+        manifest_path = self._plate_dataset_source_manifest_path(dataset_dir)
+        if not manifest_path.exists():
+            return {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_plate_dataset_source_manifest(
+        self,
+        dataset_dir: Path,
+        *,
+        source_kind: str,
+        source_run_dir: Path | None = None,
+        source_xml_path: Path | None = None,
+        source_images_dir: Path | None = None,
+    ) -> None:
+        try:
+            dataset_dir = Path(dataset_dir)
+        except Exception:
+            return
+
+        payload = {
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "project": "",
+            "iteration": 0,
+            "dataset_dir": str(dataset_dir.resolve()),
+            "source_kind": str(source_kind or "").strip(),
+            "source_run_dir": "",
+            "source_run_name": "",
+            "source_xml_path": "",
+            "source_images_dir": "",
+        }
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            payload["project"] = str(CAMPAIGN.get_active_project_name() or "").strip()
+            payload["iteration"] = int(CAMPAIGN.get_current_iteration_num() or 0)
+        except Exception:
+            pass
+
+        if source_run_dir is not None:
+            try:
+                source_run_dir = Path(source_run_dir)
+                payload["source_run_dir"] = str(source_run_dir.resolve())
+                payload["source_run_name"] = source_run_dir.name
+            except Exception:
+                payload["source_run_dir"] = str(source_run_dir)
+                payload["source_run_name"] = str(Path(source_run_dir).name)
+
+        if source_xml_path is not None:
+            try:
+                payload["source_xml_path"] = str(Path(source_xml_path).resolve())
+            except Exception:
+                payload["source_xml_path"] = str(source_xml_path)
+
+        if source_images_dir is not None:
+            try:
+                payload["source_images_dir"] = str(Path(source_images_dir).resolve())
+            except Exception:
+                payload["source_images_dir"] = str(source_images_dir)
+
+        manifest_path = self._plate_dataset_source_manifest_path(dataset_dir)
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _resolve_plate_source_run_from_dataset(self, dataset_path: Path | None) -> Path | None:
+        if dataset_path is None:
+            return None
+
+        try:
+            dataset_path = Path(dataset_path)
+        except Exception:
+            return None
+
+        try:
+            if not dataset_path.exists() or not dataset_path.is_dir():
+                return None
+        except Exception:
+            return None
+
+        manifest = self._load_plate_dataset_source_manifest(dataset_path)
+        for raw_path in (
+            str(manifest.get("source_run_dir") or "").strip(),
+            str(manifest.get("source_xml_path") or "").strip(),
+        ):
+            if not raw_path:
+                continue
+            candidate = Path(raw_path)
+            if candidate.suffix.lower() == ".xml":
+                candidate = candidate.parent
+            if candidate.exists() and candidate.is_dir() and (candidate / "annotations.xml").exists():
+                return candidate
+
+        run_name = str(manifest.get("source_run_name") or "").strip()
+        if not run_name:
+            match = re.match(r"^Plates_Z2_(.+)_\d{8}_\d{6}$", dataset_path.name)
+            if match:
+                run_name = str(match.group(1) or "").strip()
+
+        if not run_name:
+            return None
+
+        search_roots = []
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            for root_candidate in (CAMPAIGN.get_dir("auto_ann"), CAMPAIGN.get_staging_dir("auto_ann")):
+                if root_candidate is not None:
+                    search_roots.append(Path(root_candidate))
+        except Exception:
+            return None
+
+        candidates = []
+        for root in search_roots:
+            try:
+                if not root.exists() or not root.is_dir():
+                    continue
+                for candidate in root.rglob(run_name):
+                    if (
+                        candidate.is_dir()
+                        and candidate.name == run_name
+                        and (candidate / "annotations.xml").exists()
+                    ):
+                        candidates.append(candidate)
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def _find_reused_manual_source_run(self, expected_input_dir: Path | None) -> Path | None:
+        def matches_expected_input(run_dir: Path | None) -> bool:
+            if run_dir is None:
+                return False
+            if expected_input_dir is None:
+                return True
+            try:
+                return self._annotation_run_matches_input(run_dir, expected_input_dir)
+            except Exception:
+                return False
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            stored_source = CAMPAIGN.get_last_plate_manual_source()
+        except Exception:
+            stored_source = {}
+
+        for candidate in (
+            str(stored_source.get("source_run_path") or "").strip(),
+            str(stored_source.get("source_xml_path") or "").strip(),
+        ):
+            if not candidate:
+                continue
+            try:
+                run_dir = Path(candidate)
+                if run_dir.suffix.lower() == ".xml":
+                    run_dir = run_dir.parent
+            except Exception:
+                continue
+            if run_dir.exists() and run_dir.is_dir() and (run_dir / "annotations.xml").exists() and matches_expected_input(run_dir):
+                return run_dir
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            search_roots = []
+            for root_candidate in (CAMPAIGN.get_dir("auto_ann"), CAMPAIGN.get_staging_dir("auto_ann")):
+                if root_candidate is not None:
+                    search_roots.append(Path(root_candidate))
+        except Exception:
+            search_roots = []
+
+        candidates = []
+        for root in search_roots:
+            try:
+                if not root.exists() or not root.is_dir():
+                    continue
+                run_paths = list(root.rglob("run_*"))
+            except Exception:
+                continue
+
+            for run_dir in run_paths:
+                try:
+                    if (
+                        not run_dir.is_dir()
+                        or not (run_dir / "annotations.xml").exists()
+                        or not matches_expected_input(run_dir)
+                    ):
+                        continue
+                except Exception:
+                    continue
+
+                manifest = self._load_annotation_run_manifest(run_dir)
+                if not self._annotation_run_manifest_has_manual_value(manifest):
+                    continue
+
+                stamp = str(manifest.get("last_manual_edit_at") or "").strip()
+                try:
+                    score = datetime.datetime.fromisoformat(stamp).timestamp() if stamp else float(run_dir.stat().st_mtime)
+                except Exception:
+                    try:
+                        score = float(run_dir.stat().st_mtime)
+                    except Exception:
+                        score = 0.0
+                candidates.append((score, run_dir.name, run_dir))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def _find_reused_training_source_run(self, expected_input_dir: Path | None) -> Path | None:
+        def matches_expected_input(run_dir: Path | None) -> bool:
+            if run_dir is None:
+                return False
+            if expected_input_dir is None:
+                return True
+            try:
+                return self._annotation_run_matches_input(run_dir, expected_input_dir)
+            except Exception:
+                return False
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            stored_source = CAMPAIGN.get_last_plate_training_source()
+        except Exception:
+            stored_source = {}
+
+        stored_run = self._resolve_existing_run_dir(stored_source.get("source_run_path"))
+        if matches_expected_input(stored_run):
+            return stored_run
+
+        stored_dataset = str(stored_source.get("dataset_path") or "").strip()
+        if stored_dataset:
+            dataset_run = self._resolve_plate_source_run_from_dataset(Path(stored_dataset))
+            if matches_expected_input(dataset_run):
+                return dataset_run
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+            from ..training import TrainingHistory
+
+            runs_root = CAMPAIGN.get_dir("runs")
+            if runs_root is None:
+                return None
+
+            history = TrainingHistory(history_dir=Path(runs_root) / "plates")
+            for run in history.get_all_runs():
+                dataset_value = str(getattr(run, "dataset_path", "") or "").strip()
+                if not dataset_value:
+                    continue
+                dataset_run = self._resolve_plate_source_run_from_dataset(Path(dataset_value))
+                if matches_expected_input(dataset_run):
+                    return dataset_run
+        except Exception as e:
+            logger.debug(f"Nie udalo sie odczytac historii treningow tablic: {e}")
+
+        return None
 
     def _find_latest_annotation_run_dir(self, base_dir: Path | None = None) -> Path | None:
         try:
@@ -2087,9 +3497,267 @@ class AnnotationTab:
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return candidates[0][2]
 
+    def _annotation_run_matches_input(self, run_dir: Path, input_dir: Path | None) -> bool:
+        if input_dir is None:
+            return True
+
+        manifest = self._load_annotation_run_manifest(run_dir)
+        manifest_input = str(manifest.get("input_dir") or "").strip()
+        if not manifest_input:
+            return False
+
+        try:
+            return Path(manifest_input).resolve() == Path(input_dir).resolve()
+        except Exception:
+            return str(Path(manifest_input)) == str(Path(input_dir))
+
+    def _find_latest_annotation_run_for_input(
+        self,
+        input_dir: Path | None,
+        search_roots: list[Path] | None = None,
+    ) -> Path | None:
+        if input_dir is None:
+            return None
+
+        candidates = []
+        roots = list(search_roots or [])
+
+        for root in roots:
+            try:
+                root = Path(root)
+            except Exception:
+                continue
+
+            try:
+                if not root.exists() or not root.is_dir():
+                    continue
+            except Exception:
+                continue
+
+            try:
+                run_paths = list(root.rglob("run_*"))
+            except Exception:
+                continue
+
+            for path in run_paths:
+                try:
+                    if not path.is_dir() or not (path / "annotations.xml").exists():
+                        continue
+                    if not self._annotation_run_matches_input(path, input_dir):
+                        continue
+                    stamp = path.stat().st_mtime
+                except Exception:
+                    continue
+                candidates.append((stamp, path.name, path))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def _get_plate_dataset_base_dir(self) -> Path:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if CAMPAIGN.get_active_project_name():
+                datasets_dir = CAMPAIGN.get_dir("datasets")
+                if datasets_dir is not None:
+                    return Path(datasets_dir)
+        except Exception:
+            pass
+
+        return Path(CONFIG.get_datasets_dir("plate"))
+
+    def _get_manual_plate_stage_dir(self) -> Path:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if CAMPAIGN.get_active_project_name():
+                base_dir = CAMPAIGN.get_staging_dir("plate_stage")
+                if base_dir is not None:
+                    iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+                    return Path(base_dir) / f"Iteracja_{iter_num:03d}"
+        except Exception:
+            pass
+
+        return Path(CONFIG.get_auto_annotations_dir("plate")) / "_manual_stage"
+
+    def _get_manual_plate_stage_images_dir(self) -> Path:
+        return self._get_manual_plate_stage_dir() / "images"
+
+    def _is_manual_plate_stage_input(self, path_like) -> bool:
+        if not path_like:
+            return False
+        try:
+            return Path(path_like).resolve() == self._get_manual_plate_stage_images_dir().resolve()
+        except Exception:
+            return str(Path(path_like)) == str(self._get_manual_plate_stage_images_dir())
+
+    def _load_manual_plate_stage_manifest(self) -> dict:
+        manifest_path = self._get_manual_plate_stage_dir() / "stage_manifest.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _refresh_manual_plate_stage_ui(self):
+        section = getattr(self, "manual_stage_section", None)
+        if section is None:
+            return
+
+        manual_enabled = self._manual_xml_template_enabled()
+        separator = getattr(self, "manual_stage_separator", None)
+        if manual_enabled:
+            if not str(section.winfo_manager()):
+                pack_kwargs = {"fill": tk.X}
+                if separator is not None:
+                    pack_kwargs["before"] = separator
+                section.pack(**pack_kwargs)
+        else:
+            if str(section.winfo_manager()):
+                section.pack_forget()
+            return
+
+        stage_dir = self._get_manual_plate_stage_dir()
+        stage_images_dir = stage_dir / "images"
+        manifest = self._load_manual_plate_stage_manifest()
+        stage_images = get_image_files(stage_images_dir)
+        stage_count = len(stage_images)
+        current_is_stage = self._is_manual_plate_stage_input(self.input_dir_var.get())
+
+        self.manual_stage_dir_var.set(str(stage_images_dir))
+
+        updated_at = str(manifest.get("updated_at") or "").strip()
+        updated_suffix = f" Ostatnia synchronizacja: {updated_at}." if updated_at else ""
+
+        if current_is_stage and stage_count == 0:
+            status_text = (
+                "Stage jest aktualnym wejsciem Z2, ale nie ma w nim jeszcze zadnych zdjec. "
+                "Dodaj nowe obrazy do stage albo wroc do glownej paczki." + updated_suffix
+            )
+            tone = "warning"
+        elif stage_count > 0:
+            stage_rel = self._format_workspace_relative_path(stage_images_dir)
+            status_text = (
+                f"Stage zawiera {stage_count} zdjec oczekujacych na kolejna runde recznej anotacji. "
+                f"Możesz przelaczyc Z2 na {stage_rel} albo dolozyc nowa paczke zdjec." + updated_suffix
+            )
+            tone = "info"
+        else:
+            status_text = (
+                "Stage jest pusty. Po eksporcie datasetu trafia tutaj tylko nieoznaczona czesc obrazow. "
+                "Mozesz tez dolozyc nowe zdjecia do kolejnej iteracji." + updated_suffix
+            )
+            tone = "muted"
+
+        self._set_inline_label_state(
+            self.manual_stage_status_lbl,
+            text=status_text,
+            tone=tone,
+            emphasis=False,
+        )
+
+        if current_is_stage:
+            self.manual_stage_use_btn.configure(text="Stage jest aktywnym wejsciem Z2", state=tk.DISABLED)
+        elif stage_count > 0:
+            self.manual_stage_use_btn.configure(text="Uzyj stage jako wejscia Z2", state=tk.NORMAL)
+        else:
+            self.manual_stage_use_btn.configure(text="Uzyj stage jako wejscia Z2", state=tk.DISABLED)
+
+        self.manual_stage_add_btn.configure(state=tk.NORMAL)
+
+    def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = True) -> bool:
+        input_dir = Path(input_dir)
+        if not input_dir.exists() or not input_dir.is_dir():
+            messagebox.showerror("Brak obrazow", "Wybrany folder obrazow nie istnieje.")
+            return False
+
+        if not self._ensure_preview_edits_saved("zmiana puli obrazow Z2"):
+            return False
+
+        self.input_dir_var.set(str(input_dir))
+        self.plate_dataset_images_var.set(str(input_dir))
+        self.plate_dataset_run_var.set("")
+        self.plate_dataset_out_var.set(self._plate_dataset_output_preview())
+        self._reset_campaign_runtime_state(input_dir)
+        self.current_input_dir = input_dir
+
+        if not self._is_free_mode_session_context():
+            self._set_campaign_paths_lock_state(True)
+
+        self._refresh_plate_dataset_export_sources()
+        self._refresh_manual_plate_stage_ui()
+
+        if show_hint:
+            if self._is_manual_plate_stage_input(input_dir):
+                self._set_post_annotation_hint(
+                    "Stage zostal ustawiony jako nowa pula obrazow Z2. Kliknij Start, aby utworzyc kolejny run XML dla tych zdjec.",
+                    "info",
+                )
+            else:
+                self._set_post_annotation_hint("")
+
+        self._queue_free_mode_session_save()
+        return True
+
+    def _use_manual_plate_stage_as_input(self):
+        stage_images_dir = self._get_manual_plate_stage_images_dir()
+        stage_images = get_image_files(stage_images_dir)
+        if not stage_images:
+            messagebox.showinfo(
+                "Stage jest puste",
+                "Stage nie zawiera jeszcze zadnych zdjec. Najpierw wyeksportuj dataset lub dodaj nowa paczke zdjec do stage."
+            )
+            return
+
+        if self._switch_annotation_input_dir(stage_images_dir):
+            self._set_plate_export_status(
+                "Dla aktualnego stage nie ma jeszcze runu Z2. Kliknij Start, aby utworzyc nowy run dla tej puli obrazow.",
+                "info",
+            )
+
+    def _add_images_to_manual_plate_stage(self):
+        stage_dir = self._get_manual_plate_stage_dir()
+        stage_images_dir = stage_dir / "images"
+        initialdir = self.input_dir_var.get().strip() or str(CONFIG.DIR_1_RAW)
+        path = filedialog.askdirectory(initialdir=initialdir)
+        if not path:
+            return
+
+        source_dir = Path(path)
+        ok, msg, stats = self.dataset_creator.add_images_to_stage(source_dir, stage_dir)
+        self._refresh_manual_plate_stage_ui()
+
+        if not ok:
+            messagebox.showerror("Blad stage", msg)
+            return
+
+        stage_total = int(stats.get("stage_images_total", 0) or 0)
+        added = int(stats.get("added", 0) or 0)
+        updated = int(stats.get("updated", 0) or 0)
+        messagebox.showinfo(
+            "Stage zaktualizowane",
+            (
+                f"Stage zawiera teraz {stage_total} obrazow.\n"
+                f"{stage_images_dir}\n\n"
+                f"Dodane nowe pliki: {added}\n"
+                f"Odswiezone istniejace wpisy: {updated}"
+            )
+        )
+
+        if self._is_manual_plate_stage_input(self.input_dir_var.get()):
+            self._set_post_annotation_hint(
+                "Dolozono nowe zdjecia do aktywnego stage. Kliknij Start, aby utworzyc kolejny run XML dla tej rozszerzonej puli.",
+                "info",
+            )
+
     def _plate_dataset_output_preview(self, run_dir: Path | None = None) -> str:
         run_name = run_dir.name if isinstance(run_dir, Path) else "run_xxx"
-        return str(CONFIG.get_datasets_dir("plate") / f"Plates_Z2_{run_name}_[DATA_I_CZAS]")
+        return str(self._get_plate_dataset_base_dir() / f"Plates_Z2_{run_name}_[DATA_I_CZAS]")
 
     def _set_plate_export_status(self, text: str, tone: str = "muted"):
         self._set_inline_label_state(
@@ -2122,9 +3790,178 @@ class AnnotationTab:
             emphasis=False
         )
 
+    @staticmethod
+    def _resolve_existing_run_dir(path_value) -> Path | None:
+        raw_value = str(path_value or "").strip()
+        if not raw_value:
+            return None
+
+        try:
+            candidate = Path(raw_value)
+        except Exception:
+            return None
+
+        try:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _resolve_existing_dir(path_value) -> Path | None:
+        raw_value = str(path_value or "").strip()
+        if not raw_value:
+            return None
+
+        try:
+            candidate = Path(raw_value)
+        except Exception:
+            return None
+
+        try:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except Exception:
+            return None
+        return None
+
+    def _count_plate_annotations(self, annotations: list[ImageAnnotation] | None = None) -> tuple[int, int]:
+        images_with_plates = 0
+        total_plates = 0
+
+        for ann in list(annotations if annotations is not None else (self.current_annotations or [])):
+            plate_count = len(self._get_plate_detections(ann))
+            if plate_count > 0:
+                images_with_plates += 1
+                total_plates += plate_count
+
+        return images_with_plates, total_plates
+
+    def _get_run_plate_annotation_counts(self, run_dir: Path | None) -> tuple[int, int]:
+        if run_dir is None:
+            return 0, 0
+
+        try:
+            run_dir = Path(run_dir)
+        except Exception:
+            return 0, 0
+
+        current_run_dir = getattr(self, "current_annotation_run_dir", None)
+        if (
+            current_run_dir is not None
+            and self.current_annotations
+            and self._paths_equivalent(run_dir, current_run_dir)
+        ):
+            return self._count_plate_annotations(self.current_annotations)
+
+        xml_path = run_dir / "annotations.xml"
+        if not xml_path.exists():
+            return 0, 0
+
+        try:
+            annotations = self._parse_cvat_preview_annotations(xml_path)
+        except Exception:
+            return 0, 0
+
+        return self._count_plate_annotations(annotations)
+
+    def _refresh_step2_action_states(self):
+        dataset_run_dir = self._resolve_existing_run_dir(self.plate_dataset_run_var.get())
+        if dataset_run_dir is None:
+            dataset_run_dir = self._resolve_existing_run_dir(getattr(self, "current_annotation_run_dir", None))
+        if dataset_run_dir is None:
+            dataset_run_dir = self._resolve_existing_run_dir(getattr(self, "last_staging_run_dir", None))
+
+        dataset_images_dir = self._resolve_existing_dir(self.plate_dataset_images_var.get())
+        if dataset_images_dir is None:
+            dataset_images_dir = self._resolve_existing_dir(self.input_dir_var.get())
+
+        dataset_xml_exists = bool(dataset_run_dir and (dataset_run_dir / "annotations.xml").exists())
+        _dataset_images_with_plates, dataset_total_plates = self._get_run_plate_annotation_counts(dataset_run_dir)
+        manual_route = bool(self._manual_xml_template_enabled())
+        dataset_ready = bool(dataset_xml_exists and dataset_images_dir is not None)
+        if manual_route:
+            dataset_ready = bool(dataset_ready and dataset_total_plates > 0)
+        if self.is_processing:
+            dataset_ready = False
+
+        try:
+            self.export_plate_dataset_btn.configure(state=(tk.NORMAL if dataset_ready else tk.DISABLED))
+        except Exception:
+            pass
+
+        if manual_route and dataset_xml_exists and dataset_images_dir is not None and dataset_total_plates <= 0:
+            self._set_plate_export_status(
+                "Run recznej anotacji istnieje, ale nie ma jeszcze zapisanej ani jednej tablicy. "
+                "Dodaj i zapisz co najmniej jeden polygon 'plate', aby odblokowac eksport datasetu YOLO Pose.",
+                "warning",
+            )
+
+        approval_run_dir = None
+        project_active = False
+        current_step = 0
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            project_active = bool(CAMPAIGN.get_active_project_name())
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+            approval_run_dir = self._resolve_existing_run_dir(CAMPAIGN.get_step2_staging_run())
+        except Exception:
+            project_active = False
+            current_step = 0
+
+        approval_xml_exists = bool(approval_run_dir and (approval_run_dir / "annotations.xml").exists())
+        _approval_images_with_plates, approval_total_plates = self._get_run_plate_annotation_counts(approval_run_dir)
+        approve_ready = bool(project_active and current_step == 2 and approval_xml_exists and not self.is_processing)
+        if manual_route:
+            approve_ready = bool(approve_ready and approval_total_plates > 0)
+
+        try:
+            self.approve_btn.config(state=(tk.NORMAL if approve_ready else tk.DISABLED))
+        except Exception:
+            pass
+
+        approve_hint_text = ""
+        approve_hint_tone = "muted"
+        if project_active and current_step == 2 and manual_route and approval_xml_exists:
+            if approval_total_plates > 0:
+                approve_hint_text = (
+                    f"Gotowe do zamkniecia E2. Zapisanych tablic: {approval_total_plates}. "
+                    "Mozesz teraz wyeksportowac dataset YOLO Pose albo od razu zatwierdzic ten run."
+                )
+                approve_hint_tone = "success"
+            else:
+                approve_hint_text = (
+                    "Aby odblokowac zatwierdzenie E2, zapisz co najmniej jedna tablice 'plate'. "
+                    "Ten sam warunek odblokowuje tez eksport datasetu YOLO Pose."
+                )
+                approve_hint_tone = "warning"
+        elif project_active and current_step == 2 and approval_xml_exists:
+            approve_hint_text = "Run Z2 jest gotowy do zatwierdzenia w E2."
+            approve_hint_tone = "info"
+
+        try:
+            self.approve_gate_hint_var.set(approve_hint_text)
+        except Exception:
+            pass
+
+        approve_hint_lbl = getattr(self, "approve_gate_hint_lbl", None)
+        if approve_hint_lbl is not None:
+            self._set_inline_label_state(approve_hint_lbl, tone=approve_hint_tone, emphasis=False)
+        self._set_approve_hint_box_state(approve_hint_tone if approve_hint_text else "muted")
+
     def _build_annotation_success_next_steps(self) -> str:
         annotations = list(getattr(self, "current_annotations", []) or [])
         total_plates = sum(int(getattr(ann, "num_plates", 0) or 0) for ann in annotations)
+
+        if getattr(self, "_current_run_manual_template", False):
+            return (
+                "Utworzono run do ręcznej anotacji. Wybierz obraz w podglądzie po prawej i użyj "
+                "'Nowy polygon 4 pkt (D)', aby dorysować tablice. Po zapisaniu zmian możesz niżej "
+                "wyeksportować dataset YOLO Pose do [Z4]. Ręczne polygony są zapisywane w XML "
+                "z etykietą 'plate'."
+            )
 
         if total_plates <= 0:
             return (
@@ -2172,21 +4009,54 @@ class AnnotationTab:
     def _refresh_plate_dataset_export_sources(self):
         run_dir = None
         run_value = str(self.plate_dataset_run_var.get() or "").strip()
+        input_value = str(self.input_dir_var.get() or "").strip()
+        current_input_dir = Path(input_value) if input_value else None
         if run_value:
             candidate = Path(run_value)
             if candidate.exists() and candidate.is_dir():
                 run_dir = candidate
 
-        if run_dir is None and getattr(self, "last_staging_run_dir", None):
+        project_active = False
+        if run_dir is None:
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                project_active = bool(CAMPAIGN.get_active_project_name())
+                if project_active:
+                    step2_staging = str(CAMPAIGN.get_step2_staging_run() or "").strip()
+                    if step2_staging:
+                        candidate = Path(step2_staging)
+                        if (
+                            candidate.exists()
+                            and candidate.is_dir()
+                            and self._annotation_run_matches_input(candidate, current_input_dir)
+                        ):
+                            run_dir = candidate
+
+                    if run_dir is None:
+                        search_roots = []
+                        for root_candidate in (CAMPAIGN.get_staging_dir("auto_ann"), CAMPAIGN.get_dir("auto_ann")):
+                            if root_candidate is not None:
+                                search_roots.append(Path(root_candidate))
+
+                        run_dir = self._find_latest_annotation_run_for_input(current_input_dir, search_roots)
+            except Exception:
+                project_active = False
+
+        if run_dir is None and getattr(self, "last_staging_run_dir", None) and not project_active:
             candidate = Path(self.last_staging_run_dir)
-            if candidate.exists() and candidate.is_dir():
+            if (
+                candidate.exists()
+                and candidate.is_dir()
+                and (current_input_dir is None or self._annotation_run_matches_input(candidate, current_input_dir))
+            ):
                 run_dir = candidate
 
-        if run_dir is None:
+        if run_dir is None and current_input_dir is None:
             run_dir = self._find_latest_annotation_run_dir()
 
         if run_dir is not None:
-            self._load_plate_dataset_context_from_run(run_dir)
+            self._load_plate_dataset_context_from_run(run_dir, force_images_update=project_active)
             xml_path = run_dir / "annotations.xml"
             images_text = str(self.plate_dataset_images_var.get() or "").strip()
             if xml_path.exists():
@@ -2205,6 +4075,18 @@ class AnnotationTab:
                     "Wybrany folder run nie zawiera pliku annotations.xml.",
                     "error"
                 )
+            self._refresh_manual_plate_stage_ui()
+            self._refresh_step2_action_states()
+            return
+
+        if current_input_dir is not None:
+            self.plate_dataset_out_var.set(self._plate_dataset_output_preview())
+            self._set_plate_export_status(
+                "Dla aktualnego folderu obrazow nie ma jeszcze runu Z2. Kliknij Start, aby utworzyc nowy run dla tej puli albo wskaz run recznie.",
+                "muted"
+            )
+            self._refresh_manual_plate_stage_ui()
+            self._refresh_step2_action_states()
             return
 
         self.plate_dataset_out_var.set(self._plate_dataset_output_preview())
@@ -2212,9 +4094,23 @@ class AnnotationTab:
             "Brak runu Z2. Najpierw uruchom Start, aby utworzyć nowy run autoanotacji, albo wskaż istniejący folder run ręcznie.",
             "muted"
         )
+        self._refresh_manual_plate_stage_ui()
+        self._refresh_step2_action_states()
 
     def _select_plate_dataset_run_dir(self):
-        initialdir = self.plate_dataset_run_var.get().strip() or self.output_dir_var.get().strip() or str(CONFIG.get_auto_annotations_dir("plate"))
+        initialdir = self.plate_dataset_run_var.get().strip()
+        if not initialdir:
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                if CAMPAIGN.get_active_project_name():
+                    auto_dir = CAMPAIGN.get_dir("auto_ann")
+                    staging_dir = CAMPAIGN.get_staging_dir("auto_ann")
+                    initialdir = str(auto_dir or staging_dir or "")
+            except Exception:
+                initialdir = ""
+        if not initialdir:
+            initialdir = self.output_dir_var.get().strip() or str(CONFIG.get_auto_annotations_dir("plate"))
         path = filedialog.askdirectory(initialdir=initialdir)
         if not path:
             return
@@ -2269,7 +4165,7 @@ class AnnotationTab:
             return messagebox.showerror("Brak obrazow", "Wybrany folder obrazow nie istnieje.")
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = CONFIG.get_datasets_dir("plate") / f"Plates_Z2_{run_dir.name}_{timestamp}"
+        out_dir = self._get_plate_dataset_base_dir() / f"Plates_Z2_{run_dir.name}_{timestamp}"
         self.plate_dataset_out_var.set(str(out_dir))
         self.plate_export_progress_var.set(0.0)
         self.export_plate_dataset_btn.configure(state=tk.DISABLED)
@@ -2291,6 +4187,16 @@ class AnnotationTab:
                 logger.info(f"Run: {run_dir}")
                 logger.info(f"Obrazy: {images_dir}")
                 logger.info(f"Output: {out_dir}")
+                run_manifest = self._load_annotation_run_manifest(run_dir)
+                manual_stage_enabled = bool(run_manifest.get("manual_xml_template", False))
+                stage_result = {
+                    "enabled": manual_stage_enabled,
+                    "ok": False,
+                    "message": "",
+                    "pending_count": 0,
+                    "stage_images_total": 0,
+                    "stage_images_dir": "",
+                }
 
                 self.dataset_creator.annotations = []
                 ok, msg, _ = self.dataset_creator.parse_cvat_xml(xml_path)
@@ -2319,10 +4225,60 @@ class AnnotationTab:
                     self.frame.after(0, lambda: self._set_plate_export_status(msg, "error"))
                     return
 
+                try:
+                    self._write_plate_dataset_source_manifest(
+                        out_dir,
+                        source_kind="z2_run_export",
+                        source_run_dir=run_dir,
+                        source_xml_path=xml_path,
+                        source_images_dir=images_dir,
+                    )
+                except Exception as e:
+                    logger.debug(f"Nie udalo sie zapisac manifestu zrodla datasetu tablic: {e}")
+
+                if manual_stage_enabled:
+                    stage_ok, stage_msg, stage_stats = self.dataset_creator.sync_pending_stage(
+                        images_dir,
+                        self._get_manual_plate_stage_dir(),
+                    )
+                    stage_result["ok"] = bool(stage_ok)
+                    stage_result["message"] = str(stage_msg or "").strip()
+                    if isinstance(stage_stats, dict):
+                        stage_result["pending_count"] = int(stage_stats.get("pending_count", 0) or 0)
+                        stage_result["stage_images_total"] = int(stage_stats.get("stage_images_total", 0) or 0)
+                        stage_result["stage_images_dir"] = str(stage_stats.get("stage_images_dir") or "").strip()
+                    if stage_ok:
+                        logger.info(stage_msg)
+                    else:
+                        logger.warning(stage_msg)
+
                 logger.info(f"[OK] Dataset YOLO Pose gotowy: {out_dir}")
 
                 def finish_success():
                     self.plate_export_progress_var.set(100.0)
+                    stage_note = ""
+                    stage_hint = ""
+                    if stage_result.get("enabled"):
+                        pending_count = int(stage_result.get("pending_count", 0) or 0)
+                        stage_total = int(stage_result.get("stage_images_total", pending_count) or pending_count)
+                        stage_images_dir = str(stage_result.get("stage_images_dir") or "").strip()
+                        stage_rel = self._format_workspace_relative_path(stage_images_dir) if stage_images_dir else ""
+                        if stage_result.get("ok"):
+                            if pending_count > 0:
+                                stage_note = (
+                                    f" Do stage oczekujacych trafilo {pending_count} nieoznaczonych zdjec. "
+                                    f"Stage zawiera teraz {stage_total} obrazow: {stage_rel}."
+                                )
+                                stage_hint = (
+                                    f" Stage oczekujacych zawiera teraz {stage_total} obrazow. "
+                                    f"Do kolejnej rundy recznej anotacji wykorzystaj folder {stage_rel}."
+                                )
+                            else:
+                                stage_note = " Wszystkie zdjecia z tej paczki maja juz oznaczone tablice."
+                                stage_hint = stage_note
+                        else:
+                            stage_note = f" Dataset powstal, ale stage oczekujacych nie zostal zaktualizowany: {stage_result.get('message')}"
+                            stage_hint = stage_note
                     next_step_text = (
                         f"Dataset gotowy: {self._format_workspace_relative_path(out_dir)}. "
                         "Możesz teraz przejść do [Z4], aby rozpocząć trening modelu tablic."
@@ -2331,6 +4287,9 @@ class AnnotationTab:
                         next_step_text,
                         "success"
                     )
+                    if stage_note:
+                        self._set_plate_export_status(next_step_text + stage_note, "success")
+                    self._refresh_manual_plate_stage_ui()
                     training_tab = getattr(getattr(self, "app", None), "tabs", {}).get("training")
                     dataset_preloaded = False
                     if training_tab is not None and hasattr(training_tab, "dataset_var"):
@@ -2346,6 +4305,12 @@ class AnnotationTab:
                             "Dataset tablic jest już gotowy i został podstawiony w [Z4]. Możesz przejść do treningu modelu.",
                             "success"
                         )
+                    if dataset_preloaded and stage_hint:
+                        self._set_post_annotation_hint(
+                            "Dataset tablic jest juz gotowy i zostal podstawiony w [Z4]. Mozesz przejsc do treningu modelu."
+                            + stage_hint,
+                            "success"
+                        )
                     messagebox.showinfo(
                         "Sukces",
                         (
@@ -2355,6 +4320,24 @@ class AnnotationTab:
                             + ("\nŚcieżka datasetu została już podstawiona w Z4." if dataset_preloaded else "")
                         )
                     )
+
+                    if stage_result.get("enabled") and stage_result.get("ok") and str(stage_result.get("stage_images_dir") or "").strip():
+                        pending_count = int(stage_result.get("pending_count", 0) or 0)
+                        stage_total = int(stage_result.get("stage_images_total", pending_count) or pending_count)
+                        messagebox.showinfo(
+                            "Stage oczekujacych",
+                            (
+                                f"Do stage oczekujacych trafilo {pending_count} nieoznaczonych zdjec z tej paczki.\n\n"
+                                f"Stage zawiera teraz lacznie {stage_total} obrazow.\n"
+                                f"{stage_result.get('stage_images_dir')}\n\n"
+                                "Ten folder mozesz wykorzystac pozniej jako kolejna pule do recznej anotacji."
+                            )
+                        )
+                    elif stage_result.get("enabled") and not stage_result.get("ok") and str(stage_result.get("message") or "").strip():
+                        messagebox.showwarning(
+                            "Stage oczekujacych",
+                            stage_result.get("message"),
+                        )
 
                 self.frame.after(0, finish_success)
             except Exception as e:
@@ -2368,7 +4351,7 @@ class AnnotationTab:
                     )
                 )
             finally:
-                self.frame.after(0, lambda: self.export_plate_dataset_btn.configure(state=tk.NORMAL))
+                self.frame.after(0, self._refresh_step2_action_states)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2630,6 +4613,29 @@ class AnnotationTab:
         widget.config(**config_kwargs)
         return True
 
+    def _set_approve_hint_box_state(self, tone: str = "muted"):
+        box = getattr(self, "approve_hint_box", None)
+        if box is None:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        tone_key = str(tone or "").strip().lower()
+        bg = palette.get("panel_alt", palette.get("panel", palette.get("bg", "#1f1f1f")))
+        border = {
+            "default": palette.get("border", "#3a3a3a"),
+            "neutral": palette.get("border", "#3a3a3a"),
+            "muted": palette.get("border", "#3a3a3a"),
+            "info": palette.get("info", palette.get("accent", "#4aa3ff")),
+            "success": palette.get("success", "#2ecc71"),
+            "warning": palette.get("warning", "#f39c12"),
+            "error": palette.get("error", "#e74c3c"),
+        }.get(tone_key, palette.get("border", "#3a3a3a"))
+
+        try:
+            box.configure(bg=bg, highlightbackground=border, highlightcolor=border)
+        except Exception:
+            pass
+
     def _set_status_label_state(self, text: str, tone: str = "neutral"):
         if not self._set_inline_label_state(self.status_label, text=text, tone=tone, emphasis=True):
             style_map = {
@@ -2694,6 +4700,14 @@ class AnnotationTab:
             p = (self.plate_custom_var.get() or "").strip()
             if not p or not Path(p).exists(): raise ValueError("Wskaż wytrenowany model tablic (.pt)!")
             if not validate_model_file(Path(p))[0]: raise ValueError("Model tablic jest uszkodzony!")
+
+    def _validate_vehicle_model_selection(self):
+        if self.vehicle_model_var.get() == "Custom":
+            p = (self.vehicle_custom_var.get() or "").strip()
+            if not p or not Path(p).exists():
+                raise ValueError("Nie znaleziono wlasnego modelu pojazdow!")
+            if not validate_model_file(Path(p))[0]:
+                raise ValueError("Model pojazdow jest uszkodzony!")
 
     def clear_campaign_context(self):
         """
@@ -2828,6 +4842,202 @@ class AnnotationTab:
             self.project_paths_info_var.set("")
             self.project_paths_rel_var.set("")
 
+    def _reset_campaign_runtime_state(self, input_dir: Path | None = None):
+        self.current_annotations = []
+        self._clear_preview_editor_state(clear_dirty=True)
+        self.is_processing = False
+        self._current_run_manual_template = False
+        self.current_annotation_run_dir = None
+        self.current_annotation_xml_path = None
+        self.last_staging_run_dir = None
+
+        try:
+            self.current_input_dir = Path(input_dir) if input_dir is not None else None
+        except Exception:
+            self.current_input_dir = None
+
+        try:
+            self.preview_listbox.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.preview_canvas.delete("all")
+        except Exception:
+            pass
+
+        try:
+            self.progress.configure(value=0)
+        except Exception:
+            pass
+
+        try:
+            self._set_progress_counters(0, 0, 0)
+        except Exception:
+            pass
+
+        try:
+            self._set_status_label_state("Gotowy do uruchomienia", "neutral")
+        except Exception:
+            pass
+
+        try:
+            self._set_post_annotation_hint("")
+        except Exception:
+            pass
+
+        try:
+            self.start_btn.config(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
+            self.stop_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.approve_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.export_plate_dataset_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
+            self.approve_gate_hint_var.set("")
+        except Exception:
+            pass
+
+        approve_hint_lbl = getattr(self, "approve_gate_hint_lbl", None)
+        if approve_hint_lbl is not None:
+            self._set_inline_label_state(approve_hint_lbl, tone="muted", emphasis=False)
+        self._set_approve_hint_box_state("muted")
+
+    def restore_campaign_context_from_project(self) -> bool:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_project = CAMPAIGN.get_active_project_name()
+            if not active_project:
+                return False
+            if int(CAMPAIGN.get_current_step() or 1) < 2:
+                snapshot_path = self._get_campaign_annotation_state_path(active_project)
+                if snapshot_path is None or not snapshot_path.exists():
+                    return False
+
+            raw_dir = CAMPAIGN.get_dir("raw")
+            auto_out = CAMPAIGN.get_staging_dir("auto_ann")
+            if raw_dir is None or auto_out is None:
+                return False
+
+            iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+            bootstrap = self._get_campaign_auto_annotation_bootstrap(iteration_target)
+            input_dir = Path(bootstrap.get("input_dir") or Path(raw_dir))
+            manual_template = bool(bootstrap.get("manual_template", iteration_target == "plate"))
+            plate_bootstrap_model = str(bootstrap.get("plate_model_path") or "").strip()
+            restore_run_dir = bootstrap.get("restore_run_dir")
+
+            restored_snapshot = self.apply_campaign_context(
+                input_dir,
+                Path(auto_out),
+                manual_template=manual_template,
+                mode_text="C: Pojazdy + tablice",
+                restore_project_state=True,
+            )
+
+            v_mod = CAMPAIGN.get_global_model("vehicle")
+            p_mod = CAMPAIGN.get_global_model("plate")
+
+            if not restored_snapshot:
+                if v_mod and Path(v_mod).exists():
+                    self.vehicle_model_var.set("Custom")
+                    self.vehicle_custom_var.set(v_mod)
+                else:
+                    try:
+                        vehicle_values = list(self.vehicle_combo["values"]) if hasattr(self, "vehicle_combo") else []
+                    except Exception:
+                        vehicle_values = []
+                    detect_values = [value for value in vehicle_values if value != "Custom"]
+                    default_vehicle = "yolo11s" if "yolo11s" in detect_values else (detect_values[0] if detect_values else "")
+                    if default_vehicle:
+                        self.vehicle_model_var.set(default_vehicle)
+                    self.vehicle_custom_var.set("")
+
+                if (
+                    iteration_target == "char" and p_mod and Path(p_mod).exists()
+                ) or (
+                    iteration_target == "plate" and plate_bootstrap_model and Path(plate_bootstrap_model).exists()
+                ):
+                    self.plate_custom_var.set(plate_bootstrap_model if iteration_target == "plate" else p_mod)
+                else:
+                    self.plate_custom_var.set("")
+
+                self.mode_var.set("C: Pojazdy + tablice")
+                self._on_mode_change()
+
+                if restore_run_dir is not None:
+                    self._restore_preview_from_annotation_run(restore_run_dir)
+            return True
+        except Exception as e:
+            logger.debug(f"Nie udalo sie przywrocic projektowego kontekstu Z2: {e}")
+            return False
+
+    def _apply_campaign_iteration_model_defaults(self, iteration_target: str | None = None) -> None:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if not CAMPAIGN.get_active_project_name():
+                return
+
+            target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+            if target not in {"plate", "char"}:
+                return
+
+            vehicle_model_path = str(CAMPAIGN.get_global_model("vehicle") or "").strip()
+            plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
+        except Exception:
+            return
+
+        try:
+            vehicle_values = list(self.vehicle_combo["values"]) if hasattr(self, "vehicle_combo") else []
+        except Exception:
+            vehicle_values = []
+
+        current_vehicle = str(self.vehicle_model_var.get() or "").strip()
+        current_vehicle_custom = str(self.vehicle_custom_var.get() or "").strip()
+        vehicle_selection_invalid = False
+
+        if current_vehicle == "Custom":
+            vehicle_selection_invalid = not current_vehicle_custom or not Path(current_vehicle_custom).exists()
+        elif current_vehicle:
+            vehicle_selection_invalid = bool(vehicle_values) and current_vehicle not in vehicle_values
+        else:
+            vehicle_selection_invalid = True
+
+        if vehicle_selection_invalid:
+            if vehicle_model_path and Path(vehicle_model_path).exists():
+                self.vehicle_model_var.set("Custom")
+                self.vehicle_custom_var.set(vehicle_model_path)
+            else:
+                detect_values = [value for value in vehicle_values if value != "Custom"]
+                default_vehicle = "yolo11s" if "yolo11s" in detect_values else (detect_values[0] if detect_values else "")
+                if default_vehicle:
+                    self.vehicle_model_var.set(default_vehicle)
+                self.vehicle_custom_var.set("")
+
+        if target == "char" and plate_model_path and Path(plate_model_path).exists():
+            current_plate = str(self.plate_custom_var.get() or "").strip()
+            if not current_plate or not Path(current_plate).exists():
+                self.plate_custom_var.set(plate_model_path)
+
+        try:
+            self._on_vehicle_model_change()
+        except Exception:
+            pass
+
     def _resolve_guidance_button(self, attr_name: str):
         if not attr_name:
             return None
@@ -2878,17 +5088,146 @@ class AnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
 
-    def apply_campaign_context(self, input_dir: Path, output_dir: Path):
-        self.input_dir_var.set(str(input_dir))
-        self.output_dir_var.set(str(output_dir))
-        self.mode_var.set("C: Pojazdy + tablice")
-        self.character_model_var.set("Brak / OCR")
-        self.character_custom_var.set("")
-        self._on_mode_change()
-        self._set_campaign_paths_lock_state(True)
-        if hasattr(self, "character_combo"):
-            self._refresh_character_model_choices()
+    def apply_campaign_context(
+        self,
+        input_dir: Path,
+        output_dir: Path,
+        *,
+        manual_template: bool = False,
+        mode_text: str = "C: Pojazdy + tablice",
+        restore_project_state: bool = True,
+    ):
+        self._campaign_project_restore_in_progress = True
+        restored_snapshot = False
+        try:
+            self.input_dir_var.set(str(input_dir))
+            self.output_dir_var.set(str(output_dir))
+            self.plate_dataset_images_var.set(str(input_dir))
+            self.plate_dataset_run_var.set("")
+            self.plate_dataset_out_var.set(self._plate_dataset_output_preview())
+            self.plate_custom_var.set("")
+            self.manual_xml_template_var.set(bool(manual_template))
+            self.manual_vehicle_assist_var.set(bool(manual_template))
+            self.mode_var.set(self._normalize_mode_value(mode_text))
+            self.character_model_var.set("Brak / OCR")
+            self.character_custom_var.set("")
+            self._reset_campaign_runtime_state(input_dir)
+            self._update_manual_xml_template_ui()
+            self._on_mode_change()
+            self._set_campaign_paths_lock_state(True)
+            self._refresh_plate_dataset_export_sources()
+            if hasattr(self, "character_combo"):
+                self._refresh_character_model_choices()
+        finally:
+            self._campaign_project_restore_in_progress = False
+
+        if restore_project_state:
+            restored_snapshot = self._apply_campaign_project_snapshot(restore_preview=True)
+
+        if not restored_snapshot:
+            self._restore_preview_from_session_run()
+
+        try:
+            self._apply_campaign_iteration_model_defaults()
+        except Exception:
+            pass
+
+        self._refresh_step2_action_states()
         self._pulse_action_frame("start_btn_pulse_frame")
+        return restored_snapshot
+
+    def _manual_xml_template_enabled(self) -> bool:
+        return bool(self.manual_xml_template_var.get())
+
+    def _manual_vehicle_assist_enabled(self) -> bool:
+        return self._manual_xml_template_enabled() and bool(self.manual_vehicle_assist_var.get())
+
+    def _update_manual_xml_template_ui(self):
+        manual_enabled = self._manual_xml_template_enabled()
+        vehicle_assist_enabled = self._manual_vehicle_assist_enabled()
+        self._refresh_detection_configuration_ui()
+
+        if manual_enabled:
+            if getattr(self, "manual_vehicle_assist_check", None) is not None and not str(self.manual_vehicle_assist_check.winfo_manager()):
+                self.manual_vehicle_assist_check.pack(
+                    anchor=tk.W,
+                    pady=(0, 2),
+                    padx=(18, 0),
+                    after=self.manual_xml_template_check,
+                )
+            if getattr(self, "manual_vehicle_assist_hint_lbl", None) is not None and not str(self.manual_vehicle_assist_hint_lbl.winfo_manager()):
+                self.manual_vehicle_assist_hint_lbl.pack(
+                    anchor=tk.W,
+                    fill=tk.X,
+                    pady=(0, 6),
+                    padx=(18, 0),
+                    after=self.manual_vehicle_assist_check,
+                )
+
+            if vehicle_assist_enabled:
+                self.manual_vehicle_assist_hint_var.set(
+                    "Dotyczy tylko nowego runu po kliknieciu Start. Z2 uzyje modelu pojazdow, zapisze boxy aut do nowego XML i pozwoli przechodzic po nich klawiszem Spacja."
+                )
+                self.manual_xml_template_hint_var.set(
+                    "Z2 pominie model tablic, ale przygotuje annotations.xml dla wszystkich obrazow z auto-boxami pojazdow. "
+                    "Spacja kadruje i przelacza kolejne pojazdy, a recznie dodane tablice zapisuja sie z etykieta 'plate'. "
+                    "Kazde ponowne uruchomienie tworzy nowy run_* i nie nadpisuje starszych XML-i; starsze runy zostaja na dysku."
+                )
+                if hasattr(self, "start_btn"):
+                    self.start_btn.configure(text="UTWORZ XML + BOXY POJAZDOW")
+                self._set_inline_label_state(self.manual_vehicle_assist_hint_lbl, tone="info", emphasis=False)
+            else:
+                self.manual_vehicle_assist_hint_var.set(
+                    "Ten checkbox zadziala dopiero dla nowego runu po kliknieciu Start. Nie modyfikuje juz utworzonych XML-i."
+                )
+                self.manual_xml_template_hint_var.set(
+                    "Z2 pominie YOLO dla tablic i przygotuje run z pustym annotations.xml dla wszystkich obrazow. "
+                    "Potem dodasz polygony tablic recznie w podgladzie. Recznie dodane tablice zapisuja sie w XML z etykieta 'plate'. "
+                    "Kazde ponowne uruchomienie tworzy nowy run_* i nie nadpisuje starszych XML-i; starsze runy zostaja na dysku."
+                )
+                if hasattr(self, "start_btn"):
+                    self.start_btn.configure(text="UTWORZ XML DO ANOTACJI RECZNEJ")
+                self._set_inline_label_state(self.manual_vehicle_assist_hint_lbl, tone="muted", emphasis=False)
+            self._set_inline_label_state(self.manual_xml_template_hint_lbl, tone="warning", emphasis=False)
+            self._refresh_manual_plate_stage_ui()
+            return
+
+        self.manual_vehicle_assist_var.set(False)
+        self.manual_vehicle_assist_hint_var.set("")
+        for widget in (
+            getattr(self, "manual_vehicle_assist_check", None),
+            getattr(self, "manual_vehicle_assist_hint_lbl", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.pack_forget()
+                except Exception:
+                    pass
+        self.manual_xml_template_hint_var.set(
+            "Standardowy tryb Z2: uruchamia modele YOLO i zapisuje run autoanotacji tablic."
+        )
+        if hasattr(self, "start_btn"):
+            self.start_btn.configure(text="STARTUJ AUTOANOTACJE")
+        self._set_inline_label_state(self.manual_xml_template_hint_lbl, tone="muted", emphasis=False)
+        self._refresh_manual_plate_stage_ui()
+        return
+
+        if manual_enabled:
+            self.manual_xml_template_hint_var.set(
+                "Z2 pominie YOLO i przygotuje run z pustym annotations.xml dla wszystkich obrazów. "
+                "Potem dodasz polygony tablic ręcznie w podglądzie. "
+                "Ręcznie dodane tablice zapisują się w XML z etykietą 'plate'."
+            )
+            if hasattr(self, "start_btn"):
+                self.start_btn.configure(text="UTWÓRZ XML DO ANOTACJI RĘCZNEJ")
+            self._set_inline_label_state(self.manual_xml_template_hint_lbl, tone="warning", emphasis=False)
+        else:
+            self.manual_xml_template_hint_var.set(
+                "Standardowy tryb Z2: uruchamia modele YOLO i zapisuje run autoanotacji tablic."
+            )
+            if hasattr(self, "start_btn"):
+                self.start_btn.configure(text="STARTUJ AUTOANOTACJĘ")
+            self._set_inline_label_state(self.manual_xml_template_hint_lbl, tone="muted", emphasis=False)
 
     def _get_model_path(self, model_type: str) -> Path:
         if model_type == "vehicle":
@@ -2985,31 +5324,51 @@ class AnnotationTab:
             return messagebox.showerror("Błąd", "Wybierz folder z obrazami wejściowymi.")
         
         try:
-            self._validate_models()
             mode_text = self._normalize_mode_value()
             self.mode_var.set(mode_text)
-            conf = self.conf_var.get()
+            manual_template = self._manual_xml_template_enabled()
+            manual_vehicle_assist = self._manual_vehicle_assist_enabled()
             selected_device = self._normalize_selected_device()
             self.device_var.set(selected_device)
             dev = self._device_to_ultralytics(selected_device)
+            success, msg = True, ""
+            conf = self.conf_var.get()
+            v_p = None
+            p_p = None
 
-            pending_downloads = self._collect_pending_model_downloads(mode_text)
-            if not self._confirm_and_download_missing_models(pending_downloads):
-                return
-            
-            v_p = self._get_model_path("vehicle") if self._mode_uses_vehicle(mode_text) else None
-            p_p = self._get_model_path("plate") if self._mode_uses_plate(mode_text) else None
+            if not manual_template:
+                self._validate_models()
+
+                pending_downloads = self._collect_pending_model_downloads(mode_text)
+                if not self._confirm_and_download_missing_models(pending_downloads):
+                    return
+
+                v_p = self._get_model_path("vehicle") if self._mode_uses_vehicle(mode_text) else None
+                p_p = self._get_model_path("plate") if self._mode_uses_plate(mode_text) else None
+            elif manual_vehicle_assist:
+                self._validate_vehicle_model_selection()
+                pending_downloads = self._collect_pending_model_downloads("C: Pojazdy + tablice")
+                if not self._confirm_and_download_missing_models(pending_downloads):
+                    return
+                v_p = self._get_model_path("vehicle")
 
             if self.annotator is not None:
-                try: self.annotator.unload_models()
-                except: pass
+                try:
+                    self.annotator.unload_models()
+                except Exception:
+                    pass
+                self.annotator = None
 
-            if self._mode_uses_vehicle(mode_text):
-                self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
-            else:
-                self.annotator = PlateAnnotator(p_p, conf, dev)
-            
-            success, msg = self.annotator.load_models()
+            if not manual_template:
+                if self._mode_uses_vehicle(mode_text):
+                    self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
+                else:
+                    self.annotator = PlateAnnotator(p_p, conf, dev)
+
+                success, msg = self.annotator.load_models()
+            elif manual_vehicle_assist:
+                self.annotator = VehicleAnnotator(v_p, conf, dev)
+                success, msg = self.annotator.load_models()
             if not success: raise RuntimeError(f"Błąd silnika YOLO: {msg}")
 
             # Nowy run autoanotacji unieważnia poprzednie zatwierdzenie kroku 2.
@@ -3022,6 +5381,8 @@ class AnnotationTab:
             except Exception as e:
                 logger.debug(f"Nie udało się zresetować stanu Kroku 2: {e}")
 
+            self._current_run_manual_template = manual_template
+            self._current_run_manual_vehicle_assist = manual_vehicle_assist
             self.is_processing = True
             self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
@@ -3038,17 +5399,136 @@ class AnnotationTab:
             self._clear_preview_editor_state(clear_dirty=True)
             
             logger.info("="*50)
-            logger.info("ROZPOCZĘTO AUTOANOTACJĘ OBRAZÓW (YOLO)")
+            logger.info(
+                "ROZPOCZĘTO PRZYGOTOWANIE XML DO RĘCZNEJ ANOTACJI TABLIC"
+                if manual_template
+                else "ROZPOCZĘTO AUTOANOTACJĘ OBRAZÓW (YOLO)"
+            )
             logger.info("="*50)
-            logger.info(f"Urzadzenie Z2: {selected_device} -> runtime={dev}")
+            logger.info(
+                (
+                    f"Tryb Z2: reczna anotacja + auto-boxy pojazdow | obrazy: {in_d}"
+                    if manual_vehicle_assist
+                    else f"Tryb Z2: reczna anotacja | obrazy: {in_d}"
+                )
+                if manual_template
+                else f"Urzadzenie Z2: {selected_device} -> runtime={dev}"
+            )
             
-            threading.Thread(target=self._process_thread, args=(Path(in_d), Path(self.output_dir_var.get())), daemon=True).start()
+            threading.Thread(
+                target=self._process_thread,
+                args=(Path(in_d), Path(self.output_dir_var.get()), manual_template, manual_vehicle_assist),
+                daemon=True
+            ).start()
             
         except Exception as e:
             logger.error(f"Nie można wystartować: {e}")
             messagebox.showerror("Błąd Startu", str(e))
 
-    def _process_thread(self, in_dir: Path, base_out_dir: Path):
+    def _build_manual_annotations_template(
+        self,
+        in_dir: Path,
+        progress_callback,
+    ) -> tuple[list[ImageAnnotation], AnnotationReport]:
+        image_paths = get_image_files(in_dir)
+        annotations: list[ImageAnnotation] = []
+        report = AnnotationReport()
+        total = len(image_paths)
+
+        for idx, image_path in enumerate(image_paths, start=1):
+            if not self.is_processing:
+                raise KeyboardInterrupt("Anulowano")
+
+            width, height = get_image_size(image_path)
+            ann = ImageAnnotation(
+                filename=image_path.name,
+                width=max(1, int(width)),
+                height=max(1, int(height)),
+                detections=[],
+                status=AnnotationStatus.NO_PLATE,
+                status_message="Obraz przygotowany do recznej anotacji tablic.",
+            )
+            annotations.append(ann)
+            report.add_result(ann)
+
+            if callable(progress_callback):
+                progress_callback(idx, total, image_path.name, idx)
+
+        return annotations, report
+
+    def _build_manual_annotations_template_from_vehicle_seed(
+        self,
+        in_dir: Path,
+        seed_annotations: list[ImageAnnotation] | None,
+    ) -> tuple[list[ImageAnnotation], AnnotationReport]:
+        image_paths = get_image_files(in_dir)
+        annotations: list[ImageAnnotation] = []
+        report = AnnotationReport()
+        seed_map = {
+            str(getattr(ann, "filename", "") or ""): ann
+            for ann in (seed_annotations or [])
+            if str(getattr(ann, "filename", "") or "").strip()
+        }
+
+        for image_path in image_paths:
+            if not self.is_processing:
+                raise KeyboardInterrupt("Anulowano")
+
+            source_ann = seed_map.get(image_path.name)
+            if source_ann is not None:
+                width = max(1, int(getattr(source_ann, "width", 0) or 0))
+                height = max(1, int(getattr(source_ann, "height", 0) or 0))
+            else:
+                width, height = get_image_size(image_path)
+                width = max(1, int(width))
+                height = max(1, int(height))
+
+            vehicle_detections = []
+            if source_ann is not None:
+                for det in getattr(source_ann, "detections", []) or []:
+                    if str(getattr(det, "label", "") or "").lower() != "vehicle":
+                        continue
+                    vehicle_detections.append(
+                        Detection(
+                            label="vehicle",
+                            confidence=float(getattr(det, "confidence", 1.0) or 1.0),
+                            bbox=tuple(float(v) for v in (getattr(det, "bbox", ()) or (0.0, 0.0, 0.0, 0.0))[:4]),
+                            attributes=dict(getattr(det, "attributes", {}) or {}),
+                        )
+                    )
+
+            if vehicle_detections:
+                status = AnnotationStatus.SUCCESS
+                status_message = (
+                    f"Wykryto {len(vehicle_detections)} pojazdow. "
+                    "Spacja kadruje kolejne auta, a D dodaje reczna tablice."
+                )
+            else:
+                status = AnnotationStatus.NO_PLATE
+                status_message = (
+                    "Nie wykryto pojazdu automatycznie. Nadal mozesz recznie dodac tablice polygonem 4 pkt."
+                )
+
+            ann = ImageAnnotation(
+                filename=image_path.name,
+                width=width,
+                height=height,
+                detections=vehicle_detections,
+                status=status,
+                status_message=status_message,
+            )
+            annotations.append(ann)
+            report.add_result(ann)
+
+        return annotations, report
+
+    def _process_thread(
+        self,
+        in_dir: Path,
+        base_out_dir: Path,
+        manual_template: bool = False,
+        manual_vehicle_assist: bool = False,
+    ):
         success = False
         message = ""
         
@@ -3065,9 +5545,18 @@ class AnnotationTab:
                 pct = (current / total) * 100 if total > 0 else 0
                 self.frame.after(0, lambda: self._update_progress(pct, current, total, filename, successful))
             
-            annotations, report = self.annotator.process_directory(in_dir, prog_cb)
+            if manual_template and not manual_vehicle_assist:
+                annotations, report = self._build_manual_annotations_template(in_dir, prog_cb)
+            elif manual_template:
+                vehicle_annotations, _vehicle_report = self.annotator.process_directory(in_dir, prog_cb)
+                annotations, report = self._build_manual_annotations_template_from_vehicle_seed(
+                    in_dir,
+                    vehicle_annotations,
+                )
+            else:
+                annotations, report = self.annotator.process_directory(in_dir, prog_cb)
             
-            if self.annotator.is_stopped() or not self.is_processing:
+            if ((not manual_template) or manual_vehicle_assist) and (self.annotator.is_stopped() or not self.is_processing):
                 message = "Przetwarzanie przerwane przez użytkownika."
                 success = False
                 return
@@ -3086,8 +5575,20 @@ class AnnotationTab:
             run_dir.mkdir(parents=True, exist_ok=True)
             cvat_xml_path = run_dir / "annotations.xml"
 
-            logger.info("Zapisywanie bazy detekcji (annotations.xml)...")
-            CVATExporter().export(annotations, cvat_xml_path)
+            logger.info(
+                (
+                    "Zapisywanie annotations.xml z boxami pojazdow do recznej anotacji tablic..."
+                    if manual_vehicle_assist
+                    else "Zapisywanie pustego annotations.xml do recznej anotacji..."
+                )
+                if manual_template
+                else "Zapisywanie bazy detekcji (annotations.xml)..."
+            )
+            CVATExporter().export(
+                annotations,
+                cvat_xml_path,
+                only_successful=not manual_template,
+            )
             self.current_annotation_run_dir = run_dir
             self.current_annotation_xml_path = cvat_xml_path
 
@@ -3104,9 +5605,16 @@ class AnnotationTab:
             # Zachowaj ścieżkę do ostatniego runu w stagingu.
             self.last_staging_run_dir = run_dir
             self.frame.after(0, self._populate_preview_list)
+            self.frame.after(0, lambda run_dir=run_dir: self._load_plate_dataset_context_from_run(run_dir, force_images_update=True))
             self.frame.after(0, self._refresh_plate_dataset_export_sources)
+            self.frame.after(0, self._queue_free_mode_session_save)
+            self.frame.after(0, self.flush_free_mode_session_state)
 
-            message = f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
+            message = (
+                f"Przygotowano XML do ręcznej anotacji: {run_dir.name} (w czasie {elapsed})"
+                if manual_template
+                else f"Zakończono! Zapisano do: {run_dir.name} (w czasie {elapsed})"
+            )
             logger.info(f"✅ {message}")
             success = True
             
@@ -3250,6 +5758,56 @@ class AnnotationTab:
         self._preview_selected_plate_by_image[filename] = safe_idx
         return safe_idx
 
+    @staticmethod
+    def _get_vehicle_detections(ann) -> list[Detection]:
+        if ann is None:
+            return []
+        return [det for det in ann.detections if str(det.label or "").lower() == "vehicle"]
+
+    def _get_selected_vehicle_index_for_ann(self, ann) -> int | None:
+        vehicles = self._get_vehicle_detections(ann)
+        if not vehicles:
+            self._preview_selected_vehicle_by_image.pop(getattr(ann, "filename", ""), None)
+            return None
+
+        filename = str(getattr(ann, "filename", "") or "")
+        idx = self._preview_selected_vehicle_by_image.get(filename, 0)
+        if idx is None:
+            idx = 0
+        idx = max(0, min(int(idx), len(vehicles) - 1))
+        self._preview_selected_vehicle_by_image[filename] = idx
+        return idx
+
+    def _set_selected_vehicle_index_for_ann(self, ann, vehicle_idx: int | None):
+        vehicles = self._get_vehicle_detections(ann)
+        filename = str(getattr(ann, "filename", "") or "")
+        if not vehicles or vehicle_idx is None:
+            self._preview_selected_vehicle_by_image.pop(filename, None)
+            return None
+
+        safe_idx = max(0, min(int(vehicle_idx), len(vehicles) - 1))
+        self._preview_selected_vehicle_by_image[filename] = safe_idx
+        return safe_idx
+
+    def _set_preview_focus_target(self, kind: str | None, index: int | None = None):
+        filename = self._get_preview_focus_image_key()
+        if not kind or index is None or not filename:
+            self._preview_focus_target = None
+            return
+        self._preview_focus_target = {
+            "filename": filename,
+            "kind": str(kind),
+            "index": int(index),
+        }
+
+    def _get_preview_focus_target(self) -> dict | None:
+        target = getattr(self, "_preview_focus_target", None)
+        if not isinstance(target, dict):
+            return None
+        if str(target.get("filename", "") or "") != self._get_preview_focus_image_key():
+            return None
+        return target
+
     def _mark_preview_image_dirty(self, ann, refresh_list: bool = True):
         if ann is None:
             return
@@ -3261,12 +5819,23 @@ class AnnotationTab:
             self._update_preview_toolbar_state()
 
     def _clear_preview_editor_state(self, clear_dirty: bool = True):
+        self._cancel_preview_layout_restore_jobs()
         if getattr(self, "_preview_fullscreen_active", False):
             self._set_preview_fullscreen(False)
         try:
             self.preview_canvas.grab_release()
         except Exception:
             pass
+        try:
+            self.preview_canvas.clear_image()
+        except Exception:
+            try:
+                self.preview_canvas.original_image = None
+                self.preview_canvas.photo_image = None
+                self.preview_canvas.image_id = None
+                self.preview_canvas.delete("all")
+            except Exception:
+                pass
         self.current_preview_index = None
         self._preview_drag_state = None
         self._preview_pending_vertex_hit = None
@@ -3278,12 +5847,13 @@ class AnnotationTab:
         self._preview_delete_candidate_idx = None
         self._preview_polygon_focus_restore_state = None
         self._preview_selected_plate_by_image = {}
+        self._preview_selected_vehicle_by_image = {}
+        self._preview_focus_target = None
         if clear_dirty:
             self._preview_dirty_images.clear()
         self.current_annotation_run_dir = None
         self.current_annotation_xml_path = None
-        self.preview_edit_status_var.set("Po zakończeniu autoanotacji tutaj poprawisz rogi tablic.")
-        self._update_preview_toolbar_state()
+        self._update_preview_edit_status()
 
     def _refresh_preview_list(self, preserve_selection: bool = True, render_current: bool = False):
         selected_index = self.current_preview_index if preserve_selection else None
@@ -3317,7 +5887,10 @@ class AnnotationTab:
                 self._load_current_preview_selection(reset_view=not preserve_selection, selection_changed=True)
         else:
             self.current_preview_index = None
-            self.preview_canvas.delete("all")
+            try:
+                self.preview_canvas.clear_image()
+            except Exception:
+                self.preview_canvas.delete("all")
             self._update_preview_toolbar_state()
             self._update_preview_edit_status()
 
@@ -3336,6 +5909,7 @@ class AnnotationTab:
         self.current_preview_index = safe_idx
         self._preview_session_restore_index = safe_idx
         self._preview_session_restore_filename = str(getattr(self.current_annotations[safe_idx], "filename", "") or "")
+        self._remember_annotation_run_resume_state()
         self._load_current_preview_selection(reset_view=True, selection_changed=(safe_idx != previous_idx))
         self._queue_free_mode_session_save()
         try:
@@ -3352,6 +5926,7 @@ class AnnotationTab:
 
     def _fit_preview_image_to_view(self):
         self._preview_polygon_focus_restore_state = None
+        self._preview_focus_target = None
         try:
             if self.preview_canvas.original_image is not None:
                 self.preview_canvas.fit_to_view()
@@ -3386,8 +5961,11 @@ class AnnotationTab:
         ann = self._get_preview_annotation()
         filename = self._truncate_preview_filename(getattr(ann, "filename", "Brak obrazu"))
         plates = self._get_plate_detections(ann)
+        vehicles = self._get_vehicle_detections(ann)
         selected_idx = self._get_selected_plate_index_for_ann(ann) if ann is not None else None
+        selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann) if ann is not None else None
         current_no = 0 if not plates else ((int(selected_idx) + 1) if selected_idx is not None else 1)
+        current_vehicle_no = 0 if not vehicles else ((int(selected_vehicle_idx) + 1) if selected_vehicle_idx is not None else 1)
         total_images = len(self.current_annotations or [])
         current_image_no = 0
         if self.current_preview_index is not None and total_images > 0:
@@ -3395,6 +5973,7 @@ class AnnotationTab:
         return {
             "filename": filename or "Brak obrazu",
             "image_text": f"Zdjecie: {current_image_no}/{total_images}",
+            "vehicle_text": f"Pojazd: {current_vehicle_no}/{len(vehicles)}",
             "plate_text": f"Tablica: {current_no}/{len(plates)}",
         }
 
@@ -3587,6 +6166,7 @@ class AnnotationTab:
         return [
             {"tokens": [("key", "Q"), ("key", "E")], "connector": "/", "label": "zmien zdjecie", "accent": "#2f80ed"},
             {"tokens": [("key", "A")], "connector": "", "label": "zmien tablice", "accent": "#14b8a6"},
+            {"tokens": [("key", "Spacja")], "connector": "", "label": "kadruj pojazd", "accent": "#16a34a"},
             {"tokens": [("key", "R")], "connector": "", "label": "kadruj tablice", "accent": "#f59e0b"},
             {"tokens": [("key", "F")], "connector": "", "label": "dopasuj widok", "accent": "#64748b"},
             {"tokens": [("key", "W"), ("mouse", "LPM")], "connector": "+", "label": "przesun rog", "accent": "#fb923c"},
@@ -3600,6 +6180,14 @@ class AnnotationTab:
     def _refresh_preview_controls_legend(self):
         canvas = getattr(self, "preview_controls_canvas", None)
         if canvas is None:
+            return
+
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            try:
+                canvas.delete("all")
+                canvas.configure(height=1)
+            except Exception:
+                pass
             return
 
         try:
@@ -3639,6 +6227,7 @@ class AnnotationTab:
         badge_specs = [
             (f"Plik: {context['filename']}", legend_theme["badge_file_fill"], legend_theme["badge_file_outline"]),
             (context["image_text"], legend_theme["badge_image_fill"], legend_theme["badge_image_outline"]),
+            (context["vehicle_text"], legend_theme["badge_image_fill"], legend_theme["badge_image_outline"]),
             (context["plate_text"], legend_theme["badge_plate_fill"], legend_theme["badge_plate_outline"]),
         ]
         badge_height = 0.0
@@ -3789,9 +6378,16 @@ class AnnotationTab:
         state["filename"] = self._get_preview_focus_image_key()
         return state
 
-    def _compute_preview_plate_focus_view_state(self, polygon: list[tuple[float, float]]):
+    def _compute_preview_bbox_focus_view_state(
+        self,
+        bbox: tuple[float, float, float, float],
+        *,
+        pad_x_ratio: float = 0.20,
+        pad_y_ratio: float = 0.25,
+        min_padding: float = 16.0,
+    ):
         canvas = getattr(self, "preview_canvas", None)
-        if canvas is None or canvas.original_image is None or not polygon:
+        if canvas is None or canvas.original_image is None or not bbox:
             return None
 
         try:
@@ -3804,17 +6400,18 @@ class AnnotationTab:
         if canvas_width <= 1.0 or canvas_height <= 1.0:
             return None
 
-        min_x, min_y, max_x, max_y = self._bbox_from_polygon(polygon)
-        poly_width = max(1.0, float(max_x) - float(min_x))
-        poly_height = max(1.0, float(max_y) - float(min_y))
-        padding = max(16.0, poly_width * 0.20, poly_height * 0.25)
+        min_x, min_y, max_x, max_y = [float(v) for v in bbox]
+        box_width = max(1.0, float(max_x) - float(min_x))
+        box_height = max(1.0, float(max_y) - float(min_y))
+        padding_x = max(float(min_padding), box_width * float(pad_x_ratio))
+        padding_y = max(float(min_padding), box_height * float(pad_y_ratio))
 
         image_width = max(1.0, float(canvas.original_image.width))
         image_height = max(1.0, float(canvas.original_image.height))
-        box_min_x = max(0.0, float(min_x) - padding)
-        box_min_y = max(0.0, float(min_y) - padding)
-        box_max_x = min(image_width - 1.0, float(max_x) + padding)
-        box_max_y = min(image_height - 1.0, float(max_y) + padding)
+        box_min_x = max(0.0, float(min_x) - padding_x)
+        box_min_y = max(0.0, float(min_y) - padding_y)
+        box_max_x = min(image_width - 1.0, float(max_x) + padding_x)
+        box_max_y = min(image_height - 1.0, float(max_y) + padding_y)
         box_width = max(1.0, box_max_x - box_min_x)
         box_height = max(1.0, box_max_y - box_min_y)
 
@@ -3835,6 +6432,16 @@ class AnnotationTab:
             "origin_x": float(origin_x),
             "origin_y": float(origin_y),
         }
+
+    def _compute_preview_plate_focus_view_state(self, polygon: list[tuple[float, float]]):
+        if not polygon:
+            return None
+        return self._compute_preview_bbox_focus_view_state(
+            self._bbox_from_polygon(polygon),
+            pad_x_ratio=0.20,
+            pad_y_ratio=0.25,
+            min_padding=16.0,
+        )
 
     def _focus_preview_plate(
         self,
@@ -3876,6 +6483,8 @@ class AnnotationTab:
         if not canvas.set_view_state(view_state, redraw=True):
             return False
 
+        self._set_preview_focus_target("plate", int(safe_idx))
+
         if push_debug:
             self._push_preview_debug_event(
                 "focus-plate",
@@ -3894,13 +6503,79 @@ class AnnotationTab:
             pass
         return True
 
+    def _focus_preview_vehicle(
+        self,
+        vehicle_idx: int | None = None,
+        *,
+        store_restore: bool = True,
+        push_debug: bool = True,
+        status_message: str | None = None,
+    ) -> bool:
+        ann = self._get_preview_annotation()
+        canvas = getattr(self, "preview_canvas", None)
+        if ann is None or canvas is None or canvas.original_image is None:
+            return False
+
+        vehicle_detections = self._get_vehicle_detections(ann)
+        if not vehicle_detections:
+            return False
+
+        if not self._preview_focus_restore_matches_current_image():
+            self._preview_polygon_focus_restore_state = None
+
+        if vehicle_idx is None:
+            vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
+        if vehicle_idx is None:
+            vehicle_idx = 0
+
+        safe_idx = self._set_selected_vehicle_index_for_ann(ann, int(vehicle_idx))
+        if safe_idx is None:
+            return False
+
+        if store_restore and self._preview_polygon_focus_restore_state is None:
+            self._preview_polygon_focus_restore_state = self._capture_preview_view_state()
+
+        view_state = self._compute_preview_bbox_focus_view_state(
+            tuple(float(v) for v in vehicle_detections[int(safe_idx)].bbox[:4]),
+            pad_x_ratio=0.015,
+            pad_y_ratio=0.02,
+            min_padding=6.0,
+        )
+        if not isinstance(view_state, dict):
+            return False
+
+        if not canvas.set_view_state(view_state, redraw=True):
+            return False
+
+        self._set_preview_focus_target("vehicle", int(safe_idx))
+
+        if push_debug:
+            self._push_preview_debug_event(
+                "focus-vehicle",
+                (
+                    f"v{int(safe_idx) + 1} zoom={float(view_state.get('zoom_level', 0.0)):.3f} "
+                    f"origin=({float(view_state.get('origin_x', 0.0)):.1f},{float(view_state.get('origin_y', 0.0)):.1f})"
+                )
+            )
+        if status_message:
+            self._update_preview_edit_status(status_message)
+        else:
+            self._update_preview_edit_status()
+        try:
+            canvas.focus_set()
+        except Exception:
+            pass
+        return True
+
     def _restore_preview_focus_view(self, status_message: str | None = None) -> bool:
         if not self._preview_focus_restore_matches_current_image():
             self._preview_polygon_focus_restore_state = None
+            self._preview_focus_target = None
             return False
 
         restore_state = dict(self._preview_polygon_focus_restore_state or {})
         self._preview_polygon_focus_restore_state = None
+        self._preview_focus_target = None
         if not self.preview_canvas.set_view_state(restore_state, redraw=True):
             return False
 
@@ -3922,15 +6597,104 @@ class AnnotationTab:
         return True
 
     def _restore_preview_layout_view_after_resize(self):
+        if bool(getattr(self, "_preview_force_fit_after_resize", False)):
+            self._preview_force_fit_after_resize = False
+            self._preview_polygon_focus_restore_state = None
+            self._preview_focus_target = None
+            self._fit_preview_image_to_view()
+            return
+
         if self._preview_focus_restore_matches_current_image():
             ann = self._get_preview_annotation()
-            selected_idx = self._get_selected_plate_index_for_ann(ann) if ann is not None else None
-            if self._focus_preview_plate(selected_idx, store_restore=False, push_debug=False, status_message=None):
-                self._push_preview_debug_event("focus-layout", "odswiezono fokus polygonu po zmianie ukladu")
-                return
+            focus_target = self._get_preview_focus_target()
+            focus_kind = str((focus_target or {}).get("kind", "") or "")
+            focus_index = (focus_target or {}).get("index")
+            if focus_kind == "vehicle":
+                if self._focus_preview_vehicle(focus_index, store_restore=False, push_debug=False, status_message=None):
+                    self._push_preview_debug_event("focus-layout", "odswiezono fokus pojazdu po zmianie ukladu")
+                    return
+            else:
+                selected_idx = self._get_selected_plate_index_for_ann(ann) if ann is not None else None
+                if focus_index is not None:
+                    selected_idx = int(focus_index)
+                if self._focus_preview_plate(selected_idx, store_restore=False, push_debug=False, status_message=None):
+                    self._push_preview_debug_event("focus-layout", "odswiezono fokus polygonu po zmianie ukladu")
+                    return
             self._preview_polygon_focus_restore_state = None
+            self._preview_focus_target = None
 
         self._fit_preview_image_to_view()
+
+    def _cancel_preview_layout_restore_jobs(self):
+        pending = list(getattr(self, "_preview_layout_restore_after_ids", []) or [])
+        self._preview_layout_restore_after_ids = []
+        for after_id in pending:
+            try:
+                self.frame.after_cancel(after_id)
+            except Exception:
+                pass
+
+    def _schedule_preview_layout_restore_after_resize(self):
+        self._cancel_preview_layout_restore_jobs()
+
+        def schedule(delay_ms: int, attempt: int, last_size: tuple[int, int] | None = None, stable_count: int = 0):
+            try:
+                after_id = self.frame.after(
+                    int(delay_ms),
+                    lambda a=attempt, ls=last_size, sc=stable_count: self._stabilize_preview_layout_after_resize(a, ls, sc),
+                )
+                self._preview_layout_restore_after_ids.append(after_id)
+            except Exception:
+                pass
+
+        schedule(0, 0, None, 0)
+
+    def _stabilize_preview_layout_after_resize(
+        self,
+        attempt: int = 0,
+        last_size: tuple[int, int] | None = None,
+        stable_count: int = 0,
+    ):
+        self._preview_layout_restore_after_ids = [
+            after_id
+            for after_id in (getattr(self, "_preview_layout_restore_after_ids", []) or [])
+            if after_id
+        ]
+
+        try:
+            canvas = self.preview_canvas
+        except Exception:
+            return
+
+        if canvas is None or getattr(canvas, "original_image", None) is None:
+            self._cancel_preview_layout_restore_jobs()
+            return
+
+        try:
+            canvas.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            current_size = (max(1, int(canvas.winfo_width() or 1)), max(1, int(canvas.winfo_height() or 1)))
+        except Exception:
+            current_size = (1, 1)
+
+        self._restore_preview_layout_view_after_resize()
+
+        next_stable = (stable_count + 1) if last_size == current_size else 0
+        if attempt >= 8 or next_stable >= 2:
+            self._cancel_preview_layout_restore_jobs()
+            return
+
+        try:
+            after_id = self.frame.after(
+                70,
+                lambda a=attempt + 1, ls=current_size, sc=next_stable: self._stabilize_preview_layout_after_resize(a, ls, sc),
+            )
+            self._preview_layout_restore_after_ids.append(after_id)
+        except Exception:
+            pass
 
     def _format_preview_debug_vertex_ref(self, plate_idx: int | None, vertex_idx: int | None) -> str:
         if plate_idx is None or int(plate_idx) < 0:
@@ -4108,6 +6872,7 @@ class AnnotationTab:
             ("<KeyPress-F>", self._on_preview_fit_shortcut),
             ("<KeyPress-a>", self._on_preview_cycle_plate_shortcut),
             ("<KeyPress-A>", self._on_preview_cycle_plate_shortcut),
+            ("<KeyPress-space>", self._on_preview_cycle_vehicle_shortcut),
             ("<KeyPress-q>", self._on_preview_prev_shortcut),
             ("<KeyPress-Q>", self._on_preview_prev_shortcut),
             ("<KeyPress-e>", self._on_preview_next_shortcut),
@@ -4245,6 +7010,45 @@ class AnnotationTab:
             self._update_preview_edit_status("Nie udalo sie dopasowac widoku do wybranej tablicy.")
         return "break"
 
+    def _on_preview_cycle_vehicle_shortcut(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        if self._preview_draw_mode:
+            self._update_preview_edit_status(
+                "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem Spacji."
+            )
+            return "break"
+
+        ann = self._get_preview_annotation()
+        vehicles = self._get_vehicle_detections(ann)
+        if not vehicles:
+            self._update_preview_edit_status("Na tym obrazie nie ma boxow pojazdow do przelaczania klawiszem Spacja.")
+            return "break"
+
+        current_idx = self._get_selected_vehicle_index_for_ann(ann)
+        focus_active = self._preview_focus_restore_matches_current_image()
+        if focus_active:
+            if current_idx is None:
+                current_idx = -1
+            target_idx = (int(current_idx) + 1) % len(vehicles)
+        else:
+            target_idx = 0 if current_idx is None else int(current_idx)
+            self._preview_polygon_focus_restore_state = self._capture_preview_view_state()
+
+        if self._focus_preview_vehicle(
+            target_idx,
+            store_restore=False,
+            push_debug=False,
+            status_message=(
+                f"Aktywny pojazd {int(target_idx) + 1}/{len(vehicles)}. "
+                "Spacja przelacza kolejne auta, D dodaje tablice, R kadruje aktywna tablice."
+            ),
+        ):
+            self._push_preview_debug_event("cycle-vehicle", f"v{int(target_idx) + 1}/{len(vehicles)}")
+        else:
+            self._update_preview_edit_status("Nie udalo sie dopasowac widoku do wybranego pojazdu.")
+        return "break"
+
     def _on_preview_enter_fullscreen_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
@@ -4292,13 +7096,14 @@ class AnnotationTab:
             try:
                 if preview_hint_frame is not None and not str(preview_hint_frame.winfo_manager()):
                     preview_hint_frame.pack(fill=tk.X, pady=(0, 8), before=canvas_frame)
+                    self._refresh_preview_controls_legend()
             except Exception:
                 pass
             return
 
         try:
-            if preview_hint_frame is not None and not str(preview_hint_frame.winfo_manager()):
-                preview_hint_frame.pack(fill=tk.X, pady=(0, 8), before=canvas_frame)
+            if preview_hint_frame is not None and str(preview_hint_frame.winfo_manager()):
+                preview_hint_frame.pack_forget()
         except Exception:
             pass
         try:
@@ -4399,10 +7204,13 @@ class AnnotationTab:
                 except Exception:
                     pass
 
+            self._preview_polygon_focus_restore_state = None
+            self._preview_focus_target = None
+            self._preview_force_fit_after_resize = True
             if not self._pane_has_child(self.main_pane, self.main_left_frame):
                 self.main_pane.insert(0, self.main_left_frame, weight=2)
             if not self._pane_has_child(self.main_pane, self.main_right_frame):
-                self.main_pane.add(self.main_right_frame, weight=2)
+                self.main_pane.add(self.main_right_frame, weight=1)
             if not self._pane_has_child(self.preview_pane, self.preview_list_lf):
                 self.preview_pane.insert(0, self.preview_list_lf, weight=1)
 
@@ -4416,7 +7224,9 @@ class AnnotationTab:
             "fullscreen",
             f"active={int(bool(self._preview_fullscreen_active))} mode={'native' if use_native_root_fullscreen else 'zoomed'} ws={windowing_system or '-'}"
         )
-        self.frame.after_idle(self._restore_preview_layout_view_after_resize)
+        self._schedule_preview_layout_restore_after_resize()
+        if not self._preview_fullscreen_active:
+            self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=80)
         try:
             self.preview_canvas.focus_set()
         except Exception:
@@ -4517,9 +7327,9 @@ class AnnotationTab:
         try:
             self.preview_canvas.pan_data["press_x"] = None
             self.preview_canvas.pan_data["press_y"] = None
-            self.preview_canvas.config(cursor=("crosshair" if next_state else self.preview_canvas.current_cursor))
         except Exception:
             pass
+        self._sync_preview_canvas_cursor()
         if not next_state:
             self._preview_pending_vertex_hit = None
         if not next_state and self._preview_drag_state is not None:
@@ -4628,6 +7438,33 @@ class AnnotationTab:
         )
         return False
 
+    def _get_preview_canvas_cursor(self) -> str:
+        if bool(getattr(self, "_preview_draw_mode", False)):
+            return "crosshair"
+        if bool(getattr(self, "_preview_corner_drag_modifier_down", False)):
+            return "crosshair"
+        return "arrow"
+
+    def _sync_preview_canvas_cursor(self):
+        canvas = getattr(self, "preview_canvas", None)
+        if canvas is None:
+            return
+
+        desired_cursor = self._get_preview_canvas_cursor()
+        try:
+            canvas.current_cursor = desired_cursor
+        except Exception:
+            pass
+
+        try:
+            if canvas.pan_data.get("press_x") is None and canvas.pan_data.get("press_y") is None:
+                canvas.config(cursor=desired_cursor)
+        except Exception:
+            try:
+                canvas.config(cursor=desired_cursor)
+            except Exception:
+                pass
+
     def _update_preview_toolbar_state(self):
         total = len(self.current_annotations)
         has_selection = self.current_preview_index is not None and total > 0
@@ -4651,6 +7488,23 @@ class AnnotationTab:
         except Exception:
             pass
 
+        try:
+            self.preview_fullscreen_hint_var.set("")
+        except Exception:
+            pass
+
+        self._sync_preview_canvas_cursor()
+
+    @staticmethod
+    def _preview_draw_corner_label(point_idx: int) -> str:
+        labels = {
+            1: "1 rog",
+            2: "2 rog",
+            3: "3 rog",
+            4: "4 rog",
+        }
+        return labels.get(int(point_idx), f"{int(point_idx)} rog")
+
     def _update_preview_edit_status(self, extra_message: str | None = None):
         if extra_message:
             self.preview_edit_status_var.set(extra_message)
@@ -4667,12 +7521,22 @@ class AnnotationTab:
             return
 
         plates = self._get_plate_detections(ann)
+        vehicles = self._get_vehicle_detections(ann)
         dirty_note = " | niezapisane zmiany" if ann.filename in self._preview_dirty_images else ""
+        selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
+        vehicle_hint = ""
+        if vehicles:
+            vehicle_no = 1 if selected_vehicle_idx is None else (int(selected_vehicle_idx) + 1)
+            vehicle_hint = f" Aktywny pojazd {vehicle_no}/{len(vehicles)}. Spacja kadruje kolejne pojazdy."
 
         if self._preview_draw_mode:
-            next_idx = len(self._preview_draw_points) + 1
+            clicked_points = len(self._preview_draw_points)
+            next_idx = clicked_points + 1
+            next_corner = self._preview_draw_corner_label(next_idx)
             self.preview_edit_status_var.set(
-                f"{ann.filename} | tryb rysowania aktywny{dirty_note}. Kliknij 4 rogi tablicy ({next_idx}/4). D anuluje rysowanie, a 4. punkt domknie polygon automatycznie."
+                f"{ann.filename} | tryb rysowania aktywny{dirty_note}. "
+                f"Kliknij w {next_corner} tablicy ({next_idx}/4). "
+                f"Po zaznaczeniu 4 punktow polygon domknie sie automatycznie. D anuluje rysowanie.{vehicle_hint}"
             )
         elif self._preview_delete_mode:
             if self._preview_delete_candidate_idx is not None:
@@ -4687,7 +7551,8 @@ class AnnotationTab:
                 )
         elif not plates:
             self.preview_edit_status_var.set(
-                f"{ann.filename} | brak wykrytej tablicy{dirty_note}. Uzyj 'Nowy polygon 4 pkt (D)', aby dodac reczna anotacje."
+                f"{ann.filename} | brak wykrytej tablicy{dirty_note}. "
+                f"Uzyj 'Nowy polygon 4 pkt (D)', aby dodac reczna anotacje.{vehicle_hint}"
             )
         else:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
@@ -4710,7 +7575,7 @@ class AnnotationTab:
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
                 f"Kliknij polygon, aby go wybrac. {drag_hint} "
-                f"Q/E przelaczaja zdjecia, A przelacza tablice, R kadruje aktywny polygon, F dopasowuje widok, D rysuje nowy polygon, S uzbraja usuwanie, Ctrl+S zapisuje poprawki. {fullscreen_hint}"
+                f"Q/E przelaczaja zdjecia, A przelacza tablice, Spacja kadruje pojazdy, R kadruje aktywny polygon, F dopasowuje widok, D rysuje nowy polygon, S uzbraja usuwanie, Ctrl+S zapisuje poprawki. {fullscreen_hint}{vehicle_hint}"
             )
 
         self._update_preview_toolbar_state()
@@ -4720,6 +7585,10 @@ class AnnotationTab:
     def _load_current_preview_selection(self, reset_view: bool = True, selection_changed: bool = True):
         ann = self._get_preview_annotation()
         if ann is None:
+            try:
+                self.preview_canvas.clear_image()
+            except Exception:
+                pass
             self._update_preview_edit_status()
             self._update_preview_toolbar_state()
             return
@@ -4736,6 +7605,7 @@ class AnnotationTab:
             self._preview_delete_mode = False
             self._preview_delete_candidate_idx = None
             self._preview_polygon_focus_restore_state = None
+            self._preview_focus_target = None
             self._push_preview_debug_event(
                 "select",
                 f"idx={self.current_preview_index if self.current_preview_index is not None else '-'} file={getattr(ann, 'filename', '-')}"
@@ -4749,10 +7619,7 @@ class AnnotationTab:
         img_path = self.current_input_dir / ann.filename if self.current_input_dir else None
 
         if img_path is None or not img_path.exists():
-            self.preview_canvas.original_image = None
-            self.preview_canvas.photo_image = None
-            self.preview_canvas.image_id = None
-            self.preview_canvas.delete("all")
+            self.preview_canvas.clear_image()
             self.preview_canvas.create_text(20, 20, text="Plik nie istnieje na dysku!", fill="red", anchor="nw")
             self._update_preview_toolbar_state()
             return
@@ -4768,10 +7635,7 @@ class AnnotationTab:
                 self.preview_canvas.fit_to_view()
         except Exception as e:
             logger.error(f"Blad rysowania podgladu YOLO: {e}")
-            self.preview_canvas.original_image = None
-            self.preview_canvas.photo_image = None
-            self.preview_canvas.image_id = None
-            self.preview_canvas.delete("all")
+            self.preview_canvas.clear_image()
             self.preview_canvas.create_text(20, 20, text=f"Blad podgladu: {e}", fill="red", anchor="nw")
 
     def _refresh_preview_canvas(self, rerender_image: bool = False):
@@ -4798,6 +7662,8 @@ class AnnotationTab:
         label_fill = "#f8f8f8"
         label_bg = "#111111"
 
+        vehicle_detections = self._get_vehicle_detections(ann)
+        selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
         plate_detections = self._get_plate_detections(ann)
         selected_plate_idx = self._get_selected_plate_index_for_ann(ann)
         delete_candidate_idx = (
@@ -4806,22 +7672,45 @@ class AnnotationTab:
             else None
         )
 
-        for det in ann.detections:
-            label_name = str(det.label or "").lower()
-            if label_name == "vehicle":
-                x1, y1, x2, y2 = det.bbox
-                cx1, cy1 = canvas.image_to_canvas_coords(x1, y1)
-                cx2, cy2 = canvas.image_to_canvas_coords(x2, y2)
-                canvas.create_rectangle(cx1, cy1, cx2, cy2, outline=vehicle_color, width=2, tags=("preview_overlay",))
-                canvas.create_text(
-                    cx1 + 6,
-                    max(10, cy1 - 8),
-                    text=f"Vehicle {det.confidence:.2f}",
+        for vehicle_idx, det in enumerate(vehicle_detections):
+            x1, y1, x2, y2 = det.bbox
+            cx1, cy1 = canvas.image_to_canvas_coords(x1, y1)
+            cx2, cy2 = canvas.image_to_canvas_coords(x2, y2)
+            is_selected_vehicle = selected_vehicle_idx == vehicle_idx
+            vehicle_outline = active_color if is_selected_vehicle else vehicle_color
+            vehicle_width = 3 if is_selected_vehicle else 2
+            vehicle_dash = None if is_selected_vehicle else (6, 4)
+            if is_selected_vehicle:
+                canvas.create_rectangle(
+                    cx1,
+                    cy1,
+                    cx2,
+                    cy2,
+                    outline="",
                     fill=vehicle_color,
-                    anchor="sw",
-                    font=("Segoe UI", 9, "bold"),
+                    stipple="gray12",
+                    width=0,
                     tags=("preview_overlay",)
                 )
+            canvas.create_rectangle(
+                cx1,
+                cy1,
+                cx2,
+                cy2,
+                outline=vehicle_outline,
+                width=vehicle_width,
+                dash=vehicle_dash,
+                tags=("preview_overlay",)
+            )
+            canvas.create_text(
+                cx1 + 6,
+                max(10, cy1 - 8),
+                text=f"Vehicle {vehicle_idx + 1}/{len(vehicle_detections)}",
+                fill=vehicle_outline,
+                anchor="sw",
+                font=("Segoe UI", 9, "bold"),
+                tags=("preview_overlay",)
+            )
 
         for plate_idx, det in enumerate(plate_detections):
             polygon = self._detection_polygon(det)
@@ -4941,6 +7830,156 @@ class AnnotationTab:
                     tags=("preview_overlay",)
                 )
 
+        self._draw_preview_bottom_hint(canvas)
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            self._draw_preview_enter_fullscreen_hint(canvas)
+
+    def _draw_preview_enter_fullscreen_hint(self, canvas: ZoomableCanvas):
+        try:
+            canvas_width = int(canvas.winfo_width() or 0)
+        except Exception:
+            canvas_width = 0
+        if canvas_width <= 80:
+            return
+
+        if self._manual_xml_template_enabled():
+            hint_text = "Do recznej edycji wlacz pelny ekran klawiszem Enter."
+            accent = "#f39c12"
+        else:
+            hint_text = "Pelny ekran podgladu wlaczysz klawiszem Enter."
+            accent = "#3498db"
+
+        text_width = max(240, min(canvas_width - 72, 640))
+        center_x = max(40, canvas_width // 2)
+        text_id = canvas.create_text(
+            center_x,
+            18,
+            text=hint_text,
+            fill="#f3f3f3",
+            anchor="n",
+            justify=tk.CENTER,
+            width=text_width,
+            font=("Segoe UI", 10, "bold"),
+            tags=("preview_overlay",)
+        )
+        try:
+            bbox = canvas.bbox(text_id)
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+
+        x1, y1, x2, y2 = bbox
+        box_id = canvas.create_rectangle(
+            x1 - 14,
+            y1 - 8,
+            x2 + 14,
+            y2 + 8,
+            fill="#111111",
+            outline=accent,
+            width=1,
+            tags=("preview_overlay",)
+        )
+        canvas.tag_lower(box_id, text_id)
+
+    def _get_preview_bottom_hint_text(self) -> str:
+        ann = self._get_preview_annotation()
+        if ann is None:
+            return ""
+
+        plates = self._get_plate_detections(ann)
+        vehicles = self._get_vehicle_detections(ann)
+        selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
+        vehicle_suffix = ""
+        if vehicles:
+            vehicle_no = 1 if selected_vehicle_idx is None else (int(selected_vehicle_idx) + 1)
+            vehicle_suffix = f" Pojazd {vehicle_no}/{len(vehicles)}."
+
+        if self._preview_draw_mode:
+            clicked_points = len(self._preview_draw_points)
+            next_idx = clicked_points + 1
+            next_corner = self._preview_draw_corner_label(next_idx)
+            base = (
+                f"Rysowanie tablicy: kliknij w {next_corner} ({next_idx}/4). "
+                "D anuluje."
+            )
+        elif self._preview_delete_mode:
+            if self._preview_delete_candidate_idx is not None:
+                base = "Usuwanie: PPM usuwa zaznaczony polygon, S anuluje tryb."
+            else:
+                base = "Usuwanie: kliknij polygon tablicy, potem PPM usuwa. S anuluje tryb."
+        elif not plates:
+            base = "Brak tablicy. D dodaje nowy polygon tablicy."
+        else:
+            selected_idx = self._get_selected_plate_index_for_ann(ann)
+            plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
+            drag_hint = (
+                "Przeciagnij rog aktywnej tablicy."
+                if self._preview_corner_drag_modifier_down
+                else "Przytrzymaj W i przeciagnij rog."
+            )
+            base = (
+                f"Tablica {plate_no}/{len(plates)}. {drag_hint} "
+                "A zmienia tablice, Spacja pojazdy, R kadr, F dopasuj, D nowa, S usun, Ctrl+S zapisz."
+            )
+
+        fullscreen_hint = (
+            " Esc wychodzi z pelnego ekranu."
+            if self._preview_fullscreen_active
+            else " Enter wlacza pelny ekran."
+        )
+        return f"{base}{fullscreen_hint}{vehicle_suffix}"
+
+    def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
+        hint_text = str(self._get_preview_bottom_hint_text() or "").strip()
+        if not hint_text:
+            return
+
+        try:
+            canvas_width = int(canvas.winfo_width() or 0)
+            canvas_height = int(canvas.winfo_height() or 0)
+        except Exception:
+            canvas_width = 0
+            canvas_height = 0
+        if canvas_width <= 120 or canvas_height <= 80:
+            return
+
+        accent = "#6f6330" if self._manual_xml_template_enabled() else "#3d5d73"
+        text_width = max(280, min(canvas_width - 56, 980))
+        center_x = max(40, canvas_width // 2)
+        text_id = canvas.create_text(
+            center_x,
+            canvas_height - 14,
+            text=hint_text,
+            fill="#d7dde4",
+            anchor="s",
+            justify=tk.CENTER,
+            width=text_width,
+            font=("Segoe UI", 8, "normal"),
+            tags=("preview_overlay",)
+        )
+        try:
+            bbox = canvas.bbox(text_id)
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+
+        x1, y1, x2, y2 = bbox
+        pad_x = 12
+        pad_y = 8
+        box_id = canvas.create_rectangle(
+            max(8, x1 - pad_x),
+            max(8, y1 - pad_y),
+            min(canvas_width - 8, x2 + pad_x),
+            min(canvas_height - 8, y2 + pad_y),
+            fill="#101419",
+            outline=accent,
+            width=1,
+            tags=("preview_overlay",)
+        )
+        canvas.tag_lower(box_id, text_id)
+
     def _clamp_preview_point(self, x: float, y: float) -> tuple[float, float]:
         if self.preview_canvas.original_image is None:
             return float(x), float(y)
@@ -5025,6 +8064,34 @@ class AnnotationTab:
             if dist >= -threshold_img and (best_dist is None or dist > best_dist):
                 best_idx = plate_idx
                 best_dist = dist
+
+        return best_idx
+
+    def _find_preview_vehicle_hit(self, canvas_x: float, canvas_y: float):
+        ann = self._get_preview_annotation()
+        if ann is None or self.preview_canvas.original_image is None:
+            return None
+
+        img_x, img_y = self.preview_canvas.canvas_to_image_coords(canvas_x, canvas_y, clamp=False)
+        vehicle_detections = self._get_vehicle_detections(ann)
+        if not vehicle_detections:
+            return None
+
+        zoom_level = max(0.01, float(getattr(self.preview_canvas, "zoom_level", 1.0) or 1.0))
+        threshold_img = max(3.0, 8.0 / zoom_level)
+        best_idx = None
+        best_area = None
+
+        for vehicle_idx, det in enumerate(vehicle_detections):
+            x1, y1, x2, y2 = [float(v) for v in det.bbox[:4]]
+            if (
+                (x1 - threshold_img) <= float(img_x) <= (x2 + threshold_img)
+                and (y1 - threshold_img) <= float(img_y) <= (y2 + threshold_img)
+            ):
+                area = max(1.0, (x2 - x1) * (y2 - y1))
+                if best_area is None or area < best_area:
+                    best_idx = vehicle_idx
+                    best_area = area
 
         return best_idx
 
@@ -5370,11 +8437,31 @@ class AnnotationTab:
         self.current_annotation_xml_path = xml_path
         self.current_annotation_run_dir = xml_path.parent
         self.last_staging_run_dir = xml_path.parent
+        try:
+            self._update_annotation_run_manifest(
+                xml_path.parent,
+                has_manual_edits=True,
+                last_manual_edit_at=datetime.datetime.now().isoformat(timespec="seconds"),
+                last_manual_edit_kind="preview_save",
+                **self._collect_preview_resume_manifest_fields(),
+            )
+        except Exception:
+            pass
+        try:
+            self._remember_campaign_manual_plate_source(
+                run_dir=xml_path.parent,
+                xml_path=xml_path,
+                input_dir=self.current_input_dir,
+            )
+        except Exception:
+            pass
         self._preview_dirty_images.clear()
         self._refresh_preview_list(preserve_selection=True, render_current=False)
         self._refresh_plate_dataset_export_sources()
+        self._refresh_step2_action_states()
         self._push_preview_debug_event("save", f"xml={xml_path.name}")
         self._update_preview_edit_status("Zapisano poprawki polygonow do annotations.xml. Kolejny etap zobaczy juz nowe rogi.")
+        self._queue_free_mode_session_save()
         return True
 
     def _ensure_preview_edits_saved(self, action_label: str) -> bool:
@@ -5560,6 +8647,24 @@ class AnnotationTab:
             self._update_preview_edit_status()
             return True
 
+        vehicle_hit = self._find_preview_vehicle_hit(canvas_x, canvas_y)
+        if vehicle_hit is not None:
+            self._preview_pending_vertex_hit = None
+            self._set_selected_vehicle_index_for_ann(ann, vehicle_hit)
+            self._push_preview_debug_event(
+                "press-vehicle",
+                (
+                    f"v{int(vehicle_hit) + 1} canvas=({float(canvas_x):.1f},{float(canvas_y):.1f}) "
+                    f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
+                )
+            )
+            self._refresh_preview_canvas()
+            self._update_preview_edit_status(
+                f"Wybrano pojazd {int(vehicle_hit) + 1}/{len(self._get_vehicle_detections(ann))}. "
+                "Spacja kadruje ten pojazd i przeskakuje do kolejnych aut."
+            )
+            return False
+
         self._preview_pending_vertex_hit = None
         if self._preview_corner_drag_modifier_down:
             self._push_preview_debug_event(
@@ -5707,6 +8812,7 @@ class AnnotationTab:
         self.current_preview_index = idx
         self._preview_session_restore_index = idx
         self._preview_session_restore_filename = str(getattr(self.current_annotations[idx], "filename", "") or "")
+        self._remember_annotation_run_resume_state()
         self._load_current_preview_selection(reset_view=True, selection_changed=(idx != previous_idx))
         self._queue_free_mode_session_save()
         try:
@@ -5731,7 +8837,10 @@ class AnnotationTab:
         self.progress.configure(value=(100 if success else 0))
         if success:
             total = len(getattr(self, "current_annotations", []) or [])
-            successful = sum(1 for ann in (self.current_annotations or []) if getattr(ann, "is_successful", False))
+            if getattr(self, "_current_run_manual_template", False):
+                successful = total
+            else:
+                successful = sum(1 for ann in (self.current_annotations or []) if getattr(ann, "is_successful", False))
             self._set_progress_counters(successful, total, total)
         else:
             self._set_progress_counters(0, 0, 0)
@@ -5759,10 +8868,12 @@ class AnnotationTab:
             except Exception as e:
                 logger.debug(f"Nie udało się zaktualizować stanu kroku 2: {e}")
 
+            self._refresh_step2_action_states()
             messagebox.showinfo("Koniec", f"{msg}\n\n{next_steps}")
         else:
             self._set_status_label_state("Przerwano / Błąd", "error")
             self._set_post_annotation_hint("")
+            self._refresh_step2_action_states()
             messagebox.showerror("Zatrzymano", msg)
 
     def _approve_annotation_stage(self):
@@ -5773,7 +8884,7 @@ class AnnotationTab:
             from ..campaign_manager import CAMPAIGN
             import shutil
 
-            if not self._ensure_preview_edits_saved("zatwierdzenie etapu autoanotacji"):
+            if not self._ensure_preview_edits_saved("zatwierdzenie kroku autoanotacji"):
                 return
 
             if not CAMPAIGN.get_active_project_name():
@@ -5805,22 +8916,38 @@ class AnnotationTab:
             self.current_annotation_xml_path = target_dir / "annotations.xml"
             self.last_staging_run_dir = target_dir
             try:
+                manifest = self._load_annotation_run_manifest(target_dir)
+                if self._annotation_run_manifest_has_manual_value(manifest):
+                    self._remember_campaign_manual_plate_source(
+                        run_dir=target_dir,
+                        xml_path=target_dir / "annotations.xml",
+                        input_dir=self.current_input_dir,
+                    )
+            except Exception:
+                pass
+            try:
                 if Path(str(self.plate_dataset_run_var.get() or "").strip()) == staging_run:
                     self.plate_dataset_run_var.set(str(target_dir))
                     self._refresh_plate_dataset_export_sources()
             except Exception:
                 pass
 
+            self._queue_free_mode_session_save()
+
             CAMPAIGN.approve_step2()
-            CAMPAIGN.set_current_step(3)
+            next_step = 4 if CAMPAIGN.get_iteration_target() == "plate" else 3
+            CAMPAIGN.set_current_step(next_step)
 
             self.approve_btn.config(state=tk.DISABLED)
+            self._refresh_step2_action_states()
 
             if 'campaign' in self.app.tabs:
                 self.app.tabs['campaign']._refresh_dashboard()
 
+            next_step_label = "E4 / trening tablic" if next_step == 4 else "E3 / tor znaków"
             self.app.update_status(
-                "Zatwierdzono etap autoanotacji. Wyniki przeniesiono z katalogu stagingu do 2_auto_annotations projektu.",
+                "Zatwierdzono krok autoanotacji. Wyniki przeniesiono z katalogu stagingu do "
+                f"2_auto_annotations projektu. Kolejny krok: {next_step_label}.",
                 "info"
             )
             # po zatwierdzeniu wracamy do Wizarda
@@ -5830,7 +8957,7 @@ class AnnotationTab:
             except Exception as e:
                 logger.debug(f"Nie udało się wrócić do zakładki Wizarda: {e}")
 
-            messagebox.showinfo("Sukces", f"Etap autoanotacji został zatwierdzony.\n\nWyniki przeniesiono do:\n{target_dir}")
+            messagebox.showinfo("Sukces", f"Krok autoanotacji został zatwierdzony.\n\nWyniki przeniesiono do:\n{target_dir}")
 
         except Exception as e:
             messagebox.showerror("Błąd zatwierdzania", str(e))

@@ -144,14 +144,14 @@ class PolygonValidator:
         ordered = PolygonValidator.order_points(points)
         
         if PolygonValidator.is_valid_quad(ordered):
-            logger.info("Poligon naprawiony (zmiana kolejności punktów)")
+            logger.debug("Poligon uporzadkowany (zmiana kolejnosci punktow)")
             return ordered
         
         # Jeśli to nie zadziała, spróbuj sortowania po kącie
         clockwise = PolygonValidator.sort_points_clockwise(points)
         
         if PolygonValidator.is_valid_quad(clockwise):
-            logger.info("Poligon naprawiony (sortowanie po kącie)")
+            logger.debug("Poligon uporzadkowany (sortowanie po kacie)")
             return clockwise
         
         logger.warning("Nie udało się naprawić poligonu - może być kokarda")

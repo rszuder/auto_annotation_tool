@@ -53,6 +53,18 @@
     "tab1_dataset_export":  {
                                 "full_help":  "Ta sekcja nie uruchamia autoanotacji. Buduje gotowy dataset treningowy tablic z istniejącego runu Z2, czyli z pary: folder run z annotations.xml oraz odpowiadający mu folder źródłowych obrazów. Po nowym runie Z2 pola źródeł zwykle uzupełniają się automatycznie ostatnim runem, ale możesz też wskazać starszy run ręcznie. Ten krok jest niezależny od samego Startu autoanotacji: najpierw musi istnieć run z annotations.xml, a dopiero potem można z niego zbudować dataset. Wynik trafia domyślnie do Workspace/4_training_datasets/plates/ i zawiera plik data.yaml oraz foldery images/ i labels/."
                             },
+    "tab1_stage":  {
+                       "full_help":  "Stage to pomocnicza kolejka zdjec do kolejnej rundy recznej anotacji. Po eksporcie datasetu trafia tutaj nieoznaczona czesc paczki, czyli obrazy, ktore jeszcze nie maja recznie zapisanych tablic. Mozesz potem wrocic do tej puli w Z2 bez mieszania jej z juz oznaczonym zbiorem."
+                   },
+    "tab1_stage_use":  {
+                           "full_help":  "Przelacza Z2 na folder stage/images. Uzyj tego, gdy chcesz rozpoczac kolejna runde recznej anotacji tylko na odlozonej puli obrazow."
+                       },
+    "tab1_stage_add":  {
+                           "full_help":  "Dodaje nowa paczke zdjec do stage. To pozwala powiekszyc pule oczekujaca na kolejna iteracje bez ruszania juz oznaczonych obrazow i bez mieszania ich z biezacym datasetem treningowym."
+                       },
+    "tab1_approve":  {
+                         "full_help":  "Zamyka E2 dla aktualnego runu projektu. W torze recznej anotacji przycisk odblokowuje sie po zapisaniu co najmniej jednej tablicy z etykieta 'plate'. Nie musisz najpierw tworzyc datasetu, ale mozesz go zbudowac od razu, jesli chcesz przejsc dalej do treningu."
+                     },
     "t2_sources":  {
                        "full_help":  "Sekcja źródeł Z3/PZ1. Do wycinania tablic potrzebujesz zawsze dwóch zgodnych wejść: 1) pliku annotations.xml z anotacjami tablic oraz 2) folderu oryginalnych obrazów, na których te anotacje wykonano. To musi być dokładnie ta sama para źródeł. Jeśli paczka obrazów leży w Workspace/1_raw_images/, system spróbuje odnaleźć ją automatycznie."
                    },
@@ -270,34 +282,34 @@
                          "full_help":  "Zamyka bieżącą iterację i przygotowuje kolejną, gdy cały cykl E1-E4 został zakończony."
                      },
     "camp_step1":  {
-                       "full_help":  "E1 Dobór paczki zdjęć. Kliknięcie przycisku karty E1 rozwija panel tego kroku bez opuszczania Wizarda. Tam przygotowujesz paczkę wejściową dla aktywnej iteracji projektu. System może utworzyć pierwszy szkic paczki, a Ty możesz go ręcznie skorygować przed zatwierdzeniem. Sama obecność obrazów w folderze iteracji nie odblokowuje E2."
+                       "full_help":  "E1 Wybrany folder zdjęć. Kliknięcie przycisku karty E1 rozwija panel tego kroku bez opuszczania Wizarda. W E1 wybierasz główną pulę, system ładuje pełny wybrany folder zdjęć i po weryfikacji histogramu zatwierdzasz wynik. Sama obecność obrazów w folderze iteracji nie odblokowuje E2."
                    },
     "camp_e1_panel":  {
-                          "full_help":  "Rozwijany panel kroku E1. Tutaj przygotowujesz paczkę wejściową dla bieżącej iteracji: ustawiasz główną pulę zdjęć, odświeżasz bilans znaków, generujesz aktualną paczkę E1 i zatwierdzasz ją do projektu. E2 odblokowuje się dopiero po jawnym zatwierdzeniu paczki E1."
+                          "full_help":  "Rozwijany panel kroku E1. Tutaj wskazujesz główną pulę zdjęć, system automatycznie ładuje pełny wybrany folder zdjęć E1, pokazuje histogram znaków i pozwala zatwierdzić paczkę do projektu. E2 odblokowuje się dopiero po jawnym zatwierdzeniu E1."
                       },
     "camp_e1_master_pool":  {
-                                "full_help":  "Główna pula zdjęć projektu. To źródłowy katalog obrazów, z którego aplikacja wybiera kolejne porcje danych dla iteracji. Nazwy plików w tej puli są ground truth dla oceny OCR i znaków."
+                                "full_help":  "Główna pula zdjęć projektu (źródło wybranego folderu zdjęć). To źródłowy katalog obrazów dla E1. Nazwy plików w tej puli są ground truth dla oceny OCR i znaków."
                             },
     "camp_e1_balance":  {
-                            "full_help":  "Odświeża bilans znaków 0-9 i A-Z na podstawie zaakceptowanej wiedzy projektu: gold packów oraz importów ręcznych. Ten bilans jest podstawą do proponowania kolejnej paczki zdjęć."
+                            "full_help":  "Bilans znaków 0-9 i A-Z oparty o zaakceptowaną wiedzę projektu: gold packi oraz importy ręczne. Służy do oceny pokrycia znaków."
                         },
     "camp_e1_logic":  {
-                          "full_help":  "Wyjaśnia, jak system tworzy paczkę E1. System nie losuje zdjęć: bierze nieużyte obrazy z głównej puli, odczytuje znaki z nazw plików i wyżej ocenia te zdjęcia, które pomagają uzupełnić znaki niedoreprezentowane w aktualnym zbiorze gold/manual."
+                          "full_help":  "Wyjaśnia działanie E1 po uproszczeniu: system ładuje pełną listę poprawnych zdjęć z głównej puli, odczytuje znaki z nazw plików i aktualizuje histogram, a następnie paczka jest zatwierdzana do iteracji."
                       },
     "camp_e1_balance_chart":  {
-                                  "full_help":  "Histogram pokazuje wszystkie znaki 0-9 i A-Z w aktualnej paczce E1. Wysokość słupka oznacza liczbę wystąpień danego znaku w nazwach tablic zdjęć należących do tej paczki. Najwyższy słupek wskazuje znak dominujący w paczce."
+                                  "full_help":  "Histogram pokazuje wszystkie znaki 0-9 i A-Z w aktualnym wybranym folderze zdjęć E1. Wysokość słupka oznacza liczbę wystąpień danego znaku w nazwach tablic zdjęć należących do tej listy."
                               },
     "camp_e1_generate":  {
-                             "full_help":  "Generuje aktualną paczkę E1 dla bieżącej iteracji. System wybiera obrazy z głównej puli tak, aby uzupełniać znaki niedoreprezentowane w aktualnym zbiorze treningowym."
+                             "full_help":  "Wybrany folder zdjęć E1 ładuje się automatycznie po użyciu przycisku „Wybierz...” przy polu głównej puli zdjęć."
                          },
     "camp_e1_plan_list":  {
-                              "full_help":  "Lista aktualnej paczki E1. Pokazuje zdjęcia wybrane do bieżącej paczki i obsługuje zaznaczanie wielokrotne jak w Windows: Ctrl, Shift i selekcję grupową. Po zaznaczeniu jednego lub kilku zdjęć zobaczysz, jakie znaki wnosi to zaznaczenie i jaki będzie efekt ich usunięcia z paczki."
+                              "full_help":  "W uproszczonym E1 lista ręcznej selekcji została ukryta. Panel koncentruje się na wyborze puli zdjęć i histogramie znaków."
                           },
     "camp_e1_apply":  {
-                          "full_help":  "Zatwierdza aktualną propozycję i kopiuje wybrane obrazy do folderu aktywnej iteracji. Od tej chwili paczka wejściowa jest traktowana jako materiał kroku E1."
+                          "full_help":  "Zatwierdza aktualny wybrany folder zdjęć i kopiuje obrazy do folderu aktywnej iteracji. Od tej chwili paczka wejściowa jest traktowana jako materiał kroku E1."
                       },
     "camp_e1_manual":  {
-                           "full_help":  "Ścieżka ręczna dla E1. Pozwala samodzielnie wskazać katalog z nową paczką zdjęć, jeśli nie chcesz korzystać z automatycznej propozycji albo chcesz ją zastąpić własnym wyborem. Jeśli folder iteracji zawiera już obrazy, ten przycisk służy do jawnego zatwierdzenia istniejącej paczki E1."
+                           "full_help":  "W uproszczonym E1 ręczne kopiowanie paczki zostało ukryte z panelu. Standardowa ścieżka to wybór głównej puli, załadowanie wybranego folderu zdjęć i zatwierdzenie E1."
                        },
     "camp_step2":  {
                        "full_help":  "E2 Autoanotacja. Wizard przechodzi do Z2, podstawia ścieżki projektowe i prowadzi przez generowanie oraz zatwierdzenie adnotacji dla bieżącej iteracji."
