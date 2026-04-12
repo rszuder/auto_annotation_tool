@@ -17,6 +17,7 @@ class DetectionMethod(Enum):
     OCR = "ocr"
     YOLO = "yolo"
     BOTH = "both"
+    YOLO_OCR = "yolo_ocr"
 
 
 @dataclass
@@ -25,6 +26,7 @@ class CharacterDetection:
     bbox: Tuple[float, float, float, float]
     confidence: float
     method: str = "ocr"
+    source_tag: str = ""
     
     @property
     def center(self) -> Tuple[float, float]:
@@ -50,6 +52,7 @@ class CharacterDetection:
             'bbox': [float(x) for x in self.bbox],
             'confidence': float(self.confidence),
             'method': str(self.method),
+            'source_tag': str(self.source_tag),
         }
 
 
@@ -89,6 +92,7 @@ class CharacterDetector:
         self.last_yolo_raw_detections: List[CharacterDetection] = []
         self.last_yolo_nms_detections: List[CharacterDetection] = []
         self.last_yolo_detections: List[CharacterDetection] = []
+        self.last_yolo_ocr_detections: List[CharacterDetection] = []
     
     def detect(self, plate_image: np.ndarray) -> List[CharacterDetection]:
         detections = []
@@ -96,13 +100,26 @@ class CharacterDetector:
         self.last_yolo_raw_detections = []
         self.last_yolo_nms_detections = []
         self.last_yolo_detections = []
+        self.last_yolo_ocr_detections = []
 
         if self.method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
             self.last_ocr_detections = self._detect_with_ocr(plate_image)
             detections.extend(self.last_ocr_detections)
-        if self.method in [DetectionMethod.YOLO, DetectionMethod.BOTH]:
+        if self.method in [DetectionMethod.YOLO, DetectionMethod.BOTH, DetectionMethod.YOLO_OCR]:
             self.last_yolo_detections = self._detect_with_yolo(plate_image)
-            detections.extend(self.last_yolo_detections)
+            if self.method == DetectionMethod.YOLO_OCR:
+                yolo_boxes_for_ocr = (
+                    list(self.last_yolo_nms_detections)
+                    or list(self.last_yolo_detections)
+                    or list(self.last_yolo_raw_detections)
+                )
+                self.last_yolo_ocr_detections = self._detect_with_yolo_boxes_and_ocr(
+                    plate_image,
+                    yolo_boxes_for_ocr,
+                )
+                detections.extend(self.last_yolo_ocr_detections)
+            else:
+                detections.extend(self.last_yolo_detections)
             
         detections.sort(key=lambda d: d.bbox[0])
         return detections
@@ -223,6 +240,136 @@ class CharacterDetector:
             logger.error(f"Błąd YOLO detection na znakach: {e}")
             return []
 
+    def _expand_crop_bbox(
+        self,
+        bbox: Tuple[float, float, float, float],
+        image_shape,
+        *,
+        pad_x_ratio: float = 0.18,
+        pad_y_ratio: float = 0.16,
+        min_pad: int = 2,
+    ) -> Tuple[int, int, int, int]:
+        img_h, img_w = image_shape[:2]
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+
+        pad_x = max(int(round(width * float(pad_x_ratio))), int(min_pad))
+        pad_y = max(int(round(height * float(pad_y_ratio))), int(min_pad))
+
+        crop_x1 = max(0, int(np.floor(x1 - pad_x)))
+        crop_y1 = max(0, int(np.floor(y1 - pad_y)))
+        crop_x2 = min(int(img_w), int(np.ceil(x2 + pad_x)))
+        crop_y2 = min(int(img_h), int(np.ceil(y2 + pad_y)))
+
+        if crop_x2 <= crop_x1:
+            crop_x2 = min(int(img_w), crop_x1 + 1)
+        if crop_y2 <= crop_y1:
+            crop_y2 = min(int(img_h), crop_y1 + 1)
+
+        return crop_x1, crop_y1, crop_x2, crop_y2
+
+    def _recognize_char_from_crop_with_ocr(self, char_image: np.ndarray) -> Tuple[str, float]:
+        if self.ocr_engine is None or not getattr(self.ocr_engine, "is_loaded", False):
+            return "", 0.0
+        if char_image is None or getattr(char_image, "size", 0) == 0:
+            return "", 0.0
+
+        try:
+            prep_kwargs = getattr(self.ocr_engine, "custom_prep_params", {}) or {}
+            if hasattr(self.ocr_engine, "preprocess_plate"):
+                clean_kwargs = {k: v for k, v in prep_kwargs.items() if k != "padding_pct"}
+                processed = self.ocr_engine.preprocess_plate(char_image, **clean_kwargs)
+            else:
+                processed = char_image
+
+            if processed is None or getattr(processed, "size", 0) == 0:
+                return "", 0.0
+
+            bg_value = 255 if len(processed.shape) == 2 else [255, 255, 255]
+            proc_h, proc_w = processed.shape[:2]
+            pad_y = max(2, int(round(proc_h * 0.16)))
+            pad_x = max(2, int(round(proc_w * 0.20)))
+            padded = cv2.copyMakeBorder(
+                processed,
+                pad_y,
+                pad_y,
+                pad_x,
+                pad_x,
+                cv2.BORDER_CONSTANT,
+                value=bg_value,
+            )
+
+            if hasattr(self.ocr_engine, "read_text_aggressive"):
+                results = self.ocr_engine.read_text_aggressive(padded)
+            else:
+                results = self.ocr_engine.reader.readtext(
+                    padded,
+                    allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                    mag_ratio=2.0,
+                    text_threshold=0.3,
+                    link_threshold=0.6,
+                    width_ths=0.8,
+                    decoder="beamsearch",
+                )
+        except Exception as e:
+            logger.debug(f"Błąd OCR dla cropa znaku: {e}")
+            return "", 0.0
+
+        best_char = ""
+        best_conf = 0.0
+        threshold = float(getattr(self.ocr_engine, "confidence_threshold", 0.15) or 0.15)
+        for result in list(results or []):
+            try:
+                _bbox, text, conf = result
+            except Exception:
+                continue
+
+            clean_text = "".join(ch for ch in str(text or "").upper() if ch.isalnum())
+            if not clean_text:
+                continue
+
+            candidate_char = clean_text[0]
+            candidate_conf = float(conf or 0.0)
+            if candidate_conf < threshold:
+                continue
+            if candidate_conf > best_conf:
+                best_char = candidate_char
+                best_conf = candidate_conf
+
+        return best_char, best_conf
+
+    def _detect_with_yolo_boxes_and_ocr(
+        self,
+        plate_image: np.ndarray,
+        yolo_detections: List[CharacterDetection],
+    ) -> List[CharacterDetection]:
+        if not isinstance(yolo_detections, list) or not yolo_detections:
+            return []
+        if plate_image is None or getattr(plate_image, "size", 0) == 0:
+            return []
+
+        recognized = []
+        for det in sorted(list(yolo_detections), key=lambda item: float(item.bbox[0])):
+            try:
+                crop_x1, crop_y1, crop_x2, crop_y2 = self._expand_crop_bbox(det.bbox, plate_image.shape)
+                crop = plate_image[crop_y1:crop_y2, crop_x1:crop_x2]
+            except Exception:
+                crop = None
+
+            symbol, ocr_conf = self._recognize_char_from_crop_with_ocr(crop)
+            recognized.append(
+                CharacterDetection(
+                    character=str(symbol or ""),
+                    bbox=tuple(float(v) for v in det.bbox),
+                    confidence=float(ocr_conf if symbol else 0.0),
+                    method="ocr",
+                    source_tag="yolo_box_ocr",
+                )
+            )
+
+        return recognized
+
     def _bbox_area(self, bbox: Tuple[float, float, float, float]) -> float:
         x1, y1, x2, y2 = bbox
         return max(0.0, float(x2) - float(x1)) * max(0.0, float(y2) - float(y1))
@@ -335,22 +482,85 @@ class CharacterDetector:
     def _detection_center_y(self, det: CharacterDetection) -> float:
         return (float(det.bbox[1]) + float(det.bbox[3])) / 2.0
 
+    def _sequence_reference_subset_score(self, detections: List[CharacterDetection]) -> float:
+        if not detections:
+            return 0.0
+
+        heights = np.array([self._detection_height(det) for det in detections], dtype=float)
+        median_height = max(1.0, float(np.median(heights)))
+        confidence_sum = sum(max(0.0, float(det.confidence)) for det in detections)
+        return (float(len(detections)) * median_height) + (0.35 * confidence_sum)
+
+    def _collect_sequence_reference_cluster(
+        self,
+        anchor: CharacterDetection,
+        detections: List[CharacterDetection]
+    ) -> List[CharacterDetection]:
+        anchor_height = max(1.0, self._detection_height(anchor))
+        anchor_center_y = self._detection_center_y(anchor)
+        cluster: List[CharacterDetection] = []
+
+        for det in detections:
+            det_height = max(1.0, self._detection_height(det))
+            det_center_y = self._detection_center_y(det)
+            height_similarity = min(anchor_height, det_height) / max(anchor_height, det_height)
+            center_y_gap = abs(det_center_y - anchor_center_y) / max(anchor_height, det_height, 1.0)
+
+            if height_similarity >= self.yolo_sequence_min_height_ratio and center_y_gap <= self.yolo_sequence_center_y_tolerance:
+                cluster.append(det)
+
+        return cluster
+
+    def _select_sequence_reference_detections(
+        self,
+        detections: List[CharacterDetection]
+    ) -> List[CharacterDetection]:
+        if len(detections) <= 2:
+            return detections
+
+        anchors = sorted(
+            detections,
+            key=lambda det: (
+                -float(det.confidence),
+                -self._detection_height(det),
+                float(det.bbox[0]),
+            )
+        )
+
+        best_subset = list(detections)
+        best_score = self._sequence_reference_subset_score(best_subset)
+
+        for anchor in anchors:
+            cluster = self._collect_sequence_reference_cluster(anchor, detections)
+            if not cluster:
+                continue
+
+            cluster_score = self._sequence_reference_subset_score(cluster)
+            if cluster_score > best_score + 1e-6:
+                best_subset = cluster
+                best_score = cluster_score
+
+        return sorted(best_subset, key=lambda det: float(det.bbox[0]))
+
     def _build_sequence_reference_stats(self, detections: List[CharacterDetection]) -> dict:
         if not detections:
             return {
                 "median_width": 1.0,
                 "median_height": 1.0,
                 "median_center_y": 0.0,
+                "reference_count": 0,
             }
 
-        widths = np.array([self._detection_width(det) for det in detections], dtype=float)
-        heights = np.array([self._detection_height(det) for det in detections], dtype=float)
-        centers_y = np.array([self._detection_center_y(det) for det in detections], dtype=float)
+        reference_subset = self._select_sequence_reference_detections(detections)
+        widths = np.array([self._detection_width(det) for det in reference_subset], dtype=float)
+        heights = np.array([self._detection_height(det) for det in reference_subset], dtype=float)
+        centers_y = np.array([self._detection_center_y(det) for det in reference_subset], dtype=float)
 
         return {
             "median_width": max(1.0, float(np.median(widths))),
             "median_height": max(1.0, float(np.median(heights))),
             "median_center_y": float(np.median(centers_y)),
+            "reference_count": int(len(reference_subset)),
         }
 
     def _is_sequence_geometry_outlier(

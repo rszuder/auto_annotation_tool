@@ -3385,7 +3385,7 @@ class CampaignTab:
                                 source_run = Path(char_ready_source.get("restore_run_dir"))
                                 note_text = (
                                     "Dla tej paczki są już dostępne ręczne anotacje tablic. "
-                                    f"Wizard może pominąć Z2 i przejść od razu do Z3 z runem {source_run.name}."
+                                    f"Wizard może pominąć Z2 i przejść od razu do Z3 z runem anotacji {source_run.name}."
                                 )
                                 tone = "success"
                             else:
@@ -4087,7 +4087,7 @@ class CampaignTab:
                 self.app.update_campaign_tab_access()
 
                 try:
-                    run_hint = f" Korzystam z runu {ready_run_name}." if ready_run_name else ""
+                    run_hint = f" Korzystam z runu anotacji {ready_run_name}." if ready_run_name else ""
                     self.app.update_status(
                         "Znaleziono gotowe reczne anotacje tablic dla tej paczki. "
                         "Pomijam Z2 i przechodze od razu do Z3."
@@ -4167,11 +4167,11 @@ class CampaignTab:
                 elif input_source == "reused_manual_source_run":
                     extra_hint += " Przywrocono reczne anotacje z poprzedniej iteracji dla tej samej paczki."
                 elif input_source == "latest_approved_run":
-                    extra_hint += " Przywrocono tez ostatni zatwierdzony run tablic projektu."
+                    extra_hint += " Przywrocono tez ostatni zatwierdzony run anotacji tablic projektu."
                 elif input_source == "reused_training_source_run":
-                    extra_hint += " Przywrocono reczne anotacje z runu Z2, ktory zasilił trening w poprzedniej iteracji."
+                    extra_hint += " Przywrocono reczne anotacje z runu anotacji Z2, ktory zasilił trening w poprzedniej iteracji."
                 elif input_source == "reused_iteration_run":
-                    extra_hint += " Przywrocono zatwierdzony run Z2 z poprzedniej iteracji dla tej samej paczki."
+                    extra_hint += " Przywrocono zatwierdzony run anotacji Z2 z poprzedniej iteracji dla tej samej paczki."
                 self.app.update_status(
                     f"Auto-ustawiono Z2 dla toru tablic: IN={Path(input_dir).name} | OUT={Path(auto_out).name}. "
                     + (
@@ -4278,10 +4278,30 @@ class CampaignTab:
                 pass
 
             # Podstaw źródła z najnowszej zatwierdzonej próby.
-            if folder.exists():
-                tab_char.images_dir_var.set(str(folder))
-            if latest_xml:
-                tab_char.xml_path_var.set(latest_xml)
+            try:
+                tab_char.annotation_run_dir_var.set("")
+            except Exception:
+                pass
+            try:
+                tab_char.images_dir_var.set("")
+            except Exception:
+                pass
+            try:
+                tab_char.xml_path_var.set("")
+            except Exception:
+                pass
+            try:
+                latest_run_dir = str(Path(latest_xml).parent) if latest_xml else ""
+            except Exception:
+                latest_run_dir = ""
+            try:
+                tab_char.set_pending_z2_annotation_source(
+                    xml_path=latest_xml,
+                    images_dir=(str(folder) if folder.exists() else ""),
+                    run_dir=latest_run_dir,
+                )
+            except Exception:
+                pass
 
             # projektowe katalogi wyjściowe
             tab_char._campaign_chars_dir = str(chars_dir) if chars_dir else None

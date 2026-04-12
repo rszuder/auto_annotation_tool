@@ -120,11 +120,12 @@ class PlateGenerator:
                             sharpen=sharpen
                         )
                         
-                        # --- 2. ODCINANIE MARGINESÓW ---
-                        if not is_square:
-                            crop_left = int(w * 0.10) # pasek PL/UE
-                            crop_right = int(w * 0.96) # śruby po prawej
-                            plate_image = plate_image[:, crop_left:crop_right]
+                        # --- 2. ZACHOWAJ DOKLADNY ZAKRES ANOTACJI ---
+                        # Historycznie po prostowaniu ucinalismy lewy/prawy margines,
+                        # zeby usunac niebieski wyroznik kraju i skrajne artefakty.
+                        # Przy obecnym schemacie anotacji polygon obejmuje juz tylko
+                        # wlasciwa tablice, wiec dodatkowe docinanie obcinaloby znaki.
+                        # Zachowujemy wiec caly wycinek zwrocony przez rectifier.
                             
                     except Exception as e:
                         logger.debug(f"Błąd prostowania tablicy: {e}")

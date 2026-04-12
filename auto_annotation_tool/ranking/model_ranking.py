@@ -64,14 +64,13 @@ class ModelRanking:
         self.ranking_dir = Path(ranking_dir) if ranking_dir else Path(CONFIG.DEFAULT_RANKING_DIR)
         self.ranking_file = self.ranking_dir / self.RANKING_FILE
         self.entries: List[ModelRankingEntry] = []
-        
-        self.ranking_dir.mkdir(parents=True, exist_ok=True)
+
         self._load()
     
     def _load(self):
         if self.ranking_file.exists():
             try:
-                with open(self.ranking_file, 'r', encoding='utf-8') as f:
+                with open(self.ranking_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                 
                 self.entries = [
@@ -87,6 +86,7 @@ class ModelRanking:
                 self.entries = []
     
     def _save(self):
+        self.ranking_file.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "version": "1.0",
             "updated_at": datetime.now().isoformat(),
