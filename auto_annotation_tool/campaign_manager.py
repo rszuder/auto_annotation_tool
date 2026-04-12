@@ -27,37 +27,17 @@ class CampaignManager:
         datasets_root = root / "4_training_datasets"
         runs_root = root / "5_training_runs"
         models_root = root / "6_models"
-        models_base_root = models_root / "base"
-        models_trained_root = models_root / "trained"
         rankings_root = root / "7_rankings"
         staging_root = root / "_staging"
 
         return [
             root / "1_raw_images",
             auto_ann_root,
-            auto_ann_root / "plates",
-            auto_ann_root / "chars",
             root / "3_cropped_characters",
             datasets_root,
-            datasets_root / "plates",
-            datasets_root / "chars",
-            datasets_root / "vehicles",
             runs_root,
-            runs_root / "plates",
-            runs_root / "chars",
-            runs_root / "vehicles",
             models_root,
-            models_base_root,
-            models_base_root / "pose",
-            models_base_root / "detect",
-            models_trained_root,
-            models_trained_root / "plates",
-            models_trained_root / "chars",
-            models_trained_root / "vehicles",
             rankings_root,
-            rankings_root / "plates",
-            rankings_root / "chars",
-            rankings_root / "vehicles",
             root / "8_ocr_presets",
             staging_root,
             staging_root / "auto_annotations",

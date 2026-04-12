@@ -71,6 +71,7 @@ class SessionManager:
             "ui": {
                 "theme": "dark_visual_cs",
                 "active_main_tab": "annotation",
+                "global_yolo_device": "auto",
             },
         }
     

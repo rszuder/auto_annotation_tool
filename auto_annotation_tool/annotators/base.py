@@ -43,7 +43,7 @@ class BaseAnnotator(ABC):
     
     def stop(self):
         """Zatrzymuje przetwarzanie."""
-        logger.info("⏹️ Sygnał zatrzymania wysłany do annotatora")
+        logger.info("[STOP] Sygnał zatrzymania wysłany do annotatora")
         self._stop_event.set()
     
     def is_stopped(self) -> bool:
@@ -97,7 +97,7 @@ class BaseAnnotator(ABC):
         
         for i, img_path in enumerate(image_files):
             if self.is_stopped():
-                logger.warning(f"⏹️ Przetwarzanie przerwane na obrazie {i+1}/{len(image_files)}")
+                logger.warning(f"[STOP] Przetwarzanie przerwane na obrazie {i+1}/{len(image_files)}")
                 break
             
             ann = self.process_image(img_path)

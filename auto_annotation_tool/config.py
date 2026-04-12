@@ -260,36 +260,16 @@ class Config:
         return unique
 
     def init_workspace(self):
-        """Automatycznie buduje strukturę katalogów przy starcie aplikacji."""
+        """Buduje tylko bazowy szkielet Workspace; głębsze gałęzie powstają leniwie przy użyciu."""
         directories = [
             self.DIR_1_RAW, 
             self.DIR_2_AUTO_ANN, 
-            self.DIR_2_AUTO_ANN_PLATES,
-            self.DIR_2_AUTO_ANN_CHARS,
             self.DIR_3_CHARS,
             self.DIR_4_DATASETS, 
-            self.DIR_4_DATASETS_PLATES,
-            self.DIR_4_DATASETS_CHARS,
-            self.DIR_4_DATASETS_VEHICLES,
             self.DIR_5_RUNS, 
-            self.DIR_5_RUNS_PLATES,
-            self.DIR_5_RUNS_CHARS,
-            self.DIR_5_RUNS_VEHICLES,
             self.DIR_6_MODELS, 
-            self.DIR_6_MODELS_BASE, 
-            self.DIR_6_MODELS_BASE_POSE,
-            self.DIR_6_MODELS_BASE_DETECT,
-            self.DIR_6_MODELS_PLATES, 
-            self.DIR_6_MODELS_CHARS,
-            self.DIR_6_MODELS_TRAINED_PLATES,
-            self.DIR_6_MODELS_TRAINED_CHARS,
-            self.DIR_6_MODELS_TRAINED_VEHICLES,
             self.DIR_7_RANKINGS, 
-            self.DIR_7_RANKINGS_PLATES,
-            self.DIR_7_RANKINGS_CHARS,
-            self.DIR_7_RANKINGS_VEHICLES,
             self.DIR_9_PROJECTS,
-            
         ]
         
         for directory in directories:

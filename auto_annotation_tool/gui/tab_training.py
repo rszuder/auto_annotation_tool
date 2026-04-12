@@ -28,6 +28,7 @@ from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, Dataset
 from ..ranking import ModelRanking, ModelRankingEntry
 from ..utils import safe_load_yaml
 from .help_manager import HELP
+from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar
 from .zoomable_canvas import ZoomableCanvas
 
@@ -107,13 +108,20 @@ class TrainingTab:
     def _ui(self, fn):
         self.frame.after(0, fn)
 
-    def _append_train_log(self, message: str):
+    def _append_train_log(self, message: str, mirror_global: bool = True):
         """Bezpieczne dopisywanie linii do konsoli treningu z dowolnego wątku."""
         text = "" if message is None else str(message)
         if not text:
             return
         if not text.endswith("\n"):
             text += "\n"
+
+        if mirror_global:
+            try:
+                if hasattr(self.app, "append_global_terminal"):
+                    self.app.append_global_terminal(text.rstrip("\n"), source="Z4")
+            except Exception:
+                pass
 
         def update():
             try:
@@ -141,7 +149,7 @@ class TrainingTab:
                 try:
                     msg = self.format(record)
                     if msg:
-                        self.owner._append_train_log(msg)
+                        self.owner._append_train_log(msg, mirror_global=False)
                 except Exception:
                     pass
 
@@ -2069,6 +2077,19 @@ class TrainingTab:
         palette = getattr(self.app, "palette", {})
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
 
+        for label_name in (
+            "train_dataset_title_lbl",
+            "train_base_title_lbl",
+            "train_params_title_lbl",
+        ):
+            label = getattr(self, label_name, None)
+            if label is None or not hasattr(label, "apply_theme"):
+                continue
+            try:
+                label.apply_theme()
+            except Exception:
+                pass
+
         try:
             self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
         except Exception:
@@ -2172,6 +2193,29 @@ class TrainingTab:
             return
 
         self._step4_train_log_visible = bool(visible)
+        try:
+            self.step4_train_log_frame.pack_forget()
+        except Exception:
+            pass
+        if hasattr(self, "step4_train_log_host"):
+            try:
+                self.step4_train_log_host.grid_remove()
+            except Exception:
+                pass
+
+        if self._step4_train_log_visible:
+            try:
+                if hasattr(self.app, "show_global_terminal"):
+                    self.app.show_global_terminal()
+            except Exception:
+                pass
+
+        if hasattr(self, "btn_toggle_step4_train_log"):
+            try:
+                self.btn_toggle_step4_train_log.configure(text="Terminal")
+            except Exception:
+                pass
+        return
 
         if self._step4_train_log_visible:
             if hasattr(self, "step4_train_log_host"):
@@ -2193,6 +2237,12 @@ class TrainingTab:
                 self.btn_toggle_step4_train_log.configure(text="Pokaż terminal")
 
     def _toggle_step4_train_log(self):
+        try:
+            if hasattr(self.app, "toggle_global_terminal"):
+                self.app.toggle_global_terminal()
+                return
+        except Exception:
+            pass
         self._set_step4_train_log_visibility(
             not getattr(self, "_step4_train_log_visible", False)
         )
@@ -2979,7 +3029,7 @@ class TrainingTab:
                 )
                 try:
                     self._append_train_log(
-                        "[KAMPANIA] Ten run nie wypromował nowego aktywnego modelu projektu. "
+                        "[KAMPANIA] Ten run treningu nie wypromował nowego aktywnego modelu projektu. "
                         "Możesz zamknąć krok 4 i rozpocząć kolejną iterację od tego samego "
                         "zestawu zdjęć albo od nowego zestawu zdjęć."
                     )
@@ -3785,7 +3835,7 @@ class TrainingTab:
         ttk.Entry(self.train_session_name_row, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
         self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
 
-        self.train_dataset_title_lbl = ttk.Label(settings_col, text="Dataset treningowy", style="Panel.TLabel")
+        self.train_dataset_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Dataset treningowy")
         self.train_dataset_title_lbl.pack(anchor=tk.W, fill=tk.X)
         self.train_dataset_caption_lbl = ttk.Label(
             settings_col,
@@ -3852,7 +3902,7 @@ class TrainingTab:
 
         self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
 
-        self.train_base_title_lbl = ttk.Label(settings_col, text="Model bazowy (.pt)", style="Panel.TLabel")
+        self.train_base_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Model bazowy (.pt)")
         self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X)
         self.train_base_caption_lbl = ttk.Label(
             settings_col,
@@ -3910,7 +3960,7 @@ class TrainingTab:
         
         self._build_train_left_separator(settings_col, pady=(self._train_left_section_gap, self._train_left_section_gap))
 
-        self.train_params_title_lbl = ttk.Label(settings_col, text="Parametry treningu YOLO", style="Panel.TLabel")
+        self.train_params_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Parametry treningu YOLO")
         self.train_params_title_lbl.pack(anchor=tk.W, fill=tk.X)
         self.train_params_caption_lbl = ttk.Label(
             settings_col,
@@ -4105,6 +4155,10 @@ class TrainingTab:
             "Terminal procesu jest gotowy na dane z Ultralytics.\n"
         )
         self._set_step4_train_log_visibility(False)
+        try:
+            terminal_tools.grid_remove()
+        except Exception:
+            pass
 
         self.right_nb = ttk.Notebook(self.right)
         self.right_nb.pack(fill=tk.BOTH, expand=True)
@@ -4898,7 +4952,7 @@ class TrainingTab:
         self._set_train_progress_values(overall=0.0, epoch=0.0)
         self.btn_start_train.configure(state=tk.DISABLED)
         self.btn_stop_train.configure(state=tk.NORMAL)
-        self.train_progress_label.configure(text=f"Trening uruchomiony: {run_id}")
+        self.train_progress_label.configure(text=f"Run treningu uruchomiony: {run_id}")
 
         try:
             self._refresh_step4_campaign_navigation_ui()
@@ -5034,7 +5088,7 @@ class TrainingTab:
 
     def _delete_selected(self):
         run = self._selected_run()
-        if run and messagebox.askyesno("Potwierdź", "Usunąć run?"):
+        if run and messagebox.askyesno("Potwierdź", "Usunąć run treningu?"):
             self.history.delete_run(run.id, delete_files=True)
             self._load_history()
 

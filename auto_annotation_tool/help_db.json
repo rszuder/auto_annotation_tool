@@ -87,17 +87,17 @@
                        "full_help":  "Lista tablic w Z3/PZ2. Zielony wpis oznacza zgodność z ground truth, czerwony wymaga poprawy. Znaki w nawiasach kwadratowych są składane w kolejności osi X."
                    },
     "t2_canvas":  {
-                      "full_help":  "Canvas podglądu tablicy w Z3/PZ2. Pokazuje obraz tablicy oraz położenie znaków wykrytych przez OCR lub YOLO. Górny pasek canvasa pokazuje w 2 liniach wynik końcowy i źródła boxów dla aktualnego widoku, a same boxy są oznaczane kolorami i badge: OCR, YOLO oraz RES dla YOLO rescue."
-                  },
+                       "full_help":  "Canvas podgladu tablicy w Z3/PZ2. Pokazuje obraz tablicy, odczyt koncowy oraz zrodla ramek znakow. YOLO moze tu dzialac samodzielnie albo w hybrydzie z OCR. W samodzielnym trybie YOLO odczytuje znaki i ustala ich ramki. W hybrydzie warto czytac to w 3 etapach: 1. OCR odczytuje znaki, 2. YOLO pomaga dopasowac znaki do pozycji, 3. YOLO moze przejac koncowe ramki do treningu. Same ramki sa oznaczane kolorami i badge: OCR, YOLO oraz R dla YOLO rescue."
+                   },
     "t2_preview_run":  {
                            "full_help":  "Folder wyciętych tablic analizowany w Z3/PZ2. Domyślnie system podpowiada produkt zakładki Z3/PZ1 zapisany względnie jako Workspace/3_cropped_characters/run_XXX_*/. Ten folder zawiera wycięte i zrektyfikowane tablice oraz metadata.json utworzone podczas wycinania. W trybie swobodnym możesz wskazać inny folder, ale powinien mieć tę samą strukturę."
                        },
     "t2_preview_info":  {
-                            "full_help":  "Status i licznik tablic dla aktualnie wczytanej paczki. W Z3/PZ2 widzisz też rozbicie perfect według strategii, np. OCR exact, YOLO exact i OCR+YOLO rescue. Pod etykietą trybu widzisz również dla wybranej tablicy ile boxów zostało w wariancie raw, po NMS i po filtrze sekwencji."
-                        },
+                             "full_help":  "Status i licznik tablic dla aktualnie wczytanej paczki. W Z3/PZ2 widzisz tez rozbicie perfect wedlug strategii, np. OCR exact, YOLO exact i OCR+YOLO rescue. Pod etykieta zrodla koncowych ramek widzisz dla wybranej tablicy, ile ramek zostalo w wariancie surowym, po NMS i po filtrze sekwencji."
+                         },
     "t2_preview_mode":  {
-                            "full_help":  "Tryb podglądu boxów na canvasie. Auto dobiera widok do aktywnej metody, a pozostałe opcje pozwalają porównać wynik końcowy z YOLO surowym, po NMS i po filtrze sekwencji."
-                        },
+                             "full_help":  "To jest wybor zrodla koncowych ramek pokazywanych na canvasie. Auto dobiera widok do aktywnej metody, a pozostale opcje pozwalaja porownac ramki treningowe z YOLO surowym, po usunieciu dubli (NMS) i po filtrze sekwencji."
+                         },
     "t2_tree":  {
                     "full_help":  "Widok szczegółów znaków. Jeśli jest dostępny w danym narzędziu, pokazuje pojedyncze znaki i informacje pomocnicze."
                 },
@@ -108,8 +108,8 @@
                     "full_help":  "Porównuje zapisane presety OCR i wskazuje lidera skuteczności dla bieżącej paczki."
                 },
     "t2_method":  {
-                      "full_help":  "Wybiera metodę rozpoznawania znaków: OCR, YOLO albo tryb łączony. W hybrydzie OCR dostarcza tekst, a YOLO może ratować błędne znaki i opcjonalnie poprawiać samą geometrię boxów przez przejęcie ich pozycji. W kampanii wybór powinien odpowiadać aktualnemu torowi modeli."
-                  },
+                       "full_help":  "Wybiera sposob pracy dla znakow: OCR, YOLO albo hybryde. Najprosciej czytaj to tak: zrodlo odczytu znakow odpowiada za to, jaki znak widzimy; dopasowanie znakow do pozycji odpowiada za to, ktory box YOLO nalezy do ktorego miejsca w napisie; zrodlo koncowych ramek odpowiada za to, skad biora sie wspolrzedne boxa do treningu. YOLO moze dzialac samodzielnie i wtedy samo odczytuje znaki oraz ustala ich ramki. W hybrydzie OCR odczytuje znaki, YOLO pomaga dopasowac pozycje i moze przejac koncowe ramki. Docelowo dobrze wytrenowane YOLO moze przejac caly tor detekcji."
+                   },
     "t2_device":  {
                       "full_help":  "Urządzenie obliczeń dla Z3/PZ2. Auto najpierw próbuje użyć akceleracji GPU/CUDA, a dopiero gdy jej nie ma, spada do CPU. Wpisy cuda pokazują wykrytą kartę, więc możesz świadomie wskazać konkretny GPU."
                   },
@@ -120,8 +120,11 @@
                           "full_help":  "Wytrenowany model YOLO dla znaków w Z3/PZ2. Ta zakładka nie wybiera już architektury YOLO z listy wariantów, tylko pracuje na realnym checkpointcie .pt, który został wcześniej wytrenowany do wykrywania znaków."
                       },
     "t2_yolo_tuning":  {
-                           "full_help":  "Parametry strojenia inferencji YOLO dla znaków. Confidence: wyżej daje mniej słabych boxów, niżej większą czułość i więcej szumu. NMS IoU: niżej agresywniej scala podobne ramki, wyżej zostawia więcej zbliżonych boxów. Próg nakładania: niżej szybciej uznaje dwa boxy za duplikat, wyżej wymaga większego pokrycia. Class-agnostic NMS pomaga, gdy ten sam znak dostaje kilka różnych klas naraz. Filtr sekwencji znaków działa po NMS i sprawdza, czy boxy pasują do jednej linii znaków na tablicy: suwaki osi Y, wysokości, szerokości i konfliktu nakładania pozwalają go stroić bez zmiany kodu."
+                           "full_help":  "Parametry strojenia inferencji YOLO dla znakow i ich ramek. Confidence: wyzej daje mniej slabych ramek, nizej wieksza czulosc i wiecej szumu. NMS IoU: nizej agresywniej scala podobne ramki, wyzej zostawia wiecej zblizonych boxow. Prog nakladania: nizej szybciej uznaje dwa boxy za duplikat, wyzej wymaga wiekszego pokrycia. Class-agnostic NMS pomaga, gdy ten sam znak dostaje kilka roznych klas naraz. Filtr sekwencji YOLO dziala po NMS i sprawdza, czy ramki pasuja do jednej linii znakow na tablicy."
                        },
+    "t2_yolo_box_backend":  {
+                                "full_help":  "To ustawienie wybiera zrodlo koncowych ramek w trybie hybrydowym OCR + YOLO. Gdy jest wlaczone, koncowy napis nadal bierze sie z wyniku hybrydy, ale system moze przejac geometrie ramek z YOLO dla znakow, ktore dobrze pasuja po pozycji i rozmiarze. To pomaga, gdy OCR trafia tekst, ale jego boxy sa tylko technicznym podzialem napisu. Po wylaczeniu zostaja ramki z OCR lub rescue bez tej korekty geometrii."
+                            },
     "lab_angle":  {
                       "full_help":  "Korekta kąta tablicy w Laboratorium OCR. Pomaga, gdy tablica jest lekko przekrzywiona."
                   },

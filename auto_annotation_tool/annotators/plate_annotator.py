@@ -69,9 +69,9 @@ class PlateAnnotator(BaseAnnotator):
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'kpt_shape'):
                 self.is_pose_model = True
                 kpt_shape = self.model.model.kpt_shape
-                logger.info(f"✅ Model POSE (keypoints: {kpt_shape})")
+                logger.info(f"[OK] Model POSE (keypoints: {kpt_shape})")
             else:
-                logger.warning("⚠️ Model nie jest typu POSE - użyję bbox jako polygon")
+                logger.warning("[WARN] Model nie jest typu POSE - użyję bbox jako polygon")
             
             # Załaduj OCR, jeśli jest włączony.
             if self.enable_ocr:
@@ -82,12 +82,12 @@ class PlateAnnotator(BaseAnnotator):
                         confidence_threshold=self.ocr_confidence_threshold
                     )
                     if self.ocr_engine.is_loaded:
-                        logger.info("✅ OCR engine załadowany")
+                        logger.info("[OK] OCR engine załadowany")
                     else:
-                        logger.warning("⚠️ OCR engine nie załadował się - będzie pominięty")
+                        logger.warning("[WARN] OCR engine nie załadował się - będzie pominięty")
                         self.enable_ocr = False
                 except Exception as e:
-                    logger.warning(f"⚠️ Błąd ładowania OCR: {e} - będzie pominięty")
+                    logger.warning(f"[WARN] Błąd ładowania OCR: {e} - będzie pominięty")
                     self.enable_ocr = False
             
             return True, "Modele załadowane"
@@ -191,7 +191,7 @@ class PlateAnnotator(BaseAnnotator):
                 return validation.text, ocr_conf, attributes
             else:
                 # Dla niepewnego formatu zwróć surowy wynik z obniżoną pewnością.
-                logger.warning(f"⚠️ Tablica ma nieznany format: {text}")
+                logger.warning(f"[WARN] Tablica ma nieznany format: {text}")
                 return text, ocr_conf * 0.7, attributes  # Obniż confidence
         
         except Exception as e:

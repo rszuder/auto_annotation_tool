@@ -319,7 +319,7 @@ class YOLOPoseTrainer:
                     logger.info(f"   DST: {target_path}")
 
                     shutil.copy2(best_weights, target_path)
-                    logger.info(f"✅ Skopiowano najlepszy model do: {target_path.name}")
+                    logger.info(f"[OK] Skopiowano najlepszy model do: {target_path.name}")
 
                     # =========================================================
                     # AUTO-WIRING: aktualizacja modeli aktywnego projektu

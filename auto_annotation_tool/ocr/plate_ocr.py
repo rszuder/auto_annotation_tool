@@ -57,7 +57,7 @@ class PlateOCR:
             )
             self.is_loaded = True
         except Exception as e:
-            logger.error(f"❌ Błąd ładowania EasyOCR: {e}")
+            logger.error(f"[ERR] Błąd ładowania EasyOCR: {e}")
             self.is_loaded = False
             
     def preprocess_plate(self, image: np.ndarray, 

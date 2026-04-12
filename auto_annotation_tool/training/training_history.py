@@ -124,8 +124,7 @@ class TrainingHistory:
         self.history_dir = Path(history_dir) if history_dir else Path(CONFIG.DEFAULT_TRAINING_DIR)
         self.history_file = self.history_dir / self.HISTORY_FILE
         self.runs: Dict[str, TrainingRun] = {}
-        
-        self.history_dir.mkdir(parents=True, exist_ok=True)
+
         self._load()
 
     def _get_target_scope(self) -> str:
@@ -136,7 +135,7 @@ class TrainingHistory:
         if not history_file.exists():
             return runs
 
-        with open(history_file, 'r', encoding='utf-8') as f:
+        with open(history_file, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
 
         for run_id, run_data in data.get("runs", {}).items():
@@ -227,12 +226,15 @@ class TrainingHistory:
             self.runs = self._load_runs_from_file(self.history_file)
 
             imported_legacy = 0
-            for legacy_file in self._get_legacy_history_files():
-                for run_id, run in self._load_runs_from_file(legacy_file).items():
-                    if run_id in self.runs or not self._matches_current_scope(run):
-                        continue
-                    self.runs[run_id] = run
-                    imported_legacy += 1
+            # Legacy z katalogu nadrzednego importujemy tylko jako jednorazowy fallback,
+            # gdy scoped history jeszcze nie istnieje albo jest pusta.
+            if not self.runs:
+                for legacy_file in self._get_legacy_history_files():
+                    for run_id, run in self._load_runs_from_file(legacy_file).items():
+                        if run_id in self.runs or not self._matches_current_scope(run):
+                            continue
+                        self.runs[run_id] = run
+                        imported_legacy += 1
 
             if imported_legacy:
                 logger.info(
@@ -249,6 +251,7 @@ class TrainingHistory:
     def _save(self):
         """Zapisuje historię."""
         try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "version": "1.0",
                 "updated_at": datetime.now().isoformat(),

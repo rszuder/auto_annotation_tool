@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
 from datetime import datetime
 import time
+import faulthandler
 
 from ..config import CONFIG, logger, TK_AVAILABLE, SESSION
 from ..icons import IconManager
@@ -147,8 +148,10 @@ THEME_DEFINITIONS = {
 class AutoAnnotationApp:
     def __init__(self, root):
         self.root = root
+        self._faulthandler_stream = None
         self.root.title(f"{CONFIG.APP_NAME} v{CONFIG.VERSION}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self._enable_fatal_crash_logging()
         
         self.icon_manager = IconManager
         self.icon_manager.test_emoji_support(root)
@@ -158,12 +161,17 @@ class AutoAnnotationApp:
         self.current_theme_name = self.themes[self.current_theme_key]["label"]
         self.palette = dict(self.themes[self.current_theme_key]["palette"])
         self.theme_var = tk.StringVar(master=root, value=self.current_theme_key)
+        self.global_yolo_device_var = tk.StringVar(
+            master=root,
+            value=self._load_global_yolo_device_preference(),
+        )
         self.menu_bar_frame = None
         self.menu_theme_badge = None
         self._menu_dropdown = None
         self._menu_dropdown_owner = None
         self._menu_outside_click_bind_id = None
         self._menu_escape_bind_id = None
+        self._theme_refresh_after_id = None
         self._help_scroll_ctrl_down = False
         self._help_scroll_alt_down = False
         self._help_panel_default_height = 1
@@ -172,8 +180,22 @@ class AutoAnnotationApp:
         self._help_overlay_place_after_id = None
         self._help_overlay_forced_visible = False
         self._help_overlay_forced_text = ""
-        self._help_panel_message_prefix = "[HELP/CTRL+ALT]"
+        self._help_panel_message_prefix = "HELP:"
         self._status_full_text = ""
+        self._global_terminal_lines = ["[APP] Terminal globalny gotowy. Tutaj trafiaja logi procesow z Z2, PZ2 i Z4."]
+        self._global_terminal_max_lines = 1600
+        self._global_terminal_window = None
+        self._global_terminal_shell = None
+        self._global_terminal_header = None
+        self._global_terminal_title_lbl = None
+        self._global_terminal_clear_btn = None
+        self._global_terminal_close_btn = None
+        self._global_terminal_body = None
+        self._global_terminal_text = None
+        self._global_terminal_scrollbar = None
+        self._global_terminal_toggle_btn = None
+        self._global_terminal_visible = False
+        self._global_terminal_geometry_initialized = False
         self.tabs = {}
         self._closing_in_progress = False
         self.startup_overlay_frame = None
@@ -216,7 +238,22 @@ class AutoAnnotationApp:
         self._set_startup_progress(34, "Inicjalizacja panelu pomocy...")
         self.info_panel_frame = tk.Frame(root, bg="#050505", bd=0, highlightthickness=0)
         self.info_panel_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        
+
+        self._global_terminal_toggle_btn = tk.Button(
+            self.info_panel_frame,
+            text=">_",
+            command=self.toggle_global_terminal,
+            width=3,
+            cursor="hand2",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            padx=6,
+            pady=2,
+            font=("Consolas", 9, "bold"),
+        )
+        self._global_terminal_toggle_btn.pack(side=tk.LEFT, padx=(8, 0), pady=4)
+
         self.status_text = tk.Text(
             self.info_panel_frame, height=1, wrap=tk.NONE, 
             bg="#050505",
@@ -227,7 +264,7 @@ class AutoAnnotationApp:
             insertbackground="#f7f7f7",
             highlightthickness=0
         )
-        self.status_text.pack(fill=tk.X, padx=10, pady=4)
+        self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 10), pady=4)
         self.status_text.insert(tk.END, self._format_help_panel_message(self.default_status_message))
         self.status_text.config(state=tk.DISABLED)
         self.status_text.bind("<Configure>", self._on_help_panel_text_configure, add="+")
@@ -314,6 +351,15 @@ class AutoAnnotationApp:
             pass
 
         self._schedule_startup_finalize()
+
+    def _enable_fatal_crash_logging(self):
+        try:
+            crash_log_path = Path(CONFIG.WORKSPACE_DIR) / "fatal_crash.log"
+            crash_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._faulthandler_stream = open(crash_log_path, "a", encoding="utf-8")
+            faulthandler.enable(self._faulthandler_stream, all_threads=True)
+        except Exception as e:
+            logger.debug(f"Nie udało się włączyć fatal crash log dla GUI: {e}")
 
     def _raise_startup_overlay(self):
         overlay_window = getattr(self, "startup_overlay_window", None)
@@ -424,6 +470,11 @@ class AutoAnnotationApp:
 
         self._main_window_hidden_for_startup = False
         self._main_window_revealed = True
+
+        try:
+            self.root.after_idle(lambda: self._refresh_adaptive_wraps(self.root))
+        except Exception:
+            pass
 
     def _show_startup_overlay(self):
         if self.startup_overlay_frame is not None:
@@ -876,6 +927,93 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
+    def _auto_device_label(self) -> str:
+        return "auto (prefer GPU/CUDA, fallback CPU)"
+
+    def get_available_yolo_devices(self) -> list[str]:
+        devices = [self._auto_device_label(), "cpu"]
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    name = torch.cuda.get_device_name(i)
+                    devices.append(f"cuda:{i} ({name})")
+        except Exception:
+            pass
+        return devices
+
+    def normalize_global_yolo_device_choice(
+        self,
+        raw_value: str | None = None,
+        devices: list[str] | None = None,
+    ) -> str:
+        available = list(devices or self.get_available_yolo_devices())
+        current = str(
+            raw_value if raw_value is not None else self.global_yolo_device_var.get() or ""
+        ).strip()
+        current_lower = current.lower()
+
+        if not current or current_lower.startswith("auto"):
+            return available[0] if available else "auto"
+        if current_lower.startswith("cpu"):
+            return "cpu"
+        if current_lower.startswith("cuda:"):
+            prefix = current.split()[0]
+            for option in available:
+                if option.startswith(prefix):
+                    return option
+
+        return current if current in available else (available[0] if available else "auto")
+
+    def _load_global_yolo_device_preference(self) -> str:
+        try:
+            saved = SESSION.get("ui", "global_yolo_device", "auto") if SESSION else "auto"
+        except Exception:
+            saved = "auto"
+        return self.normalize_global_yolo_device_choice(saved)
+
+    def _save_global_yolo_device_preference(self, value: str):
+        try:
+            if not SESSION:
+                return
+            SESSION.set("ui", "global_yolo_device", value)
+            SESSION.save_session()
+        except Exception:
+            pass
+
+    def get_global_yolo_device_choice(self) -> str:
+        normalized = self.normalize_global_yolo_device_choice()
+        try:
+            if self.global_yolo_device_var.get() != normalized:
+                self.global_yolo_device_var.set(normalized)
+        except Exception:
+            pass
+        return normalized
+
+    def set_global_yolo_device_choice(self, value: str, *, persist: bool = True):
+        normalized = self.normalize_global_yolo_device_choice(value)
+        try:
+            self.global_yolo_device_var.set(normalized)
+        except Exception:
+            pass
+
+        if persist:
+            self._save_global_yolo_device_preference(normalized)
+
+        for tab_key in ("annotation", "characters"):
+            try:
+                tab = self.tabs.get(tab_key)
+                if tab is not None and hasattr(tab, "apply_global_yolo_device_choice"):
+                    tab.apply_global_yolo_device_choice(normalized)
+            except Exception:
+                pass
+
+        try:
+            self.update_status(f"Globalne urzadzenie YOLO: {normalized}", "info")
+        except Exception:
+            pass
+
     def _is_free_mode_session_context(self) -> bool:
         try:
             from ..campaign_manager import CAMPAIGN
@@ -1092,6 +1230,7 @@ class AutoAnnotationApp:
 
         self._setup_style(theme_key)
         self._restyle_shell()
+        self._schedule_theme_refresh_finalize()
 
         if persist:
             self._save_theme_preference(theme_key)
@@ -1135,6 +1274,65 @@ class AutoAnnotationApp:
                     apply_theme()
         except Exception:
             pass
+
+    def _apply_theme_to_widget_tree(self, root):
+        if root is None:
+            return
+
+        visited: set[int] = set()
+
+        def walk(widget):
+            if widget is None:
+                return
+
+            widget_id = id(widget)
+            if widget_id in visited:
+                return
+            visited.add(widget_id)
+
+            apply_theme = getattr(widget, "apply_theme", None)
+            if callable(apply_theme):
+                try:
+                    apply_theme()
+                except Exception:
+                    pass
+
+            try:
+                for child in widget.winfo_children():
+                    walk(child)
+            except Exception:
+                pass
+
+        walk(root)
+
+    def _finalize_theme_refresh(self):
+        self._theme_refresh_after_id = None
+
+        try:
+            self._apply_theme_to_widget_tree(self.root)
+        except Exception:
+            pass
+
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+    def _schedule_theme_refresh_finalize(self):
+        pending = getattr(self, "_theme_refresh_after_id", None)
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except Exception:
+                pass
+            self._theme_refresh_after_id = None
+
+        self._finalize_theme_refresh()
+
+        try:
+            self._theme_refresh_after_id = self.root.after_idle(self._finalize_theme_refresh)
+        except Exception:
+            self._theme_refresh_after_id = None
 
     def style_native_scrollbar(self, scrollbar, background: str = None, troughcolor: str = None, bordercolor: str = None):
         if scrollbar is None:
@@ -1302,7 +1500,10 @@ class AutoAnnotationApp:
 
     def _get_scale_colors(self, background: str = None) -> tuple[str, str, str, str, str]:
         palette = getattr(self, "palette", {})
-        bg = background or palette.get("panel", palette.get("bg", "#252526"))
+        bg = self._coerce_color_hex(
+            background,
+            fallback=palette.get("panel", palette.get("bg", "#252526")),
+        )
         success = palette.get("success", "#4ec9b0")
         track = blend_hex_colors(success, bg, 0.45)
         thumb = success
@@ -1346,20 +1547,114 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
-    def _ensure_horizontal_scale_style_assets(self, background: str = None):
+    @staticmethod
+    def _style_token(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "default"
+        return "".join(ch if ch.isalnum() else "_" for ch in raw) or "default"
+
+    def _coerce_color_hex(self, color: str = None, fallback: str = None) -> str:
+        palette = getattr(self, "palette", {})
+        default = str(fallback or palette.get("panel", palette.get("bg", "#252526")) or "#252526").strip()
+        raw = str(color or "").strip() or default
+
+        def _normalize_hex(value: str):
+            candidate = str(value or "").strip()
+            if not candidate.startswith("#"):
+                return None
+            token = candidate[1:]
+            if len(token) == 3:
+                token = "".join(ch * 2 for ch in token)
+            if len(token) != 6:
+                return None
+            try:
+                int(token, 16)
+            except Exception:
+                return None
+            return f"#{token.lower()}"
+
+        normalized = _normalize_hex(raw)
+        if normalized:
+            return normalized
+
+        try:
+            red, green, blue = self.root.winfo_rgb(raw)
+            return f"#{red // 256:02x}{green // 256:02x}{blue // 256:02x}"
+        except Exception:
+            pass
+
+        normalized_default = _normalize_hex(default)
+        if normalized_default:
+            return normalized_default
+        return "#252526"
+
+    def _resolve_widget_background(self, widget, fallback: str = None) -> str:
+        palette = getattr(self, "palette", {})
+        default_bg = self._coerce_color_hex(fallback, fallback=palette.get("panel", "#252526"))
+        current = widget
+        visited: set[int] = set()
+
+        while current is not None:
+            current_id = id(current)
+            if current_id in visited:
+                break
+            visited.add(current_id)
+
+            for option_name in ("bg", "background"):
+                try:
+                    value = str(current.cget(option_name) or "").strip()
+                except Exception:
+                    value = ""
+                if value:
+                    resolved = self._coerce_color_hex(value, fallback=None)
+                    if resolved:
+                        return resolved
+
+            try:
+                class_name = str(current.winfo_class() or "")
+            except Exception:
+                class_name = ""
+            if class_name.startswith("T"):
+                style_name = ""
+                try:
+                    style_name = str(current.cget("style") or "").strip()
+                except Exception:
+                    style_name = ""
+                for lookup_style in (style_name, class_name):
+                    if not lookup_style:
+                        continue
+                    try:
+                        value = str(self.style.lookup(lookup_style, "background") or "").strip()
+                    except Exception:
+                        value = ""
+                    if value:
+                        resolved = self._coerce_color_hex(value, fallback=None)
+                        if resolved:
+                            return resolved
+
+            current = getattr(current, "master", None)
+
+        return default_bg
+
+    def _ensure_horizontal_scale_style_assets(self, background: str = None, style_name: str = "Horizontal.TScale"):
         if not hasattr(self, "_horizontal_scale_style_assets"):
             self._horizontal_scale_style_assets = {}
 
-        assets = self._horizontal_scale_style_assets
+        normalized_style = str(style_name or "Horizontal.TScale").strip() or "Horizontal.TScale"
+        style_token = self._style_token(normalized_style)
+        assets = self._horizontal_scale_style_assets.setdefault(normalized_style, {})
         if not assets:
             assets["track"] = tk.PhotoImage(master=self.root, width=16, height=4)
             assets["thumb"] = tk.PhotoImage(master=self.root, width=14, height=14)
             assets["thumb_active"] = tk.PhotoImage(master=self.root, width=14, height=14)
             assets["thumb_disabled"] = tk.PhotoImage(master=self.root, width=14, height=14)
+            assets["trough_element"] = f"{style_token}.Horizontal.Scale.trough"
+            assets["slider_element"] = f"{style_token}.Horizontal.Scale.slider"
 
             try:
                 self.style.element_create(
-                    "Green.Horizontal.Scale.trough",
+                    assets["trough_element"],
                     "image",
                     assets["track"],
                     border=0,
@@ -1370,7 +1665,7 @@ class AutoAnnotationApp:
 
             try:
                 self.style.element_create(
-                    "Green.Horizontal.Scale.slider",
+                    assets["slider_element"],
                     "image",
                     assets["thumb"],
                     ("active", assets["thumb_active"]),
@@ -1393,14 +1688,14 @@ class AutoAnnotationApp:
 
         try:
             self.style.layout(
-                "Horizontal.TScale",
+                normalized_style,
                 [
                     (
-                        "Green.Horizontal.Scale.trough",
+                        assets["trough_element"],
                         {
                             "sticky": "ew",
                             "children": [
-                                ("Green.Horizontal.Scale.slider", {"side": "left", "sticky": ""})
+                                (assets["slider_element"], {"side": "left", "sticky": ""})
                             ],
                         },
                     )
@@ -1411,7 +1706,7 @@ class AutoAnnotationApp:
 
         try:
             self.style.configure(
-                "Horizontal.TScale",
+                normalized_style,
                 background=bg,
                 borderwidth=0,
                 relief=tk.FLAT,
@@ -1425,7 +1720,7 @@ class AutoAnnotationApp:
 
         try:
             self.style.map(
-                "Horizontal.TScale",
+                normalized_style,
                 background=[
                     ("disabled", bg),
                     ("active", bg),
@@ -1445,6 +1740,233 @@ class AutoAnnotationApp:
             )
         except Exception:
             pass
+
+    def style_ttk_scale_widget(self, widget, background: str = None, base_style: str = None) -> str:
+        if widget is None:
+            return str(base_style or "Horizontal.TScale")
+
+        try:
+            current_style = str(widget.cget("style") or "").strip()
+        except Exception:
+            current_style = ""
+
+        resolved_base_style = str(
+            base_style
+            or getattr(widget, "_base_ttk_scale_style", "")
+            or current_style
+            or "Horizontal.TScale"
+        ).strip() or "Horizontal.TScale"
+        if ".AutoBg_" in resolved_base_style:
+            resolved_base_style = resolved_base_style.split(".AutoBg_", 1)[0] or "Horizontal.TScale"
+
+        resolved_bg = self._coerce_color_hex(
+            background,
+            fallback=self._resolve_widget_background(getattr(widget, "master", None), fallback=background),
+        )
+        style_name = f"{resolved_base_style}.AutoBg_{self._style_token(resolved_bg)}"
+        self._ensure_horizontal_scale_style_assets(background=resolved_bg, style_name=style_name)
+
+        try:
+            widget._base_ttk_scale_style = resolved_base_style
+        except Exception:
+            pass
+
+        try:
+            widget.configure(style=style_name, cursor="hand2", takefocus=0)
+        except Exception:
+            pass
+
+        return style_name
+
+    def _update_adaptive_wraplength(self, widget):
+        if widget is None:
+            return
+
+        if bool(getattr(self, "_main_window_hidden_for_startup", False)) and not bool(getattr(self, "_main_window_revealed", False)):
+            return
+
+        try:
+            base_wrap = int(float(getattr(widget, "_adaptive_wrap_base", 0) or 0))
+        except Exception:
+            base_wrap = 0
+        if base_wrap <= 0:
+            return
+
+        container = getattr(widget, "_adaptive_wrap_container", None) or getattr(widget, "master", None)
+        mapped = False
+        for candidate in (container, widget):
+            if candidate is None:
+                continue
+            try:
+                if bool(candidate.winfo_ismapped()):
+                    mapped = True
+                    break
+            except Exception:
+                pass
+        if not mapped:
+            return
+
+        width = 0
+        for candidate in (container, widget):
+            if candidate is None:
+                continue
+            try:
+                width = int(candidate.winfo_width() or 0)
+            except Exception:
+                width = 0
+            if width > 1:
+                break
+
+        if width <= 1:
+            return
+
+        try:
+            padding = int(getattr(widget, "_adaptive_wrap_padding", 18))
+        except Exception:
+            padding = 18
+        try:
+            min_wrap = int(getattr(widget, "_adaptive_wrap_min", 80))
+        except Exception:
+            min_wrap = 80
+        try:
+            max_wrap = int(getattr(widget, "_adaptive_wrap_max", base_wrap) or base_wrap)
+        except Exception:
+            max_wrap = base_wrap
+
+        target = max(min_wrap, int(width) - padding)
+        if max_wrap > 0:
+            target = min(max_wrap, target)
+
+        try:
+            current_wrap = int(float(widget.cget("wraplength") or 0))
+        except Exception:
+            current_wrap = 0
+
+        if abs(current_wrap - target) <= 2:
+            return
+
+        try:
+            widget.configure(wraplength=target)
+        except Exception:
+            pass
+
+    def _refresh_adaptive_wraps(self, root):
+        if root is None:
+            return
+
+        visited: set[int] = set()
+
+        def walk(widget):
+            if widget is None:
+                return
+
+            widget_id = id(widget)
+            if widget_id in visited:
+                return
+            visited.add(widget_id)
+
+            if hasattr(widget, "_adaptive_wrap_base"):
+                try:
+                    self._update_adaptive_wraplength(widget)
+                except Exception:
+                    pass
+
+            try:
+                for child in widget.winfo_children():
+                    walk(child)
+            except Exception:
+                pass
+
+        walk(root)
+
+    def _refresh_adaptive_wraps_for_container(self, container):
+        if container is None:
+            return
+
+        try:
+            container._adaptive_wrap_after_id = None
+        except Exception:
+            pass
+
+        targets = list(getattr(container, "_adaptive_wrap_targets", []) or [])
+        seen: set[int] = set()
+        for widget in targets:
+            if widget is None:
+                continue
+            widget_id = id(widget)
+            if widget_id in seen:
+                continue
+            seen.add(widget_id)
+            try:
+                if bool(widget.winfo_exists()):
+                    self._update_adaptive_wraplength(widget)
+            except Exception:
+                pass
+
+    def _schedule_adaptive_wrap_refresh(self, container):
+        if container is None:
+            return
+
+        pending = getattr(container, "_adaptive_wrap_after_id", None)
+        if pending is not None:
+            return
+
+        try:
+            container._adaptive_wrap_after_id = container.after_idle(
+                lambda target=container: self._refresh_adaptive_wraps_for_container(target)
+            )
+        except Exception:
+            try:
+                container._adaptive_wrap_after_id = None
+            except Exception:
+                pass
+
+    def ensure_adaptive_wrap(self, widget, container=None, *, padding: int = 18, min_wrap: int = 80):
+        if widget is None:
+            return
+
+        try:
+            configured_wrap = int(float(widget.cget("wraplength") or 0))
+        except Exception:
+            configured_wrap = 0
+        if configured_wrap <= 0:
+            return
+
+        if not hasattr(widget, "_adaptive_wrap_base"):
+            try:
+                widget._adaptive_wrap_base = int(configured_wrap)
+            except Exception:
+                return
+        try:
+            widget._adaptive_wrap_max = max(int(getattr(widget, "_adaptive_wrap_max", 0) or 0), int(configured_wrap))
+        except Exception:
+            widget._adaptive_wrap_max = int(configured_wrap)
+        widget._adaptive_wrap_container = container or getattr(widget, "master", None)
+        widget._adaptive_wrap_padding = int(padding)
+        widget._adaptive_wrap_min = int(min_wrap)
+
+        container_widget = getattr(widget, "_adaptive_wrap_container", None)
+        if container_widget is not None:
+            targets = list(getattr(container_widget, "_adaptive_wrap_targets", []) or [])
+            if all(existing is not widget for existing in targets):
+                targets.append(widget)
+                try:
+                    container_widget._adaptive_wrap_targets = targets
+                except Exception:
+                    pass
+            if not bool(getattr(container_widget, "_adaptive_wrap_bound", False)):
+                try:
+                    container_widget.bind(
+                        "<Configure>",
+                        lambda _event, target=container_widget: self._schedule_adaptive_wrap_refresh(target),
+                        add="+",
+                    )
+                    container_widget._adaptive_wrap_bound = True
+                except Exception:
+                    pass
+            self._schedule_adaptive_wrap_refresh(container_widget)
+
+        self._update_adaptive_wraplength(widget)
 
     def style_classic_scale_widget(self, widget, background: str = None):
         if widget is None:
@@ -1533,15 +2055,14 @@ class AutoAnnotationApp:
             except Exception:
                 class_name = ""
 
+            local_bg = self._resolve_widget_background(getattr(widget, "master", None), fallback=bg)
+
             if isinstance(widget, WebSlimScrollbar):
-                self.style_web_scrollbar(widget, track_color=bg)
+                self.style_web_scrollbar(widget, track_color=local_bg)
             elif class_name == "TScale":
-                try:
-                    widget.configure(cursor="hand2", takefocus=0)
-                except Exception:
-                    pass
+                self.style_ttk_scale_widget(widget, background=local_bg)
             elif class_name == "Scale":
-                self.style_classic_scale_widget(widget, background=bg)
+                self.style_classic_scale_widget(widget, background=local_bg)
             elif class_name == "TFrame":
                 try:
                     current_style = str(widget.cget("style") or "").strip()
@@ -1946,6 +2467,9 @@ class AutoAnnotationApp:
                     self.style.map(style_name, **kwargs)
                 except Exception:
                     pass
+
+            control_arrow = palette.get("success", palette.get("accent", palette["fg"]))
+            control_arrow_disabled = palette.get("muted_dim", palette["fg"])
 
             safe_configure(
                 '.',
@@ -2437,14 +2961,20 @@ class AutoAnnotationApp:
                 bordercolor=palette["border"],
                 lightcolor=palette["border"],
                 darkcolor=palette["border"],
-                arrowsize=14
+                arrowsize=14,
+                arrowcolor=control_arrow,
             )
             safe_map(
                 'TCombobox',
                 fieldbackground=[('readonly', palette["field"])],
                 selectbackground=[('readonly', palette["accent"])],
                 selectforeground=[('readonly', '#ffffff')],
-                foreground=[('disabled', palette["muted_dim"])]
+                foreground=[('disabled', palette["muted_dim"])],
+                arrowcolor=[
+                    ('readonly', control_arrow),
+                    ('active', control_arrow),
+                    ('disabled', control_arrow_disabled),
+                ],
             )
             safe_configure(
                 'TSpinbox',
@@ -2453,7 +2983,15 @@ class AutoAnnotationApp:
                 bordercolor=palette["border"],
                 lightcolor=palette["border"],
                 darkcolor=palette["border"],
-                arrowsize=14
+                arrowsize=14,
+                arrowcolor=control_arrow,
+            )
+            safe_map(
+                'TSpinbox',
+                arrowcolor=[
+                    ('active', control_arrow),
+                    ('disabled', control_arrow_disabled),
+                ],
             )
             safe_configure(
                 'Treeview',
@@ -2493,24 +3031,24 @@ class AutoAnnotationApp:
                 background=palette["panel_alt"],
                 troughcolor=palette["bg"],
                 bordercolor=palette["border"],
-                arrowcolor=palette["fg"]
+                arrowcolor=control_arrow
             )
             safe_map(
                 'Vertical.TScrollbar',
                 background=[('active', palette.get("button_hover", palette["panel_alt"]))],
-                arrowcolor=[('active', palette["fg"])]
+                arrowcolor=[('active', control_arrow), ('disabled', control_arrow_disabled)]
             )
             safe_configure(
                 'Horizontal.TScrollbar',
                 background=palette["panel_alt"],
                 troughcolor=palette["bg"],
                 bordercolor=palette["border"],
-                arrowcolor=palette["fg"]
+                arrowcolor=control_arrow
             )
             safe_map(
                 'Horizontal.TScrollbar',
                 background=[('active', palette.get("button_hover", palette["panel_alt"]))],
-                arrowcolor=[('active', palette["fg"])]
+                arrowcolor=[('active', control_arrow), ('disabled', control_arrow_disabled)]
             )
         except: pass
 
@@ -2710,6 +3248,22 @@ class AutoAnnotationApp:
         )
 
         make_menu_button(
+            "Konfiguracja",
+            lambda: [
+                {
+                    "kind": "radio",
+                    "label": device_label,
+                    "selected": (device_label == self.get_global_yolo_device_choice()),
+                    "command": (
+                        lambda value=device_label: self.set_global_yolo_device_choice(value)
+                    ),
+                }
+                for device_label in self.get_available_yolo_devices()
+            ],
+            min_width=320
+        )
+
+        make_menu_button(
             "Styl",
             lambda: [
                 {
@@ -2896,7 +3450,7 @@ class AutoAnnotationApp:
         return bool(tracked_ctrl_down and tracked_alt_down)
 
     def _format_help_panel_message(self, message: str, icon: str | None = None) -> str:
-        base_prefix = str(getattr(self, "_help_panel_message_prefix", "[HELP/CTRL+ALT]")).strip()
+        base_prefix = str(getattr(self, "_help_panel_message_prefix", "HELP:")).strip()
         clean_message = str(message or "").strip()
         default_message = str(getattr(self, "default_status_message", "") or "").strip()
 
@@ -2906,18 +3460,32 @@ class AutoAnnotationApp:
         if clean_message.startswith(base_prefix):
             return clean_message
 
-        if clean_message == default_message or not icon:
-            return f"{base_prefix} {clean_message}".strip()
+        return f"{base_prefix} {clean_message}".strip()
 
-        prefixes = {
-            "help": "[POMOC]",
-            "warning": "[UWAGA]",
-            "error": "[BLAD]",
-            "success": "[OK]",
-            "info": "[INFO]",
-        }
-        severity_prefix = prefixes.get(icon, "[INFO]").strip()
-        return f"{base_prefix} {severity_prefix} {clean_message}".strip()
+    def _should_show_help_context_ppm_hint(self) -> bool:
+        try:
+            hover_widget = getattr(HELP, "_hover_widget", None)
+            if hover_widget is None:
+                return False
+
+            current_cursor = ""
+            try:
+                current_cursor = str(hover_widget.cget("cursor") or "").strip().lower()
+            except Exception:
+                current_cursor = str(getattr(hover_widget, "_help_context_cursor", "") or "").strip().lower()
+
+            if current_cursor not in ("question_arrow", "help"):
+                return False
+
+            try:
+                if HELP._widget_has_explicit_right_click(hover_widget):
+                    return False
+            except Exception:
+                pass
+
+            return True
+        except Exception:
+            return False
 
     def _get_help_strip_available_width(self) -> int:
         widget = getattr(self, "status_text", None)
@@ -2953,7 +3521,10 @@ class AutoAnnotationApp:
         if not full_text:
             return ""
 
-        compact_prefix = str(getattr(self, "_help_panel_message_prefix", "[HELP/CTRL+ALT]")).strip()
+        if self._should_show_help_context_ppm_hint():
+            full_text = f"{full_text} | PPM"
+
+        compact_prefix = str(getattr(self, "_help_panel_message_prefix", "HELP:")).strip()
         hint_suffix = "..."
         available_width = self._get_help_strip_available_width()
         full_width = self._measure_help_text_width(full_text)
@@ -3149,10 +3720,362 @@ class AutoAnnotationApp:
             except Exception:
                 pass
 
+            self._sync_global_terminal_toggle_state()
+            self._apply_global_terminal_visual_state()
             self._render_help_panel_text()
             self._set_help_overlay_visible(expanded)
         finally:
             self._help_panel_apply_in_progress = False
+
+    def _sync_global_terminal_toggle_state(self):
+        btn = getattr(self, "_global_terminal_toggle_btn", None)
+        if btn is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        visible = bool(getattr(self, "_global_terminal_visible", False))
+        base_bg = palette.get("panel", "#252526")
+        hover_bg = palette.get("panel_alt", "#2d2d30")
+        active_bg = palette.get("surface_info", hover_bg)
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+
+        try:
+            btn.configure(
+                bg=active_bg if visible else base_bg,
+                fg=fg,
+                activebackground=hover_bg,
+                activeforeground=fg,
+                highlightbackground=border,
+                highlightcolor=border,
+                relief=tk.FLAT,
+            )
+        except Exception:
+            pass
+
+    def _apply_global_terminal_visual_state(self):
+        palette = getattr(self, "palette", {})
+        window = getattr(self, "_global_terminal_window", None)
+        shell = getattr(self, "_global_terminal_shell", None)
+        header = getattr(self, "_global_terminal_header", None)
+        body = getattr(self, "_global_terminal_body", None)
+        title_lbl = getattr(self, "_global_terminal_title_lbl", None)
+        clear_btn = getattr(self, "_global_terminal_clear_btn", None)
+        close_btn = getattr(self, "_global_terminal_close_btn", None)
+        text_widget = getattr(self, "_global_terminal_text", None)
+        scrollbar = getattr(self, "_global_terminal_scrollbar", None)
+
+        if window is not None:
+            try:
+                window.configure(bg=palette.get("bg", "#1e1e1e"))
+            except Exception:
+                pass
+
+        if shell is not None:
+            try:
+                shell.configure(
+                    bg=palette.get("panel", "#252526"),
+                    highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                )
+            except Exception:
+                pass
+
+        for widget in (header, body):
+            if widget is None:
+                continue
+            try:
+                widget.configure(bg=palette.get("panel", "#252526"))
+            except Exception:
+                pass
+
+        if title_lbl is not None:
+            try:
+                title_lbl.configure(
+                    bg=palette.get("panel", "#252526"),
+                    fg=palette.get("fg", "#f3f3f3"),
+                )
+            except Exception:
+                pass
+
+        for button in (clear_btn, close_btn):
+            if button is None:
+                continue
+            try:
+                button.configure(
+                    bg=palette.get("panel_alt", "#2d2d30"),
+                    fg=palette.get("fg", "#f3f3f3"),
+                    activebackground=palette.get("button_hover", "#37373d"),
+                    activeforeground=palette.get("fg", "#f3f3f3"),
+                    highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                )
+            except Exception:
+                pass
+
+        if text_widget is not None:
+            self.style_text_widget(text_widget, role="console")
+
+        if scrollbar is not None:
+            try:
+                self.style_web_scrollbar(
+                    scrollbar,
+                    track_color=palette.get("console_bg", palette.get("panel", "#252526")),
+                )
+            except Exception:
+                pass
+
+    def _populate_global_terminal_widget(self):
+        text_widget = getattr(self, "_global_terminal_text", None)
+        if text_widget is None:
+            return
+
+        try:
+            text_widget.configure(state=tk.NORMAL)
+            text_widget.delete("1.0", tk.END)
+            if self._global_terminal_lines:
+                text_widget.insert(tk.END, "\n".join(self._global_terminal_lines) + "\n")
+            text_widget.see(tk.END)
+        except Exception:
+            pass
+        finally:
+            try:
+                text_widget.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+
+    def _position_global_terminal_window(self, force: bool = False):
+        window = getattr(self, "_global_terminal_window", None)
+        if window is None:
+            return
+        if self._global_terminal_geometry_initialized and not force:
+            return
+
+        try:
+            self.root.update_idletasks()
+            root_x = int(self.root.winfo_rootx() or 0)
+            root_y = int(self.root.winfo_rooty() or 0)
+            root_w = max(900, int(self.root.winfo_width() or self.root.winfo_reqwidth() or 900))
+            root_h = max(640, int(self.root.winfo_height() or self.root.winfo_reqheight() or 640))
+        except Exception:
+            root_x = 80
+            root_y = 80
+            root_w = 1200
+            root_h = 760
+
+        width = min(1080, max(780, int(root_w * 0.78)))
+        height = min(420, max(260, int(root_h * 0.36)))
+        pos_x = max(8, root_x + int((root_w - width) / 2))
+        pos_y = max(8, root_y + int((root_h - height) / 2))
+
+        try:
+            window.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
+            self._global_terminal_geometry_initialized = True
+        except Exception:
+            pass
+
+    def _ensure_global_terminal_window(self):
+        window = getattr(self, "_global_terminal_window", None)
+        try:
+            if window is not None and window.winfo_exists():
+                return window
+        except Exception:
+            pass
+
+        palette = getattr(self, "palette", {})
+        window = tk.Toplevel(self.root)
+        window.withdraw()
+        window.title("Terminal procesu")
+        try:
+            window.transient(self.root)
+        except Exception:
+            pass
+        window.configure(bg=palette.get("bg", "#1e1e1e"))
+        window.protocol("WM_DELETE_WINDOW", self.hide_global_terminal)
+        try:
+            window.bind("<Escape>", lambda _event: self.hide_global_terminal(), add="+")
+        except Exception:
+            pass
+
+        shell = tk.Frame(
+            window,
+            bg=palette.get("panel", "#252526"),
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        )
+        shell.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        header = tk.Frame(shell, bg=palette.get("panel", "#252526"), bd=0, highlightthickness=0)
+        header.pack(fill=tk.X, padx=12, pady=(12, 6))
+
+        title_lbl = tk.Label(
+            header,
+            text="Terminal procesu",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 10, "bold"),
+            bg=palette.get("panel", "#252526"),
+            fg=palette.get("fg", "#f3f3f3"),
+            bd=0,
+            highlightthickness=0,
+        )
+        title_lbl.pack(side=tk.LEFT)
+
+        close_btn = tk.Button(
+            header,
+            text="Zwin",
+            command=self.hide_global_terminal,
+            cursor="hand2",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            padx=10,
+            pady=3,
+            font=("Segoe UI", 9),
+        )
+        close_btn.pack(side=tk.RIGHT)
+
+        clear_btn = tk.Button(
+            header,
+            text="Wyczysc",
+            command=self.clear_global_terminal,
+            cursor="hand2",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            padx=10,
+            pady=3,
+            font=("Segoe UI", 9),
+        )
+        clear_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+        body = tk.Frame(shell, bg=palette.get("panel", "#252526"), bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        text_widget = tk.Text(
+            body,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
+        )
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = WebSlimScrollbar(
+            body,
+            orient=tk.VERTICAL,
+            command=text_widget.yview,
+            auto_hide=False,
+        )
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.web_vbar = scrollbar
+
+        self._global_terminal_window = window
+        self._global_terminal_shell = shell
+        self._global_terminal_header = header
+        self._global_terminal_title_lbl = title_lbl
+        self._global_terminal_clear_btn = clear_btn
+        self._global_terminal_close_btn = close_btn
+        self._global_terminal_body = body
+        self._global_terminal_text = text_widget
+        self._global_terminal_scrollbar = scrollbar
+
+        self._apply_global_terminal_visual_state()
+        self._populate_global_terminal_widget()
+        self._position_global_terminal_window(force=True)
+        return window
+
+    def is_global_terminal_visible(self) -> bool:
+        window = getattr(self, "_global_terminal_window", None)
+        if window is None:
+            return False
+        try:
+            return bool(window.winfo_exists()) and str(window.state()) != "withdrawn"
+        except Exception:
+            return False
+
+    def show_global_terminal(self):
+        window = self._ensure_global_terminal_window()
+        self._position_global_terminal_window()
+        try:
+            window.deiconify()
+            window.lift()
+            window.focus_force()
+        except Exception:
+            pass
+        self._global_terminal_visible = True
+        self._sync_global_terminal_toggle_state()
+
+    def hide_global_terminal(self):
+        window = getattr(self, "_global_terminal_window", None)
+        if window is not None:
+            try:
+                window.withdraw()
+            except Exception:
+                pass
+        self._global_terminal_visible = False
+        self._sync_global_terminal_toggle_state()
+
+    def toggle_global_terminal(self):
+        if self.is_global_terminal_visible():
+            self.hide_global_terminal()
+        else:
+            self.show_global_terminal()
+
+    def clear_global_terminal(self):
+        self._global_terminal_lines = []
+        self._populate_global_terminal_widget()
+
+    def append_global_terminal(self, message: str, source: str = None):
+        text = "" if message is None else str(message)
+        if not text:
+            return
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        prefix = f"[{str(source).strip()}] " if str(source or "").strip() else ""
+        new_lines = []
+        for line in normalized.split("\n"):
+            if line == "":
+                continue
+            new_lines.append(f"{prefix}{line}")
+
+        if not new_lines:
+            return
+
+        self._global_terminal_lines.extend(new_lines)
+        overflow = len(self._global_terminal_lines) - int(self._global_terminal_max_lines)
+        if overflow > 0:
+            self._global_terminal_lines = self._global_terminal_lines[overflow:]
+
+        def update():
+            text_widget = getattr(self, "_global_terminal_text", None)
+            if text_widget is None:
+                return
+
+            try:
+                text_widget.configure(state=tk.NORMAL)
+                if overflow > 0:
+                    text_widget.delete("1.0", tk.END)
+                    text_widget.insert(tk.END, "\n".join(self._global_terminal_lines) + "\n")
+                else:
+                    text_widget.insert(tk.END, "\n".join(new_lines) + "\n")
+                text_widget.see(tk.END)
+            except Exception:
+                pass
+            finally:
+                try:
+                    text_widget.configure(state=tk.DISABLED)
+                except Exception:
+                    pass
+
+        try:
+            self.root.after(0, update)
+        except Exception:
+            pass
 
     def _on_help_panel_text_configure(self, event=None):
         if bool(getattr(self, "_help_panel_apply_in_progress", False)):
