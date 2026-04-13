@@ -47,6 +47,7 @@ class AnnotationComparator:
     
     def __init__(self):
         self.diffs: List[AnnotationDiff] = []
+        self._parse_cache: Dict[tuple[str, int, int], Dict[str, List[Tuple]]] = {}
     
     def compare(self,
                 auto_xml_path: Path,
@@ -114,6 +115,19 @@ class AnnotationComparator:
     
     def _parse_cvat(self, xml_path: Path) -> Dict[str, List[Tuple]]:
         """Parsuje CVAT XML → {image: [bbox, ...]}"""
+        try:
+            stat = xml_path.stat()
+            cache_key = (
+                str(xml_path.resolve()),
+                int(getattr(stat, "st_mtime_ns", 0)),
+                int(getattr(stat, "st_size", 0)),
+            )
+        except Exception:
+            cache_key = None
+
+        if cache_key is not None and cache_key in self._parse_cache:
+            return self._parse_cache[cache_key]
+
         data = {}
         
         try:
@@ -145,6 +159,9 @@ class AnnotationComparator:
         except Exception as e:
             logger.error(f"Błąd parsowania {xml_path}: {e}")
         
+        if cache_key is not None:
+            self._parse_cache[cache_key] = data
+
         return data
     
     def _compare_image(self, img_name: str, auto: List, corr: List) -> AnnotationDiff:

@@ -9,6 +9,7 @@ from typing import Optional, List, Tuple
 import numpy as np
 
 from ..config import logger, CV2_AVAILABLE, cv2
+from ..utils import cleanup_gpu_memory
 from .validators import LicensePlateValidator
 
 try:
@@ -190,3 +191,14 @@ class PlateOCR:
             return clean_text, confidence, validation
             
         return clean_text
+
+    def unload(self):
+        """Zwalnia reader OCR i czyści pamięć po zakończeniu pracy."""
+        try:
+            self.reader = None
+            self.is_loaded = False
+        finally:
+            try:
+                cleanup_gpu_memory()
+            except Exception:
+                pass
