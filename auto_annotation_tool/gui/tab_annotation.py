@@ -42,6 +42,8 @@ from ..rectification.polygon_validator import PolygonValidator
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
+NAV_BUTTON_WIDTH = 18
+
 
 class SlimProgressBar(tk.Canvas):
     def __init__(
@@ -2817,7 +2819,7 @@ class AnnotationTab:
             "manual_history_import_btn": "WorkflowCard.TButton",
             "workflow_input_browse_btn": "WorkflowCard.TButton",
             "workflow_back_btn": "WorkflowCard.TButton",
-            "workflow_next_btn": "WorkflowCardPrimary.TButton",
+            "workflow_next_btn": "Accent.TButton",
             "start_btn": "WorkflowCardPrimary.TButton",
             "stop_btn": "WorkflowCard.TButton",
             "enter_manual_review_btn": "WorkflowCardPrimary.TButton",
@@ -3790,13 +3792,15 @@ class AnnotationTab:
             command=self._go_to_previous_workflow_step,
         )
         self.workflow_back_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.workflow_back_btn.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
         self.workflow_next_btn = ttk.Button(
             self.workflow_nav_row,
             text="Dalej",
-            style="WorkflowCardPrimary.TButton",
+            style="Accent.TButton",
             command=self._go_to_next_workflow_step,
         )
         self.workflow_next_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.workflow_next_btn.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         self.workflow_start_section = self._build_workflow_step_card(actions_lf)
         self.workflow_start_title_lbl = tk.Label(
@@ -8622,6 +8626,8 @@ class AnnotationTab:
         current = self._coerce_workflow_step()
         steps = self._get_current_workflow_steps()
         if current not in steps:
+            if self._is_free_mode_session_context() and self._get_workflow_route():
+                self._clear_free_mode_route_selection()
             return
         idx = steps.index(current)
         if idx <= 0:
@@ -9345,6 +9351,11 @@ class AnnotationTab:
             self._is_free_mode_session_context()
             and not self.is_processing
             and not self._dataset_export_completed
+            and (
+                self._manual_review_export_ready
+                or self._manual_review_active
+                or bool(route)
+            )
         )
         next_enabled = bool(
             self._dataset_export_completed and self._is_free_mode_session_context()
@@ -9356,24 +9367,26 @@ class AnnotationTab:
             next_text = "Powrot"
         if route == "manual" and current_step == "manual_entry" and not self._dataset_export_completed:
             next_text = (
-                "Przejdz do nowej anotacji"
+                "Nowy run"
                 if manual_entry_mode == "new"
                 else (
-                    "Przejdz do historii runow anotacji"
+                    "Historia runow"
                     if manual_entry_mode == "continue"
-                    else "Wskaz run autoanotacji Z2"
+                    else "Wskaz run"
                 )
             )
         elif route == "manual" and current_step == "manual_history" and not self._dataset_export_completed:
-            next_text = "Otworz wybrany run anotacji"
+            next_text = "Otworz run"
         try:
             self.workflow_back_btn.configure(
                 state=(tk.NORMAL if back_enabled else tk.DISABLED),
                 text="Wstecz",
+                width=NAV_BUTTON_WIDTH,
             )
             self.workflow_next_btn.configure(
                 state=(tk.NORMAL if next_enabled else tk.DISABLED),
                 text=next_text,
+                width=NAV_BUTTON_WIDTH,
             )
         except Exception:
             pass
@@ -9948,8 +9961,14 @@ class AnnotationTab:
             self._current_run_manual_vehicle_assist = manual_vehicle_assist
             safe_output_dir = self._coerce_annotation_output_dir(self.output_dir_var.get())
             self.output_dir_var.set(str(safe_output_dir))
+            app = getattr(self, "app", None)
+            if app is not None and hasattr(app, "try_begin_exclusive_operation"):
+                ok, busy_message = app.try_begin_exclusive_operation("z2.annotation.run", "Z2: przygotowanie anotacji")
+                if not ok:
+                    return messagebox.showinfo("Proces w toku", busy_message)
+            else:
+                self.app.set_processing(True)
             self.is_processing = True
-            self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
             self.approve_btn.config(state=tk.DISABLED)
@@ -10082,8 +10101,14 @@ class AnnotationTab:
             self._current_run_manual_vehicle_assist = manual_vehicle_assist
             safe_output_dir = self._coerce_annotation_output_dir(self.output_dir_var.get())
             self.output_dir_var.set(str(safe_output_dir))
+            app = getattr(self, "app", None)
+            if app is not None and hasattr(app, "try_begin_exclusive_operation"):
+                ok, busy_message = app.try_begin_exclusive_operation("z2.annotation.run", "Z2: przygotowanie anotacji")
+                if not ok:
+                    return messagebox.showinfo("Proces w toku", busy_message)
+            else:
+                self.app.set_processing(True)
             self.is_processing = True
-            self.app.set_processing(True)
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
             self.approve_btn.config(state=tk.DISABLED)
@@ -10122,6 +10147,12 @@ class AnnotationTab:
             ).start()
 
         except Exception as e:
+            if getattr(self, "is_processing", False):
+                self.is_processing = False
+                if hasattr(self.app, "end_exclusive_operation"):
+                    self.app.end_exclusive_operation("z2.annotation.run")
+                else:
+                    self.app.set_processing(False)
             logger.error(f"Nie mozna wystartowac: {e}")
             messagebox.showerror("Blad Startu", str(e))
 
@@ -14082,7 +14113,10 @@ class AnnotationTab:
 
     def _finish(self, success, msg):
         self.is_processing = False
-        self.app.set_processing(False)
+        if hasattr(self.app, "end_exclusive_operation"):
+            self.app.end_exclusive_operation("z2.annotation.run")
+        else:
+            self.app.set_processing(False)
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.export_plate_dataset_btn.config(state=tk.NORMAL)
@@ -14130,7 +14164,10 @@ class AnnotationTab:
 
     def _finish(self, success, msg):
         self.is_processing = False
-        self.app.set_processing(False)
+        if hasattr(self.app, "end_exclusive_operation"):
+            self.app.end_exclusive_operation("z2.annotation.run")
+        else:
+            self.app.set_processing(False)
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.export_plate_dataset_btn.config(state=tk.NORMAL)

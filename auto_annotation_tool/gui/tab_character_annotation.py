@@ -27,9 +27,13 @@ from ..icons import IconManager
 from ..character_recognition import PlateGenerator, CharacterDetector, CharacterDetection, DetectionMethod
 from ..ocr import PlateOCR
 from ..data_models import ImageAnnotation, Detection
+from ..training.dataset_splitter import DatasetSplitter
+from ..validators import validate_yolo_dataset
 from .help_manager import HELP
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+
+NAV_BUTTON_WIDTH = 18
 
 try:
     from ultralytics import YOLO
@@ -108,6 +112,47 @@ DETECTION_METHOD_CARD_META = {
     "YOLO_OCR": {
         "title": "YOLO boxy + OCR",
         "desc": "YOLO wyznacza boxy znakow, a OCR czyta kazdy crop osobno.",
+    },
+}
+DETECTION_PIPELINE_BLOCK_LIBRARY = {
+    "ocr_symbol": {
+        "badge": "O",
+        "title": "OCR znak",
+        "subtitle": "czyta znak lub caly napis",
+        "desc": "OCR odpowiada za odczyt tekstu. Moze czytac caly napis albo crop pojedynczego znaku.",
+        "tone": "ocr",
+    },
+    "yolo_box": {
+        "badge": "YB",
+        "title": "YOLO box",
+        "subtitle": "lokalizuje ramki znakow",
+        "desc": "YOLO wyznacza geometryczne polozenie znaku i daje boxy do dalszej pracy.",
+        "tone": "yolo_box",
+    },
+    "yolo_symbol": {
+        "badge": "YS",
+        "title": "YOLO znak",
+        "subtitle": "czyta znak z klasy modelu",
+        "desc": "YOLO przypisuje znak z klasy modelu albo pelni role rescue w hybrydzie.",
+        "tone": "yolo_symbol",
+    },
+}
+DETECTION_PIPELINE_PRESET_META = {
+    "OCR": {
+        "label": "OCR",
+        "desc": "OCR odczytuje tekst i sam segmentuje znaki.",
+    },
+    "YOLO": {
+        "label": "YOLO",
+        "desc": "YOLO daje box i znak z klas modelu.",
+    },
+    "BOTH": {
+        "label": "OCR + YOLO",
+        "desc": "OCR czyta tekst, YOLO ustawia pozycje, a rescue jest opcjonalny.",
+    },
+    "YOLO_OCR": {
+        "label": "YOLO boxy + OCR",
+        "desc": "YOLO daje boxy, a OCR czyta cropy znakow.",
     },
 }
 PREVIEW_MODE_EYE_ICON = "\N{EYE}"
@@ -285,6 +330,16 @@ class CharacterAnnotationTab:
         self._detection_advanced_expanded = False
         self._detection_ocr_advanced_expanded = False
         self._detection_yolo_advanced_expanded = False
+        self._detection_pipeline_modal = None
+        self._detection_pipeline_canvas = None
+        self._detection_pipeline_state = {"blocks": [], "selected_index": None}
+        self._detection_pipeline_runtime = {}
+        self._detection_pipeline_property_body = None
+        self._detection_pipeline_status_var = None
+        self._detection_pipeline_hint_var = None
+        self._detection_pipeline_confirm_btn = None
+        self._pz3_cvat_expanded = False
+        self._pz3_selected_path = ""
         self._ocr_summary_modal = None
         self._ocr_ranking_modal = None
         self._ocr_ranking_last_results = []
@@ -299,6 +354,7 @@ class CharacterAnnotationTab:
         self._extract_step_cards = []
         self._extract_last_source_binding_result = {"ok": False}
         self._pending_z2_source = {}
+        self._pz3_dataset_splitter = DatasetSplitter()
 
         # presets (global; later can be project-scoped)
         self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
@@ -321,11 +377,14 @@ class CharacterAnnotationTab:
         if saved_preview_sort_mode not in PREVIEW_SORT_LABELS:
             saved_preview_sort_mode = "DEFAULT"
         saved_detection_method = self._normalize_detection_method_key(get_val("char_det_method", "OCR"))
-        saved_hybrid_rescue_max_chars = max(1, min(5, int(get_val("char_hybrid_rescue_max_chars", 2) or 2)))
+        saved_hybrid_rescue_max_chars = max(0, min(5, int(get_val("char_hybrid_rescue_max_chars", 2) or 2)))
         saved_hybrid_yolo_box_backend = bool(get_val("char_hybrid_yolo_box_backend", True))
         saved_gold_export_split = bool(get_val("char_gold_export_split", False))
         saved_gold_export_train_pct = max(50.0, min(90.0, float(get_val("char_gold_export_train_pct", 80.0) or 80.0)))
         saved_gold_export_val_pct = max(5.0, min(45.0, float(get_val("char_gold_export_val_pct", 10.0) or 10.0)))
+        saved_pz3_dataset_source_mode = str(get_val("char_pz3_dataset_source_mode", "perfect") or "perfect").strip().lower()
+        if saved_pz3_dataset_source_mode not in {"perfect", "existing"}:
+            saved_pz3_dataset_source_mode = "perfect"
         saved_extract_entry_mode = ""
 
         # vars
@@ -362,6 +421,8 @@ class CharacterAnnotationTab:
         self.gold_export_split_var = tk.BooleanVar(value=saved_gold_export_split)
         self.gold_export_train_pct_var = tk.DoubleVar(value=saved_gold_export_train_pct)
         self.gold_export_val_pct_var = tk.DoubleVar(value=saved_gold_export_val_pct)
+        self.pz3_dataset_source_mode_var = tk.StringVar(value=saved_pz3_dataset_source_mode)
+        self.pz3_existing_dataset_var = tk.StringVar(value=get_val("char_pz3_existing_dataset", ""))
 
         # lab params
         self.prep_angle_var = tk.DoubleVar(value=float(get_val("char_prep_angle", 0.0)))
@@ -390,6 +451,8 @@ class CharacterAnnotationTab:
         self.gold_export_split_var.trace_add("write", self._on_gold_export_split_var_write)
         self.gold_export_train_pct_var.trace_add("write", self._on_gold_export_split_var_write)
         self.gold_export_val_pct_var.trace_add("write", self._on_gold_export_split_var_write)
+        self.pz3_dataset_source_mode_var.trace_add("write", self._on_pz3_dataset_source_var_write)
+        self.pz3_existing_dataset_var.trace_add("write", self._on_pz3_existing_dataset_var_write)
 
         self._create_widgets()
         self._bind_source_path_watchers()
@@ -4783,21 +4846,22 @@ class CharacterAnnotationTab:
             if yolo_text and yolo_text in normalized_truths:
                 return ordered_yolo, "yolo_exact", {"final_text": yolo_text}
 
-            rescued, rescue_details = self._repair_ocr_with_yolo_boxes(
-                ordered_ocr,
-                ordered_yolo,
-                normalized_truths,
-                max_mismatch_count=hybrid_rescue_max_chars,
-            )
-            if rescued:
-                if prefer_yolo_box_positions:
-                    rebuilt, backend_details = self._apply_yolo_box_backend(rescued, ordered_yolo)
-                    if backend_details:
-                        if not isinstance(rescue_details, dict):
-                            rescue_details = {}
-                        rescue_details.update(backend_details)
-                        return rebuilt, "ocr_yolo_rescue", rescue_details
-                return rescued, "ocr_yolo_rescue", rescue_details
+            if int(hybrid_rescue_max_chars or 0) > 0:
+                rescued, rescue_details = self._repair_ocr_with_yolo_boxes(
+                    ordered_ocr,
+                    ordered_yolo,
+                    normalized_truths,
+                    max_mismatch_count=hybrid_rescue_max_chars,
+                )
+                if rescued:
+                    if prefer_yolo_box_positions:
+                        rebuilt, backend_details = self._apply_yolo_box_backend(rescued, ordered_yolo)
+                        if backend_details:
+                            if not isinstance(rescue_details, dict):
+                                rescue_details = {}
+                            rescue_details.update(backend_details)
+                            return rebuilt, "ocr_yolo_rescue", rescue_details
+                    return rescued, "ocr_yolo_rescue", rescue_details
 
             best_source = ordered_ocr or ordered_yolo or ordered_combined
             best_strategy = "ocr_fallback" if ordered_ocr else ("yolo_fallback" if ordered_yolo else "both_combined")
@@ -4851,7 +4915,7 @@ class CharacterAnnotationTab:
             value = int(self.hybrid_rescue_max_chars_var.get())
         except Exception:
             value = 2
-        return max(1, min(5, value))
+        return max(0, min(5, value))
 
     def _use_hybrid_yolo_box_backend(self) -> bool:
         try:
@@ -4862,13 +4926,100 @@ class CharacterAnnotationTab:
     def _get_hybrid_detection_status_text(self) -> str:
         rescue_chars = self._get_hybrid_rescue_max_chars()
         backend_state = "ON" if self._use_hybrid_yolo_box_backend() else "OFF"
+        rescue_text = "OFF" if rescue_chars <= 0 else f"YOLO rescue <= {rescue_chars}"
         return (
-            f"odczyt: OCR | dopasowanie pozycji: YOLO rescue <= {rescue_chars} | "
+            f"odczyt: OCR | dopasowanie pozycji: YOLO | rescue: {rescue_text} | "
             f"koncowe ramki z YOLO: {backend_state}"
         )
 
     def _get_yolo_box_ocr_status_text(self) -> str:
         return "boxy: YOLO | odczyt cropow: OCR | koncowe ramki z YOLO"
+
+    def _get_detection_pipeline_blocks(self, method_key: str | None = None) -> list[str]:
+        resolved_method = self._normalize_detection_method_key(method_key or self._get_detection_method_key())
+        if resolved_method == "YOLO":
+            return ["yolo_box", "yolo_symbol"]
+        if resolved_method == "BOTH":
+            blocks = ["ocr_symbol", "yolo_box"]
+            if self._get_hybrid_rescue_max_chars() > 0:
+                blocks.append("yolo_symbol")
+            return blocks
+        if resolved_method == "YOLO_OCR":
+            return ["yolo_box", "ocr_symbol"]
+        return ["ocr_symbol"]
+
+    def _compile_detection_pipeline_blocks(self, blocks=None) -> dict:
+        prepared = [
+            str(block or "").strip().lower().replace("-", "_")
+            for block in (blocks or [])
+            if str(block or "").strip()
+        ]
+        valid_patterns = {
+            ("ocr_symbol",): ("OCR", False),
+            ("yolo_box", "yolo_symbol"): ("YOLO", False),
+            ("ocr_symbol", "yolo_box"): ("BOTH", False),
+            ("ocr_symbol", "yolo_box", "yolo_symbol"): ("BOTH", True),
+            ("yolo_box", "ocr_symbol"): ("YOLO_OCR", False),
+        }
+        compiled = valid_patterns.get(tuple(prepared))
+        if compiled is None:
+            return {
+                "valid": False,
+                "blocks": prepared,
+                "method_key": None,
+                "rescue_enabled": False,
+                "requires_yolo": any(block.startswith("yolo") for block in prepared),
+                "status_text": (
+                    "Ten lancuch nie jest jeszcze wspierany. "
+                    "Dozwolone uklady: O | YB->YS | O->YB | O->YB->YS | YB->O."
+                ),
+            }
+
+        method_key, rescue_enabled = compiled
+        label = DETECTION_METHOD_CARD_META.get(method_key, {}).get("title", method_key)
+        status_text = f"Builder zlozy ten pipeline jako tryb: {label}"
+        if method_key == "BOTH":
+            status_text += " z rescue" if rescue_enabled else " bez rescue"
+        return {
+            "valid": True,
+            "blocks": prepared,
+            "method_key": method_key,
+            "rescue_enabled": bool(rescue_enabled),
+            "requires_yolo": method_key in {"YOLO", "BOTH", "YOLO_OCR"},
+            "status_text": status_text,
+        }
+
+    def _apply_detection_pipeline_blocks(self, blocks, *, save: bool = True, prompt_for_yolo_model: bool = True) -> bool:
+        compiled = self._compile_detection_pipeline_blocks(blocks)
+        if not bool(compiled.get("valid")):
+            return False
+
+        method_key = str(compiled.get("method_key") or "OCR")
+        requires_yolo = bool(compiled.get("requires_yolo"))
+        if requires_yolo and not self._has_configured_yolo_detection_model():
+            if prompt_for_yolo_model:
+                selected_model = str(self._pick_yolo_model() or "").strip()
+                if not selected_model or not self._has_configured_yolo_detection_model():
+                    messagebox.showinfo(
+                        "Brak modelu YOLO",
+                        "Ten pipeline wymaga modelu YOLO znakow. Wskaz poprawny plik .pt, aby go zatwierdzic.",
+                    )
+                    return False
+            else:
+                return False
+
+        if method_key == "BOTH":
+            rescue_enabled = bool(compiled.get("rescue_enabled"))
+            current_rescue = self._get_hybrid_rescue_max_chars()
+            target_rescue = current_rescue if current_rescue > 0 else 2
+            try:
+                self.hybrid_rescue_max_chars_var.set(target_rescue if rescue_enabled else 0)
+            except Exception:
+                pass
+
+        self._set_detection_method_key(method_key, save=save)
+        self._refresh_detection_workflow_info_label()
+        return True
 
     def _get_detection_workflow_text(self, method_key: str | None = None) -> str:
         resolved_method = self._normalize_detection_method_key(method_key or self._get_detection_method_key())
@@ -4880,11 +5031,14 @@ class CharacterAnnotationTab:
                 "3. Koncowe ramki i odczyt pochodza z YOLO."
             )
         if resolved_method == "BOTH":
+            rescue_chars = self._get_hybrid_rescue_max_chars()
             return (
                 "Pipeline wybranego trybu:\n"
                 "1. OCR odczytuje napis i ustala kolejnosc znakow.\n"
                 "2. YOLO dopasowuje znaki do realnych pozycji na tablicy.\n"
-                "3. Opcjonalnie YOLO przejmuje koncowe ramki do treningu."
+                f"3. Rescue YOLO jest {'wlaczone' if rescue_chars > 0 else 'wylaczone'}"
+                + (f" (max {rescue_chars} pozycji).\n" if rescue_chars > 0 else ".\n")
+                + "4. Opcjonalnie YOLO przejmuje koncowe ramki do treningu."
             )
         if resolved_method == "YOLO_OCR":
             return (
@@ -5787,27 +5941,7 @@ class CharacterAnnotationTab:
         if normalized_mode not in DETECTION_METHOD_LABELS:
             return
 
-        if normalized_mode == self._get_detection_method_key():
-            return
-
-        requires_yolo = normalized_mode in ("YOLO", "BOTH", "YOLO_OCR")
-        if requires_yolo and not self._has_configured_yolo_detection_model():
-            if getattr(self, "_step3_linear_mode", False):
-                messagebox.showinfo(
-                    "Brak modelu YOLO",
-                    "Projekt nie ma jeszcze przypietego modelu YOLO znakow, wiec ten tryb pozostaje nieaktywny.",
-                )
-                return
-
-            selected_model = str(self._pick_yolo_model() or "").strip()
-            if not selected_model or not self._has_configured_yolo_detection_model():
-                messagebox.showinfo(
-                    "Brak modelu YOLO",
-                    "Tryb YOLO wlaczy sie dopiero po poprawnym wskazaniu wytrenowanego modelu znakow (.pt).",
-                )
-                return
-
-        self._set_detection_method_key(normalized_mode)
+        self._open_detection_pipeline_builder(initial_method=normalized_mode)
 
     def _refresh_detect_mode_cards(self):
         cards = getattr(self, "_detect_mode_cards", {}) or {}
@@ -5842,15 +5976,17 @@ class CharacterAnnotationTab:
             if requires_yolo:
                 if yolo_ready:
                     if mode_key == "YOLO":
-                        description = "YOLO sam wykrywa boxy i przypisuje klasy znakow."
+                        description = "YOLO sam wykrywa boxy i przypisuje klasy znakow. Kliknij karte, aby otworzyc builder pipeline."
                     elif mode_key == "BOTH":
-                        description = "OCR pilnuje tekstu, a YOLO dopasowuje pozycje i moze przejac koncowe ramki."
+                        description = "OCR pilnuje tekstu, a YOLO dopasowuje pozycje i moze przejac koncowe ramki. Kliknij karte, aby otworzyc builder pipeline."
                     else:
-                        description = "YOLO wyznacza boxy znakow, a OCR czyta juz pojedyncze cropy."
+                        description = "YOLO wyznacza boxy znakow, a OCR czyta juz pojedyncze cropy. Kliknij karte, aby otworzyc builder pipeline."
                 elif getattr(self, "_step3_linear_mode", False):
                     description = "Tryb odblokuje sie po przypieciu modelu YOLO znakow do projektu."
                 else:
-                    description = "Kliknij, aby wskazac wytrenowany model YOLO znakow (.pt)."
+                    description = "Kliknij, aby otworzyc builder pipeline i wskazac wytrenowany model YOLO znakow (.pt)."
+            elif mode_key == "OCR":
+                description = "OCR odczytuje caly napis i dzieli go na techniczne segmenty znakow. Kliknij karte, aby otworzyc builder pipeline."
 
             widgets["enabled"] = is_enabled
 
@@ -5885,6 +6021,590 @@ class CharacterAnnotationTab:
             if frame is not None:
                 self._bind_detect_mode_card(frame, mode_key)
         self._refresh_detection_workflow_info_label()
+
+    def _get_detection_pipeline_block_meta(self, block_key: str) -> dict:
+        normalized = str(block_key or "").strip().lower().replace("-", "_")
+        return dict(DETECTION_PIPELINE_BLOCK_LIBRARY.get(normalized, DETECTION_PIPELINE_BLOCK_LIBRARY["ocr_symbol"]))
+
+    def _get_detection_pipeline_block_style(self, block_key: str) -> dict:
+        normalized = str(block_key or "").strip().lower().replace("-", "_")
+        palette = getattr(self.app, "palette", {})
+        component_style = self._get_preview_badge_component_style(normalized)
+        panel = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        badge_fill = str(component_style.get("badge_fill", component_style.get("outline", "#3c3c3c")))
+        badge_outline = str(component_style.get("badge_outline", badge_fill))
+        return {
+            "badge_fill": badge_fill,
+            "badge_outline": badge_outline,
+            "badge_fg": str(component_style.get("badge_fg", "#ffffff")),
+            "fill": blend_hex_colors(badge_fill, panel_alt, 0.22),
+            "fill_selected": blend_hex_colors(badge_fill, panel_alt, 0.42),
+            "outline": badge_outline,
+            "text": palette.get("fg", "#f3f3f3"),
+            "muted": palette.get("muted", "#c7c7c7"),
+            "shadow": blend_hex_colors(badge_fill, panel, 0.55),
+        }
+
+    def _get_detection_pipeline_builder_blocks(self) -> list[str]:
+        state = getattr(self, "_detection_pipeline_state", {}) or {}
+        return list(state.get("blocks", []) or [])
+
+    def _set_detection_pipeline_builder_blocks(self, blocks, *, selected_index: int | None = None):
+        prepared = [
+            str(block or "").strip().lower().replace("-", "_")
+            for block in (blocks or [])
+            if str(block or "").strip()
+        ]
+        if selected_index is None:
+            selected_index = 0 if prepared else None
+        elif prepared:
+            selected_index = max(0, min(len(prepared) - 1, int(selected_index)))
+        else:
+            selected_index = None
+        self._detection_pipeline_state = {
+            "blocks": prepared,
+            "selected_index": selected_index,
+        }
+
+    def _select_detection_pipeline_builder_block(self, index: int | None):
+        blocks = self._get_detection_pipeline_builder_blocks()
+        if not blocks:
+            self._set_detection_pipeline_builder_blocks([], selected_index=None)
+        else:
+            safe_index = 0 if index is None else max(0, min(len(blocks) - 1, int(index)))
+            self._set_detection_pipeline_builder_blocks(blocks, selected_index=safe_index)
+        self._refresh_detection_pipeline_builder()
+
+    def _set_detection_pipeline_builder_preset(self, method_key: str):
+        blocks = self._get_detection_pipeline_blocks(method_key)
+        self._set_detection_pipeline_builder_blocks(blocks, selected_index=0 if blocks else None)
+        self._refresh_detection_pipeline_builder()
+
+    def _append_detection_pipeline_builder_block(self, block_key: str):
+        blocks = self._get_detection_pipeline_builder_blocks()
+        blocks.append(str(block_key or "").strip().lower().replace("-", "_"))
+        self._set_detection_pipeline_builder_blocks(blocks, selected_index=len(blocks) - 1)
+        self._refresh_detection_pipeline_builder()
+
+    def _move_detection_pipeline_builder_selected_block(self, direction: int):
+        blocks = self._get_detection_pipeline_builder_blocks()
+        state = getattr(self, "_detection_pipeline_state", {}) or {}
+        selected_index = state.get("selected_index")
+        if selected_index is None or not blocks:
+            return
+        try:
+            current = int(selected_index)
+            target = int(current) + int(direction)
+        except Exception:
+            return
+        if target < 0 or target >= len(blocks):
+            return
+        blocks[current], blocks[target] = blocks[target], blocks[current]
+        self._set_detection_pipeline_builder_blocks(blocks, selected_index=target)
+        self._refresh_detection_pipeline_builder()
+
+    def _remove_detection_pipeline_builder_selected_block(self):
+        blocks = self._get_detection_pipeline_builder_blocks()
+        state = getattr(self, "_detection_pipeline_state", {}) or {}
+        selected_index = state.get("selected_index")
+        if selected_index is None or not blocks:
+            return
+        try:
+            current = int(selected_index)
+        except Exception:
+            return
+        if current < 0 or current >= len(blocks):
+            return
+        blocks.pop(current)
+        next_index = min(current, len(blocks) - 1) if blocks else None
+        self._set_detection_pipeline_builder_blocks(blocks, selected_index=next_index)
+        self._refresh_detection_pipeline_builder()
+
+    def _clear_detection_pipeline_builder(self):
+        self._set_detection_pipeline_builder_blocks([], selected_index=None)
+        self._refresh_detection_pipeline_builder()
+
+    def _close_detection_pipeline_builder(self):
+        modal = getattr(self, "_detection_pipeline_modal", None)
+        try:
+            if modal is not None and modal.winfo_exists():
+                modal.destroy()
+        except Exception:
+            pass
+        self._detection_pipeline_modal = None
+        self._detection_pipeline_canvas = None
+        self._detection_pipeline_property_body = None
+        self._detection_pipeline_runtime = {}
+        self._detection_pipeline_confirm_btn = None
+        self._detection_pipeline_status_var = None
+        self._detection_pipeline_hint_var = None
+
+    def _commit_detection_pipeline_builder(self):
+        blocks = self._get_detection_pipeline_builder_blocks()
+        if not self._apply_detection_pipeline_blocks(blocks, save=True, prompt_for_yolo_model=True):
+            self._refresh_detection_pipeline_builder()
+            return
+        self._close_detection_pipeline_builder()
+
+    def _refresh_detection_pipeline_builder(self):
+        modal = getattr(self, "_detection_pipeline_modal", None)
+        if modal is None:
+            return
+        try:
+            if not modal.winfo_exists():
+                self._close_detection_pipeline_builder()
+                return
+        except Exception:
+            self._close_detection_pipeline_builder()
+            return
+
+        blocks = self._get_detection_pipeline_builder_blocks()
+        compiled = self._compile_detection_pipeline_blocks(blocks)
+        if bool(compiled.get("valid")) and bool(compiled.get("requires_yolo")) and not self._has_configured_yolo_detection_model():
+            compiled["status_text"] = str(compiled.get("status_text") or "") + " | Brak modelu YOLO: zatwierdzenie poprosi o wskazanie pliku .pt."
+        status_var = getattr(self, "_detection_pipeline_status_var", None)
+        if status_var is not None:
+            try:
+                status_var.set(str(compiled.get("status_text") or ""))
+            except Exception:
+                pass
+
+        hint_var = getattr(self, "_detection_pipeline_hint_var", None)
+        if hint_var is not None:
+            if blocks:
+                badges = [self._get_detection_pipeline_block_meta(block).get("badge", "?") for block in blocks]
+                hint_text = "Aktualny lancuch: " + " -> ".join(badges)
+            else:
+                hint_text = "Dodaj klocki O, YB i YS, aby zlozyc metode detekcji."
+            try:
+                hint_var.set(hint_text)
+            except Exception:
+                pass
+
+        confirm_btn = getattr(self, "_detection_pipeline_confirm_btn", None)
+        if confirm_btn is not None:
+            self._set_widget_state(confirm_btn, "normal" if bool(compiled.get("valid")) else "disabled")
+
+        self._draw_detection_pipeline_builder_canvas()
+        self._refresh_detection_pipeline_builder_property_panel()
+
+    def _draw_detection_pipeline_builder_canvas(self):
+        canvas = getattr(self, "_detection_pipeline_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.update_idletasks()
+        except Exception:
+            pass
+
+        width = max(360, int(canvas.winfo_width() or 0))
+        height = max(220, int(canvas.winfo_height() or 0))
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        muted = palette.get("muted", "#c7c7c7")
+        fg = palette.get("fg", "#f3f3f3")
+        canvas.configure(bg=panel_bg)
+        canvas.delete("all")
+        self._detection_pipeline_runtime = {}
+
+        blocks = self._get_detection_pipeline_builder_blocks()
+        state = getattr(self, "_detection_pipeline_state", {}) or {}
+        selected_index = state.get("selected_index")
+
+        canvas.create_rectangle(1, 1, width - 2, height - 2, outline=border, width=1)
+        center_y = float(height // 2)
+        canvas.create_line(28, center_y, width - 28, center_y, fill=blend_hex_colors(border, panel_bg, 0.35), dash=(3, 4))
+
+        if not blocks:
+            canvas.create_text(
+                width / 2.0,
+                center_y - 16.0,
+                text="Pusty pipeline",
+                fill=fg,
+                font=("Segoe UI", 14, "bold"),
+                anchor="center",
+            )
+            canvas.create_text(
+                width / 2.0,
+                center_y + 14.0,
+                text="Dodaj klocki O, YB i YS lub kliknij preset u gory.",
+                fill=muted,
+                font=("Segoe UI", 10),
+                anchor="center",
+            )
+            return
+
+        block_w = 168.0
+        block_h = 86.0
+        gap = 34.0
+        total_w = (len(blocks) * block_w) + (max(0, len(blocks) - 1) * gap)
+        start_x = max(18.0, (float(width) - total_w) / 2.0)
+        top_y = center_y - (block_h / 2.0)
+
+        for idx, block_key in enumerate(blocks):
+            meta = self._get_detection_pipeline_block_meta(block_key)
+            style = self._get_detection_pipeline_block_style(block_key)
+            x1 = float(start_x + idx * (block_w + gap))
+            x2 = x1 + block_w
+            y1 = top_y
+            y2 = y1 + block_h
+            is_selected = idx == selected_index
+
+            if idx < len(blocks) - 1:
+                arrow_y = center_y
+                arrow_x1 = x2 + 8.0
+                arrow_x2 = arrow_x1 + gap - 16.0
+                canvas.create_line(
+                    arrow_x1,
+                    arrow_y,
+                    arrow_x2,
+                    arrow_y,
+                    fill=str(style.get("outline", border)),
+                    width=2,
+                    arrow=tk.LAST,
+                    arrowshape=(10, 12, 4),
+                )
+
+            if is_selected:
+                canvas.create_rectangle(
+                    x1 - 3,
+                    y1 - 3,
+                    x2 + 3,
+                    y2 + 3,
+                    outline=str(style.get("shadow", style.get("outline", border))),
+                    width=2,
+                )
+
+            rect_id = canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                fill=str(style.get("fill_selected" if is_selected else "fill", panel_bg)),
+                outline=str(style.get("outline", border)),
+                width=2 if is_selected else 1,
+                tags=(f"det_pipeline_block::{idx}", "det_pipeline_block"),
+            )
+            badge_text = str(meta.get("badge", "?"))
+            self._draw_preview_text_badge(
+                canvas,
+                x1 + 10,
+                y1 + 10,
+                badge_text,
+                fill_color=str(style.get("badge_fill", style.get("outline", border))),
+                outline_color=str(style.get("badge_outline", style.get("outline", border))),
+                text_color=str(style.get("badge_fg", "#ffffff")),
+                font=("Segoe UI", 9, "bold"),
+                anchor=tk.NW,
+                pad_x=6,
+                pad_y=2,
+                tags=(f"det_pipeline_block::{idx}", "det_pipeline_block"),
+            )
+            canvas.create_text(
+                x1 + 12,
+                y1 + 38,
+                text=str(meta.get("title", block_key)),
+                fill=str(style.get("text", fg)),
+                font=("Segoe UI", 10, "bold"),
+                anchor=tk.NW,
+                tags=(f"det_pipeline_block::{idx}", "det_pipeline_block"),
+            )
+            canvas.create_text(
+                x1 + 12,
+                y1 + 60,
+                text=str(meta.get("subtitle", "")),
+                fill=str(style.get("muted", muted)),
+                font=("Segoe UI", 8),
+                anchor=tk.NW,
+                tags=(f"det_pipeline_block::{idx}", "det_pipeline_block"),
+            )
+            self._detection_pipeline_runtime[idx] = {
+                "bbox": (x1, y1, x2, y2),
+                "rect_id": rect_id,
+                "block_key": block_key,
+            }
+
+        def _select_from_tag(selected=selected_index):
+            return selected
+
+        for idx in self._detection_pipeline_runtime.keys():
+            canvas.tag_bind(
+                f"det_pipeline_block::{idx}",
+                "<Button-1>",
+                lambda _event, picked=idx: self._select_detection_pipeline_builder_block(picked),
+            )
+
+    def _refresh_detection_pipeline_builder_property_panel(self):
+        body = getattr(self, "_detection_pipeline_property_body", None)
+        if body is None:
+            return
+        try:
+            for child in list(body.winfo_children()):
+                child.destroy()
+        except Exception:
+            return
+
+        blocks = self._get_detection_pipeline_builder_blocks()
+        state = getattr(self, "_detection_pipeline_state", {}) or {}
+        selected_index = state.get("selected_index")
+        if selected_index is None or not blocks:
+            ttk.Label(
+                body,
+                text="Wybierz klocek na canvasie, aby edytowac jego wlasciwosci.",
+                style="Muted.TLabel",
+                wraplength=280,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, fill=tk.X)
+            return
+
+        try:
+            block_key = blocks[int(selected_index)]
+        except Exception:
+            ttk.Label(
+                body,
+                text="Nie udalo sie odczytac zaznaczonego klocka.",
+                style="Muted.TLabel",
+                wraplength=280,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, fill=tk.X)
+            return
+
+        meta = self._get_detection_pipeline_block_meta(block_key)
+        compiled = self._compile_detection_pipeline_blocks(blocks)
+
+        ttk.Label(
+            body,
+            text=f"{meta.get('badge', '?')}  {meta.get('title', block_key)}",
+            style="PanelHeading.TLabel",
+        ).pack(anchor=tk.W, fill=tk.X)
+        ttk.Label(
+            body,
+            text=str(meta.get("desc", "")),
+            style="PanelMuted.TLabel",
+            wraplength=300,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(4, 10))
+
+        def add_spin(parent, text, variable, from_, to_, increment, width=8):
+            row = ttk.Frame(parent)
+            row.pack(fill=tk.X, pady=(0, 8))
+            ttk.Label(row, text=text).pack(side=tk.LEFT)
+            spin = ttk.Spinbox(row, from_=from_, to=to_, increment=increment, textvariable=variable, width=width)
+            spin.pack(side=tk.RIGHT)
+            return spin
+
+        def add_check(parent, text, variable):
+            ttk.Checkbutton(parent, text=text, variable=variable).pack(anchor=tk.W, pady=(0, 8))
+
+        def add_hint(parent, text):
+            ttk.Label(
+                parent,
+                text=text,
+                style="PanelMuted.TLabel",
+                wraplength=300,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+
+        if block_key == "ocr_symbol":
+            add_spin(body, "Prog pewnosci OCR:", self.ocr_conf_var, 0.05, 0.95, 0.05)
+            add_spin(body, "Wysokosc OCR [px]:", self.prep_height_var, 40, 150, 1)
+            add_spin(body, "Padding [%]:", self.prep_padding_var, 0, 50, 1)
+            add_check(body, "Pelna binaryzacja OCR", self.prep_use_bin_var)
+            add_hint(body, "Te ustawienia steruja przygotowaniem cropow dla OCR oraz progiem akceptacji odczytu.")
+        elif block_key == "yolo_box":
+            model_row = ttk.Frame(body)
+            model_row.pack(fill=tk.X, pady=(0, 8))
+            ttk.Label(model_row, text="Model YOLO:").pack(side=tk.LEFT)
+            ttk.Button(
+                model_row,
+                text="Wybierz",
+                command=lambda: (self._pick_yolo_model(), self._refresh_detection_pipeline_builder()),
+            ).pack(side=tk.RIGHT)
+            ttk.Label(
+                body,
+                text=str(Path(str(self._get_effective_yolo_model_path() or "brak modelu")).name),
+                style="PanelMuted.TLabel",
+                wraplength=300,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+            add_spin(body, "Confidence:", self.yolo_conf_var, 0.0, 1.0, 0.05)
+            add_spin(body, "NMS IoU:", self.yolo_iou_var, 0.01, 0.99, 0.05)
+            add_spin(body, "Nakladanie boxow:", self.yolo_overlap_var, 0.0, 1.0, 0.05)
+            add_check(body, "Class agnostic NMS", self.yolo_agnostic_nms_var)
+            add_spin(body, "Tolerancja osi Y:", self.yolo_seq_center_y_var, 0.10, 1.50, 0.05)
+            add_hint(body, "Klocek YB odpowiada za geometrie znaku: model, progi oraz filtr wiarygodnej sekwencji.")
+        elif block_key == "yolo_symbol":
+            if bool(compiled.get("valid")) and compiled.get("method_key") == "BOTH":
+                if self._get_hybrid_rescue_max_chars() <= 0:
+                    try:
+                        self.hybrid_rescue_max_chars_var.set(2)
+                    except Exception:
+                        pass
+                add_spin(body, "Limit rescue:", self.hybrid_rescue_max_chars_var, 1, 5, 1)
+                add_check(body, "Koncowe ramki bierz z YOLO", self.hybrid_yolo_box_backend_var)
+                add_hint(body, "W tej konfiguracji YS dziala jako ratunek: YOLO podmienia znak tylko tam, gdzie OCR sie rozjezdza.")
+            else:
+                add_hint(body, "W tej konfiguracji YS bierze znak bezposrednio z klasy modelu YOLO. Progi modelu sa wspoldzielone z klockiem YB.")
+                add_spin(body, "Confidence YB/YS:", self.yolo_conf_var, 0.0, 1.0, 0.05)
+
+        ttk.Separator(body, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(6, 10))
+        ttk.Label(
+            body,
+            text="Pelne ustawienia YOLO i OCR nadal sa dostepne w sekcji Zaawansowane YOLO i OCR w prawym panelu.",
+            style="PanelMuted.TLabel",
+            wraplength=300,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+
+    def _open_detection_pipeline_builder(self, initial_method: str | None = None):
+        initial_mode = self._normalize_detection_method_key(initial_method or self._get_detection_method_key())
+        existing = getattr(self, "_detection_pipeline_modal", None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                self._set_detection_pipeline_builder_preset(initial_mode)
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                return
+        except Exception:
+            self._close_detection_pipeline_builder()
+
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        win = tk.Toplevel(self.frame)
+        win.title("Budowniczy pipeline detekcji")
+        try:
+            win.geometry("1160x760")
+            win.minsize(980, 680)
+        except Exception:
+            pass
+        try:
+            win.transient(self.frame.winfo_toplevel())
+        except Exception:
+            pass
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        win.configure(bg=panel_bg)
+        win.protocol("WM_DELETE_WINDOW", self._close_detection_pipeline_builder)
+
+        self._detection_pipeline_modal = win
+        self._detection_pipeline_status_var = tk.StringVar(value="")
+        self._detection_pipeline_hint_var = tk.StringVar(value="")
+        self._set_detection_pipeline_builder_blocks(self._get_detection_pipeline_blocks(initial_mode), selected_index=0)
+
+        root = ttk.Frame(win, padding=14)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.columnconfigure(1, weight=0)
+        root.rowconfigure(3, weight=1)
+
+        ttk.Label(root, text="Budowniczy pipeline detekcji", style="PanelHeading.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        intro = ttk.Label(
+            root,
+            text=(
+                "Uloz liniowy lancuch klockow O, YB i YS. System na zywo sprawdzi, "
+                "czy taki pipeline jest wspierany przez obecny backend i do jakiego trybu sie mapuje."
+            ),
+            style="PanelMuted.TLabel",
+            wraplength=960,
+            justify=tk.LEFT,
+        )
+        intro.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 12))
+
+        presets_row = ttk.Frame(root)
+        presets_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(presets_row, text="Gotowe presety:").pack(side=tk.LEFT, padx=(0, 8))
+        for preset_key in ("OCR", "YOLO", "BOTH", "YOLO_OCR"):
+            meta = DETECTION_PIPELINE_PRESET_META.get(preset_key, {})
+            ttk.Button(
+                presets_row,
+                text=str(meta.get("label", preset_key)),
+                command=lambda key=preset_key: self._set_detection_pipeline_builder_preset(key),
+            ).pack(side=tk.LEFT, padx=(0, 6))
+
+        main = ttk.Frame(root)
+        main.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=0)
+        main.rowconfigure(0, weight=1)
+
+        canvas_shell = tk.Frame(main, bg=panel_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
+        canvas_shell.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        canvas_shell.grid_rowconfigure(1, weight=1)
+        canvas_shell.grid_columnconfigure(0, weight=1)
+
+        builder_hint_lbl = tk.Label(
+            canvas_shell,
+            textvariable=self._detection_pipeline_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            bg=panel_bg,
+            fg=palette.get("fg", "#f3f3f3"),
+            bd=0,
+            highlightthickness=0,
+            padx=12,
+            pady=10,
+        )
+        builder_hint_lbl.grid(row=0, column=0, sticky="ew")
+
+        self._detection_pipeline_canvas = tk.Canvas(
+            canvas_shell,
+            height=320,
+            bg=panel_bg,
+            bd=0,
+            highlightthickness=0,
+        )
+        self._detection_pipeline_canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._detection_pipeline_canvas.bind("<Configure>", lambda _event: self._draw_detection_pipeline_builder_canvas(), add="+")
+
+        controls_row = ttk.Frame(canvas_shell)
+        controls_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 12))
+        ttk.Button(controls_row, text="+ O", command=lambda: self._append_detection_pipeline_builder_block("ocr_symbol")).pack(side=tk.LEFT)
+        ttk.Button(controls_row, text="+ YB", command=lambda: self._append_detection_pipeline_builder_block("yolo_box")).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(controls_row, text="+ YS", command=lambda: self._append_detection_pipeline_builder_block("yolo_symbol")).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(controls_row, text="Przesun w lewo", command=lambda: self._move_detection_pipeline_builder_selected_block(-1)).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Button(controls_row, text="Przesun w prawo", command=lambda: self._move_detection_pipeline_builder_selected_block(1)).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(controls_row, text="Usun blok", command=self._remove_detection_pipeline_builder_selected_block).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Button(controls_row, text="Wyczysc", command=self._clear_detection_pipeline_builder).pack(side=tk.LEFT, padx=(6, 0))
+
+        inspector = tk.Frame(main, bg=panel_alt, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
+        inspector.grid(row=0, column=1, sticky="ns")
+        inspector.configure(width=340)
+        inspector.grid_propagate(False)
+        inspector_body = ttk.Frame(inspector, padding=(12, 12))
+        inspector_body.pack(fill=tk.BOTH, expand=True)
+        self._detection_pipeline_property_body = inspector_body
+
+        footer = ttk.Frame(root)
+        footer.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            footer,
+            textvariable=self._detection_pipeline_status_var,
+            style="PanelMuted.TLabel",
+            wraplength=900,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="w")
+
+        footer_buttons = ttk.Frame(footer)
+        footer_buttons.grid(row=0, column=1, sticky="e")
+        ttk.Button(footer_buttons, text="Anuluj", command=self._close_detection_pipeline_builder).pack(side=tk.RIGHT)
+        self._detection_pipeline_confirm_btn = ttk.Button(
+            footer_buttons,
+            text="Zatwierdz pipeline",
+            command=self._commit_detection_pipeline_builder,
+        )
+        self._detection_pipeline_confirm_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+        self._refresh_detection_pipeline_builder()
 
     def _refresh_yolo_model_picker_state(self):
         row = getattr(self, "yolo_model_row", None)
@@ -7292,6 +8012,8 @@ class CharacterAnnotationTab:
             "char_images_dir",
             "char_preview_dir",
             "char_yolo_model",
+            "char_pz3_dataset_source_mode",
+            "char_pz3_existing_dataset",
         )
 
         for key in project_bound_keys:
@@ -7322,6 +8044,14 @@ class CharacterAnnotationTab:
                 pass
             try:
                 self.yolo_model_path_var.set("")
+            except Exception:
+                pass
+            try:
+                self.pz3_dataset_source_mode_var.set("perfect")
+            except Exception:
+                pass
+            try:
+                self.pz3_existing_dataset_var.set("")
             except Exception:
                 pass
 
@@ -7493,6 +8223,14 @@ class CharacterAnnotationTab:
             self.yolo_model_path_var.set("")
         except Exception:
             pass
+        try:
+            self.pz3_dataset_source_mode_var.set("perfect")
+        except Exception:
+            pass
+        try:
+            self.pz3_existing_dataset_var.set("")
+        except Exception:
+            pass
 
         self._pending_z2_source = {}
         self._extract_workflow_step = "entry"
@@ -7613,8 +8351,9 @@ class CharacterAnnotationTab:
         try:
             if hasattr(self, "btn_finish_step3"):
                 self.btn_finish_step3.config(
-                    text="Zakończ krok 3 i wróć do Wizarda",
-                    state=tk.DISABLED
+                    text="Zakoncz krok 3",
+                    state=tk.DISABLED,
+                    width=NAV_BUTTON_WIDTH,
                 )
         except Exception:
             pass
@@ -7812,8 +8551,15 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            if hasattr(self, "extract_nav_divider"):
+                self.extract_nav_divider.configure(bg=palette.get("panel_border", palette.get("border", "#3c3c3c")))
+        except Exception:
+            pass
+
         for frame_name in (
             "btn_to_detect_frame",
+            "btn_to_detect_pulse_frame",
             "btn_run_detection_frame",
             "btn_run_detection_pulse_frame",
             "btn_to_dataset_frame",
@@ -7887,6 +8633,20 @@ class CharacterAnnotationTab:
             except Exception:
                 pass
 
+        try:
+            refresh = getattr(self, "_refresh_pz3_dataset_mode_ui", None)
+            if callable(refresh):
+                refresh()
+        except Exception:
+            pass
+
+        try:
+            refresh = getattr(self, "_refresh_pz3_cards_ui", None)
+            if callable(refresh):
+                refresh()
+        except Exception:
+            pass
+
     def _sync_detect_right_scrollregion(self, event=None):
         if not hasattr(self, "detect_right_canvas") or self.detect_right_canvas is None:
             return
@@ -7915,7 +8675,11 @@ class CharacterAnnotationTab:
 
         try:
             width = max(50, int(self.extract_left_canvas.winfo_width()))
-            self.extract_left_canvas.itemconfigure(self.extract_left_content_window, width=width)
+            inset = max(0, int(getattr(self, "_extract_content_inset", 0)))
+            max_width = max(320, int(getattr(self, "_extract_content_max_width", width)))
+            target_width = max(50, min(max_width, width - (2 * inset)))
+            self.extract_left_canvas.coords(self.extract_left_content_window, inset, 0)
+            self.extract_left_canvas.itemconfigure(self.extract_left_content_window, width=target_width)
         except Exception:
             pass
 
@@ -7977,8 +8741,17 @@ class CharacterAnnotationTab:
             return
 
         try:
-            width = max(50, int(self.cvat_export_canvas.winfo_width()))
+            inset = max(0, int(getattr(self, "_pz3_content_inset", 0)))
+            max_width = max(320, int(getattr(self, "_pz3_content_max_width", 780)))
+            available_width = max(50, int(self.cvat_export_canvas.winfo_width()) - (2 * inset))
+            width = min(available_width, max_width)
+            self.cvat_export_canvas.coords(self.cvat_export_content_window, inset, 0)
             self.cvat_export_canvas.itemconfigure(self.cvat_export_content_window, width=width)
+        except Exception:
+            pass
+
+        try:
+            self.app._refresh_adaptive_wraps(self.cvat_export_content)
         except Exception:
             pass
 
@@ -8665,6 +9438,43 @@ class CharacterAnnotationTab:
         self._apply_gold_export_split_check_style()
         self._update_gold_export_split_labels()
         self._refresh_gold_export_scope_label()
+        refresh = getattr(self, "_refresh_pz3_dataset_mode_ui", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
+
+    def _on_pz3_dataset_source_var_write(self, *_args):
+        try:
+            raw_mode = str(self.pz3_dataset_source_mode_var.get() or "").strip().lower()
+            normalized = raw_mode if raw_mode in {"perfect", "existing"} else "perfect"
+            if raw_mode != normalized:
+                self.pz3_dataset_source_mode_var.set(normalized)
+                return
+            self._save_local_setting("char_pz3_dataset_source_mode", normalized)
+        except Exception:
+            normalized = "perfect"
+
+        refresh = getattr(self, "_refresh_pz3_dataset_mode_ui", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
+
+    def _on_pz3_existing_dataset_var_write(self, *_args):
+        try:
+            self._save_local_setting("char_pz3_existing_dataset", str(self.pz3_existing_dataset_var.get() or "").strip())
+        except Exception:
+            pass
+
+        refresh = getattr(self, "_refresh_pz3_dataset_mode_ui", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
 
     def _refresh_gold_export_filter_labels(self):
         counts = self._count_preview_statuses()
@@ -10154,7 +10964,150 @@ class CharacterAnnotationTab:
             return candidates[0]
         except Exception:
             return None
-        
+
+    def _inspect_pz3_dataset_source_dir(self, dataset_dir: Path | None) -> dict:
+        result = {
+            "ok": False,
+            "path": "",
+            "message": "",
+            "total_pairs": 0,
+            "flat_pairs": 0,
+            "split_pairs": {"train": 0, "val": 0, "test": 0},
+            "validation": None,
+            "validation_message": "",
+            "validation_stats": {},
+        }
+
+        if dataset_dir is None:
+            result["message"] = "Wskaż gotowy dataset YOLO, aby wznowić split bez wracania do PZ2."
+            return result
+
+        try:
+            dataset_dir = Path(dataset_dir)
+        except Exception:
+            result["message"] = "Ścieżka datasetu jest niepoprawna."
+            return result
+
+        result["path"] = str(dataset_dir)
+
+        if not dataset_dir.exists():
+            result["message"] = "Wskazany folder datasetu nie istnieje."
+            return result
+
+        if not dataset_dir.is_dir():
+            result["message"] = "Wskazana ścieżka nie jest katalogiem."
+            return result
+
+        data_yaml = dataset_dir / "data.yaml"
+        images_root = dataset_dir / "images"
+        labels_root = dataset_dir / "labels"
+
+        if not data_yaml.exists():
+            result["message"] = "Brak pliku data.yaml w wskazanym folderze."
+            return result
+
+        if not images_root.exists() or not images_root.is_dir():
+            result["message"] = "Brak katalogu images/ w wskazanym datasiecie."
+            return result
+
+        if not labels_root.exists() or not labels_root.is_dir():
+            result["message"] = "Brak katalogu labels/ w wskazanym datasiecie."
+            return result
+
+        try:
+            validation_ok, validation_msg, validation_stats = validate_yolo_dataset(dataset_dir)
+        except Exception as exc:
+            validation_ok, validation_msg, validation_stats = False, str(exc), {}
+
+        result["validation"] = bool(validation_ok)
+        result["validation_message"] = str(validation_msg or "")
+        result["validation_stats"] = validation_stats if isinstance(validation_stats, dict) else {}
+
+        total_pairs = 0
+        split_pairs = {"train": 0, "val": 0, "test": 0}
+        flat_pairs = 0
+
+        for split_name in ("train", "val", "test", ""):
+            img_dir = images_root / split_name if split_name else images_root
+            lbl_dir = labels_root / split_name if split_name else labels_root
+            if not img_dir.exists() or not img_dir.is_dir() or not lbl_dir.exists() or not lbl_dir.is_dir():
+                continue
+
+            pair_count = 0
+            try:
+                for img_path in img_dir.iterdir():
+                    if not img_path.is_file() or img_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                        continue
+                    lbl_path = lbl_dir / f"{img_path.stem}.txt"
+                    if lbl_path.exists() and lbl_path.is_file():
+                        pair_count += 1
+            except Exception:
+                continue
+
+            if split_name:
+                split_pairs[split_name] = pair_count
+            else:
+                flat_pairs = pair_count
+            total_pairs += pair_count
+
+        result["total_pairs"] = int(total_pairs)
+        result["flat_pairs"] = int(flat_pairs)
+        result["split_pairs"] = {key: int(value) for key, value in split_pairs.items()}
+
+        if total_pairs <= 0:
+            result["message"] = (
+                "Nie znaleziono żadnej pary obraz + etykieta. "
+                "Obsługiwane są układy images/labels oraz images/{train,val,test}."
+            )
+            return result
+
+        flat_note = f"flat={flat_pairs}" if flat_pairs > 0 else ""
+        split_note = ", ".join(f"{name}={split_pairs.get(name, 0)}" for name in ("train", "val", "test"))
+        summary_parts = [part for part in (flat_note, split_note) if part]
+        validation_note = "Walidacja YOLO pełna: OK." if validation_ok else f"Walidacja YOLO pełna: {validation_msg or 'pominięta'}."
+        result["message"] = (
+            f"Dataset gotowy do pracy: {total_pairs} par obraz + etykieta"
+            + (f" ({'; '.join(summary_parts)})" if summary_parts else "")
+            + f" {validation_note}"
+        )
+        result["ok"] = True
+        return result
+
+    def _pick_pz3_existing_dataset_dir(self):
+        initial = str((self.pz3_existing_dataset_var.get() or "").strip())
+        if not initial:
+            preferred = self._get_preferred_step3_training_dataset_dir()
+            if preferred is not None:
+                initial = str(preferred)
+        if not initial:
+            initial = str(getattr(self, "_campaign_datasets_dir", CONFIG.get_datasets_dir("char")))
+
+        selected = filedialog.askdirectory(
+            initialdir=str(initial),
+            title="Wybierz gotowy dataset YOLO znaków"
+        )
+        if selected:
+            self.pz3_existing_dataset_var.set(str(selected))
+            try:
+                self._force_save_all()
+            except Exception:
+                pass
+
+    def _use_preferred_pz3_dataset_dir(self):
+        preferred = self._get_preferred_step3_training_dataset_dir()
+        if preferred is None:
+            messagebox.showwarning(
+                "Brak datasetu",
+                "Nie znaleziono jeszcze gotowego datasetu znaków w katalogach projektu."
+            )
+            return
+
+        self.pz3_existing_dataset_var.set(str(preferred))
+        try:
+            self._force_save_all()
+        except Exception:
+            pass
+
     def _get_project_review_dir(self) -> Path | None:
         """
         Projektowy katalog review dla eksportów CVAT z kroku 3.
@@ -10291,8 +11244,40 @@ class CharacterAnnotationTab:
     def _update_step3_finish_button_state(self):
         btn = getattr(self, "btn_finish_step3", None)
         back_btn = getattr(self, "btn_back_to_wizard_step3", None)
+        btn_frame = getattr(self, "btn_finish_step3_frame", None)
 
         if btn is None:
+            return
+
+        show_finish_button = False
+        try:
+            show_finish_button = bool(
+                getattr(self, "_step3_linear_mode", False)
+                and CAMPAIGN.get_active_project_name()
+            )
+        except Exception:
+            show_finish_button = False
+
+        try:
+            if btn_frame is not None:
+                if show_finish_button:
+                    if not str(btn_frame.winfo_manager()):
+                        btn_frame.pack(side=tk.RIGHT)
+                elif str(btn_frame.winfo_manager()):
+                    btn_frame.pack_forget()
+        except Exception:
+            pass
+
+        if not show_finish_button:
+            try:
+                self._set_button_emphasis("btn_finish_step3_frame", False)
+            except Exception:
+                pass
+            try:
+                if back_btn is not None:
+                    back_btn.config(state="disabled")
+            except Exception:
+                pass
             return
 
         enabled = self._has_any_step3_export_outputs()
@@ -10311,9 +11296,10 @@ class CharacterAnnotationTab:
         try:
             if rework_return_mode:
                 btn.config(
-                    text="Powrót do wizarda",
+                    text="Powrot do wizarda",
                     command=self._return_to_wizard_for_step3_rework,
-                    state="normal"
+                    state="normal",
+                    width=NAV_BUTTON_WIDTH,
                 )
                 self._set_button_emphasis("btn_finish_step3_frame", True)
                 self._pulse_button_emphasis("btn_finish_step3_frame")
@@ -10323,9 +11309,10 @@ class CharacterAnnotationTab:
                 return
 
             btn.config(
-                text="Zakończ krok 3 i wróć do Wizarda",
+                text="Zakoncz krok 3",
                 command=self._finalize_step3_from_existing_outputs,
-                state=("normal" if enabled else "disabled")
+                state=("normal" if enabled else "disabled"),
+                width=NAV_BUTTON_WIDTH,
             )
 
             if enabled:
@@ -10488,6 +11475,11 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            self._update_step3_finish_button_state()
+        except Exception:
+            pass
+
         # wyczyść stan ostatniego testu
         try:
             self.test_progress.config(value=0)
@@ -10515,6 +11507,10 @@ class CharacterAnnotationTab:
     def unlock_detection_subtab(self):
         self._set_button_state("btn_to_detect", True)
         self._set_button_emphasis("btn_to_detect_frame", False)
+        try:
+            self._refresh_extract_workflow_ui()
+        except Exception:
+            pass
 
         if self._step3_linear_mode:
             CAMPAIGN.set_step3_stage1_done(True)
@@ -10858,6 +11854,8 @@ class CharacterAnnotationTab:
                 ("char_gold_export_split", self.gold_export_split_var),
                 ("char_gold_export_train_pct", self.gold_export_train_pct_var),
                 ("char_gold_export_val_pct", self.gold_export_val_pct_var),
+                ("char_pz3_dataset_source_mode", self.pz3_dataset_source_mode_var),
+                ("char_pz3_existing_dataset", self.pz3_existing_dataset_var),
                 ("char_prep_angle", self.prep_angle_var),
                 ("char_prep_height", self.prep_height_var),
                 ("char_prep_padding", self.prep_padding_var),
@@ -11541,27 +12539,16 @@ class CharacterAnnotationTab:
         source_ready = bool(getattr(self, "_extract_last_source_binding_result", {}).get("ok"))
         has_preview = bool(str(self.preview_dir_var.get() or "").strip())
 
-        nav_frame = getattr(self, "extract_step_nav_frame", None)
+        nav_row = getattr(self, "extract_step_nav_row", None)
         prev_btn = getattr(self, "extract_step_back_btn", None)
         next_btn = getattr(self, "extract_step_next_btn", None)
+        main_nav_panel = getattr(self, "extract_main_nav_panel", None)
+        tab_nav_row = getattr(self, "extract_tab_nav_row", None)
+        back_btn = getattr(self, "btn_back_to_wizard_step3", None)
         detect_frame = getattr(self, "btn_to_detect_frame", None)
         detect_btn = getattr(self, "btn_to_detect", None)
-        detect_enabled = False
-        if detect_btn is not None:
-            try:
-                detect_enabled = str(detect_btn.cget("state")) == "normal"
-            except Exception:
-                detect_enabled = False
 
-        if nav_frame is not None:
-            try:
-                if current in {"source", "start"}:
-                    if not str(nav_frame.winfo_manager()):
-                        nav_frame.pack(side=tk.LEFT)
-                elif str(nav_frame.winfo_manager()):
-                    nav_frame.pack_forget()
-            except Exception:
-                pass
+        show_step_nav = current in {"source", "start"}
 
         if prev_btn is not None:
             try:
@@ -11590,13 +12577,52 @@ class CharacterAnnotationTab:
             except Exception:
                 pass
 
+        show_back_nav = False
+        try:
+            show_back_nav = bool(
+                current == "start"
+                and getattr(self, "_step3_linear_mode", False)
+                and CAMPAIGN.get_active_project_name()
+            )
+        except Exception:
+            show_back_nav = False
+
+        if back_btn is not None:
+            try:
+                if show_back_nav:
+                    if not str(back_btn.winfo_manager()):
+                        back_btn.grid(row=0, column=0, sticky="w")
+                elif str(back_btn.winfo_manager()):
+                    back_btn.grid_remove()
+            except Exception:
+                pass
+
         if detect_frame is not None:
             try:
-                if current == "start" or has_preview or detect_enabled:
-                    if not str(detect_frame.winfo_manager()):
-                        detect_frame.pack(side=tk.RIGHT)
-                elif str(detect_frame.winfo_manager()):
-                    detect_frame.pack_forget()
+                if not str(detect_frame.winfo_manager()):
+                    detect_frame.grid(row=0, column=2, sticky="e")
+            except Exception:
+                pass
+
+        show_tab_nav = True
+
+        try:
+            if nav_row is not None and str(nav_row.winfo_manager()):
+                nav_row.pack_forget()
+            if main_nav_panel is not None and str(main_nav_panel.winfo_manager()):
+                main_nav_panel.grid_remove()
+
+            if show_step_nav and nav_row is not None:
+                nav_row.pack(fill=tk.X, pady=(0, 8))
+
+            if show_tab_nav and main_nav_panel is not None:
+                main_nav_panel.grid()
+        except Exception:
+            pass
+
+        if not getattr(self, "_step3_linear_mode", False):
+            try:
+                self._set_button_emphasis("btn_to_detect_frame", False)
             except Exception:
                 pass
 
@@ -12468,43 +13494,130 @@ class CharacterAnnotationTab:
         nav = ttk.Frame(parent)
         nav.pack(fill=tk.X, padx=10, pady=(0, 10))
 
+        self.extract_step_nav_frame = ttk.Frame(nav)
+        self.extract_step_nav_frame.pack(side=tk.LEFT)
+        self.extract_step_nav_frame.pack_forget()
+
+        self.extract_step_back_btn = ttk.Button(
+            self.extract_step_nav_frame,
+            text="â† Wstecz",
+            command=self._go_to_previous_extract_step,
+            state=tk.DISABLED,
+            style="WorkflowCard.TButton",
+        )
+        self.extract_step_back_btn.pack(side=tk.LEFT)
+        self.extract_step_back_btn.config(text="Wstecz", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+        self.extract_step_next_btn = ttk.Button(
+            self.extract_step_nav_frame,
+            text="Dalej â†’",
+            command=self._go_to_next_extract_step,
+            state=tk.DISABLED,
+            style="Accent.TButton",
+        )
+        self.extract_step_next_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.extract_step_next_btn.config(text="Dalej", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+        self.extract_tab_nav_row = ttk.Frame(nav, style="Panel.TFrame")
+        self.extract_tab_nav_row.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+        self.extract_tab_nav_row.pack_forget()
+
         self.btn_back_to_wizard_step3 = ttk.Button(
-            nav,
+            self.extract_tab_nav_row,
             text="← Wstecz",
             command=self._return_to_wizard_for_step3_rework,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            style="WorkflowCard.TButton"
         )
         self.btn_back_to_wizard_step3.pack(side=tk.LEFT)
+        self.btn_back_to_wizard_step3.configure(text="Powrot do wizarda", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
-        self.btn_to_detect_frame = tk.Frame(nav, bd=0, highlightthickness=0)
-        self.btn_to_detect_frame.pack(side=tk.RIGHT)
+        self.btn_to_detect_frame = tk.Frame(self.extract_tab_nav_row, bd=0, highlightthickness=0)
+        self.btn_to_detect_frame.grid(row=0, column=2, sticky="e")
+
+        self.btn_to_detect_pulse_frame = tk.Frame(
+            self.btn_to_detect_frame,
+            bd=0,
+            highlightthickness=0
+        )
+        self.btn_to_detect_pulse_frame.pack(anchor=tk.E)
+
+        self.btn_to_detect_pulse_frame = tk.Frame(
+            self.btn_to_detect_pulse_frame,
+            bd=0,
+            highlightthickness=0
+        )
+        self.btn_to_detect_pulse_frame.pack(anchor=tk.E)
+
+        self.btn_to_detect_pulse_frame = tk.Frame(
+            self.btn_to_detect_pulse_frame,
+            bd=0,
+            highlightthickness=0
+        )
+        self.btn_to_detect_pulse_frame.pack(anchor=tk.E)
+        self.btn_to_detect_pulse_frame = tk.Frame(
+            self.btn_to_detect_pulse_frame,
+            bd=0,
+            highlightthickness=0
+        )
+        self.btn_to_detect_pulse_frame.pack(anchor=tk.E)
 
         self.btn_to_detect = ttk.Button(
-            self.btn_to_detect_frame,
+            self.btn_to_detect_pulse_frame,
             text="Dalej → Wykrywanie Znaków i Analiza",
             command=self.go_to_substep_2,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            style="WorkflowCardPrimary.TButton"
         )
         self.btn_to_detect.pack()
+        self.btn_to_detect.configure(text="Dalej do PZ2", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
     def _build_extraction_tab(self, parent):
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+
+        def ensure_wrap(widget, container, *, padding=28, min_wrap=220):
+            try:
+                self.app.ensure_adaptive_wrap(widget, container=container, padding=padding, min_wrap=min_wrap)
+            except Exception:
+                pass
+
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_rowconfigure(1, weight=0)
         parent.grid_columnconfigure(0, weight=1)
 
-        content_frame = ttk.Frame(parent, style="Panel.TFrame")
-        content_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
-        content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=1)
+        self._extract_content_inset = 14
+        self._extract_content_max_width = 420
+        self._extract_right_panel_width = 132
+        self._extract_left_panel_width = self._extract_content_max_width + (2 * self._extract_content_inset) + 24
 
-        self.extract_left_scroll_host = ttk.Frame(content_frame, style="Panel.TFrame")
+        pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
+        self.extract_main_pane = pane
+
+        left_frame = ttk.Frame(pane, style="Panel.TFrame", width=self._extract_left_panel_width)
+        right_frame = ttk.Frame(pane, style="Panel.TFrame", width=self._extract_right_panel_width)
+        self.extract_main_left_frame = left_frame
+        self.extract_main_right_frame = right_frame
+
+        pane.add(left_frame, weight=0)
+        pane.add(right_frame, weight=1)
+
+        left_frame.grid_rowconfigure(0, weight=1)
+        left_frame.grid_rowconfigure(1, weight=0)
+        left_frame.grid_columnconfigure(0, weight=1)
+
+        right_frame.grid_rowconfigure(0, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
+
+        self.extract_left_scroll_host = ttk.Frame(left_frame, style="Panel.TFrame")
         self.extract_left_scroll_host.grid(row=0, column=0, sticky="nsew")
         self.extract_left_scroll_host.grid_rowconfigure(0, weight=1)
         self.extract_left_scroll_host.grid_columnconfigure(0, weight=1)
 
         self.extract_left_canvas = tk.Canvas(
             self.extract_left_scroll_host,
-            bg="#252526",
+            bg=panel_bg,
             bd=0,
             highlightthickness=0,
         )
@@ -12521,7 +13634,7 @@ class CharacterAnnotationTab:
         self.extract_left_content = ttk.Frame(self.extract_left_canvas, style="Panel.TFrame")
         self.extract_left_content.grid_columnconfigure(0, weight=1)
         self.extract_left_content_window = self.extract_left_canvas.create_window(
-            (0, 0),
+            (self._extract_content_inset, 0),
             window=self.extract_left_content,
             anchor="nw",
         )
@@ -12544,7 +13657,7 @@ class CharacterAnnotationTab:
         )
 
         settings_col = ttk.Frame(self.extract_left_content, style="Panel.TFrame")
-        settings_col.pack(fill=tk.BOTH, expand=True)
+        settings_col.pack(fill=tk.X, expand=True, padx=12, pady=(14, 20))
 
         self.extract_entry_section = ttk.Frame(settings_col, style="Panel.TFrame")
         self.extract_entry_section.pack(fill=tk.X)
@@ -12559,7 +13672,6 @@ class CharacterAnnotationTab:
         self.extract_entry_cards_frame = ttk.Frame(self.extract_entry_section, style="Panel.TFrame")
         self.extract_entry_cards_frame.pack(fill=tk.X)
 
-        palette = getattr(self.app, "palette", {})
         card_bg = palette.get("panel_alt", palette.get("panel", "#252526"))
         card_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
 
@@ -12701,6 +13813,7 @@ class CharacterAnnotationTab:
         )
         self.extract_source_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
         self._set_inline_status_label_state(self.extract_source_intro_lbl, text=self.extract_source_intro_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_source_intro_lbl, self.extract_source_section, padding=28, min_wrap=240)
 
         self.extract_continue_source_frame = ttk.LabelFrame(
             self.extract_source_section,
@@ -12745,6 +13858,7 @@ class CharacterAnnotationTab:
         )
         self.extract_run_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
         self._set_inline_status_label_state(self.extract_run_hint_lbl, text=self.extract_run_hint_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_run_hint_lbl, self.extract_continue_source_frame, padding=28, min_wrap=240)
 
         self.extract_source_fields_frame = ttk.LabelFrame(
             self.extract_source_section,
@@ -12780,6 +13894,7 @@ class CharacterAnnotationTab:
         )
         self.extract_xml_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
         self._set_inline_status_label_state(self.extract_xml_hint_lbl, text=self.extract_xml_hint_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_xml_hint_lbl, self.extract_source_fields_frame, padding=28, min_wrap=240)
 
         ttk.Label(
             self.extract_source_fields_frame,
@@ -12809,6 +13924,7 @@ class CharacterAnnotationTab:
         )
         self.extract_images_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
         self._set_inline_status_label_state(self.extract_images_hint_lbl, text=self.extract_images_hint_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_images_hint_lbl, self.extract_source_fields_frame, padding=28, min_wrap=240)
 
         self.extract_source_fields_hint_lbl = tk.Label(
             self.extract_source_fields_frame,
@@ -12821,6 +13937,7 @@ class CharacterAnnotationTab:
         )
         self.extract_source_fields_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
         self._set_inline_status_label_state(self.extract_source_fields_hint_lbl, text=self.extract_source_fields_hint_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_source_fields_hint_lbl, self.extract_source_fields_frame, padding=28, min_wrap=240)
 
         self.source_binding_status_frame = tk.Frame(
             self.extract_source_fields_frame,
@@ -12856,6 +13973,7 @@ class CharacterAnnotationTab:
             pady=0,
         )
         self.source_binding_status_lbl.pack(fill=tk.X, padx=0, pady=(0, 8))
+        ensure_wrap(self.source_binding_status_lbl, self.source_binding_status_frame, padding=28, min_wrap=240)
 
         self.extract_start_section = ttk.Frame(settings_col, style="Panel.TFrame")
         self.extract_start_section.pack(fill=tk.X, pady=(18, 0))
@@ -12878,6 +13996,7 @@ class CharacterAnnotationTab:
         )
         self.extract_start_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
         self._set_inline_status_label_state(self.extract_start_hint_lbl, text=self.extract_start_hint_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.extract_start_hint_lbl, self.extract_start_section, padding=28, min_wrap=240)
 
         lf_run = ttk.LabelFrame(self.extract_start_section, text=" Start procesu ", padding=12)
         lf_run.pack(fill=tk.X)
@@ -12924,28 +14043,6 @@ class CharacterAnnotationTab:
         self.ext_status.pack(anchor=tk.W)
         self._set_inline_status_label_state(self.ext_status, text="Gotowy", tone="neutral", emphasis=True)
 
-        self.ext_log_host = ttk.Frame(self.extract_left_content, style="Panel.TFrame")
-        self.ext_log = tk.Text(
-            self.ext_log_host,
-            wrap=tk.WORD,
-            font=("Consolas", 10),
-            bg="#161616",
-            fg="#f3f3f3",
-            insertbackground="#f3f3f3",
-            bd=0,
-            relief=tk.FLAT,
-            highlightthickness=0,
-            height=1,
-        )
-        self.ext_log_scrollbar = WebSlimScrollbar(
-            self.ext_log_host,
-            orient=tk.VERTICAL,
-            command=self.ext_log.yview,
-            auto_hide=False,
-        )
-        self.ext_log.configure(yscrollcommand=self.ext_log_scrollbar.set)
-        self.ext_log.web_vbar = self.ext_log_scrollbar
-
         HELP.bind_help(self.extract_entry_section, "t2_sources")
         HELP.bind_help(self.extract_source_section, "t2_sources")
         HELP.bind_help(self.source_binding_status_frame, "t2_sources")
@@ -12964,59 +14061,127 @@ class CharacterAnnotationTab:
         self.frame.after_idle(self._sync_extract_left_canvas_width)
         self.frame.after_idle(self._refresh_extract_workflow_ui)
 
-        nav = ttk.Frame(parent)
-        nav.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 10))
+        self.extract_right_panel = ttk.Frame(right_frame, style="Panel.TFrame")
+        self.extract_right_panel.grid(row=0, column=0, sticky="nsew")
+        self.extract_right_panel.grid_rowconfigure(0, weight=1)
+        self.extract_right_panel.grid_columnconfigure(0, weight=1)
+
+        self.extract_log_section = ttk.Frame(left_frame, style="Panel.TFrame")
+        self.ext_log_host = ttk.Frame(self.extract_log_section, style="Panel.TFrame")
+        self.ext_log_host.pack(fill=tk.BOTH, expand=True)
+
+        self.ext_log = tk.Text(
+            self.ext_log_host,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg="#161616",
+            fg="#f3f3f3",
+            insertbackground="#f3f3f3",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            height=1,
+        )
+        self.ext_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.ext_log_scrollbar = WebSlimScrollbar(
+            self.ext_log_host,
+            orient=tk.VERTICAL,
+            command=self.ext_log.yview,
+            auto_hide=False,
+        )
+        self.ext_log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.ext_log.configure(yscrollcommand=self.ext_log_scrollbar.set)
+        self.ext_log.web_vbar = self.ext_log_scrollbar
+
+        nav_panel = ttk.Frame(left_frame, style="Panel.TFrame")
+        nav_panel.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        ttk.Separator(nav_panel, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
+
+        self.extract_step_nav_row = ttk.Frame(nav_panel, style="Panel.TFrame")
+        self.extract_step_nav_row.pack(fill=tk.X, pady=(0, 8))
+        self.extract_step_nav_row.pack_forget()
+
+        self.extract_step_nav_frame = ttk.Frame(self.extract_step_nav_row, style="Panel.TFrame")
+        self.extract_step_nav_frame.pack(side=tk.LEFT)
+
+        self.extract_step_back_btn = ttk.Button(
+            self.extract_step_nav_frame,
+            text="Wstecz",
+            command=self._go_to_previous_extract_step,
+            state=tk.DISABLED,
+            style="WorkflowCard.TButton",
+        )
+        self.extract_step_back_btn.pack(side=tk.LEFT)
+        self.extract_step_back_btn.config(text="Wstecz", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+        self.extract_step_next_btn = ttk.Button(
+            self.extract_step_nav_frame,
+            text="Dalej",
+            command=self._go_to_next_extract_step,
+            state=tk.DISABLED,
+            style="Accent.TButton",
+        )
+        self.extract_step_next_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.extract_step_next_btn.config(text="Dalej", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+        self.extract_main_nav_panel = ttk.Frame(parent, style="Panel.TFrame")
+        self.extract_main_nav_panel.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.extract_main_nav_panel.grid_remove()
+
+        self.extract_nav_divider = tk.Frame(
+            self.extract_main_nav_panel,
+            height=1,
+            bg=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            bd=0,
+            highlightthickness=0,
+        )
+        self.extract_nav_divider.pack(fill=tk.X, pady=(0, 8))
+
+        self.extract_tab_nav_row = ttk.Frame(self.extract_main_nav_panel, style="Panel.TFrame")
+        self.extract_tab_nav_row.pack(fill=tk.X)
+        self.extract_tab_nav_row.grid_columnconfigure(0, weight=0)
+        self.extract_tab_nav_row.grid_columnconfigure(1, weight=1)
+        self.extract_tab_nav_row.grid_columnconfigure(2, weight=0)
 
         self.btn_back_to_wizard_step3 = ttk.Button(
-            nav,
+            self.extract_tab_nav_row,
             text="← Wstecz",
             command=self._return_to_wizard_for_step3_rework,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            style="WorkflowCard.TButton"
         )
-        self.btn_back_to_wizard_step3.pack(side=tk.LEFT)
-        self.btn_back_to_wizard_step3.pack_forget()
+        self.btn_back_to_wizard_step3.grid(row=0, column=0, sticky="w")
+        self.btn_back_to_wizard_step3.grid_remove()
+        self.btn_back_to_wizard_step3.configure(text="Powrot do wizarda", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
-        self.btn_to_detect_frame = tk.Frame(nav, bd=0, highlightthickness=0)
-        self.btn_to_detect_frame.pack(side=tk.RIGHT)
+        self.btn_to_detect_frame = tk.Frame(self.extract_tab_nav_row, bd=0, highlightthickness=0)
+        self.btn_to_detect_frame.grid(row=0, column=2, sticky="e")
+
+        self.btn_to_detect_pulse_frame = tk.Frame(
+            self.btn_to_detect_frame,
+            bd=0,
+            highlightthickness=0
+        )
+        self.btn_to_detect_pulse_frame.pack(anchor=tk.E)
 
         self.btn_to_detect = ttk.Button(
-            self.btn_to_detect_frame,
+            self.btn_to_detect_pulse_frame,
             text="Dalej → Wykrywanie Znaków i Analiza",
             command=self.go_to_substep_2,
-            state=tk.DISABLED
+            state=tk.DISABLED,
+            style="WorkflowCardPrimary.TButton"
         )
         self.btn_to_detect.pack()
         self.btn_to_detect.config(text="Przejdz do PZ2")
-        self.btn_to_detect_frame.pack_forget()
+        self.btn_to_detect_frame.grid_remove()
         self.btn_to_detect.config(text="Przejdz do PZ2 →")
 
         self.btn_to_detect.config(text="Przejdz do PZ2")
 
-        self.btn_to_detect.config(text="Dalej do PZ2", padding=(8, 2))
+        self.btn_to_detect.config(text="Dalej do PZ2", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
-        self.extract_step_nav_frame = ttk.Frame(nav)
-        self.extract_step_nav_frame.pack(side=tk.LEFT)
-        self.extract_step_nav_frame.pack_forget()
-
-        self.extract_step_back_btn = ttk.Button(
-            self.extract_step_nav_frame,
-            text="← Wstecz",
-            command=self._go_to_previous_extract_step,
-            state=tk.DISABLED,
-        )
-        self.extract_step_back_btn.pack(side=tk.LEFT)
-        self.extract_step_back_btn.config(text="Wstecz")
-
-        self.extract_step_next_btn = ttk.Button(
-            self.extract_step_nav_frame,
-            text="Dalej →",
-            command=self._go_to_next_extract_step,
-            state=tk.DISABLED,
-        )
-        self.extract_step_next_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.extract_step_next_btn.config(text="Dalej")
-
-        self.btn_back_to_wizard_step3.config(text="Powrot do wizarda")
+        self.btn_back_to_wizard_step3.config(text="Powrot do wizarda", width=NAV_BUTTON_WIDTH)
 
     def _run_extraction(self):
         self._force_save_all()
@@ -13058,6 +14223,10 @@ class CharacterAnnotationTab:
         except Exception:
             return messagebox.showerror("Błąd", "Zły plik XML.")
 
+        if hasattr(self.app, "try_begin_exclusive_operation"):
+            ok, busy_message = self.app.try_begin_exclusive_operation("pz1.extract.run", "PZ1: wycinanie tablic")
+            if not ok:
+                return messagebox.showinfo("Proces w toku", busy_message)
         self.btn_extract.config(state=tk.DISABLED)
         self.btn_ext_stop.config(state=tk.NORMAL)
         self.is_processing = True
@@ -13137,6 +14306,8 @@ class CharacterAnnotationTab:
             finally:
                 if session_token == self._project_reset_token:
                     self.is_processing = False
+                    if hasattr(self.app, "end_exclusive_operation"):
+                        self.app.end_exclusive_operation("pz1.extract.run")
                     self.frame.after(0, lambda: self.btn_extract.config(state=tk.NORMAL))
                     self.frame.after(0, lambda: self.btn_ext_stop.config(state=tk.DISABLED))
 
@@ -13681,6 +14852,14 @@ class CharacterAnnotationTab:
         )
         self.detect_workflow_info_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
+        self.detect_pipeline_builder_btn = ttk.Button(
+            set_lf,
+            text="Otworz budowniczy pipeline",
+            command=self._open_detection_pipeline_builder,
+            style="WorkflowCard.TButton",
+        )
+        self.detect_pipeline_builder_btn.pack(anchor=tk.W, pady=(0, 10))
+
         self._refresh_device_options()
 
         self.detection_advanced_toggle_btn = ttk.Button(
@@ -13817,7 +14996,7 @@ class CharacterAnnotationTab:
             except Exception:
                 snapped = self._get_hybrid_rescue_max_chars()
 
-            snapped = max(1, min(5, snapped))
+            snapped = max(0, min(5, snapped))
 
             try:
                 self._hybrid_rescue_scale_updating = True
@@ -13832,7 +15011,7 @@ class CharacterAnnotationTab:
 
         self.hybrid_rescue_scale = ttk.Scale(
             self.hybrid_rescue_slider_row,
-            from_=1,
+            from_=0,
             to=5,
             orient=tk.HORIZONTAL,
             variable=self.hybrid_rescue_max_chars_var,
@@ -13843,7 +15022,7 @@ class CharacterAnnotationTab:
 
         self.hybrid_rescue_value_lbl = tk.Label(
             self.hybrid_rescue_slider_row,
-            width=2,
+            width=4,
             anchor="e",
             bd=0,
             highlightthickness=0,
@@ -13853,7 +15032,8 @@ class CharacterAnnotationTab:
         def _refresh_hybrid_rescue_value(*_args):
             try:
                 current_value = self._get_hybrid_rescue_max_chars()
-                self.hybrid_rescue_value_lbl.configure(text=str(current_value))
+                self.hybrid_rescue_value_lbl.configure(text=("OFF" if current_value <= 0 else str(current_value)))
+                self._refresh_detection_workflow_info_label()
                 if self._get_detection_method_key() == "BOTH" and hasattr(self, "test_status_lbl"):
                     self._set_test_status(
                         self._compose_detection_method_status(self._get_hybrid_detection_status_text()),
@@ -14554,7 +15734,7 @@ class CharacterAnnotationTab:
             style="WorkflowCard.TButton"
         )
         self.btn_back_to_extract.grid(row=0, column=0, sticky="w")
-        self.btn_back_to_extract.configure(text="Wstecz do wycinania tablic", padding=(8, 2))
+        self.btn_back_to_extract.configure(text="Wstecz do PZ1", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         self.btn_run_detection_frame = tk.Frame(self.detect_actions_row, bd=0, highlightthickness=0)
         self.btn_run_detection_frame.grid(row=0, column=0, sticky="w")
@@ -14679,7 +15859,7 @@ class CharacterAnnotationTab:
             style="WorkflowCardPrimary.TButton"
         )
         self.btn_to_dataset.pack()
-        self.btn_to_dataset.configure(text="Dalej do integracji i datasetu", padding=(8, 2))
+        self.btn_to_dataset.configure(text="Dalej do PZ3", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         # =========================
         # HELP BINDS
@@ -15427,7 +16607,13 @@ class CharacterAnnotationTab:
     # Fast test UI lock/unlock
     # =========================================================
 
-    def _lock_ui_for_testing(self):
+    def _lock_ui_for_testing(self, owner: str, label: str) -> bool:
+        if hasattr(self.app, "try_begin_exclusive_operation"):
+            ok, busy_message = self.app.try_begin_exclusive_operation(owner, label)
+            if not ok:
+                messagebox.showinfo("Proces w toku", busy_message)
+                return False
+        self._active_test_operation_owner = owner
         self.is_processing = True
 
         # główne akcje
@@ -15459,11 +16645,16 @@ class CharacterAnnotationTab:
             self._set_button_emphasis("btn_run_detection_frame", False)
         except Exception:
             pass
+        return True
 
     def _unlock_ui_after_testing(self):
         # NAJWAŻNIEJSZE: kończymy stan "processing"
         self.is_processing = False
         self.fast_test_running = False
+        active_owner = str(getattr(self, "_active_test_operation_owner", "") or "").strip()
+        self._active_test_operation_owner = None
+        if active_owner and hasattr(self.app, "end_exclusive_operation"):
+            self.app.end_exclusive_operation(active_owner)
 
         try:
             self.fast_test_stop.clear()
@@ -15545,7 +16736,8 @@ class CharacterAnnotationTab:
         session_token = self._project_reset_token
 
         self.test_log_text.delete(1.0, tk.END)
-        self._lock_ui_for_testing()
+        if not self._lock_ui_for_testing("pz2.fast_test.run", "PZ2: szybki test detekcji"):
+            return
         self._set_test_status(self._compose_detection_method_status("start detekcji"), "info")
         self.test_progress.config(value=0)
         self._set_test_progress_counter(0, len(self.preview_plate_ids), perfect_count=0)
@@ -15895,7 +17087,7 @@ class CharacterAnnotationTab:
     # TAB 3: CVAT + YOLO exports/imports
     # =========================================================
 
-    def _build_cvat_tab(self, parent):
+    def _build_cvat_tab_legacy(self, parent):
         palette = getattr(self.app, "palette", {})
 
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
@@ -16275,12 +17467,1145 @@ class CharacterAnnotationTab:
 
         self.btn_finish_step3 = ttk.Button(
             self.btn_finish_step3_pulse_frame,
-            text="Zakończ krok 3 i wróć do Wizarda",
+            text="Zakoncz krok 3",
             command=self._finalize_step3_from_existing_outputs,
             style="Accent.TButton",
             state=tk.DISABLED
         )
         self.btn_finish_step3.pack()
+        self.btn_finish_step3.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+    def _build_cvat_tab(self, parent):
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        card_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        card_bg = panel_alt
+        card_hover_bg = palette.get("button_hover", panel_alt)
+        card_active_bg = blend_hex_colors(panel_alt, card_hover_bg, 0.42)
+        card_fg = palette.get("fg", "#f3f3f3")
+        card_muted = palette.get("muted", "#c7c7c7")
+
+        def ensure_wrap(widget, container, *, padding=28, min_wrap=180):
+            try:
+                self.app.ensure_adaptive_wrap(widget, container=container, padding=padding, min_wrap=min_wrap)
+            except Exception:
+                pass
+
+        def _get_pz3_card_palette() -> dict:
+            current_palette = getattr(self.app, "palette", {})
+            current_card_bg = current_palette.get("panel_alt", current_palette.get("panel", "#252526"))
+            current_hover_bg = current_palette.get("button_hover", current_card_bg)
+            return {
+                "card_bg": current_card_bg,
+                "card_hover_bg": current_hover_bg,
+                "card_active_bg": blend_hex_colors(current_card_bg, current_hover_bg, 0.42),
+                "card_border": current_palette.get("panel_border", current_palette.get("border", "#3c3c3c")),
+                "card_fg": current_palette.get("fg", "#f3f3f3"),
+                "card_muted": current_palette.get("muted", "#c7c7c7"),
+            }
+
+        def make_pz3_card(parent_frame, badge_text: str, title_text: str, desc_text: str, *, clickable: bool = False):
+            cursor = "hand2" if clickable else "arrow"
+            card = tk.Frame(
+                parent_frame,
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=card_border,
+                highlightcolor=card_border,
+                bg=card_bg,
+                padx=14,
+                pady=12,
+                cursor=cursor,
+            )
+            badge = tk.Label(
+                card,
+                text=badge_text,
+                anchor="w",
+                justify=tk.LEFT,
+                font=("Segoe UI", 9, "bold"),
+                bd=0,
+                highlightthickness=0,
+                bg=card_bg,
+                fg=card_muted,
+                cursor=cursor,
+            )
+            badge.pack(anchor=tk.W, fill=tk.X)
+            title = tk.Label(
+                card,
+                text=title_text,
+                anchor="w",
+                justify=tk.LEFT,
+                font=("Segoe UI Semibold", 10),
+                bd=0,
+                highlightthickness=0,
+                bg=card_bg,
+                fg=card_fg,
+                cursor=cursor,
+            )
+            title.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+            desc = tk.Label(
+                card,
+                text=desc_text,
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=320,
+                bd=0,
+                highlightthickness=0,
+                bg=card_bg,
+                fg=card_muted,
+                cursor=cursor,
+            )
+            desc.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+            self._set_inline_status_label_state(desc, text=desc_text, tone="muted", emphasis=False)
+            ensure_wrap(desc, card, padding=34, min_wrap=220)
+            return {
+                "frame": card,
+                "badge": badge,
+                "title": title,
+                "desc": desc,
+            }
+
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=0)
+        parent.grid_columnconfigure(0, weight=1)
+
+        content_frame = ttk.Frame(parent, style="Panel.TFrame")
+        content_frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=(10, 0))
+        content_frame.grid_rowconfigure(0, weight=1)
+        self._pz3_content_inset = 14
+        self._pz3_content_max_width = 780
+        self._pz3_future_panel_width = 132
+        self._pz3_export_host_width = self._pz3_content_max_width + (2 * self._pz3_content_inset)
+        content_frame.grid_columnconfigure(0, weight=0, minsize=self._pz3_export_host_width)
+        content_frame.grid_columnconfigure(2, weight=0, minsize=self._pz3_future_panel_width)
+
+        export_host = ttk.Frame(content_frame, style="Panel.TFrame", width=self._pz3_export_host_width)
+        export_host.grid(row=0, column=0, sticky="nsw")
+        export_host.grid_propagate(False)
+        export_host.grid_rowconfigure(0, weight=1)
+        export_host.grid_columnconfigure(0, weight=1)
+
+        cvat_divider = ttk.Separator(content_frame, orient=tk.VERTICAL)
+        cvat_divider.grid(row=0, column=1, sticky="ns", padx=0)
+
+        self.pz3_future_panel = ttk.Frame(content_frame, style="Panel.TFrame", width=self._pz3_future_panel_width)
+        self.pz3_future_panel.grid(row=0, column=2, sticky="nsw")
+        self.pz3_future_panel.grid_propagate(False)
+
+        self.cvat_export_canvas = tk.Canvas(
+            export_host,
+            bg=panel_bg,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_export_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.cvat_export_scrollbar = WebSlimScrollbar(
+            export_host,
+            command=self.cvat_export_canvas.yview,
+        )
+        self.cvat_export_scrollbar.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.cvat_export_canvas.configure(yscrollcommand=self.cvat_export_scrollbar.set)
+
+        self.cvat_export_content = ttk.Frame(self.cvat_export_canvas, style="Panel.TFrame")
+        self.cvat_export_content_window = self.cvat_export_canvas.create_window(
+            (self._pz3_content_inset, 0),
+            window=self.cvat_export_content,
+            anchor="nw",
+        )
+        self.cvat_export_content.bind("<Configure>", self._sync_cvat_export_scrollregion, add="+")
+        self.cvat_export_canvas.bind("<Configure>", self._sync_cvat_export_canvas_width, add="+")
+
+        settings_col = ttk.Frame(self.cvat_export_content, style="Panel.TFrame")
+        settings_col.pack(fill=tk.BOTH, expand=True, padx=10, pady=2)
+
+        overview_section = ttk.Frame(settings_col, style="Panel.TFrame")
+        overview_section.pack(fill=tk.X)
+        self.dataset_title_lbl = SectionHeaderLabel(
+            overview_section,
+            self.app,
+            text="PZ3: dataset i integracje",
+        )
+        self.dataset_title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.dataset_intro_lbl = tk.Label(
+            overview_section,
+            text=(
+                "Domyslnie: wybierz perfecty, ustaw split i wyeksportuj dataset. "
+                "CVAT otwierasz tylko wtedy, gdy potrzebujesz recznych poprawek poza aplikacja."
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=900,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.dataset_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.dataset_intro_lbl, text=self.dataset_intro_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.dataset_intro_lbl, overview_section, padding=28, min_wrap=280)
+
+        self.pz3_flow_lbl = tk.Label(
+            overview_section,
+            text="Flow: perfecty -> split -> eksport datasetu",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+        )
+        self._set_inline_status_label_state(self.pz3_flow_lbl, text=self.pz3_flow_lbl.cget("text"), tone="success", emphasis=True)
+
+        overview_cards = ttk.Frame(overview_section, style="Panel.TFrame")
+        overview_cards.pack(fill=tk.X, pady=(2, 8))
+        overview_cards.grid_columnconfigure(0, weight=1)
+        overview_cards.grid_columnconfigure(1, weight=1)
+
+        card_dataset = make_pz3_card(
+            overview_cards,
+            "DATASET • DOMYSLNE",
+            "Budowa datasetu",
+            "Perfecty, split i eksport datasetu treningowego.",
+            clickable=True,
+        )
+        card_dataset["frame"].grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 2))
+
+        card_review = make_pz3_card(
+            overview_cards,
+            "CVAT • OPCJONALNE",
+            "Pokaż integrację CVAT",
+            "Eksport i import recznych poprawek.",
+            clickable=True,
+        )
+        card_review["frame"].grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=(0, 2))
+
+        self.pz3_cvat_section = ttk.Frame(settings_col, style="Panel.TFrame")
+
+        review_section = ttk.Frame(self.pz3_cvat_section, style="Panel.TFrame")
+        review_section.pack(fill=tk.X)
+        self.review_title_lbl = SectionHeaderLabel(
+            review_section,
+            self.app,
+            text="2. CVAT (opcjonalnie)",
+        )
+        self.review_title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.review_intro_lbl = tk.Label(
+            review_section,
+            text="Uzyj tylko wtedy, gdy chcesz poprawiac bledne tablice poza aplikacja.",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=900,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.review_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.review_intro_lbl, text=self.review_intro_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.review_intro_lbl, review_section, padding=28, min_wrap=280)
+
+        review_pack_lf = ttk.LabelFrame(review_section, text=" Paczka do poprawy ", padding=8)
+        review_pack_lf.pack(fill=tk.X)
+
+        self.cvat_option1_title_lbl = tk.Label(
+            review_pack_lf,
+            text="Eksportuj bledne tablice do CVAT",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_option1_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._set_inline_status_label_state(self.cvat_option1_title_lbl, tone="error", emphasis=True)
+
+        self.cvat_option1_desc_lbl = tk.Label(
+            review_pack_lf,
+            text="Eksport do CVAT obejmuje wylacznie tablice oznaczone jako bledne lub wymagajace korekty.",
+            wraplength=820,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_option1_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.cvat_option1_desc_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.cvat_option1_desc_lbl, review_pack_lf, padding=28, min_wrap=260)
+
+        btn_cvat = ttk.Button(
+            review_pack_lf,
+            text="WYGENERUJ PACZKE .ZIP DLA CVAT",
+            command=self._run_cvat_export,
+            style="Accent.TButton",
+        )
+        btn_cvat.pack(fill=tk.X, ipady=4)
+
+        dataset_section = ttk.Frame(settings_col, style="Panel.TFrame")
+        dataset_section.pack(fill=tk.X, pady=(12, 0))
+        self.dataset_export_title_lbl = SectionHeaderLabel(
+            dataset_section,
+            self.app,
+            text="1. Budowa datasetu treningowego",
+        )
+        self.dataset_export_title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.cvat_option2_title_lbl = tk.Label(
+            dataset_section,
+            text="Eksport perfect do uczenia modelu znakow",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_option2_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+        self._set_inline_status_label_state(self.cvat_option2_title_lbl, tone="success", emphasis=True)
+
+        self.cvat_option2_desc_lbl = tk.Label(
+            dataset_section,
+            text=(
+                "Wybierz strategie perfect, opcjonalnie ustaw split i wyeksportuj dataset YOLO "
+                "albo zbior poprawnych znakow do klasyfikacji."
+            ),
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_option2_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.cvat_option2_desc_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.cvat_option2_desc_lbl, dataset_section, padding=28, min_wrap=280)
+
+        dataset_source_lf = ttk.LabelFrame(dataset_section, text=" Zrodlo pracy w PZ3 ", padding=8)
+        dataset_source_lf.pack(fill=tk.X, pady=(0, 8))
+
+        self.pz3_dataset_source_intro_lbl = tk.Label(
+            dataset_source_lf,
+            text=(
+                "Domyslnie PZ3 pracuje na perfectach z aktywnego runu PZ2. "
+                "Mozesz tez wskazac gotowy dataset YOLO i wykonac nowy split bez powtarzania PZ2."
+            ),
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_dataset_source_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+        self._set_inline_status_label_state(self.pz3_dataset_source_intro_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.pz3_dataset_source_intro_lbl, dataset_source_lf, padding=28, min_wrap=280)
+
+        dataset_source_cards = ttk.Frame(dataset_source_lf, style="Panel.TFrame")
+        dataset_source_cards.pack(fill=tk.X)
+        dataset_source_cards.grid_columnconfigure(0, weight=1)
+        dataset_source_cards.grid_columnconfigure(1, weight=1)
+
+        dataset_source_perfect_card = make_pz3_card(
+            dataset_source_cards,
+            "PZ2 | DOMYSLNIE",
+            "Perfecty z aktywnego runu",
+            "Buduj nowy dataset bezposrednio z wyniku PZ2 i aktualnych perfectow.",
+            clickable=True,
+        )
+        dataset_source_perfect_card["frame"].grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        dataset_source_existing_card = make_pz3_card(
+            dataset_source_cards,
+            "DATASET | WZNOWIENIE",
+            "Gotowy dataset YOLO",
+            "Wskaz juz zapisany dataset znakow, aby wykonac nowy split albo wznowic prace po restarcie.",
+            clickable=True,
+        )
+        dataset_source_existing_card["frame"].grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self.pz3_existing_dataset_panel = ttk.Frame(dataset_source_lf, style="Panel.TFrame")
+        self.pz3_existing_dataset_panel.pack(fill=tk.X, pady=(10, 0))
+
+        self.pz3_existing_dataset_title_lbl = tk.Label(
+            self.pz3_existing_dataset_panel,
+            text="Wskaz gotowy dataset YOLO znakow",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_existing_dataset_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._set_inline_status_label_state(self.pz3_existing_dataset_title_lbl, tone="default", emphasis=True)
+
+        self.pz3_existing_dataset_desc_lbl = tk.Label(
+            self.pz3_existing_dataset_panel,
+            text="Mozesz wskazac dataset flat images/labels albo dataset z istniejacymi splitami train / val / test.",
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_existing_dataset_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.pz3_existing_dataset_desc_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.pz3_existing_dataset_desc_lbl, self.pz3_existing_dataset_panel, padding=28, min_wrap=260)
+
+        existing_dataset_row = ttk.Frame(self.pz3_existing_dataset_panel, style="Panel.TFrame")
+        existing_dataset_row.pack(fill=tk.X)
+        existing_dataset_row.columnconfigure(0, weight=1)
+
+        self.pz3_existing_dataset_entry = ttk.Entry(
+            existing_dataset_row,
+            textvariable=self.pz3_existing_dataset_var,
+        )
+        self.pz3_existing_dataset_entry.grid(row=0, column=0, sticky="ew")
+
+        self.pz3_existing_dataset_pick_btn = ttk.Button(
+            existing_dataset_row,
+            text="Wybierz",
+            command=self._pick_pz3_existing_dataset_dir,
+            style="WorkflowCard.TButton",
+        )
+        self.pz3_existing_dataset_pick_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
+
+        self.pz3_existing_dataset_project_btn = ttk.Button(
+            existing_dataset_row,
+            text="Ostatni projektowy",
+            command=self._use_preferred_pz3_dataset_dir,
+            style="WorkflowCard.TButton",
+        )
+        self.pz3_existing_dataset_project_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
+
+        self.pz3_existing_dataset_status_lbl = tk.Label(
+            self.pz3_existing_dataset_panel,
+            text="Wskaz folder z gotowym data.yaml, images/ i labels/.",
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_existing_dataset_status_lbl.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+        self._set_inline_status_label_state(self.pz3_existing_dataset_status_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.pz3_existing_dataset_status_lbl, self.pz3_existing_dataset_panel, padding=28, min_wrap=260)
+
+        dataset_grid = ttk.Frame(dataset_section, style="Panel.TFrame")
+        dataset_grid.pack(fill=tk.X)
+        dataset_grid.grid_columnconfigure(0, weight=1)
+
+        self.gold_export_filters_lf = ttk.LabelFrame(dataset_grid, text=" Zrodla perfect do eksportu ", padding=8)
+        self.gold_export_filters_lf.grid(row=0, column=0, sticky="ew")
+
+        self.gold_export_filter_rows = []
+        for bucket_key, filter_label, filter_var in (
+            ("ocr_exact", PERFECT_STRATEGY_LABELS["ocr_exact"], self.gold_include_ocr_exact_var),
+            ("yolo_exact", PERFECT_STRATEGY_LABELS["yolo_exact"], self.gold_include_yolo_exact_var),
+            ("ocr_yolo_rescue", PERFECT_STRATEGY_LABELS["ocr_yolo_rescue"], self.gold_include_ocr_yolo_rescue_var),
+            ("yolo_box_ocr", PERFECT_STRATEGY_LABELS["yolo_box_ocr"], self.gold_include_yolo_box_ocr_var),
+            ("other_perfect", PERFECT_STRATEGY_LABELS["other_perfect"], self.gold_include_other_perfect_var),
+        ):
+            row = tk.Frame(self.gold_export_filters_lf, bd=0, highlightthickness=0, cursor="hand2")
+            row.pack(anchor=tk.W, fill=tk.X, pady=(0, 3))
+            indicator = tk.Canvas(
+                row,
+                width=16,
+                height=16,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            indicator.pack(side=tk.LEFT, padx=(0, 6))
+            label = tk.Label(
+                row,
+                text=filter_label,
+                anchor="w",
+                justify=tk.LEFT,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            def _toggle_gold_filter(_event=None, target_var=filter_var):
+                target_var.set(not bool(target_var.get()))
+                self._on_gold_export_filter_change()
+
+            for widget in (row, indicator, label):
+                widget.bind("<Button-1>", _toggle_gold_filter)
+
+            row_info = {
+                "kind": "check",
+                "frame": row,
+                "indicator": indicator,
+                "label": label,
+                "bucket_key": bucket_key,
+                "base_label": filter_label,
+                "selected_getter": (lambda target_var=filter_var: bool(target_var.get())),
+                "hovered": False,
+            }
+            for widget in (row, indicator, label):
+                widget.bind("<Enter>", lambda _event, info=row_info: self._set_selection_row_hover(info, True))
+                widget.bind("<Leave>", lambda _event, info=row_info: self._set_selection_row_hover(info, False))
+            self.gold_export_filter_rows.append(row_info)
+        self._apply_gold_export_filter_check_style()
+        self._refresh_gold_export_filter_labels()
+
+        self.gold_export_scope_lbl = tk.Label(
+            self.gold_export_filters_lf,
+            text="Do eksportu: OCR exact, YOLO exact, OCR + YOLO rescue, YOLO boxy + OCR, Manual / inne perfect",
+            justify=tk.LEFT,
+            wraplength=540,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.gold_export_scope_lbl.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+        self._set_inline_status_label_state(
+            self.gold_export_scope_lbl,
+            text=self.gold_export_scope_lbl.cget("text"),
+            tone="muted",
+            emphasis=False,
+        )
+        ensure_wrap(self.gold_export_scope_lbl, self.gold_export_filters_lf, padding=28, min_wrap=220)
+        self._refresh_gold_export_scope_label()
+
+        self.gold_export_split_lf = ttk.LabelFrame(dataset_grid, text=" Split train / val / test ", padding=8)
+        self.gold_export_split_lf.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+        self.gold_export_split_row = tk.Frame(
+            self.gold_export_split_lf,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.gold_export_split_row.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+
+        self.gold_export_split_indicator = tk.Canvas(
+            self.gold_export_split_row,
+            width=16,
+            height=16,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.gold_export_split_indicator.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.gold_export_split_label = tk.Label(
+            self.gold_export_split_row,
+            text="Po eksporcie podziel dane na train / val / test",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.gold_export_split_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def _toggle_gold_export_split(_event=None):
+            try:
+                self.gold_export_split_var.set(not bool(self.gold_export_split_var.get()))
+            except Exception:
+                self.gold_export_split_var.set(False)
+            return "break"
+
+        for widget in (self.gold_export_split_row, self.gold_export_split_indicator, self.gold_export_split_label):
+            widget.bind("<Button-1>", _toggle_gold_export_split)
+
+        self.gold_export_split_row_info = {
+            "kind": "check",
+            "frame": self.gold_export_split_row,
+            "indicator": self.gold_export_split_indicator,
+            "label": self.gold_export_split_label,
+            "selected_getter": lambda: bool(self.gold_export_split_var.get()),
+            "hovered": False,
+        }
+        for widget in (self.gold_export_split_row, self.gold_export_split_indicator, self.gold_export_split_label):
+            widget.bind("<Enter>", lambda _event, info=self.gold_export_split_row_info: self._set_selection_row_hover(info, True))
+            widget.bind("<Leave>", lambda _event, info=self.gold_export_split_row_info: self._set_selection_row_hover(info, False))
+        self._apply_gold_export_split_check_style()
+
+        ratios = ttk.Frame(self.gold_export_split_lf)
+        ratios.pack(fill=tk.X)
+        ratios.columnconfigure(1, weight=1)
+
+        ttk.Label(ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
+        self.gold_export_train_scale = ttk.Scale(
+            ratios,
+            from_=50,
+            to=90,
+            variable=self.gold_export_train_pct_var,
+            orient=tk.HORIZONTAL,
+        )
+        self.gold_export_train_scale.grid(row=0, column=1, sticky=tk.EW, padx=5)
+        self.gold_export_train_pct_lbl = ttk.Label(ratios, text="80%")
+        self.gold_export_train_pct_lbl.grid(row=0, column=2, sticky=tk.W)
+
+        ttk.Label(ratios, text="Val %").grid(row=1, column=0, sticky=tk.W)
+        self.gold_export_val_scale = ttk.Scale(
+            ratios,
+            from_=5,
+            to=45,
+            variable=self.gold_export_val_pct_var,
+            orient=tk.HORIZONTAL,
+        )
+        self.gold_export_val_scale.grid(row=1, column=1, sticky=tk.EW, padx=5)
+        self.gold_export_val_pct_lbl = ttk.Label(ratios, text="10%")
+        self.gold_export_val_pct_lbl.grid(row=1, column=2, sticky=tk.W)
+
+        ttk.Label(ratios, text="Test %").grid(row=2, column=0, sticky=tk.W)
+        self.gold_export_test_hint_lbl = ttk.Label(ratios, text="liczony automatycznie")
+        self.gold_export_test_hint_lbl.grid(row=2, column=1, sticky=tk.W, padx=5)
+        self.gold_export_test_pct_lbl = ttk.Label(ratios, text="Test: 10%")
+        self.gold_export_test_pct_lbl.grid(row=2, column=2, sticky=tk.W)
+        self._update_gold_export_split_labels()
+
+        export_actions = ttk.Frame(dataset_section, style="Panel.TFrame")
+        export_actions.pack(fill=tk.X, pady=(8, 0))
+        export_actions.columnconfigure(0, weight=1)
+        export_actions.columnconfigure(1, weight=1)
+
+        self.btn_yolo_gold_export = ttk.Button(
+            export_actions,
+            text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO",
+            command=self._run_yolo_gold_export,
+            style="Accent.TButton",
+        )
+        self.btn_yolo_gold_export.grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=4)
+
+        self.btn_char_classifier_export = ttk.Button(
+            export_actions,
+            text="WYEKSPORTUJ POPRAWNE ZNAKI DO KLASYFIKACJI",
+            command=self._run_char_classification_export,
+            style="WorkflowCard.TButton",
+        )
+        self.btn_char_classifier_export.grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
+
+        self.pz3_dataset_action_hint_lbl = tk.Label(
+            dataset_section,
+            text="Tor perfect: budowa nowego datasetu na bazie aktywnego runu PZ2.",
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_dataset_action_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+        self._set_inline_status_label_state(self.pz3_dataset_action_hint_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.pz3_dataset_action_hint_lbl, dataset_section, padding=28, min_wrap=260)
+
+        import_section = ttk.Frame(self.pz3_cvat_section, style="Panel.TFrame")
+        import_section.pack(fill=tk.X, pady=(12, 0))
+        self.import_section_title_lbl = SectionHeaderLabel(
+            import_section,
+            self.app,
+            text="3. Import z CVAT",
+        )
+        self.import_section_title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.cvat_import_title_lbl = tk.Label(
+            import_section,
+            text="Wczytaj recznie poprawione znaki",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_import_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+        self._set_inline_status_label_state(self.cvat_import_title_lbl, tone="default", emphasis=True)
+
+        self.cvat_import_desc_lbl = tk.Label(
+            import_section,
+            text=(
+                "Wczytaj XML z poprawkami znakow, aby dolaczyc je do puli treningowej."
+            ),
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.cvat_import_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 8))
+        self._set_inline_status_label_state(self.cvat_import_desc_lbl, tone="muted", emphasis=False)
+        ensure_wrap(self.cvat_import_desc_lbl, import_section, padding=28, min_wrap=280)
+
+        import_lf = ttk.LabelFrame(import_section, text=" Plik XML z poprawkami ", padding=8)
+        import_lf.pack(fill=tk.X)
+
+        row2 = ttk.Frame(import_lf)
+        row2.pack(fill=tk.X)
+        self.import_cvat_xml_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.import_cvat_xml_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row2, text="Wybierz XML", command=lambda: self._pick_file(self.import_cvat_xml_var)).pack(side=tk.RIGHT, padx=(6, 0))
+
+        btn_import = ttk.Button(import_lf, text="Importuj poprawki", command=self._run_cvat_import, style="Accent.TButton")
+        btn_import.pack(fill=tk.X, pady=(10, 0), ipady=4)
+
+        selected_path = str(getattr(self, "_pz3_selected_path", "") or "").strip().lower()
+        self._pz3_selected_path = selected_path if selected_path in ("dataset", "cvat") else ""
+        self._pz3_cvat_expanded = self._pz3_selected_path == "cvat"
+        dataset_card_state = {"hovered": False}
+        pz3_cvat_card_state = {"hovered": False}
+        dataset_source_card_state = {"perfect_hovered": False, "existing_hovered": False}
+
+        def _refresh_pz3_dataset_source_card(card_info, *, selected: bool, hovered: bool, badge_text: str, title_text: str, desc_text: str):
+            card_palette = _get_pz3_card_palette()
+            current_card_bg = card_palette["card_active_bg"] if selected else (card_palette["card_hover_bg"] if hovered else card_palette["card_bg"])
+            border_color = card_palette["card_border"]
+            for widget in (card_info.get("frame"), card_info.get("badge"), card_info.get("title"), card_info.get("desc")):
+                if widget is None:
+                    continue
+                try:
+                    widget.configure(bg=current_card_bg, highlightbackground=border_color, highlightcolor=border_color, cursor="hand2")
+                except Exception:
+                    pass
+            try:
+                card_info["badge"].configure(text=badge_text, fg=(card_palette["card_fg"] if selected else card_palette["card_muted"]))
+            except Exception:
+                pass
+            try:
+                card_info["title"].configure(text=title_text, fg=card_palette["card_fg"])
+            except Exception:
+                pass
+            self._set_inline_status_label_state(
+                card_info["desc"],
+                text=desc_text,
+                tone=("default" if selected else "muted"),
+                emphasis=False,
+            )
+            try:
+                card_info["desc"].configure(fg=(card_palette["card_fg"] if selected else card_palette["card_muted"]))
+            except Exception:
+                pass
+
+        def _set_pz3_dataset_source_mode(mode: str):
+            normalized = str(mode or "").strip().lower()
+            if normalized not in ("perfect", "existing"):
+                normalized = "perfect"
+            if normalized == "existing" and not str(self.pz3_existing_dataset_var.get() or "").strip():
+                preferred = self._get_preferred_step3_training_dataset_dir()
+                if preferred is not None:
+                    try:
+                        self.pz3_existing_dataset_var.set(str(preferred))
+                    except Exception:
+                        pass
+            current_mode = str(self.pz3_dataset_source_mode_var.get() or "").strip().lower()
+            if current_mode != normalized:
+                try:
+                    self.pz3_dataset_source_mode_var.set(normalized)
+                except Exception:
+                    pass
+            else:
+                _refresh_pz3_dataset_mode_ui()
+            return "break"
+
+        def _refresh_pz3_dataset_mode_ui():
+            mode = str(self.pz3_dataset_source_mode_var.get() or "").strip().lower()
+            if mode not in ("perfect", "existing"):
+                mode = "perfect"
+
+            perfect_selected = mode == "perfect"
+            existing_selected = mode == "existing"
+
+            _refresh_pz3_dataset_source_card(
+                dataset_source_perfect_card,
+                selected=perfect_selected,
+                hovered=bool(dataset_source_card_state.get("perfect_hovered", False)),
+                badge_text=("PZ2 | WYBRANE" if perfect_selected else "PZ2 | DOMYSLNIE"),
+                title_text="Perfecty z aktywnego runu",
+                desc_text="Buduj nowy dataset bezposrednio z wyniku PZ2 i aktualnych perfectow.",
+            )
+            _refresh_pz3_dataset_source_card(
+                dataset_source_existing_card,
+                selected=existing_selected,
+                hovered=bool(dataset_source_card_state.get("existing_hovered", False)),
+                badge_text=("DATASET | WYBRANE" if existing_selected else "DATASET | WZNOWIENIE"),
+                title_text="Gotowy dataset YOLO",
+                desc_text="Wskaz juz zapisany dataset znakow, aby wykonac nowy split albo wznowic prace po restarcie.",
+            )
+
+            if perfect_selected:
+                if str(self.pz3_existing_dataset_panel.winfo_manager()):
+                    self.pz3_existing_dataset_panel.pack_forget()
+                try:
+                    self.cvat_option2_title_lbl.configure(text="Eksport perfect do uczenia modelu znakow")
+                except Exception:
+                    pass
+                self._set_inline_status_label_state(self.cvat_option2_title_lbl, tone="success", emphasis=True)
+                perfect_desc = (
+                    "Wybierz strategie perfect, opcjonalnie ustaw split i wyeksportuj dataset YOLO "
+                    "albo zbior poprawnych znakow do klasyfikacji."
+                )
+                self._set_inline_status_label_state(self.cvat_option2_desc_lbl, text=perfect_desc, tone="muted", emphasis=False)
+                try:
+                    self.gold_export_filters_lf.grid()
+                except Exception:
+                    pass
+                try:
+                    self.gold_export_split_lf.configure(text=" Split train / val / test ")
+                except Exception:
+                    pass
+                try:
+                    self.gold_export_split_label.configure(text="Po eksporcie podziel dane na train / val / test")
+                except Exception:
+                    pass
+                try:
+                    self.btn_yolo_gold_export.configure(
+                        text="WYEKSPORTUJ PERFEKCYJNE TABLICE DO YOLO",
+                        command=self._run_yolo_gold_export,
+                        style="Accent.TButton",
+                        state=tk.NORMAL,
+                    )
+                    self.btn_yolo_gold_export.grid_configure(column=0, columnspan=1, padx=(0, 4))
+                except Exception:
+                    pass
+                try:
+                    if not str(self.btn_char_classifier_export.winfo_manager()):
+                        self.btn_char_classifier_export.grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
+                except Exception:
+                    pass
+                self._set_inline_status_label_state(
+                    self.pz3_dataset_action_hint_lbl,
+                    text="Tor perfect: budowa nowego datasetu na bazie aktywnego runu PZ2.",
+                    tone="muted",
+                    emphasis=False,
+                )
+                return
+
+            if not str(self.pz3_existing_dataset_panel.winfo_manager()):
+                self.pz3_existing_dataset_panel.pack(fill=tk.X, pady=(10, 0))
+
+            source_dir_raw = str(self.pz3_existing_dataset_var.get() or "").strip()
+            source_info = self._inspect_pz3_dataset_source_dir(Path(source_dir_raw) if source_dir_raw else None)
+            status_tone = "success" if source_info.get("ok") else ("warning" if source_dir_raw else "muted")
+            split_ready = bool(self.gold_export_split_var.get())
+
+            try:
+                self.cvat_option2_title_lbl.configure(text="Wznow split na gotowym datasiecie YOLO")
+            except Exception:
+                pass
+            self._set_inline_status_label_state(self.cvat_option2_title_lbl, tone="default", emphasis=True)
+            existing_desc = (
+                "Wskaz gotowy dataset znakow z dysku, aby wykonac nowy split bez ponownego eksportu perfectow z PZ2."
+            )
+            self._set_inline_status_label_state(self.cvat_option2_desc_lbl, text=existing_desc, tone="muted", emphasis=False)
+            self._set_inline_status_label_state(
+                self.pz3_existing_dataset_status_lbl,
+                text=str(source_info.get("message") or ""),
+                tone=status_tone,
+                emphasis=False,
+            )
+            try:
+                if str(self.gold_export_filters_lf.winfo_manager()):
+                    self.gold_export_filters_lf.grid_remove()
+            except Exception:
+                pass
+            try:
+                self.gold_export_split_lf.configure(text=" Nowy split train / val / test ")
+            except Exception:
+                pass
+            try:
+                self.gold_export_split_label.configure(text="Utworz nowy split train / val / test dla wskazanego datasetu")
+            except Exception:
+                pass
+            try:
+                self.btn_char_classifier_export.grid_remove()
+            except Exception:
+                pass
+            try:
+                self.btn_yolo_gold_export.configure(
+                    text="WYKONAJ NOWY SPLIT WSKAZANEGO DATASETU",
+                    command=self._run_pz3_existing_dataset_split,
+                    style="Accent.TButton",
+                    state=(tk.NORMAL if source_info.get("ok") and split_ready else tk.DISABLED),
+                )
+                self.btn_yolo_gold_export.grid_configure(column=0, columnspan=2, padx=(0, 0))
+            except Exception:
+                pass
+            action_hint = "Tor dataset: wznowienie pracy na zapisanym folderze, bez ponownego eksportu perfectow z PZ2."
+            action_tone = status_tone if source_info.get("ok") else "muted"
+            if source_info.get("ok") and not split_ready:
+                action_hint = "Wlacz split train / val / test, aby utworzyc nowy podzial wskazanego datasetu."
+                action_tone = "warning"
+            self._set_inline_status_label_state(
+                self.pz3_dataset_action_hint_lbl,
+                text=action_hint,
+                tone=action_tone,
+                emphasis=False,
+            )
+
+        self._refresh_pz3_dataset_mode_ui = _refresh_pz3_dataset_mode_ui
+
+        def _refresh_pz3_cvat_card():
+            expanded = bool(getattr(self, "_pz3_cvat_expanded", False))
+            hovered = bool(pz3_cvat_card_state.get("hovered", False))
+            card_palette = _get_pz3_card_palette()
+            current_card_bg = card_palette["card_active_bg"] if expanded else (card_palette["card_hover_bg"] if hovered else card_palette["card_bg"])
+            border_color = card_palette["card_border"]
+            desc_text = "Eksport i import recznych poprawek."
+            badge_text = "CVAT • OTWARTE" if expanded else "CVAT • OPCJONALNE"
+            title_text = "Integracja CVAT"
+            badge_text = "CVAT | WYBRANE" if expanded else "CVAT | START"
+            for widget in (card_review.get("frame"), card_review.get("badge"), card_review.get("title"), card_review.get("desc")):
+                if widget is None:
+                    continue
+                try:
+                    widget.configure(bg=current_card_bg, highlightbackground=border_color, highlightcolor=border_color, cursor="hand2")
+                except Exception:
+                    pass
+            try:
+                card_review["badge"].configure(text=badge_text, fg=(card_palette["card_fg"] if expanded else card_palette["card_muted"]))
+            except Exception:
+                pass
+            try:
+                card_review["title"].configure(text=title_text, fg=card_palette["card_fg"])
+            except Exception:
+                pass
+            self._set_inline_status_label_state(card_review["desc"], text=desc_text, tone=("default" if expanded else "muted"), emphasis=False)
+            try:
+                card_review["desc"].configure(fg=(card_palette["card_fg"] if expanded else card_palette["card_muted"]))
+            except Exception:
+                pass
+
+        def _refresh_pz3_dataset_card():
+            selected = str(getattr(self, "_pz3_selected_path", "") or "").strip().lower() == "dataset"
+            hovered = bool(dataset_card_state.get("hovered", False))
+            card_palette = _get_pz3_card_palette()
+            current_card_bg = card_palette["card_active_bg"] if selected else (card_palette["card_hover_bg"] if hovered else card_palette["card_bg"])
+            border_color = card_palette["card_border"]
+
+            for widget in (card_dataset.get("frame"), card_dataset.get("badge"), card_dataset.get("title"), card_dataset.get("desc")):
+                if widget is None:
+                    continue
+                try:
+                    widget.configure(bg=current_card_bg, highlightbackground=border_color, highlightcolor=border_color, cursor="hand2")
+                except Exception:
+                    pass
+            try:
+                card_dataset["badge"].configure(text=("DATASET | WYBRANE" if selected else "DATASET | START"), fg=(card_palette["card_fg"] if selected else card_palette["card_muted"]))
+            except Exception:
+                pass
+            try:
+                card_dataset["title"].configure(text="Budowa datasetu", fg=card_palette["card_fg"])
+            except Exception:
+                pass
+            self._set_inline_status_label_state(
+                card_dataset["desc"],
+                text="Perfecty, split i eksport datasetu treningowego.",
+                tone=("default" if selected else "muted"),
+                emphasis=False,
+            )
+            try:
+                card_dataset["desc"].configure(fg=(card_palette["card_fg"] if selected else card_palette["card_muted"]))
+            except Exception:
+                pass
+
+        def _refresh_pz3_cvat_section():
+            selected = str(getattr(self, "_pz3_selected_path", "") or "").strip().lower()
+            self._pz3_cvat_expanded = selected == "cvat"
+            try:
+                if selected == "dataset":
+                    if str(self.pz3_cvat_section.winfo_manager()):
+                        self.pz3_cvat_section.pack_forget()
+                    if not str(dataset_section.winfo_manager()):
+                        dataset_section.pack(fill=tk.X, pady=(12, 0), after=overview_section)
+                elif selected == "cvat":
+                    if str(dataset_section.winfo_manager()):
+                        dataset_section.pack_forget()
+                    if not str(self.pz3_cvat_section.winfo_manager()):
+                        self.pz3_cvat_section.pack(fill=tk.X, pady=(12, 0), after=overview_section)
+                else:
+                    if str(dataset_section.winfo_manager()):
+                        dataset_section.pack_forget()
+                    if str(self.pz3_cvat_section.winfo_manager()):
+                        self.pz3_cvat_section.pack_forget()
+            except Exception:
+                pass
+            _refresh_pz3_dataset_card()
+            _refresh_pz3_cvat_card()
+
+        self._refresh_pz3_cards_ui = _refresh_pz3_cvat_section
+
+        def _toggle_pz3_cvat_section(_event=None):
+            current = str(getattr(self, "_pz3_selected_path", "") or "").strip().lower()
+            self._pz3_selected_path = "" if current == "cvat" else "cvat"
+            _refresh_pz3_cvat_section()
+            return "break"
+
+        def _toggle_pz3_dataset_section(_event=None):
+            current = str(getattr(self, "_pz3_selected_path", "") or "").strip().lower()
+            self._pz3_selected_path = "" if current == "dataset" else "dataset"
+            _refresh_pz3_cvat_section()
+            return "break"
+
+        def _set_pz3_dataset_hover(hovered: bool):
+            dataset_card_state["hovered"] = bool(hovered)
+            _refresh_pz3_cvat_section()
+
+        def _set_pz3_cvat_hover(hovered: bool):
+            pz3_cvat_card_state["hovered"] = bool(hovered)
+            _refresh_pz3_cvat_section()
+
+        for widget in (card_dataset.get("frame"), card_dataset.get("badge"), card_dataset.get("title"), card_dataset.get("desc")):
+            if widget is None:
+                continue
+            try:
+                widget.bind("<Button-1>", _toggle_pz3_dataset_section)
+                widget.bind("<Enter>", lambda _event: _set_pz3_dataset_hover(True))
+                widget.bind("<Leave>", lambda _event: _set_pz3_dataset_hover(False))
+            except Exception:
+                pass
+
+        for widget in (card_review.get("frame"), card_review.get("badge"), card_review.get("title"), card_review.get("desc")):
+            if widget is None:
+                continue
+            try:
+                widget.bind("<Button-1>", _toggle_pz3_cvat_section)
+                widget.bind("<Enter>", lambda _event: _set_pz3_cvat_hover(True))
+                widget.bind("<Leave>", lambda _event: _set_pz3_cvat_hover(False))
+            except Exception:
+                pass
+
+        for widget in (
+            dataset_source_perfect_card.get("frame"),
+            dataset_source_perfect_card.get("badge"),
+            dataset_source_perfect_card.get("title"),
+            dataset_source_perfect_card.get("desc"),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.bind("<Button-1>", lambda _event: _set_pz3_dataset_source_mode("perfect"))
+                widget.bind("<Enter>", lambda _event: (dataset_source_card_state.__setitem__("perfect_hovered", True), _refresh_pz3_dataset_mode_ui()))
+                widget.bind("<Leave>", lambda _event: (dataset_source_card_state.__setitem__("perfect_hovered", False), _refresh_pz3_dataset_mode_ui()))
+            except Exception:
+                pass
+
+        for widget in (
+            dataset_source_existing_card.get("frame"),
+            dataset_source_existing_card.get("badge"),
+            dataset_source_existing_card.get("title"),
+            dataset_source_existing_card.get("desc"),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.bind("<Button-1>", lambda _event: _set_pz3_dataset_source_mode("existing"))
+                widget.bind("<Enter>", lambda _event: (dataset_source_card_state.__setitem__("existing_hovered", True), _refresh_pz3_dataset_mode_ui()))
+                widget.bind("<Leave>", lambda _event: (dataset_source_card_state.__setitem__("existing_hovered", False), _refresh_pz3_dataset_mode_ui()))
+            except Exception:
+                pass
+
+        _refresh_pz3_dataset_mode_ui()
+        _refresh_pz3_cvat_section()
+
+        status_section = ttk.Frame(settings_col, style="Panel.TFrame")
+        self.pz3_status_section = status_section
+        self.dataset_status_title_lbl = SectionHeaderLabel(
+            status_section,
+            self.app,
+            text="4. Status eksportu i importu",
+        )
+        self.dataset_status_title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        self.dataset_status_intro_lbl = tk.Label(
+            status_section,
+            text="Tutaj widzisz ostatni przebieg eksportu i importu bez przelaczania sie miedzy oddzielnymi panelami.",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=900,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.dataset_status_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
+        self._set_inline_status_label_state(self.dataset_status_intro_lbl, text=self.dataset_status_intro_lbl.cget("text"), tone="muted", emphasis=False)
+        ensure_wrap(self.dataset_status_intro_lbl, status_section, padding=28, min_wrap=280)
+
+        status_grid = ttk.Frame(status_section, style="Panel.TFrame")
+        status_grid.pack(fill=tk.X)
+        status_grid.columnconfigure(0, weight=1)
+
+        export_status_lf = ttk.LabelFrame(status_grid, text=" Status eksportu ", padding=6)
+        export_status_lf.grid(row=0, column=0, sticky="ew")
+        self.export_console = tk.Text(
+            export_status_lf,
+            height=6,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg=palette.get("console_bg", "#252526"),
+            fg=palette.get("console_fg", "#f3f3f3"),
+            insertbackground=palette.get("console_fg", "#f3f3f3"),
+            bd=0,
+        )
+        self.export_console.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.export_console.insert(tk.END, "Oczekuje na akcje eksportu...")
+        self.export_console.config(state=tk.DISABLED)
+
+        import_console_lf = ttk.LabelFrame(status_grid, text=" Status importu ", padding=6)
+        import_console_lf.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.import_console = tk.Text(
+            import_console_lf,
+            height=6,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg=palette.get("console_bg", "#252526"),
+            fg=palette.get("console_fg", "#f3f3f3"),
+            insertbackground=palette.get("console_fg", "#f3f3f3"),
+            bd=0,
+        )
+        self.import_console.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.import_console.insert(tk.END, "Oczekuje na plik XML z poprawkami...")
+        self.import_console.config(state=tk.DISABLED)
+
+        try:
+            self.pz3_status_section.pack_forget()
+        except Exception:
+            pass
+
+        HELP.bind_help(btn_cvat, "btn_export_cvat")
+        HELP.bind_help(self.btn_yolo_gold_export, "btn_export_yolo")
+        HELP.bind_help(self.btn_char_classifier_export, "btn_export_yolo")
+        HELP.bind_help(self.gold_export_filters_lf, "btn_export_yolo")
+        HELP.bind_help(self.gold_export_split_lf, "btn_export_yolo")
+        HELP.bind_help(btn_import, "btn_import_cvat")
+
+        self._bind_scroll_canvas_children(
+            self.cvat_export_content,
+            self.cvat_export_canvas,
+            self._cvat_export_canvas_overflows,
+        )
+        self.frame.after_idle(self._sync_cvat_export_scrollregion)
+        self.frame.after_idle(self._sync_cvat_export_canvas_width)
+        self.frame.bind_all("<MouseWheel>", self._on_cvat_export_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_cvat_export_global_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_cvat_export_global_mousewheel, add="+")
+
+        nav = ttk.Frame(parent)
+        nav.grid(row=1, column=0, sticky="ew", padx=12, pady=(8, 10))
+
+        self.btn_back_to_detect = ttk.Button(
+            nav,
+            text="Wstecz do PZ2",
+            command=self.back_to_substep_2,
+            style="WorkflowCard.TButton",
+        )
+        self.btn_back_to_detect.pack(side=tk.LEFT)
+        self.btn_back_to_detect.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
+
+        self.btn_finish_step3_frame = tk.Frame(nav, bd=0, highlightthickness=0)
+        self.btn_finish_step3_frame.pack(side=tk.RIGHT)
+
+        self.btn_finish_step3_pulse_frame = tk.Frame(
+            self.btn_finish_step3_frame,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.btn_finish_step3_pulse_frame.pack(anchor=tk.E)
+
+        self.btn_finish_step3 = ttk.Button(
+            self.btn_finish_step3_pulse_frame,
+            text="Zakoncz krok 3",
+            command=self._finalize_step3_from_existing_outputs,
+            style="Accent.TButton",
+            state=tk.DISABLED,
+        )
+        self.btn_finish_step3.pack()
+        self.btn_finish_step3.configure(text="Zakoncz krok 3", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+        try:
+            self._update_step3_finish_button_state()
+        except Exception:
+            pass
 
     def _set_console_text(self, console_widget, text):
         console_widget.config(state=tk.NORMAL)
@@ -16723,6 +19048,92 @@ class CharacterAnnotationTab:
                 pass
         except Exception as e:
             self._set_console_text(self.export_console, f"❌ BŁĄD EKSPORTU YOLO:\n{e}")
+
+    def _run_pz3_existing_dataset_split(self):
+        src_raw = str(self.pz3_existing_dataset_var.get() or "").strip()
+        source_dir = Path(src_raw) if src_raw else None
+        source_info = self._inspect_pz3_dataset_source_dir(source_dir)
+
+        if not source_info.get("ok"):
+            self._set_console_text(
+                self.export_console,
+                "âťŚ Nie mozna wykonac nowego splitu.\n\n"
+                + str(source_info.get("message") or "Wskaz poprawny dataset YOLO znakow.")
+            )
+            return
+
+        split_enabled = bool(self.gold_export_split_var.get())
+        train_pct, val_pct, test_pct = self._get_gold_export_split_percentages()
+        if not split_enabled:
+            self._set_console_text(
+                self.export_console,
+                "âťŚ Dla wskazanego datasetu wlacz split train / val / test, aby utworzyc nowy podzial."
+            )
+            return
+
+        if source_dir is None:
+            self._set_console_text(
+                self.export_console,
+                "âťŚ Brak zrodla datasetu do podzialu."
+            )
+            return
+
+        ratios = {
+            "train": train_pct / 100.0,
+            "val": val_pct / 100.0,
+            "test": test_pct / 100.0,
+        }
+
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_datasets_dir = Path(getattr(self, "_campaign_datasets_dir", str(CONFIG.get_datasets_dir("char"))))
+        base_datasets_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = base_datasets_dir / f"{source_dir.name}_Split_{timestamp}"
+
+        self._set_console_text(
+            self.export_console,
+            "âŚ› Przygotowuje nowy split datasetu...\n"
+            f"Zrodlo: {source_dir}\n"
+            f"Rozklad: train={train_pct:.0f}, val={val_pct:.0f}, test={test_pct:.0f}\n"
+            f"Par obraz + etykieta: {int(source_info.get('total_pairs', 0) or 0)}"
+        )
+
+        try:
+            ok, msg, stats = self._pz3_dataset_splitter.split_dataset(source_dir, out_dir, ratios)
+            if not ok:
+                self._set_console_text(
+                    self.export_console,
+                    f"âťŚ Nowy split nie powiodl sie:\n{msg}"
+                )
+                return
+
+            self._set_console_text(
+                self.export_console,
+                f"âś… Nowy split datasetu gotowy: {out_dir}\n"
+                f"Zrodlo: {source_dir}\n"
+                f"Train: {int((stats or {}).get('train', 0) or 0)}\n"
+                f"Val: {int((stats or {}).get('val', 0) or 0)}\n"
+                f"Test: {int((stats or {}).get('test', 0) or 0)}\n"
+                f"Razem: {int((stats or {}).get('total', 0) or 0)}"
+            )
+            try:
+                self._update_step3_finish_button_state()
+                self._set_button_emphasis("btn_finish_step3_frame", True)
+                self._pulse_button_emphasis("btn_finish_step3_frame")
+            except Exception:
+                pass
+            try:
+                self.app.update_status(
+                    "Nowy split datasetu znakow zostal zapisany w katalogu projektu.",
+                    "info"
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            self._set_console_text(
+                self.export_console,
+                f"âťŚ Blad nowego splitu datasetu:\n{exc}"
+            )
 
     def _build_gold_export_plate_unique_key(self, data: dict) -> str:
         if not isinstance(data, dict):
@@ -17167,7 +19578,8 @@ class CharacterAnnotationTab:
         ranking_state = {"error": ""}
 
         self.test_log_text.delete(1.0, tk.END)
-        self._lock_ui_for_testing()
+        if not self._lock_ui_for_testing("pz2.ocr_ranking.run", "PZ2: ranking presetow OCR"):
+            return
         self._set_ocr_ranking_modal_running(True)
         self._set_ocr_ranking_modal_source(
             self._compose_ocr_ranking_source_text(source_desc="", total_imgs=total_imgs, ranking_mode=ranking_mode, preset_count=total_presets),

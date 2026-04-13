@@ -200,6 +200,11 @@ class YOLOPoseTrainer:
             batch_state = {"epoch": -1, "batch": 0}
 
             def on_train_epoch_start(trainer):
+                if self.should_stop:
+                    raise InterruptedError("Zatrzymano")
+                if self.should_pause:
+                    self._save_checkpoint(trainer)
+                    raise InterruptedError("Wstrzymano")
                 batch_state["epoch"] = int(getattr(trainer, "epoch", -1))
                 batch_state["batch"] = 0
                 total_batches = max(1, int(len(getattr(trainer, "train_loader", []) or [])))
@@ -221,6 +226,12 @@ class YOLOPoseTrainer:
                         total_batches,
                         (float(batch_state["batch"]) / float(total_batches)) * 100.0,
                     )
+
+                if self.should_stop:
+                    raise InterruptedError("Zatrzymano")
+                if self.should_pause:
+                    self._save_checkpoint(trainer)
+                    raise InterruptedError("Wstrzymano")
 
             def on_train_epoch_end(trainer):
                 if self.should_stop:
@@ -405,6 +416,12 @@ class YOLOPoseTrainer:
     def stop_training(self):
         if self.is_training:
             self.should_stop = True
+            try:
+                trainer = getattr(self.model, "trainer", None)
+                if trainer is not None:
+                    setattr(trainer, "stop", True)
+            except Exception:
+                pass
             logger.info("Stop...")
 
     def resume_training(self, run_id: str) -> Optional[str]:

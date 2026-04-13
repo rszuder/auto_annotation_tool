@@ -19,6 +19,8 @@ class ModelRankingEntry:
     model_name: str
     model_path: str
     date_evaluated: str
+    reference_name: str = ""
+    reference_path: str = ""
     
     task_type: str = "Tablice (Pose)" 
     
@@ -103,12 +105,17 @@ class ModelRanking:
                   model_name: str,
                   model_path: str,
                   comparison_stats: Dict,
-                  task_type: str = "Tablice (Pose)") -> ModelRankingEntry:
+                  task_type: str = "Tablice (Pose)",
+                  reference_name: str = "",
+                  reference_path: str = "",
+                  save: bool = True) -> ModelRankingEntry:
         """Dodaje wpis do bazy, obsługując kategorie zadań."""
         entry = ModelRankingEntry(
             model_name=model_name,
             model_path=model_path,
             date_evaluated=datetime.now().isoformat(),
+            reference_name=str(reference_name or "").strip(),
+            reference_path=str(reference_path or "").strip(),
             task_type=task_type,  # ZAPISUJE ZADANIE
             total_images=comparison_stats.get("total_images", 0),
             total_auto_plates=comparison_stats.get("total_auto_plates", 0),
@@ -125,9 +132,13 @@ class ModelRanking:
         
         self.entries.append(entry)
         self._sort()
-        self._save()
+        if save:
+            self._save()
         
         return entry
+
+    def flush(self):
+        self._save()
     
     def get_ranking(self) -> List[ModelRankingEntry]:
         return self.entries

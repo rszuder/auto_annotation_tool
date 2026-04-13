@@ -9,6 +9,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog
 from pathlib import Path
 from datetime import datetime
+import threading
 import time
 import faulthandler
 
@@ -183,6 +184,12 @@ class AutoAnnotationApp:
         self._help_panel_message_prefix = "HELP:"
         self._status_full_text = ""
         self._global_terminal_lines = ["[APP] Terminal globalny gotowy. Tutaj trafiaja logi procesow z Z2, PZ2 i Z4."]
+        self._global_terminal_entries = [
+            {
+                "text": "[APP] Terminal globalny gotowy. Tutaj trafiaja logi procesow z Z2, PZ2 i Z4.",
+                "tag": "terminal_info",
+            }
+        ]
         self._global_terminal_max_lines = 1600
         self._global_terminal_window = None
         self._global_terminal_shell = None
@@ -193,6 +200,7 @@ class AutoAnnotationApp:
         self._global_terminal_body = None
         self._global_terminal_text = None
         self._global_terminal_scrollbar = None
+        self._global_terminal_hscrollbar = None
         self._global_terminal_toggle_btn = None
         self._global_terminal_visible = False
         self._global_terminal_geometry_initialized = False
@@ -222,6 +230,9 @@ class AutoAnnotationApp:
         self._show_startup_overlay()
         self._set_startup_progress(8, "Uruchamianie interfejsu...")
         self.is_processing = False
+        self._manual_processing = False
+        self._exclusive_operation = None
+        self._processing_state_lock = threading.RLock()
         # Lokalna flaga aktywnego trybu kampanii.
         self.campaign_mode_active = False
         # Ręczne wyjście z projektu ma pierwszeństwo nad automatycznym trybem kampanii.
@@ -251,6 +262,10 @@ class AutoAnnotationApp:
             padx=6,
             pady=2,
             font=("Consolas", 9, "bold"),
+            bg="#050505",
+            activebackground="#050505",
+            fg=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
+            activeforeground=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
         )
         self._global_terminal_toggle_btn.pack(side=tk.LEFT, padx=(8, 0), pady=4)
 
@@ -1001,7 +1016,7 @@ class AutoAnnotationApp:
         if persist:
             self._save_global_yolo_device_preference(normalized)
 
-        for tab_key in ("annotation", "characters"):
+        for tab_key in ("annotation", "characters", "training"):
             try:
                 tab = self.tabs.get(tab_key)
                 if tab is not None and hasattr(tab, "apply_global_yolo_device_choice"):
@@ -2742,6 +2757,7 @@ class AutoAnnotationApp:
                 darkcolor=palette["border"],
                 padding=6
             )
+            nav_button_font = ('Segoe UI Semibold', 10)
             safe_map(
                 'TButton',
                 background=[
@@ -2760,7 +2776,8 @@ class AutoAnnotationApp:
                 darkcolor=palette["accent"],
                 padding=6,
                 borderwidth=1,
-                relief=tk.SOLID
+                relief=tk.SOLID,
+                font=nav_button_font,
             )
             safe_map(
                 'Accent.TButton',
@@ -2795,7 +2812,8 @@ class AutoAnnotationApp:
                 darkcolor=palette["accent"],
                 padding=6,
                 borderwidth=1,
-                relief=tk.SOLID
+                relief=tk.SOLID,
+                font=nav_button_font,
             )
             safe_map(
                 'GuidedNeutral.TButton',
@@ -2830,7 +2848,8 @@ class AutoAnnotationApp:
                 darkcolor=palette["accent"],
                 padding=6,
                 borderwidth=1,
-                relief=tk.SOLID
+                relief=tk.SOLID,
+                font=nav_button_font,
             )
             safe_map(
                 'GuidedAccent.TButton',
@@ -2865,7 +2884,8 @@ class AutoAnnotationApp:
                 darkcolor=palette["accent_hover"],
                 padding=6,
                 borderwidth=1,
-                relief=tk.SOLID
+                relief=tk.SOLID,
+                font=nav_button_font,
             )
             safe_map(
                 'PulseNeutral.TButton',
@@ -2900,7 +2920,8 @@ class AutoAnnotationApp:
                 darkcolor=palette["accent_hover"],
                 padding=6,
                 borderwidth=1,
-                relief=tk.SOLID
+                relief=tk.SOLID,
+                font=nav_button_font,
             )
             safe_map(
                 'PulseAccent.TButton',
@@ -3733,18 +3754,15 @@ class AutoAnnotationApp:
             return
 
         palette = getattr(self, "palette", {})
-        visible = bool(getattr(self, "_global_terminal_visible", False))
-        base_bg = palette.get("panel", "#252526")
-        hover_bg = palette.get("panel_alt", "#2d2d30")
-        active_bg = palette.get("surface_info", hover_bg)
+        base_bg = "#050505"
         border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        fg = palette.get("fg", "#f3f3f3")
+        fg = palette.get("guide", palette.get("warning", "#f0b44c"))
 
         try:
             btn.configure(
-                bg=active_bg if visible else base_bg,
+                bg=base_bg,
                 fg=fg,
-                activebackground=hover_bg,
+                activebackground=base_bg,
                 activeforeground=fg,
                 highlightbackground=border,
                 highlightcolor=border,
@@ -3764,6 +3782,7 @@ class AutoAnnotationApp:
         close_btn = getattr(self, "_global_terminal_close_btn", None)
         text_widget = getattr(self, "_global_terminal_text", None)
         scrollbar = getattr(self, "_global_terminal_scrollbar", None)
+        hscrollbar = getattr(self, "_global_terminal_hscrollbar", None)
 
         if window is not None:
             try:
@@ -3815,6 +3834,7 @@ class AutoAnnotationApp:
 
         if text_widget is not None:
             self.style_text_widget(text_widget, role="console")
+            self._configure_global_terminal_tags(text_widget)
 
         if scrollbar is not None:
             try:
@@ -3822,6 +3842,77 @@ class AutoAnnotationApp:
                     scrollbar,
                     track_color=palette.get("console_bg", palette.get("panel", "#252526")),
                 )
+            except Exception:
+                pass
+        if hscrollbar is not None:
+            try:
+                self.style_web_scrollbar(
+                    hscrollbar,
+                    track_color=palette.get("console_bg", palette.get("panel", "#252526")),
+                )
+            except Exception:
+                pass
+
+    def _normalize_global_terminal_entry(self, entry, default_tag: str = "terminal_default"):
+        text = ""
+        tag = default_tag
+
+        if isinstance(entry, dict):
+            text = str(entry.get("text", "") or "")
+            tag = str(entry.get("tag", default_tag) or default_tag)
+        elif isinstance(entry, (tuple, list)):
+            if entry:
+                text = str(entry[0] or "")
+            if len(entry) > 1:
+                tag = str(entry[1] or default_tag)
+        else:
+            text = str(entry or "")
+
+        return {"text": text, "tag": tag}
+
+    def _refresh_global_terminal_plain_lines(self):
+        entries = list(getattr(self, "_global_terminal_entries", []) or [])
+        self._global_terminal_lines = [str(entry.get("text", "") or "") for entry in entries]
+
+    def _configure_global_terminal_tags(self, text_widget):
+        if text_widget is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        default_fg = palette.get("console_fg", palette.get("fg", "#f3f3f3"))
+        muted_fg = palette.get("muted", "#b9b9b9")
+        info_fg = palette.get("accent", "#4aa3ff")
+        success_fg = palette.get("success", "#2ecc71")
+        warning_fg = palette.get("guide", palette.get("warning", "#f0b44c"))
+        error_fg = palette.get("error", "#ff6b6b")
+        header_fg = palette.get("accent_selected", info_fg)
+        border_fg = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            text_widget.tag_configure("terminal_default", foreground=default_fg)
+            text_widget.tag_configure("terminal_muted", foreground=muted_fg)
+            text_widget.tag_configure("terminal_info", foreground=info_fg)
+            text_widget.tag_configure("terminal_success", foreground=success_fg)
+            text_widget.tag_configure("terminal_warning", foreground=warning_fg)
+            text_widget.tag_configure("terminal_error", foreground=error_fg)
+            text_widget.tag_configure("terminal_header", foreground=header_fg, font=("Consolas", 9, "bold"))
+            text_widget.tag_configure("terminal_border", foreground=border_fg)
+        except Exception:
+            pass
+
+    def _insert_global_terminal_entry(self, text_widget, entry):
+        if text_widget is None:
+            return
+
+        normalized = self._normalize_global_terminal_entry(entry)
+        text = str(normalized.get("text", "") or "")
+        tag = str(normalized.get("tag", "terminal_default") or "terminal_default")
+
+        try:
+            text_widget.insert(tk.END, text + "\n", (tag,))
+        except Exception:
+            try:
+                text_widget.insert(tk.END, text + "\n")
             except Exception:
                 pass
 
@@ -3833,8 +3924,13 @@ class AutoAnnotationApp:
         try:
             text_widget.configure(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
-            if self._global_terminal_lines:
-                text_widget.insert(tk.END, "\n".join(self._global_terminal_lines) + "\n")
+            self._configure_global_terminal_tags(text_widget)
+            entries = list(getattr(self, "_global_terminal_entries", []) or [])
+            if not entries and getattr(self, "_global_terminal_lines", None):
+                entries = [self._normalize_global_terminal_entry(line) for line in self._global_terminal_lines]
+                self._global_terminal_entries = entries
+            for entry in entries:
+                self._insert_global_terminal_entry(text_widget, entry)
             text_widget.see(tk.END)
         except Exception:
             pass
@@ -3956,12 +4052,19 @@ class AutoAnnotationApp:
 
         text_widget = tk.Text(
             body,
-            wrap=tk.WORD,
+            wrap=tk.NONE,
             font=("Consolas", 9),
             bd=0,
             relief=tk.FLAT,
             highlightthickness=0,
         )
+        hscrollbar = WebSlimScrollbar(
+            body,
+            orient=tk.HORIZONTAL,
+            command=text_widget.xview,
+            auto_hide=False,
+        )
+        hscrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         scrollbar = WebSlimScrollbar(
@@ -3971,8 +4074,9 @@ class AutoAnnotationApp:
             auto_hide=False,
         )
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.configure(yscrollcommand=scrollbar.set, xscrollcommand=hscrollbar.set)
         text_widget.web_vbar = scrollbar
+        text_widget.web_hbar = hscrollbar
 
         self._global_terminal_window = window
         self._global_terminal_shell = shell
@@ -3983,6 +4087,7 @@ class AutoAnnotationApp:
         self._global_terminal_body = body
         self._global_terminal_text = text_widget
         self._global_terminal_scrollbar = scrollbar
+        self._global_terminal_hscrollbar = hscrollbar
 
         self._apply_global_terminal_visual_state()
         self._populate_global_terminal_widget()
@@ -4027,29 +4132,30 @@ class AutoAnnotationApp:
             self.show_global_terminal()
 
     def clear_global_terminal(self):
+        self._global_terminal_entries = []
         self._global_terminal_lines = []
         self._populate_global_terminal_widget()
 
-    def append_global_terminal(self, message: str, source: str = None):
-        text = "" if message is None else str(message)
-        if not text:
+    def append_global_terminal_entries(self, entries):
+        normalized_entries = []
+        for entry in list(entries or []):
+            normalized = self._normalize_global_terminal_entry(entry)
+            text = str(normalized.get("text", "") or "")
+            if text == "":
+                normalized_entries.append(normalized)
+            elif text.strip():
+                normalized_entries.append(normalized)
+
+        if not normalized_entries:
             return
 
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        prefix = f"[{str(source).strip()}] " if str(source or "").strip() else ""
-        new_lines = []
-        for line in normalized.split("\n"):
-            if line == "":
-                continue
-            new_lines.append(f"{prefix}{line}")
-
-        if not new_lines:
-            return
-
-        self._global_terminal_lines.extend(new_lines)
-        overflow = len(self._global_terminal_lines) - int(self._global_terminal_max_lines)
+        current_entries = list(getattr(self, "_global_terminal_entries", []) or [])
+        current_entries.extend(normalized_entries)
+        overflow = len(current_entries) - int(self._global_terminal_max_lines)
         if overflow > 0:
-            self._global_terminal_lines = self._global_terminal_lines[overflow:]
+            current_entries = current_entries[overflow:]
+        self._global_terminal_entries = current_entries
+        self._refresh_global_terminal_plain_lines()
 
         def update():
             text_widget = getattr(self, "_global_terminal_text", None)
@@ -4058,11 +4164,14 @@ class AutoAnnotationApp:
 
             try:
                 text_widget.configure(state=tk.NORMAL)
+                self._configure_global_terminal_tags(text_widget)
                 if overflow > 0:
                     text_widget.delete("1.0", tk.END)
-                    text_widget.insert(tk.END, "\n".join(self._global_terminal_lines) + "\n")
+                    for entry in self._global_terminal_entries:
+                        self._insert_global_terminal_entry(text_widget, entry)
                 else:
-                    text_widget.insert(tk.END, "\n".join(new_lines) + "\n")
+                    for entry in normalized_entries:
+                        self._insert_global_terminal_entry(text_widget, entry)
                 text_widget.see(tk.END)
             except Exception:
                 pass
@@ -4076,6 +4185,21 @@ class AutoAnnotationApp:
             self.root.after(0, update)
         except Exception:
             pass
+
+    def append_global_terminal(self, message: str, source: str = None, tag: str = "terminal_default"):
+        text = "" if message is None else str(message)
+        if not text:
+            return
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        prefix = f"[{str(source).strip()}] " if str(source or "").strip() else ""
+        new_entries = []
+        for line in normalized.split("\n"):
+            if line == "":
+                continue
+            new_entries.append({"text": f"{prefix}{line}", "tag": tag})
+
+        self.append_global_terminal_entries(new_entries)
 
     def _on_help_panel_text_configure(self, event=None):
         if bool(getattr(self, "_help_panel_apply_in_progress", False)):
@@ -4246,9 +4370,97 @@ class AutoAnnotationApp:
             pass
     
     def set_processing(self, processing: bool):
-        self.is_processing = processing
-        self.root.config(cursor="wait" if processing else "")
-        self.root.update()
+        with self._processing_state_lock:
+            self._manual_processing = bool(processing)
+        self._refresh_processing_state()
+
+    def _refresh_processing_state(self):
+        with self._processing_state_lock:
+            processing = bool(self._manual_processing or self._exclusive_operation)
+            self.is_processing = processing
+
+        def update():
+            try:
+                self.root.config(cursor="wait" if processing else "")
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, update)
+        except Exception:
+            try:
+                update()
+            except Exception:
+                pass
+
+    def get_active_exclusive_operation_label(self) -> str:
+        with self._processing_state_lock:
+            active = dict(self._exclusive_operation or {})
+        return str(active.get("label") or "").strip()
+
+    def try_begin_exclusive_operation(self, owner: str, label: str) -> tuple[bool, str]:
+        owner_key = str(owner or "").strip()
+        label_text = str(label or "").strip() or owner_key or "operacja"
+        denial_message = ""
+        started = False
+
+        with self._processing_state_lock:
+            active = dict(self._exclusive_operation or {})
+            active_owner = str(active.get("owner") or "").strip()
+            active_label = str(active.get("label") or "").strip()
+
+            if active_owner:
+                denial_message = (
+                    f"W aplikacji trwa juz: {active_label or 'inna operacja'}.\n\n"
+                    f"Poczekaj na jej zakonczenie, zanim uruchomisz: {label_text}."
+                )
+            else:
+                self._exclusive_operation = {"owner": owner_key, "label": label_text}
+                started = not active_owner
+
+        if denial_message:
+            try:
+                self.append_global_terminal(
+                    f"[BUSY] Odrzucono start: {label_text}. Trwa: {active_label or 'inna operacja'}.",
+                    source="APP",
+                    tag="terminal_warning",
+                )
+            except Exception:
+                pass
+            self._refresh_processing_state()
+            return False, denial_message
+
+        self._refresh_processing_state()
+        if started:
+            try:
+                self.append_global_terminal(
+                    f"[LOCK] Rozpoczeto: {label_text}. Pozostale procesy sa chwilowo zablokowane.",
+                    source="APP",
+                    tag="terminal_info",
+                )
+            except Exception:
+                pass
+        return True, ""
+
+    def end_exclusive_operation(self, owner: str):
+        owner_key = str(owner or "").strip()
+        finished_label = ""
+        with self._processing_state_lock:
+            active = dict(self._exclusive_operation or {})
+            active_owner = str(active.get("owner") or "").strip()
+            if active_owner and active_owner == owner_key:
+                finished_label = str(active.get("label") or "").strip()
+                self._exclusive_operation = None
+        self._refresh_processing_state()
+        if finished_label:
+            try:
+                self.append_global_terminal(
+                    f"[LOCK] Zakonczono: {finished_label}. Mozesz uruchomic kolejny proces.",
+                    source="APP",
+                    tag="terminal_info",
+                )
+            except Exception:
+                pass
 
     def set_campaign_mode(self, active: bool):
         """
