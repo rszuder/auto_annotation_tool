@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Zakładka Treningu: trening YOLO + analiza modeli.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import threading
 import datetime
@@ -42,6 +43,210 @@ try:
     from ultralytics import YOLO
 except ImportError:
     pass
+
+
+class TrainProgressBar(tk.Canvas):
+    def __init__(
+        self,
+        master,
+        *,
+        variable=None,
+        maximum: float = 100.0,
+        value: float = 0.0,
+        mode: str = "determinate",
+        thickness: int = 6,
+        trough_color: str = "#3c3c3c",
+        fill_color: str = "#4ec9b0",
+        segment_ratio: float = 0.28,
+        **kwargs,
+    ):
+        canvas_height = max(int(kwargs.pop("height", thickness + 6)), int(thickness) + 6)
+        bg = kwargs.pop("bg", kwargs.pop("background", trough_color))
+        super().__init__(
+            master,
+            height=canvas_height,
+            bg=bg,
+            bd=0,
+            highlightthickness=0,
+            **kwargs,
+        )
+        self._maximum = max(1.0, float(maximum))
+        self._value = 0.0
+        self._mode = str(mode or "determinate").strip().lower() or "determinate"
+        self._thickness = max(1, int(thickness))
+        self._trough_color = str(trough_color)
+        self._fill_color = str(fill_color)
+        self._segment_ratio = max(0.12, min(0.50, float(segment_ratio)))
+        self._variable = None
+        self._variable_trace_id = None
+        self._indeterminate_after_id = None
+        self._indeterminate_running = False
+        self._indeterminate_interval_ms = 40
+        self._indeterminate_phase = 0.0
+
+        self._trough_id = self.create_line(0, 0, 0, 0, capstyle=tk.ROUND)
+        self._fill_id = self.create_line(0, 0, 0, 0, capstyle=tk.ROUND)
+        self.bind("<Configure>", lambda _event: self._redraw(), add="+")
+
+        self._set_variable(variable)
+        self.configure(value=value)
+
+    def _set_variable(self, variable):
+        if self._variable is variable:
+            return
+
+        if self._variable is not None and self._variable_trace_id is not None:
+            try:
+                self._variable.trace_remove("write", self._variable_trace_id)
+            except Exception:
+                pass
+
+        self._variable = variable
+        self._variable_trace_id = None
+
+        if variable is None:
+            return
+
+        try:
+            self._variable_trace_id = variable.trace_add("write", lambda *_args: self._sync_variable_value())
+        except Exception:
+            self._variable_trace_id = None
+
+        self._sync_variable_value()
+
+    def _sync_variable_value(self):
+        variable = getattr(self, "_variable", None)
+        if variable is None:
+            return
+
+        try:
+            self._value = max(0.0, float(variable.get()))
+        except Exception:
+            return
+
+        self._redraw()
+
+    def _redraw(self):
+        width = max(1.0, float(self.winfo_width()))
+        height = max(1.0, float(self.winfo_height()))
+        center_y = height / 2.0
+        half_thickness = max(0.5, float(self._thickness) / 2.0)
+        left = half_thickness + 1.0
+        right = max(left, width - half_thickness - 1.0)
+
+        self.coords(self._trough_id, left, center_y, right, center_y)
+        self.itemconfigure(self._trough_id, fill=self._trough_color, width=self._thickness)
+
+        if self._mode == "indeterminate":
+            if self._indeterminate_running:
+                span = max(12.0, (right - left) * self._segment_ratio)
+                travel = max(1.0, (right - left) + span)
+                start = left - span + (travel * self._indeterminate_phase)
+                end = start + span
+                visible_start = max(left, start)
+                visible_end = min(right, end)
+                if visible_end <= visible_start:
+                    visible_start = left
+                    visible_end = left
+            else:
+                visible_start = left
+                visible_end = left
+        else:
+            ratio = max(0.0, min(1.0, float(self._value) / max(1.0, float(self._maximum))))
+            visible_start = left
+            visible_end = left + ((right - left) * ratio)
+
+        self.coords(self._fill_id, visible_start, center_y, max(visible_start, visible_end), center_y)
+        self.itemconfigure(self._fill_id, fill=self._fill_color, width=self._thickness)
+
+    def _tick_indeterminate(self):
+        self._indeterminate_after_id = None
+        if not self._indeterminate_running:
+            return
+
+        self._indeterminate_phase = (float(self._indeterminate_phase) + 0.04) % 1.0
+        self._redraw()
+
+        try:
+            self._indeterminate_after_id = self.after(
+                max(16, int(self._indeterminate_interval_ms)),
+                self._tick_indeterminate,
+            )
+        except Exception:
+            self._indeterminate_after_id = None
+
+    def start(self, interval: int | None = None):
+        if interval is not None:
+            try:
+                self._indeterminate_interval_ms = max(16, int(interval))
+            except Exception:
+                pass
+
+        self._indeterminate_running = True
+        if self._indeterminate_after_id is None:
+            self._tick_indeterminate()
+
+    def stop(self):
+        self._indeterminate_running = False
+        pending = self._indeterminate_after_id
+        self._indeterminate_after_id = None
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._redraw()
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf is not None and not isinstance(cnf, dict):
+            return super().configure(cnf, **kwargs)
+
+        merged = {}
+        if isinstance(cnf, dict):
+            merged.update(cnf)
+        merged.update(kwargs)
+
+        if "variable" in merged:
+            self._set_variable(merged.pop("variable"))
+        if "maximum" in merged:
+            self._maximum = max(1.0, float(merged.pop("maximum")))
+        if "value" in merged:
+            self._value = max(0.0, float(merged.pop("value")))
+        if "mode" in merged:
+            self._mode = str(merged.pop("mode") or "determinate").strip().lower() or "determinate"
+            if self._mode != "indeterminate":
+                self.stop()
+        if "thickness" in merged:
+            self._thickness = max(1, int(merged.pop("thickness")))
+            merged.setdefault("height", self._thickness + 6)
+        if "trough_color" in merged:
+            self._trough_color = str(merged.pop("trough_color"))
+        if "fill_color" in merged:
+            self._fill_color = str(merged.pop("fill_color"))
+
+        background = merged.pop("background", None)
+        bg = merged.pop("bg", None)
+        resolved_bg = background if background is not None else bg
+        if resolved_bg is not None:
+            super().configure(bg=resolved_bg)
+
+        result = super().configure(**merged)
+        self._redraw()
+        return result
+
+    config = configure
+
+    def destroy(self):
+        self.stop()
+        if self._variable is not None and self._variable_trace_id is not None:
+            try:
+                self._variable.trace_remove("write", self._variable_trace_id)
+            except Exception:
+                pass
+        self._variable = None
+        self._variable_trace_id = None
+        super().destroy()
+
 
 class TrainingTab:
     def __init__(self, parent, app):
@@ -86,12 +291,15 @@ class TrainingTab:
         self._train_left_wrap_targets = []
         self._train_left_section_separators = []
         self._latest_training_metrics = {}
+        self._last_training_completion_summary_run_id = None
         self._dynamic_metric_tables = []
         self._analysis_dialog = None
         self._analysis_dialog_shell = None
         self._analysis_plot_paths = []
         self._analysis_plot_canvas = None
         self._analysis_plots_list = None
+        self._ui_dispatch_queue = queue.Queue()
+        self._ui_dispatch_after_id = None
 
         self.is_processing = False
         self.dataset_build_is_running = False
@@ -107,6 +315,7 @@ class TrainingTab:
         self._rank_watchdog_repeat_s = 15.0
 
         self._build_ui()
+        self._ensure_ui_dispatch_pump()
         self._attach_training_log_handlers()
         self._bind_trainer_callbacks()
         self._load_history()
@@ -125,7 +334,52 @@ class TrainingTab:
         return bool(getattr(self, "_startup_ui_ready", False))
 
     def _ui(self, fn):
-        self.frame.after(0, fn)
+        if not callable(fn):
+            return
+
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self.frame.after(0, fn)
+            except Exception:
+                try:
+                    fn()
+                except Exception:
+                    pass
+            return
+
+        try:
+            self._ui_dispatch_queue.put_nowait(fn)
+        except Exception:
+            pass
+
+    def _ensure_ui_dispatch_pump(self):
+        if getattr(self, "_ui_dispatch_after_id", None):
+            return
+        try:
+            self._ui_dispatch_after_id = self.frame.after(20, self._drain_ui_dispatch_queue)
+        except Exception:
+            self._ui_dispatch_after_id = None
+
+    def _drain_ui_dispatch_queue(self):
+        self._ui_dispatch_after_id = None
+
+        for _ in range(200):
+            try:
+                fn = self._ui_dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+            except Exception:
+                break
+
+            try:
+                fn()
+            except Exception:
+                pass
+
+        try:
+            self._ui_dispatch_after_id = self.frame.after(20, self._drain_ui_dispatch_queue)
+        except Exception:
+            self._ui_dispatch_after_id = None
 
     def _append_train_log(self, message: str, mirror_global: bool = True):
         """Bezpieczne dopisywanie linii do konsoli treningu z dowolnego wątku."""
@@ -136,11 +390,13 @@ class TrainingTab:
             text += "\n"
 
         if mirror_global:
-            try:
-                if hasattr(self.app, "append_global_terminal"):
-                    self.app.append_global_terminal(text.rstrip("\n"), source="Z4")
-            except Exception:
-                pass
+            self._ui(
+                lambda message=text.rstrip("\n"): (
+                    self.app.append_global_terminal(message, source="Z4")
+                    if hasattr(self.app, "append_global_terminal")
+                    else None
+                )
+            )
 
         def update():
             try:
@@ -204,7 +460,7 @@ class TrainingTab:
                 else:
                     self._append_ranking_log(
                         f"Watchdog: brak nowego postepu od {seconds}s | etap: {stage}. "
-                        "Mozesz poczekac albo kliknac 'Anuluj ranking'."
+                        "Możesz poczekac albo kliknac 'Anuluj ranking'."
                     )
                 self._set_ranking_ui_state(
                     status=(
@@ -381,7 +637,7 @@ class TrainingTab:
             if val < 0.40:
                 return "slaby", "< 0.40"
             if val < 0.60:
-                return "uzywalny", "0.40 - 0.60"
+                return "używalny", "0.40 - 0.60"
             if val < 0.80:
                 return "dobry", "0.60 - 0.80"
             return "bardzo dobry", "> 0.80"
@@ -390,7 +646,7 @@ class TrainingTab:
             if val < 0.70:
                 return "slaby", "< 0.70"
             if val < 0.85:
-                return "uzywalny", "0.70 - 0.85"
+                return "używalny", "0.70 - 0.85"
             if val < 0.93:
                 return "dobry", "0.85 - 0.93"
             return "bardzo dobry", "> 0.93"
@@ -398,7 +654,7 @@ class TrainingTab:
         if val < 0.60:
             return "slaby", "< 0.60"
         if val < 0.75:
-            return "uzywalny", "0.60 - 0.75"
+            return "używalny", "0.60 - 0.75"
         if val < 0.90:
             return "dobry", "0.75 - 0.90"
         return "bardzo dobry", "> 0.90"
@@ -408,15 +664,15 @@ class TrainingTab:
         if target == "plate":
             return (
                 "Zakresy orientacyjne dla tablic: kluczowe jest pose mAP50-95 (rogi). "
-                "< 0.40 = slabo | 0.40 - 0.60 = uzywalnie | 0.60 - 0.80 = dobrze | > 0.80 = bardzo dobrze. "
-                "Dla mAP50: < 0.70 = slabo | 0.70 - 0.85 = uzywalnie | 0.85 - 0.93 = dobrze | > 0.93 = bardzo dobrze. "
+                "< 0.40 = słabo | 0.40 - 0.60 = używalnie | 0.60 - 0.80 = dobrze | > 0.80 = bardzo dobrze. "
+                "Dla mAP50: < 0.70 = słabo | 0.70 - 0.85 = używalnie | 0.85 - 0.93 = dobrze | > 0.93 = bardzo dobrze. "
                 "Loss porownuj tylko miedzy epokami tego samego treningu - powinien raczej spadac."
             )
 
         return (
             "Zakresy orientacyjne: kluczowe jest mAP50-95. "
-            "< 0.40 = slabo | 0.40 - 0.60 = uzywalnie | 0.60 - 0.80 = dobrze | > 0.80 = bardzo dobrze. "
-            "Dla mAP50: < 0.70 = slabo | 0.70 - 0.85 = uzywalnie | 0.85 - 0.93 = dobrze | > 0.93 = bardzo dobrze. "
+            "< 0.40 = słabo | 0.40 - 0.60 = używalnie | 0.60 - 0.80 = dobrze | > 0.80 = bardzo dobrze. "
+            "Dla mAP50: < 0.70 = słabo | 0.70 - 0.85 = używalnie | 0.85 - 0.93 = dobrze | > 0.93 = bardzo dobrze. "
             "Loss porownuj tylko wzgledem poprzednich epok tego samego treningu."
         )
 
@@ -440,7 +696,7 @@ class TrainingTab:
 
     def _build_training_metric_interpretation(self, metrics: dict | None) -> str:
         if not isinstance(metrics, dict) or not metrics:
-            return "Interpretacja pojawi sie po pierwszej zakonczonej epoce."
+            return "Interpretacja pojawi się po pierwszej zakończonej epoce."
 
         target = self.get_campaign_training_target()
         loss = self._metric_float(metrics.get("loss", 0.0))
@@ -454,13 +710,13 @@ class TrainingTab:
             loose_label, loose_range = self._describe_metric_band(loose_value, "loose_map")
 
             if strict_value < 0.40:
-                note = "Model dopiero uczy sie precyzji rogow; do rektyfikacji bedzie jeszcze duzo poprawek recznych."
+                note = "Model dopiero uczy się precyzji rogów; do rektyfikacji będzie jeszcze dużo poprawek ręcznych."
             elif strict_value < 0.60:
-                note = "Wynik jest juz uzywalny do dalszej autoanotacji, ale rogi tablic nadal beda wymagaly korekt."
+                note = "Wynik jest już używalny do dalszej autoanotacji, ale rogi tablic nadal będą wymagaly korekt."
             elif strict_value < 0.80:
-                note = "Rogi sa lokalizowane dobrze; model nadaje sie do codziennej pracy i dalszego dotrenowania."
+                note = "Rogi są lokalizowane dobrze; model nadaje się do codziennej pracy i dalszego dotrenowania."
             else:
-                note = "Rogi sa lapane bardzo dobrze; to mocny poziom do autoanotacji i rektyfikacji."
+                note = "Rogi są lapane bardzo dobrze; to mocny poziom do autoanotacji i rektyfikacji."
 
             return (
                 f"Interpretacja: {strict_name} = {strict_value:.3f} -> {strict_label} ({strict_range}); "
@@ -476,11 +732,11 @@ class TrainingTab:
         if strict_value < 0.40:
             note = "Model wykrywa jeszcze zbyt malo stabilnie, wiec potrzeba dalszego treningu albo lepszego datasetu."
         elif strict_value < 0.60:
-            note = "Wynik jest juz uzywalny, ale model nadal bedzie sie mylic w trudniejszych przypadkach."
+            note = "Wynik jest już używalny, ale model nadal będzie się mylic w trudniejszych przypadkach."
         elif strict_value < 0.80:
-            note = "Model wykrywa dobrze i nadaje sie do praktycznej pracy."
+            note = "Model wykrywa dobrze i nadaje się do praktycznej pracy."
         else:
-            note = "Model wykrywa bardzo dobrze i jest gotowy do mocnego uzycia."
+            note = "Model wykrywa bardzo dobrze i jest gotowy do mocnego użycia."
 
         return (
             f"Interpretacja: mAP50-95 = {strict_value:.3f} -> {strict_label} ({strict_range}); "
@@ -893,7 +1149,7 @@ class TrainingTab:
         normalized = str(band or "").strip().lower()
         if normalized in {"bardzo dobry", "dobry"}:
             return "terminal_success"
-        if normalized in {"uzywalny", "monitoruj"}:
+        if normalized in {"używalny", "monitoruj"}:
             return "terminal_warning"
         if normalized == "slaby":
             return "terminal_error"
@@ -1102,9 +1358,9 @@ class TrainingTab:
         if campaign_active:
             preferred_dir = self._format_workspace_relative_path(self._get_datasets_base_dir())
             return (
-                "Tryb projektu: to pole zwykle uzupelnia kampania. Jesli wskazujesz dataset recznie, "
+                "Tryb projektu: to pole zwykle uzupelnia kampania. Jesli wskazujesz dataset ręcznie, "
                 "wybierz katalog zawierajacy plik data.yaml oraz foldery images/ i labels/.\n"
-                f"Najczesciej bedzie to katalog projektu albo jego datasetowy odpowiednik: {preferred_dir}"
+                f"Najczesciej będzie to katalog projektu albo jego datasetowy odpowiednik: {preferred_dir}"
             )
 
         if selected_target == "plate":
@@ -1114,10 +1370,10 @@ class TrainingTab:
 
         return (
             "Tryb swobodny: najpierw wybierasz tor treningu, a tutaj wskazujesz gotowy katalog datasetu YOLO.\n"
-            "data.yaml to plik konfiguracyjny YOLO, ktory opisuje splity train/val/test oraz klasy modelu.\n"
+            "data.yaml to plik konfiguracyjny YOLO, który opisuje splity train/val/test oraz klasy modelu.\n"
             f"{source_hint}\n"
             f"W sztywnym drzewie Workspace szukaj go przede wszystkim w: {workspace_dir}\n"
-            "Tutaj wybierz caly folder datasetu, w ktorym lezy data.yaml oraz podfoldery images/ i labels/. "
+            "Tutaj wybierz cały folder datasetu, w którym lezy data.yaml oraz podfoldery images/ i labels/. "
             "Jesli dataset nie pasuje do wybranego toru, start treningu zostanie zablokowany."
         )
 
@@ -1169,17 +1425,17 @@ class TrainingTab:
             if target == "plate":
                 guidance = (
                     "Ten dataset ma pusty split walidacyjny `images/val`. "
-                    "Przebuduj dataset tablic w Z2, aby co najmniej 1 oznaczony obraz trafil do walidacji. "
-                    "Przy bardzo malych probkach oznacz przynajmniej 2 obrazy, a praktycznie 3+."
+                    "Przebuduj dataset tablic w Z2, aby co najmniej 1 oznaczony obraz trafił do walidacji. "
+                    "Przy bardzo małych próbkach oznacz przynajmniej 2 obrazy, a praktycznie 3+."
                 )
             else:
                 guidance = (
                     "Ten dataset ma pusty split walidacyjny `images/val`. "
-                    "Przebuduj lub podziel dataset ponownie tak, aby co najmniej 1 obraz trafil do walidacji."
+                    "Przebuduj lub podziel dataset ponownie tak, aby co najmniej 1 obraz trafił do walidacji."
                 )
         elif msg == "Brak obrazów w images/train":
             guidance = (
-                "Dataset nie ma zadnych obrazow treningowych. "
+                "Dataset nie ma zadnych obrazów treningowych. "
                 "Przebuduj go tak, aby folder `images/train` zawieral dane do nauki modelu."
             )
         elif msg.startswith("Brak: images/"):
@@ -1192,7 +1448,7 @@ class TrainingTab:
         unlock_note = ""
         if CAMPAIGN.get_active_project_name():
             unlock_note = (
-                "\n\nDopoki trening w E4 nie wystartuje poprawnie, iteracja nie odblokuje zakonczenia kroku 4."
+                "\n\nDopoki trening w E4 nie wystartuje poprawnie, iteracja nie odblokuje zakończenia kroku 4."
             )
 
         return (
@@ -1244,15 +1500,15 @@ class TrainingTab:
         if total_images <= 10 or train_images < 8 or val_images < 2:
             size_label = "bardzo maly"
             warning_body = (
-                "Przy tak malej probce model moze nauczyc sie zgrubnej lokalizacji tablicy, "
-                "ale nie geometrii jej rogow. Czestym objawem sa male lub niestabilne wielokaty "
-                "pojawiajace sie w okolicy prawdziwej tablicy."
+                "Przy tak małej próbce model może nauczyc się zgrubnej lokalizacji tablicy, "
+                "ale nie geometrii jej rogów. Częstym objawem są małe lub niestabilne wielokąty "
+                "pojawiajace się w okolicy prawdziwej tablicy."
             )
         elif total_images < 30 or train_images < 20 or val_images < 5:
             size_label = "maly"
             warning_body = (
-                "To zwykle wystarcza tylko na bardzo wstepny eksperyment. Geometria rogow tablic "
-                "moze byc nadal niestabilna, dlatego przed ocena modelu warto powiekszyc zbior recznych anotacji."
+                "To zwykle wystarcza tylko na bardzo wstępny eksperyment. Geometria rogów tablic "
+                "może być nadal niestabilna, dlatego przed oceną modelu warto powiększyć zbiór ręcznych anotacji."
             )
         else:
             return ""
@@ -1384,8 +1640,8 @@ class TrainingTab:
             inferred_label = self._format_training_target_label(inferred_target)
             return (
                 f"Wybrany tor: {selected_label}. "
-                f"Uwaga: wskazany dataset wyglada na tor {inferred_label}. "
-                "To pole powinno byc zgodne z wyborem kart powyzej."
+                f"Uwaga: wskazany dataset wygląda na tor {inferred_label}. "
+                "To pole powinno być zgodne z wyborem kart powyzej."
             )
 
         return (
@@ -1576,7 +1832,7 @@ class TrainingTab:
             "image_paths": [],
             "image_count": 0,
             "message": (
-                "Wskaz folder runu Z2/PZ2, w ktorym po sprawdzeniu tablic zapisano zmiany. "
+                "Wskaż folder runu Z2/PZ2, w którym po sprawdzeniu tablic zapisano zmiany. "
                 "To zwykle katalog z plikiem annotations.xml oraz zgodnymi obrazami."
             ),
         }
@@ -1586,7 +1842,7 @@ class TrainingTab:
         try:
             selected_path = Path(selected_raw)
         except Exception:
-            result["message"] = "Nie udalo sie odczytac wskazanego folderu runu."
+            result["message"] = "Nie udało się odczytać wskazanego folderu runu."
             return result
 
         if not selected_path.exists():
@@ -1619,7 +1875,7 @@ class TrainingTab:
         if xml_path is None or reference_dir is None:
             result["message"] = (
                 "W tym folderze nie ma zapisanych zmian tablic. "
-                "Wskaz run Z2/PZ2, ktory zostal przejrzany i zapisany po poprawkach."
+                "Wskaż run Z2/PZ2, który został przejrzany i zapisany po poprawkach."
             )
             return result
 
@@ -1691,7 +1947,7 @@ class TrainingTab:
                     resolved_images_dir = str(selected_path)
 
         if not image_paths:
-            result["message"] = "W wybranym zestawie testowym nie znaleziono obrazow do porownania modeli."
+            result["message"] = "W wybranym zestawie testowym nie znaleziono obrazów do porównania modeli."
             return result
 
         try:
@@ -1709,8 +1965,8 @@ class TrainingTab:
                 "image_paths": image_paths,
                 "image_count": len(image_paths),
                 "message": (
-                    f"Gotowy zestaw: {reference_dir.name} | {len(image_paths)} obrazow. "
-                    "System uzyje zapisanych zmian z annotations.xml jako punktu odniesienia."
+                    f"Gotowy zestaw: {reference_dir.name} | {len(image_paths)} obrazów. "
+                    "System użyje zapisanych zmian z annotations.xml jako punktu odniesienia."
                 ),
             }
         )
@@ -2017,44 +2273,16 @@ class TrainingTab:
             return None
 
         palette = getattr(self.app, "palette", {})
-        host = tk.Frame(
+        spacer = tk.Frame(
             parent,
-            height=4,
+            height=1,
             bd=0,
             highlightthickness=0,
             bg=palette.get("panel", "#252526"),
         )
-        host.pack(fill=tk.X, pady=pady)
-        host.pack_propagate(False)
-
-        accent_line = tk.Frame(
-            host,
-            height=1,
-            bd=0,
-            highlightthickness=0,
-            bg=palette.get("surface_info", palette.get("accent", "#0e639c")),
-        )
-        accent_line.pack(fill=tk.X, side=tk.TOP)
-
-        shadow_line = tk.Frame(
-            host,
-            height=1,
-            bd=0,
-            highlightthickness=0,
-            bg=palette.get("panel_border", palette.get("border", "#3c3c3c")),
-        )
-        shadow_line.pack(fill=tk.X, side=tk.TOP, pady=(1, 0))
-        try:
-            self._train_left_section_separators.append(
-                {
-                    "host": host,
-                    "accent": accent_line,
-                    "shadow": shadow_line,
-                }
-            )
-        except Exception:
-            pass
-        return host
+        spacer.pack(fill=tk.X, pady=pady)
+        spacer.pack_propagate(False)
+        return spacer
 
     def _create_metric_table(
         self,
@@ -2180,6 +2408,9 @@ class TrainingTab:
         trough = palette.get("surface_info", palette.get("panel_alt", palette.get("panel", "#252526")))
         shell_bg = palette.get("panel", palette.get("bg", "#1f1f1f"))
         border = shell_bg
+        dataset_fill = palette.get("accent", "#0e639c")
+        split_fill = palette.get("guide", palette.get("warning", "#f0b44c"))
+        rank_fill = palette.get("accent_hover", dataset_fill)
         epoch_fill = palette.get("guide", palette.get("warning", "#f0b44c"))
         overall_fill = palette.get("success", "#2ecc71")
 
@@ -2202,13 +2433,103 @@ class TrainingTab:
                 lightcolor=overall_fill,
                 darkcolor=overall_fill,
             )
+            style.configure(
+                "TrainDataset.Horizontal.TProgressbar",
+                thickness=8,
+                background=dataset_fill,
+                troughcolor=trough,
+                bordercolor=border,
+                lightcolor=dataset_fill,
+                darkcolor=dataset_fill,
+            )
+            style.configure(
+                "TrainSplit.Horizontal.TProgressbar",
+                thickness=8,
+                background=split_fill,
+                troughcolor=trough,
+                bordercolor=border,
+                lightcolor=split_fill,
+                darkcolor=split_fill,
+            )
+            style.configure(
+                "TrainRank.Horizontal.TProgressbar",
+                thickness=8,
+                background=rank_fill,
+                troughcolor=trough,
+                bordercolor=border,
+                lightcolor=rank_fill,
+                darkcolor=rank_fill,
+            )
         except Exception:
             pass
+
+        progress_configs = {
+            "train_epoch_progress": {
+                "bg": shell_bg,
+                "trough_color": trough,
+                "fill_color": epoch_fill,
+                "thickness": 4,
+            },
+            "train_progress": {
+                "bg": shell_bg,
+                "trough_color": trough,
+                "fill_color": overall_fill,
+                "thickness": 4,
+            },
+            "ds_progress": {
+                "bg": palette.get("panel", "#252526"),
+                "trough_color": palette.get("panel_alt", palette.get("panel", "#252526")),
+                "fill_color": dataset_fill,
+                "thickness": 6,
+            },
+            "split_progress": {
+                "bg": palette.get("panel", "#252526"),
+                "trough_color": palette.get("panel_alt", palette.get("panel", "#252526")),
+                "fill_color": split_fill,
+                "thickness": 6,
+            },
+            "rank_progress": {
+                "bg": palette.get("panel", "#252526"),
+                "trough_color": palette.get("panel_alt", palette.get("panel", "#252526")),
+                "fill_color": rank_fill,
+                "thickness": 6,
+            },
+        }
+
+        style_targets = {
+            "train_epoch_progress": "TrainEpoch.Horizontal.TProgressbar",
+            "train_progress": "TrainOverall.Horizontal.TProgressbar",
+            "ds_progress": "TrainDataset.Horizontal.TProgressbar",
+            "split_progress": "TrainSplit.Horizontal.TProgressbar",
+            "rank_progress": "TrainRank.Horizontal.TProgressbar",
+        }
+
+        for widget_name, config in progress_configs.items():
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            if isinstance(widget, TrainProgressBar):
+                try:
+                    widget.configure(**config)
+                except Exception:
+                    pass
+                continue
+            try:
+                widget.configure(style=style_targets.get(widget_name, "Horizontal.TProgressbar"))
+            except Exception:
+                pass
 
         shell = getattr(self, "train_progress_shell", None)
         if shell is not None:
             try:
                 shell.configure(bg=shell_bg, highlightbackground=shell_bg, highlightcolor=shell_bg)
+            except Exception:
+                pass
+
+        split_feedback_frame = getattr(self, "split_feedback_frame", None)
+        if split_feedback_frame is not None:
+            try:
+                self.app.style_ttk_frame_widget(split_feedback_frame, background=shell_bg)
             except Exception:
                 pass
 
@@ -2293,6 +2614,266 @@ class TrainingTab:
             pass
 
         logger.info(f"TrainingTab przełączony na projektowy katalog runów: {new_runs_dir}")
+
+    def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -> dict:
+        target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+        if target not in {"plate", "char"}:
+            target = "char"
+
+        result = {
+            "ok": True,
+            "reason": "",
+            "message": "",
+            "iteration_target": target,
+            "ready_dataset": "",
+            "dataset_hint": "",
+            "annotated_images": 0,
+            "required_images": 2,
+            "source_run": "",
+            "train_images": 0,
+            "val_images": 0,
+            "test_images": 0,
+            "validation_message": "",
+        }
+
+        if not CAMPAIGN.get_active_project_name():
+            result.update(
+                ok=False,
+                reason="campaign_inactive",
+                message="Brak aktywnego projektu kampanii.",
+            )
+            return result
+
+        datasets_dir = CAMPAIGN.get_dir("datasets")
+        if datasets_dir is None:
+            logger.error("Brak katalogu datasets dla aktywnego projektu.")
+            result.update(
+                ok=False,
+                reason="missing_datasets_dir",
+                message="Projekt nie ma jeszcze poprawnie przygotowanego katalogu datasetow.",
+            )
+            return result
+
+        ready_dataset = None
+        try:
+            ready_candidates = self._find_ready_dataset_candidates(Path(datasets_dir))
+            preferred = [rec for rec in ready_candidates if rec[1] == target]
+            if preferred:
+                ready_dataset, _ready_target, _stamp = max(preferred, key=lambda rec: rec[2])
+            elif ready_candidates:
+                ready_dataset, _ready_target, _stamp = max(ready_candidates, key=lambda rec: rec[2])
+        except Exception:
+            ready_dataset = None
+
+        if ready_dataset is not None:
+            ready_dataset_str = str(ready_dataset)
+            result["ready_dataset"] = ready_dataset_str
+            result["dataset_hint"] = ready_dataset_str
+            if target == "char":
+                validation_stats = {}
+                try:
+                    is_valid_dataset, validation_msg, validation_stats = self.trainer.validate_dataset(Path(ready_dataset))
+                except Exception as e:
+                    is_valid_dataset = False
+                    validation_msg = f"Błąd walidacji datasetu: {e}"
+                    validation_stats = {}
+
+                validation_stats = dict(validation_stats or {})
+                result["train_images"] = int(validation_stats.get("train_images", 0) or 0)
+                result["val_images"] = int(validation_stats.get("val_images", 0) or 0)
+                result["test_images"] = int(validation_stats.get("test_images", 0) or 0)
+                result["validation_message"] = str(validation_msg or "").strip()
+
+                if not is_valid_dataset:
+                    result.update(
+                        ok=False,
+                        reason="invalid_char_dataset",
+                        message=(
+                            "E4 w torze znaków pozostaje zablokowane, bo ostatni dataset z Z3 nie jest jeszcze gotowy do treningu.\n\n"
+                            f"{self._build_training_dataset_validation_message(Path(ready_dataset), validation_msg, validation_stats)}\n\n"
+                            "Wróć do Z3 i przebuduj eksport albo split datasetu znaków."
+                        ),
+                    )
+                    return result
+            return result
+
+        if target != "plate":
+            dataset_hint = self._format_workspace_relative_path(Path(datasets_dir))
+            result.update(
+                ok=False,
+                reason="missing_char_dataset",
+                dataset_hint=dataset_hint,
+                message=(
+                    "E4 w torze znaków pozostaje zablokowane, bo Z3 nie przygotowalo jeszcze poprawnego datasetu treningowego.\n\n"
+                    f"Katalog datasetow projektu: {dataset_hint}\n\n"
+                    "Wróć do Z3, wyeksportuj albo podziel dataset znaków i upewnij się, ze zawiera niepuste obrazy w train i val."
+                ),
+            )
+            return result
+
+        auto_dir = CAMPAIGN.get_dir("auto_ann")
+        if auto_dir is None:
+            result.update(
+                ok=False,
+                reason="missing_plate_annotations",
+                message="E4 w torze tablic pozostaje zablokowane, bo projekt nie ma jeszcze katalogu z zatwierdzona anotacja Z2.",
+            )
+            return result
+
+        try:
+            xml_files = list(Path(auto_dir).rglob("annotations.xml"))
+        except Exception:
+            xml_files = []
+
+        if not xml_files:
+            result.update(
+                ok=False,
+                reason="missing_plate_annotations",
+                message="E4 w torze tablic pozostaje zablokowane, bo nie ma jeszcze zatwierdzonego runu Z2 z plikiem annotations.xml.",
+            )
+            return result
+
+        latest_xml_path = max(xml_files, key=lambda p: p.stat().st_mtime)
+        source_run = str(latest_xml_path.parent.name or "").strip()
+        result["source_run"] = source_run
+
+        inspector = DatasetCreator()
+        parse_ok, parse_msg, parse_stats = inspector.parse_cvat_xml(latest_xml_path)
+        annotated_images = int((parse_stats or {}).get("annotated_images", 0) or 0)
+        result["annotated_images"] = annotated_images
+
+        if not parse_ok:
+            run_suffix = f" ({source_run})" if source_run else ""
+            result.update(
+                ok=False,
+                reason="invalid_plate_annotations",
+                message=(
+                    "E4 w torze tablic pozostaje zablokowane, bo ostatni zatwierdzony run Z2"
+                    f"{run_suffix} nie zawiera jeszcze poprawnych tablic do budowy datasetu.\n\n"
+                    f"Walidacja: {parse_msg}\n"
+                    "Wróć do Z2 i dopracuj anotacje."
+                ),
+            )
+            return result
+
+        if annotated_images < 2:
+            run_suffix = f" ({source_run})" if source_run else ""
+            result.update(
+                ok=False,
+                reason="insufficient_plate_annotations",
+                message=(
+                    "E4 w torze tablic wymaga co najmniej 2 oznaczonych obrazów.\n\n"
+                    f"Bieżący zatwierdzony run Z2{run_suffix} ma teraz {annotated_images} taki obraz(y).\n"
+                    "Wróć do Z2, dodaj brakujące oznaczenia i dopiero wtedy przejdź dalej."
+                ),
+            )
+            return result
+
+        return result
+
+    def open_campaign_step4_entry(self, *, iteration_target: str | None = None) -> dict:
+        if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 4:
+            return {"ok": False, "reason": "campaign_inactive"}
+
+        target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+        if target not in {"plate", "char"}:
+            target = "char"
+
+        datasets_dir = CAMPAIGN.get_dir("datasets")
+        runs_dir = CAMPAIGN.get_dir("runs")
+        if datasets_dir is None:
+            logger.error("Brak katalogu datasets dla aktywnego projektu.")
+            return {"ok": False, "reason": "missing_datasets_dir"}
+
+        try:
+            self.set_campaign_training_target(target)
+        except Exception:
+            pass
+
+        self.set_campaign_context(
+            runs_dir=str(runs_dir) if runs_dir is not None else None,
+            datasets_dir=str(datasets_dir),
+        )
+
+        readiness = self.get_campaign_step4_readiness(iteration_target=target)
+        if not readiness.get("ok", False):
+            return readiness
+
+        datasets_dir = Path(datasets_dir)
+        source_candidates = []
+        try:
+            for path in self._find_dataset_source_candidates(datasets_dir):
+                inferred = self._infer_dataset_target(str(path))
+                if target == "char":
+                    if inferred != "char":
+                        continue
+                elif inferred not in {"plate", None}:
+                    continue
+                source_candidates.append(path)
+        except Exception:
+            source_candidates = []
+
+        latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
+
+        if target == "char" and latest_source is not None:
+            self.split_src_var.set(str(latest_source))
+            self.split_out_var.set(str(latest_source.parent / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
+        elif target == "char":
+            self.split_src_var.set("")
+            self.split_out_var.set(str(datasets_dir / "[BRAK_DATASETU_ZRODLOWEGO]"))
+
+        if target == "plate":
+            plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
+            preferred_pose = "yolo11s-pose"
+            try:
+                pose_choices = self._get_base_model_choices_for_mode("plate")
+            except Exception:
+                pose_choices = []
+
+            if plate_model and Path(plate_model).exists():
+                self.base_model_var.set("Custom")
+                self.base_custom_var.set(plate_model)
+            else:
+                self.base_model_var.set(
+                    preferred_pose if preferred_pose in pose_choices else self._get_default_base_model_for_mode("plate")
+                )
+                self.base_custom_var.set("")
+        else:
+            char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
+            if char_model and Path(char_model).exists():
+                self.base_model_var.set("Custom")
+                self.base_custom_var.set(char_model)
+            else:
+                self.base_model_var.set(self._get_default_base_model_for_mode("char"))
+                self.base_custom_var.set("")
+
+        try:
+            self._on_base_model_change()
+        except Exception:
+            pass
+
+        try:
+            self.imgsz_var.set(640 if target == "plate" else 256)
+        except Exception:
+            pass
+
+        try:
+            if bool(getattr(self, "_step4_train_unlocked", False)):
+                self.main_nb.select(self.tab_train)
+                self._select_step4_analysis_tab(self.hist_tab)
+            else:
+                self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        dataset_hint = str(self.dataset_var.get() or "").strip()
+        return {
+            "ok": True,
+            "iteration_target": target,
+            "latest_source": str(latest_source or ""),
+            "dataset_hint": dataset_hint,
+            "train_unlocked": bool(getattr(self, "_step4_train_unlocked", False)),
+        }
 
 
 
@@ -2412,6 +2993,24 @@ class TrainingTab:
         self.set_campaign_training_target(active_target)
         self._step4_route_selected = bool(campaign_target in ("char", "plate"))
         self._step4_train_unlocked = False
+        self._step4_campaign_finish_ready = False
+
+        finish_state = {}
+        try:
+            finish_state = CAMPAIGN.get_step4_finish_state() or {}
+        except Exception:
+            finish_state = {}
+
+        finish_ready = bool(finish_state.get("ready", False))
+        finish_run_id = str(finish_state.get("run_id", "") or "").strip()
+        finish_target = str(finish_state.get("target", "") or "").strip().lower()
+        if finish_target not in ("char", "plate"):
+            finish_target = active_target
+
+        if finish_ready and finish_target == active_target:
+            self._step4_campaign_finish_ready = True
+            self._step4_train_unlocked = True
+            self.current_run_id = finish_run_id or self.current_run_id
 
         if ready_dataset is not None:
             try:
@@ -2473,6 +3072,8 @@ class TrainingTab:
 
         try:
             target_tab = self.tab_dataset if bool(CAMPAIGN.get_active_project_name()) else self.tab_train
+            if bool(CAMPAIGN.get_active_project_name()) and self._step4_campaign_finish_ready:
+                target_tab = self.tab_train
             self.main_nb.select(target_tab)
         except Exception:
             pass
@@ -2636,16 +3237,45 @@ class TrainingTab:
         Czyści projektowy kontekst treningu i wraca do globalnych katalogów Workspace.
         Dodatkowo czyści kampanijne logi / wyniki widoczne w UI.
         """
+        free_mode_target = CONFIG.normalize_task_target(
+            getattr(self, "_step4_dataset_mode", getattr(self, "_campaign_training_target", "char"))
+        )
+
         self._campaign_runs_dir = None
         self._campaign_datasets_dir = None
 
-        self._rebind_free_mode_training_storage(target=self._step4_dataset_mode, reload_history=False)
+        self._rebind_free_mode_training_storage(target=free_mode_target, reload_history=False)
 
         self._reset_step4_transient_ui(
-            target="char",
+            target=free_mode_target,
             clear_builder_inputs=True,
             require_route_selection=False
         )
+
+        try:
+            self._update_step4_notebook_mode()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_free_training_route_ui()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        try:
+            self._update_training_dataset_hint()
+        except Exception:
+            pass
 
     def _reset_step4_transient_ui(
         self,
@@ -2835,8 +3465,15 @@ class TrainingTab:
                 pass
             self._training_completion_poll_job = None
 
-        self._load_history()
-        self._set_training_ui_idle_state()
+        try:
+            self._load_history()
+        except Exception:
+            pass
+
+        try:
+            self._set_training_ui_idle_state()
+        except Exception:
+            pass
 
         try:
             self._set_step4_builder_log_visibility(False)
@@ -2849,7 +3486,8 @@ class TrainingTab:
             pass
 
         try:
-            self.main_nb.select(self.tab_dataset)
+            target_tab = self.tab_dataset if CAMPAIGN.get_active_project_name() else self.tab_train
+            self.main_nb.select(target_tab)
         except Exception:
             pass
 
@@ -2921,37 +3559,31 @@ class TrainingTab:
             return
 
         self._step4_builder_log_visible = bool(visible)
+        try:
+            self.step4_builder_log_frame.pack_forget()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "step4_builder_tools"):
+                self.step4_builder_tools.pack_forget()
+        except Exception:
+            pass
 
         if self._step4_builder_log_visible:
-            self.step4_builder_log_frame.pack(
-                fill=tk.BOTH,
-                expand=True,
-                pady=(8, 0),
-                before=self.step4_builder_nav
-            )
             try:
-                self.btn_toggle_step4_log.pack_forget()
+                if hasattr(self.app, "show_global_terminal"):
+                    self.app.show_global_terminal()
             except Exception:
                 pass
-            try:
-                if hasattr(self, "step4_builder_tools"):
-                    self.step4_builder_tools.pack_forget()
-            except Exception:
-                pass
-        else:
-            self.step4_builder_log_frame.pack_forget()
-            try:
-                if hasattr(self, "step4_builder_tools") and not str(self.step4_builder_tools.winfo_manager()):
-                    self.step4_builder_tools.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0), before=self.step4_builder_nav)
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "step4_builder_tools") and not str(self.btn_toggle_step4_log.winfo_manager()):
-                    self.btn_toggle_step4_log.pack(side=tk.LEFT)
-            except Exception:
-                pass
+        return
 
     def _toggle_step4_builder_log(self):
+        try:
+            if hasattr(self.app, "toggle_global_terminal"):
+                self.app.toggle_global_terminal()
+                return
+        except Exception:
+            pass
         self._set_step4_builder_log_visibility(
             not getattr(self, "_step4_builder_log_visible", False)
         )
@@ -3163,6 +3795,11 @@ class TrainingTab:
     def apply_theme(self):
         palette = getattr(self.app, "palette", {})
         console_border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            self._configure_train_progress_styles()
+        except Exception:
+            pass
 
         for label_name in (
             "free_training_route_title_lbl",
@@ -3587,7 +4224,7 @@ class TrainingTab:
             if active_label:
                 messagebox.showinfo(
                     "Proces w toku",
-                    "Nie mozna teraz zmienic toru treningu.\n\n"
+                    "Nie można teraz zmienic toru treningu.\n\n"
                     f"Najpierw poczekaj na zakonczenie: {active_label}.",
                 )
                 return
@@ -3598,7 +4235,7 @@ class TrainingTab:
             if mode != locked_target:
                 messagebox.showinfo(
                     "Tor zablokowany przez E2",
-                    "Tor treningu dla tej iteracji zostal juz ustalony w wizardzie E2.\n\n"
+                    "Tor treningu dla tej iteracji został już ustalony w wizardzie E2.\n\n"
                     f"Ta iteracja pozostaje w torze {self._format_training_target_label(locked_target)}."
                 )
             mode = locked_target
@@ -3644,6 +4281,79 @@ class TrainingTab:
                 self._guide_step4_builder_action()
             except Exception:
                 pass
+
+    def _refresh_step4_campaign_builder_inputs_ui(self):
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        locked_target = self._get_locked_campaign_training_target()
+        route_locked = campaign_active and locked_target in ("char", "plate")
+        mode = getattr(self, "_step4_dataset_mode", "char")
+
+        try:
+            route_manager = str(self.step4_route_panel_frame.winfo_manager())
+        except Exception:
+            route_manager = ""
+
+        if route_locked:
+            if route_manager == "pack":
+                try:
+                    self.step4_route_panel_frame.pack_forget()
+                except Exception:
+                    pass
+        else:
+            if route_manager != "pack":
+                try:
+                    self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8), before=self.step4_mode_right_host)
+                except Exception:
+                    pass
+
+        creator_summary = ""
+        if campaign_active and mode == "plate":
+            xml_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_xml_var.get()), 96)
+            images_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_images_var.get()), 96)
+            creator_summary = (
+                "Źródła do budowy datasetu tablic zostały już przygotowane wczesniej.\n"
+                f"Anotacje tablic: {xml_value}\n"
+                f"Obrazy źródłowe: {images_value}"
+            )
+
+        split_summary = ""
+        if campaign_active and mode == "char":
+            split_src_value = self._shorten_training_text(self._format_workspace_relative_path(self.split_src_var.get()), 96)
+            split_summary = (
+                "Źródło do podziału datasetu znaków zostało już wybrane wcześniej.\n"
+                f"Dataset źródłowy: {split_src_value}"
+            )
+
+        try:
+            if campaign_active and mode == "plate":
+                self.creator_xml_row.pack_forget()
+                self.creator_images_row.pack_forget()
+                self.creator_source_summary_lbl.configure(text=creator_summary)
+                if str(self.creator_source_summary_lbl.winfo_manager()) != "pack":
+                    self.creator_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+            else:
+                if str(self.creator_xml_row.winfo_manager()) != "pack":
+                    self.creator_xml_row.pack(fill=tk.X, pady=2, before=self.creator_source_summary_lbl)
+                if str(self.creator_images_row.winfo_manager()) != "pack":
+                    self.creator_images_row.pack(fill=tk.X, pady=2, before=self.creator_source_summary_lbl)
+                if str(self.creator_source_summary_lbl.winfo_manager()) == "pack":
+                    self.creator_source_summary_lbl.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            if campaign_active and mode == "char":
+                self.split_source_row.pack_forget()
+                self.split_source_summary_lbl.configure(text=split_summary)
+                if str(self.split_source_summary_lbl.winfo_manager()) != "pack":
+                    self.split_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+            else:
+                if str(self.split_source_row.winfo_manager()) != "pack":
+                    self.split_source_row.pack(fill=tk.X, pady=2, before=self.split_source_summary_lbl)
+                if str(self.split_source_summary_lbl.winfo_manager()) == "pack":
+                    self.split_source_summary_lbl.pack_forget()
+        except Exception:
+            pass
 
     def _refresh_step4_dataset_mode_ui(self):
         try:
@@ -3705,6 +4415,10 @@ class TrainingTab:
             self.btn_choose_char.configure(state=(tk.DISABLED if route_locked else tk.NORMAL))
             self.ds_creator_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(text="Dalej do treningu")
+            if route_locked:
+                self.ds_mode_desc_var.set(
+                    "Ten etap korzysta z zatwierdzonych zrodel projektu i buduje dataset tablic bez ponownego wybierania XML ani obrazów."
+                )
         else:
             self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
             self.ds_mode_desc_var.set(
@@ -3715,14 +4429,23 @@ class TrainingTab:
             self.btn_choose_char.configure(state=tk.DISABLED)
             self.ds_split_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(text="Dalej do treningu")
+            if route_locked:
+                self.ds_mode_desc_var.set(
+                    "Ten etap korzysta z gotowego źródła datasetu znaków projektu i prowadzi od razu do podzialu oraz treningu."
+                )
 
         if route_locked:
             self.btn_choose_plate.configure(state=tk.DISABLED)
             self.btn_choose_char.configure(state=tk.DISABLED)
             self.ds_mode_desc_var.set(
                 str(self.ds_mode_desc_var.get() or "").strip()
-                + " Tor tej iteracji zostal zatwierdzony w E2 i nie moze byc zmieniony w Z4."
+                + " Tor tej iteracji został zatwierdzony w E2 i nie może być zmieniony w Z4."
             )
+
+        try:
+            self._refresh_step4_campaign_builder_inputs_ui()
+        except Exception:
+            pass
 
     def _step4_dataset_go_next(self):
         if CAMPAIGN.get_active_project_name() and not getattr(self, "_step4_train_unlocked", False):
@@ -3760,11 +4483,7 @@ class TrainingTab:
 
     def _step4_dataset_go_back(self):
         if CAMPAIGN.get_active_project_name():
-            try:
-                self.app.open_controlled_tab("campaign")
-                return
-            except Exception:
-                pass
+            return
 
         self._append_step4_builder_log(
             "[NAWIGACJA] Tryb swobodny: brak poprzedniego kroku wizardowego do otwarcia."
@@ -3798,6 +4517,14 @@ class TrainingTab:
         try:
             next_state = tk.NORMAL if (not campaign_active or (route_selected and train_unlocked)) else tk.DISABLED
             self.btn_step4_next.configure(state=next_state)
+        except Exception:
+            pass
+
+        try:
+            if campaign_active:
+                self.btn_step4_back.grid_remove()
+            else:
+                self.btn_step4_back.grid()
         except Exception:
             pass
 
@@ -3877,10 +4604,14 @@ class TrainingTab:
             return
 
         self._step4_campaign_finish_ready = False
+        try:
+            CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
 
         try:
             self._append_train_log(
-                "[KAMPANIA] Użytkownik zakończył krok 4. "
+                "[KAMPANIA] Użytkownik domknął etap iteracji. "
                 "Cykl iteracji został domknięty i można rozpocząć kolejną iterację."
             )
         except Exception:
@@ -3905,7 +4636,7 @@ class TrainingTab:
 
         try:
             self.app.update_status(
-                "Krok 4 został zamknięty. W kampanii możesz rozpocząć nową iterację od tego samego zestawu zdjęć (E2) albo od nowego zestawu zdjęć (E1).",
+                "Etap iteracji został zamknięty. W kampanii możesz rozpocząć nową iterację od tego samego zestawu zdjęć (E2) albo od nowego zestawu zdjęć (E1). Aktywne modele projektu pozostały zachowane.",
                 "info"
             )
         except Exception:
@@ -3925,11 +4656,11 @@ class TrainingTab:
 
         should_finish = self.app.themed_confirm(
             "Zakonczenie projektu",
-            "Czy oznaczyc ten projekt jako zakonczony?\n\n"
-            "Projekt pozostanie dostepny do przegladu, ale dashboard nie bedzie juz prowadzil do nowej iteracji, "
-            "dopoki recznie go nie wznowisz.",
+            "Czy oznaczyc ten projekt jako zakończony?\n\n"
+            "Projekt pozostanie dostępny do przegladu, ale dashboard nie będzie już prowadzil do nowej iteracji, "
+            "dopoki ręcznie go nie wznowisz.",
             parent=self.frame,
-            confirm_label="Zakoncz projekt",
+            confirm_label="Zakończ projekt",
             tone="info"
         )
         if not should_finish:
@@ -3939,11 +4670,15 @@ class TrainingTab:
             return
 
         self._step4_campaign_finish_ready = False
+        try:
+            CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
 
         try:
             self._append_train_log(
-                "[KAMPANIA] Uzytkownik oznaczyl projekt jako zakonczony. "
-                "Nowa iteracja nie zostanie juz proponowana, dopoki projekt nie zostanie wznowiony."
+                "[KAMPANIA] Użytkownik oznaczyl projekt jako zakończony. "
+                "Nowa iteracja nie zostanie już proponowana, dopoki projekt nie zostanie wznowiony."
             )
         except Exception:
             pass
@@ -4075,7 +4810,7 @@ class TrainingTab:
     def _complete_campaign_step4_if_needed(self, target: str) -> bool:
         """
         Po promocji modelu kampanijnego tylko sygnalizuje gotowość
-        do ręcznego zakończenia kroku 4. Nie zamyka kroku automatycznie.
+        do ręcznego domknięcia etapu iteracji. Nie zamyka etapu automatycznie.
         """
         target = str(target or "").strip().lower()
         if target not in ("char", "plate"):
@@ -4088,7 +4823,7 @@ class TrainingTab:
             label = "znaków" if target == "char" else "tablic"
             self._append_train_log(
                 f"[KAMPANIA] Model {label} został wypromowany do projektu. "
-                "Możesz teraz zakończyć krok 4 albo oznaczyć cały projekt jako zakończony."
+                "Możesz teraz domknąć etap iteracji albo oznaczyć cały projekt jako zakończony."
             )
         except Exception:
             pass
@@ -4109,6 +4844,70 @@ class TrainingTab:
             pass
 
         return True
+
+    def _show_training_completion_summary(self, *, promoted: bool, can_finish_step4: bool):
+        run_id = str(self.current_run_id or "").strip()
+        if not run_id:
+            return
+
+        if str(getattr(self, "_last_training_completion_summary_run_id", "") or "").strip() == run_id:
+            return
+
+        run = None
+        try:
+            run = self.history.get_run(run_id)
+        except Exception:
+            run = None
+
+        target = self.get_campaign_training_target()
+        if target not in ("char", "plate"):
+            target = str(getattr(self, "_pending_campaign_model_type", "") or "").strip().lower()
+
+        if target == "char":
+            target_label = "znaków"
+        elif target == "plate":
+            target_label = "tablic"
+        else:
+            target_label = "projektu"
+
+        success = bool(run and str(getattr(run, "status", "") or "").strip().lower() == TrainingStatus.COMPLETED.value)
+        title = "Podsumowanie treningu"
+        tone = "success" if success else "warning"
+
+        lines = []
+        if run is not None:
+            lines.append(f"Run: {run.name}")
+            lines.append(f"Model bazowy: {run.base_model}")
+            lines.append(f"Dataset: {run.dataset_path}")
+            if float(getattr(run, "best_map50_95", 0.0) or 0.0) > 0.0:
+                lines.append(f"Najlepsze mAP50-95: {float(run.best_map50_95):.3f}")
+
+        if can_finish_step4:
+            if promoted:
+                lines.append("")
+                lines.append(f"Nowy aktywny model {target_label} został zapisany w projekcie.")
+            else:
+                lines.append("")
+                lines.append(f"Aktywny model {target_label} projektu nie został podmieniony.")
+            lines.append("Dalej: możesz kliknąć „Zakończ etap iteracji” albo „Zakończ projekt”.")
+        else:
+            lines.append("")
+            if success:
+                lines.append("Trening zakończył się poprawnie.")
+            else:
+                lines.append("Trening został zatrzymany albo zakończył się błędem.")
+            lines.append("Dalej: możesz zmienić ustawienia i uruchomić kolejny trening.")
+
+        try:
+            self.app.themed_info(
+                title,
+                "\n".join(lines).strip(),
+                parent=self.frame,
+                tone=tone,
+            )
+            self._last_training_completion_summary_run_id = run_id
+        except Exception:
+            pass
 
     def _poll_training_completion(self):
         """
@@ -4137,8 +4936,19 @@ class TrainingTab:
 
             if can_finish_step4 and promoted:
                 self._step4_campaign_finish_ready = True
+                finish_target = self.get_campaign_training_target()
+                if finish_target not in ("char", "plate"):
+                    finish_target = (self._pending_campaign_model_type or "").strip().lower()
+                try:
+                    CAMPAIGN.set_step4_finish_state(
+                        True,
+                        run_id=str(self.current_run_id or ""),
+                        target=finish_target,
+                    )
+                except Exception:
+                    pass
                 self._set_training_ui_idle_state(
-                    "Trening zakończony. Kliknij „Zakończ krok 4...” albo „Zakończ projekt”.",
+                    "Trening zakończony. Kliknij „Zakończ etap iteracji...” albo „Zakończ projekt”.",
                     "#1e8449"
                 )
             elif can_finish_step4:
@@ -4150,10 +4960,18 @@ class TrainingTab:
                 )
 
                 self._step4_campaign_finish_ready = True
+                try:
+                    CAMPAIGN.set_step4_finish_state(
+                        True,
+                        run_id=str(self.current_run_id or ""),
+                        target=target,
+                    )
+                except Exception:
+                    pass
                 self._set_training_ui_idle_state(
                     (
                         "Trening zakończony lub zatrzymany bez podmiany aktywnego "
-                        f"{target_label}. Możesz zamknąć krok 4 i zdecydować, "
+                        f"{target_label}. Możesz domknąć etap iteracji i zdecydować, "
                         "czy kolejna iteracja ma użyć tego samego zestawu zdjęć, czy nowego."
                     ),
                     "#7f8c8d"
@@ -4161,17 +4979,27 @@ class TrainingTab:
                 try:
                     self._append_train_log(
                         "[KAMPANIA] Ten run treningu nie wypromował nowego aktywnego modelu projektu. "
-                        "Możesz zamknąć krok 4 i rozpocząć kolejną iterację od tego samego "
+                        "Możesz domknąć etap iteracji i rozpocząć kolejną iterację od tego samego "
                         "zestawu zdjęć albo od nowego zestawu zdjęć."
                     )
                 except Exception:
                     pass
             else:
                 self._step4_campaign_finish_ready = False
+                try:
+                    if CAMPAIGN.get_active_project_name():
+                        CAMPAIGN.set_step4_finish_state(False)
+                except Exception:
+                    pass
                 self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
 
             try:
                 self._refresh_step4_campaign_navigation_ui()
+            except Exception:
+                pass
+
+            try:
+                self._show_training_completion_summary(promoted=promoted, can_finish_step4=can_finish_step4)
             except Exception:
                 pass
 
@@ -4186,6 +5014,11 @@ class TrainingTab:
             self._training_completion_poll_job = None
             self._pending_campaign_model_type = None
             self._step4_campaign_finish_ready = False
+            try:
+                if CAMPAIGN.get_active_project_name():
+                    CAMPAIGN.set_step4_finish_state(False)
+            except Exception:
+                pass
             self._set_training_ui_idle_state("Błąd monitorowania końca treningu.", "#c0392b")
 
             try:
@@ -4410,7 +5243,7 @@ class TrainingTab:
                 "imgsz": 640,
                 "lr0": 0.01,
                 "note": (
-                    "CPU zadziala, ale trening bedzie wyraznie wolniejszy. "
+                    "CPU zadziala, ale trening będzie wyraznie wolniejszy. "
                     "Gdy brakuje czasu, lepiej poczekac na GPU CUDA."
                 ),
             }
@@ -4456,10 +5289,10 @@ class TrainingTab:
 
         if selected_raw == "auto":
             if recommendation["effective_raw"] == "cpu":
-                prefix = "AUTO uzyje CPU, bo nie wykryto GPU CUDA."
+                prefix = "AUTO użyje CPU, bo nie wykryto GPU CUDA."
             else:
                 prefix = (
-                    f"AUTO uzyje {recommendation['device_name']} "
+                    f"AUTO użyje {recommendation['device_name']} "
                     f"({recommendation['memory_gb']:.1f} GB VRAM)."
                 )
         elif recommendation["effective_raw"] == "cpu":
@@ -4575,6 +5408,7 @@ class TrainingTab:
 
         self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=1)
         self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self.step4_dataset_top = top
 
         left = ttk.LabelFrame(self.step4_route_panel_frame, text=" Wybór ścieżki treningowej ", padding=10)
         left.pack(fill=tk.BOTH, expand=True)
@@ -4623,6 +5457,7 @@ class TrainingTab:
 
         right = ttk.Frame(top)
         right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.step4_mode_right_host = right
 
         header = ttk.LabelFrame(right, text=" Aktywny tor ", padding=10)
         header.pack(fill=tk.X)
@@ -4673,6 +5508,9 @@ class TrainingTab:
             padding=10
         )
 
+        self.train_pct = tk.DoubleVar(value=80.0)
+        self.val_pct = tk.DoubleVar(value=10.0)
+
         self._build_creator_ui()
         self._build_splitter_ui()
 
@@ -4712,7 +5550,7 @@ class TrainingTab:
         self.step4_builder_log_text.configure(state=tk.DISABLED)
 
         self.step4_builder_tools = ttk.Frame(root)
-        self.step4_builder_tools.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.step4_builder_tools.pack_forget()
 
         self.step4_builder_nav = ttk.Frame(root)
         self.step4_builder_nav.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
@@ -4734,7 +5572,7 @@ class TrainingTab:
             text="Pokaż terminal",
             command=self._toggle_step4_builder_log
         )
-        self.btn_toggle_step4_log.pack(side=tk.LEFT)
+        self.btn_toggle_step4_log.pack_forget()
 
         self.btn_step4_next_frame = tk.Frame(self.step4_builder_nav, bd=0, highlightthickness=0)
         self.btn_step4_next_frame.grid(row=0, column=2, sticky="e", padx=(10, 0))
@@ -4774,28 +5612,73 @@ class TrainingTab:
 
     def _build_creator_ui(self):
         f = self.ds_creator_frame
+        palette = getattr(self.app, "palette", {})
         ttk.Label(
             f,
             text="Tworzy strukturę YOLO Pose na podstawie wyeksportowanego pliku annotations.xml.",
             font=("Segoe UI", 9)
         ).pack(anchor=tk.W, pady=(0, 10))
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
+        self.split_source_row = row1
+        self.creator_xml_row = row1
         ttk.Label(row1, text="CVAT XML:").pack(side=tk.LEFT)
         self.cvat_xml_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.cvat_xml_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row1, text="Wybierz", command=lambda: self._pick_file(self.cvat_xml_var, "*.xml")).pack(side=tk.LEFT)
+        self.cvat_xml_entry = ttk.Entry(row1, textvariable=self.cvat_xml_var)
+        self.cvat_xml_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.btn_pick_cvat_xml = ttk.Button(row1, text="Wybierz", command=lambda: self._pick_file(self.cvat_xml_var, "*.xml"))
+        self.btn_pick_cvat_xml.pack(side=tk.LEFT)
 
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
+        self.creator_images_row = row2
         ttk.Label(row2, text="Folder obrazów:").pack(side=tk.LEFT)
         self.cvat_images_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.cvat_images_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.cvat_images_var)).pack(side=tk.LEFT)
+        self.cvat_images_entry = ttk.Entry(row2, textvariable=self.cvat_images_var)
+        self.cvat_images_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.btn_pick_cvat_images = ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.cvat_images_var))
+        self.btn_pick_cvat_images.pack(side=tk.LEFT)
+
+        self.creator_source_summary_lbl = ttk.Label(
+            f,
+            text="",
+            justify=tk.LEFT,
+            wraplength=720
+        )
 
         row3 = ttk.Frame(f); row3.pack(fill=tk.X, pady=2)
         ttk.Label(row3, text="Zapis danych:").pack(side=tk.LEFT)
         # Ścieżka docelowa jest wyliczana automatycznie i pozostaje tylko do odczytu.
         self.ds_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
         ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        creator_ratios = ttk.Frame(f)
+        creator_ratios.pack(fill=tk.X, pady=10)
+        ttk.Label(creator_ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
+        ttk.Scale(
+            creator_ratios,
+            from_=50,
+            to=90,
+            variable=self.train_pct,
+            command=lambda e: self._update_ratio_labels(),
+        ).grid(row=0, column=1, sticky=tk.EW, padx=5)
+        self.creator_train_lbl = ttk.Label(creator_ratios, text="80%")
+        self.creator_train_lbl.grid(row=0, column=2, sticky=tk.W)
+
+        ttk.Label(creator_ratios, text="Val %").grid(row=1, column=0, sticky=tk.W)
+        ttk.Scale(
+            creator_ratios,
+            from_=5,
+            to=50,
+            variable=self.val_pct,
+            command=lambda e: self._update_ratio_labels(),
+        ).grid(row=1, column=1, sticky=tk.EW, padx=5)
+        self.creator_val_lbl = ttk.Label(creator_ratios, text="10%")
+        self.creator_val_lbl.grid(row=1, column=2, sticky=tk.W)
+
+        ttk.Label(creator_ratios, text="Test %").grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(creator_ratios, text="liczony automatycznie").grid(row=2, column=1, sticky=tk.W, padx=5)
+        self.creator_test_lbl = ttk.Label(creator_ratios, text="Test: 10%")
+        self.creator_test_lbl.grid(row=2, column=2, sticky=tk.W)
+        creator_ratios.columnconfigure(1, weight=1)
 
         self.btn_step4_create_frame = tk.Frame(f, bd=0, highlightthickness=0)
         self.btn_step4_create_frame.pack(anchor=tk.W, pady=(10, 5))
@@ -4815,7 +5698,16 @@ class TrainingTab:
         self.btn_step4_create.pack()
         
         self.ds_progress_var = tk.DoubleVar(value=0.0)
-        self.ds_progress = ttk.Progressbar(f, variable=self.ds_progress_var, maximum=100)
+        self.ds_progress = TrainProgressBar(
+            f,
+            variable=self.ds_progress_var,
+            maximum=100,
+            thickness=6,
+            trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
+            fill_color=palette.get("accent", "#0e639c"),
+            bg=palette.get("panel", "#252526"),
+            height=10,
+        )
         self.ds_progress.pack(fill=tk.X, pady=2)
         
         self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
@@ -4824,10 +5716,12 @@ class TrainingTab:
         # Powiązania pomocy dla budowy datasetu z CVAT.
         HELP.bind_help(row1, "tr_cvat_xml")
         HELP.bind_help(row2, "tr_cvat_img")
+        HELP.bind_help(creator_ratios, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_create, "tr_cvat_btn")
 
     def _build_splitter_ui(self):
         f = self.ds_split_frame
+        palette = getattr(self.app, "palette", {})
         ttk.Label(
             f,
             text="Dzieli zbiór (np. wygenerowany w zakładce Znaków) na foldery train/val potrzebne do treningu.",
@@ -4837,8 +5731,17 @@ class TrainingTab:
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="Źródło (np. mega-dataset):").pack(side=tk.LEFT)
         self.split_src_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.split_src_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var)).pack(side=tk.LEFT)
+        self.split_src_entry = ttk.Entry(row1, textvariable=self.split_src_var)
+        self.split_src_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.btn_pick_split_src = ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var))
+        self.btn_pick_split_src.pack(side=tk.LEFT)
+
+        self.split_source_summary_lbl = ttk.Label(
+            f,
+            text="",
+            justify=tk.LEFT,
+            wraplength=720
+        )
 
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
         ttk.Label(row2, text="Wynik podziału:").pack(side=tk.LEFT)
@@ -4848,12 +5751,10 @@ class TrainingTab:
         
         ratios = ttk.Frame(f); ratios.pack(fill=tk.X, pady=10)
         ttk.Label(ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
-        self.train_pct = tk.DoubleVar(value=80.0)
         ttk.Scale(ratios, from_=50, to=90, variable=self.train_pct, command=lambda e: self._update_ratio_labels()).grid(row=0, column=1, sticky=tk.EW, padx=5)
         self.train_lbl = ttk.Label(ratios, text="80%"); self.train_lbl.grid(row=0, column=2, sticky=tk.W)
 
         ttk.Label(ratios, text="Val %").grid(row=1, column=0, sticky=tk.W)
-        self.val_pct = tk.DoubleVar(value=10.0)
         ttk.Scale(ratios, from_=5, to=50, variable=self.val_pct, command=lambda e: self._update_ratio_labels()).grid(row=1, column=1, sticky=tk.EW, padx=5)
         self.val_lbl = ttk.Label(ratios, text="10%"); self.val_lbl.grid(row=1, column=2, sticky=tk.W)
 
@@ -4882,7 +5783,16 @@ class TrainingTab:
         
         self.split_progress_var = tk.DoubleVar(value=0.0)
         self.split_feedback_frame = ttk.Frame(f)
-        self.split_progress = ttk.Progressbar(self.split_feedback_frame, variable=self.split_progress_var, maximum=100)
+        self.split_progress = TrainProgressBar(
+            self.split_feedback_frame,
+            variable=self.split_progress_var,
+            maximum=100,
+            thickness=6,
+            trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
+            fill_color=palette.get("guide", palette.get("warning", "#f0b44c")),
+            bg=palette.get("panel", "#252526"),
+            height=10,
+        )
         self.split_progress.pack(fill=tk.X, pady=2)
         self.split_status = ttk.Label(self.split_feedback_frame, text="Gotowy")
         self.split_status.pack(anchor=tk.W)
@@ -4895,6 +5805,7 @@ class TrainingTab:
         self._update_ratio_labels()
 
     def _build_train_tab(self):
+        palette = getattr(self.app, "palette", {})
         root = ttk.Frame(self.tab_train, padding=5)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
@@ -4918,7 +5829,7 @@ class TrainingTab:
 
         self.train_left_canvas = tk.Canvas(
             self.train_left_scroll_host,
-            bg="#252526",
+            bg=palette.get("panel", "#252526"),
             bd=0,
             highlightthickness=0
         )
@@ -5040,7 +5951,7 @@ class TrainingTab:
         self.train_dataset_caption_lbl = ttk.Label(
             settings_col,
             text=(
-                "Wskaz gotowy folder datasetu z plikiem data.yaml. "
+                "Wskaż gotowy folder datasetu z plikiem data.yaml. "
                 "Dataset powstaje wczesniej w Z2 albo Z3/PZ3, a tutaj tylko go wybierasz do treningu."
             ),
             style="PanelMuted.TLabel",
@@ -5108,8 +6019,8 @@ class TrainingTab:
             settings_col,
             text=(
                 "Dla tablic wybieraj modele YOLO Pose. "
-                "Dla znakow tablic wybieraj modele YOLO Detect. "
-                "Mozesz tez wskazac wlasny checkpoint .pt do fine tuningu."
+                "Dla znaków tablic wybieraj modele YOLO Detect. "
+                "Możesz też wskazać własny checkpoint .pt do fine tuningu."
             ),
             style="PanelMuted.TLabel",
             anchor=tk.W,
@@ -5316,7 +6227,12 @@ class TrainingTab:
         self._register_train_left_wrap_target(self.train_device_hint_lbl, padding=16, min_wrap=220)
         self._refresh_training_device_hint()
 
-        self.btn_step4_start_train_frame = tk.Frame(settings_col, bd=0, highlightthickness=0, bg="#252526")
+        self.btn_step4_start_train_frame = tk.Frame(
+            settings_col,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel", "#252526"),
+        )
         self.btn_step4_start_train_frame.pack(fill=tk.X, pady=(15, 6))
         self.btn_step4_start_train_frame.grid_columnconfigure(0, weight=1)
 
@@ -5346,22 +6262,35 @@ class TrainingTab:
 
         self.train_epoch_progress_var = tk.DoubleVar(value=0.0)
         self.train_progress_var = tk.DoubleVar(value=0.0)
-        self.train_progress_shell = tk.Frame(settings_col, bd=0, highlightthickness=0)
+        self.train_progress_shell = tk.Frame(
+            settings_col,
+            bd=0,
+            highlightthickness=0,
+            bg=palette.get("panel", palette.get("bg", "#1f1f1f")),
+        )
         self.train_progress_shell.pack(fill=tk.X, pady=(10, 0))
 
-        self.train_epoch_progress = ttk.Progressbar(
+        self.train_epoch_progress = TrainProgressBar(
             self.train_progress_shell,
             variable=self.train_epoch_progress_var,
             maximum=100,
-            style="TrainEpoch.Horizontal.TProgressbar"
+            thickness=4,
+            trough_color=palette.get("surface_info", palette.get("panel_alt", palette.get("panel", "#252526"))),
+            fill_color=palette.get("guide", palette.get("warning", "#f0b44c")),
+            bg=palette.get("panel", palette.get("bg", "#1f1f1f")),
+            height=8,
         )
         self.train_epoch_progress.pack(fill=tk.X, pady=(0, 3))
 
-        self.train_progress = ttk.Progressbar(
+        self.train_progress = TrainProgressBar(
             self.train_progress_shell,
             variable=self.train_progress_var,
             maximum=100,
-            style="TrainOverall.Horizontal.TProgressbar"
+            thickness=4,
+            trough_color=palette.get("surface_info", palette.get("panel_alt", palette.get("panel", "#252526"))),
+            fill_color=palette.get("success", "#2ecc71"),
+            bg=palette.get("panel", palette.get("bg", "#1f1f1f")),
+            height=8,
         )
         self.train_progress.pack(fill=tk.X)
         self._configure_train_progress_styles()
@@ -5369,7 +6298,7 @@ class TrainingTab:
         self.train_progress_label = ttk.Label(settings_col, text="Czekam na start...", font=("Segoe UI", 9), style="Panel.TLabel")
         self.train_metric_hint_lbl = ttk.Label(
             settings_col,
-            text="Interpretacja pojawi sie po pierwszej zakonczonej epoce.",
+            text="Interpretacja pojawi się po pierwszej zakończonej epoce.",
             style="Panel.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
@@ -5388,7 +6317,7 @@ class TrainingTab:
         self._refresh_training_recommendation_table()
         self._refresh_training_start_state()
 
-        terminal_tools = ttk.Frame(root)
+        terminal_tools = ttk.Frame(root, style="Panel.TFrame")
         terminal_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
         self.btn_toggle_step4_train_log = ttk.Button(
@@ -5396,7 +6325,7 @@ class TrainingTab:
             text="Pokaż terminal",
             command=self._toggle_step4_train_log
         )
-        self.btn_toggle_step4_train_log.pack(side=tk.LEFT)
+        self.btn_toggle_step4_train_log.pack_forget()
 
         ttk.Label(
             terminal_tools,
@@ -5404,7 +6333,7 @@ class TrainingTab:
             foreground="gray"
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        self.step4_train_log_host = ttk.Frame(root)
+        self.step4_train_log_host = ttk.Frame(root, style="Panel.TFrame")
         self.step4_train_log_host.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
         self.step4_train_log_frame = ttk.LabelFrame(
@@ -5421,8 +6350,8 @@ class TrainingTab:
             height=10,
             wrap=tk.NONE,
             font=("Consolas", 10),
-            bg="#1e1e1e",
-            fg="#ecf0f1",
+            bg=palette.get("console_bg", palette.get("field", "#1e1e1e")),
+            fg=palette.get("console_fg", palette.get("fg", "#ecf0f1")),
             bd=0,
             relief=tk.FLAT,
             highlightthickness=0,
@@ -5475,8 +6404,8 @@ class TrainingTab:
         ttk.Label(
             hist_top,
             text=(
-                "Historia sluzy jako glowny panel wynikow. "
-                "Podwojne klikniecie LPM na wpisie otwiera osobne okno analizy z wykresami treningu."
+                "Historia służy jako główny panel wyników. "
+                "Podwójne kliknięcie LPM na wpisie otwiera osobne okno analizy z wykresami treningu."
             ),
             style="PanelMuted.TLabel",
             anchor=tk.W,
@@ -5505,7 +6434,7 @@ class TrainingTab:
         self.tree.bind("<Double-1>", self._open_selected_run_analysis, add="+")
         self.tree.bind("<Button-3>", self._show_history_context_menu, add="+")
         self.history_context_menu = tk.Menu(self.tree, tearoff=0)
-        self.history_context_menu.add_command(label="Otworz folder", command=self._open_run_folder)
+        self.history_context_menu.add_command(label="Otwórz folder", command=self._open_run_folder)
         self.history_context_menu.add_command(label="Usun", command=self._delete_selected)
 
         hist_details = ttk.Frame(hist_top, style="Panel.TFrame")
@@ -5592,13 +6521,13 @@ class TrainingTab:
 
         self.btn_step4_finish = ttk.Button(
             self.btn_step4_finish_pulse_frame,
-            text="Zakończ krok 4 i wróć do kampanii",
+            text="Zakończ etap iteracji i wróć do kampanii",
             command=self._finish_campaign_step4,
             style="Accent.TButton",
             state=tk.DISABLED
         )
         self.btn_step4_finish.pack(side=tk.LEFT)
-        self.btn_step4_finish.configure(text="Zakoncz krok 4", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+        self.btn_step4_finish.configure(text="Zakończ etap iteracji", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         self._refresh_step4_campaign_navigation_ui()
 
@@ -5633,11 +6562,12 @@ class TrainingTab:
         self.frame.bind_all("<Button-5>", self._on_train_left_global_mousewheel, add="+")
 
     def _build_plots_ui(self):
+        palette = getattr(self.app, "palette", {})
         self.plots_pane = ttk.PanedWindow(self.plots_tab, orient=tk.HORIZONTAL)
         self.plots_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        left = ttk.Frame(self.plots_pane)
-        right = ttk.Frame(self.plots_pane)
+        left = ttk.Frame(self.plots_pane, style="Panel.TFrame")
+        right = ttk.Frame(self.plots_pane, style="Panel.TFrame")
         self.plots_pane.add(left, weight=1)
         self.plots_pane.add(right, weight=4) # Poszerzamy pole na wykres
 
@@ -5646,11 +6576,15 @@ class TrainingTab:
         self.plots_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.plots_list.bind("<<ListboxSelect>>", self._on_plot_selected)
 
-        canvas_frame = ttk.Frame(right)
+        canvas_frame = ttk.Frame(right, style="Panel.TFrame")
         canvas_frame.pack(fill=tk.BOTH, expand=True)
         
         # Inicjalizujemy ZoomableCanvas (ten sam co w przeglądarce tablic)
-        self.plot_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
+        self.plot_canvas = ZoomableCanvas(
+            canvas_frame,
+            bg=palette.get("panel", "#252526"),
+            highlightthickness=0,
+        )
         self.plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _build_validation_panel(self, parent):
@@ -5723,7 +6657,7 @@ class TrainingTab:
         summary_box.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
 
         self.val_summary_title_var = tk.StringVar(
-            value="Po uruchomieniu walidacji najwazniejsze metryki pojawia sie tutaj."
+            value="Po uruchomieniu walidacji najwazniejsze metryki pojawia się tutaj."
         )
         self.val_summary_title_lbl = ttk.Label(
             summary_box,
@@ -5859,8 +6793,8 @@ class TrainingTab:
         ttk.Label(
             shell,
             text=(
-                "Walidacja sluzy do szybkiego sprawdzenia juz wytrenowanego modelu na wybranym splicie. "
-                "Po uruchomieniu dostajesz czytelna tabele metryk, a pelny log nadal trafia do wspolnego terminala procesu."
+                "Walidacja służy do szybkiego sprawdzenia już wytrenowanego modelu na wybranym splicie. "
+                "Po uruchomieniu dostajesz czytelna tabele metryk, a pełny log nadal trafia do wspolnego terminala procesu."
             ),
             style="PanelMuted.TLabel",
             anchor=tk.W,
@@ -5947,10 +6881,10 @@ class TrainingTab:
         summary_box.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
         self.val_summary_title_var = tk.StringVar(
-            value="Po uruchomieniu walidacji najwazniejsze metryki pojawia sie tutaj."
+            value="Po uruchomieniu walidacji najwazniejsze metryki pojawia się tutaj."
         )
         self.val_summary_note_var = tk.StringVar(
-            value="Tabela pokazuje wynik i jego orientacyjna ocene, zeby latwiej bylo porownac modele."
+            value="Tabela pokazuje wynik i jego orientacyjna ocene, zeby latwiej bylo porównać modele."
         )
         ttk.Label(
             summary_box,
@@ -5980,9 +6914,9 @@ class TrainingTab:
             height=9,
         )
         self._set_validation_summary(
-            "Po uruchomieniu walidacji najwazniejsze metryki pojawia sie tutaj.",
+            "Po uruchomieniu walidacji najwazniejsze metryki pojawia się tutaj.",
             [],
-            "Tabela pokazuje wynik i jego orientacyjna ocene, zeby latwiej bylo porownac modele.",
+            "Tabela pokazuje wynik i jego orientacyjna ocene, zeby latwiej bylo porównać modele.",
         )
 
     def _format_validation_metric_band(self, raw_name: str, value) -> tuple[str, str]:
@@ -6185,6 +7119,7 @@ class TrainingTab:
             self._show_analysis_plot(self._analysis_plot_paths[0])
 
     def _open_run_analysis_window(self, run):
+        palette = getattr(self.app, "palette", {})
         plot_paths = self._collect_run_analysis_paths(run)
         if not plot_paths:
             return messagebox.showinfo(
@@ -6195,7 +7130,7 @@ class TrainingTab:
         if not PIL_AVAILABLE:
             self._open_run_folder()
             return messagebox.showinfo(
-                "Brak podgladu obrazow",
+                "Brak podgladu obrazów",
                 "Brakuje biblioteki PIL, wiec otworzylem folder runu zamiast podgladu wykresow.",
             )
 
@@ -6255,7 +7190,11 @@ class TrainingTab:
 
             canvas_shell = ttk.Frame(right, style="Panel.TFrame")
             canvas_shell.pack(fill=tk.BOTH, expand=True)
-            self._analysis_plot_canvas = ZoomableCanvas(canvas_shell, bg="#1e1e1e", highlightthickness=0)
+            self._analysis_plot_canvas = ZoomableCanvas(
+                canvas_shell,
+                bg=palette.get("panel", "#252526"),
+                highlightthickness=0,
+            )
             self._analysis_plot_canvas.pack(fill=tk.BOTH, expand=True)
 
         try:
@@ -6308,12 +7247,13 @@ class TrainingTab:
             self._analysis_plot_canvas.set_image(img)
             self._analysis_plot_canvas.fit_to_view()
         except Exception as e:
-            logger.error(f"Nie udalo sie wyswietlic wykresu: {e}")
+            logger.error(f"Nie udało się wyswietlic wykresu: {e}")
 
     def _build_plots_ui(self):
         return None
 
     def _build_ranking_panel(self, parent):
+        palette = getattr(self.app, "palette", {})
         ttk.Label(
             parent,
             text="Porownuj wytrenowane modele wzgledem zapisanych poprawek z annotations.xml.",
@@ -6377,7 +7317,16 @@ class TrainingTab:
         self.btn_run_rank.pack(fill=tk.X, pady=(20,5), ipady=4)
         
         self.rank_progress_var = tk.DoubleVar(value=0.0)
-        self.rank_progress = ttk.Progressbar(left_f, mode="determinate", variable=self.rank_progress_var)
+        self.rank_progress = TrainProgressBar(
+            left_f,
+            variable=self.rank_progress_var,
+            mode="determinate",
+            thickness=6,
+            trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
+            fill_color=palette.get("accent_hover", palette.get("accent", "#0e639c")),
+            bg=palette.get("panel", "#252526"),
+            height=10,
+        )
         self.rank_progress.pack(fill=tk.X)
         self.rank_status = ttk.Label(left_f, text="Gotowy", foreground="gray")
         self.rank_status.pack(anchor=tk.W)
@@ -6403,14 +7352,15 @@ class TrainingTab:
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
 
     def _build_ranking_panel_v2(self, parent):
+        palette = getattr(self.app, "palette", {})
         shell = ttk.Frame(parent, padding=10, style="Panel.TFrame")
         shell.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(
             shell,
             text=(
-                "Ranking dla tablic porownuje kilka modeli YOLO Pose na jednym runie Z2/PZ2, "
-                "w ktorym po sprawdzeniu tablic zapisano zmiany. Wskazujesz folder modeli oraz "
+                "Ranking dla tablic porównuje kilka modeli YOLO Pose na jednym runie Z2/PZ2, "
+                "w którym po sprawdzeniu tablic zapisano zmiany. Wskazujesz folder modeli oraz "
                 "folder tego runu, a system sam odczyta obrazy i zapisane poprawki z annotations.xml."
             ),
             style="PanelMuted.TLabel",
@@ -6461,8 +7411,8 @@ class TrainingTab:
         self.rank_reference_hint_lbl = ttk.Label(
             config_box,
             text=(
-                "Wybierz folder runu Z2/PZ2, w ktorym po przejrzeniu tablic zapisales zmiany. "
-                "W srodku powinny byc obrazy i plik annotations.xml."
+                "Wybierz folder runu Z2/PZ2, w którym po przejrzeniu tablic zapisales zmiany. "
+                "W srodku powinny być obrazy i plik annotations.xml."
             ),
             style="PanelMuted.TLabel",
             anchor=tk.W,
@@ -6473,7 +7423,7 @@ class TrainingTab:
 
         ttk.Label(
             config_box,
-            text=f"Ranking uzywa domyslnego progu wykrycia: {float(CONFIG.DEFAULT_CONFIDENCE):.2f}.",
+            text=f"Ranking używa domyślnego progu wykrycia: {float(CONFIG.DEFAULT_CONFIDENCE):.2f}.",
             style="PanelMuted.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
@@ -6501,7 +7451,16 @@ class TrainingTab:
         self.btn_cancel_rank.grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
 
         self.rank_progress_var = tk.DoubleVar(value=0.0)
-        self.rank_progress = ttk.Progressbar(config_box, mode="determinate", variable=self.rank_progress_var)
+        self.rank_progress = TrainProgressBar(
+            config_box,
+            variable=self.rank_progress_var,
+            mode="determinate",
+            thickness=6,
+            trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
+            fill_color=palette.get("accent_hover", palette.get("accent", "#0e639c")),
+            bg=palette.get("panel", "#252526"),
+            height=10,
+        )
         self.rank_progress.pack(fill=tk.X)
         self.rank_status = ttk.Label(config_box, text="Gotowy", style="PanelMuted.TLabel")
         self.rank_status.pack(anchor=tk.W, pady=(4, 0))
@@ -6545,7 +7504,7 @@ class TrainingTab:
         models_dir = Path(models_dir_raw)
 
         if not models_dir.exists() or not models_dir.is_dir():
-            return messagebox.showerror("Blad", "Wskaz poprawny folder z modelami .pt.")
+            return messagebox.showerror("Błąd", "Wskaż poprawny folder z modelami .pt.")
 
         target_task = "Tablice (Pose)"
         if not self._begin_step4_operation("z4.ranking.run", "Z4: ranking modeli"):
@@ -6561,7 +7520,7 @@ class TrainingTab:
         except Exception:
             pass
         self._set_ranking_ui_state(
-            status="Przygotowuje ranking...",
+            status="Przygotowuję ranking...",
             status_color="gray",
             button_text="Przygotowanie...",
             cancel_enabled=True,
@@ -6573,7 +7532,7 @@ class TrainingTab:
         if reference_raw:
             self._append_ranking_log(f"Wybrany folder runu: {reference_raw}")
         else:
-            self._append_ranking_log("Nie wskazano jeszcze folderu runu do porownania.")
+            self._append_ranking_log("Nie wskazano jeszcze folderu runu do porównania.")
         self._start_ranking_watchdog("start przygotowania rankingu")
 
         def worker():
@@ -6594,11 +7553,11 @@ class TrainingTab:
                 )
                 reference_info = self._resolve_ranking_reference_source(reference_raw)
                 if not reference_info.get("ok"):
-                    self._append_ranking_log(str(reference_info.get("message") or "Nie udalo sie przygotowac folderu runu."))
+                    self._append_ranking_log(str(reference_info.get("message") or "Nie udało się przygotować folderu runu."))
                     self._ui(
                         lambda: messagebox.showerror(
-                            "Blad",
-                            str(reference_info.get("message") or "Wskaz poprawny folder runu po sprawdzeniu tablic."),
+                            "Błąd",
+                            str(reference_info.get("message") or "Wskaż poprawny folder runu po sprawdzeniu tablic."),
                         )
                     )
                     return
@@ -6638,11 +7597,11 @@ class TrainingTab:
                 gt_xml = Path(str(reference_info.get("xml_path") or "").strip())
                 images = list(reference_info.get("image_paths") or [])
                 if not gt_xml.exists() or not images:
-                    self._append_ranking_log("Wybrany folder runu nie zawiera kompletu obrazow i zapisanych zmian tablic.")
+                    self._append_ranking_log("Wybrany folder runu nie zawiera kompletu obrazów i zapisanych zmian tablic.")
                     self._ui(
                         lambda: messagebox.showerror(
-                            "Blad",
-                            "Wybrany folder nie zawiera kompletu obrazow i zapisanych zmian tablic.",
+                            "Błąd",
+                            "Wybrany folder nie zawiera kompletu obrazów i zapisanych zmian tablic.",
                         )
                     )
                     return
@@ -6662,7 +7621,7 @@ class TrainingTab:
                 total_models = len(models_to_test)
                 temp_xml_path = Path(str(reference_info.get("reference_dir") or models_dir)) / "temp_ranking_auto.xml"
                 self._append_ranking_log(
-                    f"Przygotowanie zakonczone. Modele pose: {total_models} | obrazy do porownania: {len(images)}"
+                    f"Przygotowanie zakończone. Modele pose: {total_models} | obrazy do porównania: {len(images)}"
                 )
                 self._append_ranking_log(
                     f"Urzadzenie rankingu: {selected_device_display} -> {effective_device_desc} | backend Ultralytics: {device}"
@@ -6699,13 +7658,13 @@ class TrainingTab:
                             pass
                         break
                     if not success:
-                        self._append_ranking_log(f"Pominieto model {model_path.name}: nie udalo sie go zaladowac.")
+                        self._append_ranking_log(f"Pominieto model {model_path.name}: nie udało się go załadować.")
                         continue
                     self._append_ranking_log(
                         f"{idx + 1}/{total_models} | Model zaladowany po {time.perf_counter() - model_started_at:.1f}s. "
-                        f"Start analizy {len(images)} obrazow."
+                        f"Start analizy {len(images)} obrazów."
                     )
-                    self._touch_ranking_watchdog(f"{model_path.name}: start analizy obrazow")
+                    self._touch_ranking_watchdog(f"{model_path.name}: start analizy obrazów")
 
                     auto_annotations = []
                     for img_idx, img_path in enumerate(images):
@@ -6734,9 +7693,9 @@ class TrainingTab:
                     annotator.unload_models()
                     if cancelled:
                         break
-                    self._touch_ranking_watchdog(f"{model_path.name}: eksport i porownanie wynikow")
+                    self._touch_ranking_watchdog(f"{model_path.name}: eksport i porownanie wyników")
                     self._set_ranking_ui_state(
-                        status=f"Analiza wynikow {model_path.name}...",
+                        status=f"Analiza wyników {model_path.name}...",
                         status_color="gray",
                     )
 
@@ -6765,24 +7724,24 @@ class TrainingTab:
                         temp_xml_path.unlink()
 
                 try:
-                    self._touch_ranking_watchdog("zapisywanie wynikow rankingu")
+                    self._touch_ranking_watchdog("zapisywanie wyników rankingu")
                     self.ranking_engine.flush()
                 except Exception as save_error:
-                    self._append_ranking_log(f"Ostrzezenie: nie udalo sie zapisac rankingu: {save_error}")
+                    self._append_ranking_log(f"Ostrzezenie: nie udało się zapisac rankingu: {save_error}")
                 if cancelled or self.rank_cancel_requested:
-                    self._append_ranking_log("Ranking anulowany przez uzytkownika.")
+                    self._append_ranking_log("Ranking anulowany przez użytkownika.")
                     self._ui(lambda: self._load_ranking())
                     self._ui(lambda: self.rank_status.config(text="Ranking anulowany.", foreground="#d35400"))
                 else:
-                    self._append_ranking_log("Ranking zakonczony.")
+                    self._append_ranking_log("Ranking zakończony.")
                     self._ui(lambda: self.rank_progress_var.set(100))
                     self._ui(lambda: self._load_ranking())
-                    self._ui(lambda: self.rank_status.config(text="Ranking zakonczony.", foreground="green"))
+                    self._ui(lambda: self.rank_status.config(text="Ranking zakończony.", foreground="green"))
 
             except Exception as e:
-                self._append_ranking_log(f"Blad rankingu: {e}")
-                self._ui(lambda err=e: messagebox.showerror("Blad", f"Blad w trakcie rankingu:\n{err}"))
-                self._ui(lambda: self.rank_status.config(text="Blad rankingu", foreground="red"))
+                self._append_ranking_log(f"Błąd rankingu: {e}")
+                self._ui(lambda err=e: messagebox.showerror("Błąd", f"Błąd w trakcie rankingu:\n{err}"))
+                self._ui(lambda: self.rank_status.config(text="Błąd rankingu", foreground="red"))
             finally:
                 self._stop_ranking_watchdog()
                 self.rank_is_running = False
@@ -6801,7 +7760,7 @@ class TrainingTab:
         self.rank_cancel_requested = True
         self.rank_is_running = False
         self._touch_ranking_watchdog("przerywanie rankingu")
-        self._append_ranking_log("Uzytkownik zazadal przerwania rankingu. Czekam na bezpieczne zatrzymanie...")
+        self._append_ranking_log("Użytkownik zazadal przerwania rankingu. Czekam na bezpieczne zatrzymanie...")
         self._set_ranking_ui_state(
             status="Przerywanie rankingu...",
             status_color="#d35400",
@@ -6835,9 +7794,20 @@ class TrainingTab:
             self.val_pct.set(val)
 
         test = max(5.0, 100.0 - train - val)
-        self.train_lbl.configure(text=f"{train:.0f}%")
-        self.val_lbl.configure(text=f"{val:.0f}%")
-        self.test_lbl.configure(text=f"Test: {test:.0f}%")
+        for attr_name, value in (
+            ("train_lbl", f"{train:.0f}%"),
+            ("val_lbl", f"{val:.0f}%"),
+            ("test_lbl", f"Test: {test:.0f}%"),
+            ("creator_train_lbl", f"{train:.0f}%"),
+            ("creator_val_lbl", f"{val:.0f}%"),
+            ("creator_test_lbl", f"Test: {test:.0f}%"),
+        ):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                try:
+                    widget.configure(text=value)
+                except Exception:
+                    pass
 
     def _on_base_model_change(self):
         if self.base_model_var.get() == "Custom":
@@ -6929,7 +7899,7 @@ class TrainingTab:
                             source_images_dir=images_dir,
                         )
                     except Exception as e:
-                        logger.debug(f"Nie udalo sie zapisac manifestu zrodla datasetu Z4: {e}")
+                        logger.debug(f"Nie udało się zapisac manifestu źródła datasetu Z4: {e}")
 
                     if stage_result["enabled"]:
                         stage_ok, stage_msg, stage_stats = self.creator.sync_pending_stage(
@@ -6952,10 +7922,10 @@ class TrainingTab:
                             lambda info=dict(stage_result): messagebox.showinfo(
                                 "Stage oczekujacych",
                                 (
-                                    f"Do stage oczekujacych trafilo {int(info.get('pending_count', 0) or 0)} nieoznaczonych zdjec.\n\n"
-                                    f"Stage zawiera teraz lacznie {int(info.get('stage_images_total', 0) or 0)} obrazow.\n"
+                                    f"Do stage oczekujacych trafiło {int(info.get('pending_count', 0) or 0)} nieoznaczonych zdjęć.\n\n"
+                                    f"Stage zawiera teraz lacznie {int(info.get('stage_images_total', 0) or 0)} obrazów.\n"
                                     f"{info.get('stage_images_dir')}\n\n"
-                                    "Ten folder mozesz wykorzystac pozniej jako kolejna pule do recznej anotacji."
+                                    "Ten folder możesz wykorzystać później jako kolejną pulę do ręcznej anotacji."
                                 ),
                             )
                         )
@@ -7073,7 +8043,7 @@ class TrainingTab:
         
         self._set_step4_process_console_text("Uruchamianie treningu...\n")
         self._latest_training_metrics = {}
-        self._set_training_metric_interpretation("Interpretacja pojawi sie po pierwszej zakonczonej epoce.")
+        self._set_training_metric_interpretation("Interpretacja pojawi się po pierwszej zakończonej epoce.")
 
         ds = self.dataset_var.get().strip()
         if not ds:
@@ -7130,7 +8100,7 @@ class TrainingTab:
                         "Wybrany tor treningu nie pasuje do wskazanego datasetu.\n\n"
                         f"Wybrany tor: {selected_label}\n"
                         f"Rozpoznany dataset: {inferred_label}\n\n"
-                        "Zmien karte wyboru toru albo wskaz dataset zgodny z tym wyborem."
+                        "Zmien karte wyboru toru albo wskaż dataset zgodny z tym wyborem."
                     )
                 self._rebind_free_mode_training_storage(target=selected_target)
 
@@ -7206,8 +8176,8 @@ class TrainingTab:
             )
         except Exception as e:
             self._end_step4_operation("z4.training.run")
-            logger.exception("Nie udalo sie wystartowac treningu")
-            return messagebox.showerror("Blad", f"Nie udalo sie uruchomic treningu:\n{e}")
+            logger.exception("Nie udało się wystartować treningu")
+            return messagebox.showerror("Błąd", f"Nie udało się uruchomic treningu:\n{e}")
 
         if not run_id:
             self._end_step4_operation("z4.training.run")
@@ -7224,11 +8194,17 @@ class TrainingTab:
             )
 
         self.current_run_id = run_id
+        self._last_training_completion_summary_run_id = None
         try:
             self._remember_campaign_plate_training_source(dataset_root)
         except Exception as e:
-            logger.debug(f"Nie udalo sie zapamietac zrodla treningu tablic: {e}")
+            logger.debug(f"Nie udało się zapamietac źródła treningu tablic: {e}")
         self._step4_campaign_finish_ready = False
+        try:
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
         self._set_train_progress_values(overall=0.0, epoch=0.0)
         self._set_train_live_metrics(None)
         self.btn_start_train.configure(state=tk.DISABLED)
@@ -7536,7 +8512,7 @@ class TrainingTab:
         self._set_validation_summary(
             f"Trwa walidacja: {Path(model_path).name} | split: {self.val_split_var.get()}",
             [],
-            "Model jest sprawdzany na wskazanym splicie. Po zakonczeniu tabela odswiezy wynik automatycznie.",
+            "Model jest sprawdzany na wskazanym splicie. Po zakończeniu tabela odświeży wynik automatycznie.",
         )
         self._set_step4_process_console_text(
             f"Inicjalizowanie silnika YOLO do ewaluacji...\n"
@@ -7574,7 +8550,7 @@ class TrainingTab:
                 self._ui(
                     lambda rows=metric_rows, model_name=Path(model_path).name, split_name=self.val_split_var.get():
                     self._set_validation_summary(
-                        f"Walidacja zakonczona: {model_name} | split: {split_name}",
+                        f"Walidacja zakończona: {model_name} | split: {split_name}",
                         rows,
                         "Tabela pokazuje najwazniejsze metryki walidacyjne i ich orientacyjna ocene.",
                     )
@@ -7587,8 +8563,8 @@ class TrainingTab:
                 self._ui(
                     lambda err=str(e), model_name=Path(model_path).name:
                     self._set_validation_summary(
-                        f"Walidacja nie powiodla sie: {model_name}",
-                        [("Blad", self._shorten_training_text(err, 72), "-", "-")],
+                        f"Walidacja nie powiodla się: {model_name}",
+                        [("Błąd", self._shorten_training_text(err, 72), "-", "-")],
                         err,
                     )
                 )

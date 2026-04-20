@@ -54,6 +54,7 @@ class CampaignManager:
         return {
             "master_pool_dir": "",
             "ingest_batch_size": 200,
+            "project_start_mode": "",
             "step1_status": "pending",
             "iteration_target": "",
             "last_iteration_target": "",
@@ -63,6 +64,14 @@ class CampaignManager:
             "last_plate_training_dataset": "",
             "last_plate_training_source_run": "",
             "last_plate_training_source_xml": "",
+            "step4_finish_ready": False,
+            "step4_last_run_id": "",
+            "step4_last_target": "",
+            "step3_extract_entry_mode": "",
+            "step3_extract_workflow_step": "entry",
+            "step3_extract_annotation_run_dir": "",
+            "step3_extract_xml_path": "",
+            "step3_extract_images_dir": "",
             "project_status": "active",
             "project_completed_at": "",
         }
@@ -86,6 +95,7 @@ class CampaignManager:
             "created_at": datetime.now().isoformat(),
             "current_iteration": 1,
             "current_step": 1,
+            "project_start_mode": "",
             "step1_status": "pending",
             "step2_status": "pending",
             "step2_staging_run": "",
@@ -97,6 +107,9 @@ class CampaignManager:
             "last_plate_training_dataset": "",
             "last_plate_training_source_run": "",
             "last_plate_training_source_xml": "",
+            "step4_finish_ready": False,
+            "step4_last_run_id": "",
+            "step4_last_target": "",
             "best_vehicle_model": "",
             "best_plate_model": "",
             "best_char_model": "",
@@ -104,6 +117,11 @@ class CampaignManager:
             "step3_substep": 1,
             "step3_stage1_done": False,
             "step3_stage2_done": False,
+            "step3_extract_entry_mode": "",
+            "step3_extract_workflow_step": "entry",
+            "step3_extract_annotation_run_dir": "",
+            "step3_extract_xml_path": "",
+            "step3_extract_images_dir": "",
             "project_status": "active",
             "project_completed_at": "",
         }
@@ -278,6 +296,32 @@ class CampaignManager:
         return self.state["projects"][act].get("step1_status", "pending")
 
     @staticmethod
+    def _normalize_project_start_mode(mode: str | None) -> str:
+        value = str(mode or "").strip().lower()
+        if not value:
+            return ""
+        if value in {"assets", "import", "resource", "resources", "mam_zasoby"}:
+            return "assets"
+        return "fresh"
+
+    def set_project_start_mode(self, mode: str | None, project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+
+        self.state["projects"][project_name]["project_start_mode"] = self._normalize_project_start_mode(mode)
+        self.save_state()
+        return True
+
+    def get_project_start_mode(self, project_name: str = None) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+
+        raw_value = self.state["projects"][project_name].get("project_start_mode", "")
+        return self._normalize_project_start_mode(raw_value)
+
+    @staticmethod
     def _normalize_iteration_target(target: str | None) -> str:
         value = str(target or "").strip().lower()
         if value in {"plate", "plates", "tablica", "tablice", "pose"}:
@@ -414,6 +458,11 @@ class CampaignManager:
         self.state["projects"][act]["step3_substep"] = 1
         self.state["projects"][act]["step3_stage1_done"] = False
         self.state["projects"][act]["step3_stage2_done"] = False
+        self.state["projects"][act]["step3_extract_entry_mode"] = ""
+        self.state["projects"][act]["step3_extract_workflow_step"] = "entry"
+        self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
+        self.state["projects"][act]["step3_extract_xml_path"] = ""
+        self.state["projects"][act]["step3_extract_images_dir"] = ""
         self.save_state()
 
     def get_step3_status(self) -> str:
@@ -484,6 +533,59 @@ class CampaignManager:
         self.state["projects"][act]["step3_substep"] = 1
         self.state["projects"][act]["step3_stage1_done"] = False
         self.state["projects"][act]["step3_stage2_done"] = False
+        self.state["projects"][act]["step3_extract_entry_mode"] = ""
+        self.state["projects"][act]["step3_extract_workflow_step"] = "entry"
+        self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
+        self.state["projects"][act]["step3_extract_xml_path"] = ""
+        self.state["projects"][act]["step3_extract_images_dir"] = ""
+        self.save_state()
+
+    def get_step3_extract_state(self) -> Dict[str, str]:
+        act = self.get_active_project_name()
+        if not act:
+            return {
+                "entry_mode": "",
+                "workflow_step": "entry",
+                "annotation_run_dir": "",
+                "xml_path": "",
+                "images_dir": "",
+            }
+
+        project_data = self.state["projects"][act]
+        return {
+            "entry_mode": str(project_data.get("step3_extract_entry_mode", "") or "").strip(),
+            "workflow_step": str(project_data.get("step3_extract_workflow_step", "entry") or "entry").strip(),
+            "annotation_run_dir": str(project_data.get("step3_extract_annotation_run_dir", "") or "").strip(),
+            "xml_path": str(project_data.get("step3_extract_xml_path", "") or "").strip(),
+            "images_dir": str(project_data.get("step3_extract_images_dir", "") or "").strip(),
+        }
+
+    def set_step3_extract_state(
+        self,
+        *,
+        entry_mode: str | None = None,
+        workflow_step: str | None = None,
+        annotation_run_dir: str | None = None,
+        xml_path: str | None = None,
+        images_dir: str | None = None,
+    ) -> None:
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        project_data = self.state["projects"][act]
+
+        if entry_mode is not None:
+            project_data["step3_extract_entry_mode"] = str(entry_mode or "").strip()
+        if workflow_step is not None:
+            project_data["step3_extract_workflow_step"] = str(workflow_step or "entry").strip() or "entry"
+        if annotation_run_dir is not None:
+            project_data["step3_extract_annotation_run_dir"] = str(annotation_run_dir or "").strip()
+        if xml_path is not None:
+            project_data["step3_extract_xml_path"] = str(xml_path or "").strip()
+        if images_dir is not None:
+            project_data["step3_extract_images_dir"] = str(images_dir or "").strip()
+
         self.save_state()
 
     def _clone_iteration_ingest_manifest(
@@ -565,6 +667,262 @@ class CampaignManager:
             "manifest_cloned": bool(manifest_cloned),
         }
 
+    def _seed_iteration_from_master_pool(
+        self,
+        *,
+        source_iteration: int,
+        target_iteration: int,
+        project_name: str,
+    ) -> Dict[str, Any]:
+        master_pool_dir = self.get_master_pool_dir(project_name)
+        target_raw_dir = self.get_iteration_raw_dir(target_iteration, project_name)
+        if master_pool_dir is None or target_raw_dir is None:
+            return {"ok": False, "reason": "missing_project_dirs"}
+        if not master_pool_dir.exists() or not master_pool_dir.is_dir():
+            return {"ok": False, "reason": "missing_master_pool"}
+
+        from .campaign_ingest_planner import CampaignIngestPlanner
+
+        planner = CampaignIngestPlanner()
+        used_registry = self.get_used_image_registry(project_name)
+        balance_snapshot = self.refresh_ingest_balance_snapshot(project_name)
+        effective_batch = max(1, int(self.get_ingest_batch_size(project_name)))
+
+        plan = planner.plan_from_master_pool(
+            master_pool_dir=master_pool_dir,
+            current_balance=balance_snapshot.get("char_balance", {}),
+            used_source_keys=used_registry.get("source_keys", []),
+            used_filenames=used_registry.get("filenames", []),
+            batch_size=effective_batch,
+        )
+
+        selected_items = list(plan.get("selected", []) or [])
+        if not selected_items:
+            return {
+                "ok": False,
+                "reason": "missing_remaining_images",
+                "source_dir": str(master_pool_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_cloned": False,
+            }
+
+        target_raw_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        selected_images: list[Dict[str, Any]] = []
+        total_hist: Dict[str, int] = {ch: 0 for ch in CHAR_ALPHABET}
+
+        for item in selected_items:
+            try:
+                source_path = Path(str(item.get("source_path", "") or "").strip())
+            except Exception:
+                continue
+            if not source_path.exists() or not source_path.is_file():
+                continue
+
+            target_path = target_raw_dir / source_path.name
+            shutil.copy2(source_path, target_path)
+            copied += 1
+
+            char_hist = {
+                str(ch): int(value)
+                for ch, value in dict(item.get("char_histogram") or {}).items()
+                if int(value or 0) > 0
+            }
+            for ch, value in char_hist.items():
+                total_hist[ch] = total_hist.get(ch, 0) + int(value)
+
+            selected_images.append(
+                {
+                    "name": source_path.name,
+                    "source_path": str(source_path.resolve()),
+                    "source_key": str(item.get("source_key", "") or "").strip(),
+                    "target_path": str(target_path.resolve()),
+                    "ground_truth_texts": list(item.get("ground_truth_texts", []) or []),
+                    "char_histogram": char_hist,
+                    "score": float(item.get("score", 0.0) or 0.0),
+                    "score_details": dict(item.get("score_details", {}) or {}),
+                }
+            )
+
+        if copied <= 0:
+            return {
+                "ok": False,
+                "reason": "copy_failed",
+                "source_dir": str(master_pool_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_cloned": False,
+            }
+
+        manifest = {
+            "project": project_name,
+            "iteration": int(target_iteration),
+            "created_at": datetime.now().isoformat(),
+            "selection_mode": "pool_reuse",
+            "reused_from_iteration": int(source_iteration),
+            "source_dir": str(master_pool_dir.resolve()),
+            "target_dir": str(target_raw_dir.resolve()),
+            "master_pool_dir": str(master_pool_dir.resolve()),
+            "selected_count": len(selected_images),
+            "char_histogram": {k: int(v) for k, v in total_hist.items() if int(v) > 0},
+            "selected_images": selected_images,
+            "proposal_summary": {
+                "planner_version": str(plan.get("planner_version", "") or ""),
+                "generated_at": str(plan.get("generated_at", "") or ""),
+                "selected_total": int(plan.get("selected_total", 0) or 0),
+                "batch_size": int(plan.get("batch_size", effective_batch) or effective_batch),
+                "skipped_used": int(plan.get("skipped_used", 0) or 0),
+                "source_iteration": int(source_iteration),
+            },
+        }
+
+        manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+        try:
+            plan["ok"] = True
+            plan["project"] = project_name
+            plan["iteration"] = int(target_iteration)
+            self.save_latest_ingest_plan(plan, project_name)
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "source_dir": str(master_pool_dir.resolve()),
+            "target_dir": str(target_raw_dir.resolve()),
+            "copied_images": int(copied),
+            "manifest_cloned": manifest_saved,
+        }
+
+    def _seed_iteration_from_stage(
+        self,
+        *,
+        source_iteration: int,
+        target_iteration: int,
+        project_name: str,
+    ) -> Dict[str, Any]:
+        target_raw_dir = self.get_iteration_raw_dir(target_iteration, project_name)
+        stage_root = self.get_staging_dir("plate_stage")
+        if target_raw_dir is None or stage_root is None:
+            return {"ok": False, "reason": "missing_project_dirs"}
+
+        stage_root = Path(stage_root)
+        stage_candidates = [
+            (stage_root / f"Iteracja_{int(source_iteration):03d}", stage_root / f"Iteracja_{int(source_iteration):03d}" / "images"),
+            (stage_root, stage_root / "images"),
+        ]
+
+        stage_iteration_dir = None
+        stage_images_dir = None
+        for candidate_dir, candidate_images_dir in stage_candidates:
+            if candidate_images_dir.exists() and candidate_images_dir.is_dir():
+                stage_iteration_dir = candidate_dir
+                stage_images_dir = candidate_images_dir
+                break
+
+        if stage_iteration_dir is None or stage_images_dir is None:
+            missing_images_dir = stage_candidates[0][1]
+            return {
+                "ok": False,
+                "reason": "missing_stage_images",
+                "source_dir": str(missing_images_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_cloned": False,
+            }
+
+        stage_images = [
+            path for path in stage_images_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+        ]
+        if not stage_images:
+            return {
+                "ok": False,
+                "reason": "missing_stage_images",
+                "source_dir": str(stage_images_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_cloned": False,
+            }
+
+        target_raw_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        selected_images: list[Dict[str, Any]] = []
+
+        for source_path in stage_images:
+            target_path = target_raw_dir / source_path.name
+            if target_path.exists():
+                try:
+                    target_path.unlink()
+                except Exception:
+                    pass
+            shutil.move(str(source_path), str(target_path))
+            moved += 1
+            selected_images.append(
+                {
+                    "name": source_path.name,
+                    "source_path": str(source_path.resolve()),
+                    "target_path": str(target_path.resolve()),
+                }
+            )
+
+        if moved <= 0:
+            return {
+                "ok": False,
+                "reason": "copy_failed",
+                "source_dir": str(stage_images_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_cloned": False,
+            }
+
+        manifest = {
+            "project": project_name,
+            "iteration": int(target_iteration),
+            "created_at": datetime.now().isoformat(),
+            "selection_mode": "stage_reuse",
+            "reused_from_iteration": int(source_iteration),
+            "source_dir": str(stage_images_dir.resolve()),
+            "target_dir": str(target_raw_dir.resolve()),
+            "selected_count": len(selected_images),
+            "selected_images": selected_images,
+            "char_histogram": {},
+            "proposal_summary": {
+                "source_iteration": int(source_iteration),
+                "source_kind": "stage",
+            },
+        }
+        manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+
+        manifest_path = stage_iteration_dir / "stage_manifest.json"
+        if manifest_path.exists():
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            payload["pending_images"] = 0
+            payload["stage_images_total"] = 0
+            payload["entries"] = {}
+            try:
+                manifest_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+        return {
+            "ok": True,
+            "source_dir": str(stage_images_dir.resolve()),
+            "target_dir": str(target_raw_dir.resolve()),
+            "copied_images": int(moved),
+            "manifest_cloned": manifest_saved,
+            "source_kind": "stage",
+        }
+
     def advance_to_next_iteration(self, start_mode: str = "new_input") -> Dict[str, Any]:
         act = self.state.get("active_project", "")
         if not act or act not in self.state.get("projects", {}):
@@ -596,13 +954,22 @@ class CampaignManager:
         if current_target in {"plate", "char"}:
             project_data["last_iteration_target"] = current_target
         project_data["iteration_target"] = ""
+        project_data["step4_finish_ready"] = False
+        project_data["step4_last_run_id"] = ""
+        project_data["step4_last_target"] = ""
 
         if start_mode == "reuse_input":
-            reuse_result = self._carry_iteration_input_forward(
+            reuse_result = self._seed_iteration_from_stage(
                 source_iteration=current_iteration,
                 target_iteration=next_iteration,
                 project_name=act,
             )
+            if not reuse_result.get("ok"):
+                reuse_result = self._seed_iteration_from_master_pool(
+                    source_iteration=current_iteration,
+                    target_iteration=next_iteration,
+                    project_name=act,
+                )
             result.update(reuse_result)
             if reuse_result.get("ok"):
                 project_data["current_step"] = 2
@@ -619,6 +986,11 @@ class CampaignManager:
         project_data["step3_substep"] = 1
         project_data["step3_stage1_done"] = False
         project_data["step3_stage2_done"] = False
+        project_data["step3_extract_entry_mode"] = ""
+        project_data["step3_extract_workflow_step"] = "entry"
+        project_data["step3_extract_annotation_run_dir"] = ""
+        project_data["step3_extract_xml_path"] = ""
+        project_data["step3_extract_images_dir"] = ""
         project_data["project_status"] = "active"
         project_data["project_completed_at"] = ""
         self.save_state()
@@ -667,6 +1039,40 @@ class CampaignManager:
             "dataset_path": str(project_data.get("last_plate_training_dataset", "") or "").strip(),
             "source_run_path": str(project_data.get("last_plate_training_source_run", "") or "").strip(),
             "source_xml_path": str(project_data.get("last_plate_training_source_xml", "") or "").strip(),
+        }
+
+    def set_step4_finish_state(
+        self,
+        ready: bool,
+        *,
+        run_id: str = "",
+        target: str = "",
+    ) -> None:
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        project_data = self.state["projects"][act]
+        is_ready = bool(ready)
+        project_data["step4_finish_ready"] = is_ready
+        project_data["step4_last_run_id"] = str(run_id or "").strip() if is_ready else ""
+        project_data["step4_last_target"] = self._normalize_iteration_target(target) if is_ready else ""
+        self.save_state()
+
+    def get_step4_finish_state(self) -> Dict[str, Any]:
+        act = self.get_active_project_name()
+        if not act:
+            return {
+                "ready": False,
+                "run_id": "",
+                "target": "",
+            }
+
+        project_data = self.state["projects"].get(act, {})
+        return {
+            "ready": bool(project_data.get("step4_finish_ready", False)),
+            "run_id": str(project_data.get("step4_last_run_id", "") or "").strip(),
+            "target": self._normalize_iteration_target(project_data.get("step4_last_target", "")),
         }
 
     def set_last_plate_manual_source(

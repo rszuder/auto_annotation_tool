@@ -7,7 +7,7 @@ Zarządca archiwów ZIP (Import/Export do CVAT).
 import zipfile
 import shutil
 from pathlib import Path
-from typing import Tuple
+from typing import Iterable, Tuple
 
 from ..config import logger, CONFIG
 
@@ -52,7 +52,12 @@ class CVATZipManager:
             return False, f"Błąd weryfikacji paczki ZIP: {e}", target_dir
 
     @staticmethod
-    def create_cvat_import_zip(xml_path: Path, images_dir: Path, output_zip_path: Path) -> Tuple[bool, str]:
+    def create_cvat_import_zip(
+        xml_path: Path,
+        images_dir: Path,
+        output_zip_path: Path,
+        image_names_allowlist: Iterable[str] | None = None,
+    ) -> Tuple[bool, str]:
         """
         Pakuje wskazany annotations.xml oraz wszystkie zdjęcia w nim użyte 
         w elegancką paczkę .zip, gotową do Drag & Drop w oknie przeglądarki z CVAT.
@@ -61,6 +66,7 @@ class CVATZipManager:
             xml_path: Ścieżka do stworzonego annotations.xml
             images_dir: Folder skąd wziąć zdjęcia pojazdów/tablic
             output_zip_path: Miejsce zapisu gotowej paczki .zip
+            image_names_allowlist: Opcjonalna lista nazw obrazów, które mają wejść do paczki
         """
         if not xml_path.exists():
             return False, "Brak pliku annotations.xml do spakowania!"
@@ -68,6 +74,11 @@ class CVATZipManager:
         try:
             output_zip_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Pakowanie zdjęć i XML dla CVAT: {output_zip_path.name}")
+            allowed_names = {
+                str(name or "").strip().lower()
+                for name in (image_names_allowlist or [])
+                if str(name or "").strip()
+            }
             
             with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_ref:
                 # Plik XML musi leżeć w głównym korzeniu pnia ZIP, a nie w folderach
@@ -78,6 +89,8 @@ class CVATZipManager:
                     added_images = 0
                     for img_file in images_dir.iterdir():
                         if img_file.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                            if allowed_names and img_file.name.lower() not in allowed_names:
+                                continue
                             zip_ref.write(img_file, arcname=f"images/{img_file.name}")
                             added_images += 1
                             

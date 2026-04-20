@@ -158,6 +158,7 @@ class CVATExporter:
             attr = ET.SubElement(box, "attribute")
             attr.set("name", "confidence")
             attr.text = f"{det.confidence:.3f}"
+        self._add_detection_attributes(box, det, include_confidence=include_confidence)
     
     def _add_polygon(self, parent: ET.Element, det: Detection, include_confidence: bool):
         """Dodaje <polygon>."""
@@ -182,6 +183,21 @@ class CVATExporter:
             attr = ET.SubElement(poly, "attribute")
             attr.set("name", "confidence")
             attr.text = f"{det.confidence:.3f}"
+        self._add_detection_attributes(poly, det, include_confidence=include_confidence)
+
+    @staticmethod
+    def _add_detection_attributes(parent: ET.Element, det: Detection, *, include_confidence: bool):
+        """Zapisuje dodatkowe atrybuty detekcji do XML."""
+        for attr_name, attr_value in dict(getattr(det, "attributes", {}) or {}).items():
+            name = str(attr_name or "").strip()
+            value = str(attr_value or "").strip()
+            if not name or not value:
+                continue
+            if include_confidence and name == "confidence":
+                continue
+            attr = ET.SubElement(parent, "attribute")
+            attr.set("name", name)
+            attr.text = value
     
     def _prettify(self, xml_str: str) -> str:
         """Formatuje XML."""

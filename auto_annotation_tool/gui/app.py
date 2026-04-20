@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Główna aplikacja GUI.
@@ -1793,6 +1793,156 @@ class AutoAnnotationApp:
 
         return style_name
 
+    def style_ttk_frame_widget(self, widget, background: str = None, base_style: str = None) -> str:
+        if widget is None:
+            return str(base_style or "TFrame")
+
+        try:
+            current_style = str(widget.cget("style") or "").strip()
+        except Exception:
+            current_style = ""
+
+        resolved_base_style = str(
+            base_style
+            or getattr(widget, "_base_ttk_frame_style", "")
+            or current_style
+            or "TFrame"
+        ).strip() or "TFrame"
+        if resolved_base_style.startswith("AutoBg_") and "." in resolved_base_style:
+            resolved_base_style = resolved_base_style.split(".", 1)[1] or "TFrame"
+
+        resolved_bg = self._coerce_color_hex(
+            background,
+            fallback=self._resolve_widget_background(getattr(widget, "master", None), fallback=background),
+        )
+        style_name = f"AutoBg_{self._style_token(resolved_bg)}.{resolved_base_style}"
+
+        try:
+            self.style.configure(style_name, background=resolved_bg)
+        except Exception:
+            pass
+
+        try:
+            widget._base_ttk_frame_style = resolved_base_style
+        except Exception:
+            pass
+
+        try:
+            widget.configure(style=style_name)
+        except Exception:
+            pass
+
+        return style_name
+
+    def style_ttk_panedwindow_widget(self, widget, background: str = None, base_style: str = None) -> str:
+        if widget is None:
+            return str(base_style or "TPanedwindow")
+
+        try:
+            current_style = str(widget.cget("style") or "").strip()
+        except Exception:
+            current_style = ""
+
+        resolved_base_style = str(
+            base_style
+            or getattr(widget, "_base_ttk_panedwindow_style", "")
+            or current_style
+            or "TPanedwindow"
+        ).strip() or "TPanedwindow"
+        if resolved_base_style.startswith("AutoBg_") and "." in resolved_base_style:
+            resolved_base_style = resolved_base_style.split(".", 1)[1] or "TPanedwindow"
+
+        resolved_bg = self._coerce_color_hex(
+            background,
+            fallback=self._resolve_widget_background(getattr(widget, "master", None), fallback=background),
+        )
+        style_name = f"AutoBg_{self._style_token(resolved_bg)}.{resolved_base_style}"
+
+        try:
+            self.style.configure(style_name, background=resolved_bg)
+        except Exception:
+            pass
+
+        try:
+            widget._base_ttk_panedwindow_style = resolved_base_style
+        except Exception:
+            pass
+
+        try:
+            widget.configure(style=style_name)
+        except Exception:
+            pass
+
+        return style_name
+
+    def style_ttk_labelframe_widget(self, widget, background: str = None, base_style: str = None) -> str:
+        if widget is None:
+            return str(base_style or "TLabelframe")
+
+        try:
+            current_style = str(widget.cget("style") or "").strip()
+        except Exception:
+            current_style = ""
+
+        resolved_base_style = str(
+            base_style
+            or getattr(widget, "_base_ttk_labelframe_style", "")
+            or current_style
+            or "TLabelframe"
+        ).strip() or "TLabelframe"
+        if resolved_base_style.startswith("AutoBg_") and "." in resolved_base_style:
+            resolved_base_style = resolved_base_style.split(".", 1)[1] or "TLabelframe"
+
+        resolved_bg = self._coerce_color_hex(
+            background,
+            fallback=self._resolve_widget_background(getattr(widget, "master", None), fallback=background),
+        )
+        palette = getattr(self, "palette", {})
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        style_name = f"AutoBg_{self._style_token(resolved_bg)}.{resolved_base_style}"
+        label_style_name = f"{style_name}.Label"
+
+        try:
+            self.style.configure(
+                style_name,
+                background=resolved_bg,
+                bordercolor=border,
+                lightcolor=border,
+                darkcolor=border,
+                borderwidth=1,
+                relief=tk.SOLID,
+            )
+        except Exception:
+            pass
+
+        try:
+            current_font = self.style.lookup(f"{resolved_base_style}.Label", "font") or ("Segoe UI", 10, "bold")
+        except Exception:
+            current_font = ("Segoe UI", 10, "bold")
+
+        try:
+            self.style.configure(
+                label_style_name,
+                background=resolved_bg,
+                foreground=fg,
+                font=current_font,
+            )
+        except Exception:
+            pass
+
+        try:
+            widget._base_ttk_labelframe_style = resolved_base_style
+        except Exception:
+            pass
+
+        try:
+            widget.configure(style=style_name)
+        except Exception:
+            pass
+
+        return style_name
+
     def _update_adaptive_wraplength(self, widget):
         if widget is None:
             return
@@ -2053,7 +2203,10 @@ class AutoAnnotationApp:
             return
 
         palette = getattr(self, "palette", {})
-        bg = background or palette.get("panel", "#252526")
+        bg = self._coerce_color_hex(
+            background,
+            fallback=palette.get("panel", "#252526"),
+        )
         visited: set[int] = set()
 
         def walk(widget):
@@ -2070,7 +2223,10 @@ class AutoAnnotationApp:
             except Exception:
                 class_name = ""
 
-            local_bg = self._resolve_widget_background(getattr(widget, "master", None), fallback=bg)
+            if widget is root:
+                local_bg = bg
+            else:
+                local_bg = self._resolve_widget_background(getattr(widget, "master", None), fallback=bg)
 
             if isinstance(widget, WebSlimScrollbar):
                 self.style_web_scrollbar(widget, track_color=local_bg)
@@ -2083,11 +2239,19 @@ class AutoAnnotationApp:
                     current_style = str(widget.cget("style") or "").strip()
                 except Exception:
                     current_style = ""
-                if current_style in ("", "TFrame"):
-                    try:
-                        widget.configure(style="Panel.TFrame")
-                    except Exception:
-                        pass
+                self.style_ttk_frame_widget(widget, background=local_bg, base_style=(current_style or "TFrame"))
+            elif class_name == "TPanedwindow":
+                try:
+                    current_style = str(widget.cget("style") or "").strip()
+                except Exception:
+                    current_style = ""
+                self.style_ttk_panedwindow_widget(widget, background=local_bg, base_style=(current_style or "TPanedwindow"))
+            elif class_name == "TLabelframe":
+                try:
+                    current_style = str(widget.cget("style") or "").strip()
+                except Exception:
+                    current_style = ""
+                self.style_ttk_labelframe_widget(widget, background=local_bg, base_style=(current_style or "TLabelframe"))
             elif class_name == "TLabel":
                 try:
                     current_style = str(widget.cget("style") or "").strip()
@@ -2112,7 +2276,27 @@ class AutoAnnotationApp:
                         pass
             elif class_name == "Frame":
                 try:
-                    widget.configure(bg=bg)
+                    widget.configure(bg=local_bg)
+                except Exception:
+                    pass
+            elif class_name == "Label":
+                try:
+                    widget.configure(bg=local_bg)
+                except Exception:
+                    pass
+            elif class_name == "Canvas":
+                try:
+                    widget.configure(bg=local_bg)
+                except Exception:
+                    pass
+            elif class_name == "Labelframe":
+                try:
+                    widget.configure(
+                        bg=local_bg,
+                        fg=palette.get("fg", "#f3f3f3"),
+                        highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                        highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    )
                 except Exception:
                     pass
 
@@ -2504,6 +2688,7 @@ class AutoAnnotationApp:
                 borderwidth=1,
                 relief=tk.SOLID
             )
+            safe_configure('TPanedwindow', background=palette["panel"])
             safe_configure('TLabel', background=palette["bg"], foreground=palette["fg"], padding=2)
             safe_configure(
                 'Panel.TLabel',
@@ -3076,7 +3261,7 @@ class AutoAnnotationApp:
     def get_main_tab_label(self, tab_key: str) -> str:
         labels = {
             "campaign": "[Z1] Wizard",
-            "annotation": "[Z2] Autoanotacja kształtu tablic",
+            "annotation": "[Z2] Anotacja tablic",
             "characters": "[Z3] Autoanotacja znaków tablic",
             "training": "[Z4] Trening i analiza",
             "help": "[Z5] Instrukcja i architektura",
@@ -3263,9 +3448,11 @@ class AutoAnnotationApp:
         make_menu_button(
             "Plik",
             lambda: [
+                {"kind": "command", "label": "Wyjdź z projektu / trybu kampanii", "command": self._exit_campaign_mode_anytime},
+                {"kind": "separator"},
                 {"kind": "command", "label": "Wyjście", "command": self._on_closing},
             ],
-            min_width=180
+            min_width=260
         )
 
         make_menu_button(
@@ -3340,6 +3527,37 @@ class AutoAnnotationApp:
             badge.configure(text=self._get_menu_badge_text())
         except Exception:
             pass
+
+    def _exit_campaign_mode_anytime(self):
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_project = (CAMPAIGN.get_active_project_name() or "").strip()
+        except Exception:
+            active_project = ""
+
+        if not active_project:
+            self.themed_info(
+                "Tryb swobodny",
+                "Nie ma aktywnego projektu. Aplikacja działa już w trybie swobodnym.",
+                parent=self.root,
+                tone="info",
+            )
+            return
+
+        campaign_tab = self.tabs.get("campaign")
+        if campaign_tab is not None and hasattr(campaign_tab, "_exit_project_mode"):
+            try:
+                campaign_tab._exit_project_mode()
+                return
+            except Exception as e:
+                logger.error(f"Nie udało się wyjść z projektu przez menu główne: {e}")
+
+        self.themed_info(
+            "Wyjście z projektu",
+            "Nie udało się uruchomić wyjścia z projektu z poziomu menu. Spróbuj użyć przycisku „Wyjdź z projektu” w wizardzie.",
+            parent=self.root,
+            tone="warning",
+        )
 
     def _widget_contains_point(self, widget, x_root: int, y_root: int) -> bool:
         if widget is None:
@@ -4563,6 +4781,8 @@ class AutoAnnotationApp:
         if tab_key not in self.tabs:
             raise KeyError(f"Unknown tab key: {tab_key}")
 
+        if tab_key == "campaign":
+            self._allow_campaign_tab_once = True
         self.notebook.select(str(self.tabs[tab_key].frame))
 
     def open_controlled_tab(self, tab_key: str):
@@ -4573,16 +4793,71 @@ class AutoAnnotationApp:
 
         # Na chwilę odblokuj zakładkę, aby można ją było wybrać programowo.
         self.notebook.tab(tab_widget, state="normal")
+        if tab_key == "campaign":
+            self._allow_campaign_tab_once = True
         self.notebook.select(tab_widget)
 
         # po przejściu od razu zsynchronizuj dostępność zakładek
         self.update_campaign_tab_access()
 
     def _guard_campaign_navigation(self, event=None):
-        return
+        try:
+            from ..campaign_manager import CAMPAIGN
+        except Exception:
+            return
+
+        if self.campaign_free_mode or not CAMPAIGN.get_active_project_name():
+            return
+
+        if bool(getattr(self, "_campaign_nav_guard_in_progress", False)):
+            return
+
+        selected_key = self._get_selected_tab_key()
+        if selected_key != "campaign":
+            return
+
+        if bool(getattr(self, "_allow_campaign_tab_once", False)):
+            self._allow_campaign_tab_once = False
+            return
+
+        fallback_key = str(getattr(self, "_last_allowed_main_tab_key", "") or "").strip()
+        if fallback_key not in {"annotation", "characters", "training"}:
+            step_to_tab = {
+                2: "annotation",
+                3: "characters",
+                4: "training",
+            }
+            try:
+                fallback_key = step_to_tab.get(int(CAMPAIGN.get_current_step() or 0), "annotation")
+            except Exception:
+                fallback_key = "annotation"
+
+        if fallback_key not in self.tabs or fallback_key == "campaign":
+            return
+
+        def _restore_previous_tab():
+            self._campaign_nav_guard_in_progress = True
+            try:
+                self.notebook.select(str(self.tabs[fallback_key].frame))
+                self.update_status(
+                    "Do wizarda kampanii wracaj przez dedykowany przycisk w module, a nie przez klikniecie zakladki Z1.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            finally:
+                self._campaign_nav_guard_in_progress = False
+
+        try:
+            self.notebook.after_idle(_restore_previous_tab)
+        except Exception:
+            _restore_previous_tab()
 
     def _on_main_notebook_tab_changed(self, event=None):
         self._guard_campaign_navigation(event)
+        selected_key = self._get_selected_tab_key()
+        if selected_key in {"annotation", "characters", "training"}:
+            self._last_allowed_main_tab_key = selected_key
         self._save_active_main_tab_preference()
 
 

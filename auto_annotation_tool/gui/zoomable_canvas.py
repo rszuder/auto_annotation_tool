@@ -265,18 +265,22 @@ class ZoomableCanvas(tk.Canvas):
             pointer_local_x = None
             pointer_local_y = None
 
-        if pointer_local_x is not None and pointer_local_y is not None:
-            if abs(pointer_local_x - raw_x) > 1.5 or abs(pointer_local_y - raw_y) > 1.5:
-                norm_x = pointer_local_x
-                norm_y = pointer_local_y
-                corrected = True
-                norm_source = "pointer"
-        elif event_local_x is not None and event_local_y is not None:
+        if event_local_x is not None and event_local_y is not None:
             if abs(event_local_x - raw_x) > 1.5 or abs(event_local_y - raw_y) > 1.5:
                 norm_x = event_local_x
                 norm_y = event_local_y
                 corrected = True
                 norm_source = "event_root"
+        elif pointer_local_x is not None and pointer_local_y is not None:
+            # Korzystamy z biezacej pozycji kursora tylko jako ostatecznego fallbacku.
+            # Przy dragowaniu zalegle eventy musza zachowac historyczne wspolrzedne
+            # zdarzenia; podstawianie tu "zywego" kursora powodowalo skoki uchwytu
+            # i przestawienie punktu juz po puszczeniu myszy.
+            if abs(pointer_local_x - raw_x) > 1.5 or abs(pointer_local_y - raw_y) > 1.5:
+                norm_x = pointer_local_x
+                norm_y = pointer_local_y
+                corrected = True
+                norm_source = "pointer"
 
         data = {}
         try:
