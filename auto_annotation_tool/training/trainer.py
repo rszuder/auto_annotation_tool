@@ -4,6 +4,7 @@
 Trener modeli YOLO Pose.
 """
 
+import gc
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -26,7 +27,7 @@ class YOLOPoseTrainer:
     def __init__(self, history: TrainingHistory = None):
         self.history = history or TrainingHistory()
         self.current_run: Optional[TrainingRun] = None
-        self.model: Optional['YOLO'] = None
+        self.model: Optional["YOLO"] = None
 
         self.is_training = False
         self.should_pause = False
@@ -37,14 +38,38 @@ class YOLOPoseTrainer:
         self.on_training_end: Optional[Callable[[bool, str], None]] = None
         self.on_progress: Optional[Callable[[float, str], None]] = None
 
+    def _reset_runtime_state(self):
+        """Czyści stan modelu i pamięć CUDA przed kolejną próbą treningu."""
+        try:
+            model_ref = getattr(self, "model", None)
+            self.model = None
+            if model_ref is not None:
+                try:
+                    trainer_ref = getattr(model_ref, "trainer", None)
+                    if trainer_ref is not None:
+                        setattr(trainer_ref, "stop", True)
+                except Exception:
+                    pass
+                del model_ref
+        except Exception:
+            self.model = None
+
+        gc.collect()
+        cleanup_gpu_memory()
+
     def get_available_models(self) -> Dict:
         return AVAILABLE_POSE_MODELS
 
     def get_latest_pose_model(self) -> str:
         priority = [
-            "yolo26m-pose", "yolo26s-pose", "yolo26n-pose",
-            "yolo11s-pose", "yolo11n-pose", "yolo11m-pose",
-            "yolov8s-pose", "yolov8n-pose"
+            "yolo26m-pose",
+            "yolo26s-pose",
+            "yolo26n-pose",
+            "yolo11s-pose",
+            "yolo11n-pose",
+            "yolo11m-pose",
+            "yolov8s-pose",
+            "yolov8n-pose",
         ]
         for model_key in priority:
             if model_key in AVAILABLE_POSE_MODELS:
@@ -59,7 +84,7 @@ class YOLOPoseTrainer:
         return self.get_latest_pose_model()
 
     def validate_dataset(self, dataset_path: Path) -> Tuple[bool, str, Dict]:
-        stats = {"train_images": 0, "val_images": 0, "kpt_shape": None, "nc": 0}
+        stats = {"train_images": 0, "val_images": 0, "test_images": 0, "kpt_shape": None, "nc": 0}
 
         dataset_path = Path(dataset_path)
         yaml_file = dataset_path / "data.yaml"
@@ -68,11 +93,11 @@ class YOLOPoseTrainer:
 
         try:
             config = safe_load_yaml(yaml_file)
-            
+
             # Dataset detekcyjny nie musi definiować kpt_shape.
             if "kpt_shape" in config:
                 stats["kpt_shape"] = config["kpt_shape"]
-                
+
             stats["nc"] = config.get("nc", 1)
 
         except Exception as e:
@@ -88,6 +113,12 @@ class YOLOPoseTrainer:
             if count == 0:
                 return False, f"Brak obrazów w images/{split}", stats
 
+        test_dir = dataset_path / "images" / "test"
+        if test_dir.exists():
+            stats["test_images"] = sum(
+                1 for f in test_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+            )
+
         return True, "Dataset OK", stats
 
     def start_training(
@@ -101,7 +132,7 @@ class YOLOPoseTrainer:
         device: str = "auto",
         lr0: float = 0.01,
         resume_from: str = None,
-        **kwargs
+        **kwargs,
     ) -> Optional[str]:
         if not YOLO_AVAILABLE:
             logger.error("YOLO niedostępny")
@@ -115,6 +146,8 @@ class YOLOPoseTrainer:
         if not is_valid:
             logger.error(f"Dataset: {msg}")
             return None
+
+        self._reset_runtime_state()
 
         # base_model może być: klucz (np. yolo26m-pose) albo ścieżka do .pt
         model_file = base_model
@@ -133,7 +166,7 @@ class YOLOPoseTrainer:
             self.history.update_run(
                 run_id,
                 status=TrainingStatus.RUNNING.value,
-                started_at=datetime.now().isoformat()
+                started_at=datetime.now().isoformat(),
             )
         else:
             self.current_run = self.history.create_run(
@@ -144,7 +177,7 @@ class YOLOPoseTrainer:
                 batch_size=batch_size,
                 img_size=img_size,
                 device=device,
-                lr0=lr0
+                lr0=lr0,
             )
 
         self.is_training = True
@@ -154,7 +187,7 @@ class YOLOPoseTrainer:
         thread = threading.Thread(
             target=self._training_loop,
             args=(model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from),
-            daemon=True
+            daemon=True,
         )
         thread.start()
 
@@ -163,8 +196,9 @@ class YOLOPoseTrainer:
     def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from):
         run = self.current_run
         try:
+            self._reset_runtime_state()
             is_resuming = bool(resume_from and Path(resume_from).exists())
-            
+
             if is_resuming:
                 logger.info(f"Wznawiam z: {resume_from}")
                 self.model = YOLO(resume_from)
@@ -175,7 +209,7 @@ class YOLOPoseTrainer:
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.RUNNING.value,
-                started_at=datetime.now().isoformat()
+                started_at=datetime.now().isoformat(),
             )
 
             train_args = {
@@ -194,7 +228,7 @@ class YOLOPoseTrainer:
                 "save_period": 10,
                 "patience": 50,
                 "plots": True,
-                "workers": 0
+                "workers": 0,
             }
 
             batch_state = {"epoch": -1, "batch": 0}
@@ -244,7 +278,7 @@ class YOLOPoseTrainer:
                 epoch = trainer.epoch + 1
                 raw_metrics = getattr(trainer, "metrics", {}) or {}
                 metrics = {
-                    "loss": float(trainer.loss.item()) if hasattr(trainer, 'loss') else 0,
+                    "loss": float(trainer.loss.item()) if hasattr(trainer, "loss") else 0,
                     "map50": float(raw_metrics.get("metrics/mAP50(B)", 0) or 0),
                     "map50_95": float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0),
                     "precision": float(raw_metrics.get("metrics/precision(B)", 0) or 0),
@@ -287,7 +321,7 @@ class YOLOPoseTrainer:
                 finished_at=datetime.now().isoformat(),
                 best_weights=str(best_weights) if best_weights.exists() else "",
                 last_weights=str(last_weights) if last_weights.exists() else "",
-                current_epoch=epochs
+                current_epoch=epochs,
             )
             # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
             try:
@@ -367,7 +401,7 @@ class YOLOPoseTrainer:
             self.history.update_run(
                 run.id,
                 status=status,
-                paused_at=datetime.now().isoformat()
+                paused_at=datetime.now().isoformat(),
             )
 
             logger.info(f"Przerwano: {e}")
@@ -375,13 +409,17 @@ class YOLOPoseTrainer:
                 self.on_training_end(False, str(e))
 
         except Exception as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("Wykryto błąd VRAM. Czyszczę pamięć CUDA przed kolejną próbą treningu.")
+                self._reset_runtime_state()
+
             logger.exception("Błąd treningu")
 
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.FAILED.value,
                 finished_at=datetime.now().isoformat(),
-                error_message=str(e)
+                error_message=str(e),
             )
 
             if self.on_training_end:
@@ -389,8 +427,7 @@ class YOLOPoseTrainer:
 
         finally:
             self.is_training = False
-            self.model = None
-            cleanup_gpu_memory()
+            self._reset_runtime_state()
 
     def _save_checkpoint(self, trainer):
         try:
@@ -400,7 +437,7 @@ class YOLOPoseTrainer:
             self.history.update_run(
                 run.id,
                 last_weights=str(checkpoint),
-                current_epoch=trainer.epoch + 1
+                current_epoch=trainer.epoch + 1,
             )
 
             logger.info(f"Checkpoint: {checkpoint}")
@@ -446,5 +483,5 @@ class YOLOPoseTrainer:
             batch_size=run.batch_size,
             img_size=run.img_size,
             device=run.device,
-            resume_from=run.last_weights
+            resume_from=run.last_weights,
         )

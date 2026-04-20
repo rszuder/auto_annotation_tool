@@ -22,8 +22,17 @@ def cleanup_gpu_memory():
     gc.collect()
     if CUDA_AVAILABLE and torch is not None:
         try:
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                try:
+                    torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
+                torch.cuda.synchronize()
         except Exception as e:
             logger.debug(f"Błąd czyszczenia GPU: {e}")
 

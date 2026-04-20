@@ -9,7 +9,6 @@ from .cvat_character_importer import CVATCharacterImporter
 from .cvat_zip_manager import CVATZipManager
 
 __all__ = [
-    'CVATExporter',
     'CVATCharacterExporter',
     'CVATCharacterImporter',
     'CVATZipManager'  

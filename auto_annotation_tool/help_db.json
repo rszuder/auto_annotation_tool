@@ -165,7 +165,7 @@
                             "full_help":  "Buduje gold pack YOLO z perfekcyjnych tablic. System zbiera wiele paczek, usuwa duplikaty i zostawia czyste złoto do treningu. Możesz filtrować, które strategie perfect mają wejść do eksportu, np. OCR exact, YOLO exact, OCR+YOLO rescue albo materiał manualny. Eksport może też opcjonalnie od razu podzielić paczkę na train/val/test, aby wynik był gotowym datasetem treningowym. Ta zaakceptowana pula zasila też bilans znaków dla kolejnych iteracji doboru paczki zdjęć."
                         },
     "btn_import_cvat":  {
-                            "full_help":  "Importuje poprawki z CVAT z powrotem do metadata.json i aktualizuje statusy tablic. Poprawne importy mogą później zasilić wspólną pulę gold/manual i wpłynąć na dobór następnych porcji danych w E1."
+                            "full_help":  "Importuje poprawki z CVAT XML do aktywnego preview runu i zapisuje je jako źródło manualne CVAT. Po imporcie rekordy trafiają z powrotem do metadata.json, mogą zasilić pulę gold/manual i można je włączyć checkboxami do budowy gold packa."
                         },
     "tr_route_panel":  {
                            "full_help":  "Panel wyboru toru w Z4. Najpierw wybierasz, czy chcesz trenować model tablic, czy model znaków tablic. Sam wybór toru nie tworzy datasetu; wskazuje tylko, jakiego typu dataset i model bazowy będą dalej oczekiwane."
