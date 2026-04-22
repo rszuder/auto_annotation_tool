@@ -1078,8 +1078,6 @@ class AutoAnnotationApp:
         return style_name in {
             "GuidedNeutral.TButton",
             "GuidedAccent.TButton",
-            "PulseNeutral.TButton",
-            "PulseAccent.TButton",
         }
 
     def _remember_guided_base_style(self, button, base_style: str = None) -> str:
@@ -1093,70 +1091,17 @@ class AutoAnnotationApp:
         style_name = self._remember_guided_base_style(button, base_style)
         is_accent = ("Accent" in style_name) or style_name == "Accent.TButton"
         emphasis_style = "GuidedAccent.TButton" if is_accent else "GuidedNeutral.TButton"
-        pulse_style = "PulseAccent.TButton" if is_accent else "PulseNeutral.TButton"
-        return style_name, emphasis_style, pulse_style
-
-    def clear_button_pulse(self, button):
-        after_id = getattr(button, "_guided_pulse_after_id", None)
-        if after_id:
-            try:
-                button.after_cancel(after_id)
-            except Exception:
-                pass
-        button._guided_pulse_after_id = None
+        return style_name, emphasis_style
 
     def set_button_emphasis(self, button, enabled: bool, base_style: str = None):
         if button is None:
             return
 
         try:
-            self.clear_button_pulse(button)
-            base_name, emphasis_style, _pulse_style = self._get_guided_styles_for_button(button, base_style)
+            base_name, emphasis_style = self._get_guided_styles_for_button(button, base_style)
             button.configure(style=(emphasis_style if enabled else base_name))
         except Exception as e:
             logger.debug(f"Nie udało się ustawić podświetlenia przycisku: {e}")
-
-    def pulse_button(self, button, pulses: int = 8, interval_ms: int = 260, keep_emphasis: bool = True, base_style: str = None):
-        if button is None:
-            return
-
-        try:
-            self.clear_button_pulse(button)
-            base_name, emphasis_style, pulse_style = self._get_guided_styles_for_button(button, base_style)
-            final_style = emphasis_style if keep_emphasis else base_name
-            button.configure(style=final_style)
-
-            def tick(step=0):
-                try:
-                    if not button.winfo_exists():
-                        return
-
-                    button.configure(style=(pulse_style if step % 2 == 0 else final_style))
-
-                    if step < (pulses * 2 - 1):
-                        after_id = button.after(interval_ms, lambda: tick(step + 1))
-                        button._guided_pulse_after_id = after_id
-                    else:
-                        button.configure(style=final_style)
-                        button._guided_pulse_after_id = None
-                except Exception as inner_e:
-                    logger.debug(f"Nie udało się pulsować przycisku: {inner_e}")
-
-            tick()
-        except Exception as e:
-            logger.debug(f"Nie udało się rozpocząć pulsowania przycisku: {e}")
-
-    def clear_guidance_frame_pulse(self, frame):
-        if frame is None:
-            return
-
-        after_id = getattr(frame, "_guided_frame_after_id", None)
-        if after_id:
-            try:
-                frame.after_cancel(after_id)
-            except Exception:
-                pass
-        frame._guided_frame_after_id = None
 
     def style_guidance_frame(self, frame, background: str = None, emphasized: bool = None):
         if frame is None:
@@ -1164,7 +1109,11 @@ class AutoAnnotationApp:
 
         palette = self.palette
         base_border = palette.get("panel_border", palette["border"])
-        emphasis_border = palette.get("accent", palette["border"])
+        emphasis_border = blend_hex_colors(
+            palette.get("success", "#4ec9b0"),
+            palette.get("panel_border", palette["border"]),
+            0.18,
+        )
         bg = background or getattr(frame, "_guided_frame_bg", None) or palette.get("panel", palette["bg"])
         is_emphasized = getattr(frame, "_guided_frame_emphasized", False) if emphasized is None else bool(emphasized)
         border = emphasis_border if is_emphasized else base_border
@@ -1177,7 +1126,7 @@ class AutoAnnotationApp:
                 bg=bg,
                 bd=0,
                 relief=tk.FLAT,
-                highlightthickness=1,
+                highlightthickness=(1 if is_emphasized else 0),
                 highlightbackground=border,
                 highlightcolor=border
             )
@@ -1189,55 +1138,9 @@ class AutoAnnotationApp:
             return
 
         try:
-            self.clear_guidance_frame_pulse(frame)
             self.style_guidance_frame(frame, background=background, emphasized=enabled)
         except Exception as e:
             logger.debug(f"Nie udało się ustawić podświetlenia ramki: {e}")
-
-    def pulse_frame(self, frame, pulses: int = 8, interval_ms: int = 260, keep_emphasis: bool = True, background: str = None):
-        if frame is None:
-            return
-
-        try:
-            self.clear_guidance_frame_pulse(frame)
-            palette = self.palette
-            base_border = palette.get("panel_border", palette["border"])
-            emphasis_border = palette.get("accent", palette["border"])
-            pulse_border = palette.get("accent_hover", emphasis_border)
-            final_border = emphasis_border if keep_emphasis else base_border
-            bg = background or getattr(frame, "_guided_frame_bg", None) or palette.get("panel", palette["bg"])
-
-            frame._guided_frame_bg = bg
-            frame._guided_frame_emphasized = bool(keep_emphasis)
-            self.style_guidance_frame(frame, background=bg, emphasized=keep_emphasis)
-
-            def tick(step=0):
-                try:
-                    if not frame.winfo_exists():
-                        return
-
-                    border = pulse_border if step % 2 == 0 else final_border
-                    frame.configure(
-                        bg=bg,
-                        bd=0,
-                        relief=tk.FLAT,
-                        highlightthickness=1,
-                        highlightbackground=border,
-                        highlightcolor=border
-                    )
-
-                    if step < (pulses * 2 - 1):
-                        after_id = frame.after(interval_ms, lambda: tick(step + 1))
-                        frame._guided_frame_after_id = after_id
-                    else:
-                        self.style_guidance_frame(frame, background=bg, emphasized=keep_emphasis)
-                        frame._guided_frame_after_id = None
-                except Exception as inner_e:
-                    logger.debug(f"Nie udało się pulsować ramki: {inner_e}")
-
-            tick()
-        except Exception as e:
-            logger.debug(f"Nie udało się rozpocząć pulsowania ramki: {e}")
 
     def set_theme(self, theme_key: str, persist: bool = True, announce: bool = True):
         if theme_key not in self.themes:
@@ -2933,16 +2836,28 @@ class AutoAnnotationApp:
                     ('active', [0, 0, 0, 0])
                 ]
             )
+            nav_button_font = ('Segoe UI Semibold', 10)
+            cta_outline = blend_hex_colors(
+                palette.get("success", "#4ec9b0"),
+                palette.get("panel_border", palette["border"]),
+                0.18,
+            )
+            cta_outline_hover = blend_hex_colors(
+                palette.get("success", "#4ec9b0"),
+                palette.get("accent_hover", palette.get("accent", "#63c7ff")),
+                0.24,
+            )
             safe_configure(
                 'TButton',
                 background=palette["panel_alt"],
                 foreground=palette["fg"],
-                bordercolor=palette["border"],
-                lightcolor=palette["border"],
-                darkcolor=palette["border"],
-                padding=6
+                bordercolor=cta_outline,
+                lightcolor=cta_outline,
+                darkcolor=cta_outline,
+                padding=6,
+                borderwidth=1,
+                relief=tk.SOLID,
             )
-            nav_button_font = ('Segoe UI Semibold', 10)
             safe_map(
                 'TButton',
                 background=[
@@ -2950,15 +2865,30 @@ class AutoAnnotationApp:
                     ('pressed', palette["accent_selected"]),
                     ('disabled', palette["panel"])
                 ],
-                foreground=[('disabled', palette["muted_dim"])]
+                foreground=[('disabled', palette["muted_dim"])],
+                bordercolor=[
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
+                    ('disabled', palette["border"])
+                ],
+                lightcolor=[
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
+                    ('disabled', palette["border"])
+                ],
+                darkcolor=[
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
+                    ('disabled', palette["border"])
+                ]
             )
             safe_configure(
                 'Accent.TButton',
                 background=palette["panel_alt"],
                 foreground=palette["fg"],
-                bordercolor=palette["accent"],
-                lightcolor=palette["accent"],
-                darkcolor=palette["accent"],
+                bordercolor=cta_outline,
+                lightcolor=cta_outline,
+                darkcolor=cta_outline,
                 padding=6,
                 borderwidth=1,
                 relief=tk.SOLID,
@@ -2973,18 +2903,18 @@ class AutoAnnotationApp:
                 ],
                 foreground=[('disabled', palette["muted_dim"])],
                 bordercolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 lightcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 darkcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ]
             )
@@ -2992,9 +2922,9 @@ class AutoAnnotationApp:
                 'GuidedNeutral.TButton',
                 background=palette["panel_alt"],
                 foreground=palette["fg"],
-                bordercolor=palette["accent"],
-                lightcolor=palette["accent"],
-                darkcolor=palette["accent"],
+                bordercolor=cta_outline,
+                lightcolor=cta_outline,
+                darkcolor=cta_outline,
                 padding=6,
                 borderwidth=1,
                 relief=tk.SOLID,
@@ -3009,18 +2939,18 @@ class AutoAnnotationApp:
                 ],
                 foreground=[('disabled', palette["muted_dim"])],
                 bordercolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 lightcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 darkcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ]
             )
@@ -3028,9 +2958,9 @@ class AutoAnnotationApp:
                 'GuidedAccent.TButton',
                 background=palette["panel_alt"],
                 foreground=palette["fg"],
-                bordercolor=palette["accent"],
-                lightcolor=palette["accent"],
-                darkcolor=palette["accent"],
+                bordercolor=cta_outline,
+                lightcolor=cta_outline,
+                darkcolor=cta_outline,
                 padding=6,
                 borderwidth=1,
                 relief=tk.SOLID,
@@ -3045,90 +2975,18 @@ class AutoAnnotationApp:
                 ],
                 foreground=[('disabled', palette["muted_dim"])],
                 bordercolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 lightcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ],
                 darkcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ]
-            )
-            safe_configure(
-                'PulseNeutral.TButton',
-                background=palette.get("surface_info", palette.get("button_hover", palette["panel_alt"])),
-                foreground=palette["fg"],
-                bordercolor=palette["accent_hover"],
-                lightcolor=palette["accent_hover"],
-                darkcolor=palette["accent_hover"],
-                padding=6,
-                borderwidth=1,
-                relief=tk.SOLID,
-                font=nav_button_font,
-            )
-            safe_map(
-                'PulseNeutral.TButton',
-                background=[
-                    ('active', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                    ('pressed', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                    ('disabled', palette["panel"])
-                ],
-                foreground=[('disabled', palette["muted_dim"])],
-                bordercolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ],
-                lightcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ],
-                darkcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ]
-            )
-            safe_configure(
-                'PulseAccent.TButton',
-                background=palette.get("surface_info", palette.get("button_hover", palette["panel_alt"])),
-                foreground=palette["fg"],
-                bordercolor=palette["accent_hover"],
-                lightcolor=palette["accent_hover"],
-                darkcolor=palette["accent_hover"],
-                padding=6,
-                borderwidth=1,
-                relief=tk.SOLID,
-                font=nav_button_font,
-            )
-            safe_map(
-                'PulseAccent.TButton',
-                background=[
-                    ('active', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                    ('pressed', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                    ('disabled', palette["panel"])
-                ],
-                foreground=[('disabled', palette["muted_dim"])],
-                bordercolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ],
-                lightcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
-                    ('disabled', palette["border"])
-                ],
-                darkcolor=[
-                    ('active', palette["accent_hover"]),
-                    ('pressed', palette["accent_hover"]),
+                    ('active', cta_outline_hover),
+                    ('pressed', cta_outline_hover),
                     ('disabled', palette["border"])
                 ]
             )

@@ -9205,13 +9205,9 @@ class CharacterAnnotationTab:
 
         for frame_name in (
             "btn_to_detect_frame",
-            "btn_to_detect_pulse_frame",
             "btn_run_detection_frame",
-            "btn_run_detection_pulse_frame",
             "btn_to_dataset_frame",
-            "btn_to_dataset_pulse_frame",
             "btn_finish_step3_frame",
-            "btn_finish_step3_pulse_frame",
         ):
             frame = getattr(self, frame_name, None)
             if frame is None:
@@ -9227,7 +9223,7 @@ class CharacterAnnotationTab:
                 palette.get("panel", "#252526"),
                 0.80,
             )
-            for frame_name in ("btn_finish_step3_frame", "btn_finish_step3_pulse_frame"):
+            for frame_name in ("btn_finish_step3_frame",):
                 frame = getattr(self, frame_name, None)
                 if frame is not None:
                     frame.configure(bg=export_shell_fill)
@@ -12280,8 +12276,6 @@ class CharacterAnnotationTab:
             return None
 
         candidates = [attr_name]
-        if attr_name.endswith("_pulse_frame"):
-            candidates.append(attr_name[:-12])
         if attr_name.endswith("_frame"):
             candidates.append(attr_name[:-6])
 
@@ -12291,16 +12285,6 @@ class CharacterAnnotationTab:
                 return widget
 
         return None
-
-    def _pulse_button_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
-        btn = self._resolve_guidance_button(frame_attr)
-        if btn is None:
-            return
-
-        try:
-            self.app.pulse_button(btn, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
-        except Exception as e:
-            logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
 
     def _update_step3_finish_button_state(self):
         btn = getattr(self, "btn_finish_step3", None)
@@ -12365,7 +12349,6 @@ class CharacterAnnotationTab:
                     width=NAV_BUTTON_WIDTH,
                 )
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
                 self._set_step3_finish_hint("")
 
                 if back_btn is not None:
@@ -12381,7 +12364,6 @@ class CharacterAnnotationTab:
 
             if enabled:
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
                 self._set_step3_finish_hint("")
             else:
                 self._set_button_emphasis("btn_finish_step3_frame", False)
@@ -13013,7 +12995,6 @@ class CharacterAnnotationTab:
         self._set_button_state("btn_to_dataset", True)
         self._set_button_emphasis("btn_run_detection_frame", False)
         self._set_button_emphasis("btn_to_dataset_frame", True)
-        self._pulse_button_emphasis("btn_to_dataset_frame")
 
         if self._step3_linear_mode:
             CAMPAIGN.set_step3_stage2_done(True)
@@ -13033,7 +13014,6 @@ class CharacterAnnotationTab:
 
         self._select_subtab(self.tab_detect)
         self._persist_step3_progress()
-        self._pulse_button_emphasis("btn_run_detection_frame")
 
     def go_to_substep_3(self):
         if self._step3_linear_mode:
@@ -13088,7 +13068,6 @@ class CharacterAnnotationTab:
 
         self._select_subtab(self.tab_detect)
         self._persist_step3_progress()
-        self._pulse_button_emphasis("btn_run_detection_frame")
 
     def _persist_step3_progress(self):
         if not getattr(self, "_step3_linear_mode", False):
@@ -13223,10 +13202,8 @@ class CharacterAnnotationTab:
 
         if saved_substep == 2 and not stage2_done:
             self._set_button_emphasis("btn_run_detection_frame", True)
-            self._pulse_button_emphasis("btn_run_detection_frame")
         elif saved_substep == 2 and stage2_done:
             self._set_button_emphasis("btn_to_dataset_frame", True)
-            self._pulse_button_emphasis("btn_to_dataset_frame")
         elif saved_substep == 3:
             self._update_step3_finish_button_state()
 
@@ -21221,7 +21198,6 @@ class CharacterAnnotationTab:
             try:
                 self._update_step3_finish_button_state()
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
             except Exception:
                 pass
 
@@ -21497,7 +21473,6 @@ class CharacterAnnotationTab:
             try:
                 self._update_step3_finish_button_state()
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
             except Exception:
                 pass
 
@@ -21592,7 +21567,6 @@ class CharacterAnnotationTab:
             try:
                 self._update_step3_finish_button_state()
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
             except Exception:
                 pass
             try:
@@ -21969,7 +21943,6 @@ class CharacterAnnotationTab:
             try:
                 self._update_step3_finish_button_state()
                 self._set_button_emphasis("btn_finish_step3_frame", True)
-                self._pulse_button_emphasis("btn_finish_step3_frame")
             except Exception:
                 pass
 

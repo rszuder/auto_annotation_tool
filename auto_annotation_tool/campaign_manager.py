@@ -1260,6 +1260,160 @@ class CampaignManager:
             return plan_path
         return None
 
+    def get_plate_approved_set_path(self, project_name: str = None) -> Path | None:
+        state_dir = self.get_project_state_dir(project_name)
+        if state_dir is None:
+            return None
+        return state_dir / "plate_approved_set.json"
+
+    def load_plate_approved_set(self, project_name: str = None) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+
+        manifest_path = self.get_plate_approved_set_path(project_name)
+        if manifest_path is None or not manifest_path.exists():
+            return {
+                "project": project_name,
+                "updated_at": "",
+                "entries": {},
+            }
+
+        payload = self._read_json_file(manifest_path)
+        if not isinstance(payload, dict):
+            payload = {}
+
+        entries = payload.get("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+
+        return {
+            "project": project_name,
+            "updated_at": str(payload.get("updated_at", "") or "").strip(),
+            "entries": entries,
+        }
+
+    def list_plate_approved_entries(self, project_name: str = None) -> List[Dict[str, Any]]:
+        manifest = self.load_plate_approved_set(project_name)
+        entries = manifest.get("entries", {})
+        if not isinstance(entries, dict):
+            return []
+
+        result: List[Dict[str, Any]] = []
+        for entry_key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            normalized = dict(entry)
+            normalized.setdefault("entry_key", str(entry_key or "").strip())
+            result.append(normalized)
+
+        result.sort(
+            key=lambda item: (
+                str(item.get("approved_at", "") or "").strip(),
+                str(item.get("image_name", "") or "").strip().lower(),
+            )
+        )
+        return result
+
+    def get_plate_approved_set_stats(self, project_name: str = None) -> Dict[str, Any]:
+        manifest = self.load_plate_approved_set(project_name)
+        entries = self.list_plate_approved_entries(project_name)
+
+        stats = {
+            "project": str(manifest.get("project", "") or "").strip(),
+            "updated_at": str(manifest.get("updated_at", "") or "").strip(),
+            "images": 0,
+            "plates": 0,
+            "manual_images": 0,
+            "manual_plates": 0,
+            "auto_accepted_images": 0,
+            "auto_accepted_plates": 0,
+        }
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            valid_plate_count = 0
+            for plate_entry in list(entry.get("plates") or []):
+                if not isinstance(plate_entry, dict):
+                    continue
+                polygon = list(plate_entry.get("polygon") or [])
+                if len(polygon) >= 4:
+                    valid_plate_count += 1
+
+            if valid_plate_count <= 0:
+                valid_plate_count = int(entry.get("plate_count", 0) or 0)
+            if valid_plate_count <= 0:
+                continue
+
+            stats["images"] += 1
+            stats["plates"] += int(valid_plate_count)
+
+            origin = str(entry.get("annotation_origin", "") or "").strip().lower()
+            if origin == "auto_accepted":
+                stats["auto_accepted_images"] += 1
+                stats["auto_accepted_plates"] += int(valid_plate_count)
+            else:
+                stats["manual_images"] += 1
+                stats["manual_plates"] += int(valid_plate_count)
+
+        return stats
+
+    def upsert_plate_approved_entries(
+        self,
+        entries: List[Dict[str, Any]],
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {"ok": False, "reason": "missing_project"}
+
+        manifest_path = self.get_plate_approved_set_path(project_name)
+        if manifest_path is None:
+            return {"ok": False, "reason": "missing_manifest_path"}
+
+        manifest = self.load_plate_approved_set(project_name)
+        stored_entries = manifest.get("entries", {})
+        if not isinstance(stored_entries, dict):
+            stored_entries = {}
+
+        added = 0
+        updated = 0
+        for raw_entry in list(entries or []):
+            if not isinstance(raw_entry, dict):
+                continue
+
+            image_name = str(raw_entry.get("image_name", "") or "").strip()
+            entry_key = str(raw_entry.get("entry_key", "") or "").strip().lower() or image_name.lower()
+            if not image_name or not entry_key:
+                continue
+
+            normalized = dict(raw_entry)
+            normalized["entry_key"] = entry_key
+            normalized["image_name"] = image_name
+
+            if entry_key in stored_entries:
+                updated += 1
+            else:
+                added += 1
+            stored_entries[entry_key] = normalized
+
+        manifest["project"] = project_name
+        manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        manifest["entries"] = stored_entries
+
+        if not self._write_json_file(manifest_path, manifest):
+            return {"ok": False, "reason": "save_failed"}
+
+        return {
+            "ok": True,
+            "added": int(added),
+            "updated": int(updated),
+            "total": int(len(stored_entries)),
+            "manifest_path": str(manifest_path),
+        }
+
     def load_ingest_manifest(self, iteration_num: int = None, project_name: str = None) -> Dict[str, Any]:
         manifest_path = self.get_ingest_manifest_path(iteration_num, project_name)
         if manifest_path is None or not manifest_path.exists():

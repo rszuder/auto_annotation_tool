@@ -2634,6 +2634,10 @@ class TrainingTab:
             "val_images": 0,
             "test_images": 0,
             "validation_message": "",
+            "project_approved_images": 0,
+            "project_approved_plates": 0,
+            "project_manual_images": 0,
+            "project_auto_accepted_images": 0,
         }
 
         if not CAMPAIGN.get_active_project_name():
@@ -2711,60 +2715,44 @@ class TrainingTab:
             )
             return result
 
-        auto_dir = CAMPAIGN.get_dir("auto_ann")
-        if auto_dir is None:
-            result.update(
-                ok=False,
-                reason="missing_plate_annotations",
-                message="E4 w torze tablic pozostaje zablokowane, bo projekt nie ma jeszcze katalogu z zatwierdzona anotacja Z2.",
-            )
-            return result
-
         try:
-            xml_files = list(Path(auto_dir).rglob("annotations.xml"))
+            approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
         except Exception:
-            xml_files = []
+            approved_stats = {}
 
-        if not xml_files:
+        approved_images = int(approved_stats.get("images", 0) or 0)
+        approved_plates = int(approved_stats.get("plates", 0) or 0)
+        result["project_approved_images"] = approved_images
+        result["project_approved_plates"] = approved_plates
+        result["project_manual_images"] = int(approved_stats.get("manual_images", 0) or 0)
+        result["project_auto_accepted_images"] = int(approved_stats.get("auto_accepted_images", 0) or 0)
+        result["annotated_images"] = approved_images
+        result["source_run"] = "ApprovedSet projektu"
+
+        if approved_images <= 0:
             result.update(
                 ok=False,
                 reason="missing_plate_annotations",
-                message="E4 w torze tablic pozostaje zablokowane, bo nie ma jeszcze zatwierdzonego runu Z2 z plikiem annotations.xml.",
-            )
-            return result
-
-        latest_xml_path = max(xml_files, key=lambda p: p.stat().st_mtime)
-        source_run = str(latest_xml_path.parent.name or "").strip()
-        result["source_run"] = source_run
-
-        inspector = DatasetCreator()
-        parse_ok, parse_msg, parse_stats = inspector.parse_cvat_xml(latest_xml_path)
-        annotated_images = int((parse_stats or {}).get("annotated_images", 0) or 0)
-        result["annotated_images"] = annotated_images
-
-        if not parse_ok:
-            run_suffix = f" ({source_run})" if source_run else ""
-            result.update(
-                ok=False,
-                reason="invalid_plate_annotations",
                 message=(
-                    "E4 w torze tablic pozostaje zablokowane, bo ostatni zatwierdzony run Z2"
-                    f"{run_suffix} nie zawiera jeszcze poprawnych tablic do budowy datasetu.\n\n"
-                    f"Walidacja: {parse_msg}\n"
-                    "Wróć do Z2 i dopracuj anotacje."
+                    "E4 w torze tablic pozostaje zablokowane, bo zbiór zatwierdzonych tablic projektu "
+                    "jest jeszcze pusty.\n\n"
+                    "Najpierw przygotuj i zatwierdź ręcznie pierwszą paczkę w Z2. "
+                    "Dopiero wtedy projekt będzie miał własne źródło do budowy datasetu YOLO Pose."
                 ),
             )
             return result
 
-        if annotated_images < 2:
-            run_suffix = f" ({source_run})" if source_run else ""
+        if approved_images < 2:
+            manual_images = int(result.get("project_manual_images", 0) or 0)
+            auto_images = int(result.get("project_auto_accepted_images", 0) or 0)
             result.update(
                 ok=False,
                 reason="insufficient_plate_annotations",
                 message=(
                     "E4 w torze tablic wymaga co najmniej 2 oznaczonych obrazów.\n\n"
-                    f"Bieżący zatwierdzony run Z2{run_suffix} ma teraz {annotated_images} taki obraz(y).\n"
-                    "Wróć do Z2, dodaj brakujące oznaczenia i dopiero wtedy przejdź dalej."
+                    f"Zatwierdzony zbiór projektu ma teraz {approved_images} obraz(y) i {approved_plates} tablic(e).\n"
+                    f"W tym: ręczne {manual_images}, zaakceptowane po autoanotacji {auto_images}.\n"
+                    "Wróć do Z2, dodaj brakujące oznaczenia albo zaakceptuj kolejne obrazy i dopiero wtedy przejdź dalej."
                 ),
             )
             return result
@@ -3855,12 +3843,11 @@ class TrainingTab:
 
         for frame_name in (
             "step4_route_panel_frame",
-            "btn_step4_next_pulse_frame",
-            "btn_step4_create_pulse_frame",
-            "btn_step4_split_pulse_frame",
+            "btn_step4_next_frame",
+            "btn_step4_create_frame",
+            "btn_step4_split_frame",
             "btn_step4_start_train_frame",
-            "btn_step4_start_train_pulse_frame",
-            "btn_step4_finish_pulse_frame",
+            "btn_step4_finish_frame",
         ):
             frame = getattr(self, frame_name, None)
             if frame is None:
@@ -4062,8 +4049,6 @@ class TrainingTab:
             ]
 
         candidates = [attr_name]
-        if attr_name.endswith("_pulse_frame"):
-            candidates.append(attr_name[:-12])
         if attr_name.endswith("_frame"):
             candidates.append(attr_name[:-6])
 
@@ -4091,10 +4076,7 @@ class TrainingTab:
         if attr_name == "step4_route_panel_frame":
             return getattr(self, "step4_route_panel_frame", None)
 
-        candidates = []
-        if attr_name.endswith("_frame"):
-            candidates.append(f"{attr_name[:-6]}_pulse_frame")
-        candidates.append(attr_name)
+        candidates = [attr_name]
 
         for candidate in candidates:
             widget = getattr(self, candidate, None)
@@ -4119,22 +4101,6 @@ class TrainingTab:
             except Exception as e:
                 logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
 
-    def _pulse_step4_emphasis(self, frame_attr: str, pulses: int = 8, interval_ms: int = 260, color: str = "#f39c12"):
-        frame = self._resolve_step4_guidance_frame(frame_attr)
-        if frame is not None:
-            try:
-                bg = self.app.palette.get("bg", "#1e1e1e") if frame_attr == "step4_route_panel_frame" else self.app.palette.get("panel", "#252526")
-                self.app.pulse_frame(frame, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True, background=bg)
-            except Exception as e:
-                logger.debug(f"Nie udało się pulsować ramki dla {frame_attr}: {e}")
-
-        buttons = self._resolve_step4_guidance_buttons(frame_attr)
-        for btn in buttons:
-            try:
-                self.app.pulse_button(btn, pulses=pulses, interval_ms=interval_ms, keep_emphasis=True)
-            except Exception as e:
-                logger.debug(f"Nie udało się pulsować przycisku dla {frame_attr}: {e}")
-
     def _clear_step4_guidance(self):
         for attr_name in (
             "step4_route_panel_frame",
@@ -4155,7 +4121,6 @@ class TrainingTab:
 
         self._clear_step4_guidance()
         self._set_step4_emphasis("step4_route_panel_frame", True)
-        self._pulse_step4_emphasis("step4_route_panel_frame")
 
     def _guide_step4_builder_action(self):
         if not CAMPAIGN.get_active_project_name():
@@ -4164,7 +4129,6 @@ class TrainingTab:
         self._clear_step4_guidance()
         frame_attr = "btn_step4_create_frame" if self._step4_dataset_mode == "plate" else "btn_step4_split_frame"
         self._set_step4_emphasis(frame_attr, True)
-        self._pulse_step4_emphasis(frame_attr)
 
     def _guide_step4_next_action(self):
         if not CAMPAIGN.get_active_project_name():
@@ -4172,7 +4136,6 @@ class TrainingTab:
 
         self._clear_step4_guidance()
         self._set_step4_emphasis("btn_step4_next_frame", True)
-        self._pulse_step4_emphasis("btn_step4_next_frame")
 
     def _guide_step4_training_action(self):
         if not CAMPAIGN.get_active_project_name():
@@ -4180,7 +4143,6 @@ class TrainingTab:
 
         self._clear_step4_guidance()
         self._set_step4_emphasis("btn_step4_start_train_frame", True)
-        self._pulse_step4_emphasis("btn_step4_start_train_frame")
 
     def _guide_step4_finish_action(self):
         if not CAMPAIGN.get_active_project_name():
@@ -4188,7 +4150,6 @@ class TrainingTab:
 
         self._clear_step4_guidance()
         self._set_step4_emphasis("btn_step4_finish_frame", True)
-        self._pulse_step4_emphasis("btn_step4_finish_frame")
 
     def _mark_step4_dataset_ready(self, dataset_path: str | Path | None = None):
         if dataset_path:
@@ -4374,6 +4335,12 @@ class TrainingTab:
         route_selected = bool(getattr(self, "_step4_route_selected", False))
         locked_target = self._get_locked_campaign_training_target()
         route_locked = campaign_active and locked_target in ("char", "plate")
+        campaign_plate_stats = {}
+        if campaign_active:
+            try:
+                campaign_plate_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+            except Exception:
+                campaign_plate_stats = {}
 
         try:
             self.ds_creator_frame.pack_forget()
@@ -4416,8 +4383,11 @@ class TrainingTab:
             self.ds_creator_frame.pack(fill=tk.X, expand=False)
             self.btn_step4_next.configure(text="Dalej do treningu")
             if route_locked:
+                approved_images = int(campaign_plate_stats.get("images", 0) or 0)
+                approved_plates = int(campaign_plate_stats.get("plates", 0) or 0)
                 self.ds_mode_desc_var.set(
-                    "Ten etap korzysta z zatwierdzonych zrodel projektu i buduje dataset tablic bez ponownego wybierania XML ani obrazów."
+                    "Ten etap korzysta z zatwierdzonych źródeł projektu i buduje dataset tablic bez ponownego wybierania XML ani obrazów. "
+                    f"Aktualnie zbiór projektu ma {approved_images} obraz(y) i {approved_plates} tablic(e)."
                 )
         else:
             self.ds_mode_title_var.set("Tor znaków (YOLO Detect)")
