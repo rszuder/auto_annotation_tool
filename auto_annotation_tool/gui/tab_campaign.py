@@ -4008,7 +4008,29 @@ class CampaignTab:
             return payload
 
         stored_manual_source = CAMPAIGN.get_last_plate_manual_source()
+        current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+
+        def _extract_iteration_num(raw_value: str) -> int:
+            text = str(raw_value or "").strip()
+            if not text:
+                return 0
+            try:
+                candidate = Path(text)
+                parts = list(candidate.parts)
+            except Exception:
+                parts = [text]
+            for part in reversed(parts):
+                stripped = str(part).strip()
+                lowered = stripped.lower()
+                if lowered.startswith("iteracja_"):
+                    try:
+                        return int(stripped.split("_", 1)[1])
+                    except Exception:
+                        return 0
+            return 0
+
         source_label = ""
+        source_iteration = 0
         for raw_path in (
             str(stored_manual_source.get("source_input_path") or "").strip(),
             str(stored_manual_source.get("source_run_path") or "").strip(),
@@ -4025,9 +4047,14 @@ class CampaignTab:
                 lowered = str(part).strip().lower()
                 if lowered.startswith("iteracja_"):
                     source_label = str(part)
+                    source_iteration = _extract_iteration_num(source_label)
                     break
             if source_label:
                 break
+
+        if source_iteration <= 0 or source_iteration >= current_iteration:
+            payload["source_label"] = source_label
+            return payload
 
         xml_path = None
         for raw_xml in (
@@ -5251,6 +5278,7 @@ class CampaignTab:
         plate_ready_source = self._get_plate_route_ready_source() if iteration_target == "plate" else {}
         char_ready_source = self._get_char_route_ready_source() if iteration_target == "char" else {}
         char_route_source_state = self._get_char_route_source_state() if iteration_target == "char" else {}
+        plate_approved_stats = self._get_plate_approved_set_stats()
         plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
         plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
         training_tab = self.app.tabs.get("training") if getattr(self.app, "tabs", None) else None
@@ -5420,7 +5448,29 @@ class CampaignTab:
             )
         )
 
-        if not iteration_target:
+        step2_vm = self._get_annotation_step2_view_model()
+        step2_title = "E2. Tor iteracji i przygotowanie Z2"
+        if step2_vm is not None:
+            primary_cta = getattr(step2_vm, "primary_cta", None)
+            secondary_cta = getattr(step2_vm, "secondary_cta", None)
+            step2_title = str(getattr(step2_vm, "title", "") or "").strip() or step2_title
+            step2_state = str(getattr(step2_vm, "state", "") or "").strip() or "locked"
+            step2_summary = str(getattr(step2_vm, "summary", "") or "").strip()
+            step2_details = str(getattr(step2_vm, "details", "") or "").strip()
+            step2_primary_label = str(getattr(primary_cta, "label", "") or "").strip()
+            step2_primary_command = self._resolve_step2_wizard_action_command(
+                str(getattr(primary_cta, "command_id", "") or "").strip(),
+                context=dict(getattr(primary_cta, "command_context", {}) or {}),
+            )
+            step2_secondary_label = str(getattr(secondary_cta, "label", "") or "").strip()
+            step2_secondary_command = self._resolve_step2_wizard_action_command(
+                str(getattr(secondary_cta, "command_id", "") or "").strip(),
+                context=dict(getattr(secondary_cta, "command_context", {}) or {}),
+            )
+            vm_current_step = int(getattr(step2_vm, "current_step", current_step) or current_step)
+            step2_body_mode = "step2_route" if bool(not project_completed and vm_current_step == 2) else ""
+            step2_body_visible = bool(step2_body_mode)
+        elif not iteration_target:
             step2_state = "in_progress" if current_step >= 2 else "locked"
             step2_summary = "Wybierz tor iteracji: tablice albo znaki."
             step2_details = (
@@ -5441,155 +5491,17 @@ class CampaignTab:
             step2_body_mode = "step2_route" if bool(not project_completed and current_step == 2) else ""
             step2_body_visible = bool(step2_body_mode)
 
-            if iteration_target == "plate":
-                if plate_step4_blocked:
-                    plate_gate_count = int(plate_step4_gate.get("annotated_images", 0) or 0)
-                    step2_state = "needs_attention"
-                    step2_summary = f"E2 wymaga jeszcze co najmniej 2 oznaczonych obrazów. Aktualnie: {plate_gate_count}."
-                    step2_details = str(plate_step4_gate.get("message") or "").strip() or (
-                        "Wróć do Z2 i dodaj brakujące oznaczenia tablic, zanim projekt przejdzie do E4."
-                    )
-                    step2_primary_label = "Wróć do Z2"
-                    step2_primary_command = self._step_goto_auto_annotation
-                elif step2_status == "generated":
-                    step2_state = "needs_attention"
-                    step2_summary = "Z2 utworzyło już run anotacji tablic, ale etap E2 nie został jeszcze zatwierdzony."
-                    step2_details = "Wejdź do Z2, sprawdź lub popraw polygony tablic i domknij etap."
-                elif current_step > 2 or step2_status == "approved":
-                    step2_state = "done"
-                    step2_summary = "Tor tablic został domknięty i projekt może przejść bezpośrednio do Z4."
-                    step2_details = "W torze tablic etap Z3 jest pomijany."
-                elif plate_ready_source:
-                    ready_run_name = ""
-                    try:
-                        ready_run_name = Path(plate_ready_source.get("restore_run_dir")).name
-                    except Exception:
-                        ready_run_name = ""
-                    step2_state = "in_progress" if current_step == 2 else "ready"
-                    step2_summary = "Dla tej paczki wykryto już gotowe anotacje tablic."
-                    step2_details = (
-                        f"Z2 może wystartować od runu {ready_run_name} zamiast od pustego XML."
-                        if ready_run_name
-                        else "Z2 może wystartować od istniejącego runu zamiast od pustego XML."
-                    )
-                elif current_step == 2:
-                    step2_state = "in_progress"
-                    step2_summary = "Ta iteracja pracuje w torze tablic i kieruje do Z2."
-                    step2_details = (
-                        "W Z2 przygotujesz ręczną albo automatyczną anotację tablic przed treningiem Pose. "
-                        "Opcjonalnie możesz tam też od razu zbudować dataset do Z4, ale nie blokuje to domknięcia E2."
-                    )
-                else:
-                    step2_state = "locked"
-                    step2_summary = "E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1."
-                    step2_details = "Najpierw domknij E1."
-            else:
-                if step2_status == "generated":
-                    step2_state = "needs_attention"
-                    step2_summary = "Tablice dla tej paczki są już przygotowane, ale E2 czeka na zatwierdzenie."
-                    step2_details = "Po zatwierdzeniu przejdziesz do wycinania tablic, OCR i korekty znaków (Z3)."
-                elif char_ready_source:
-                    ready_run_name = ""
-                    try:
-                        ready_run_name = Path(char_ready_source.get("restore_run_dir")).name
-                    except Exception:
-                        ready_run_name = ""
-                    if current_step > 2 or step2_status == "approved":
-                        step2_state = "done"
-                        step2_summary = "E2 zostało zatwierdzone. Źródła tablic do pracy nad znakami są gotowe."
-                        step2_details = (
-                            f"Zatwierdzone źródło tablic: {ready_run_name}. Dalsza praca odbywa się już w E3 / Z3."
-                            if ready_run_name
-                            else "Źródła tablic zostały zatwierdzone. Dalsza praca odbywa się już w E3 / Z3."
-                        )
-                        step2_primary_label = ""
-                        step2_primary_command = None
-                        step2_secondary_label = ""
-                        step2_secondary_command = None
-                    else:
-                        step2_state = "ready"
-                        step2_summary = "Dla tej paczki są już gotowe tablice i można od razu zacząć pracę nad znakami."
-                        step2_details = (
-                            f"Źródło tablic: {ready_run_name}. Po kliknięciu otworzysz wycinanie tablic, OCR i korekte znaków (Z3)."
-                            if ready_run_name
-                            else "Tablice zostały rozpoznane automatycznie z projektu. Po kliknięciu otworzysz wycinanie tablic, OCR i korekte znaków (Z3)."
-                        )
-                        step2_primary_label = "Kontynuuj pracę nad znakami (Z3)"
-                        step2_primary_command = lambda ctx=dict(char_ready_source): self._step_continue_characters_from_ready_source(ctx)
-                        step2_secondary_label = "Wróć do sprawdzania tablic (Z2)"
-                        step2_secondary_command = self._step_return_to_annotation_review
-                elif char_route_source_state.get("needs_more_tables"):
-                    ready_run_name = str(char_route_source_state.get("run_name", "") or "").strip()
-                    source_images = int(char_route_source_state.get("images_with_plates", 0) or 0)
-                    source_plates = int(char_route_source_state.get("total_plates", 0) or 0)
-                    step2_state = "needs_attention"
-                    step2_summary = "Tor znaków jest wybrany, ale źródło tablic jest jeszcze za male."
-                    step2_details = (
-                        f"Źródło tablic: {ready_run_name}. Oznaczone obrazy: {source_images}/2. Zapisanych tablic: {source_plates}. "
-                        "Przy jednej tablicy nie przygotujesz potem poprawnego train i val dla znaków. "
-                        "Najpierw wróć do Z2 i przygotuj więcej tablic."
-                        if ready_run_name
-                        else f"Oznaczone obrazy: {source_images}/2. Zapisanych tablic: {source_plates}. "
-                        "Przy jednej tablicy nie przygotujesz potem poprawnego train i val dla znaków. "
-                        "Najpierw wróć do Z2 i przygotuj więcej tablic."
-                    )
-                    step2_primary_label = "Przygotuj więcej tablic w Z2"
-                    step2_primary_command = self._step_return_to_annotation_review
-                    step2_secondary_label = ""
-                    step2_secondary_command = None
-                elif current_step > 2 or step2_status == "approved":
-                    step2_state = "done"
-                    step2_summary = "Źródła tablic do pracy nad znakami zostały zatwierdzone."
-                    step2_details = "E2 jest domkniete. Dalsza praca odbywa się już w E3 / Z3."
-                    step2_primary_label = ""
-                    step2_primary_command = None
-                    step2_secondary_label = ""
-                    step2_secondary_command = None
-                elif current_step == 2:
-                    step2_state = "in_progress"
-                    step2_summary = "Tor znaków najpierw przygotuje tablice dla tej paczki."
-                    step2_details = (
-                        "Model tablic projektu zostanie podstawiony automatycznie. "
-                        "Gdy tablice będą gotowe, przejdziesz do wycinania tablic, OCR i korekty znaków (Z3), "
-                        "gdzie model znaków projektu też zostanie uzyty automatycznie."
-                    )
-                else:
-                    step2_state = "locked"
-                    step2_summary = "E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1."
-                    step2_details = "Najpierw domknij E1."
-
-        if (
-            iteration_target == "char"
-            and current_step == 2
-            and step2_state == "in_progress"
-            and not char_ready_source
-            and not plate_model_ready
-        ):
-            step2_state = "needs_attention"
-            step2_summary = "Tor znaków potrzebuje źródła tablic dla Z3."
-            step2_details = (
-                "Podlacz gotowy run lub anotacje tablic albo przygotuj model tablic w torze A. "
-                "Sam model znaków nie odblokowuje jeszcze E2."
-            )
-
-        if current_step == 2 and step2_state == "in_progress":
-            if iteration_target == "plate":
-                step2_details = (
-                    "W Z2 przygotujesz ręczna albo automatyczna anotacje tablic przed treningiem Pose. "
-                    "Po domknięciu E2 projekt przejdzie dalej do Z4."
-                )
-            elif iteration_target:
-                step2_details = (
-                    "Model tablic projektu zostanie podstawiony automatycznie. "
-                    "Ten etap służy tutaj tylko do przygotowania tablic w sprawdzaniu tablic (Z2) przed wycinaniem tablic, OCR i korekta znaków (Z3). "
-                    "Po wejsciu do Z3 model znaków projektu będzie już podstawiony automatycznie."
-                )
+            step2_state = "locked"
+            step2_summary = "E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1."
+            step2_details = "Najpierw domknij E1."
 
         if current_step == 2 and bool(step2_body_visible):
             step2_primary_label = ""
             step2_primary_command = None
             step2_secondary_label = ""
             step2_secondary_command = None
+            step2_summary = ""
+            step2_details = ""
 
         if step2_state == "done":
             step2_primary_label = ""
@@ -5602,7 +5514,7 @@ class CampaignTab:
         statuses.append(
             WizardStageStatus(
                 key="step2",
-                title="E2. Tor iteracji i przygotowanie Z2",
+                title=step2_title,
                 state=step2_state,
                 summary=step2_summary,
                 details=step2_details,
@@ -5791,7 +5703,12 @@ class CampaignTab:
             step4_state = "in_progress"
             step4_summary = "Budowa datasetu i trening odbywają się w Z4."
             if iteration_target == "plate":
-                step4_details = "W torze tablic Z4 przygotuje dataset YOLO Pose i uruchomi trening modelu tablic."
+                approved_images = int(plate_step4_gate.get("project_approved_images", 0) or 0)
+                approved_plates = int(plate_step4_gate.get("project_approved_plates", 0) or 0)
+                step4_details = (
+                    "W torze tablic Z4 przygotuje dataset YOLO Pose i uruchomi trening modelu tablic. "
+                    f"Źródłem jest zatwierdzony zbiór projektu: {approved_images} obraz(y), {approved_plates} tablic(e)."
+                )
             else:
                 step4_details = "W torze znaków Z4 zbuduje dataset znaków i uruchomi trening modelu YOLO Detect."
             step4_secondary_label = ""
@@ -5885,6 +5802,69 @@ class CampaignTab:
             return {}
 
         return dict(bootstrap) if isinstance(bootstrap, dict) else {}
+
+    def _get_annotation_step2_source_state(self, target: str) -> dict:
+        target = self._normalize_iteration_target(target)
+        if target not in {"plate", "char"}:
+            return {}
+
+        annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+        if annotation_tab is None:
+            return {}
+
+        getter = getattr(annotation_tab, "get_campaign_step2_source_state", None)
+        if not callable(getter):
+            return {}
+
+        try:
+            source_state = getter(iteration_target=target)
+        except Exception as e:
+            logger.debug(f"Nie udało się pobrac stanu źródła E2 z Z2 dla toru {target}: {e}")
+            return {}
+
+        return dict(source_state) if isinstance(source_state, dict) else {}
+
+    def _get_plate_approved_set_stats(self) -> dict:
+        try:
+            stats = CAMPAIGN.get_plate_approved_set_stats()
+        except Exception as e:
+            logger.debug(f"Nie udało się pobrac statystyk ApprovedSet tablic: {e}")
+            return {}
+
+        return dict(stats) if isinstance(stats, dict) else {}
+
+    def _resolve_step2_wizard_action_command(self, action_id: str, *, context: dict | None = None):
+        normalized = str(action_id or "").strip().lower()
+        if not normalized:
+            return None
+
+        if normalized == "choose_iteration_target":
+            target = self._normalize_iteration_target((context or {}).get("target"))
+            if target not in {"plate", "char"}:
+                return None
+            return lambda t=target: self._step2_choose_iteration_target(t)
+        if normalized == "open_z2":
+            return self._step_goto_auto_annotation
+        if normalized == "return_to_z2":
+            return self._step_return_to_annotation_review
+        if normalized == "continue_z3":
+            return lambda ctx=dict(context or {}): self._step_continue_characters_from_ready_source(ctx)
+        return None
+
+    def _get_annotation_step2_view_model(self):
+        annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+        if annotation_tab is None:
+            return None
+
+        getter = getattr(annotation_tab, "get_campaign_step2_view_model", None)
+        if not callable(getter):
+            return None
+
+        try:
+            return getter()
+        except Exception as e:
+            logger.debug(f"Nie udało się pobrac modelu widoku E2 z Z2: {e}")
+            return None
 
     def _get_char_route_ready_source(self) -> dict:
         source_state = self._get_char_route_source_state()
@@ -5991,94 +5971,18 @@ class CampaignTab:
 
         if CAMPAIGN.get_step2_status() == "generated":
             return result
-
-        bootstrap = self._get_annotation_bootstrap_for_target("char")
-        if not bootstrap:
+        source_state = self._get_annotation_step2_source_state("char")
+        if not source_state:
             return result
-
-        restore_run_dir = bootstrap.get("restore_run_dir")
-        if restore_run_dir is None:
-            return result
-
-        try:
-            restore_run_dir = Path(restore_run_dir)
-        except Exception:
-            return result
-
-        if not restore_run_dir.exists() or not restore_run_dir.is_dir():
-            return result
-        if not (restore_run_dir / "annotations.xml").exists():
-            return result
-
-        annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-        if annotation_tab is None:
-            return result
-
-        result["has_source"] = True
-        result["restore_run_dir"] = restore_run_dir
-        result["run_name"] = str(restore_run_dir.name or "").strip()
-
-        try:
-            manifest = annotation_tab._load_annotation_run_manifest(restore_run_dir)
-            manual_ready = bool(annotation_tab._annotation_run_manifest_has_manual_value(manifest))
-            images_with_plates = int(manifest.get("result_images_with_plates", 0) or 0)
-            total_plates = int(manifest.get("result_total_plates", 0) or 0)
-            plate_annotations_ready = total_plates > 0
-        except Exception:
-            manual_ready = False
-            images_with_plates = 0
-            total_plates = 0
-            plate_annotations_ready = False
-
-        if total_plates <= 0:
-            try:
-                annotations = annotation_tab._parse_cvat_preview_annotations(restore_run_dir / "annotations.xml")
-                images_with_plates, total_plates = annotation_tab._count_plate_annotations(annotations)
-                plate_annotations_ready = int(total_plates or 0) > 0
-            except Exception:
-                images_with_plates = 0
-                total_plates = 0
-                plate_annotations_ready = False
-
-        if not manual_ready and not plate_annotations_ready:
-            return result
-
-        bootstrap["restore_run_dir"] = restore_run_dir
-        result["bootstrap"] = dict(bootstrap)
-        result["images_with_plates"] = int(images_with_plates or 0)
-        result["total_plates"] = int(total_plates or 0)
-
-        if int(images_with_plates or 0) >= 2 and int(total_plates or 0) > 0:
-            result["ready"] = True
-        else:
-            result["needs_more_tables"] = True
-
+        result.update(source_state)
         return result
 
     def _get_plate_route_ready_source(self) -> dict:
         if CAMPAIGN.get_step2_status() == "generated":
             return {}
-
-        bootstrap = self._get_annotation_bootstrap_for_target("plate")
-        if not bootstrap:
-            return {}
-
-        restore_run_dir = bootstrap.get("restore_run_dir")
-        if restore_run_dir is None:
-            return {}
-
-        try:
-            restore_run_dir = Path(restore_run_dir)
-        except Exception:
-            return {}
-
-        if not restore_run_dir.exists() or not restore_run_dir.is_dir():
-            return {}
-        if not (restore_run_dir / "annotations.xml").exists():
-            return {}
-
-        bootstrap["restore_run_dir"] = restore_run_dir
-        return bootstrap
+        source_state = self._get_annotation_step2_source_state("plate")
+        bootstrap = source_state.get("bootstrap")
+        return dict(bootstrap) if isinstance(bootstrap, dict) else {}
 
     def _get_step2_staging_run_dir(self) -> Path | None:
         run_dir = str(CAMPAIGN.get_step2_staging_run() or "").strip()
@@ -6282,7 +6186,7 @@ class CampaignTab:
             plate_bootstrap = self._get_annotation_bootstrap_for_target("plate")
             if not bool(plate_bootstrap.get("manual_template", True)):
                 return "Przygotuj tablice na modelu projektu (Z2)"
-            return "Przejdź do sprawdzania tablic (Z2)"
+            return "Przejdź do anotacji tablic"
 
         if target == "char":
             if CAMPAIGN.get_step2_status() == "generated":
@@ -6292,7 +6196,7 @@ class CampaignTab:
             plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
             if plate_model_path and Path(plate_model_path).exists():
                 return "Przygotuj tablice na modelu projektu (Z2)"
-            return "Przejdź do sprawdzania tablic (Z2)"
+            return "Przejdź do anotacji tablic"
 
         return "Najpierw wybierz tor"
 
@@ -6336,7 +6240,7 @@ class CampaignTab:
                 "a nie do przelaczania projektu na drugi tor."
             )
 
-        if step2_status in {"generated", "approved"} or self._get_step2_staging_run_dir() is not None:
+        if step2_status in {"generated", "approved"}:
             return (
                 "Dla tej iteracji istnieja już artefakty z Z2, dlatego tor jest zablokowany. "
                 "Jesli chcesz pracowac drugim torem, rozpocznij nowa iteracje."
@@ -6410,6 +6314,8 @@ class CampaignTab:
             return
 
         previous_target = self._normalize_iteration_target(CAMPAIGN.get_iteration_target())
+        plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
+        plate_model_ready = bool(plate_model and Path(plate_model).exists())
         if previous_target in {"plate", "char"} and previous_target != target:
             lock_reason = self._get_iteration_target_lock_reason()
             if lock_reason:
@@ -6420,7 +6326,6 @@ class CampaignTab:
                 return
 
         if target == "char":
-            plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
             ready_source = self._get_char_route_ready_source()
             if not ready_source and (not plate_model or not Path(plate_model).exists()):
                 messagebox.showwarning(
@@ -6487,15 +6392,12 @@ class CampaignTab:
     def _render_step2_route_actions(self, frame):
         palette = getattr(self.app, "palette", {})
         card_bg = str(frame.cget("bg") or palette.get("panel", "#252526"))
+        step2_vm = self._get_annotation_step2_view_model()
         target = self._get_iteration_target()
-        last_target = self._get_last_iteration_target()
-        step2_status = str(CAMPAIGN.get_step2_status() or "").strip().lower()
-        plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
-        plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
-        char_ready_source = self._get_char_route_ready_source()
-        char_route_source_state = self._get_char_route_source_state()
-        target_locked_reason = self._get_iteration_target_lock_reason()
-        target_locked = bool(target_locked_reason)
+        target_locked_reason = ""
+        target_locked = False
+        route_hint = ""
+        route_choices = []
 
         for widget in frame.winfo_children():
             widget.destroy()
@@ -6503,20 +6405,19 @@ class CampaignTab:
         frame.configure(bg=card_bg)
         frame.pack(fill=tk.X, pady=(6, 0))
 
-        tk.Label(
-            frame,
-            text="Wybór toru",
-            fg=palette.get("fg", "#f3f3f3"),
-            bg=card_bg,
-            justify=tk.LEFT,
-            font=("Segoe UI", 9, "bold"),
-        ).pack(anchor=tk.W, pady=(0, 3))
+        if step2_vm is not None:
+            route_hint = str(getattr(step2_vm, "route_hint", "") or "").strip()
+            target_locked_reason = str(getattr(step2_vm, "route_lock_reason", "") or "").strip()
+            target_locked = bool(target_locked_reason)
+            route_choices = list(getattr(step2_vm, "route_choices", []) or [])
 
-        route_hint = (
-            "Najpierw wybierz, czy ta iteracja pracuje w torze tablic, czy w torze znaków."
-            if not target
-            else f"Wybrany tor: {self._iteration_target_label(target)}."
-        )
+        if not route_hint:
+            route_hint = (
+                "Wybierz tor tej iteracji."
+                if not target
+                else f"Wybrany tor: {self._iteration_target_label(target)}."
+            )
+
         tk.Label(
             frame,
             text=route_hint,
@@ -6524,34 +6425,59 @@ class CampaignTab:
             bg=card_bg,
             justify=tk.LEFT,
             wraplength=520,
-        ).pack(anchor=tk.W, pady=(0, 6))
+        ).pack(anchor=tk.W, pady=(0, 4))
 
         btn_row = tk.Frame(frame, bg=card_bg)
         btn_row.pack(anchor=tk.W, fill=tk.X)
 
-        btn_plate = ttk.Button(
-            btn_row,
-            text=self._step2_route_button_label("plate", current_target=target, last_target=last_target),
-            command=lambda: self._step2_choose_iteration_target("plate"),
-        )
-        btn_plate.pack(side=tk.LEFT, padx=(0, 8))
+        btn_plate = None
+        btn_char = None
+        if route_choices:
+            for idx, choice in enumerate(route_choices):
+                if not bool(getattr(choice, "visible", True)):
+                    continue
+                label = str(getattr(choice, "label", "") or "").strip()
+                command = self._resolve_step2_wizard_action_command(
+                    str(getattr(choice, "command_id", "") or "").strip(),
+                    context=dict(getattr(choice, "command_context", {}) or {}),
+                )
+                btn = ttk.Button(
+                    btn_row,
+                    text=label,
+                    command=command,
+                )
+                if not bool(getattr(choice, "enabled", True)) or command is None:
+                    btn.configure(state=tk.DISABLED)
+                btn.pack(side=tk.LEFT, padx=(0, 8) if idx == 0 else 0)
+                if str(getattr(choice, "id", "") or "").strip() == "plate":
+                    btn_plate = btn
+                elif str(getattr(choice, "id", "") or "").strip() == "char":
+                    btn_char = btn
+        else:
+            last_target = self._get_last_iteration_target()
+            btn_plate = ttk.Button(
+                btn_row,
+                text=self._step2_route_button_label("plate", current_target=target, last_target=last_target),
+                command=lambda: self._step2_choose_iteration_target("plate"),
+            )
+            btn_plate.pack(side=tk.LEFT, padx=(0, 8))
 
-        btn_char = ttk.Button(
-            btn_row,
-            text=self._step2_route_button_label("char", current_target=target, last_target=last_target),
-            command=lambda: self._step2_choose_iteration_target("char"),
-        )
-        btn_char.pack(side=tk.LEFT)
+            btn_char = ttk.Button(
+                btn_row,
+                text=self._step2_route_button_label("char", current_target=target, last_target=last_target),
+                command=lambda: self._step2_choose_iteration_target("char"),
+            )
+            btn_char.pack(side=tk.LEFT)
 
-        if target_locked:
-            btn_plate.configure(state=tk.DISABLED)
-            btn_char.configure(state=tk.DISABLED)
-        elif target == "plate":
-            btn_plate.configure(state=tk.DISABLED)
-        elif target == "char":
-            btn_char.configure(state=tk.DISABLED)
-        elif not plate_model_ready:
-            btn_char.configure(state=tk.DISABLED)
+            target_locked_reason = self._get_iteration_target_lock_reason()
+            target_locked = bool(target_locked_reason)
+            if target_locked:
+                btn_plate.configure(state=tk.DISABLED)
+                btn_char.configure(state=tk.DISABLED)
+            elif target == "plate":
+                btn_plate.configure(state=tk.DISABLED)
+            elif target == "char":
+                btn_char.configure(state=tk.DISABLED)
 
         if target_locked:
             tk.Label(
@@ -6567,36 +6493,44 @@ class CampaignTab:
         action_primary_command = None
         action_secondary_label = ""
         action_secondary_command = None
+        action_details = ""
 
-        if target == "plate":
-            action_primary_label = self._get_step2_jump_button_text("plate")
-            action_primary_command = self._step_goto_auto_annotation
-        elif target == "char":
-            if char_ready_source:
-                action_primary_label = "Kontynuuj pracę nad znakami (Z3)"
-                action_primary_command = lambda ctx=dict(char_ready_source): self._step_continue_characters_from_ready_source(ctx)
-                action_secondary_label = "Wróć do sprawdzania tablic (Z2)"
-                action_secondary_command = self._step_return_to_annotation_review
-            elif char_route_source_state.get("needs_more_tables"):
-                action_primary_label = "Przygotuj więcej tablic w Z2"
-                action_primary_command = self._step_return_to_annotation_review
-            elif step2_status == "generated":
-                action_primary_label = "Sprawdz i zatwierdz tablice (Z2)"
-                action_primary_command = self._step_goto_auto_annotation
-            elif plate_model_ready:
-                action_primary_label = "Przygotuj tablice na modelu projektu (Z2)"
-                action_primary_command = self._step_goto_auto_annotation
+        if step2_vm is not None:
+            primary_cta = getattr(step2_vm, "primary_cta", None)
+            secondary_cta = getattr(step2_vm, "secondary_cta", None)
+            action_details = str(getattr(step2_vm, "details", "") or "").strip()
+            if primary_cta is not None:
+                action_primary_label = str(getattr(primary_cta, "label", "") or "").strip()
+                action_primary_command = self._resolve_step2_wizard_action_command(
+                    str(getattr(primary_cta, "command_id", "") or "").strip(),
+                    context=dict(getattr(primary_cta, "command_context", {}) or {}),
+                )
+            if secondary_cta is not None:
+                action_secondary_label = str(getattr(secondary_cta, "label", "") or "").strip()
+                action_secondary_command = self._resolve_step2_wizard_action_command(
+                    str(getattr(secondary_cta, "command_id", "") or "").strip(),
+                    context=dict(getattr(secondary_cta, "command_context", {}) or {}),
+                )
 
         if action_primary_command is not None or action_secondary_command is not None:
             tk.Label(
                 frame,
-                text="Następny ruch",
+                text="Dalej",
                 fg=palette.get("fg", "#f3f3f3"),
                 bg=card_bg,
                 justify=tk.LEFT,
                 font=("Segoe UI", 9, "bold"),
                 wraplength=520,
-            ).pack(anchor=tk.W, pady=(10, 4))
+            ).pack(anchor=tk.W, pady=(8, 2))
+            if action_details:
+                tk.Label(
+                    frame,
+                    text=action_details,
+                    fg=palette.get("muted", "#c7c7c7"),
+                    bg=card_bg,
+                    justify=tk.LEFT,
+                    wraplength=520,
+                ).pack(anchor=tk.W, pady=(8, 4))
 
             action_row = tk.Frame(frame, bg=card_bg, bd=0, highlightthickness=0)
             action_row.pack(anchor=tk.W, fill=tk.X)
@@ -6614,26 +6548,6 @@ class CampaignTab:
                     text=f"{action_secondary_label} (STEP2-B2)",
                     command=action_secondary_command,
                 ).pack(side=tk.LEFT)
-
-        if target == "char" and char_route_source_state.get("needs_more_tables"):
-            source_images = int(char_route_source_state.get("images_with_plates", 0) or 0)
-            source_plates = int(char_route_source_state.get("total_plates", 0) or 0)
-            run_name = str(char_route_source_state.get("run_name", "") or "").strip()
-            warning_text = (
-                f"Masz już źródło tablic ({run_name}), ale tylko {source_images}/2 oznaczone obrazy i {source_plates} zapisanych tablic. "
-                "To za malo, by później przygotować poprawny dataset znaków do treningu."
-                if run_name
-                else f"Masz już źródło tablic, ale tylko {source_images}/2 oznaczone obrazy i {source_plates} zapisanych tablic. "
-                "To za malo, by później przygotować poprawny dataset znaków do treningu."
-            )
-            tk.Label(
-                frame,
-                text=warning_text,
-                fg=palette.get("warning", "#d19a66"),
-                bg=card_bg,
-                justify=tk.LEFT,
-                wraplength=520,
-            ).pack(anchor=tk.W, pady=(8, 0))
 
         self._render_step2_asset_summary(frame, current_target=target)
 
@@ -6935,9 +6849,9 @@ class CampaignTab:
             )
         elif curr_step >= 5:
             self.btn_advance.config(
-                text="🎉 Cykl zakończony → Nowa iteracja",
-                state="normal",
-                style="Accent.TButton"
+                text="Cykl zakończony",
+                state="disabled",
+                style="TButton"
             )
             self.btn_complete_project.config(
                 text="Zakończ projekt",
