@@ -158,6 +158,10 @@ class PlateGenerator:
                 self.metadata[plate_id] = {
                     'source_image': str(source_image_path),
                     'source_bbox': [float(x) for x in plate_detection.bbox],
+                    'source_polygon': (
+                        [[float(px), float(py)] for px, py in list(plate_detection.polygon or [])[:4]]
+                        if plate_detection.polygon else None
+                    ),
                     'is_square': bool(is_square),  # Zapisujemy typ, może się przydać do YOLO
                     'ocr_text': str(plate_detection.text) if plate_detection.text else None,
                     'ocr_confidence': float(plate_detection.text_confidence) if plate_detection.text_confidence else 0.0,
