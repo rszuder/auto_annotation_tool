@@ -73,6 +73,7 @@ class CampaignManager:
             "step3_extract_xml_path": "",
             "step3_extract_images_dir": "",
             "project_status": "active",
+            "project_paused_at": "",
             "project_completed_at": "",
         }
 
@@ -123,6 +124,7 @@ class CampaignManager:
             "step3_extract_xml_path": "",
             "step3_extract_images_dir": "",
             "project_status": "active",
+            "project_paused_at": "",
             "project_completed_at": "",
         }
         return self._ensure_project_defaults(data)
@@ -359,16 +361,41 @@ class CampaignManager:
             return "active"
 
         status = str(self.state["projects"][project_name].get("project_status", "active") or "").strip().lower()
-        return "completed" if status == "completed" else "active"
+        if status == "completed":
+            return "completed"
+        if status == "paused":
+            return "paused"
+        return "active"
 
     def is_project_completed(self, project_name: str = None) -> bool:
         return self.get_project_status(project_name) == "completed"
+
+    def is_project_paused(self, project_name: str = None) -> bool:
+        return self.get_project_status(project_name) == "paused"
+
+    def get_project_paused_at(self, project_name: str = None) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+        return str(self.state["projects"][project_name].get("project_paused_at", "") or "").strip()
 
     def get_project_completed_at(self, project_name: str = None) -> str:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
             return ""
         return str(self.state["projects"][project_name].get("project_completed_at", "") or "").strip()
+
+    def pause_project(self, project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+
+        project_data = self.state["projects"][project_name]
+        project_data["project_status"] = "paused"
+        project_data["project_paused_at"] = datetime.now().isoformat()
+        project_data["project_completed_at"] = ""
+        self.save_state()
+        return True
 
     def complete_project(self, project_name: str = None) -> bool:
         project_name = self._resolve_project_name(project_name)
@@ -379,6 +406,7 @@ class CampaignManager:
         if int(project_data.get("current_step", 1) or 1) < 5:
             project_data["current_step"] = 5
         project_data["project_status"] = "completed"
+        project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = datetime.now().isoformat()
         self.save_state()
         return True
@@ -390,6 +418,7 @@ class CampaignManager:
 
         project_data = self.state["projects"][project_name]
         project_data["project_status"] = "active"
+        project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = ""
         self.save_state()
         return True
@@ -992,6 +1021,7 @@ class CampaignManager:
         project_data["step3_extract_xml_path"] = ""
         project_data["step3_extract_images_dir"] = ""
         project_data["project_status"] = "active"
+        project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = ""
         self.save_state()
         return result

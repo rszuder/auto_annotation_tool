@@ -57,12 +57,15 @@ class PlateManualAction(Z2Action):
     id = "plate_manual"
 
     def is_available(self, ctx: Z2ActionContext) -> bool:
-        if ctx.mode == "campaign" and ctx.campaign_step == 2 and ctx.iteration_target == "plate" and ctx.has_plate_model:
-            try:
-                from ..campaign_manager import CAMPAIGN
-                return int(CAMPAIGN.get_current_iteration_num() or 1) <= 1
-            except Exception:
-                return True
+        if ctx.mode == "campaign" and ctx.campaign_step == 2 and ctx.has_plate_model:
+            if ctx.iteration_target == "char":
+                return False
+            if ctx.iteration_target == "plate":
+                try:
+                    from ..campaign_manager import CAMPAIGN
+                    return int(CAMPAIGN.get_current_iteration_num() or 1) <= 1
+                except Exception:
+                    return True
         return True
     label = "Anotacja ręczna tablic"
 
@@ -405,7 +408,22 @@ class PlateReviewAction(Z2Action):
                 pass
             return
 
-        host._open_existing_run_for_manual_review(show_dialog=False)
+        from_auto = False
+        try:
+            current_screen = str(host._coerce_free_mode_screen() or "").strip().lower()
+        except Exception:
+            current_screen = ""
+        try:
+            thematic_route = str(host._get_z2_thematic_route() or "").strip().lower()
+        except Exception:
+            thematic_route = ""
+
+        if thematic_route == "auto" and current_screen in {"auto_summary", "manual_review", "export"}:
+            from_auto = True
+        elif str(ctx.route or "").strip().lower() == "auto":
+            from_auto = True
+
+        host._open_existing_run_for_manual_review(show_dialog=False, from_auto=from_auto)
 
 
 class PlateExportAction(Z2Action):
