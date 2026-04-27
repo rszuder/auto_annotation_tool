@@ -18,7 +18,10 @@ class HelpSystem:
         self.status_updater = None
         self.overlay_presenter = None
         self.overlay_dismisser = None
-        self.default_message = "Gotowy. Najedź myszką na element interfejsu, aby zobaczyć wskazówki."
+        self.default_message = (
+            "Gotowy. Najedź, kliknij albo ustaw fokus na elemencie interfejsu, "
+            "aby zobaczyć wskazówkę. PPM pokaże pełniejszy opis."
+        )
         self._hover_widget = None
         self._hover_help_key = ""
         self._hover_full_text = ""
@@ -129,6 +132,12 @@ class HelpSystem:
             self._set_help_cursor(widget, True)
             self._push_status(full_text, "help")
 
+        def on_focus_in(event=None):
+            self._hover_widget = widget
+            self._hover_help_key = str(index_key or "")
+            self._hover_full_text = full_text
+            self._push_status(full_text, "help")
+
         def on_leave(event=None):
             if self._hover_widget is widget:
                 self._hover_widget = None
@@ -137,11 +146,24 @@ class HelpSystem:
             self._set_help_cursor(widget, False)
             self._push_status(self.default_message, "info")
 
+        def on_focus_out(event=None):
+            if self._hover_widget is widget:
+                self._hover_widget = None
+                self._hover_help_key = ""
+                self._hover_full_text = ""
+            self._push_status(self.default_message, "info")
+
         def on_destroy(event=None):
             if self._hover_widget is widget:
                 self._hover_widget = None
                 self._hover_help_key = ""
                 self._hover_full_text = ""
+
+        def on_primary_help(event=None):
+            self._hover_widget = widget
+            self._hover_help_key = str(index_key or "")
+            self._hover_full_text = full_text
+            self._push_status(full_text, "help")
 
         def on_secondary_help(event=None):
             self._hover_widget = widget
@@ -151,7 +173,10 @@ class HelpSystem:
             self._show_overlay(full_text, "help")
 
         widget.bind("<Enter>", on_enter, add="+")
+        widget.bind("<FocusIn>", on_focus_in, add="+")
         widget.bind("<Leave>", on_leave, add="+")
+        widget.bind("<FocusOut>", on_focus_out, add="+")
+        widget.bind("<ButtonPress-1>", on_primary_help, add="+")
         widget.bind("<Destroy>", on_destroy, add="+")
 
         # Nie nadpisujemy widgetów, które mają już własną logikę PPM.

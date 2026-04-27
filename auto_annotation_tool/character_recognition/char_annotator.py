@@ -85,7 +85,7 @@ class CharacterAnnotator:
                 characters=characters
             )
             
-            logger.debug(f"✅ Anotowano {len(characters)} znaków w {plate_path.name}")
+            logger.debug(f"[OK] Anotowano {len(characters)} znaków w {plate_path.name}")
             return annotation
         
         except Exception as e:

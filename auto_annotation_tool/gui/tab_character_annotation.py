@@ -31,6 +31,7 @@ from ..data_models import ImageAnnotation, Detection
 from ..training.dataset_splitter import DatasetSplitter
 from ..validators import validate_yolo_dataset
 from .help_manager import HELP
+from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import (
@@ -265,6 +266,7 @@ class CharacterAnnotationTab:
         self.app = app
         self.icon_manager = IconManager
         self.frame = ttk.Frame(parent)
+        self._inertial_scroll = InertialScrollController(self.frame)
         self._startup_ui_ready = False
 
         # core state
@@ -1670,6 +1672,20 @@ class CharacterAnnotationTab:
             pass
         return None
 
+    @staticmethod
+    def _clear_listbox_selection_fast(listbox) -> None:
+        if listbox is None:
+            return
+        try:
+            selected_indices = list(listbox.curselection() or ())
+        except Exception:
+            selected_indices = []
+        for selected_index in selected_indices:
+            try:
+                listbox.selection_clear(selected_index)
+            except Exception:
+                pass
+
     def _on_preview_list_mouse_primary(self, event):
         try:
             modifier_state = int(getattr(event, "state", 0) or 0)
@@ -1690,6 +1706,10 @@ class CharacterAnnotationTab:
 
         shift_pressed = bool(modifier_state & 0x0001)
         control_pressed = bool(modifier_state & 0x0004)
+        preserve_index = self._get_current_preview_list_index()
+        if preserve_index is not None and not (0 <= int(preserve_index) < size):
+            preserve_index = None
+        preserve_preview = False
 
         try:
             if shift_pressed:
@@ -1706,25 +1726,39 @@ class CharacterAnnotationTab:
                 start_index = min(anchor_index, target_index)
                 end_index = max(anchor_index, target_index)
                 if not control_pressed:
-                    self.plates_listbox.selection_clear(0, tk.END)
+                    self._clear_listbox_selection_fast(self.plates_listbox)
                 self.plates_listbox.selection_set(start_index, end_index)
-                self.plates_listbox.activate(target_index)
+                if preserve_index is not None:
+                    self.plates_listbox.activate(preserve_index)
+                else:
+                    self.plates_listbox.activate(anchor_index)
                 self.plates_listbox.see(target_index)
+                preserve_preview = True
             elif control_pressed:
                 if self.plates_listbox.selection_includes(target_index):
                     self.plates_listbox.selection_clear(target_index)
                 else:
                     self.plates_listbox.selection_set(target_index)
                 self.plates_listbox.selection_anchor(target_index)
-                self.plates_listbox.activate(target_index)
+                if preserve_index is not None:
+                    self.plates_listbox.activate(preserve_index)
+                else:
+                    self.plates_listbox.activate(target_index)
                 self.plates_listbox.see(target_index)
+                preserve_preview = True
             else:
-                self.plates_listbox.selection_clear(0, tk.END)
+                self._suppress_preview_reload_on_list_select = False
+                self._clear_listbox_selection_fast(self.plates_listbox)
                 self.plates_listbox.selection_set(target_index)
                 self.plates_listbox.selection_anchor(target_index)
                 self.plates_listbox.activate(target_index)
                 self.plates_listbox.see(target_index)
         except Exception:
+            return "break"
+
+        if preserve_preview:
+            self._suppress_preview_reload_on_list_select = True
+            self._refresh_preview_editor_toolbar()
             return "break"
 
         self._on_preview_select(None)
@@ -1744,7 +1778,7 @@ class CharacterAnnotationTab:
             return False
 
         try:
-            listbox.selection_clear(0, tk.END)
+            self._clear_listbox_selection_fast(listbox)
             listbox.selection_set(target_idx)
             listbox.activate(target_idx)
             listbox.see(target_idx)
@@ -9539,7 +9573,7 @@ class CharacterAnnotationTab:
                 restore_idx = 0
 
             if restore_idx is not None:
-                self.plates_listbox.selection_clear(0, tk.END)
+                self._clear_listbox_selection_fast(self.plates_listbox)
                 self.plates_listbox.selection_set(restore_idx)
                 self.plates_listbox.activate(restore_idx)
                 self.plates_listbox.see(restore_idx)
@@ -10452,20 +10486,21 @@ class CharacterAnnotationTab:
             return False
 
     def _mousewheel_units(self, event) -> int:
-        event_num = getattr(event, "num", None)
-        if event_num == 4:
-            return -1
-        if event_num == 5:
-            return 1
+        return self._inertial_scroll.mousewheel_units(event)
 
-        delta = int(getattr(event, "delta", 0) or 0)
-        if delta == 0:
-            return 0
-        if abs(delta) >= 120:
-            units = -int(delta / 120)
-        else:
-            units = -1 if delta > 0 else 1
-        return units if units != 0 else (-1 if delta > 0 else 1)
+    def _on_plates_listbox_mousewheel(self, event):
+        listbox = getattr(self, "plates_listbox", None)
+        if listbox is None:
+            return None
+        units = self._inertial_scroll.mousewheel_units(event)
+        if units == 0 or not self._inertial_scroll.listbox_can_scroll(listbox, units):
+            return None
+        self._inertial_scroll.queue_listbox_by_units(
+            listbox,
+            units,
+            magnitude=self._inertial_scroll.mousewheel_magnitude(event),
+        )
+        return "break"
 
     def _detect_right_canvas_overflows(self) -> bool:
         canvas = getattr(self, "detect_right_canvas", None)
@@ -10491,31 +10526,14 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        canvas = getattr(self, "detect_right_canvas", None)
-        if canvas is None:
-            return None
-
-        units = self._mousewheel_units(event)
-        if units == 0:
-            return None
-
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-        except Exception:
-            return None
-
-        if not self._widget_contains_point(canvas, x_root, y_root):
-            return None
-
-        if not self._detect_right_canvas_overflows():
-            return None
-
-        try:
-            canvas.yview_scroll(units, "units")
-        except Exception:
+        if self._inertial_scroll.scroll_canvas_if_targeted(
+            getattr(self, "detect_right_canvas", None),
+            event,
+            pointer_widget=self.frame,
+            overflow_checker=self._detect_right_canvas_overflows,
+        ):
             return "break"
-        return "break"
+        return None
 
     def _cvat_export_canvas_overflows(self) -> bool:
         canvas = getattr(self, "cvat_export_canvas", None)
@@ -10556,31 +10574,14 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        canvas = getattr(self, "cvat_export_canvas", None)
-        if canvas is None:
-            return None
-
-        units = self._mousewheel_units(event)
-        if units == 0:
-            return None
-
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-        except Exception:
-            return None
-
-        if not self._widget_contains_point(canvas, x_root, y_root):
-            return None
-
-        if not self._cvat_export_canvas_overflows():
-            return None
-
-        try:
-            canvas.yview_scroll(units, "units")
-        except Exception:
+        if self._inertial_scroll.scroll_canvas_if_targeted(
+            getattr(self, "cvat_export_canvas", None),
+            event,
+            pointer_widget=self.frame,
+            overflow_checker=self._cvat_export_canvas_overflows,
+        ):
             return "break"
-        return "break"
+        return None
 
     def _restore_scroll_canvas_focus(self, canvas):
         if canvas is None:
@@ -10599,31 +10600,14 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
-        if canvas is None:
-            return None
-
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-        except Exception:
-            return None
-
-        if not self._widget_contains_point(canvas, x_root, y_root):
-            return None
-
-        can_scroll = True
-        if callable(overflow_checker):
-            try:
-                can_scroll = bool(overflow_checker())
-            except Exception:
-                can_scroll = True
-
-        units = self._mousewheel_units(event)
-        if units != 0 and can_scroll:
-            try:
-                canvas.yview_scroll(units, "units")
-            except Exception:
-                return "break"
+        if self._inertial_scroll.redirect_child_mousewheel_to_canvas(
+            event,
+            canvas,
+            pointer_widget=self.frame,
+            overflow_checker=overflow_checker,
+        ):
+            self._restore_scroll_canvas_focus(canvas)
+            return "break"
 
         self._restore_scroll_canvas_focus(canvas)
         return "break"
@@ -11400,6 +11384,13 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            refresh_pz3_cards = getattr(self, "_refresh_pz3_cards_ui", None)
+            if callable(refresh_pz3_cards):
+                refresh_pz3_cards()
+        except Exception:
+            pass
+
         for refresh_name in (
             "_refresh_gold_export_filter_labels",
             "_refresh_gold_export_source_labels",
@@ -11423,7 +11414,8 @@ class CharacterAnnotationTab:
     def _reset_pz3_runtime_ui(self, collapse_cards: bool = True):
         try:
             if collapse_cards:
-                self._pz3_selected_path = ""
+                in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+                self._pz3_selected_path = "dataset" if in_campaign else ""
             self._pz3_cvat_expanded = False
         except Exception:
             pass
@@ -13634,7 +13626,9 @@ class CharacterAnnotationTab:
             in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
         except Exception:
             in_campaign = False
-        if not selected_path and not in_campaign:
+        if not selected_path and in_campaign:
+            selected_path = "dataset"
+        elif not selected_path and not in_campaign:
             selected_path = "dataset"
         return Step3Pz3PathSelectionViewModel(
             selected_path=selected_path,
@@ -14122,6 +14116,8 @@ class CharacterAnnotationTab:
         self.preview_plate_ids = []
         self._loaded_meta_path = None
         self._loaded_meta_mtime = None
+        self._pz3_selected_path = "dataset"
+        self._pz3_cvat_expanded = False
 
         try:
             self.plates_listbox.delete(0, tk.END)
@@ -14248,6 +14244,13 @@ class CharacterAnnotationTab:
 
         try:
             self._refresh_extract_workflow_ui()
+        except Exception:
+            pass
+
+        try:
+            refresh_pz3_cards = getattr(self, "_refresh_pz3_cards_ui", None)
+            if callable(refresh_pz3_cards):
+                refresh_pz3_cards()
         except Exception:
             pass
 
@@ -18208,6 +18211,9 @@ class CharacterAnnotationTab:
         self.plates_listbox.bind("<Button-1>", self._on_preview_list_mouse_primary, add=False)
         self.plates_listbox.bind("<B1-Motion>", lambda _event: "break", add=False)
         self.plates_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
+        self.plates_listbox.bind("<MouseWheel>", self._on_plates_listbox_mousewheel, add="+")
+        self.plates_listbox.bind("<Button-4>", self._on_plates_listbox_mousewheel, add="+")
+        self.plates_listbox.bind("<Button-5>", self._on_plates_listbox_mousewheel, add="+")
 
         self.preview_box_mode_rows = []
         for mode_key, mode_label in PREVIEW_BOX_MODE_OPTIONS:
@@ -19436,9 +19442,13 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.hybrid_yolo_box_backend_row, "t2_yolo_box_backend")
         HELP.bind_help(self.hybrid_yolo_box_backend_indicator, "t2_yolo_box_backend")
         HELP.bind_help(self.hybrid_yolo_box_backend_lbl, "t2_yolo_box_backend")
+        det_device_combo = getattr(self, "det_device_combo", None)
+        det_device_hint_lbl = getattr(self, "det_device_hint_lbl", None)
         HELP.bind_help(self.btn_toggle_detection_log, "t2_cut_logs")
         HELP.bind_help(self.plates_listbox, "t2_listbox")
         HELP.bind_help(self.preview_canvas, "t2_canvas")
+        HELP.bind_help(det_device_combo, "t2_device")
+        HELP.bind_help(det_device_hint_lbl, "t2_device")
         HELP.bind_help(self.preview_dir_hint_lbl, "t2_preview_run")
         HELP.bind_help(self.preview_dir_entry, "t2_preview_run")
         HELP.bind_help(self.preview_dir_browse_btn, "t2_preview_run")
@@ -19447,6 +19457,8 @@ class CharacterAnnotationTab:
         HELP.bind_help(self.preview_edit_toolbar, "t2_canvas")
         HELP.bind_help(self.preview_controls_canvas, "t2_canvas")
         HELP.bind_help(self.preview_load_note_lbl, "t2_preview_info")
+        HELP.bind_help(self.btn_to_dataset_frame, "t2_to_dataset")
+        HELP.bind_help(self.btn_to_dataset, "t2_to_dataset")
 
         for entry in getattr(self, "_detect_mode_cards", {}).values():
             ensure_self_adaptive_wrap(entry.get("desc"), padding=6, min_wrap=130)
@@ -19677,6 +19689,10 @@ class CharacterAnnotationTab:
         # jeśli akurat przebudowujemy listę - nie renderujemy
         if getattr(self, "_reloading_preview", False):
             return
+        if getattr(self, "_suppress_preview_reload_on_list_select", False):
+            self._suppress_preview_reload_on_list_select = False
+            self._refresh_preview_editor_toolbar()
+            return
 
         pid_map = getattr(self, "_listbox_pid_by_index", [])
         sel = self.plates_listbox.curselection()
@@ -19688,7 +19704,7 @@ class CharacterAnnotationTab:
 
             if 0 <= active_idx < len(pid_map):
                 try:
-                    self.plates_listbox.selection_clear(0, tk.END)
+                    self._clear_listbox_selection_fast(self.plates_listbox)
                     self.plates_listbox.selection_set(active_idx)
                     self.plates_listbox.activate(active_idx)
                     self.plates_listbox.see(active_idx)
@@ -19756,37 +19772,6 @@ class CharacterAnnotationTab:
             yolo_nms_count=yolo_nms_count,
             yolo_filtered_count=yolo_filtered_count,
         )
-        display_text = self._format_plate_listbox_label(pid, data)
-
-        # Jeśli tekst listy jest nieaktualny, zsynchronizuj go z bieżącym metadata.
-        try:
-            row_text = self.plates_listbox.get(idx)
-        except Exception:
-            row_text = None
-
-        if row_text != display_text:
-            try:
-                self._reloading_preview = True
-                self.plates_listbox.delete(idx)
-                self.plates_listbox.insert(idx, display_text)
-
-                status = str(data.get("status", "unknown")).strip().lower()
-                if hasattr(self, "_apply_plate_listbox_row_style"):
-                    self._apply_plate_listbox_row_style(idx, status)
-                else:
-                    if status == "perfect":
-                        self.plates_listbox.itemconfig(idx, foreground="#27ae60")
-                    elif status == "needs_fix":
-                        self.plates_listbox.itemconfig(idx, foreground="#c0392b")
-                    else:
-                        self.plates_listbox.itemconfig(idx, foreground="#444444")
-
-                self.plates_listbox.selection_clear(0, tk.END)
-                self.plates_listbox.selection_set(idx)
-                self.plates_listbox.activate(idx)
-                self.plates_listbox.see(idx)
-            finally:
-                self._reloading_preview = False
 
         img_path = Path(self.preview_dir_var.get().strip()) / "images" / f"{pid}.jpg"
 
@@ -23999,26 +23984,14 @@ class CharacterAnnotationTab:
                 return False
 
         def _on_lab_mousewheel(event):
-            units = self._mousewheel_units(event)
-            if units == 0:
-                return None
-
-            try:
-                x_root = int(getattr(event, "x_root", 0) or lab_win.winfo_pointerx())
-                y_root = int(getattr(event, "y_root", 0) or lab_win.winfo_pointery())
-            except Exception:
-                return None
-
             for target_canvas in (canvas_sliders, view_canvas):
-                if not self._widget_contains_point(target_canvas, x_root, y_root):
-                    continue
-                if not _lab_canvas_overflows(target_canvas):
-                    return None
-                try:
-                    target_canvas.yview_scroll(units, "units")
-                except Exception:
+                if self._inertial_scroll.scroll_canvas_if_targeted(
+                    target_canvas,
+                    event,
+                    pointer_widget=lab_win,
+                    overflow_checker=lambda c=target_canvas: _lab_canvas_overflows(c),
+                ):
                     return "break"
-                return "break"
             return None
 
         lab_win.bind("<MouseWheel>", _on_lab_mousewheel, add="+")

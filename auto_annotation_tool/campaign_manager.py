@@ -710,19 +710,18 @@ class CampaignManager:
         if not master_pool_dir.exists() or not master_pool_dir.is_dir():
             return {"ok": False, "reason": "missing_master_pool"}
 
-        from .campaign_ingest_planner import CampaignIngestPlanner
+        from .campaign_ingest_planner import CampaignIngestPlanner, CHAR_ALPHABET
 
         planner = CampaignIngestPlanner()
         used_registry = self.get_used_image_registry(project_name)
         balance_snapshot = self.refresh_ingest_balance_snapshot(project_name)
-        effective_batch = max(1, int(self.get_ingest_batch_size(project_name)))
 
         plan = planner.plan_from_master_pool(
             master_pool_dir=master_pool_dir,
             current_balance=balance_snapshot.get("char_balance", {}),
             used_source_keys=used_registry.get("source_keys", []),
             used_filenames=used_registry.get("filenames", []),
-            batch_size=effective_batch,
+            batch_size=None,
         )
 
         selected_items = list(plan.get("selected", []) or [])
@@ -800,7 +799,7 @@ class CampaignManager:
                 "planner_version": str(plan.get("planner_version", "") or ""),
                 "generated_at": str(plan.get("generated_at", "") or ""),
                 "selected_total": int(plan.get("selected_total", 0) or 0),
-                "batch_size": int(plan.get("batch_size", effective_batch) or effective_batch),
+                "batch_size": int(plan.get("batch_size", plan.get("selected_total", 0)) or 0),
                 "skipped_used": int(plan.get("skipped_used", 0) or 0),
                 "source_iteration": int(source_iteration),
             },
@@ -976,17 +975,7 @@ class CampaignManager:
             "manifest_cloned": False,
         }
 
-        project_data["current_iteration"] = next_iteration
-        project_data["current_step"] = 1
-        project_data["step1_status"] = "pending"
-
-        if current_target in {"plate", "char"}:
-            project_data["last_iteration_target"] = current_target
-        project_data["iteration_target"] = ""
-        project_data["step4_finish_ready"] = False
-        project_data["step4_last_run_id"] = ""
-        project_data["step4_last_target"] = ""
-
+        reuse_result: Dict[str, Any] | None = None
         if start_mode == "reuse_input":
             reuse_result = self._seed_iteration_from_stage(
                 source_iteration=current_iteration,
@@ -999,14 +988,29 @@ class CampaignManager:
                     target_iteration=next_iteration,
                     project_name=act,
                 )
-            result.update(reuse_result)
-            if reuse_result.get("ok"):
-                project_data["current_step"] = 2
-                project_data["step1_status"] = "approved"
-                result["effective_mode"] = "reuse_input"
-            else:
-                result["effective_mode"] = "new_input"
-                result["fallback_reason"] = str(reuse_result.get("reason", "reuse_failed"))
+            if not reuse_result.get("ok"):
+                result.update(reuse_result)
+                result["ok"] = False
+                return result
+
+        project_data["current_iteration"] = next_iteration
+        project_data["current_step"] = 1
+        project_data["step1_status"] = "pending"
+
+        if current_target in {"plate", "char"}:
+            project_data["last_iteration_target"] = current_target
+        project_data["iteration_target"] = ""
+        project_data["step4_finish_ready"] = False
+        project_data["step4_last_run_id"] = ""
+        project_data["step4_last_target"] = ""
+
+        if start_mode == "reuse_input":
+            result.update(reuse_result or {})
+            project_data["current_step"] = 2
+            project_data["step1_status"] = "approved"
+            result["effective_mode"] = "reuse_input"
+        else:
+            project_data["master_pool_dir"] = ""
 
         # Nowa iteracja zaczyna się od pełnego resetu stanów etapów zależnych od danych wejściowych.
         project_data["step2_status"] = "pending"
@@ -1024,6 +1028,11 @@ class CampaignManager:
         project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = ""
         self.save_state()
+        if start_mode != "reuse_input":
+            try:
+                self.clear_latest_ingest_plan(act)
+            except Exception:
+                pass
         return result
 
     def set_global_model(self, model_type: str, model_path: str):
@@ -1232,6 +1241,14 @@ class CampaignManager:
         self.save_state()
         return True
 
+    def clear_master_pool_dir(self, project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+        self.state["projects"][project_name]["master_pool_dir"] = ""
+        self.save_state()
+        return True
+
     def get_ingest_batch_size(self, project_name: str = None) -> int:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
@@ -1289,6 +1306,17 @@ class CampaignManager:
         if self._write_json_file(plan_path, plan):
             return plan_path
         return None
+
+    def clear_latest_ingest_plan(self, project_name: str = None) -> bool:
+        plan_path = self.get_latest_ingest_plan_path(project_name)
+        if plan_path is None:
+            return False
+        try:
+            if plan_path.exists():
+                plan_path.unlink()
+            return True
+        except Exception:
+            return False
 
     def get_plate_approved_set_path(self, project_name: str = None) -> Path | None:
         state_dir = self.get_project_state_dir(project_name)
@@ -1489,31 +1517,97 @@ class CampaignManager:
 
         source_keys = set()
         filenames = set()
+        master_pool_dir = self.get_master_pool_dir(project_name)
 
-        ingest_dir = self.get_project_ingest_state_dir(project_name)
-        if ingest_dir is not None and ingest_dir.exists():
-            for manifest_path in ingest_dir.glob("iter_*_manifest.json"):
-                manifest = self._read_json_file(manifest_path)
-                for item in manifest.get("selected_images", []) or []:
-                    if not isinstance(item, dict):
-                        continue
-                    source_key = str(item.get("source_key", "") or "").strip().lower()
-                    if source_key:
-                        source_keys.add(source_key)
-                    name = str(item.get("name", "") or "").strip().lower()
-                    if name:
-                        filenames.add(name)
+        try:
+            from .campaign_ingest_planner import CampaignIngestPlanner
 
-        raw_dir = self.get_project_root_dir(project_name) / "1_raw_images"
-        if raw_dir.exists() and raw_dir.is_dir():
-            for image_path in raw_dir.rglob("*"):
-                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
-                    filenames.add(image_path.name.lower())
+            planner = CampaignIngestPlanner()
+        except Exception:
+            planner = None
+
+        for entry in self.list_plate_approved_entries(project_name):
+            if not isinstance(entry, dict):
+                continue
+
+            image_name = str(entry.get("image_name", "") or "").strip().lower()
+            if image_name:
+                filenames.add(image_name)
+
+            source_image_path = str(entry.get("source_image_path", "") or "").strip()
+            if not source_image_path:
+                continue
+
+            try:
+                source_path = Path(source_image_path)
+            except Exception:
+                continue
+
+            if planner is not None:
+                try:
+                    source_key = planner.make_source_key(source_path, master_pool_dir=master_pool_dir)
+                except Exception:
+                    source_key = ""
+            else:
+                try:
+                    source_key = str(source_path.resolve()).strip().lower()
+                except Exception:
+                    source_key = str(source_path).strip().lower()
+
+            if source_key:
+                source_keys.add(source_key)
 
         return {
             "source_keys": sorted(source_keys),
             "filenames": sorted(filenames),
             "total_source_keys": len(source_keys),
+            "total_filenames": len(filenames),
+        }
+
+    def get_project_packet_filename_registry(self, project_name: str = None) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {
+                "filenames": [],
+                "total_filenames": 0,
+            }
+
+        filenames = set()
+        raw_root = self.get_dir("raw") if project_name == self.get_active_project_name() else self.get_project_root_dir(project_name) / "1_raw_images"
+        if raw_root is None:
+            return {
+                "filenames": [],
+                "total_filenames": 0,
+            }
+
+        try:
+            raw_root = Path(raw_root)
+        except Exception:
+            return {
+                "filenames": [],
+                "total_filenames": 0,
+            }
+
+        if not raw_root.exists() or not raw_root.is_dir():
+            return {
+                "filenames": [],
+                "total_filenames": 0,
+            }
+
+        try:
+            for image_path in raw_root.rglob("*"):
+                if not image_path.is_file():
+                    continue
+                if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                    continue
+                filename = str(image_path.name or "").strip().lower()
+                if filename:
+                    filenames.add(filename)
+        except Exception:
+            pass
+
+        return {
+            "filenames": sorted(filenames),
             "total_filenames": len(filenames),
         }
 

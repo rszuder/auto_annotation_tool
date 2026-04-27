@@ -353,8 +353,13 @@ class AutoAnnotationApp:
             if active_proj:
                 try:
                     annotation_tab = getattr(self, "tabs", {}).get("annotation")
-                    if annotation_tab is not None and hasattr(annotation_tab, "restore_campaign_context_from_project"):
-                        annotation_tab.restore_campaign_context_from_project()
+                    ensure_context = (
+                        getattr(annotation_tab, "ensure_campaign_context_ready_for_active_project", None)
+                        if annotation_tab is not None
+                        else None
+                    )
+                    if callable(ensure_context) and self._get_selected_tab_key() == "annotation":
+                        self.root.after_idle(ensure_context)
                 except Exception as restore_err:
                     logger.debug(f"Nie udalo sie przywrocic kontekstu Z2 dla aktywnego projektu po starcie: {restore_err}")
 
@@ -4714,6 +4719,20 @@ class AutoAnnotationApp:
     def _on_main_notebook_tab_changed(self, event=None):
         self._guard_campaign_navigation(event)
         selected_key = self._get_selected_tab_key()
+        if selected_key == "annotation":
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if not self.campaign_free_mode and CAMPAIGN.get_active_project_name():
+                    annotation_tab = getattr(self, "tabs", {}).get("annotation")
+                    ensure_context = (
+                        getattr(annotation_tab, "ensure_campaign_context_ready_for_active_project", None)
+                        if annotation_tab is not None
+                        else None
+                    )
+                    if callable(ensure_context):
+                        self.root.after_idle(ensure_context)
+            except Exception:
+                pass
         if selected_key in {"annotation", "characters", "training"}:
             self._last_allowed_main_tab_key = selected_key
         self._save_active_main_tab_preference()

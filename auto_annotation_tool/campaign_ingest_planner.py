@@ -310,7 +310,11 @@ class CampaignIngestPlanner:
 
         used_keys = {str(key).strip().lower() for key in (used_source_keys or []) if str(key).strip()}
         used_names = {str(name).strip().lower() for name in (used_filenames or []) if str(name).strip()}
-        batch_size = max(1, int(batch_size or 1))
+        try:
+            requested_batch = int(batch_size) if batch_size is not None else 0
+        except Exception:
+            requested_batch = 0
+        select_all_remaining = requested_batch <= 0
 
         current_counter = Counter()
         for ch in CHAR_ALPHABET:
@@ -355,7 +359,7 @@ class CampaignIngestPlanner:
         selected: list[IngestCandidate] = []
         working_counter = Counter(current_counter)
 
-        while remaining and len(selected) < batch_size:
+        while remaining and (select_all_remaining or len(selected) < requested_batch):
             best_index = -1
             best_score = -1.0
             best_details: dict[str, float] = {}
@@ -381,7 +385,7 @@ class CampaignIngestPlanner:
             "planner_version": self.planner_version,
             "generated_at": datetime.now().isoformat(),
             "master_pool_dir": str(master_pool_dir),
-            "batch_size": batch_size,
+            "batch_size": len(selected) if select_all_remaining else requested_batch,
             "candidates_total": len(candidates),
             "selected_total": len(selected),
             "skipped_used": skipped_used,

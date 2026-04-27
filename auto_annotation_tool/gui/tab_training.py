@@ -30,6 +30,7 @@ from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, Dataset
 from ..ranking import ModelRanking, ModelRankingEntry
 from ..utils import safe_load_yaml, get_image_files
 from .help_manager import HELP
+from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar
 from .zoomable_canvas import ZoomableCanvas
@@ -260,6 +261,7 @@ class TrainingTab:
         self.icon_manager = IconManager
 
         self.frame = ttk.Frame(parent)
+        self._inertial_scroll = InertialScrollController(self.frame)
         self._startup_ui_ready = False
 
         self.history = TrainingHistory(history_dir=Path(CONFIG.get_training_runs_dir("char")))
@@ -1311,6 +1313,131 @@ class TrainingTab:
 
         return candidates
 
+    def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> dict[str, int]:
+        counts = {"train": 0, "val": 0, "test": 0, "total": 0}
+        if dataset_path is None:
+            return counts
+
+        try:
+            root = Path(dataset_path)
+        except Exception:
+            return counts
+
+        if root.is_file():
+            root = root.parent
+
+        images_root = root / "images"
+        if not images_root.exists() or not images_root.is_dir():
+            return counts
+
+        total = 0
+        for split_name in ("train", "val", "test"):
+            split_dir = images_root / split_name
+            if not split_dir.exists() or not split_dir.is_dir():
+                continue
+            try:
+                split_count = len(get_image_files(split_dir))
+            except Exception:
+                split_count = 0
+            counts[split_name] = int(split_count)
+            total += int(split_count)
+
+        counts["total"] = int(total)
+        return counts
+
+    def _get_campaign_plate_builder_source(self) -> dict:
+        if not CAMPAIGN.get_active_project_name():
+            return {}
+        if str(self.get_campaign_training_target() or "").strip().lower() != "plate":
+            return {}
+
+        try:
+            annotation_tab = self.app.tabs.get("annotation")
+        except Exception:
+            annotation_tab = None
+
+        if annotation_tab is None or not hasattr(annotation_tab, "_build_campaign_plate_approved_export_source"):
+            return {}
+
+        try:
+            source = annotation_tab._build_campaign_plate_approved_export_source()
+        except Exception:
+            source = {}
+
+        return dict(source or {}) if isinstance(source, dict) else {}
+
+    def _resolve_campaign_plate_ready_dataset(self, datasets_dir: Path | None = None) -> dict:
+        result = {
+            "path": None,
+            "counts": {"train": 0, "val": 0, "test": 0, "total": 0},
+            "stale": False,
+        }
+
+        if not CAMPAIGN.get_active_project_name():
+            return result
+
+        try:
+            approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+        except Exception:
+            approved_stats = {}
+        approved_images = int(approved_stats.get("images", 0) or 0)
+
+        candidate_paths: list[Path] = []
+        seen: set[str] = set()
+
+        stored = dict(CAMPAIGN.get_last_plate_training_source() or {})
+        stored_dataset_path = str(stored.get("dataset_path", "") or "").strip()
+        if stored_dataset_path:
+            try:
+                stored_path = Path(stored_dataset_path)
+            except Exception:
+                stored_path = None
+            if stored_path is not None and stored_path.exists():
+                key = str(stored_path.resolve())
+                seen.add(key)
+                candidate_paths.append(stored_path)
+
+        if datasets_dir is not None and datasets_dir.exists():
+            try:
+                ready_candidates = self._find_ready_dataset_candidates(datasets_dir)
+            except Exception:
+                ready_candidates = []
+            ready_candidates.sort(key=lambda rec: rec[2], reverse=True)
+            for path, target, _stamp in ready_candidates:
+                if target != "plate":
+                    continue
+                try:
+                    key = str(path.resolve())
+                except Exception:
+                    key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidate_paths.append(path)
+
+        stale_path = None
+        stale_counts = None
+
+        for path in candidate_paths:
+            counts = self._get_dataset_split_image_counts(path)
+            total_images = int(counts.get("total", 0) or 0)
+            if total_images <= 0:
+                continue
+            if approved_images > 0 and total_images == approved_images:
+                result["path"] = path
+                result["counts"] = counts
+                return result
+            if stale_path is None:
+                stale_path = path
+                stale_counts = counts
+
+        if stale_path is not None and approved_images > 0:
+            result["path"] = stale_path
+            result["counts"] = stale_counts or result["counts"]
+            result["stale"] = True
+
+        return result
+
     def _get_runs_base_dir(self) -> Path:
         """Zwraca bazowy katalog runów treningowych dla aktywnego projektu albo globalny fallback."""
         if self._campaign_runs_dir:
@@ -1412,6 +1539,69 @@ class TrainingTab:
 
         target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
         return target if target in ("char", "plate") else None
+
+    def _recover_campaign_finish_state_from_history(self, target: str | None = None) -> dict:
+        if not CAMPAIGN.get_active_project_name():
+            return {}
+
+        try:
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+        except Exception:
+            current_step = 0
+        if current_step < 4:
+            return {}
+
+        normalized_target = str(target or self.get_campaign_training_target() or "").strip().lower()
+        if normalized_target not in ("char", "plate"):
+            return {}
+
+        try:
+            all_runs = list(self.history.get_all_runs() or []) if self.history is not None else []
+        except Exception:
+            all_runs = []
+        if not all_runs:
+            return {}
+
+        infer_target = getattr(self.history, "_infer_run_target", None)
+        for run in all_runs:
+            if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.COMPLETED.value:
+                continue
+
+            run_target = ""
+            try:
+                if callable(infer_target):
+                    run_target = str(infer_target(run) or "").strip().lower()
+            except Exception:
+                run_target = ""
+            if run_target not in ("char", "plate"):
+                try:
+                    run_target = str(
+                        self._infer_dataset_target(getattr(run, "dataset_path", "")) or ""
+                    ).strip().lower()
+                except Exception:
+                    run_target = ""
+            if run_target != normalized_target:
+                continue
+
+            best_weights = str(getattr(run, "best_weights", "") or "").strip()
+            output_dir = str(getattr(run, "output_dir", "") or "").strip()
+            try:
+                has_artifacts = bool(
+                    (best_weights and Path(best_weights).exists())
+                    or (output_dir and Path(output_dir).exists())
+                )
+            except Exception:
+                has_artifacts = bool(best_weights or output_dir)
+            if not has_artifacts:
+                continue
+
+            return {
+                "ready": True,
+                "run_id": str(getattr(run, "id", "") or "").strip(),
+                "target": normalized_target,
+            }
+
+        return {}
 
     def _build_training_dataset_validation_message(self, dataset_root: Path, msg: str, stats: dict | None = None) -> str:
         stats = stats or {}
@@ -1520,6 +1710,8 @@ class TrainingTab:
         return (
             f"Ostrzezenie: dataset YOLO Pose jest {size_label} "
             f"(train={train_images}, val={val_images}, test={test_images}, razem={total_images}).\n"
+            f"Przy tak małym zbiorze split 80/10/10 może naturalnie dać np. {train_images}/{val_images}/{test_images}; "
+            "to nie jest błąd splitu, tylko skutek małej liczby obrazów.\n"
             f"{warning_body}"
         )
 
@@ -1643,6 +1835,15 @@ class TrainingTab:
         selected_label = self._format_training_target_label(selected_target)
 
         if campaign_active:
+            dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+            dataset_counts = self._get_dataset_split_image_counts(dataset_value)
+            total_images = int(dataset_counts.get("total", 0) or 0)
+            if total_images > 0:
+                return (
+                    f"Aktywny tor kampanii: {selected_label}. "
+                    f"Trening korzysta teraz z datasetu: train={dataset_counts.get('train', 0)}, "
+                    f"val={dataset_counts.get('val', 0)}, test={dataset_counts.get('test', 0)}, razem={total_images}."
+                )
             return (
                 f"Aktywny tor kampanii: {selected_label}. "
                 "W kampanii Z4 pracuje na torze wybranym przez workflow projektu."
@@ -1675,6 +1876,34 @@ class TrainingTab:
             if choice != "Custom":
                 return choice
         return "Custom"
+
+    def _is_pose_base_model(self, base_key: str, base_model: str) -> bool:
+        base_key = str(base_key or "").strip()
+        base_model = str(base_model or "").strip()
+
+        if base_key in AVAILABLE_POSE_MODELS:
+            return True
+        if base_key in AVAILABLE_DETECT_MODELS:
+            return False
+
+        model_text = base_model.lower()
+        if "pose" in model_text:
+            return True
+
+        try:
+            model_path = Path(base_model)
+        except Exception:
+            model_path = None
+
+        if model_path is not None and model_path.suffix.lower() == ".pt" and model_path.exists():
+            ok, _message, info = validate_model_file(model_path)
+            if ok:
+                task = str(info.get("task") or "").strip().lower()
+                inferred_type = str(info.get("type") or "").strip().lower()
+                if bool(info.get("keypoints")) or task == "pose" or inferred_type == "pose":
+                    return True
+
+        return False
 
     def _refresh_base_model_choices(self):
         combo = getattr(self, "base_combo", None)
@@ -2674,22 +2903,22 @@ class TrainingTab:
             )
             return result
 
-        ready_dataset = None
-        try:
-            ready_candidates = self._find_ready_dataset_candidates(Path(datasets_dir))
-            preferred = [rec for rec in ready_candidates if rec[1] == target]
-            if preferred:
-                ready_dataset, _ready_target, _stamp = max(preferred, key=lambda rec: rec[2])
-            elif ready_candidates:
-                ready_dataset, _ready_target, _stamp = max(ready_candidates, key=lambda rec: rec[2])
-        except Exception:
+        if target == "char":
             ready_dataset = None
+            try:
+                ready_candidates = self._find_ready_dataset_candidates(Path(datasets_dir))
+                preferred = [rec for rec in ready_candidates if rec[1] == target]
+                if preferred:
+                    ready_dataset, _ready_target, _stamp = max(preferred, key=lambda rec: rec[2])
+                elif ready_candidates:
+                    ready_dataset, _ready_target, _stamp = max(ready_candidates, key=lambda rec: rec[2])
+            except Exception:
+                ready_dataset = None
 
-        if ready_dataset is not None:
-            ready_dataset_str = str(ready_dataset)
-            result["ready_dataset"] = ready_dataset_str
-            result["dataset_hint"] = ready_dataset_str
-            if target == "char":
+            if ready_dataset is not None:
+                ready_dataset_str = str(ready_dataset)
+                result["ready_dataset"] = ready_dataset_str
+                result["dataset_hint"] = ready_dataset_str
                 validation_stats = {}
                 try:
                     is_valid_dataset, validation_msg, validation_stats = self.trainer.validate_dataset(Path(ready_dataset))
@@ -2715,7 +2944,7 @@ class TrainingTab:
                         ),
                     )
                     return result
-            return result
+                return result
 
         if target != "plate":
             dataset_hint = self._format_workspace_relative_path(Path(datasets_dir))
@@ -2773,15 +3002,48 @@ class TrainingTab:
             )
             return result
 
+        plate_dataset_info = self._resolve_campaign_plate_ready_dataset(Path(datasets_dir))
+        ready_dataset = plate_dataset_info.get("path")
+        ready_counts = dict(plate_dataset_info.get("counts") or {})
+        if ready_dataset is not None and not bool(plate_dataset_info.get("stale")):
+            result["ready_dataset"] = str(ready_dataset)
+            result["dataset_hint"] = str(ready_dataset)
+            result["train_images"] = int(ready_counts.get("train", 0) or 0)
+            result["val_images"] = int(ready_counts.get("val", 0) or 0)
+            result["test_images"] = int(ready_counts.get("test", 0) or 0)
+            return result
+
+        if ready_dataset is not None and bool(plate_dataset_info.get("stale")):
+            stale_total = int(ready_counts.get("total", 0) or 0)
+            result.update(
+                ok=False,
+                reason="stale_plate_dataset",
+                message=(
+                    "Z4 w torze tablic widzi nowszy ApprovedSet projektu niż ostatnio przygotowany dataset treningowy.\n\n"
+                    f"Aktualny ApprovedSet: {approved_images} obraz(y), {approved_plates} tablic(e).\n"
+                    f"Ostatni gotowy dataset: {stale_total} obraz(y).\n\n"
+                    "Wróć do PZ1 i przebuduj dataset tablic, aby trening korzystał z aktualnego zbioru projektu."
+                ),
+            )
+            return result
+
         return result
 
-    def open_campaign_step4_entry(self, *, iteration_target: str | None = None) -> dict:
+    def open_campaign_step4_entry(
+        self,
+        *,
+        iteration_target: str | None = None,
+        preferred_subtab: str | None = None,
+    ) -> dict:
         if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 4:
             return {"ok": False, "reason": "campaign_inactive"}
 
         target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
         if target not in {"plate", "char"}:
             target = "char"
+        preferred_subtab = str(preferred_subtab or "").strip().lower()
+        if preferred_subtab not in {"dataset", "train"}:
+            preferred_subtab = ""
 
         datasets_dir = CAMPAIGN.get_dir("datasets")
         runs_dir = CAMPAIGN.get_dir("runs")
@@ -2800,9 +3062,11 @@ class TrainingTab:
         )
 
         readiness = self.get_campaign_step4_readiness(iteration_target=target)
-        if not readiness.get("ok", False):
+        readiness_reason = str(readiness.get("reason") or "").strip().lower()
+        if not readiness.get("ok", False) and readiness_reason != "stale_plate_dataset":
             return readiness
 
+        self._step4_train_unlocked = False
         try:
             if str(readiness.get("ready_dataset") or "").strip():
                 self._step4_train_unlocked = True
@@ -2868,11 +3132,21 @@ class TrainingTab:
             pass
 
         try:
-            if bool(getattr(self, "_step4_train_unlocked", False)):
+            if preferred_subtab == "dataset":
+                self.main_nb.select(self.tab_dataset)
+            elif preferred_subtab == "train":
+                self.main_nb.select(self.tab_train)
+                self._select_step4_analysis_tab(self.hist_tab)
+            elif bool(getattr(self, "_step4_train_unlocked", False)):
                 self.main_nb.select(self.tab_train)
                 self._select_step4_analysis_tab(self.hist_tab)
             else:
                 self.main_nb.select(self.tab_dataset)
+        except Exception:
+            pass
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
         except Exception:
             pass
 
@@ -2942,13 +3216,20 @@ class TrainingTab:
             if source_candidates:
                 latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
 
-            ready_candidates = self._find_ready_dataset_candidates(datasets_dir)
+            if remembered_target == "plate":
+                plate_dataset_info = self._resolve_campaign_plate_ready_dataset(datasets_dir)
+                if not bool(plate_dataset_info.get("stale")):
+                    ready_dataset = plate_dataset_info.get("path")
+                    if ready_dataset is not None:
+                        ready_target = "plate"
+            else:
+                ready_candidates = self._find_ready_dataset_candidates(datasets_dir)
 
-            preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
-            if preferred:
-                ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
-            elif ready_candidates:
-                ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
+                preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
+                if preferred:
+                    ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
+                elif ready_candidates:
+                    ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
 
         try:
             auto_dir = CAMPAIGN.get_dir("auto_ann")
@@ -2980,6 +3261,14 @@ class TrainingTab:
         except Exception:
             current_iter_images = ""
 
+        if remembered_target == "plate":
+            approved_source = self._get_campaign_plate_builder_source()
+            approved_xml = str(approved_source.get("xml_path") or "").strip()
+            approved_images_dir = str(approved_source.get("images_dir") or "").strip()
+            if approved_xml and approved_images_dir:
+                latest_xml = approved_xml
+                latest_xml_images = approved_images_dir
+
         if latest_source is not None:
             try:
                 self.split_src_var.set(str(latest_source))
@@ -3010,12 +3299,43 @@ class TrainingTab:
             finish_state = CAMPAIGN.get_step4_finish_state() or {}
         except Exception:
             finish_state = {}
+        try:
+            current_campaign_step = int(CAMPAIGN.get_current_step() or 0)
+        except Exception:
+            current_campaign_step = 0
 
         finish_ready = bool(finish_state.get("ready", False))
         finish_run_id = str(finish_state.get("run_id", "") or "").strip()
         finish_target = str(finish_state.get("target", "") or "").strip().lower()
         if finish_target not in ("char", "plate"):
             finish_target = active_target
+
+        step4_already_closed = current_campaign_step > 4
+        if step4_already_closed:
+            # Ponowne wejscie do Z4 po domknieciu iteracji nie moze reaktywowac
+            # przycisku zamkniecia E4 ani cofac projektu do kroku 4.
+            if finish_ready or finish_run_id:
+                try:
+                    CAMPAIGN.set_step4_finish_state(False)
+                except Exception:
+                    pass
+            finish_ready = False
+            finish_run_id = ""
+            finish_target = active_target
+        elif not finish_ready or not finish_run_id:
+            recovered_finish_state = self._recover_campaign_finish_state_from_history(active_target)
+            if recovered_finish_state:
+                finish_ready = bool(recovered_finish_state.get("ready", False))
+                finish_run_id = str(recovered_finish_state.get("run_id", "") or "").strip()
+                finish_target = str(recovered_finish_state.get("target", active_target) or "").strip().lower()
+                try:
+                    CAMPAIGN.set_step4_finish_state(
+                        finish_ready,
+                        run_id=finish_run_id,
+                        target=finish_target,
+                    )
+                except Exception:
+                    pass
 
         if finish_ready and finish_target == active_target:
             self._step4_campaign_finish_ready = True
@@ -3679,20 +3999,7 @@ class TrainingTab:
             return False
 
     def _mousewheel_units(self, event) -> int:
-        event_num = getattr(event, "num", None)
-        if event_num == 4:
-            return -1
-        if event_num == 5:
-            return 1
-
-        delta = int(getattr(event, "delta", 0) or 0)
-        if delta == 0:
-            return 0
-        if abs(delta) >= 120:
-            units = -int(delta / 120)
-        else:
-            units = -1 if delta > 0 else 1
-        return units if units != 0 else (-1 if delta > 0 else 1)
+        return self._inertial_scroll.mousewheel_units(event)
 
     def _train_left_canvas_overflows(self) -> bool:
         canvas = getattr(self, "train_left_canvas", None)
@@ -3714,27 +4021,14 @@ class TrainingTab:
         if canvas is None:
             return None
 
-        units = self._mousewheel_units(event)
-        if units == 0:
-            return None
-
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-        except Exception:
-            return None
-
-        if not self._widget_contains_point(canvas, x_root, y_root):
-            return None
-
-        if not self._train_left_canvas_overflows():
-            return None
-
-        try:
-            canvas.yview_scroll(units, "units")
-        except Exception:
+        if self._inertial_scroll.scroll_canvas_if_targeted(
+            canvas,
+            event,
+            pointer_widget=self.frame,
+            overflow_checker=self._train_left_canvas_overflows,
+        ):
             return "break"
-        return "break"
+        return None
 
     def _restore_scroll_canvas_focus(self, canvas):
         if canvas is None:
@@ -3748,21 +4042,14 @@ class TrainingTab:
         if canvas is None:
             return None
 
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-        except Exception:
-            return None
-
-        if not self._widget_contains_point(canvas, x_root, y_root):
-            return None
-
-        units = self._mousewheel_units(event)
-        if units != 0 and self._train_left_canvas_overflows():
-            try:
-                canvas.yview_scroll(units, "units")
-            except Exception:
-                return "break"
+        if self._inertial_scroll.redirect_child_mousewheel_to_canvas(
+            event,
+            canvas,
+            pointer_widget=self.frame,
+            overflow_checker=self._train_left_canvas_overflows,
+        ):
+            self._restore_scroll_canvas_focus(canvas)
+            return "break"
 
         self._restore_scroll_canvas_focus(canvas)
         return "break"
@@ -4212,6 +4499,14 @@ class TrainingTab:
         except Exception:
             pass
         try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+        try:
+            self._update_training_dataset_hint()
+        except Exception:
+            pass
+        try:
             self._refresh_training_start_state()
         except Exception:
             pass
@@ -4309,13 +4604,29 @@ class TrainingTab:
         char_ready_path = ""
 
         if campaign_active and mode == "plate":
+            plate_readiness = {}
+            try:
+                plate_readiness = dict(self.get_campaign_step4_readiness(iteration_target="plate") or {})
+            except Exception:
+                plate_readiness = {}
+            approved_images = int(plate_readiness.get("project_approved_images", 0) or 0)
+            approved_plates = int(plate_readiness.get("project_approved_plates", 0) or 0)
+            ready_dataset_path = str(plate_readiness.get("ready_dataset") or "").strip()
+            ready_train = int(plate_readiness.get("train_images", 0) or 0)
+            ready_val = int(plate_readiness.get("val_images", 0) or 0)
+            ready_test = int(plate_readiness.get("test_images", 0) or 0)
             xml_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_xml_var.get()), 96)
             images_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_images_var.get()), 96)
             creator_summary = (
+                f"ApprovedSet projektu: {approved_images} obraz(y), {approved_plates} tablic(e).\n"
                 "Źródła do budowy datasetu tablic zostały już przygotowane wcześniej.\n"
                 f"Anotacje tablic: {xml_value}\n"
                 f"Obrazy źródłowe: {images_value}"
             )
+            if ready_dataset_path and (ready_train > 0 or ready_val > 0 or ready_test > 0):
+                creator_summary += (
+                    f"\nAktualny dataset treningowy: train={ready_train}, val={ready_val}, test={ready_test}"
+                )
 
         if campaign_active and mode == "char":
             readiness = {}
@@ -4487,9 +4798,11 @@ class TrainingTab:
             train_tab_enabled=(not campaign_active) or train_unlocked,
             next_enabled=(not campaign_active) or (route_selected and train_unlocked),
             next_label=str(dataset_vm.next_label or "Dalej do treningu"),
-            show_dataset_back=(not campaign_active),
+            show_dataset_back=True,
+            dataset_back_label=("Wróć do kampanii" if campaign_active else "Wstecz"),
             show_train_nav=campaign_active,
-            show_train_back=(not campaign_active),
+            show_train_back=True,
+            train_back_label=("Wróć do kampanii" if campaign_active else "Wstecz do toru"),
             finish_enabled=campaign_active and finish_ready,
             show_complete_project=False,
             force_dataset_tab_selection=campaign_active and dataset_tab_visible and not train_unlocked,
@@ -4847,6 +5160,7 @@ class TrainingTab:
 
     def _step4_dataset_go_back(self):
         if CAMPAIGN.get_active_project_name():
+            self._return_to_campaign_from_step4()
             return
 
         self._append_step4_builder_log(
@@ -4892,6 +5206,7 @@ class TrainingTab:
             pass
 
         try:
+            self.btn_step4_back.configure(text=str(vm.dataset_back_label or "Wstecz"))
             if not bool(vm.show_dataset_back):
                 self.btn_step4_back.grid_remove()
             else:
@@ -4925,6 +5240,7 @@ class TrainingTab:
             pass
 
         try:
+            self.btn_step4_train_back.configure(text=str(vm.train_back_label or "Wstecz do toru"))
             if not bool(vm.show_train_back):
                 self.btn_step4_train_back.pack_forget()
             elif not str(self.btn_step4_train_back.winfo_manager()):
@@ -4952,12 +5268,39 @@ class TrainingTab:
     def _step4_train_go_back(self):
         if CAMPAIGN.get_active_project_name():
             try:
-                self.main_nb.select(self.tab_dataset)
-                if getattr(self, "_step4_train_unlocked", False):
-                    self._guide_step4_next_action()
+                self._return_to_campaign_from_step4()
                 return
             except Exception:
                 pass
+
+    def _return_to_campaign_from_step4(self):
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign")
+            if campaign_tab:
+                campaign_tab._refresh_dashboard()
+        except Exception:
+            pass
+
+        try:
+            self.app.update_campaign_tab_access()
+        except Exception:
+            pass
+
+        try:
+            self.app.update_status(
+                "Wracam do wizarda kampanii.",
+                "info"
+            )
+        except Exception:
+            pass
+
+        try:
+            self.app.open_controlled_tab("campaign")
+        except Exception:
+            pass
 
 
     def _finish_campaign_step4(self):
@@ -6925,6 +7268,7 @@ class TrainingTab:
         HELP.bind_help(self.base_combo, "tr_train_base")
         HELP.bind_help(grid, "tr_train_params")
         HELP.bind_help(self.train_device_hint_lbl, "tr_train_device")
+        HELP.bind_help(self.btn_step4_back, "tr_builder_back")
         
         try:
             HELP.bind_help(grid.grid_slaves(row=0, column=1)[0], "tr_train_ep") 
@@ -7646,6 +7990,10 @@ class TrainingTab:
 
         HELP.bind_help(self.rank_category_info_lbl, "tr_rank_cat")
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
+        HELP.bind_help(row1, "tr_rank_models")
+        HELP.bind_help(row2, "tr_rank_reference")
+        HELP.bind_help(conf_row, "tr_rank_conf")
+        HELP.bind_help(self.rank_tree, "tr_rank_table")
 
     def _build_ranking_panel_v2(self, parent):
         palette = getattr(self.app, "palette", {})
@@ -7785,6 +8133,12 @@ class TrainingTab:
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         HELP.bind_help(self.btn_run_rank, "tr_rank_btn")
+        HELP.bind_help(self.btn_cancel_rank, "tr_rank_btn")
+        HELP.bind_help(row1, "tr_rank_models")
+        HELP.bind_help(row2, "tr_rank_reference")
+        HELP.bind_help(self.rank_reference_hint_lbl, "tr_rank_reference")
+        HELP.bind_help(config_box, "tr_rank_conf")
+        HELP.bind_help(self.rank_tree, "tr_rank_table")
         self.rank_models_dir.trace_add("write", self._refresh_ranking_reference_ui)
         self.rank_data_dir.trace_add("write", self._refresh_ranking_reference_ui)
         self._prefill_ranking_reference_if_empty()
@@ -8123,11 +8477,20 @@ class TrainingTab:
     def _create_dataset_thread(self):
         xml = Path(self.cvat_xml_var.get().strip())
         images_dir = Path(self.cvat_images_var.get().strip())
+        stage_source_images_dir = images_dir
 
         if not xml.exists():
             return messagebox.showerror("Błąd", "XML nie istnieje.")
         if not images_dir.exists():
             return messagebox.showerror("Błąd", "Folder obrazów nie istnieje.")
+
+        try:
+            if bool(CAMPAIGN.get_active_project_name()) and self._get_selected_training_target() == "plate":
+                campaign_iter_raw = CAMPAIGN.get_iteration_raw_dir()
+                if campaign_iter_raw is not None and Path(campaign_iter_raw).exists():
+                    stage_source_images_dir = Path(campaign_iter_raw)
+        except Exception:
+            stage_source_images_dir = images_dir
 
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -8186,6 +8549,7 @@ class TrainingTab:
                 ok2, msg2, _ = self.creator.create_dataset(images_dir, out_dir, ratios, prog)
 
                 if ok2:
+                    dataset_counts = self._get_dataset_split_image_counts(out_dir)
                     try:
                         source_run_dir = xml.parent if xml.name.lower() == "annotations.xml" else None
                         self._write_plate_dataset_source_manifest(
@@ -8200,7 +8564,7 @@ class TrainingTab:
 
                     if stage_result["enabled"]:
                         stage_ok, stage_msg, stage_stats = self.creator.sync_pending_stage(
-                            images_dir,
+                            stage_source_images_dir,
                             self._get_manual_plate_stage_dir(),
                         )
                         stage_result["ok"] = bool(stage_ok)
@@ -8228,6 +8592,18 @@ class TrainingTab:
                         )
                     elif stage_result["enabled"] and (not stage_result["ok"]) and stage_result["message"]:
                         self._ui(lambda warn=str(stage_result["message"]): messagebox.showwarning("Stage oczekujacych", warn))
+
+                    self._ui(
+                        lambda counts=dict(dataset_counts): self.ds_status.configure(
+                            text=(
+                                "Dataset został utworzony: "
+                                f"train={int(counts.get('train', 0) or 0)}, "
+                                f"val={int(counts.get('val', 0) or 0)}, "
+                                f"test={int(counts.get('test', 0) or 0)}"
+                            ),
+                            foreground="green"
+                        )
+                    )
 
                     # Po sukcesie od razu podstaw dataset do sekcji treningu.
                     self._ui(lambda p=str(out_dir): self._mark_step4_dataset_ready(p))
@@ -8413,11 +8789,7 @@ class TrainingTab:
         device = self._device_to_ultralytics(self.device_var.get())
 
         # Rozpoznaj, czy wybrany model jest modelem pose.
-        is_pose_model = False
-        if base_key in AVAILABLE_POSE_MODELS:
-            is_pose_model = True
-        elif "pose" in str(base_model).lower():
-            is_pose_model = True
+        is_pose_model = self._is_pose_base_model(base_key, base_model)
 
         # Zablokuj niezgodne pary dataset-model przed startem treningu.
         if is_pose_dataset and not is_pose_model:

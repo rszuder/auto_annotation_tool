@@ -90,16 +90,16 @@ class DatasetCreator:
 ║  1. W CVAT: Menu → Export annotations → Format: "CVAT for images 1.1"       ║
 ║                                                                              ║
 ║  2. Struktura eksportu:                                                      ║
-║     📁 cvat_export/                                                          ║
-║     ├── 📄 annotations.xml                                                   ║
-║     └── 📁 images/                                                           ║
+║     cvat_export/                                                             ║
+║     ├── annotations.xml                                                      ║
+║     └── images/                                                              ║
 ║         ├── img001.jpg                                                       ║
 ║         └── ...                                                              ║
 ║                                                                              ║
 ║  3. Format tablicy w XML:                                                    ║
 ║     <polygon label="plate" points="x1,y1;x2,y2;x3,y3;x4,y4"/>               ║
 ║                                                                              ║
-║  ⚠️ UWAGI:                                                                   ║
+║  UWAGI:                                                                      ║
 ║  • Polygon MUSI mieć dokładnie 4 punkty (4 rogi tablicy)                    ║
 ║  • Label: "plate", "license_plate" lub "numberplate"                        ║
 ║                                                                              ║
@@ -123,13 +123,6 @@ class DatasetCreator:
         if n_total < len(required_splits):
             return {}
 
-        for split in required_splits:
-            counts[split] = 1
-
-        remaining = n_total - len(required_splits)
-        if remaining <= 0:
-            return counts
-
         weights = {
             split: max(0.0, float(split_ratios.get(split, 0.0) or 0.0))
             for split in ordered_splits
@@ -140,24 +133,43 @@ class DatasetCreator:
             weight_sum = 1.0
 
         exact = {
-            split: (weights[split] / weight_sum) * remaining
+            split: (weights[split] / weight_sum) * n_total
             for split in ordered_splits
         }
         fractional_parts = []
         allocated = 0
         for split in ordered_splits:
             extra = int(exact[split])
-            counts[split] += extra
+            counts[split] = extra
             allocated += extra
             fractional_parts.append((exact[split] - extra, split))
 
-        leftover = remaining - allocated
+        leftover = n_total - allocated
         fractional_parts.sort(key=lambda item: (item[0], -ordered_splits.index(item[1])), reverse=True)
         for _fraction, split in fractional_parts:
             if leftover <= 0:
                 break
             counts[split] += 1
             leftover -= 1
+
+        # YOLO potrzebuje niepustych splitów train i val. Jeśli po czystym podziale
+        # któryś z nich dostał 0, pożycz 1 obraz z największego splitu mającego zapas.
+        for required_split in required_splits:
+            if int(counts.get(required_split, 0) or 0) > 0:
+                continue
+            donor = None
+            donor_count = 0
+            for split in ordered_splits:
+                split_count = int(counts.get(split, 0) or 0)
+                if split == required_split or split_count <= 1:
+                    continue
+                if split_count > donor_count:
+                    donor = split
+                    donor_count = split_count
+            if donor is None:
+                return {}
+            counts[donor] -= 1
+            counts[required_split] += 1
 
         return counts
     

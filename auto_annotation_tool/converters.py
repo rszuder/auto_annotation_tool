@@ -90,9 +90,9 @@ class CVATToYOLOPoseConverter:
     
     WYMAGANY FORMAT WEJŚCIOWY (CVAT):
     ================================
-    📁 cvat_export/
-    ├── 📄 annotations.xml     <- Eksport z CVAT (format "CVAT for images 1.1")
-    └── 📁 images/             <- Folder z obrazami (opcjonalnie osobno)
+    cvat_export/
+    ├── annotations.xml        <- Eksport z CVAT (format "CVAT for images 1.1")
+    └── images/                <- Folder z obrazami (opcjonalnie osobno)
         ├── img001.jpg
         ├── img002.jpg
         └── ...
@@ -102,14 +102,14 @@ class CVATToYOLOPoseConverter:
     
     FORMAT WYJŚCIOWY (YOLO Pose):
     =============================
-    📁 dataset_yolo_pose/
-    ├── 📄 data.yaml
-    ├── 📁 images/
-    │   ├── 📁 train/
-    │   └── 📁 val/
-    └── 📁 labels/
-        ├── 📁 train/
-        └── 📁 val/
+    dataset_yolo_pose/
+    ├── data.yaml
+    ├── images/
+    │   ├── train/
+    │   └── val/
+    └── labels/
+        ├── train/
+        └── val/
     """
     
     REQUIRED_INPUT_FORMAT = """
@@ -117,19 +117,19 @@ class CVATToYOLOPoseConverter:
 ║                    WYMAGANY FORMAT DANYCH Z CVAT                            ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
-║  📁 Eksport z CVAT:                                                         ║
+║  Eksport z CVAT:                                                            ║
 ║  ─────────────────                                                          ║
 ║  W CVAT wybierz: Menu → Export task → Format: "CVAT for images 1.1"         ║
 ║                                                                              ║
 ║  Otrzymasz plik ZIP zawierający:                                            ║
-║  📁 cvat_export/                                                            ║
-║  ├── 📄 annotations.xml    ← Główny plik anotacji                          ║
-║  └── 📁 images/            ← Folder z obrazami                             ║
+║  cvat_export/                                                               ║
+║  ├── annotations.xml      ← Główny plik anotacji                           ║
+║  └── images/              ← Folder z obrazami                              ║
 ║      ├── img001.jpg                                                         ║
 ║      ├── img002.jpg                                                         ║
 ║      └── ...                                                                ║
 ║                                                                              ║
-║  📋 Format anotacji tablicy:                                                ║
+║  Format anotacji tablicy:                                                   ║
 ║  ────────────────────────────                                               ║
 ║  Tablica MUSI być oznaczona jako POLYGON z dokładnie 4 punktami:           ║
 ║                                                                              ║
@@ -138,7 +138,7 @@ class CVATToYOLOPoseConverter:
 ║  Gdzie punkty to 4 ROGI tablicy w dowolnej kolejności                      ║
 ║  (program automatycznie posortuje: TL → TR → BR → BL)                      ║
 ║                                                                              ║
-║  ⚠️  UWAGI:                                                                  ║
+║  UWAGI:                                                                     ║
 ║  • Label MUSI być: "plate", "license_plate" lub "numberplate"              ║
 ║  • Polygon MUSI mieć dokładnie 4 punkty                                    ║
 ║  • Obrazy muszą być w formacie: JPG, PNG, BMP, WebP, TIFF                  ║
@@ -151,24 +151,24 @@ class CVATToYOLOPoseConverter:
 ║                    FORMAT WYJŚCIOWY (YOLO POSE)                             ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
-║  📁 dataset_yolo_pose/                                                      ║
-║  ├── 📄 data.yaml              ← Konfiguracja datasetu                     ║
-║  ├── 📁 images/                                                             ║
-║  │   ├── 📁 train/             ← Obrazy treningowe                         ║
+║  dataset_yolo_pose/                                                         ║
+║  ├── data.yaml                ← Konfiguracja datasetu                      ║
+║  ├── images/                                                                ║
+║  │   ├── train/               ← Obrazy treningowe                          ║
 ║  │   │   ├── img001.jpg                                                     ║
 ║  │   │   └── ...                                                            ║
-║  │   └── 📁 val/               ← Obrazy walidacyjne                        ║
+║  │   └── val/                 ← Obrazy walidacyjne                         ║
 ║  │       ├── img050.jpg                                                     ║
 ║  │       └── ...                                                            ║
-║  └── 📁 labels/                                                             ║
-║      ├── 📁 train/             ← Etykiety treningowe                       ║
+║  └── labels/                                                                ║
+║      ├── train/               ← Etykiety treningowe                        ║
 ║      │   ├── img001.txt                                                     ║
 ║      │   └── ...                                                            ║
-║      └── 📁 val/               ← Etykiety walidacyjne                      ║
+║      └── val/                 ← Etykiety walidacyjne                       ║
 ║          ├── img050.txt                                                     ║
 ║          └── ...                                                            ║
 ║                                                                              ║
-║  📄 Format etykiety (plik .txt):                                            ║
+║  Format etykiety (plik .txt):                                               ║
 ║  ─────────────────────────────────                                          ║
 ║  class x_center y_center width height kp1_x kp1_y kp2_x kp2_y ...          ║
 ║                                                                              ║

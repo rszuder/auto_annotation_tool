@@ -11,6 +11,7 @@ from textwrap import shorten
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
 import xml.etree.ElementTree as ET
 import shutil
 
@@ -21,7 +22,7 @@ from ..validators import validate_model_file
 from ..icons import IconManager
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
-from .z2_view_models import Step2CtaViewModel, Step3ViewModel
+from .z2_view_models import Step2CtaViewModel, Step2RouteChoiceViewModel, Step2ViewModel, Step3ViewModel
 
 
 @dataclass
@@ -56,6 +57,7 @@ class CampaignTab:
         self.right_content = None
         self.right_content_window = None
         self._model_status_title_labels = []
+        self._model_status_meta_labels = []
         self.project_listbox = None
         self.project_list_host = None
         self.project_list_status_lbl = None
@@ -115,10 +117,23 @@ class CampaignTab:
             "project_add": {"hover": False, "pressed": False, "enabled": True},
             "exit_project": {"hover": False, "pressed": False, "enabled": False},
         }
+        self._scroll_inertia_jobs = {}
+        self._step2_target_change_after_id = None
+        self._dashboard_perf_cache = {
+            "image_counts": {},
+            "json_payloads": {},
+            "model_created": {},
+            "approved_stats": {},
+            "step2_source_states": {},
+            "step2_view_models": {},
+        }
         self._wizard_header_metro_statuses = []
+        self._wizard_step2_target_var = tk.StringVar(master=self.frame, value="")
         self.wizard_empty_state_card = None
         self.wizard_stage_cards = {}
         self.wizard_stage_cards_host = None
+        self._project_open_refresh_after_id = None
+        self._project_open_context_after_id = None
 
         self._build_ui()
         self._refresh_dashboard()
@@ -130,6 +145,82 @@ class CampaignTab:
     def is_startup_ui_ready(self) -> bool:
         return bool(getattr(self, "_startup_ui_ready", False))
 
+    def _ensure_roadmap_ui_ready(self) -> None:
+        if not getattr(self, "wizard_stage_cards_host", None) or not getattr(self, "wizard_stage_cards", None):
+            self._rebuild_roadmap_ui()
+
+    def _clear_dashboard_perf_cache(self) -> None:
+        cache = getattr(self, "_dashboard_perf_cache", None)
+        if not isinstance(cache, dict):
+            self._dashboard_perf_cache = {
+                "image_counts": {},
+                "json_payloads": {},
+                "model_created": {},
+                "approved_stats": {},
+                "step2_source_states": {},
+                "step2_view_models": {},
+            }
+            return
+        for key in (
+            "image_counts",
+            "json_payloads",
+            "model_created",
+            "approved_stats",
+            "step2_source_states",
+            "step2_view_models",
+        ):
+            value = cache.get(key)
+            if isinstance(value, dict):
+                value.clear()
+            else:
+                cache[key] = {}
+
+    @staticmethod
+    def _build_cache_token_for_path(path: Path | None):
+        if path is None:
+            return ("missing", "")
+        try:
+            candidate = Path(path)
+        except Exception:
+            return ("invalid", str(path))
+        if not candidate.exists():
+            return ("missing", str(candidate))
+        try:
+            stat = candidate.stat()
+            resolved = str(candidate.resolve())
+            return (resolved, int(stat.st_mtime_ns), int(stat.st_size))
+        except Exception:
+            return ("exists", str(candidate))
+
+    def _get_dashboard_cache_bucket(self, key: str) -> dict:
+        cache = getattr(self, "_dashboard_perf_cache", None)
+        if not isinstance(cache, dict):
+            self._clear_dashboard_perf_cache()
+            cache = getattr(self, "_dashboard_perf_cache", {})
+
+        bucket = cache.get(key)
+        if isinstance(bucket, dict):
+            return bucket
+
+        bucket = {}
+        cache[key] = bucket
+        return bucket
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> float:
+        try:
+            return max(0.0, (perf_counter() - float(started_at)) * 1000.0)
+        except Exception:
+            return 0.0
+
+    def _log_perf(self, label: str, started_at: float, *, threshold_ms: float = 40.0, extra: str = "") -> None:
+        elapsed_ms = self._elapsed_ms(started_at)
+        if elapsed_ms < float(threshold_ms):
+            return
+
+        extra_text = f" | {extra}" if str(extra or "").strip() else ""
+        logger.debug(f"[CampaignTab][PERF] {label}: {elapsed_ms:.1f} ms{extra_text}")
+
     # ======================================================
     # UI BUILD
     # ======================================================
@@ -139,7 +230,7 @@ class CampaignTab:
 
         # ---------------- HEADER ----------------
         header_bg = palette.get("panel", "#252526")
-        header_f = tk.Frame(self.frame, bg=header_bg, bd=0, highlightthickness=0, padx=15, pady=15)
+        header_f = tk.Frame(self.frame, bg=header_bg, bd=0, highlightthickness=0, padx=14, pady=10)
         header_f.pack(fill=tk.X)
         header_f.columnconfigure(0, weight=1)
         header_f.columnconfigure(1, weight=1)
@@ -148,8 +239,8 @@ class CampaignTab:
 
         self.lbl_title = tk.Label(
             header_f,
-            text="MENEDZER KAMPANII",
-            font=("Segoe UI", 16, "bold"),
+            text="PANEL KAMPANII",
+            font=("Segoe UI", 14, "bold"),
             fg=palette.get("fg", "#f3f3f3"),
             bg=header_bg
         )
@@ -168,7 +259,7 @@ class CampaignTab:
         self.lbl_iter = tk.Label(
             header_f,
             text="Iteracja: -",
-            font=("Segoe UI", 14, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg=palette.get("warning", "#ffb3b3"),
             bg=header_bg,
             padx=0,
@@ -188,7 +279,7 @@ class CampaignTab:
             bd=0,
             highlightthickness=0
         )
-        self.campaign_banner_shell.pack(fill=tk.X, padx=15, pady=(0, 8))
+        self.campaign_banner_shell.pack(fill=tk.X, padx=15, pady=(0, 6))
 
         self.banner_top_row = tk.Frame(
             self.campaign_banner_shell,
@@ -201,11 +292,11 @@ class CampaignTab:
         self.lbl_campaign_banner = tk.Label(
             self.banner_top_row,
             text="",
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8, "bold"),
             fg=palette.get("warning", "#ffd37a"),
             bg=banner_bg,
-            padx=10,
-            pady=4,
+            padx=8,
+            pady=2,
             anchor="w",
             justify=tk.LEFT
         )
@@ -217,11 +308,11 @@ class CampaignTab:
             bd=0,
             highlightthickness=0
         )
-        self.banner_progress_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self.banner_progress_row.pack(fill=tk.X, padx=8, pady=(0, 4))
 
         self.wizard_header_metro_canvas = tk.Canvas(
             self.banner_progress_row,
-            height=112,
+            height=84,
             bd=0,
             highlightthickness=0,
             bg=banner_bg,
@@ -232,14 +323,14 @@ class CampaignTab:
 
         self.wizard_exit_button_canvas = tk.Canvas(
             self.banner_progress_row,
-            width=220,
-            height=42,
+            width=184,
+            height=34,
             bd=0,
             highlightthickness=0,
             bg=banner_bg,
             cursor="hand2",
         )
-        self.wizard_exit_button_canvas.pack(side=tk.RIGHT, padx=(10, 0), pady=(22, 0), anchor="n")
+        self.wizard_exit_button_canvas.pack(side=tk.RIGHT, padx=(8, 0), pady=(14, 0), anchor="n")
         HELP.bind_help(self.wizard_exit_button_canvas, "camp_exit_project")
         self._bind_icon_button(self.wizard_exit_button_canvas, role="exit_project", command=self._exit_project_mode)
         self.frame.after_idle(lambda: self._draw_icon_button("exit_project"))
@@ -457,6 +548,135 @@ class CampaignTab:
             units = -1 if delta > 0 else 1
         return units if units != 0 else (-1 if delta > 0 else 1)
 
+    def _mousewheel_magnitude(self, event) -> float:
+        event_num = getattr(event, "num", None)
+        if event_num in {4, 5}:
+            return 1.0
+        try:
+            delta = abs(int(getattr(event, "delta", 0) or 0))
+        except Exception:
+            delta = 0
+        if delta <= 0:
+            return 1.0
+        return max(1.0, min(3.0, float(delta) / 120.0))
+
+    def _compute_canvas_scroll_delta(self, canvas, units: int, *, magnitude: float = 1.0) -> float:
+        if canvas is None or units == 0:
+            return 0.0
+        try:
+            first, last = canvas.yview()
+            span = max(0.02, float(last) - float(first))
+            base_step = max(0.0035, min(0.018, span * 0.08))
+            step = base_step * max(1.0, min(3.0, float(magnitude or 1.0)))
+            return float(units) * step
+        except Exception:
+            return 0.0
+
+    def _compute_listbox_scroll_delta(self, listbox, units: int, *, magnitude: float = 1.0) -> float:
+        if listbox is None or units == 0:
+            return 0.0
+        try:
+            first, last = listbox.yview()
+            span = max(0.02, float(last) - float(first))
+            base_step = max(0.008, min(0.035, span * 0.12))
+            step = base_step * max(1.0, min(3.0, float(magnitude or 1.0)))
+            return float(units) * step
+        except Exception:
+            return 0.0
+
+    def _apply_canvas_scroll_delta(self, canvas, delta_fraction: float) -> bool:
+        if canvas is None or abs(float(delta_fraction or 0.0)) < 1e-6:
+            return False
+        try:
+            first, last = canvas.yview()
+            first = float(first)
+            last = float(last)
+            span = max(0.02, last - first)
+            target = max(0.0, min(max(0.0, 1.0 - span), first + float(delta_fraction)))
+            if abs(target - first) < 1e-6:
+                return False
+            canvas.yview_moveto(target)
+            return True
+        except Exception:
+            return False
+
+    def _apply_listbox_scroll_delta(self, listbox, delta_fraction: float) -> bool:
+        if listbox is None or abs(float(delta_fraction or 0.0)) < 1e-6:
+            return False
+        try:
+            first, last = listbox.yview()
+            first = float(first)
+            last = float(last)
+            span = max(0.02, last - first)
+            target = max(0.0, min(max(0.0, 1.0 - span), first + float(delta_fraction)))
+            if abs(target - first) < 1e-6:
+                return False
+            listbox.yview_moveto(target)
+            return True
+        except Exception:
+            return False
+
+    def _queue_scroll_inertia(self, widget, *, mode: str, delta_fraction: float) -> bool:
+        if widget is None:
+            return False
+        delta_fraction = float(delta_fraction or 0.0)
+        if abs(delta_fraction) < 1e-6:
+            return False
+
+        key = f"{mode}:{str(widget)}"
+        state = self._scroll_inertia_jobs.get(key)
+        if not isinstance(state, dict):
+            state = {
+                "widget": widget,
+                "mode": str(mode or "").strip().lower(),
+                "velocity": 0.0,
+                "after_id": None,
+            }
+            self._scroll_inertia_jobs[key] = state
+
+        velocity = float(state.get("velocity", 0.0) or 0.0) + delta_fraction
+        state["velocity"] = max(-0.14, min(0.14, velocity))
+
+        if state.get("after_id") is None:
+            try:
+                state["after_id"] = self.frame.after(14, lambda scroll_key=key: self._advance_scroll_inertia(scroll_key))
+            except Exception:
+                state["after_id"] = None
+                return False
+        return True
+
+    def _advance_scroll_inertia(self, key: str):
+        state = self._scroll_inertia_jobs.get(str(key or "").strip())
+        if not isinstance(state, dict):
+            return
+
+        state["after_id"] = None
+        widget = state.get("widget")
+        mode = str(state.get("mode", "") or "").strip().lower()
+        velocity = float(state.get("velocity", 0.0) or 0.0)
+        if abs(velocity) < 0.0007:
+            self._scroll_inertia_jobs.pop(key, None)
+            return
+
+        if mode == "canvas":
+            moved = self._apply_canvas_scroll_delta(widget, velocity)
+        else:
+            moved = self._apply_listbox_scroll_delta(widget, velocity)
+
+        if not moved:
+            self._scroll_inertia_jobs.pop(key, None)
+            return
+
+        state["velocity"] = velocity * 0.78
+        if abs(float(state.get("velocity", 0.0) or 0.0)) < 0.0007:
+            self._scroll_inertia_jobs.pop(key, None)
+            return
+
+        try:
+            state["after_id"] = self.frame.after(14, lambda scroll_key=key: self._advance_scroll_inertia(scroll_key))
+        except Exception:
+            self._scroll_inertia_jobs.pop(key, None)
+
     def _canvas_can_scroll(self, canvas, units: int) -> bool:
         if canvas is None or units == 0:
             return False
@@ -493,6 +713,7 @@ class CampaignTab:
             pass
 
         units = self._mousewheel_units(event)
+        magnitude = self._mousewheel_magnitude(event)
         if listbox is None or units == 0:
             return None
         host_canvas = None
@@ -502,14 +723,16 @@ class CampaignTab:
             host_canvas = self.right_panel_canvas
         if host_canvas is not None and self._canvas_can_scroll(host_canvas, units):
             try:
-                host_canvas.yview_scroll(units, "units")
+                delta_fraction = self._compute_canvas_scroll_delta(host_canvas, units, magnitude=magnitude)
+                self._queue_scroll_inertia(host_canvas, mode="canvas", delta_fraction=delta_fraction)
             except Exception:
                 pass
             return "break"
         if not self._listbox_can_scroll(listbox, units):
             return None
         try:
-            listbox.yview_scroll(units, "units")
+            delta_fraction = self._compute_listbox_scroll_delta(listbox, units, magnitude=magnitude)
+            self._queue_scroll_inertia(listbox, mode="listbox", delta_fraction=delta_fraction)
         except Exception:
             pass
         return "break"
@@ -524,6 +747,7 @@ class CampaignTab:
             pass
 
         units = self._mousewheel_units(event)
+        magnitude = self._mousewheel_magnitude(event)
         if units == 0:
             return None
 
@@ -544,10 +768,12 @@ class CampaignTab:
                     host_canvas = self.right_panel_canvas
 
                 if host_canvas is not None and self._canvas_can_scroll(host_canvas, units):
-                    host_canvas.yview_scroll(units, "units")
+                    delta_fraction = self._compute_canvas_scroll_delta(host_canvas, units, magnitude=magnitude)
+                    self._queue_scroll_inertia(host_canvas, mode="canvas", delta_fraction=delta_fraction)
                     return "break"
                 if self._listbox_can_scroll(listbox, units):
-                    listbox.yview_scroll(units, "units")
+                    delta_fraction = self._compute_listbox_scroll_delta(listbox, units, magnitude=magnitude)
+                    self._queue_scroll_inertia(listbox, mode="listbox", delta_fraction=delta_fraction)
                 return "break"
             except Exception:
                 return "break"
@@ -558,7 +784,8 @@ class CampaignTab:
             if not self._canvas_can_scroll(canvas, units):
                 continue
             try:
-                canvas.yview_scroll(units, "units")
+                delta_fraction = self._compute_canvas_scroll_delta(canvas, units, magnitude=magnitude)
+                self._queue_scroll_inertia(canvas, mode="canvas", delta_fraction=delta_fraction)
                 return "break"
             except Exception:
                 return None
@@ -960,7 +1187,6 @@ class CampaignTab:
             bg=palette.get("panel", "#252526"),
             anchor="w"
         )
-        header_lbl.pack(fill=tk.X, padx=10, pady=(10, 4))
         self.ingest_header_lbl = header_lbl
 
         intro_lbl = tk.Label(
@@ -971,7 +1197,7 @@ class CampaignTab:
             fg=palette.get("muted", "#b8b8b8"),
             bg=palette.get("panel", "#252526"),
         )
-        intro_lbl.pack(anchor=tk.W, padx=10, pady=(0, 6))
+        intro_lbl.pack(anchor=tk.W, padx=10, pady=(10, 6))
         self.ingest_intro_lbl = intro_lbl
 
         start_shell = tk.Frame(
@@ -1136,7 +1362,7 @@ class CampaignTab:
             status_shell,
             bg=summary_style["bg"],
         )
-        status_panel.pack(fill=tk.X, padx=10, pady=8)
+        status_panel.pack(fill=tk.X, padx=8, pady=6)
         self.ingest_status_panel = status_panel
         self.ingest_status_labels = []
         self.ingest_status_summary_lbl = tk.Label(
@@ -1146,7 +1372,7 @@ class CampaignTab:
             anchor="w",
             fg=summary_style["fg"],
             bg=summary_style["bg"],
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10),
             wraplength=620,
         )
         self.ingest_status_summary_lbl.pack(fill=tk.X)
@@ -1331,19 +1557,74 @@ class CampaignTab:
         lbl_val.pack(side=tk.LEFT, expand=True, anchor=tk.W)
 
         setattr(self, f"lbl_model_{model_type}", lbl_val)
+
+        lbl_meta = tk.Label(
+            f,
+            text="Utworzono: -",
+            fg=palette.get("muted", "#b0b0b0"),
+            bg=palette.get("panel", "#252526"),
+            font=("Segoe UI", 8),
+        )
+        lbl_meta.pack(anchor=tk.W, pady=(2, 0))
+        self._model_status_meta_labels.append(lbl_meta)
+        setattr(self, f"lbl_model_{model_type}_meta", lbl_meta)
         setattr(self, f"btn_model_{model_type}", None)
+
+    def _format_model_created_label(self, model_path: str | Path | None) -> str:
+        path_text = str(model_path or "").strip()
+        if not path_text:
+            return "Utworzono: -"
+
+        try:
+            path = Path(path_text)
+        except Exception:
+            return "Utworzono: -"
+
+        if not path.exists():
+            return "Utworzono: -"
+
+        cache = getattr(self, "_dashboard_perf_cache", {})
+        model_cache = cache.get("model_created", {}) if isinstance(cache, dict) else {}
+        cache_token = self._build_cache_token_for_path(path)
+        cache_key = ("created_label", cache_token)
+        cached = model_cache.get(cache_key) if isinstance(model_cache, dict) else None
+        if isinstance(cached, str):
+            return cached
+
+        try:
+            created_at = datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "Utworzono: -"
+        label = f"Utworzono: {created_at}"
+        if isinstance(model_cache, dict):
+            if len(model_cache) > 128:
+                model_cache.clear()
+            model_cache[cache_key] = label
+        return label
 
     def _count_images_in_dir(self, directory: Path | None, recursive: bool = True) -> int:
         if directory is None or not directory.exists() or not directory.is_dir():
             return 0
 
+        cache = getattr(self, "_dashboard_perf_cache", {})
+        image_cache = cache.get("image_counts", {}) if isinstance(cache, dict) else {}
+        cache_key = (self._build_cache_token_for_path(directory), bool(recursive))
+        cached = image_cache.get(cache_key) if isinstance(image_cache, dict) else None
+        if isinstance(cached, int):
+            return cached
+
         try:
             iterator = directory.rglob("*") if recursive else directory.iterdir()
-            return sum(
+            count = sum(
                 1
                 for image_path in iterator
                 if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
             )
+            if isinstance(image_cache, dict):
+                if len(image_cache) > 256:
+                    image_cache.clear()
+                image_cache[cache_key] = int(count)
+            return int(count)
         except Exception:
             return 0
 
@@ -1759,15 +2040,59 @@ class CampaignTab:
             pass
 
         try:
-            self._set_pack_visibility(self.ingest_intro_lbl, mode_selected, anchor=tk.W, padx=10, pady=(0, 6))
-            self._set_pack_visibility(self.ingest_top_section, mode_selected, fill=tk.X, padx=10, pady=(0, 6))
-            self._set_pack_visibility(self.ingest_body, mode_selected, fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
-            self._set_pack_visibility(self.ingest_insights_toggle_shell, mode_selected, fill=tk.X, padx=10, pady=(0, 6))
+            self._set_pack_visibility(self.ingest_header_lbl, False)
+            self._set_pack_visibility(
+                self.ingest_intro_lbl,
+                mode_selected,
+                anchor=tk.W,
+                padx=10,
+                pady=(0, 6),
+                before=self.ingest_start_shell,
+            )
+            self._set_pack_visibility(
+                self.ingest_top_section,
+                mode_selected,
+                fill=tk.X,
+                padx=10,
+                pady=(0, 6),
+                before=self.ingest_body,
+            )
+            self._set_pack_visibility(
+                self.ingest_body,
+                mode_selected,
+                fill=tk.BOTH,
+                expand=True,
+                padx=10,
+                pady=(0, 6),
+                before=self.ingest_insights_toggle_shell,
+            )
+            self._set_pack_visibility(
+                self.ingest_insights_toggle_shell,
+                mode_selected,
+                fill=tk.X,
+                padx=10,
+                pady=(0, 6),
+                before=self.ingest_insights_shell,
+            )
             self._set_pack_visibility(self.ingest_start_title_lbl, mode_selected and mode_is_assets, fill=tk.X)
             self._set_pack_visibility(self.ingest_start_summary_lbl, mode_selected and mode_is_assets, fill=tk.X, pady=(4, 8))
             self._set_pack_visibility(self.ingest_start_detected_lbl, mode_selected and mode_is_assets, fill=tk.X, pady=(10, 0))
             self._set_pack_visibility(self.ingest_start_next_lbl, mode_selected and mode_is_assets, fill=tk.X, pady=(6, 0))
             self._set_pack_visibility(self.btn_choose_master_pool, not self._is_first_iteration_start_context(), side=tk.RIGHT, padx=(8, 0))
+        except Exception:
+            pass
+
+        try:
+            if visible and self.ingest_top_section is not None:
+                self.ingest_start_shell.pack_configure(before=self.ingest_top_section)
+            if mode_selected and self.ingest_start_shell is not None:
+                self.ingest_intro_lbl.pack_configure(before=self.ingest_start_shell)
+            if mode_selected and self.ingest_body is not None:
+                self.ingest_top_section.pack_configure(before=self.ingest_body)
+            if mode_selected and self.ingest_insights_toggle_shell is not None:
+                self.ingest_body.pack_configure(before=self.ingest_insights_toggle_shell)
+            if mode_selected and self.ingest_insights_shell is not None:
+                self.ingest_insights_toggle_shell.pack_configure(before=self.ingest_insights_shell)
         except Exception:
             pass
 
@@ -1923,7 +2248,7 @@ class CampaignTab:
         palette = getattr(self.app, "palette", {})
         return {
             "bg": palette.get("panel", "#252526"),
-            "border": palette.get("success", "#63b37b"),
+            "border": palette.get("panel_border", palette.get("border", "#3c3c3c")),
             "fg": palette.get("fg", "#f3f3f3"),
             "muted": palette.get("muted", "#c7c7c7"),
         }
@@ -1997,8 +2322,52 @@ class CampaignTab:
         iter_dir = CAMPAIGN.get_iteration_raw_dir()
         return self._count_images_in_dir(iter_dir, recursive=True)
 
+    def _load_ingest_manifest_cached(self) -> dict:
+        try:
+            manifest_path = CAMPAIGN.get_ingest_manifest_path()
+        except Exception:
+            manifest_path = None
+
+        cache = getattr(self, "_dashboard_perf_cache", {})
+        json_cache = cache.get("json_payloads", {}) if isinstance(cache, dict) else {}
+        cache_key = ("ingest_manifest", self._build_cache_token_for_path(manifest_path))
+        cached = json_cache.get(cache_key) if isinstance(json_cache, dict) else None
+        if isinstance(cached, dict):
+            return dict(cached)
+
+        try:
+            manifest = CAMPAIGN.load_ingest_manifest()
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+
+        if isinstance(json_cache, dict):
+            if len(json_cache) > 128:
+                json_cache.clear()
+            json_cache[cache_key] = dict(manifest)
+        return dict(manifest)
+
     def _load_latest_ingest_plan_for_current_iteration(self) -> dict:
-        plan = CAMPAIGN.load_latest_ingest_plan()
+        try:
+            plan_path = CAMPAIGN.get_latest_ingest_plan_path()
+        except Exception:
+            plan_path = None
+
+        cache = getattr(self, "_dashboard_perf_cache", {})
+        json_cache = cache.get("json_payloads", {}) if isinstance(cache, dict) else {}
+        cache_key = ("latest_ingest_plan", self._build_cache_token_for_path(plan_path))
+        cached = json_cache.get(cache_key) if isinstance(json_cache, dict) else None
+        if isinstance(cached, dict):
+            plan = dict(cached)
+        else:
+            plan = CAMPAIGN.load_latest_ingest_plan()
+            if not isinstance(plan, dict):
+                plan = {}
+            if isinstance(json_cache, dict):
+                if len(json_cache) > 128:
+                    json_cache.clear()
+                json_cache[cache_key] = dict(plan)
         if not isinstance(plan, dict):
             return {}
         if int(plan.get("iteration", 0) or 0) != CAMPAIGN.get_current_iteration_num():
@@ -2216,6 +2585,7 @@ class CampaignTab:
         package_balance = Counter(self.current_ingest_plan.get("selected_balance", {}) or {})
         package_total = sum(int(v) for v in package_balance.values())
         package_images = int(self.current_ingest_plan.get("selected_total", 0) or 0)
+        raw_package_images = int(self.current_ingest_plan.get("raw_total", package_images) or package_images)
 
         if package_total <= 0:
             width = max(int(canvas.winfo_width() or 280), 280)
@@ -2294,9 +2664,15 @@ class CampaignTab:
         missing_text = ", ".join(missing[:10]) if missing else "brak"
         summary = (
             "Wysokość słupka = liczba wystąpień danego znaku w nazwach tablic zdjęć należących do aktualnego wybranego folderu zdjęć E1.\n"
-            f"Wybrany folder zdjęć E1 zawiera teraz {package_images} zdjęć i {package_total} znaków. "
-            f"Najczęstsze znaki: {dominant_text}.\n"
-            f"Brakujące znaki w tym wybranym folderze zdjęć: {missing_text}."
+            f"Wybrany folder zdjęć E1 zawiera teraz {raw_package_images} zdjęć"
+            + (
+                f", z czego {package_images} weszło do planu E1"
+                if raw_package_images != package_images
+                else ""
+            )
+            + f", oraz {package_total} znaków GT w planie. "
+            + f"Najczęstsze znaki: {dominant_text}.\n"
+            + f"Brakujące znaki w tym wybranym folderze zdjęć: {missing_text}."
         )
         try:
             self.ingest_balance_summary_lbl.config(text=summary)
@@ -2422,7 +2798,7 @@ class CampaignTab:
                 lbl.config(
                     bg=summary_style["bg"],
                     fg=(summary_style["fg"] if idx == 0 else summary_style["muted"]),
-                    font=("Segoe UI", 11, "bold"),
+                    font=("Segoe UI", 10, "normal"),
                 )
         except Exception:
             pass
@@ -2503,38 +2879,92 @@ class CampaignTab:
             elif latest_plan:
                 self.current_ingest_plan = latest_plan
                 self._recalculate_current_ingest_plan()
+            else:
+                self.current_ingest_plan = {}
             self._populate_ingest_plan_list()
         else:
             self.current_ingest_plan = {}
             self._populate_ingest_plan_list()
 
         plan_count = int(self.current_ingest_plan.get("selected_total", 0) or 0)
+        raw_plan_count = int(self.current_ingest_plan.get("raw_total", plan_count) or plan_count)
+        manifest = self._load_ingest_manifest_cached() if has_project else {}
+        step1_context = self._get_step1_manifest_context(manifest if isinstance(manifest, dict) else None)
+        project_pool_total = int(step1_context.get("project_pool_total_after", step1_context.get("project_pool_total", 0)) or 0)
+        source_total = int(step1_context.get("source_total", 0) or 0)
+        approved_images = int(step1_context.get("approved_images", 0) or 0)
+        approved_plates = int(step1_context.get("approved_plates", 0) or 0)
+        current_iteration_package = int(
+            step1_context.get("current_iteration_package_count", 0)
+            or iter_image_count
+            or plan_count
+            or 0
+        )
+        new_to_project_count = int(step1_context.get("new_to_project_count", 0) or 0)
+        skipped_approved_count = int(step1_context.get("skipped_duplicate_filenames", 0) or 0)
 
-        line1 = ""
-        line2 = ""
-        if iter_image_count > 0 and step1_approved:
-            line3 = "Bieżąca iteracja ma już zatwierdzony zestaw zdjęć wejściowych. E1 jest zamknięte."
+        if not step1_approved and plan_count > 0:
+            project_pool_before = int(approved_images or 0)
+            new_to_project_count = int(
+                self.current_ingest_plan.get(
+                    "new_to_project_total",
+                    plan_count,
+                ) or 0
+            )
+            project_pool_total = max(project_pool_total, project_pool_before + new_to_project_count)
+            current_iteration_package = max(current_iteration_package, plan_count)
+            skipped_approved_count = int(
+                self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)) or 0
+            )
+            source_total = max(source_total, raw_plan_count)
+
+        if project_pool_total <= 0:
+            project_pool_total = max(int(source_total or 0), int(raw_plan_count or 0), int(current_iteration_package or 0))
+
+        line1 = (
+            f"Łączna pula obrazów projektu: {project_pool_total} zdjęć = "
+            f"{approved_images} zatwierdzonych do treningu YOLO + "
+            f"{current_iteration_package} do oznaczenia w bieżącej iteracji."
+        )
+        line2 = f"Zatwierdzone w poprzednich iteracjach do treningu YOLO: {approved_images} zdjęć / {approved_plates} tablic."
+        line3 = f"Do oznaczenia w bieżącej iteracji: {current_iteration_package} zdjęć."
+        if current_iteration_package > 0 and step1_approved:
+            if source_total > 0 and (new_to_project_count > 0 or skipped_approved_count > 0):
+                line3 = (
+                    f"{line3} Z tej paczki {new_to_project_count} jest nowych dla projektu, "
+                    f"a {skipped_approved_count} było już zatwierdzonych do treningu YOLO."
+                )
         elif iter_image_count > 0:
             line3 = (
-                "W folderze iteracji są już obrazy, ale E1 nie zostało jeszcze zatwierdzone. "
+                f"{line3} W folderze iteracji są już obrazy, ale E1 nie zostało jeszcze zatwierdzone. "
                 "Kliknij „Zatwierdź E1”, aby odblokować E2."
             )
         elif plan_count > 0:
-            line3 = ""
+            skipped_invalid = int(self.current_ingest_plan.get("skipped_invalid_ground_truth", 0) or 0)
+            skipped_duplicates = int(
+                self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)) or 0
+            )
+            if raw_plan_count > plan_count:
+                line3_parts = [
+                    f"{line3}",
+                    f"Wybrany folder zdjęć zawiera {raw_plan_count} obrazów.",
+                    f"Do planu E1 weszło {plan_count}.",
+                ]
+                if skipped_duplicates > 0:
+                    line3_parts.append(f"Pominięto {skipped_duplicates} dubli po nazwie.")
+                if skipped_invalid > 0:
+                    line3_parts.append(f"Pominięto {skipped_invalid} plików bez poprawnego GT w nazwie.")
+                line3 = " ".join(line3_parts)
         elif has_project and master_pool and not master_pool_exists:
-            line3 = "Zapisana główna pula zdjęć nie istnieje na dysku. Wskaż poprawny katalog albo użyj ścieżki ręcznej."
+            line3 = f"{line3} Zapisana główna pula zdjęć nie istnieje na dysku. Wskaż poprawny katalog albo użyj ścieżki ręcznej."
         elif has_project and master_pool_exists:
             line3 = (
-                "Główna pula zdjęć jest gotowa. Kliknij „Wybierz...”, "
+                f"{line3} Główna pula zdjęć jest gotowa. Kliknij „Wybierz...”, "
                 "a system automatycznie załaduje paczkę wejściową tej iteracji."
             )
-        elif has_project:
-            line3 = ""
-        else:
-            line3 = ""
         if has_project and master_pool_exists and project_start_mode == "assets" and self._is_first_iteration_start_context():
             line3 = (
-                "Obrazy tej iteracji są już wskazane. Możesz teraz zatwierdzic E1 "
+                f"{line3} Obrazy tej iteracji są już wskazane. Możesz teraz zatwierdzic E1 "
                 "albo dopiąć jeszcze gotowe anotacje tablic i modele startowe."
             )
         self._set_ingest_status_lines(line1, line2, line3)
@@ -2610,6 +3040,15 @@ class CampaignTab:
         selected_items = []
         selected_hist = Counter()
         skipped_invalid_gt = 0
+        skipped_duplicate_filenames = 0
+        skipped_duplicate_approved = 0
+        project_overlap_filenames = 0
+        approved_registry = CAMPAIGN.get_used_image_registry()
+        approved_names = {
+            str(name or "").strip().lower()
+            for name in (approved_registry.get("filenames", []) or [])
+            if str(name or "").strip()
+        }
 
         current_counter = Counter()
         for ch in CHAR_ALPHABET:
@@ -2623,8 +3062,15 @@ class CampaignTab:
             ),
             key=lambda p: p.as_posix().lower(),
         )
+        raw_total = int(len(image_paths))
 
         for image_path in image_paths:
+            image_name_key = str(image_path.name or "").strip().lower()
+            if image_name_key and image_name_key in approved_names:
+                skipped_duplicate_filenames += 1
+                skipped_duplicate_approved += 1
+                continue
+
             gt_texts = planner.extract_true_texts_from_filename(image_path.name)
             if not gt_texts:
                 skipped_invalid_gt += 1
@@ -2655,6 +3101,7 @@ class CampaignTab:
 
         predicted_counter = Counter(current_counter)
         predicted_counter.update(selected_hist)
+        new_to_project_total = int(len(selected_items))
 
         return {
             "ok": True,
@@ -2664,9 +3111,14 @@ class CampaignTab:
             "iteration": int(CAMPAIGN.get_current_iteration_num() or 1),
             "master_pool_dir": str(master_pool_dir.resolve()),
             "batch_size": 0,
-            "candidates_total": len(selected_items),
+            "raw_total": raw_total,
+            "candidates_total": raw_total,
             "selected_total": len(selected_items),
-            "skipped_used": 0,
+            "new_to_project_total": new_to_project_total,
+            "skipped_used": skipped_duplicate_filenames,
+            "skipped_duplicate_filenames": skipped_duplicate_filenames,
+            "skipped_duplicate_approved_filenames": skipped_duplicate_approved,
+            "project_overlap_filenames": project_overlap_filenames,
             "skipped_invalid_ground_truth": skipped_invalid_gt,
             "current_balance": {ch: int(current_counter.get(ch, 0)) for ch in CHAR_ALPHABET},
             "selected_balance": {ch: int(selected_hist.get(ch, 0)) for ch in CHAR_ALPHABET},
@@ -2704,7 +3156,9 @@ class CampaignTab:
         self.current_ingest_plan = plan
         self._recalculate_current_ingest_plan()
         selected_total = int(plan.get("selected_total", 0) or 0)
+        raw_total = int(plan.get("raw_total", selected_total) or selected_total)
         skipped_invalid = int(plan.get("skipped_invalid_ground_truth", 0) or 0)
+        skipped_duplicates = int(plan.get("skipped_duplicate_filenames", plan.get("skipped_used", 0)) or 0)
         try:
             CAMPAIGN.save_latest_ingest_plan(self.current_ingest_plan)
         except Exception:
@@ -2712,6 +3166,15 @@ class CampaignTab:
         self._refresh_ingest_panel(snapshot_override=snapshot)
 
         if selected_total <= 0:
+            if skipped_duplicates > 0 and skipped_invalid <= 0:
+                messagebox.showwarning(
+                    "Brak nowych zdjęć do iteracji",
+                    (
+                        f"Wybrany folder zawiera {raw_total} zdjęć, ale wszystkie zostały odrzucone jako duble po nazwie.\n\n"
+                        "Ta paczka nie wnosi nowych obrazów do projektu."
+                    ),
+                )
+                return
             messagebox.showwarning(
                 "Brak poprawnych pozycji w wybranym folderze zdjęć",
                 (
@@ -2722,7 +3185,11 @@ class CampaignTab:
             return
 
         try:
-            status_text = f"Załadowano wybrany folder zdjęć E1: {selected_total} zdjęć."
+            status_text = f"Załadowano wybrany folder zdjęć E1: {raw_total} zdjęć w folderze."
+            if raw_total != selected_total:
+                status_text += f" Do planu E1 weszło {selected_total}."
+            if skipped_duplicates > 0:
+                status_text += f" Pominięto {skipped_duplicates} dubli po nazwie."
             if skipped_invalid > 0:
                 status_text += f" Pominięto {skipped_invalid} plików bez poprawnego GT w nazwie."
             self.app.update_status(status_text, "info")
@@ -2769,13 +3236,47 @@ class CampaignTab:
                 if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
             ]
 
+        summary_payload = dict(proposal_summary or {})
+        package_count = int(len(selected_files) or 0)
+        new_to_project_count = int(
+            summary_payload.get(
+                "new_to_project_count",
+                package_count,
+            ) or 0
+        )
+
+        approved_stats = self._get_plate_approved_set_stats() or {}
+        approved_images_before = int(summary_payload.get("approved_images_before_iteration", approved_stats.get("images", 0)) or 0)
+        approved_plates_before = int(summary_payload.get("approved_plates_before_iteration", approved_stats.get("plates", 0)) or 0)
+        project_pool_total_before = int(
+            summary_payload.get(
+                "project_pool_total_before_iteration",
+                approved_images_before,
+            ) or 0
+        )
+        project_pool_total_after = int(
+            summary_payload.get(
+                "project_pool_total_after_iteration",
+                max(project_pool_total_before, approved_images_before) + new_to_project_count,
+            ) or 0
+        )
+
+        if package_count > 0 and "source_total" not in summary_payload:
+            summary_payload["source_total"] = package_count
+        summary_payload["current_iteration_package_count"] = package_count
+        summary_payload["new_to_project_count"] = new_to_project_count
+        summary_payload["project_pool_total_before_iteration"] = project_pool_total_before
+        summary_payload["project_pool_total_after_iteration"] = project_pool_total_after
+        summary_payload["approved_images_before_iteration"] = approved_images_before
+        summary_payload["approved_plates_before_iteration"] = approved_plates_before
+
         source_root = Path(source_dir) if source_dir else target_iter_dir
         try:
             CAMPAIGN.record_iteration_ingest(
                 source_dir=source_root,
                 selected_source_files=selected_files,
                 selection_mode=selection_mode,
-                proposal_summary=proposal_summary,
+                proposal_summary=summary_payload,
             )
         except Exception as e:
             logger.debug(f"Nie udało się zapisać manifestu E1 dla {target_iter_dir}: {e}")
@@ -2911,8 +3412,15 @@ class CampaignTab:
             proposal_summary={
                 "planner_version": self.current_ingest_plan.get("planner_version", ""),
                 "generated_at": self.current_ingest_plan.get("generated_at", ""),
+                "source_total": self.current_ingest_plan.get("raw_total", 0),
                 "selected_total": self.current_ingest_plan.get("selected_total", 0),
+                "current_iteration_package_count": self.current_ingest_plan.get("selected_total", 0),
                 "batch_size": self.current_ingest_plan.get("batch_size", 0),
+                "skipped_duplicate_filenames": self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)),
+                "skipped_duplicate_approved_filenames": self.current_ingest_plan.get("skipped_duplicate_approved_filenames", 0),
+                "project_overlap_filenames": self.current_ingest_plan.get("project_overlap_filenames", 0),
+                "new_to_project_count": self.current_ingest_plan.get("new_to_project_total", 0),
+                "skipped_invalid_ground_truth": self.current_ingest_plan.get("skipped_invalid_ground_truth", 0),
             },
         )
 
@@ -3100,6 +3608,12 @@ class CampaignTab:
             if lbl_val is not None:
                 try:
                     lbl_val.config(bg=panel)
+                except Exception:
+                    pass
+            lbl_meta = getattr(self, f"lbl_model_{model_type}_meta", None)
+            if lbl_meta is not None:
+                try:
+                    lbl_meta.config(bg=panel, fg=palette.get("muted", "#b0b0b0"))
                 except Exception:
                     pass
 
@@ -3320,7 +3834,7 @@ class CampaignTab:
             title="Ta sama pula zdjęć",
             description=(
                 "System przygotuje kolejną paczkę z tej samej puli zdjęć projektu, "
-                "pomijając obrazy już użyte w poprzednich iteracjach. "
+                "pomijając obrazy już zatwierdzone w projekcie. "
                 "Potem od razu wrócisz do wyboru toru w E2. "
                 "Aktywne modele projektu pozostaną dostępne do dalszej pracy."
             ),
@@ -3549,13 +4063,13 @@ class CampaignTab:
         panel_bg = palette.get("panel", "#252526")
 
         header_shell = tk.Frame(roadmap_parent, bg=panel_bg, bd=0, highlightthickness=0)
-        header_shell.pack(fill=tk.X, pady=(0, 12))
+        header_shell.pack(fill=tk.X, pady=(0, 8))
         self.wizard_header_title_lbl = tk.Label(
             header_shell,
             text="Etapy projektu",
             anchor="w",
             justify=tk.LEFT,
-            font=("Segoe UI", 15, "bold"),
+            font=("Segoe UI", 13, "bold"),
             fg=palette.get("fg", "#f3f3f3"),
             bg=panel_bg,
         )
@@ -3569,7 +4083,7 @@ class CampaignTab:
             fg=palette.get("muted", "#c7c7c7"),
             bg=panel_bg,
         )
-        self.wizard_header_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+        self.wizard_header_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
 
         self.wizard_empty_state_card = self._build_wizard_stage_card(
             roadmap_parent,
@@ -3962,8 +4476,8 @@ class CampaignTab:
             "manual": "Wskazano paczkę ręcznie",
             "existing": "Użyto gotowego katalogu iteracji",
             "iteration_reuse": "Użyto tego samego zestawu zdjęć co poprzednio",
-            "pool_reuse": "Użyto kolejnej paczki z tej samej puli zdjęć",
-            "stage_reuse": "Użyto zdjęć oczekujących w stage z poprzedniej iteracji",
+            "pool_reuse": "Przygotowano kolejną paczkę z tej samej puli projektu",
+            "stage_reuse": "Przejęto zdjęcia oczekujące w stage po poprzedniej iteracji",
         }
         return labels.get(normalized, "Tryb przygotowania nie jest jeszcze znany")
 
@@ -4092,11 +4606,110 @@ class CampaignTab:
         payload["source_label"] = source_label
         return payload
 
+    def _get_step1_manifest_context(self, manifest: dict | None = None) -> dict:
+        manifest = manifest if isinstance(manifest, dict) else {}
+        current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        iter_num = int(manifest.get("iteration", current_iteration) or current_iteration)
+        manifest_mode = str(manifest.get("selection_mode", "") or "").strip().lower()
+        selected_count = int(manifest.get("selected_count", 0) or 0)
+
+        proposal_summary = manifest.get("proposal_summary", {})
+        if not isinstance(proposal_summary, dict):
+            proposal_summary = {}
+        source_total = int(proposal_summary.get("source_total", 0) or 0)
+        skipped_duplicate_filenames = int(proposal_summary.get("skipped_duplicate_filenames", 0) or 0)
+        skipped_duplicate_approved = int(proposal_summary.get("skipped_duplicate_approved_filenames", 0) or 0)
+        project_overlap_filenames = int(proposal_summary.get("project_overlap_filenames", 0) or 0)
+        current_iteration_package_count = int(proposal_summary.get("current_iteration_package_count", selected_count) or selected_count)
+        new_to_project_count = int(
+            proposal_summary.get(
+                "new_to_project_count",
+                (
+                    current_iteration_package_count
+                    if manifest_mode in {"planned", "manual", "existing"}
+                    else max(0, current_iteration_package_count - project_overlap_filenames)
+                ),
+            ) or 0
+        )
+        project_pool_total_before = int(proposal_summary.get("project_pool_total_before_iteration", 0) or 0)
+        project_pool_total_after = int(proposal_summary.get("project_pool_total_after_iteration", 0) or 0)
+        approved_images_before = int(proposal_summary.get("approved_images_before_iteration", 0) or 0)
+        approved_plates_before = int(proposal_summary.get("approved_plates_before_iteration", 0) or 0)
+
+        source_iteration = int(proposal_summary.get("source_iteration", 0) or 0)
+        source_kind = str(proposal_summary.get("source_kind", "") or "").strip().lower()
+
+        if source_iteration <= 0:
+            source_dir = str(manifest.get("source_dir", "") or "").strip()
+            for raw_part in reversed(str(source_dir).replace("\\", "/").split("/")):
+                lowered = str(raw_part).strip().lower()
+                if lowered.startswith("iteracja_"):
+                    try:
+                        source_iteration = int(str(raw_part).split("_", 1)[1])
+                    except Exception:
+                        source_iteration = 0
+                    break
+
+        source_label = f"Iteracja_{source_iteration:03d}" if source_iteration > 0 else ""
+
+        approved_stats = {}
+        try:
+            approved_stats = CAMPAIGN.get_plate_approved_set_stats() or {}
+        except Exception:
+            approved_stats = {}
+        if approved_images_before <= 0:
+            approved_images_before = int(approved_stats.get("images", 0) or 0)
+        if approved_plates_before <= 0:
+            approved_plates_before = int(approved_stats.get("plates", 0) or 0)
+        if project_pool_total_before <= 0:
+            project_pool_total_before = approved_images_before
+        if project_pool_total_after <= 0:
+            project_pool_total_after = max(project_pool_total_before, approved_images_before) + new_to_project_count
+
+        if manifest_mode == "stage_reuse":
+            if source_label:
+                source_summary = f"Stage po {source_label}"
+            else:
+                source_summary = "Stage po poprzedniej iteracji"
+        elif manifest_mode == "pool_reuse":
+            source_summary = "Ta sama pula projektu"
+        elif manifest_mode == "iteration_reuse":
+            source_summary = "Ten sam zestaw zdjęć co poprzednio"
+        elif manifest_mode == "planned":
+            source_summary = "Wybrana paczka z głównej puli projektu"
+        elif manifest_mode == "manual":
+            source_summary = "Ręcznie wskazana paczka wejściowa"
+        elif manifest_mode == "existing":
+            source_summary = "Gotowy katalog bieżącej iteracji"
+        else:
+            source_summary = "Źródło paczki nie jest jeszcze znane"
+
+        return {
+            "iteration": iter_num,
+            "selection_mode": manifest_mode,
+            "selected_count": selected_count,
+            "source_kind": source_kind,
+            "source_iteration": source_iteration,
+            "source_label": source_label,
+            "source_summary": source_summary,
+            "source_total": source_total,
+            "skipped_duplicate_filenames": skipped_duplicate_filenames,
+            "skipped_duplicate_approved": skipped_duplicate_approved,
+            "project_overlap_filenames": project_overlap_filenames,
+            "project_pool_total": int(project_pool_total_after or 0),
+            "project_pool_total_before": int(project_pool_total_before or 0),
+            "project_pool_total_after": int(project_pool_total_after or 0),
+            "current_iteration_package_count": int(current_iteration_package_count or selected_count or 0),
+            "new_to_project_count": int(new_to_project_count or 0),
+            "approved_images": approved_images_before,
+            "approved_plates": approved_plates_before,
+        }
+
     def _build_step1_summary_payload(self) -> dict:
         if not CAMPAIGN.get_active_project_name():
             return {}
 
-        manifest = CAMPAIGN.load_ingest_manifest()
+        manifest = self._load_ingest_manifest_cached()
         if not isinstance(manifest, dict) or not manifest:
             raw_dir = CAMPAIGN.get_dir("raw")
             if raw_dir is None:
@@ -4129,114 +4742,60 @@ class CampaignTab:
         target_dir = str(manifest.get("target_dir", "") or "").strip()
         if selected_count <= 0 and not target_dir:
             return {}
-        effective_breakdown = self._get_effective_iteration_package_breakdown(manifest)
-        effective_total = int(effective_breakdown.get("effective_total", selected_count) or selected_count)
-        manual_reuse_count = int(effective_breakdown.get("manual_reuse_count", 0) or 0)
-        base_count = int(effective_breakdown.get("base_count", selected_count) or selected_count)
-        source_label = str(effective_breakdown.get("source_label") or "").strip()
+        step1_context = self._get_step1_manifest_context(manifest)
+        package_count = int(
+            step1_context.get("current_iteration_package_count", 0)
+            or self._get_iteration_image_count()
+            or selected_count
+            or 0
+        )
+        source_total = int(step1_context.get("source_total", 0) or 0)
+        duplicate_count = int(step1_context.get("skipped_duplicate_filenames", 0) or 0)
+        project_pool_total = int(step1_context.get("project_pool_total_after", step1_context.get("project_pool_total", 0)) or 0)
+        approved_images = int(step1_context.get("approved_images", 0) or 0)
+        new_to_project_count = int(step1_context.get("new_to_project_count", 0) or 0)
+        source_summary = str(step1_context.get("source_summary", "") or "").strip()
+        source_label = str(step1_context.get("source_label", "") or "").strip()
+        if source_label and str(step1_context.get("selection_mode", "") or "").strip().lower() == "stage_reuse":
+            source_summary = f"{source_summary} ({source_label})"
 
-        selection_mode = self._format_step1_selection_mode_label(manifest.get("selection_mode", "manual"))
         manifest_mode = str(manifest.get("selection_mode", "") or "").strip().lower()
-        if manifest_mode == "stage_reuse" and manual_reuse_count > 0:
-            selection_mode = self._format_effective_stage_reuse_label(base_count, manual_reuse_count)
-        source_dir_text = self._format_campaign_summary_path(manifest.get("source_dir", ""), max_len=84)
-        target_dir_text = self._format_campaign_summary_path(target_dir, max_len=84)
-
-        extra_resources = []
-        try:
-            plate_ready_source = self._get_plate_route_ready_source() or {}
-        except Exception:
-            plate_ready_source = {}
-        try:
-            plate_run_name = Path(str(plate_ready_source.get("restore_run_dir") or "")).name if plate_ready_source else ""
-        except Exception:
-            plate_run_name = ""
-
-        plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
-        char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
         current_iteration = int(manifest.get("iteration", CAMPAIGN.get_current_iteration_num()) or CAMPAIGN.get_current_iteration_num())
-        if plate_ready_source:
-            extra_resources.append(
-                f"Importuj anotacje tablic ({plate_run_name})"
-                if plate_run_name
-                else "Importuj anotacje tablic"
-            )
-        if plate_model_path and Path(plate_model_path).exists():
-            extra_resources.append(
-                f"Model tablic (odziedziczony: {Path(plate_model_path).name})"
-                if current_iteration > 1
-                else f"Model tablic ({Path(plate_model_path).name})"
-            )
-        if char_model_path and Path(char_model_path).exists():
-            extra_resources.append(
-                f"Model znaków (odziedziczony: {Path(char_model_path).name})"
-                if current_iteration > 1
-                else f"Model znaków ({Path(char_model_path).name})"
-            )
-        extra_resources_text = ", ".join(extra_resources) if extra_resources else "Nie dołączono dodatkowych zasobów"
-        is_iteration_reuse = manifest_mode in {"iteration_reuse", "pool_reuse", "stage_reuse"}
-
-        created_display = str(manifest.get("created_at", "") or "").replace("T", " ").strip() or "brak daty"
-        formatter = getattr(self.app, "_format_project_created_at", None)
-        if callable(formatter) and manifest.get("created_at"):
-            try:
-                created_display = formatter(str(manifest.get("created_at") or ""))
-            except Exception:
-                pass
+        total_pool_images = max(int(project_pool_total or 0), int(package_count or 0))
+        previous_approved_images = max(0, int(approved_images or 0))
+        current_iteration_package = int(package_count or 0)
 
         rows = [
-            ("Iteracja", f"Iteracja {int(manifest.get('iteration', CAMPAIGN.get_current_iteration_num()) or CAMPAIGN.get_current_iteration_num()):03d}"),
-            ("Tryb wejścia", selection_mode),
-            ("Skąd są zdjęcia", source_dir_text),
             (
-                "Liczba zdjęć",
+                "Łączna pula obrazów projektu",
                 (
-                    f"{effective_total} (stage: {base_count} + ręczne korekty: {manual_reuse_count})"
-                    if manual_reuse_count > 0
-                    else f"{selected_count}"
+                    f"{total_pool_images} zdjęć = "
+                    f"{previous_approved_images} zatwierdzonych do treningu YOLO + "
+                    f"{current_iteration_package} do oznaczenia"
                 ),
             ),
+            ("Zatwierdzone w poprzednich iteracjach do treningu YOLO", f"{previous_approved_images} zdjęć"),
+            ("Do oznaczenia w bieżącej iteracji", f"{current_iteration_package} zdjęć"),
         ]
 
-        if current_iteration > 1:
-            rows.extend(
-                [
-                    ("Model tablic projektu", Path(plate_model_path).name if plate_model_path and Path(plate_model_path).exists() else "brak"),
-                    ("Model znaków projektu", Path(char_model_path).name if char_model_path and Path(char_model_path).exists() else "brak"),
-                    ("Run tablic", plate_run_name or "brak"),
-                ]
-            )
+        if manifest_mode == "stage_reuse" and current_iteration > 1:
+            meta_text = f"Do bieżącej iteracji przejęto {current_iteration_package} zdjęć ze stage po poprzedniej iteracji."
+        elif manifest_mode == "pool_reuse" and current_iteration > 1:
+            meta_text = f"Do bieżącej iteracji przygotowano {current_iteration_package} zdjęć z tej samej puli projektu."
+        elif source_total > 0:
+            meta_parts = [f"Wybrana paczka źródłowa zawiera {source_total} zdjęć."]
+            if new_to_project_count > 0:
+                meta_parts.append(f"Do projektu dopisano {new_to_project_count} nowych.")
+            meta_parts.append(f"W tej iteracji pracujesz na {current_iteration_package} zdjęciach.")
+            if duplicate_count > 0:
+                meta_parts.append(f"{duplicate_count} było już zatwierdzonych do treningu YOLO.")
+            meta_text = " ".join(meta_parts).strip()
         else:
-            rows.append(("Jakie dodatkowe zasoby dołączono", extra_resources_text))
-
-        rows.extend(
-            [
-                ("Gdzie zapisano paczkę", target_dir_text),
-                ("Kiedy zatwierdzono E1", created_display),
-            ]
-        )
+            meta_text = f"W tej iteracji pracujesz na {current_iteration_package} zdjęciach."
 
         return {
             "title": "Co wybrano w E1",
-            "meta": (
-                (
-                    (
-                        f"{effective_total} zdjęć gotowych do pracy nad tą samą paczką "
-                        f"(stage: {base_count} + ręczne korekty: {manual_reuse_count})"
-                        if manual_reuse_count > 0
-                        else f"{selected_count} zdjęć przygotowanych z tej samej puli dla tej iteracji"
-                    )
-                    if manifest_mode == "pool_reuse" and current_iteration > 1
-                    else (
-                        f"{effective_total} zdjęć gotowych do pracy nad tą samą paczką "
-                        f"(stage: {base_count} + ręczne korekty: {manual_reuse_count})"
-                        if manifest_mode == "stage_reuse" and manual_reuse_count > 0
-                        else f"{selected_count} odziedziczonych zdjęć gotowych do tej iteracji"
-                    )
-                )
-                if is_iteration_reuse and current_iteration > 1
-                else f"{selected_count} zdjęć gotowych do tej iteracji"
-            ),
+            "meta": meta_text,
             "rows": rows,
         }
 
@@ -4245,14 +4804,15 @@ class CampaignTab:
             return
 
         payload = {}
+        state_key = str(getattr(status, "state", "") or "").strip().lower()
         if (
             str(getattr(status, "key", "") or "").strip() == "step1"
-            and str(getattr(status, "state", "") or "").strip().lower() in {"done", "needs_attention"}
+            and state_key in {"done", "needs_attention"}
         ):
             payload = self._build_step1_summary_payload()
 
         rows = list(payload.get("rows", []) or [])
-        visible = bool(rows)
+        visible = bool(rows) and (bool(getattr(status, "is_current", False)) or state_key == "needs_attention")
         card["curtain_visible"] = visible
 
         shell = card.get("curtain_shell")
@@ -4443,10 +5003,29 @@ class CampaignTab:
         fg = palette.get("fg", "#f3f3f3")
         muted = palette.get("muted", "#c7c7c7")
         muted_dim = palette.get("muted_dim", "#9a9a9a")
-        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        accent = palette.get("accent", "#2980b9")
-        success = palette.get("success", "#27ae60")
-        warning = palette.get("warning", "#d35400")
+        border = blend_hex_colors(
+            palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            panel_bg,
+            0.28,
+        )
+        accent = blend_hex_colors(
+            palette.get("accent", "#2980b9"),
+            palette.get("surface_info", "#213a4d"),
+            0.24,
+        )
+        success = blend_hex_colors(
+            palette.get("success", "#27ae60"),
+            palette.get("accent", "#2980b9"),
+            0.48,
+        )
+        warning = blend_hex_colors(
+            palette.get("warning", "#d7ba7d"),
+            palette.get("accent", "#2980b9"),
+            0.12,
+        )
+        ready_outline = blend_hex_colors(accent, panel_alt, 0.18)
+        halo_outline = blend_hex_colors(accent, success, 0.22)
+        soft_label = blend_hex_colors(muted, panel_bg, 0.18)
         accent_text = palette.get("accent_text", "#ffffff")
 
         canvas.delete("all")
@@ -4459,12 +5038,12 @@ class CampaignTab:
             ]
 
         width = max(int(canvas.winfo_width() or 720), 360)
-        height = max(int(canvas.winfo_height() or 112), 112)
-        line_y = 44
-        circle_r = 15
-        halo_r = 21
-        top_y = 5
-        label_y = 84
+        height = max(int(canvas.winfo_height() or 84), 84)
+        line_y = 31
+        circle_r = 12
+        halo_r = 17
+        top_y = 0
+        label_y = 58
         label_map = {
             "step1": "Wejście",
             "step2": "Tor",
@@ -4472,11 +5051,11 @@ class CampaignTab:
             "step4": "Trening",
         }
 
-        usable_left = 58
-        usable_right = width - 58
+        usable_left = 46
+        usable_right = width - 46
         if usable_right <= usable_left:
-            usable_left = 32
-            usable_right = width - 32
+            usable_left = 28
+            usable_right = width - 28
         count = max(len(statuses), 2)
         step_gap = (usable_right - usable_left) / max(count - 1, 1)
         positions = [usable_left + idx * step_gap for idx in range(len(statuses))]
@@ -4514,10 +5093,10 @@ class CampaignTab:
                     "dash": None,
                 }
             if state_key == "ready":
-                return {"fill": panel_bg, "outline": accent, "text": accent, "label": accent, "dash": None}
+                return {"fill": panel_bg, "outline": ready_outline, "text": accent, "label": accent, "dash": None}
             if state_key == "skipped":
                 return {"fill": panel_bg, "outline": muted_dim, "text": muted_dim, "label": muted_dim, "dash": (3, 2)}
-            return {"fill": panel_bg, "outline": border, "text": muted, "label": muted, "dash": None}
+            return {"fill": panel_bg, "outline": border, "text": soft_label, "label": soft_label, "dash": None}
 
         if PIL_AVAILABLE and Image is not None and ImageTk is not None and ImageDraw is not None and ImageFont is not None:
             scale = 4
@@ -4525,10 +5104,10 @@ class CampaignTab:
             hi_h = max(height * scale, 4)
             image = Image.new("RGBA", (hi_w, hi_h), self._hex_to_rgba(panel_bg))
             draw = ImageDraw.Draw(image, "RGBA")
-            font_marker = self._get_pil_font(12 * scale, bold=False)
-            font_step = self._get_pil_font(11 * scale, bold=True)
-            font_label = self._get_pil_font(12 * scale, bold=False)
-            font_skipped = self._get_pil_font(11 * scale, bold=False)
+            font_marker = self._get_pil_font(10 * scale, bold=False)
+            font_step = self._get_pil_font(10 * scale, bold=True)
+            font_label = self._get_pil_font(10 * scale, bold=False)
+            font_skipped = self._get_pil_font(9 * scale, bold=False)
 
             def s(value: float) -> int:
                 return int(round(float(value) * scale))
@@ -4571,8 +5150,8 @@ class CampaignTab:
                 text_pos = (marker_x - text_w // 2, marker_y)
                 draw.text(text_pos, marker_text, font=font_marker, fill=self._hex_to_rgba(current_style["outline"]))
                 marker_bbox = (text_pos[0], text_pos[1], text_pos[0] + text_w, text_pos[1] + text_h)
-                marker_line_top = marker_bbox[3] + (3 * scale)
-                marker_line_bottom = s(line_y - halo_r - 2)
+                marker_line_top = marker_bbox[3] + (6 * scale)
+                marker_line_bottom = s(line_y - halo_r - 4)
                 if marker_line_bottom > marker_line_top:
                     draw.line(
                         [(marker_x, marker_line_top), (marker_x, marker_line_bottom)],
@@ -4606,7 +5185,7 @@ class CampaignTab:
                 if highlighted:
                     draw.ellipse(
                         [s(x - halo_r), s(line_y - halo_r), s(x + halo_r), s(line_y + halo_r)],
-                        outline=self._hex_to_rgba(style["outline"]),
+                        outline=self._hex_to_rgba(halo_outline if str(getattr(status, "state", "") or "").strip().lower() in {"in_progress", "ready"} else style["outline"]),
                         width=max(2, s(2)),
                     )
 
@@ -4633,7 +5212,7 @@ class CampaignTab:
                 )
 
                 label_text_local = label_map.get(getattr(status, "key", ""), f"E{idx + 1}")
-                label_color = style["label"] if highlighted or str(getattr(status, "state", "") or "").strip().lower() in {"done", "in_progress", "needs_attention"} else muted
+                label_color = style["label"] if highlighted or str(getattr(status, "state", "") or "").strip().lower() in {"done", "in_progress", "needs_attention"} else soft_label
                 try:
                     bbox = draw.textbbox((0, 0), label_text_local, font=font_label)
                     label_w = max(1, bbox[2] - bbox[0])
@@ -4697,8 +5276,8 @@ class CampaignTab:
             except Exception:
                 marker_bbox = None
 
-            marker_line_top = (marker_bbox[3] + 3) if marker_bbox else (top_y + 12)
-            marker_line_bottom = line_y - halo_r - 2
+            marker_line_top = (marker_bbox[3] + 6) if marker_bbox else (top_y + 14)
+            marker_line_bottom = line_y - halo_r - 4
             if marker_line_bottom > marker_line_top:
                 canvas.create_line(
                     positions[current_index],
@@ -4734,7 +5313,7 @@ class CampaignTab:
                     line_y - halo_r,
                     x + halo_r,
                     line_y + halo_r,
-                    outline=style["outline"],
+                    outline=(halo_outline if str(getattr(status, "state", "") or "").strip().lower() in {"in_progress", "ready"} else style["outline"]),
                     width=2,
                 )
 
@@ -4761,7 +5340,7 @@ class CampaignTab:
                 x,
                 label_y,
                 text=label_map.get(getattr(status, "key", ""), f"E{idx + 1}"),
-                fill=(style["label"] if highlighted or str(getattr(status, "state", "") or "").strip().lower() in {"done", "in_progress", "needs_attention"} else muted),
+                fill=(style["label"] if highlighted or str(getattr(status, "state", "") or "").strip().lower() in {"done", "in_progress", "needs_attention"} else soft_label),
                 font=("Segoe UI", 11, ("bold" if highlighted else "normal")),
             )
 
@@ -4943,7 +5522,13 @@ class CampaignTab:
 
         return card
 
-    def _get_wizard_stage_state_style(self, state: str, *, is_current: bool = False) -> dict:
+    def _is_wizard_stage_emphasized(self, status: WizardStageStatus) -> bool:
+        state_key = str(getattr(status, "state", "") or "").strip().lower()
+        if bool(getattr(status, "is_current", False)):
+            return True
+        return state_key in {"in_progress", "needs_attention"}
+
+    def _get_wizard_stage_state_style(self, state: str, *, is_current: bool = False, emphasized: bool = True) -> dict:
         palette = getattr(self.app, "palette", {})
         state_key = str(state or "").strip().lower()
         style_map = {
@@ -4954,6 +5539,7 @@ class CampaignTab:
                 "badge_fg": palette.get("muted", "#c7c7c7"),
                 "title_fg": palette.get("muted", "#c7c7c7"),
                 "summary_fg": palette.get("muted", "#c7c7c7"),
+                "details_fg": palette.get("muted_dim", "#9a9a9a"),
             },
             "ready": {
                 "label": "GOTOWE",
@@ -4962,6 +5548,7 @@ class CampaignTab:
                 "badge_fg": palette.get("accent", "#2980b9"),
                 "title_fg": palette.get("fg", "#f3f3f3"),
                 "summary_fg": palette.get("fg", "#f3f3f3"),
+                "details_fg": palette.get("muted", "#c7c7c7"),
             },
             "in_progress": {
                 "label": "W TOKU",
@@ -4970,6 +5557,7 @@ class CampaignTab:
                 "badge_fg": palette.get("accent", "#2980b9"),
                 "title_fg": palette.get("fg", "#f3f3f3"),
                 "summary_fg": palette.get("fg", "#f3f3f3"),
+                "details_fg": palette.get("muted", "#c7c7c7"),
             },
             "needs_attention": {
                 "label": "UWAGA",
@@ -4978,14 +5566,24 @@ class CampaignTab:
                 "badge_fg": palette.get("warning", "#d35400"),
                 "title_fg": palette.get("fg", "#f3f3f3"),
                 "summary_fg": palette.get("fg", "#f3f3f3"),
+                "details_fg": palette.get("muted", "#c7c7c7"),
             },
             "done": {
                 "label": "GOTOWE",
-                "border": palette.get("success", "#27ae60"),
-                "badge_bg": palette.get("surface_success", palette.get("panel_alt", "#1f3320")),
+                "border": blend_hex_colors(
+                    palette.get("success", "#27ae60"),
+                    palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    0.78,
+                ),
+                "badge_bg": blend_hex_colors(
+                    palette.get("surface_success", palette.get("panel_alt", "#1f3320")),
+                    palette.get("panel_alt", "#2f3136"),
+                    0.42,
+                ),
                 "badge_fg": palette.get("success", "#27ae60"),
                 "title_fg": palette.get("fg", "#f3f3f3"),
                 "summary_fg": palette.get("fg", "#f3f3f3"),
+                "details_fg": palette.get("muted", "#c7c7c7"),
             },
             "skipped": {
                 "label": "POMINIETE",
@@ -4994,11 +5592,21 @@ class CampaignTab:
                 "badge_fg": palette.get("muted_dim", "#9a9a9a"),
                 "title_fg": palette.get("muted", "#c7c7c7"),
                 "summary_fg": palette.get("muted", "#c7c7c7"),
+                "details_fg": palette.get("muted_dim", "#9a9a9a"),
             },
         }
         base = dict(style_map.get(state_key, style_map["locked"]))
         if is_current and state_key in {"ready", "in_progress", "needs_attention"}:
             base["border"] = palette.get("accent", "#2980b9")
+        if not emphasized:
+            panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+            panel_alt = palette.get("panel_alt", "#2f3136")
+            base["border"] = blend_hex_colors(base.get("border", panel_border), panel_border, 0.82)
+            base["badge_bg"] = blend_hex_colors(base.get("badge_bg", panel_alt), panel_alt, 0.42)
+            base["badge_fg"] = palette.get("muted_dim", "#9a9a9a")
+            base["title_fg"] = palette.get("muted", "#c7c7c7")
+            base["summary_fg"] = palette.get("muted_dim", "#9a9a9a")
+            base["details_fg"] = palette.get("muted_dim", "#9a9a9a")
         return base
 
     def _configure_wizard_stage_button(self, button, label: str, command, *, side=tk.LEFT, padx=(0, 0), debug_id: str = ""):
@@ -5030,7 +5638,8 @@ class CampaignTab:
 
         palette = getattr(self.app, "palette", {})
         card_bg = palette.get("panel", "#252526")
-        style = self._get_wizard_stage_state_style(status.state, is_current=status.is_current)
+        emphasized = self._is_wizard_stage_emphasized(status)
+        style = self._get_wizard_stage_state_style(status.state, is_current=status.is_current, emphasized=emphasized)
 
         try:
             card["shell"].config(bg=style["border"])
@@ -5046,7 +5655,7 @@ class CampaignTab:
 
         details_text = str(status.details or "").strip()
         try:
-            card["details"].config(text=details_text, bg=card_bg, fg=palette.get("muted", "#c7c7c7"))
+            card["details"].config(text=details_text, bg=card_bg, fg=style.get("details_fg", palette.get("muted", "#c7c7c7")))
         except Exception:
             pass
         self._set_pack_visibility(
@@ -5110,7 +5719,7 @@ class CampaignTab:
         palette = getattr(self.app, "palette", {})
         panel_bg = palette.get("panel", "#252526")
         try:
-            return blend_hex_colors(bg, panel_bg, 0.58)
+            return blend_hex_colors(bg, panel_bg, 0.74)
         except Exception:
             return str(bg or panel_bg)
 
@@ -5161,6 +5770,324 @@ class CampaignTab:
         self._set_pack_visibility(self.wizard_stage_cards_host, False)
         self._refresh_wizard_stage_metro([])
         return
+
+    def _build_active_project_dashboard_state(self) -> dict:
+        state_started = perf_counter()
+        active_proj = str(CAMPAIGN.get_active_project_name() or "").strip()
+        if not active_proj:
+            return {}
+
+        curr_step = int(CAMPAIGN.get_current_step() or 1)
+        step1_status = str(CAMPAIGN.get_step1_status() or "").strip().lower() or "pending"
+        step2_status = str(CAMPAIGN.get_step2_status() or "").strip().lower() or "pending"
+        step3_status = str(CAMPAIGN.get_step3_status() or "").strip().lower() or "pending"
+        iteration_target = self._get_iteration_target()
+        has_saved_step3_progress = self._has_saved_step3_progress()
+        project_status = str(CAMPAIGN.get_project_status() or "active").strip().lower() or "active"
+        project_paused_at = CAMPAIGN.get_project_paused_at()
+        project_completed_at = CAMPAIGN.get_project_completed_at()
+
+        step1_approved = step1_status == "approved"
+        if curr_step >= 2 and not step1_approved and self._get_iteration_image_count() > 0:
+            CAMPAIGN.approve_step1()
+            step1_status = "approved"
+            step1_approved = True
+
+        default_iteration_target = self._get_default_step2_iteration_target(
+            current_step=curr_step,
+            step1_status=step1_status,
+            step2_status=step2_status,
+            step3_status=step3_status,
+            iteration_target=iteration_target,
+        )
+        if default_iteration_target in {"plate", "char"} and default_iteration_target != iteration_target:
+            CAMPAIGN.set_iteration_target(default_iteration_target)
+            iteration_target = default_iteration_target
+
+        if (
+            curr_step <= 2
+            and step2_status == "pending"
+            and step3_status == "pending"
+            and not iteration_target
+            and has_saved_step3_progress
+        ):
+            try:
+                CAMPAIGN.reset_step3()
+                has_saved_step3_progress = False
+            except Exception as e:
+                logger.debug(f"Nie udało się wyczyscic przestarzalego stanu Z3 przy starcie iteracji: {e}")
+
+        if not iteration_target and (curr_step >= 3 or step3_status != "pending" or has_saved_step3_progress):
+            CAMPAIGN.set_iteration_target("char")
+            iteration_target = "char"
+
+        if iteration_target == "char" and curr_step < 3 and step2_status == "approved" and has_saved_step3_progress:
+            if step2_status != "approved":
+                CAMPAIGN.approve_step2()
+                step2_status = "approved"
+            CAMPAIGN.set_current_step(3)
+            curr_step = 3
+
+        if iteration_target == "plate" and curr_step == 3 and step2_status == "approved":
+            CAMPAIGN.set_current_step(4)
+            curr_step = 4
+
+        self._log_perf(
+            "build_active_dashboard_state",
+            state_started,
+            threshold_ms=20.0,
+            extra=f"step={curr_step}, target={iteration_target or '-'}",
+        )
+        return {
+            "active_project": active_proj,
+            "current_step": int(curr_step),
+            "step1_status": step1_status,
+            "step2_status": step2_status,
+            "step3_status": step3_status,
+            "iteration_target": iteration_target,
+            "project_status": project_status,
+            "project_paused_at": project_paused_at,
+            "project_completed_at": project_completed_at,
+        }
+
+    def _refresh_active_project_wizard_only(self) -> None:
+        refresh_started = perf_counter()
+        self._clear_dashboard_perf_cache()
+        active_state = self._build_active_project_dashboard_state()
+        active_project = str(active_state.get("active_project") or "").strip()
+        if not active_project:
+            self._refresh_dashboard()
+            return
+
+        try:
+            self._ensure_roadmap_ui_ready()
+        except Exception:
+            pass
+
+        palette = getattr(self.app, "palette", {})
+        header_bg = palette.get("panel", "#252526")
+        accent = palette.get("accent", "#2980b9")
+        success = palette.get("success", "#27ae60")
+        warning = palette.get("warning", "#d35400")
+        surface_info = palette.get("surface_info", palette.get("panel_alt", "#252526"))
+        surface_success = palette.get("surface_success", palette.get("panel_alt", "#1f3320"))
+        surface_warning = palette.get("surface_warning", palette.get("panel_alt", "#3a2323"))
+
+        curr_step = int(active_state.get("current_step", 1) or 1)
+        step1_status = str(active_state.get("step1_status", "pending") or "pending")
+        step2_status = str(active_state.get("step2_status", "pending") or "pending")
+        step3_status = str(active_state.get("step3_status", "pending") or "pending")
+        iteration_target = str(active_state.get("iteration_target", "") or "").strip().lower()
+        project_status = str(active_state.get("project_status", "active") or "active").strip().lower()
+        project_paused_at = str(active_state.get("project_paused_at", "") or "").strip()
+        project_completed_at = str(active_state.get("project_completed_at", "") or "").strip()
+        project_paused = project_status == "paused"
+        project_completed = project_status == "completed"
+        iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+
+        banner_text = f"Projekt: {active_project}"
+        banner_fg = success
+        banner_bg = surface_success
+        if project_completed:
+            completed_display = self._format_project_status_timestamp(project_completed_at)
+            banner_text = f"Projekt: {active_project}  |  Zakończony: {completed_display}"
+            banner_fg = warning
+            banner_bg = surface_warning
+        elif project_paused:
+            paused_display = self._format_project_status_timestamp(project_paused_at)
+            banner_text = f"Projekt: {active_project}  |  Odłożony: {paused_display}"
+            banner_fg = accent
+            banner_bg = surface_info
+
+        self.lbl_iter.config(text=f"Iteracja: {iter_num}", fg=warning, bg=header_bg)
+        self._configure_campaign_banner(text=banner_text, fg=banner_fg, bg=banner_bg)
+        self._set_icon_button_enabled("exit_project", True)
+        self._refresh_wizard_active_dashboard(
+            active_project=active_project,
+            current_step=curr_step,
+            iteration_target=iteration_target,
+            project_status=project_status,
+            project_paused_at=project_paused_at,
+            project_completed_at=project_completed_at,
+            step1_status=step1_status,
+            step2_status=step2_status,
+            step3_status=step3_status,
+        )
+        self._update_main_tabs_highlight(curr_step=curr_step, has_project=True)
+        self.app.update_campaign_tab_access()
+        self.frame.update_idletasks()
+        self.frame.after_idle(self._sync_right_panel_scrollregion)
+        self._log_perf(
+            "refresh_active_project_wizard_only",
+            refresh_started,
+            threshold_ms=20.0,
+            extra=f"step={curr_step}, target={iteration_target or '-'}",
+        )
+
+    def _cancel_deferred_project_open_tasks(self) -> None:
+        for attr_name in ("_project_open_refresh_after_id", "_project_open_context_after_id"):
+            pending = getattr(self, attr_name, None)
+            if not pending:
+                continue
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+            setattr(self, attr_name, None)
+
+    def _build_project_loading_stage_statuses(
+        self,
+        *,
+        active_project: str,
+        current_step: int,
+        iteration_target: str,
+    ) -> list[WizardStageStatus]:
+        iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        target_label = self._iteration_target_label(iteration_target) if iteration_target else "tor iteracji jest ustalany"
+        clamped_step = min(max(int(current_step or 1), 1), 4)
+
+        statuses = [
+            WizardStageStatus(
+                key="project",
+                title=f"Projekt {active_project}",
+                state="in_progress",
+                summary=f"Iteracja {iter_num}. Trwa otwieranie projektu.",
+                details=f"Ładuję stan projektu, modeli i etapów. Kontekst: {target_label}.",
+                is_current=True,
+            ),
+        ]
+
+        stage_specs = (
+            ("step1", "E1. Paczka wejściowa iteracji"),
+            ("step2", "E2. Tor iteracji i przygotowanie Z2"),
+            ("step3", "E3. Znaki i gold pack"),
+            ("step4", "E4. Dataset i trening"),
+        )
+
+        for idx, (key, title) in enumerate(stage_specs, start=1):
+            if idx < clamped_step:
+                state = "ready"
+                summary = "Odtwarzam zapisany stan etapu."
+            elif idx == clamped_step:
+                state = "in_progress"
+                summary = "Ładuję bieżący stan etapu."
+            else:
+                state = "locked"
+                summary = "Stan etapu zostanie odczytany za chwilę."
+
+            statuses.append(
+                WizardStageStatus(
+                    key=key,
+                    title=title,
+                    state=state,
+                    summary=summary,
+                    details="To chwilowy stan podczas otwierania projektu.",
+                    body_mode="",
+                    body_visible=False,
+                    is_current=bool(idx == clamped_step),
+                )
+            )
+
+        return statuses
+
+    def _show_project_loading_dashboard(self, active_project: str) -> None:
+        if not active_project:
+            return
+
+        palette = getattr(self.app, "palette", {})
+        header_bg = palette.get("panel", "#252526")
+        info_fg = palette.get("accent", "#2980b9")
+        info_bg = palette.get("surface_info", palette.get("panel_alt", "#252526"))
+        muted = palette.get("muted", "#c7c7c7")
+        muted_dim = palette.get("muted_dim", "#9a9a9a")
+
+        current_step = int(CAMPAIGN.get_current_step() or 1)
+        iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+        iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+
+        try:
+            self._refresh_projects_list()
+        except Exception:
+            pass
+
+        try:
+            self._collapse_all_wizard_stage_curtains()
+        except Exception:
+            pass
+
+        try:
+            self.lbl_iter.config(text=f"Iteracja: {iter_num}", fg=info_fg, bg=header_bg)
+            self._configure_campaign_banner(
+                text=f"Projekt: {active_project}  |  Ładowanie kontekstu kampanii...",
+                fg=info_fg,
+                bg=info_bg,
+            )
+            self._set_icon_button_enabled("exit_project", True)
+        except Exception:
+            pass
+
+        for mt in ["vehicle", "plate", "char"]:
+            try:
+                getattr(self, f"lbl_model_{mt}").config(text="Ładowanie...", fg=muted)
+            except Exception:
+                pass
+            try:
+                lbl_meta = getattr(self, f"lbl_model_{mt}_meta", None)
+                if lbl_meta is not None:
+                    lbl_meta.config(text="Utworzono: -", fg=muted_dim)
+            except Exception:
+                pass
+            try:
+                btn_model = getattr(self, f"btn_model_{mt}", None)
+                if btn_model is not None:
+                    btn_model.config(state="disabled")
+            except Exception:
+                pass
+
+        try:
+            self.btn_open_proj.config(state="normal")
+            self.btn_del_proj.config(state="normal")
+            self.btn_exit_project.config(state="normal")
+            self.btn_complete_project.config(text="Ładowanie...", state="disabled", style="TButton")
+        except Exception:
+            pass
+
+        try:
+            self._set_pack_visibility(self.wizard_empty_state_card.get("shell"), False)
+            self._set_pack_visibility(self.wizard_stage_cards_host, True, fill=tk.X)
+            self.wizard_header_title_lbl.config(text=f"Projekt: {active_project}")
+            self.wizard_header_summary_lbl.config(
+                text=(
+                    f"Iteracja {iter_num}. Trwa odczyt stanu kampanii. "
+                    "Za chwilę pojawi się pełny status E1-E4."
+                )
+            )
+        except Exception:
+            pass
+
+        statuses = self._build_project_loading_stage_statuses(
+            active_project=active_project,
+            current_step=current_step,
+            iteration_target=iteration_target,
+        )
+        try:
+            self._refresh_wizard_stage_metro(statuses)
+            for status in statuses:
+                card = self.wizard_stage_cards.get(status.key)
+                if card is not None:
+                    self._apply_wizard_stage_status(card, status)
+        except Exception:
+            pass
+
+        try:
+            self._update_main_tabs_highlight(curr_step=current_step, has_project=True)
+        except Exception:
+            pass
+
+        try:
+            self.frame.update_idletasks()
+        except Exception:
+            pass
 
     def _refresh_wizard_active_dashboard(
         self,
@@ -5328,12 +6255,28 @@ class CampaignTab:
             and (current_step >= 4 or str(step2_status or "").strip().lower() == "approved")
             and not bool(plate_step4_gate.get("ok", True))
         )
+        plate_step4_reason = str(plate_step4_gate.get("reason") or "").strip().lower()
         char_step4_blocked = bool(
             iteration_target == "char"
             and (current_step >= 4 or str(step3_status or "").strip().lower() == "approved")
             and not bool(char_step4_gate.get("ok", True))
         )
         step4_gate_blocked = bool(plate_step4_blocked or char_step4_blocked)
+        step4_finish_state = {}
+        try:
+            step4_finish_state = CAMPAIGN.get_step4_finish_state() or {}
+        except Exception:
+            step4_finish_state = {}
+        step4_finish_ready = bool(step4_finish_state.get("ready", False))
+        step4_finish_target = self._normalize_iteration_target(step4_finish_state.get("target", ""))
+        if not step4_finish_target:
+            step4_finish_target = iteration_target
+        step4_can_advance = bool(
+            current_step == 4
+            and not step4_gate_blocked
+            and step4_finish_ready
+            and step4_finish_target == iteration_target
+        )
 
         project_summary = (
             f"Iteracja {iter_num}. {target_label.capitalize()}."
@@ -5374,48 +6317,56 @@ class CampaignTab:
             )
         )
 
-        manifest = CAMPAIGN.load_ingest_manifest()
+        manifest = self._load_ingest_manifest_cached()
         manifest_mode = str((manifest or {}).get("selection_mode", "") or "").strip().lower() if isinstance(manifest, dict) else ""
         is_iteration_reuse = bool(iter_num > 1 and manifest_mode in {"iteration_reuse", "pool_reuse", "stage_reuse"})
-        effective_breakdown = self._get_effective_iteration_package_breakdown(manifest if isinstance(manifest, dict) else None)
-        effective_iter_image_count = int(effective_breakdown.get("effective_total", iter_image_count) or iter_image_count)
-        manual_reuse_count = int(effective_breakdown.get("manual_reuse_count", 0) or 0)
+        step1_context = self._get_step1_manifest_context(manifest if isinstance(manifest, dict) else None)
+        project_pool_total = int(step1_context.get("project_pool_total_after", step1_context.get("project_pool_total", 0)) or 0)
+        approved_images = int(step1_context.get("approved_images", 0) or 0)
+        approved_plates = int(step1_context.get("approved_plates", 0) or 0)
+        source_total = int(step1_context.get("source_total", 0) or 0)
+        duplicate_count = int(step1_context.get("skipped_duplicate_filenames", 0) or 0)
+        new_to_project_count = int(step1_context.get("new_to_project_count", 0) or 0)
+        current_iteration_package = int(
+            step1_context.get("current_iteration_package_count", 0)
+            or iter_image_count
+            or 0
+        )
+        source_label = str(step1_context.get("source_label", "") or "").strip()
+
+        project_scope_parts: list[str] = []
+        if project_pool_total > 0:
+            project_scope_parts.append(f"Łączna pula projektu: {project_pool_total} zdjęć.")
+        if approved_images > 0 or approved_plates > 0:
+            project_scope_parts.append(
+                f"Aktualnie zatwierdzone w projekcie: {approved_images} zdjęć / {approved_plates} tablic."
+            )
+        project_scope_text = " ".join(project_scope_parts).strip()
 
         if step1_approved and iter_image_count > 0:
             step1_state = "done"
             if is_iteration_reuse:
-                if manifest_mode == "pool_reuse":
-                    step1_summary = f"Zdjęcia tej iteracji zostały przygotowane z tej samej puli projektu ({iter_image_count} zdjęć)."
-                    step1_details = (
-                        "E1 jest już domknięte. Wizard wybrał kolejną paczkę nieużytych obrazów, "
-                        "a aktywne modele projektu zostały zachowane, więc możesz od razu przejść do E2."
-                    )
+                step1_summary = f"Łączna pula projektu: {project_pool_total} zdjęć. Do tej iteracji weszło {current_iteration_package} zdjęć."
+                if manifest_mode == "stage_reuse" and source_label:
+                    step1_details = f"Źródło tej iteracji: stage po {source_label}."
                 elif manifest_mode == "stage_reuse":
-                    if manual_reuse_count > 0:
-                        step1_summary = (
-                            f"Ta sama paczka pracy jest gotowa do dalszej pracy "
-                            f"({effective_iter_image_count} zdjęć: stage {iter_image_count} + ręczne korekty {manual_reuse_count})."
-                        )
-                        step1_details = (
-                            "E1 jest już domknięte. Wizard przejął nieoznaczone zdjęcia odłożone wcześniej do stage "
-                            "i zachował możliwość dołączenia ręcznie poprawionych zdjęć z poprzedniej iteracji, "
-                            "więc możesz od razu przejść do E2."
-                        )
-                    else:
-                        step1_summary = f"Zdjęcia tej iteracji zostały przygotowane ze stage poprzedniej iteracji ({iter_image_count} zdjęć)."
-                        step1_details = (
-                            "E1 jest już domknięte. Wizard przejął nieoznaczone zdjęcia odłożone wcześniej do stage, "
-                            "a aktywne modele projektu zostały zachowane, więc możesz od razu przejść do E2."
-                        )
+                    step1_details = "Źródło tej iteracji: stage po poprzedniej iteracji."
+                elif manifest_mode == "pool_reuse":
+                    step1_details = "Źródło tej iteracji: ta sama pula projektu."
                 else:
-                    step1_summary = f"Zdjęcia tej iteracji zostały odziedziczone z poprzedniej iteracji ({iter_image_count} zdjęć)."
-                    step1_details = (
-                        "E1 jest już domknięte. Aktywne modele projektu zostały zachowane, "
-                        "więc możesz od razu przejść do E2 i wybrać tor tej iteracji."
-                    )
+                    step1_details = "Źródło tej iteracji: poprzedni zestaw wejściowy projektu."
+                if project_scope_text:
+                    step1_details = f"{step1_details} {project_scope_text}".strip()
             else:
-                step1_summary = f"Paczka wejściowa iteracji jest zatwierdzona ({iter_image_count} zdjęć)."
-                step1_details = "E1 jest zamknięte. Jeśli chcesz pracować na nowej paczce, uruchom kolejną iterację."
+                step1_summary = f"Łączna pula projektu: {project_pool_total} zdjęć. Do tej iteracji weszło {current_iteration_package} zdjęć."
+                if source_total > 0:
+                    step1_details = (
+                        f"Wybrana paczka źródłowa: {source_total} zdjęć. "
+                        f"Nowe dla projektu: {new_to_project_count}. "
+                        f"Już zatwierdzone do treningu YOLO: {duplicate_count}."
+                    )
+                else:
+                    step1_details = "E1 jest zamknięte. Jeśli chcesz pracować na nowej paczce, uruchom kolejną iterację."
         elif iter_image_count > 0:
             step1_state = "needs_attention"
             step1_summary = f"W folderze iteracji są już {iter_image_count} zdjęcia, ale E1 czeka na zatwierdzenie."
@@ -5424,7 +6375,22 @@ class CampaignTab:
             step1_state = "in_progress" if current_step == 1 else "ready"
             step1_summary = "Przygotuj wybrany folder zdjęć i zatwierdź E1."
             if plan_count > 0:
-                step1_details = f"Obecny plan zawiera {plan_count} zdjęć gotowych do zatwierdzenia."
+                plan_project_overlap = int(self.current_ingest_plan.get("project_overlap_filenames", 0) or 0)
+                plan_new_to_project = int(
+                    self.current_ingest_plan.get(
+                        "new_to_project_total",
+                        max(0, plan_count - plan_project_overlap),
+                    ) or 0
+                )
+                plan_skipped_approved = int(
+                    self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)) or 0
+                )
+                preview_pool_total = max(int(project_pool_total or 0), int((project_pool_total or 0) + plan_new_to_project))
+                step1_details = (
+                    f"Po zatwierdzeniu pula projektu będzie miała {preview_pool_total} zdjęć. "
+                    f"Do tej iteracji wejdzie {plan_count} zdjęć, z czego {plan_new_to_project} będzie nowych dla projektu, "
+                    f"a {plan_skipped_approved} było już zatwierdzonych do treningu YOLO."
+                )
             elif master_pool_ready:
                 step1_details = "Główna pula zdjęć jest ustawiona. Panel E1 pokaże listę wejściową oraz opcjonalną analizę puli."
             else:
@@ -5525,7 +6491,13 @@ class CampaignTab:
                 secondary_command=step2_secondary_command,
                 body_mode=step2_body_mode,
                 body_visible=step2_body_visible,
-                is_current=bool(not project_suspended and (current_step == 2 or plate_step4_blocked)),
+                is_current=bool(
+                    not project_suspended
+                    and (
+                        current_step == 2
+                        or plate_step4_reason in {"missing_plate_annotations", "insufficient_plate_annotations"}
+                    )
+                ),
             )
         )
 
@@ -5582,12 +6554,28 @@ class CampaignTab:
             step4_details = "Wizard nie prowadzi już treningu samodzielnie. Kieruje tylko do Z4 i zarządza stanem iteracji."
             step4_secondary_label = "Nowa iteracja"
             step4_secondary_command = self._advance_iteration
-        elif plate_step4_blocked:
-            step4_state = "locked"
-            step4_summary = "Z4 czeka na uzupelnienie oznaczen w Z2."
-            step4_details = str(plate_step4_gate.get("message") or "").strip() or (
-                "W torze tablic potrzebujesz co najmniej 2 oznaczonych obrazów, zanim wejdziesz do Z4."
+        elif step4_can_advance:
+            step4_state = "done"
+            step4_summary = "Trening tej iteracji jest zakończony. Możesz przejrzeć Z4 albo uruchomić nową iterację."
+            step4_details = (
+                "Wizard odtworzył zapisany stan zakończenia E4. "
+                "Możesz wrócić do Z4, aby przejrzeć run treningu, albo od razu rozpocząć kolejną iterację."
             )
+            step4_secondary_label = "Nowa iteracja"
+            step4_secondary_command = self._advance_iteration
+        elif plate_step4_blocked:
+            step4_state = "needs_attention"
+            if plate_step4_reason == "stale_plate_dataset":
+                step4_summary = "Z4 wymaga przebudowy datasetu tablic."
+                step4_details = str(plate_step4_gate.get("message") or "").strip() or (
+                    "ApprovedSet projektu jest już większy niż ostatnio przygotowany dataset treningowy. "
+                    "Przejdź do Z4 i przebuduj dataset w PZ1."
+                )
+            else:
+                step4_summary = "Z4 czeka na uzupełnienie oznaczeń w Z2."
+                step4_details = str(plate_step4_gate.get("message") or "").strip() or (
+                    "W torze tablic potrzebujesz co najmniej 2 oznaczonych obrazów, zanim wejdziesz do Z4."
+                )
             step4_secondary_label = ""
             step4_secondary_command = None
         elif current_step == 4:
@@ -5617,7 +6605,7 @@ class CampaignTab:
             step4_secondary_command = None
 
         if char_step4_blocked and not project_suspended and current_step < 5:
-            step4_state = "locked"
+            step4_state = "needs_attention"
             step4_summary = "Z4 czeka na poprawny dataset znaków z Z3."
             gate_msg = str(char_step4_gate.get("message") or "").strip()
             repair_msg = str(char_repair_guidance.get("details") or "").strip()
@@ -5636,8 +6624,13 @@ class CampaignTab:
             step4_primary_label = "Otwórz Z4"
             step4_primary_command = self._step_goto_training
         elif plate_step4_blocked:
-            step4_primary_label = "Wróć do Z2"
-            step4_primary_command = self._step_return_to_annotation_review
+            plate_step4_reason = str(plate_step4_gate.get("reason") or "").strip().lower()
+            if plate_step4_reason == "stale_plate_dataset":
+                step4_primary_label = "Przebuduj dataset w Z4"
+                step4_primary_command = self._step_goto_training_dataset
+            else:
+                step4_primary_label = "Wróć do Z2"
+                step4_primary_command = self._step_return_to_annotation_review
         elif char_step4_blocked:
             step4_primary_label = str(char_repair_guidance.get("primary_label") or "Wróć do Z3")
             step4_primary_command = char_repair_guidance.get("primary_command") or self._step_goto_characters
@@ -5653,7 +6646,7 @@ class CampaignTab:
                 primary_command=step4_primary_command,
                 secondary_label=step4_secondary_label,
                 secondary_command=step4_secondary_command,
-                is_current=bool(not project_suspended and current_step >= 4 and not step4_gate_blocked),
+                is_current=bool(not project_suspended and current_step >= 4),
             )
         )
 
@@ -5677,6 +6670,76 @@ class CampaignTab:
         except Exception:
             return ""
 
+    def _should_default_first_iteration_step2_to_plate(
+        self,
+        *,
+        current_step: int,
+        step1_status: str,
+        step2_status: str,
+        step3_status: str,
+        iteration_target: str,
+    ) -> bool:
+        if self._normalize_iteration_target(iteration_target):
+            return False
+
+        try:
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            current_iteration = 1
+        if current_iteration != 1:
+            return False
+
+        if int(current_step or 1) != 2:
+            return False
+        if str(step1_status or "").strip().lower() != "approved":
+            return False
+        if str(step2_status or "").strip().lower() != "pending":
+            return False
+        if str(step3_status or "").strip().lower() != "pending":
+            return False
+
+        return True
+
+    def _get_default_step2_iteration_target(
+        self,
+        *,
+        current_step: int,
+        step1_status: str,
+        step2_status: str,
+        step3_status: str,
+        iteration_target: str,
+    ) -> str:
+        normalized_target = self._normalize_iteration_target(iteration_target)
+        if normalized_target in {"plate", "char"}:
+            return normalized_target
+
+        if self._should_default_first_iteration_step2_to_plate(
+            current_step=current_step,
+            step1_status=step1_status,
+            step2_status=step2_status,
+            step3_status=step3_status,
+            iteration_target=normalized_target,
+        ):
+            return "plate"
+
+        try:
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            current_iteration = 1
+
+        if (
+            current_iteration > 1
+            and int(current_step or 1) == 2
+            and str(step1_status or "").strip().lower() == "approved"
+            and str(step2_status or "").strip().lower() == "pending"
+            and str(step3_status or "").strip().lower() == "pending"
+        ):
+            last_target = self._get_last_iteration_target()
+            if last_target in {"plate", "char"}:
+                return last_target
+
+        return ""
+
     def _get_annotation_bootstrap_for_target(self, target: str) -> dict:
         target = self._normalize_iteration_target(target)
         if target not in {"plate", "char"}:
@@ -5699,6 +6762,19 @@ class CampaignTab:
         if target not in {"plate", "char"}:
             return {}
 
+        cache_key = (
+            str(CAMPAIGN.get_active_project_name() or "").strip(),
+            int(CAMPAIGN.get_current_iteration_num() or 1),
+            int(CAMPAIGN.get_current_step() or 1),
+            str(CAMPAIGN.get_step2_status() or "").strip().lower(),
+            str(CAMPAIGN.get_step3_status() or "").strip().lower(),
+            target,
+        )
+        state_cache = self._get_dashboard_cache_bucket("step2_source_states")
+        cached = state_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
         annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
         if annotation_tab is None:
             return {}
@@ -5707,22 +6783,47 @@ class CampaignTab:
         if not callable(getter):
             return {}
 
+        source_started = perf_counter()
         try:
             source_state = getter(iteration_target=target)
         except Exception as e:
             logger.debug(f"Nie udało się pobrac stanu źródła E2 z Z2 dla toru {target}: {e}")
             return {}
 
-        return dict(source_state) if isinstance(source_state, dict) else {}
+        normalized_state = dict(source_state) if isinstance(source_state, dict) else {}
+        state_cache[cache_key] = dict(normalized_state)
+        self._log_perf(
+            f"step2_source_state[{target}]",
+            source_started,
+            threshold_ms=20.0,
+            extra=f"ready={bool(normalized_state.get('ready'))}, has_source={bool(normalized_state.get('has_source'))}",
+        )
+        return normalized_state
 
     def _get_plate_approved_set_stats(self) -> dict:
+        try:
+            manifest_path = CAMPAIGN.get_plate_approved_set_path()
+        except Exception:
+            manifest_path = None
+
+        cache = getattr(self, "_dashboard_perf_cache", {})
+        stats_cache = cache.get("approved_stats", {}) if isinstance(cache, dict) else {}
+        cache_key = ("plate_approved_stats", self._build_cache_token_for_path(manifest_path))
+        cached = stats_cache.get(cache_key) if isinstance(stats_cache, dict) else None
+        if isinstance(cached, dict):
+            return dict(cached)
+
         try:
             stats = CAMPAIGN.get_plate_approved_set_stats()
         except Exception as e:
             logger.debug(f"Nie udało się pobrac statystyk ApprovedSet tablic: {e}")
             return {}
-
-        return dict(stats) if isinstance(stats, dict) else {}
+        result = dict(stats) if isinstance(stats, dict) else {}
+        if isinstance(stats_cache, dict):
+            if len(stats_cache) > 64:
+                stats_cache.clear()
+            stats_cache[cache_key] = dict(result)
+        return result
 
     def _resolve_step2_wizard_action_command(self, action_id: str, *, context: dict | None = None):
         normalized = str(action_id or "").strip().lower()
@@ -5743,6 +6844,20 @@ class CampaignTab:
         return None
 
     def _get_annotation_step2_view_model(self):
+        cache_key = (
+            str(CAMPAIGN.get_active_project_name() or "").strip(),
+            int(CAMPAIGN.get_current_iteration_num() or 1),
+            int(CAMPAIGN.get_current_step() or 1),
+            str(CAMPAIGN.get_iteration_target() or "").strip().lower(),
+            str(CAMPAIGN.get_step1_status() or "").strip().lower(),
+            str(CAMPAIGN.get_step2_status() or "").strip().lower(),
+            str(CAMPAIGN.get_step3_status() or "").strip().lower(),
+        )
+        vm_cache = self._get_dashboard_cache_bucket("step2_view_models")
+        cached = vm_cache.get(cache_key)
+        if isinstance(cached, Step2ViewModel):
+            return cached
+
         annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
         if annotation_tab is None:
             return None
@@ -5751,11 +6866,23 @@ class CampaignTab:
         if not callable(getter):
             return None
 
+        vm_started = perf_counter()
         try:
-            return getter()
+            view_model = getter()
         except Exception as e:
             logger.debug(f"Nie udało się pobrac modelu widoku E2 z Z2: {e}")
             return None
+
+        if isinstance(view_model, Step2ViewModel):
+            vm_cache[cache_key] = view_model
+
+        self._log_perf(
+            "step2_view_model",
+            vm_started,
+            threshold_ms=20.0,
+            extra=f"target={str(getattr(view_model, 'iteration_target', '') or '').strip() or '-'}",
+        )
+        return view_model
 
     def _resolve_step3_wizard_action_command(self, action_id: str, *, context: dict | None = None):
         normalized = str(action_id or "").strip().lower()
@@ -5907,9 +7034,72 @@ class CampaignTab:
             body_mode = ""
             body_visible = False
         elif int(current_step or 0) == 3:
-            state = "in_progress"
-            summary = "Pracujesz teraz w Z3: wycinanie tablic, OCR, korekty i eksport."
-            details = "Wizard pokazuje tylko stan etapu. Cała praca dzieje się w zakładce Znaki."
+            if ready_source:
+                state = "in_progress"
+                summary = "Źródło tablic jest gotowe, ale etap E3 czeka jeszcze na ponowne wejście do Z3."
+                details = (
+                    "Uruchom step3-p1, aby wrócić do Z3 i kontynuować wycinanie tablic, OCR oraz korektę znaków. "
+                    "Jeśli chcesz, możesz też nadal powiększać zbiór tablic w Z2."
+                )
+                primary_cta = Step2CtaViewModel(
+                    label="Kontynuuj pracę nad znakami (Z3)",
+                    command_id="continue_z3",
+                    command_context=dict(ready_source),
+                )
+                secondary_label = str(repair_guidance.get("secondary_label") or "").strip()
+                secondary_command_id = (
+                    "open_z3_detect"
+                    if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair"
+                    else ""
+                )
+                secondary_context = dict(ready_source or {})
+                if secondary_label:
+                    if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                        secondary_command_id = "return_to_z2"
+                        secondary_context = {}
+                    secondary_cta = Step2CtaViewModel(
+                        label=secondary_label,
+                        command_id=secondary_command_id,
+                        command_context=secondary_context,
+                    )
+            elif str(repair_guidance.get("primary_label") or "").strip():
+                primary_command_id = (
+                    "open_z3_detect"
+                    if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair"
+                    else "return_to_z2"
+                )
+                primary_context = dict(ready_source or {}) if primary_command_id == "open_z3_detect" else {}
+                primary_cta = Step2CtaViewModel(
+                    label=str(repair_guidance.get("primary_label") or "Przygotuj więcej tablic w Z2"),
+                    command_id=primary_command_id,
+                    command_context=primary_context,
+                )
+                secondary_label = str(repair_guidance.get("secondary_label") or "").strip()
+                secondary_command_id = (
+                    "open_z3_detect"
+                    if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair"
+                    else ""
+                )
+                secondary_context = dict(ready_source or {})
+                if secondary_label:
+                    if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                        secondary_command_id = "return_to_z2"
+                        secondary_context = {}
+                    secondary_cta = Step2CtaViewModel(
+                        label=secondary_label,
+                        command_id=secondary_command_id,
+                        command_context=secondary_context,
+                    )
+                state = "needs_attention"
+                summary = "Źródło tablic dla toru znaków nadal wymaga uwagi."
+                details = str(
+                    repair_guidance.get("details")
+                    or "Najpierw przygotuj więcej tablic w Z2 albo wróć do Z3, jeśli źródło jest już wystarczające."
+                )
+            else:
+                state = "in_progress"
+                summary = "Pracujesz teraz w Z3: wycinanie tablic, OCR, korekty i eksport."
+                details = "Wizard pokazuje tylko stan etapu. Cała praca dzieje się w zakładce Znaki."
         elif normalized_step2_status == "approved" or ready_source:
             state = "ready"
             summary = "Z3 jest gotowe do uruchomienia."
@@ -6410,11 +7600,19 @@ class CampaignTab:
         return ""
 
     def _step2_choose_iteration_target(self, target: str):
+        switch_started = perf_counter()
         target = self._normalize_iteration_target(target)
         if target not in {"plate", "char"}:
             return
 
         previous_target = self._normalize_iteration_target(CAMPAIGN.get_iteration_target())
+        if previous_target == target:
+            try:
+                self._wizard_step2_target_var.set(target)
+            except Exception:
+                pass
+            return
+
         plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
         plate_model_ready = bool(plate_model and Path(plate_model).exists())
         if previous_target in {"plate", "char"} and previous_target != target:
@@ -6441,58 +7639,104 @@ class CampaignTab:
         continuing_previous_iteration_route = bool(last_target and last_target == target and not route_changed)
 
         CAMPAIGN.set_iteration_target(target)
-        if route_changed:
-            try:
-                annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-                if annotation_tab is not None:
-                    annotation_tab.reset_campaign_iteration_route_state(new_target=target)
-            except Exception as e:
-                logger.debug(f"Nie udało się wyczyscic stanu Z2 po zmianie toru E2: {e}")
-
-            CAMPAIGN.set_current_step(2)
-            CAMPAIGN.reset_step2()
-            CAMPAIGN.reset_step3()
-
-        self._refresh_dashboard()
-        self.app.update_campaign_tab_access()
-        jump_label = self._get_step2_jump_button_text(target)
         try:
-            if target == "plate":
-                self.app.update_status(
-                    (
-                        f"Wybrano Tryb A. Kontynuujesz tor tablic z poprzedniej iteracji; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
-                        if continuing_previous_iteration_route
-                        else (
-                            f"Wybrano Tryb A. Pozostajesz w E2; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
-                            if not route_changed
-                            else f"Wybrano Tryb A. Poprzedni stan Z2 tej iteracji został zresetowany; przejdź dalej przyciskiem '{jump_label}'."
-                        )
-                    ),
-                    "info"
-                )
-            else:
-                self.app.update_status(
-                    (
-                        f"Wybrano Tryb B. Kontynuujesz tor znaków z poprzedniej iteracji; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
-                        if continuing_previous_iteration_route
-                        else (
-                            (
-                                f"Wybrano Tryb B. Model tablic projektu jest już dostępny i nie trzeba go dodawać ponownie w E1; użyj przycisku '{jump_label}', aby przygotować tablice."
-                                if plate_model_ready and not self._get_char_route_ready_source()
-                                else f"Wybrano Tryb B. Pozostajesz w E2; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
-                            )
-                            if not route_changed
-                            else f"Wybrano Tryb B. Poprzedni stan Z2 tej iteracji został zresetowany; przejdź dalej przyciskiem '{jump_label}'."
-                        )
-                    ),
-                    "info"
-                )
+            self._wizard_step2_target_var.set(target)
         except Exception:
             pass
+
+        pending_after = getattr(self, "_step2_target_change_after_id", None)
+        if pending_after is not None:
+            try:
+                self.frame.after_cancel(pending_after)
+            except Exception:
+                pass
+            self._step2_target_change_after_id = None
+
+        def _finish_target_switch():
+            finish_started = perf_counter()
+            self._step2_target_change_after_id = None
+            if route_changed:
+                cleanup_started = perf_counter()
+                try:
+                    annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+                    if annotation_tab is not None:
+                        annotation_tab.reset_campaign_iteration_route_state(new_target=target)
+                except Exception as e:
+                    logger.debug(f"Nie udało się wyczyscic stanu Z2 po zmianie toru E2: {e}")
+
+                CAMPAIGN.set_current_step(2)
+                CAMPAIGN.reset_step2()
+                CAMPAIGN.reset_step3()
+                self._log_perf(
+                    "step2_route_cleanup",
+                    cleanup_started,
+                    threshold_ms=20.0,
+                    extra=f"from={previous_target or '-'} to={target}",
+                )
+
+            self._refresh_active_project_wizard_only()
+            self.app.update_campaign_tab_access()
+            jump_label = self._get_step2_jump_button_text(target)
+            try:
+                if target == "plate":
+                    self.app.update_status(
+                        (
+                            f"Wybrano Tryb A. Kontynuujesz tor tablic z poprzedniej iteracji; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
+                            if continuing_previous_iteration_route
+                            else (
+                                f"Wybrano Tryb A. Pozostajesz w E2; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
+                                if not route_changed
+                                else f"Wybrano Tryb A. Poprzedni stan Z2 tej iteracji został zresetowany; przejdź dalej przyciskiem '{jump_label}'."
+                            )
+                        ),
+                        "info"
+                    )
+                else:
+                    self.app.update_status(
+                        (
+                            f"Wybrano Tryb B. Kontynuujesz tor znaków z poprzedniej iteracji; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
+                            if continuing_previous_iteration_route
+                            else (
+                                (
+                                    f"Wybrano Tryb B. Model tablic projektu jest już dostępny i nie trzeba go dodawać ponownie w E1; użyj przycisku '{jump_label}', aby przygotować tablice."
+                                    if plate_model_ready and not self._get_char_route_ready_source()
+                                    else f"Wybrano Tryb B. Pozostajesz w E2; użyj przycisku '{jump_label}', gdy chcesz przejść dalej."
+                                )
+                                if not route_changed
+                                else f"Wybrano Tryb B. Poprzedni stan Z2 tej iteracji został zresetowany; przejdź dalej przyciskiem '{jump_label}'."
+                            )
+                        ),
+                        "info"
+                    )
+            except Exception:
+                pass
+            self._log_perf(
+                "step2_target_switch",
+                finish_started,
+                threshold_ms=20.0,
+                extra=f"route_changed={route_changed}, target={target}",
+            )
+            self._log_perf(
+                "step2_target_switch_total",
+                switch_started,
+                threshold_ms=20.0,
+                extra=f"from={previous_target or '-'} to={target}",
+            )
+
+        try:
+            self._step2_target_change_after_id = self.frame.after_idle(_finish_target_switch)
+        except Exception:
+            _finish_target_switch()
 
     def _render_step2_route_actions(self, frame):
         palette = getattr(self.app, "palette", {})
         card_bg = str(frame.cget("bg") or palette.get("panel", "#252526"))
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        muted_dim = palette.get("muted_dim", "#9a9a9a")
+        accent = blend_hex_colors(palette.get("accent", "#2980b9"), palette.get("surface_info", "#213a4d"), 0.28)
+        info_surface = blend_hex_colors(palette.get("surface_info", "#213a4d"), card_bg, 0.38)
         step2_vm = self._get_annotation_step2_view_model()
         target = self._get_iteration_target()
         target_locked_reason = ""
@@ -6514,77 +7758,140 @@ class CampaignTab:
 
         if not route_hint:
             route_hint = (
-                "Wybierz tor tej iteracji."
+                "Wybierz tor tej iteracji. To określa dalszy przebieg pracy w wizardzie."
                 if not target
-                else f"Wybrany tor: {self._iteration_target_label(target)}."
+                else f"Aktualny wybór: {self._iteration_target_label(target)}."
             )
 
         tk.Label(
             frame,
             text=route_hint,
-            fg=palette.get("muted", "#c7c7c7"),
+            fg=muted,
             bg=card_bg,
             justify=tk.LEFT,
             wraplength=520,
         ).pack(anchor=tk.W, pady=(0, 4))
 
-        btn_row = tk.Frame(frame, bg=card_bg)
+        route_shell = tk.Frame(frame, bg=card_bg, bd=0, highlightthickness=0)
+        route_shell.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+
+        tk.Label(
+            route_shell,
+            text="Tor iteracji",
+            fg=fg,
+            bg=card_bg,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        btn_row = tk.Frame(route_shell, bg=card_bg, bd=0, highlightthickness=0)
         btn_row.pack(anchor=tk.W, fill=tk.X)
 
         btn_plate = None
         btn_char = None
+        resolved_choices = []
         if route_choices:
-            for idx, choice in enumerate(route_choices):
-                if not bool(getattr(choice, "visible", True)):
-                    continue
-                label = str(getattr(choice, "label", "") or "").strip()
-                command = self._resolve_step2_wizard_action_command(
-                    str(getattr(choice, "command_id", "") or "").strip(),
-                    context=dict(getattr(choice, "command_context", {}) or {}),
-                )
-                btn = ttk.Button(
-                    btn_row,
-                    text=label,
-                    command=command,
-                )
-                if not bool(getattr(choice, "enabled", True)) or command is None:
-                    btn.configure(state=tk.DISABLED)
-                btn.pack(side=tk.LEFT, padx=(0, 8) if idx == 0 else 0)
-                if str(getattr(choice, "id", "") or "").strip() == "plate":
-                    btn_plate = btn
-                elif str(getattr(choice, "id", "") or "").strip() == "char":
-                    btn_char = btn
+            resolved_choices = [choice for choice in route_choices if bool(getattr(choice, "visible", True))]
         else:
             last_target = self._get_last_iteration_target()
-            btn_plate = ttk.Button(
-                btn_row,
-                text=self._step2_route_button_label("plate", current_target=target, last_target=last_target),
-                command=lambda: self._step2_choose_iteration_target("plate"),
-            )
-            btn_plate.pack(side=tk.LEFT, padx=(0, 8))
-
-            btn_char = ttk.Button(
-                btn_row,
-                text=self._step2_route_button_label("char", current_target=target, last_target=last_target),
-                command=lambda: self._step2_choose_iteration_target("char"),
-            )
-            btn_char.pack(side=tk.LEFT)
-
+            resolved_choices = [
+                Step2RouteChoiceViewModel(
+                    id="plate",
+                    label=self._step2_route_button_label("plate", current_target=target, last_target=last_target),
+                    enabled=bool(not target_locked and target != "plate"),
+                    selected=bool(target == "plate"),
+                    command_id="choose_iteration_target",
+                    command_context={"target": "plate"},
+                ),
+                Step2RouteChoiceViewModel(
+                    id="char",
+                    label=self._step2_route_button_label("char", current_target=target, last_target=last_target),
+                    enabled=bool(not target_locked and target != "char"),
+                    selected=bool(target == "char"),
+                    command_id="choose_iteration_target",
+                    command_context={"target": "char"},
+                ),
+            ]
             target_locked_reason = self._get_iteration_target_lock_reason()
             target_locked = bool(target_locked_reason)
-            if target_locked:
-                btn_plate.configure(state=tk.DISABLED)
-                btn_char.configure(state=tk.DISABLED)
-            elif target == "plate":
-                btn_plate.configure(state=tk.DISABLED)
-            elif target == "char":
-                btn_char.configure(state=tk.DISABLED)
+
+        try:
+            self._wizard_step2_target_var.set(target if target in {"plate", "char"} else "")
+        except Exception:
+            pass
+
+        for idx, choice in enumerate(resolved_choices):
+            choice_id = str(getattr(choice, "id", "") or "").strip()
+            label = str(getattr(choice, "label", "") or "").strip()
+            command = self._resolve_step2_wizard_action_command(
+                str(getattr(choice, "command_id", "") or "").strip(),
+                context=dict(getattr(choice, "command_context", {}) or {}),
+            )
+            choice_enabled = bool(getattr(choice, "enabled", True)) and command is not None
+            choice_selected = bool(getattr(choice, "selected", False))
+            row = tk.Frame(
+                btn_row,
+                bg=card_bg,
+                bd=1,
+                highlightthickness=1,
+                highlightbackground=(accent if choice_selected else panel_alt),
+                highlightcolor=(accent if choice_selected else panel_alt),
+                padx=10,
+                pady=6,
+            )
+            row.pack(side=tk.LEFT, padx=(0, 8) if idx < (len(resolved_choices) - 1) else 0, fill=tk.X, expand=True)
+            token = tk.Canvas(
+                row,
+                width=18,
+                height=18,
+                bd=0,
+                highlightthickness=0,
+                bg=card_bg,
+                cursor=("hand2" if choice_enabled else ""),
+            )
+            token.pack(side=tk.LEFT, padx=(0, 8))
+            token.create_oval(
+                2,
+                2,
+                16,
+                16,
+                outline=(accent if choice_selected else muted_dim),
+                width=2,
+                fill=card_bg,
+            )
+            if choice_selected:
+                token.create_oval(6, 6, 12, 12, outline=accent, fill=accent, width=1)
+
+            label_widget = tk.Label(
+                row,
+                text=label,
+                anchor="w",
+                justify=tk.LEFT,
+                font=("Segoe UI", 10, "bold"),
+                fg=(fg if choice_enabled else muted_dim),
+                bg=card_bg,
+                cursor=("hand2" if choice_enabled else ""),
+            )
+            label_widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            if choice_enabled and command is not None:
+                for widget in (row, token, label_widget):
+                    try:
+                        widget.bind("<Button-1>", lambda _e, cmd=command: cmd(), add="+")
+                    except Exception:
+                        pass
+
+            if choice_id == "plate":
+                btn_plate = row
+            elif choice_id == "char":
+                btn_char = row
 
         if target_locked:
             tk.Label(
                 frame,
                 text=target_locked_reason,
-                fg=palette.get("muted", "#c7c7c7"),
+                fg=muted,
                 bg=card_bg,
                 justify=tk.LEFT,
                 wraplength=520,
@@ -6614,24 +7921,35 @@ class CampaignTab:
                 )
 
         if action_primary_command is not None or action_secondary_command is not None:
-            tk.Label(
-                frame,
-                text="Dalej",
-                fg=palette.get("fg", "#f3f3f3"),
-                bg=card_bg,
-                justify=tk.LEFT,
-                font=("Segoe UI", 9, "bold"),
-                wraplength=520,
-            ).pack(anchor=tk.W, pady=(8, 2))
             if action_details:
-                tk.Label(
+                details_shell = tk.Frame(
                     frame,
+                    bg=info_surface,
+                    bd=0,
+                    highlightthickness=1,
+                    highlightbackground=blend_hex_colors(accent, panel_alt, 0.55),
+                    highlightcolor=blend_hex_colors(accent, panel_alt, 0.55),
+                    padx=10,
+                    pady=8,
+                )
+                details_shell.pack(anchor=tk.W, fill=tk.X, pady=(8, 6))
+                tk.Label(
+                    details_shell,
+                    text="Następny krok",
+                    fg=fg,
+                    bg=info_surface,
+                    justify=tk.LEFT,
+                    font=("Segoe UI", 9, "bold"),
+                    wraplength=520,
+                ).pack(anchor=tk.W)
+                tk.Label(
+                    details_shell,
                     text=action_details,
-                    fg=palette.get("muted", "#c7c7c7"),
-                    bg=card_bg,
+                    fg=muted,
+                    bg=info_surface,
                     justify=tk.LEFT,
                     wraplength=520,
-                ).pack(anchor=tk.W, pady=(8, 4))
+                ).pack(anchor=tk.W, pady=(4, 0))
 
             action_row = tk.Frame(frame, bg=card_bg, bd=0, highlightthickness=0)
             action_row.pack(anchor=tk.W, fill=tk.X)
@@ -6730,6 +8048,8 @@ class CampaignTab:
     # ======================================================
 
     def _refresh_dashboard(self):
+        refresh_started = perf_counter()
+        self._clear_dashboard_perf_cache()
         try:
             self._collapse_all_wizard_stage_curtains()
         except Exception:
@@ -6777,6 +8097,9 @@ class CampaignTab:
             # Lewy panel wygaszony
             for mt in ["vehicle", "plate", "char"]:
                 getattr(self, f"lbl_model_{mt}").config(text="Zablokowane", fg=muted_dim)
+                lbl_meta = getattr(self, f"lbl_model_{mt}_meta", None)
+                if lbl_meta is not None:
+                    lbl_meta.config(text="Utworzono: -", fg=muted_dim)
                 btn_model = getattr(self, f"btn_model_{mt}", None)
                 if btn_model is not None:
                     btn_model.config(state="disabled")
@@ -6820,6 +8143,7 @@ class CampaignTab:
             self.app.update_campaign_tab_access()
             self.frame.update_idletasks()
             self.frame.after_idle(self._sync_right_panel_scrollregion)
+            self._log_perf("refresh_dashboard_free_mode", refresh_started, threshold_ms=20.0)
             return
 
         # ======================================================
@@ -6828,56 +8152,17 @@ class CampaignTab:
         self.app.campaign_free_mode = False
         self.app.set_campaign_mode(True)
 
-
-        curr_step = CAMPAIGN.get_current_step()
-        step1_status = CAMPAIGN.get_step1_status()
-        step2_status = CAMPAIGN.get_step2_status()
-        step3_status = CAMPAIGN.get_step3_status()
-        iteration_target = self._get_iteration_target()
-        has_saved_step3_progress = self._has_saved_step3_progress()
-        project_status = CAMPAIGN.get_project_status()
+        active_state = self._build_active_project_dashboard_state()
+        curr_step = int(active_state.get("current_step", CAMPAIGN.get_current_step()) or CAMPAIGN.get_current_step() or 1)
+        step1_status = str(active_state.get("step1_status", CAMPAIGN.get_step1_status()) or CAMPAIGN.get_step1_status() or "pending")
+        step2_status = str(active_state.get("step2_status", CAMPAIGN.get_step2_status()) or CAMPAIGN.get_step2_status() or "pending")
+        step3_status = str(active_state.get("step3_status", CAMPAIGN.get_step3_status()) or CAMPAIGN.get_step3_status() or "pending")
+        iteration_target = str(active_state.get("iteration_target", self._get_iteration_target()) or self._get_iteration_target() or "").strip().lower()
+        project_status = str(active_state.get("project_status", CAMPAIGN.get_project_status()) or CAMPAIGN.get_project_status() or "active").strip().lower()
         project_paused = project_status == "paused"
         project_completed = project_status == "completed"
-        project_paused_at = CAMPAIGN.get_project_paused_at()
-        project_completed_at = CAMPAIGN.get_project_completed_at()
-        step1_approved = step1_status == "approved"
-        if curr_step >= 2 and not step1_approved and self._get_iteration_image_count() > 0:
-            CAMPAIGN.approve_step1()
-            step1_status = "approved"
-            step1_approved = True
-
-        if (
-            curr_step <= 2
-            and str(step2_status or "").strip().lower() == "pending"
-            and str(step3_status or "").strip().lower() == "pending"
-            and not iteration_target
-            and has_saved_step3_progress
-        ):
-            try:
-                CAMPAIGN.reset_step3()
-                has_saved_step3_progress = False
-            except Exception as e:
-                logger.debug(f"Nie udało się wyczyscic przestarzalego stanu Z3 przy starcie iteracji: {e}")
-
-        if not iteration_target and (curr_step >= 3 or step3_status != "pending" or has_saved_step3_progress):
-            CAMPAIGN.set_iteration_target("char")
-            iteration_target = "char"
-
-        if (
-            iteration_target == "char"
-            and curr_step < 3
-            and str(step2_status or "").strip().lower() == "approved"
-            and has_saved_step3_progress
-        ):
-            if str(step2_status or "").strip().lower() != "approved":
-                CAMPAIGN.approve_step2()
-                step2_status = "approved"
-            CAMPAIGN.set_current_step(3)
-            curr_step = 3
-
-        if iteration_target == "plate" and curr_step == 3 and step2_status == "approved":
-            CAMPAIGN.set_current_step(4)
-            curr_step = 4
+        project_paused_at = str(active_state.get("project_paused_at", CAMPAIGN.get_project_paused_at()) or CAMPAIGN.get_project_paused_at() or "").strip()
+        project_completed_at = str(active_state.get("project_completed_at", CAMPAIGN.get_project_completed_at()) or CAMPAIGN.get_project_completed_at() or "").strip()
 
         logger.debug(
             f"[CampaignTab] active_proj={active_proj}, curr_step={curr_step}, "
@@ -6925,9 +8210,17 @@ class CampaignTab:
         def fmt_model(p):
             return Path(p).name if p and Path(p).exists() else "Domyślny/Brak"
 
-        self.lbl_model_vehicle.config(text=fmt_model(CAMPAIGN.get_global_model("vehicle")), fg=accent)
-        self.lbl_model_plate.config(text=fmt_model(CAMPAIGN.get_global_model("plate")), fg=accent)
-        self.lbl_model_char.config(text=fmt_model(CAMPAIGN.get_global_model("char")), fg=accent)
+        vehicle_model = CAMPAIGN.get_global_model("vehicle")
+        plate_model = CAMPAIGN.get_global_model("plate")
+        char_model = CAMPAIGN.get_global_model("char")
+
+        self.lbl_model_vehicle.config(text=fmt_model(vehicle_model), fg=accent)
+        self.lbl_model_plate.config(text=fmt_model(plate_model), fg=accent)
+        self.lbl_model_char.config(text=fmt_model(char_model), fg=accent)
+
+        self.lbl_model_vehicle_meta.config(text=self._format_model_created_label(vehicle_model))
+        self.lbl_model_plate_meta.config(text=self._format_model_created_label(plate_model))
+        self.lbl_model_char_meta.config(text=self._format_model_created_label(char_model))
 
         self._set_grid_visibility(self.left_footer, True)
         # Globalny przycisk awansu został wycofany z głównego okna wizarda.
@@ -6980,6 +8273,12 @@ class CampaignTab:
         self.app.update_campaign_tab_access()
         self.frame.update_idletasks()
         self.frame.after_idle(self._sync_right_panel_scrollregion)
+        self._log_perf(
+            "refresh_dashboard_active",
+            refresh_started,
+            threshold_ms=20.0,
+            extra=f"step={curr_step}, target={iteration_target or '-'}",
+        )
         return
 
     def _update_main_tabs_highlight(self, curr_step=None, has_project=True):
@@ -7239,6 +8538,8 @@ class CampaignTab:
         if not selected:
             return
 
+        open_started = perf_counter()
+
         try:
             annotation_tab = self.app.tabs.get("annotation")
             if annotation_tab is not None and hasattr(annotation_tab, "capture_free_mode_snapshot_for_project_return"):
@@ -7246,22 +8547,38 @@ class CampaignTab:
         except Exception as e:
             logger.debug(f"Nie udało się zapisać migawki free mode przed otwarciem projektu: {e}")
 
+        self._cancel_deferred_project_open_tasks()
         CAMPAIGN.set_active_project(selected)
         self.app.campaign_free_mode = False
         self.app.set_campaign_mode(True)
-        self._rebuild_roadmap_ui()
-        self._refresh_dashboard()
+        self._clear_dashboard_perf_cache()
+        self._ensure_roadmap_ui_ready()
+        self._show_project_loading_dashboard(selected)
         self.app.update_campaign_tab_access()
+
+        def _finish_project_open_refresh():
+            self._project_open_refresh_after_id = None
+            if str(CAMPAIGN.get_active_project_name() or "").strip() != str(selected or "").strip():
+                return
+            try:
+                self._refresh_dashboard()
+            except Exception as e:
+                logger.debug(f"Nie udało się odświeżyć dashboardu po otwarciu projektu: {e}")
+            self._log_perf(
+                "open_selected_project_refresh",
+                open_started,
+                threshold_ms=20.0,
+                extra=f"project={selected}",
+            )
+
         try:
-            annotation_tab = self.app.tabs.get("annotation")
-            if annotation_tab is not None and hasattr(annotation_tab, "restore_campaign_context_from_project"):
-                annotation_tab.restore_campaign_context_from_project()
-        except Exception as e:
-            logger.debug(f"Nie udało się przywrócić kontekstu Z2 po otwarciu projektu: {e}")
+            self._project_open_refresh_after_id = self.frame.after(15, _finish_project_open_refresh)
+        except Exception:
+            _finish_project_open_refresh()
 
         try:
             self.app.update_status(
-                f"Aktywowano projekt: {selected}. Aplikacja działa w trybie kampanii.",
+                f"Aktywowano projekt: {selected}. Trwa ładowanie kontekstu kampanii.",
                 "info"
             )
         except Exception:
@@ -7452,9 +8769,51 @@ class CampaignTab:
                 "W wybranym folderze nie znaleziono żadnych obrazów obsługiwanych przez aplikację."
             )
 
+        approved_registry = CAMPAIGN.get_used_image_registry()
+        approved_names = {
+            str(name or "").strip().lower()
+            for name in (approved_registry.get("filenames", []) or [])
+            if str(name or "").strip()
+        }
+
+        accepted_source_files = []
+        skipped_duplicate_total = 0
+        skipped_duplicate_approved = 0
+        for img_file in image_files:
+            name_key = str(img_file.name or "").strip().lower()
+            if name_key and name_key in approved_names:
+                skipped_duplicate_total += 1
+                skipped_duplicate_approved += 1
+                continue
+            accepted_source_files.append(img_file)
+
+        accepted_total = len(accepted_source_files)
+        new_to_project_total = accepted_total
+
+        if skipped_duplicate_total > 0:
+            duplicate_lines = [
+                f"Wybrany folder zawiera {len(image_files)} zdjęć.",
+                f"Do bieżącej iteracji trafi: {accepted_total}",
+                f"Nowe dla projektu: {new_to_project_total}",
+                f"Odrzucone jako już zatwierdzone do treningu YOLO: {skipped_duplicate_total}",
+            ]
+            if skipped_duplicate_approved > 0:
+                duplicate_lines.append(f"W tym już zatwierdzone w projekcie: {skipped_duplicate_approved}")
+            duplicate_lines.append("")
+            duplicate_lines.append("Czy przygotować iterację z pominięciem tylko zdjęć już zatwierdzonych do treningu YOLO?")
+            should_continue = self.app.themed_confirm(
+                "Wykryto duble w paczce wejściowej",
+                "\n".join(duplicate_lines),
+                parent=self.frame,
+                confirm_label="Przygotuj iterację",
+                tone="info",
+            )
+            if not should_continue:
+                return
+
         copied = 0
         copied_source_files = []
-        for img_file in image_files:
+        for img_file in accepted_source_files:
             dst = target_iter_dir / img_file.name
             if not dst.exists():
                 shutil.copy2(img_file, dst)
@@ -7473,20 +8832,54 @@ class CampaignTab:
             source_dir=source_dir,
             selected_source_files=copied_source_files,
             selection_mode="manual",
+            proposal_summary={
+                "source_total": len(image_files),
+                "accepted_total": copied,
+                "current_iteration_package_count": copied,
+                "skipped_duplicate_filenames": skipped_duplicate_total,
+                "skipped_duplicate_approved_filenames": skipped_duplicate_approved,
+                "project_overlap_filenames": 0,
+                "new_to_project_count": new_to_project_total,
+            },
         )
 
         try:
+            status_suffix = (
+                f" Pominięto {skipped_duplicate_total} zdjęć już zatwierdzonych do treningu YOLO."
+                if skipped_duplicate_total > 0
+                else ""
+            )
             self.app.update_status(
-                f"✅ Skopiowano {copied} nowych zdjęć do Iteracji {iter_num:03d}. Odblokowano Krok 2.",
+                f"✅ Skopiowano {copied} nowych zdjęć do Iteracji {iter_num:03d}. Odblokowano Krok 2.{status_suffix}",
                 "info"
             )
         except Exception:
             pass
 
+        summary_lines = [
+            f"Skopiowano {copied} zdjęć do:\n{target_iter_dir}",
+        ]
+        if skipped_duplicate_total > 0:
+            summary_lines.extend(
+                [
+                    "",
+                    f"Pominięto {skipped_duplicate_total} zdjęć już zatwierdzonych do treningu YOLO.",
+                    (
+                        f"Z tego już zatwierdzone w projekcie: {skipped_duplicate_approved}"
+                        if skipped_duplicate_approved > 0
+                        else None
+                    ),
+                ]
+            )
+        summary_lines.extend(
+            [
+                "",
+                "Bieżąca iteracja pracuje na zdjęciach z tej paczki, z pominięciem tych, które były już zatwierdzone do treningu YOLO.",
+            ]
+        )
         messagebox.showinfo(
             "Przygotowanie zestawu zdjęć zakończone",
-            f"Skopiowano {copied} zdjęć do:\n{target_iter_dir}\n\n"
-            f"Każda iteracja pracuje tylko na swojej NOWEJ paczce wejściowej."
+            "\n".join(line for line in summary_lines if line)
         )
 
     def _step_return_to_annotation_review(self):
@@ -7500,6 +8893,38 @@ class CampaignTab:
 
         iteration_target = self._get_iteration_target()
         if iteration_target in {"plate", "char"}:
+            try:
+                if iteration_target == "char" and CAMPAIGN.get_active_project_name():
+                    CAMPAIGN.set_current_step(3)
+                    CAMPAIGN.set_step3_needs_rework()
+            except Exception as e:
+                logger.debug(f"Nie udało się ustawić trybu naprawczego E3 przed powrotem do Z2: {e}")
+            if iteration_target == "char":
+                def _open_char_annotation_return():
+                    try:
+                        self._step_goto_auto_annotation(
+                            force_annotation_tab=True,
+                            open_existing_run=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"Nie udało się otworzyc kampanijnego Z2 z odroczonym startem: {e}")
+
+                try:
+                    self.app.open_controlled_tab("annotation")
+                except Exception:
+                    pass
+                try:
+                    self.app.update_status(
+                        "Otworzono Z2. Przygotowuję kontekst naprawczy tej paczki w tle.",
+                        "info",
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.frame.after_idle(_open_char_annotation_return)
+                except Exception:
+                    _open_char_annotation_return()
+                return
             try:
                 self._step_goto_auto_annotation(
                     force_annotation_tab=True,
@@ -7580,11 +9005,14 @@ class CampaignTab:
             return
 
         try:
+            self.app.campaign_free_mode = False
+            self.app.set_campaign_mode(True)
             result = tab_ann.open_campaign_step2_entry(
                 iteration_target=iteration_target,
                 entry_strategy=entry_strategy,
                 restore_preview=bool(not force_annotation_tab and not char_has_existing_source),
                 open_existing_run=open_existing_run,
+                defer_preview_load=bool(force_annotation_tab),
             )
         except Exception as e:
             logger.error(f"Nie udało się otworzyc punktu startowego Z2: {e}")
@@ -7672,6 +9100,19 @@ class CampaignTab:
             pass
 
         self.app.open_controlled_tab("annotation")
+        if bool(result.get("deferred_preview_load")):
+            try:
+                deferred_input_dir = Path(str(result.get("deferred_preview_input_dir") or "").strip())
+            except Exception:
+                deferred_input_dir = None
+            if deferred_input_dir is not None:
+                try:
+                    tab_ann._schedule_deferred_campaign_source_preview_load(
+                        deferred_input_dir,
+                        status_message="Otworzono Z2. Wczytuje liste obrazow tej paczki...",
+                    )
+                except Exception as e:
+                    logger.debug(f"Nie udało się odroczyć wczytania paczki Z2 po otwarciu zakładki: {e}")
 
     def _step_continue_characters_from_ready_source(self, preferred_source_context: dict | None = None):
         if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 2:
@@ -7834,16 +9275,25 @@ class CampaignTab:
                 readiness = None
 
             if isinstance(readiness, dict) and not readiness.get("ok", False):
-                warn_msg = str(readiness.get("message") or "").strip() or "Z4 nie jest jeszcze gotowe do otwarcia."
-                try:
-                    self.app.update_status(warn_msg, "warning")
-                except Exception:
-                    pass
-                try:
-                    messagebox.showwarning("Z4 jeszcze zablokowane", warn_msg, parent=self.frame)
-                except Exception:
-                    pass
-                return
+                reason = str(readiness.get("reason") or "").strip().lower()
+                if reason == "stale_plate_dataset":
+                    warn_msg = str(readiness.get("message") or "").strip()
+                    try:
+                        if warn_msg:
+                            self.app.update_status(warn_msg, "warning")
+                    except Exception:
+                        pass
+                else:
+                    warn_msg = str(readiness.get("message") or "").strip() or "Z4 nie jest jeszcze gotowe do otwarcia."
+                    try:
+                        self.app.update_status(warn_msg, "warning")
+                    except Exception:
+                        pass
+                    try:
+                        messagebox.showwarning("Z4 jeszcze zablokowane", warn_msg, parent=self.frame)
+                    except Exception:
+                        pass
+                    return
 
             try:
                 result = tab_train.open_campaign_step4_entry(iteration_target=iteration_target)
@@ -7891,121 +9341,50 @@ class CampaignTab:
 
             self.app.open_controlled_tab("training")
             return
+        except Exception as e:
+            logger.error(f"Błąd nawigacji (Krok 4): {e}")
 
-            datasets_dir = CAMPAIGN.get_dir("datasets")
-            runs_dir = CAMPAIGN.get_dir("runs")
+    def _step_goto_training_dataset(self):
+        if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 4:
+            return
 
-            if datasets_dir is None:
-                logger.error("Brak katalogu datasets dla aktywnego projektu.")
-                return
+        try:
+            iteration_target = self._get_iteration_target()
+            if iteration_target not in {"plate", "char"}:
+                iteration_target = "char"
 
             tab_train = self.app.tabs.get("training")
             if not tab_train:
                 logger.error("Nie znaleziono zakładki TrainingTab w app.tabs.")
                 return
 
-            try:
-                tab_train.set_campaign_training_target(iteration_target)
-            except Exception:
-                pass
-
-            # Przełącz TrainingTab na kontekst aktywnego projektu.
-            tab_train.set_campaign_context(
-                runs_dir=str(runs_dir) if runs_dir is not None else None,
-                datasets_dir=str(datasets_dir)
+            result = tab_train.open_campaign_step4_entry(
+                iteration_target=iteration_target,
+                preferred_subtab="dataset",
             )
-
-            datasets_dir = Path(datasets_dir)
-            source_candidates = []
-            try:
-                for path in tab_train._find_dataset_source_candidates(datasets_dir):
-                    inferred = tab_train._infer_dataset_target(str(path))
-                    if iteration_target == "char":
-                        if inferred != "char":
-                            continue
-                    elif inferred not in {"plate", None}:
-                        continue
-                    source_candidates.append(path)
-            except Exception:
-                source_candidates = []
-
-            latest_source = None
-            if source_candidates:
-                latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
-
-            if iteration_target == "char" and latest_source is not None:
-                tab_train.split_src_var.set(str(latest_source))
-                tab_train.split_out_var.set(
-                    str(latest_source.parent / f"{latest_source.name}_Split_[DATA_I_CZAS]")
-                )
-            elif iteration_target == "char":
-                tab_train.split_src_var.set("")
-                tab_train.split_out_var.set(str(datasets_dir / "[BRAK_DATASETU_ZRODLOWEGO]"))
-
-            if iteration_target == "plate":
-                plate_model = CAMPAIGN.get_global_model("plate")
-                preferred_pose = "yolo11s-pose"
-                pose_choices = []
-                try:
-                    pose_choices = tab_train._get_base_model_choices_for_mode("plate")
-                except Exception:
-                    pose_choices = []
-
-                if plate_model and Path(plate_model).exists():
-                    tab_train.base_model_var.set("Custom")
-                    tab_train.base_custom_var.set(plate_model)
-                else:
-                    tab_train.base_model_var.set(
-                        preferred_pose if preferred_pose in pose_choices else tab_train._get_default_base_model_for_mode("plate")
-                    )
-                    tab_train.base_custom_var.set("")
-            else:
-                char_model = CAMPAIGN.get_global_model("char")
-                if char_model and Path(char_model).exists():
-                    tab_train.base_model_var.set("Custom")
-                    tab_train.base_custom_var.set(char_model)
-                else:
-                    tab_train.base_model_var.set("yolo11n")
-                    tab_train.base_custom_var.set("")
-
-            tab_train._on_base_model_change()
-
-            try:
-                tab_train.imgsz_var.set(640 if iteration_target == "plate" else 256)
-            except Exception:
-                pass
-
-            try:
-                if iteration_target == "plate":
-                    dataset_var = getattr(tab_train, "dataset_var", None)
-                    dataset_hint = str(dataset_var.get() if dataset_var is not None else "").strip()
-                    if dataset_hint:
-                        self.app.update_status(
-                            f"Ustawiono tor treningu tablic: gotowy dataset = {Path(dataset_hint).name}, źródła XML z Z2 i model Pose.",
-                            "info"
-                        )
-                    else:
-                        self.app.update_status(
-                            "Przełączono do Treningu w torze tablic. Zbuduj dataset z XML CVAT i uruchom trening modelu Pose.",
-                            "info"
-                        )
-                elif latest_source is not None:
-                    self.app.update_status(
-                        f"Ustawiono automatycznie Trening: źródło splittera = {latest_source.name}, wynik splitu w katalogu projektu oraz model DETECT dla znaków.",
-                        "info"
-                    )
-                else:
-                    self.app.update_status(
-                        "Przełączono do Treningu w kontekście projektu, ale nie znaleziono jeszcze datasetu źródłowego w 4_training_datasets.",
-                        "warning"
-                    )
-            except Exception:
-                pass
-
-            self.app.open_controlled_tab("training")
-
         except Exception as e:
-            logger.error(f"Błąd nawigacji (Krok 4): {e}")
+            logger.error(f"Błąd otwierania PZ1 dla Z4: {e}")
+            return
+
+        if not result.get("ok"):
+            warn_msg = str(result.get("message") or "").strip()
+            if warn_msg:
+                try:
+                    self.app.update_status(warn_msg, "warning")
+                except Exception:
+                    pass
+            return
+
+        try:
+            self.app.update_status(
+                "Przejście do Z4 otworzyło PZ1, aby przebudować albo sprawdzić dataset tej iteracji.",
+                "info",
+            )
+        except Exception:
+            pass
+
+        self.app.open_controlled_tab("training")
+        return
 
     def _advance_iteration(self):
         mode = self._ask_iteration_advance_mode()
@@ -8019,7 +9398,8 @@ class CampaignTab:
                 self.app.themed_info(
                     "Brak kolejnej paczki",
                     (
-                        "Nie ma już nieużytych zdjęć w tej samej puli projektu.\n\n"
+                        "Nie ma już kolejnych zdjęć do pobrania z tej samej puli projektu.\n"
+                        "System pomija tu obrazy już zatwierdzone w projekcie.\n\n"
                         "Aby kontynuować, rozpocznij kolejną iterację od nowego zestawu zdjęć "
                         "albo zakończ projekt."
                     ),

@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 
 import sys
-import tkinter as tk
 import traceback
-from pathlib import Path
 
 def main():
     try:
+        from dependency_bootstrap import ensure_runtime_dependencies, get_last_probe_terminal_entries
+        if not ensure_runtime_dependencies(app_argv=list(sys.argv)):
+            return
+
         # Importujemy Twoją aplikację jako zewnętrzny moduł
+        import tkinter as tk
         from auto_annotation_tool.gui.app import AutoAnnotationApp
         from auto_annotation_tool.config import CONFIG
         
@@ -22,6 +25,12 @@ def main():
         
         # Odpalenie interfejsu
         app = AutoAnnotationApp(root)
+        try:
+            bootstrap_entries = list(get_last_probe_terminal_entries() or [])
+            if bootstrap_entries and hasattr(app, "append_global_terminal_entries"):
+                app.append_global_terminal_entries(bootstrap_entries)
+        except Exception:
+            pass
         
         # Start pętli zdarzeń
         root.mainloop()

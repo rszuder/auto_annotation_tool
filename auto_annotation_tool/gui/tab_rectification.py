@@ -15,6 +15,7 @@ from tkinter import ttk, filedialog, messagebox
 from ..config import CONFIG, CV2_AVAILABLE, cv2, PIL_AVAILABLE, np, SESSION
 from ..icons import IconManager
 from ..rectification import PlateRectifier
+from .inertial_scroll import InertialScrollController
 from .web_slim_scrollbar import WebSlimScrollbar
 from .zoomable_canvas import ZoomableCanvas
 
@@ -29,6 +30,7 @@ class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
         self.canvas = tk.Canvas(self, highlightthickness=0)
+        self._inertial_scroll = InertialScrollController(self.canvas)
         self.vscroll = WebSlimScrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
         self.inner = ttk.Frame(self.canvas)
         self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -45,12 +47,24 @@ class ScrollableFrame(ttk.Frame):
 
     def _bind_mousewheel(self, event):
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
 
     def _unbind_mousewheel(self, event):
         self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        units = self._inertial_scroll.mousewheel_units(event)
+        if units == 0:
+            return None
+        self._inertial_scroll.queue_canvas_by_units(
+            self.canvas,
+            units,
+            magnitude=self._inertial_scroll.mousewheel_magnitude(event),
+        )
+        return "break"
 
 
 class RectificationTab:
