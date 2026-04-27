@@ -254,8 +254,10 @@ class Step4CampaignNavigationViewModel:
     next_enabled: bool = True
     next_label: str = "Dalej do treningu"
     show_dataset_back: bool = True
+    dataset_back_label: str = "Wstecz"
     show_train_nav: bool = False
     show_train_back: bool = True
+    train_back_label: str = "Wstecz do toru"
     finish_enabled: bool = False
     show_complete_project: bool = False
     force_dataset_tab_selection: bool = False

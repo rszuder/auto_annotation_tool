@@ -209,22 +209,22 @@ class AnnotationReport:
 ║                           RAPORT AUTO-ANOTACJI                              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 
-  📊 PODSUMOWANIE OBRAZÓW
+  PODSUMOWANIE OBRAZÓW
   ─────────────────────────
   Obrazów ogółem:              {self.total_images:5d}
-  ✅ Udane anotacje:            {self.successful:5d}  ({self.success_rate:.1f}%)
-  ⏹️  Przerwane:                {self.skipped:5d}
-  ⚠️  Brak pojazdu:             {self.no_vehicle:5d}
-  ⚠️  Brak tablicy:             {self.no_plate:5d}
-  ⚠️  Tablica częściowa:        {self.partial_plate:5d}
-  ❌ Błędy:                     {self.errors:5d}
+  Udane anotacje:              {self.successful:5d}  ({self.success_rate:.1f}%)
+  Przerwane:                   {self.skipped:5d}
+  Brak pojazdu:                {self.no_vehicle:5d}
+  Brak tablicy:                {self.no_plate:5d}
+  Tablica częściowa:           {self.partial_plate:5d}
+  Błędy:                       {self.errors:5d}
 
-  📈 STATYSTYKA DETEKCJI
+  STATYSTYKA DETEKCJI
   ─────────────────────────
   Pojazdów wykrytych:          {self.total_vehicles:5d}
   Tablic wykrytych:            {self.total_plates:5d}
 
-  🔤 STATYSTYKA OCR
+  STATYSTYKA OCR
   ─────────────────────────
   Tablic z tekstem (OCR):      {self.total_plates_with_ocr:5d}  ({self.ocr_success_rate:.1f}%)
   Tablic ze zwal. formatem:    {self.plates_with_valid_format:5d}  ({self.ocr_format_validity_rate:.1f}%)
@@ -233,7 +233,7 @@ class AnnotationReport:
 """
         
         if self.no_vehicle_images:
-            report += "\n📋 OBRAZY BEZ WYKRYTEGO POJAZDU:\n"
+            report += "\nOBRAZY BEZ WYKRYTEGO POJAZDU:\n"
             report += "─" * 50 + "\n"
             for img in self.no_vehicle_images[:20]:
                 report += f"  • {img}\n"
@@ -241,7 +241,7 @@ class AnnotationReport:
                 report += f"  ... i {len(self.no_vehicle_images) - 20} więcej\n"
         
         if self.no_plate_images:
-            report += "\n📋 OBRAZY BEZ WYKRYTEJ TABLICY:\n"
+            report += "\nOBRAZY BEZ WYKRYTEJ TABLICY:\n"
             report += "─" * 50 + "\n"
             for img in self.no_plate_images[:20]:
                 report += f"  • {img}\n"
@@ -249,7 +249,7 @@ class AnnotationReport:
                 report += f"  ... i {len(self.no_plate_images) - 20} więcej\n"
         
         if self.partial_plate_images:
-            report += "\n📋 OBRAZY Z CZĘŚCIOWO WIDOCZNĄ TABLICĄ:\n"
+            report += "\nOBRAZY Z CZĘŚCIOWO WIDOCZNĄ TABLICĄ:\n"
             report += "─" * 50 + "\n"
             for img in self.partial_plate_images[:20]:
                 report += f"  • {img}\n"
@@ -257,7 +257,7 @@ class AnnotationReport:
                 report += f"  ... i {len(self.partial_plate_images) - 20} więcej\n"
         
         if self.skipped_images:
-            report += "\n⏹️  OBRAZY PRZERWANE:\n"
+            report += "\nOBRAZY PRZERWANE:\n"
             report += "─" * 50 + "\n"
             for img in self.skipped_images[:10]:
                 report += f"  • {img}\n"
@@ -265,7 +265,7 @@ class AnnotationReport:
                 report += f"  ... i {len(self.skipped_images) - 10} więcej\n"
         
         if self.error_images:
-            report += "\n❌ OBRAZY Z BŁĘDAMI:\n"
+            report += "\nOBRAZY Z BŁĘDAMI:\n"
             report += "─" * 50 + "\n"
             for img in self.error_images[:10]:
                 error_msg = self.error_details.get(img, "Nieznany błąd")

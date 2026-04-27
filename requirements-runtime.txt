@@ -1,0 +1,14 @@
+# Runtime dependencies for Auto-Annotation Tool
+# Install manually with:
+#   python -m pip install -r requirements-runtime.txt
+#
+# Tkinter is not listed here because it is usually delivered with Python
+# itself (Windows installer / Tcl-Tk component), not via pip.
+
+numpy
+opencv-python
+Pillow
+PyYAML
+torch
+ultralytics
+easyocr

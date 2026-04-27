@@ -287,7 +287,7 @@ class PlateAnnotator(BaseAnnotator):
                         ocr_text, ocr_conf, ocr_attrs = self._recognize_plate_text(plate_region)
                         
                         if ocr_text:
-                            logger.debug(f"🔤 OCR: {ocr_text} (conf: {ocr_conf:.2f})")
+                            logger.debug(f"OCR: {ocr_text} (conf: {ocr_conf:.2f})")
                 
                 detection = Detection(
                     label="plate",

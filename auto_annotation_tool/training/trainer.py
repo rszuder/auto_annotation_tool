@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Trener modeli YOLO Pose.
@@ -39,7 +39,7 @@ class YOLOPoseTrainer:
         self.on_progress: Optional[Callable[[float, str], None]] = None
 
     def _reset_runtime_state(self):
-        """Czyści stan modelu i pamięć CUDA przed kolejną próbą treningu."""
+        """CzyĹ›ci stan modelu i pamiÄ™Ä‡ CUDA przed kolejnÄ… prĂłbÄ… treningu."""
         try:
             model_ref = getattr(self, "model", None)
             self.model = None
@@ -56,6 +56,36 @@ class YOLOPoseTrainer:
 
         gc.collect()
         cleanup_gpu_memory()
+
+    def _resolve_runtime_epoch(self, trainer=None) -> int:
+        run = getattr(self, "current_run", None)
+        fallback_epoch = 0
+        if run is not None:
+            try:
+                history_run = self.history.get_run(run.id)
+            except Exception:
+                history_run = None
+            try:
+                fallback_epoch = int(getattr(history_run, "current_epoch", 0) or getattr(run, "current_epoch", 0) or 0)
+            except Exception:
+                fallback_epoch = 0
+
+        trainer_ref = trainer
+        if trainer_ref is None:
+            try:
+                trainer_ref = getattr(self.model, "trainer", None)
+            except Exception:
+                trainer_ref = None
+
+        if trainer_ref is not None:
+            try:
+                trainer_epoch = int(getattr(trainer_ref, "epoch", -1))
+            except Exception:
+                trainer_epoch = -1
+            if trainer_epoch >= 0:
+                return max(fallback_epoch, trainer_epoch + 1)
+
+        return max(0, fallback_epoch)
 
     def get_available_models(self) -> Dict:
         return AVAILABLE_POSE_MODELS
@@ -94,14 +124,14 @@ class YOLOPoseTrainer:
         try:
             config = safe_load_yaml(yaml_file)
 
-            # Dataset detekcyjny nie musi definiować kpt_shape.
+            # Dataset detekcyjny nie musi definiowaÄ‡ kpt_shape.
             if "kpt_shape" in config:
                 stats["kpt_shape"] = config["kpt_shape"]
 
             stats["nc"] = config.get("nc", 1)
 
         except Exception as e:
-            return False, f"Błąd: {e}", stats
+            return False, f"BĹ‚Ä…d: {e}", stats
 
         for split in ["train", "val"]:
             img_dir = dataset_path / "images" / split
@@ -111,7 +141,7 @@ class YOLOPoseTrainer:
             count = sum(1 for f in img_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS)
             stats[f"{split}_images"] = count
             if count == 0:
-                return False, f"Brak obrazów w images/{split}", stats
+                return False, f"Brak obrazĂłw w images/{split}", stats
 
         test_dir = dataset_path / "images" / "test"
         if test_dir.exists():
@@ -135,11 +165,11 @@ class YOLOPoseTrainer:
         **kwargs,
     ) -> Optional[str]:
         if not YOLO_AVAILABLE:
-            logger.error("YOLO niedostępny")
+            logger.error("YOLO niedostÄ™pny")
             return None
 
         if self.is_training:
-            logger.warning("Trening już trwa")
+            logger.warning("Trening juĹĽ trwa")
             return None
 
         is_valid, msg, _ = self.validate_dataset(Path(dataset_path))
@@ -149,7 +179,7 @@ class YOLOPoseTrainer:
 
         self._reset_runtime_state()
 
-        # base_model może być: klucz (np. yolo26m-pose) albo ścieżka do .pt
+        # base_model moĹĽe byÄ‡: klucz (np. yolo26m-pose) albo Ĺ›cieĹĽka do .pt
         model_file = base_model
         if base_model in AVAILABLE_POSE_MODELS:
             model_file = AVAILABLE_POSE_MODELS[base_model]["file"]
@@ -203,7 +233,7 @@ class YOLOPoseTrainer:
                 logger.info(f"Wznawiam z: {resume_from}")
                 self.model = YOLO(resume_from)
             else:
-                logger.info(f"Ładuję: {model_file}")
+                logger.info(f"ĹadujÄ™: {model_file}")
                 self.model = YOLO(model_file)
 
             self.history.update_run(
@@ -311,6 +341,28 @@ class YOLOPoseTrainer:
             else:
                 self.model.train(**train_args)
 
+            runtime_epoch = self._resolve_runtime_epoch()
+            if self.should_stop or self.should_pause:
+                interrupted_status = TrainingStatus.PAUSED.value if self.should_pause else TrainingStatus.CANCELLED.value
+                train_dir = Path(run.output_dir) / "train"
+                last_weights = train_dir / "weights" / "last.pt"
+                update_payload = {
+                    "status": interrupted_status,
+                    "current_epoch": runtime_epoch,
+                    "last_weights": str(last_weights) if last_weights.exists() else "",
+                }
+                if self.should_pause:
+                    update_payload["paused_at"] = datetime.now().isoformat()
+                else:
+                    update_payload["finished_at"] = datetime.now().isoformat()
+                self.history.update_run(run.id, **update_payload)
+                logger.info(
+                    f"Trening zakonczony przed czasem: status={interrupted_status}, epoka={runtime_epoch}/{epochs}"
+                )
+                if self.on_training_end:
+                    self.on_training_end(False, "Wstrzymano" if self.should_pause else "Zatrzymano")
+                return
+
             train_dir = Path(run.output_dir) / "train"
             best_weights = train_dir / "weights" / "best.pt"
             last_weights = train_dir / "weights" / "last.pt"
@@ -321,9 +373,9 @@ class YOLOPoseTrainer:
                 finished_at=datetime.now().isoformat(),
                 best_weights=str(best_weights) if best_weights.exists() else "",
                 last_weights=str(last_weights) if last_weights.exists() else "",
-                current_epoch=epochs,
+                current_epoch=max(epochs, self._resolve_runtime_epoch()),
             )
-            # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
+            # BĹ‚Ä™dy eksportu modelu nie powinny przerywaÄ‡ zakoĹ„czonego treningu.
             try:
                 if best_weights.exists():
                     import shutil
@@ -340,7 +392,7 @@ class YOLOPoseTrainer:
 
                     project_models_dir = Path(project_models_dir)
 
-                    # Uporządkuj modele według typu zadania w nowym drzewie trained/<target>.
+                    # UporzÄ…dkuj modele wedĹ‚ug typu zadania w nowym drzewie trained/<target>.
                     trained_root = project_models_dir / "trained"
                     if is_pose:
                         target_dir = trained_root / "plates"
@@ -359,7 +411,7 @@ class YOLOPoseTrainer:
                     safe_model_name = f"{task_tag}_{run.id}_map{int(final_map):02d}.pt"
                     target_path = (target_dir / safe_model_name).resolve()
 
-                    logger.info(f"💾 Kopiowanie najlepszego modelu:")
+                    logger.info("Kopiowanie najlepszego modelu:")
                     logger.info(f"   SRC: {best_weights}")
                     logger.info(f"   DST: {target_path}")
 
@@ -373,36 +425,45 @@ class YOLOPoseTrainer:
                     if active_proj:
                         if is_pose:
                             CAMPAIGN.set_global_model("plate", str(target_path))
-                            logger.info("🧠 Menadżer Kampanii: Zaktualizowano model TABLIC.")
+                            logger.info("MenadĹĽer Kampanii: Zaktualizowano model TABLIC.")
                         else:
                             if task_tag == "char":
                                 CAMPAIGN.set_global_model("char", str(target_path))
-                                logger.info("🧠 Menadżer Kampanii: Zaktualizowano model ZNAKÓW.")
+                                logger.info("MenadĹĽer Kampanii: Zaktualizowano model ZNAKĂ“W.")
                             else:
                                 CAMPAIGN.set_global_model("vehicle", str(target_path))
-                                logger.info("🧠 Menadżer Kampanii: Zaktualizowano model POJAZDÓW.")
+                                logger.info("MenadĹĽer Kampanii: Zaktualizowano model POJAZDĂ“W.")
 
-                        # krok 4 zakończony
-                        if CAMPAIGN.get_current_step() == 4:
-                            CAMPAIGN.set_current_step(5)
-                            logger.info("🎉 Menadżer Kampanii: Cykl ukończony. Odblokowano nową iterację.")
+                        # Sam udany trening nie domyka jeszcze iteracji kampanii.
+                        # O zakończeniu etapu decyduje dopiero jawna akcja użytkownika w Z4.
+                        if CAMPAIGN.get_current_step() >= 4:
+                            logger.info("Menadzer Kampanii: Zapisano aktywny model projektu. Oczekiwanie na ręczne domknięcie iteracji w Z4.")
 
             except Exception as export_err:
-                logger.warning(f"Nie udało się wyeksportować best.pt do katalogu modeli projektu: {export_err}")
+                logger.warning(f"Nie udaĹ‚o siÄ™ wyeksportowaÄ‡ best.pt do katalogu modeli projektu: {export_err}")
 
-            logger.info(f"Trening zakończony: {run.id}")
+            logger.info(f"Trening zakoĹ„czony: {run.id}")
 
             if self.on_training_end:
-                self.on_training_end(True, "Trening zakończony")
+                self.on_training_end(True, "Trening zakoĹ„czony")
 
         except InterruptedError as e:
             status = TrainingStatus.PAUSED.value if self.should_pause else TrainingStatus.CANCELLED.value
+            runtime_epoch = self._resolve_runtime_epoch()
+            train_dir = Path(run.output_dir) / "train"
+            last_weights = train_dir / "weights" / "last.pt"
 
-            self.history.update_run(
-                run.id,
-                status=status,
-                paused_at=datetime.now().isoformat(),
-            )
+            update_payload = {
+                "status": status,
+                "current_epoch": runtime_epoch,
+                "last_weights": str(last_weights) if last_weights.exists() else "",
+            }
+            if self.should_pause:
+                update_payload["paused_at"] = datetime.now().isoformat()
+            else:
+                update_payload["finished_at"] = datetime.now().isoformat()
+
+            self.history.update_run(run.id, **update_payload)
 
             logger.info(f"Przerwano: {e}")
             if self.on_training_end:
@@ -410,10 +471,10 @@ class YOLOPoseTrainer:
 
         except Exception as e:
             if "out of memory" in str(e).lower():
-                logger.warning("Wykryto błąd VRAM. Czyszczę pamięć CUDA przed kolejną próbą treningu.")
+                logger.warning("Wykryto bĹ‚Ä…d VRAM. CzyszczÄ™ pamiÄ™Ä‡ CUDA przed kolejnÄ… prĂłbÄ… treningu.")
                 self._reset_runtime_state()
 
-            logger.exception("Błąd treningu")
+            logger.exception("BĹ‚Ä…d treningu")
 
             self.history.update_run(
                 run.id,
@@ -443,7 +504,7 @@ class YOLOPoseTrainer:
             logger.info(f"Checkpoint: {checkpoint}")
 
         except Exception as e:
-            logger.error(f"Błąd checkpoint: {e}")
+            logger.error(f"BĹ‚Ä…d checkpoint: {e}")
 
     def pause_training(self):
         if self.is_training:
@@ -467,7 +528,7 @@ class YOLOPoseTrainer:
             return None
 
         if run.status not in [TrainingStatus.PAUSED.value, TrainingStatus.FAILED.value]:
-            logger.error(f"Nie można wznowić: {run.status}")
+            logger.error(f"Nie moĹĽna wznowiÄ‡: {run.status}")
             return None
 
         if not run.last_weights or not Path(run.last_weights).exists():
