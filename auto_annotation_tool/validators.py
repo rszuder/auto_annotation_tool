@@ -5,12 +5,114 @@ Funkcje walidacji plików i datasetów.
 """
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Set, Tuple
 
 from .config import CONFIG, logger, YOLO_AVAILABLE, YOLO
 from .utils import safe_load_yaml, cleanup_gpu_memory
+
+
+_MODEL_VALIDATION_CACHE: Dict[Tuple[str, int, int], Tuple[bool, str, Dict]] = {}
+
+
+def _empty_model_info() -> Dict:
+    return {
+        "type": "unknown",
+        "task": "unknown",
+        "classes": [],
+        "num_classes": 0,
+        "keypoints": False,
+        "kpt_shape": None,
+        "file_size_mb": 0,
+        "file_name": "",
+        "yolo_family": "",
+        "yolo_version": "",
+        "yolo_size": "",
+        "yolo_variant": "",
+        "model_scale": "",
+        "yaml_file": "",
+        "architecture_label": "",
+        "source_model": "",
+        "source_model_name": "",
+        "source_architecture_label": "",
+        "ultralytics_version": "",
+    }
+
+
+def _clone_model_info(info: Dict) -> Dict:
+    cloned = dict(info or {})
+    cloned["classes"] = list(cloned.get("classes") or [])
+    kpt_shape = cloned.get("kpt_shape")
+    if isinstance(kpt_shape, list):
+        cloned["kpt_shape"] = list(kpt_shape)
+    return cloned
+
+
+def _build_model_cache_key(model_path: Path) -> Tuple[str, int, int] | None:
+    try:
+        resolved = str(model_path.resolve())
+    except Exception:
+        resolved = str(model_path)
+
+    try:
+        stat = model_path.stat()
+    except Exception:
+        return None
+
+    return (resolved, int(getattr(stat, "st_mtime_ns", 0) or 0), int(getattr(stat, "st_size", 0) or 0))
+
+
+def _infer_yolo_identity_from_text(raw_text: str | Path | None, *, task_hint: str = "") -> Dict:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+
+    match = re.search(r"yolo(?:v)?(8|11|26)([nsmlx])(?:[-_ ]?(pose))?", text.lower())
+    if not match:
+        return {}
+
+    version = str(match.group(1) or "").strip()
+    size = str(match.group(2) or "").strip().lower()
+    pose_token = bool(match.group(3))
+    normalized_task = str(task_hint or "").strip().lower()
+    task_label = ""
+    if pose_token or normalized_task == "pose":
+        task_label = "Pose"
+    elif normalized_task:
+        task_label = "Detect"
+
+    family = f"YOLOv{version}" if version == "8" else f"YOLO{version}"
+    variant = f"{family}{size}"
+    architecture_label = f"{variant} {task_label}".strip()
+    return {
+        "yolo_family": family,
+        "yolo_version": version,
+        "yolo_size": size,
+        "yolo_variant": variant,
+        "architecture_label": architecture_label,
+    }
+
+
+def format_yolo_model_identity(info: Dict | None, *, include_ultralytics_version: bool = False) -> str:
+    if not isinstance(info, dict):
+        return ""
+
+    architecture_label = str(info.get("architecture_label") or "").strip()
+    if not architecture_label:
+        task = str(info.get("task") or info.get("type") or "").strip().lower()
+        if task == "pose":
+            architecture_label = "YOLO Pose"
+        elif task:
+            architecture_label = "YOLO Detect"
+
+    parts = [architecture_label] if architecture_label else []
+    if include_ultralytics_version:
+        runtime_version = str(info.get("ultralytics_version") or "").strip()
+        if runtime_version:
+            parts.append(f"Ultralytics {runtime_version}")
+    return " | ".join(parts)
 
 
 def validate_yolo_dataset(dataset_path: Path) -> Tuple[bool, str, Dict]:
@@ -74,55 +176,98 @@ def validate_yolo_dataset(dataset_path: Path) -> Tuple[bool, str, Dict]:
 
 def validate_model_file(model_path: Path) -> Tuple[bool, str, Dict]:
     """Waliduje plik modelu .pt."""
-    info = {
-        "type": "unknown",
-        "task": "unknown",
-        "classes": [],
-        "num_classes": 0,
-        "keypoints": False,
-        "kpt_shape": None,
-        "file_size_mb": 0
-    }
-    
+    info = _empty_model_info()
+
     if not model_path.exists():
         return False, "Plik nie istnieje", info
-    
+
     if model_path.suffix.lower() != ".pt":
         return False, "Plik musi mieć rozszerzenie .pt", info
-    
+
+    info["file_name"] = str(model_path.name or "").strip()
+    info.update(_infer_yolo_identity_from_text(model_path.name))
+
     try:
         info["file_size_mb"] = round(model_path.stat().st_size / (1024 * 1024), 2)
     except Exception:
         pass
-    
+
+    cache_key = _build_model_cache_key(model_path)
+    if cache_key is not None:
+        cached = _MODEL_VALIDATION_CACHE.get(cache_key)
+        if cached is not None:
+            ok, message, cached_info = cached
+            return ok, message, _clone_model_info(cached_info)
+
     if not YOLO_AVAILABLE:
         return False, "YOLO niedostępny", info
-    
+
     model = None
     try:
         model = YOLO(str(model_path))
-        
-        if hasattr(model, 'task'):
+
+        if hasattr(model, "task"):
             info["task"] = str(model.task)
             info["type"] = str(model.task)
-        
-        if hasattr(model, 'model') and hasattr(model.model, 'kpt_shape'):
+
+        if hasattr(model, "model") and hasattr(model.model, "kpt_shape"):
             info["type"] = "pose"
             info["keypoints"] = True
             info["kpt_shape"] = list(model.model.kpt_shape)
-        
-        if hasattr(model, 'names'):
+
+        inner_model = getattr(model, "model", None)
+        yaml_meta = getattr(inner_model, "yaml", None)
+        if isinstance(yaml_meta, dict):
+            info["yaml_file"] = str(yaml_meta.get("yaml_file") or "").strip()
+            info["model_scale"] = str(yaml_meta.get("scale") or "").strip().lower()
+
+        ckpt = getattr(model, "ckpt", None)
+        if isinstance(ckpt, dict):
+            info["ultralytics_version"] = str(ckpt.get("version") or "").strip()
+            train_args = ckpt.get("train_args")
+            if isinstance(train_args, dict):
+                info["source_model"] = str(train_args.get("model") or "").strip()
+                if info["source_model"]:
+                    try:
+                        info["source_model_name"] = Path(info["source_model"]).name
+                    except Exception:
+                        info["source_model_name"] = info["source_model"]
+                    source_identity = _infer_yolo_identity_from_text(
+                        info["source_model_name"] or info["source_model"],
+                        task_hint=str(info.get("task") or info.get("type") or ""),
+                    )
+                    info["source_architecture_label"] = str(source_identity.get("architecture_label") or "").strip()
+
+        task_hint = str(info.get("task") or info.get("type") or "").strip()
+        for candidate in (
+            info.get("yaml_file"),
+            info.get("source_model_name"),
+            info.get("source_model"),
+            model_path.name,
+        ):
+            inferred = _infer_yolo_identity_from_text(candidate, task_hint=task_hint)
+            if inferred:
+                info.update({key: value for key, value in inferred.items() if value})
+                break
+
+        if hasattr(model, "names"):
             if isinstance(model.names, dict):
                 info["classes"] = list(model.names.values())
             else:
                 info["classes"] = list(model.names)
             info["num_classes"] = len(info["classes"])
-        
-        return True, f"Model {info['type'].upper()} OK", info
-        
+
+        ok, message = True, f"Model {info['type'].upper()} OK"
+        if cache_key is not None:
+            _MODEL_VALIDATION_CACHE[cache_key] = (ok, message, _clone_model_info(info))
+        return ok, message, info
+
     except Exception as e:
-        return False, f"Błąd ładowania: {e}", info
-        
+        message = f"Błąd ładowania: {e}"
+        if cache_key is not None:
+            _MODEL_VALIDATION_CACHE[cache_key] = (False, message, _clone_model_info(info))
+        return False, message, info
+
     finally:
         if model:
             del model

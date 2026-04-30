@@ -301,6 +301,17 @@ class PlateAnnotator(BaseAnnotator):
                 )
                 
                 annotation.detections.append(detection)
+
+            deduplicated = self._suppress_overlapping_detections(
+                annotation.detections,
+                overlap_threshold=0.82,
+                iou_threshold=0.58,
+            )
+            if len(deduplicated) != len(annotation.detections):
+                logger.debug(
+                    f"[PlateAnnotator] Odrzucono {len(annotation.detections) - len(deduplicated)} nakładających się detekcji tablic dla {image_path.name}."
+                )
+                annotation.detections = deduplicated
             
             if annotation.detections:
                 annotation.status = AnnotationStatus.SUCCESS
