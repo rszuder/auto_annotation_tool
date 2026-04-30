@@ -222,8 +222,18 @@ class CombinedAnnotator(BaseAnnotator):
                 keypoints=kpts_list,
                 polygon=polygon
             ))
-        
-        return plates
+
+        deduplicated = self._suppress_overlapping_detections(
+            plates,
+            overlap_threshold=0.82,
+            iou_threshold=0.58,
+        )
+        if len(deduplicated) != len(plates):
+            logger.debug(
+                f"[CombinedAnnotator] Odrzucono {len(plates) - len(deduplicated)} nakładających się detekcji tablic dla {image_path.name}."
+            )
+
+        return deduplicated
     
     def _match_plates_to_vehicles(self, 
                                    vehicles: List[Detection], 

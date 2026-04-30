@@ -18,6 +18,7 @@ class Z2ActionContext:
     mode: str
     campaign_step: int
     iteration_target: str
+    campaign_repair_mode: bool
     route: str
     input_dir: str
     has_plate_model: bool
@@ -57,6 +58,8 @@ class PlateManualAction(Z2Action):
     id = "plate_manual"
 
     def is_available(self, ctx: Z2ActionContext) -> bool:
+        if ctx.mode == "campaign" and ctx.campaign_repair_mode:
+            return True
         if ctx.mode == "campaign" and ctx.campaign_step == 2 and ctx.has_plate_model:
             if ctx.iteration_target == "char":
                 return False
@@ -71,6 +74,11 @@ class PlateManualAction(Z2Action):
 
     def get_description(self, ctx: Z2ActionContext) -> str:
         if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
+                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                )
             return (
                 "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
                 "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
@@ -215,6 +223,8 @@ class PlateAutoAction(Z2Action):
 
     def is_available(self, ctx: Z2ActionContext) -> bool:
         if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return False
             return bool(ctx.has_plate_model)
         return True
 
@@ -222,11 +232,18 @@ class PlateAutoAction(Z2Action):
         if ctx.is_processing:
             return False
         if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return False
             return bool(ctx.has_plate_model)
         return True
 
     def get_description(self, ctx: Z2ActionContext) -> str:
         if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "W tym trybie naprawczym autoanotacja projektowym modelem jest ukryta celowo. "
+                    "Powrót z E3 służy ręcznej naprawie źródła tablic dla tej samej paczki."
+                )
             if ctx.has_plate_model:
                 return (
                     "Opcja dodatkowa. Uruchamia model tablic na obrazach widocznych na liście wyników anotacji, "
@@ -330,6 +347,11 @@ class PlateAutoAction(Z2Action):
                         pass
                     return
             manual_overlay_bundle = {}
+            try:
+                if not host._prompt_campaign_plate_auto_model_choice():
+                    return
+            except Exception:
+                return
             try:
                 manual_overlay_bundle = dict(host._get_current_campaign_manual_preview_bundle() or {})
             except Exception:

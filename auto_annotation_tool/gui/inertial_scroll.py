@@ -124,10 +124,30 @@ class InertialScrollController:
         if listbox is None or units == 0:
             return 0.0
         try:
+            total_items = max(1, int(listbox.size() or 0))
             first, last = listbox.yview()
-            span = max(0.02, float(last) - float(first))
-            base_step = max(0.008, min(0.035, span * 0.12))
-            step = base_step * max(1.0, min(3.0, float(magnitude or 1.0)))
+            span = max(1e-6, float(last) - float(first))
+            visible_rows = max(1.0, float(span) * float(total_items))
+
+            # Dla dużych list chcemy przewijać raczej o kilka wierszy,
+            # a nie o stały procent całej zawartości. W przeciwnym razie
+            # paczka 3000 obrazów skacze o dziesiątki pozycji na jeden ruch rolką.
+            if total_items <= 80:
+                base_rows = 1.35
+            elif total_items <= 300:
+                base_rows = 1.15
+            elif total_items <= 1200:
+                base_rows = 1.0
+            else:
+                base_rows = 0.85
+
+            if visible_rows <= 8.0:
+                base_rows *= 0.9
+            elif visible_rows >= 22.0:
+                base_rows *= 1.1
+
+            rows_per_tick = max(0.75, min(2.25, base_rows * max(1.0, min(3.0, float(magnitude or 1.0)))))
+            step = rows_per_tick / float(total_items)
             return float(units) * step
         except Exception:
             return 0.0
@@ -209,7 +229,8 @@ class InertialScrollController:
         widget = state.get("widget")
         mode = str(state.get("mode", "") or "").strip().lower()
         velocity = float(state.get("velocity", 0.0) or 0.0)
-        if abs(velocity) < 0.0007:
+        min_velocity = 0.0007 if mode == "canvas" else 0.00008
+        if abs(velocity) < min_velocity:
             self._jobs.pop(key, None)
             return
 
@@ -223,7 +244,7 @@ class InertialScrollController:
             return
 
         state["velocity"] = velocity * self.decay
-        if abs(float(state.get("velocity", 0.0) or 0.0)) < 0.0007:
+        if abs(float(state.get("velocity", 0.0) or 0.0)) < min_velocity:
             self._jobs.pop(key, None)
             return
 

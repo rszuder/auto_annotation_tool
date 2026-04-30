@@ -11,6 +11,7 @@ import re
 import shutil
 from pathlib import Path
 from datetime import datetime
+from time import perf_counter
 from typing import Dict, Any, List
 
 from .config import CONFIG, logger
@@ -469,12 +470,28 @@ class CampaignManager:
         self.state["projects"][act]["step3_status"] = "needs_rework"
         self.save_state()
 
+    def set_step3_ready(self):
+        """Oznacza krok 3 jako gotowy do zatwierdzenia w wizardzie."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_status"] = "ready"
+        self.save_state()
+
     def approve_step3(self):
         """Oznacza krok 3 jako zakończony powodzeniem."""
         act = self.get_active_project_name()
         if not act:
             return
         self.state["projects"][act]["step3_status"] = "approved"
+        self.save_state()
+
+    def set_step3_pending(self):
+        """Przywraca krok 3 do stanu w toku bez resetu zapisanej pracy."""
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_status"] = "pending"
         self.save_state()
 
     def reset_step3(self):
@@ -650,7 +667,9 @@ class CampaignManager:
         cloned_manifest["reused_from_iteration"] = int(source_iteration)
         cloned_manifest["target_dir"] = str(target_raw_dir.resolve())
         cloned_manifest["selected_images"] = selected_images
-        cloned_manifest["selected_count"] = len(selected_images)
+        cloned_manifest["selected_count"] = int(
+            len(selected_images) or manifest.get("selected_count", 0) or 0
+        )
 
         return bool(self.save_ingest_manifest(cloned_manifest, target_iteration, project_name))
 
@@ -703,6 +722,7 @@ class CampaignManager:
         target_iteration: int,
         project_name: str,
     ) -> Dict[str, Any]:
+        started_at = perf_counter()
         master_pool_dir = self.get_master_pool_dir(project_name)
         target_raw_dir = self.get_iteration_raw_dir(target_iteration, project_name)
         if master_pool_dir is None or target_raw_dir is None:
@@ -715,13 +735,42 @@ class CampaignManager:
         planner = CampaignIngestPlanner()
         used_registry = self.get_used_image_registry(project_name)
         balance_snapshot = self.refresh_ingest_balance_snapshot(project_name)
+        source_manifest = self.load_ingest_manifest(source_iteration, project_name)
+
+        preferred_batch_size = 0
+        try:
+            preferred_batch_size = int(
+                source_manifest.get("selected_count", 0)
+                or dict(source_manifest.get("proposal_summary") or {}).get("current_iteration_package_count", 0)
+                or 0
+            )
+        except Exception:
+            preferred_batch_size = 0
+
+        if preferred_batch_size <= 0:
+            try:
+                source_raw_dir = self.get_iteration_raw_dir(source_iteration, project_name)
+                if source_raw_dir is not None and source_raw_dir.exists():
+                    preferred_batch_size = int(
+                        len(
+                            [
+                                path for path in source_raw_dir.iterdir()
+                                if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+                            ]
+                        )
+                    )
+            except Exception:
+                preferred_batch_size = 0
+
+        if preferred_batch_size <= 0:
+            preferred_batch_size = 200
 
         plan = planner.plan_from_master_pool(
             master_pool_dir=master_pool_dir,
             current_balance=balance_snapshot.get("char_balance", {}),
             used_source_keys=used_registry.get("source_keys", []),
             used_filenames=used_registry.get("filenames", []),
-            batch_size=None,
+            batch_size=preferred_batch_size,
         )
 
         selected_items = list(plan.get("selected", []) or [])
@@ -814,6 +863,15 @@ class CampaignManager:
         except Exception:
             pass
 
+        elapsed_ms = max(0.0, (perf_counter() - started_at) * 1000.0)
+        if elapsed_ms >= 40.0:
+            logger.debug(
+                "[CampaignManager][PERF] seed_iteration_from_master_pool: "
+                f"{elapsed_ms:.1f} ms | batch={int(preferred_batch_size)} "
+                f"candidates={int(plan.get('candidates_total', 0) or 0)} "
+                f"selected={int(plan.get('selected_total', 0) or 0)}"
+            )
+
         return {
             "ok": True,
             "source_dir": str(master_pool_dir.resolve()),
@@ -829,6 +887,7 @@ class CampaignManager:
         target_iteration: int,
         project_name: str,
     ) -> Dict[str, Any]:
+        started_at = perf_counter()
         target_raw_dir = self.get_iteration_raw_dir(target_iteration, project_name)
         stage_root = self.get_staging_dir("plate_stage")
         if target_raw_dir is None or stage_root is None:
@@ -873,26 +932,47 @@ class CampaignManager:
                 "manifest_cloned": False,
             }
 
-        target_raw_dir.mkdir(parents=True, exist_ok=True)
+        stage_image_count = int(len(stage_images))
         moved = 0
-        selected_images: list[Dict[str, Any]] = []
+        transfer_mode = "per_file"
+        fast_move_fallback = False
 
-        for source_path in stage_images:
-            target_path = target_raw_dir / source_path.name
-            if target_path.exists():
-                try:
-                    target_path.unlink()
-                except Exception:
-                    pass
-            shutil.move(str(source_path), str(target_path))
-            moved += 1
-            selected_images.append(
-                {
-                    "name": source_path.name,
-                    "source_path": str(source_path.resolve()),
-                    "target_path": str(target_path.resolve()),
-                }
-            )
+        target_parent = target_raw_dir.parent
+        target_parent.mkdir(parents=True, exist_ok=True)
+
+        can_use_dir_move = not target_raw_dir.exists()
+        if target_raw_dir.exists():
+            try:
+                if any(target_raw_dir.iterdir()):
+                    can_use_dir_move = False
+                else:
+                    target_raw_dir.rmdir()
+                    can_use_dir_move = True
+            except Exception:
+                can_use_dir_move = False
+
+        if can_use_dir_move:
+            try:
+                shutil.move(str(stage_images_dir), str(target_raw_dir))
+                stage_images_dir.mkdir(parents=True, exist_ok=True)
+                moved = stage_image_count
+                transfer_mode = "dir_move"
+            except Exception:
+                fast_move_fallback = True
+
+        if moved <= 0:
+            target_raw_dir.mkdir(parents=True, exist_ok=True)
+            for source_path in stage_images:
+                if not source_path.exists() or not source_path.is_file():
+                    continue
+                target_path = target_raw_dir / source_path.name
+                if target_path.exists():
+                    try:
+                        target_path.unlink()
+                    except Exception:
+                        pass
+                shutil.move(str(source_path), str(target_path))
+                moved += 1
 
         if moved <= 0:
             return {
@@ -912,12 +992,14 @@ class CampaignManager:
             "reused_from_iteration": int(source_iteration),
             "source_dir": str(stage_images_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
-            "selected_count": len(selected_images),
-            "selected_images": selected_images,
+            "selected_count": int(moved),
+            "selected_images": [],
             "char_histogram": {},
             "proposal_summary": {
                 "source_iteration": int(source_iteration),
                 "source_kind": "stage",
+                "current_iteration_package_count": int(moved),
+                "stage_transfer_mode": transfer_mode,
             },
         }
         manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
@@ -925,22 +1007,31 @@ class CampaignManager:
         manifest_path = stage_iteration_dir / "stage_manifest.json"
         if manifest_path.exists():
             try:
-                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict):
-                    payload = {}
-            except Exception:
-                payload = {}
-            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            payload["pending_images"] = 0
-            payload["stage_images_total"] = 0
-            payload["entries"] = {}
-            try:
                 manifest_path.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    json.dumps(
+                        {
+                            "project": project_name,
+                            "iteration": int(source_iteration),
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                            "pending_images": 0,
+                            "stage_images_total": 0,
+                            "entries": {},
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
                     encoding="utf-8",
                 )
             except Exception:
                 pass
+
+        elapsed_ms = max(0.0, (perf_counter() - started_at) * 1000.0)
+        if elapsed_ms >= 40.0:
+            logger.debug(
+                "[CampaignManager][PERF] seed_iteration_from_stage: "
+                f"{elapsed_ms:.1f} ms | images={int(moved)} mode={transfer_mode} "
+                f"fallback={1 if fast_move_fallback else 0}"
+            )
 
         return {
             "ok": True,
@@ -961,6 +1052,18 @@ class CampaignManager:
             start_mode = "new_input"
 
         project_data = self.state["projects"][act]
+        project_status = str(project_data.get("project_status", "active") or "active").strip().lower()
+        current_step = int(project_data.get("current_step", 1) or 1)
+        step4_finish_ready = bool(project_data.get("step4_finish_ready", False))
+        if project_status in {"paused", "completed"}:
+            return {"ok": False, "reason": "project_not_active"}
+        if current_step < 5 and not step4_finish_ready:
+            return {
+                "ok": False,
+                "reason": "step4_not_finished",
+                "current_step": current_step,
+                "step4_finish_ready": step4_finish_ready,
+            }
         current_target = self._normalize_iteration_target(project_data.get("iteration_target", ""))
         current_iteration = int(project_data.get("current_iteration", 1) or 1)
         next_iteration = current_iteration + 1

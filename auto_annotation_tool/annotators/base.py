@@ -10,7 +10,7 @@ from typing import List, Optional, Callable, Tuple
 import threading
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE
-from ..data_models import ImageAnnotation, AnnotationReport
+from ..data_models import Detection, ImageAnnotation, AnnotationReport
 from ..utils import get_image_files, cleanup_gpu_memory
 
 
@@ -76,6 +76,84 @@ class BaseAnnotator(ABC):
                 continue
 
         return normalized
+
+    @staticmethod
+    def _bbox_iou(
+        bbox_a: tuple[float, float, float, float],
+        bbox_b: tuple[float, float, float, float],
+    ) -> float:
+        ax1, ay1, ax2, ay2 = [float(v) for v in bbox_a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in bbox_b[:4]]
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
+            return 0.0
+
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        area_a = max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+        denom = area_a + area_b - inter_area
+        if denom <= 0.0:
+            return 0.0
+        return float(inter_area / denom)
+
+    @staticmethod
+    def _bbox_overlap_over_smaller(
+        bbox_a: tuple[float, float, float, float],
+        bbox_b: tuple[float, float, float, float],
+    ) -> float:
+        ax1, ay1, ax2, ay2 = [float(v) for v in bbox_a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in bbox_b[:4]]
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
+            return 0.0
+
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        area_a = max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+        smaller_area = min(area_a, area_b)
+        if smaller_area <= 0.0:
+            return 0.0
+        return float(inter_area / smaller_area)
+
+    def _suppress_overlapping_detections(
+        self,
+        detections: list[Detection],
+        *,
+        overlap_threshold: float = 0.80,
+        iou_threshold: float = 0.55,
+    ) -> list[Detection]:
+        if len(detections or []) <= 1:
+            return list(detections or [])
+
+        ordered = sorted(
+            list(detections or []),
+            key=lambda det: (
+                -float(getattr(det, "confidence", 0.0) or 0.0),
+                -float(getattr(det, "get_area", lambda: 0.0)() or 0.0),
+            ),
+        )
+        kept: list[Detection] = []
+        for candidate in ordered:
+            is_duplicate = False
+            for existing in kept:
+                if str(getattr(candidate, "label", "") or "").lower() != str(getattr(existing, "label", "") or "").lower():
+                    continue
+                overlap = self._bbox_overlap_over_smaller(candidate.bbox, existing.bbox)
+                iou = self._bbox_iou(candidate.bbox, existing.bbox)
+                if overlap >= float(overlap_threshold) or iou >= float(iou_threshold):
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                kept.append(candidate)
+        return kept
 
     def process_directory(self,
                           images_dir: Path,

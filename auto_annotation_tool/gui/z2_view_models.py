@@ -108,10 +108,10 @@ class Step3Pz3PathSelectionViewModel:
     show_status_section: bool = False
     dataset_card_selected: bool = False
     cvat_card_selected: bool = False
-    dataset_badge_text: str = "DATASET | START"
+    dataset_badge_text: str = "DATASET"
     dataset_title_text: str = "Budowa datasetu"
     dataset_desc_text: str = "Perfecty, importy manualne, split i eksport datasetu treningowego."
-    cvat_badge_text: str = "CVAT | START"
+    cvat_badge_text: str = "CVAT"
     cvat_title_text: str = "Eksport do CVAT"
     cvat_desc_text: str = "Eksport review packa do ręcznej korekty."
 

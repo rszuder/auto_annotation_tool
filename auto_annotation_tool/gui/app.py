@@ -204,6 +204,7 @@ class AutoAnnotationApp:
         self._global_terminal_toggle_btn = None
         self._global_terminal_visible = False
         self._global_terminal_geometry_initialized = False
+        self._global_terminal_hold_position = False
         self.tabs = {}
         self._closing_in_progress = False
         self.startup_overlay_frame = None
@@ -3163,8 +3164,18 @@ class AutoAnnotationApp:
 
             created_at = CAMPAIGN.get_project_created_at(active_project)
             created_label = self._format_project_created_at(created_at)
+            try:
+                iter_num = max(1, int(CAMPAIGN.get_current_iteration_num() or 1))
+            except Exception:
+                iter_num = 1
+            route_label = self._format_iteration_target_badge_label(
+                getattr(CAMPAIGN, "get_iteration_target", lambda: "")()
+            )
 
-            title = f"{base_title} | Projekt: {active_project}"
+            title = (
+                f"{base_title} | Projekt: {active_project} | Iteracja {iter_num} | "
+                f"Tor: {route_label}"
+            )
             if created_label:
                 title += f" | Utworzono: {created_label}"
 
@@ -3374,12 +3385,29 @@ class AutoAnnotationApp:
         try:
             from ..campaign_manager import CAMPAIGN
             active_project = (CAMPAIGN.get_active_project_name() or "").strip()
+            active_iteration = int(CAMPAIGN.get_current_iteration_num() or 1) if active_project else 0
+            active_target = str(getattr(CAMPAIGN, "get_iteration_target", lambda: "")() or "").strip().lower()
         except Exception:
             active_project = ""
+            active_iteration = 0
+            active_target = ""
 
         if active_project:
-            return f"Projekt: {active_project}"
+            target_label = self._format_iteration_target_badge_label(active_target)
+            return (
+                f"Projekt: {active_project} | Iteracja {max(1, int(active_iteration or 1))} | "
+                f"Tor: {target_label}"
+            )
         return "Projekt: tryb swobodny"
+
+    @staticmethod
+    def _format_iteration_target_badge_label(target: str | None) -> str:
+        normalized = str(target or "").strip().lower()
+        if normalized == "plate":
+            return "tablice"
+        if normalized == "char":
+            return "znaki"
+        return "jeszcze nie wybrany"
 
     def _refresh_menu_badge(self):
         badge = getattr(self, "menu_theme_badge", None)
@@ -3997,12 +4025,141 @@ class AutoAnnotationApp:
             except Exception:
                 pass
 
+    @staticmethod
+    def _capture_terminal_widget_view_state(text_widget) -> dict:
+        state = {
+            "insert": None,
+            "x_first": 0.0,
+            "y_first": 0.0,
+            "view_at_end": True,
+            "insert_at_end": True,
+            "sel_first": None,
+            "sel_last": None,
+        }
+        if text_widget is None:
+            return state
+
+        try:
+            state["insert"] = text_widget.index(tk.INSERT)
+        except Exception:
+            state["insert"] = None
+
+        try:
+            x_first, _x_last = text_widget.xview()
+            state["x_first"] = float(x_first)
+        except Exception:
+            state["x_first"] = 0.0
+
+        try:
+            y_first, y_last = text_widget.yview()
+            state["y_first"] = float(y_first)
+            state["view_at_end"] = float(y_last) >= 0.999
+        except Exception:
+            state["y_first"] = 0.0
+            state["view_at_end"] = True
+
+        try:
+            state["insert_at_end"] = bool(text_widget.compare(tk.INSERT, ">=", "end-2c"))
+        except Exception:
+            state["insert_at_end"] = True
+
+        try:
+            state["sel_first"] = text_widget.index("sel.first")
+            state["sel_last"] = text_widget.index("sel.last")
+        except Exception:
+            state["sel_first"] = None
+            state["sel_last"] = None
+
+        return state
+
+    @staticmethod
+    def _restore_terminal_widget_view_state(text_widget, state: dict) -> None:
+        if text_widget is None or not isinstance(state, dict):
+            return
+
+        try:
+            insert_index = state.get("insert")
+            if insert_index:
+                text_widget.mark_set(tk.INSERT, str(insert_index))
+        except Exception:
+            pass
+
+        try:
+            text_widget.xview_moveto(float(state.get("x_first", 0.0) or 0.0))
+        except Exception:
+            pass
+
+        try:
+            text_widget.yview_moveto(float(state.get("y_first", 0.0) or 0.0))
+        except Exception:
+            pass
+
+        try:
+            text_widget.tag_remove(tk.SEL, "1.0", tk.END)
+            sel_first = state.get("sel_first")
+            sel_last = state.get("sel_last")
+            if sel_first and sel_last:
+                text_widget.tag_add(tk.SEL, str(sel_first), str(sel_last))
+        except Exception:
+            pass
+
+    def _set_global_terminal_hold_position(self, hold: bool) -> None:
+        self._global_terminal_hold_position = bool(hold)
+
+    def _sync_global_terminal_hold_position_from_view(self) -> None:
+        text_widget = getattr(self, "_global_terminal_text", None)
+        if text_widget is None:
+            self._set_global_terminal_hold_position(False)
+            return
+
+        try:
+            _y_first, y_last = text_widget.yview()
+            at_end = float(y_last) >= 0.999
+        except Exception:
+            at_end = True
+
+        self._set_global_terminal_hold_position(not at_end)
+
+    def _schedule_global_terminal_hold_position_sync(self, _event=None):
+        try:
+            self.root.after_idle(self._sync_global_terminal_hold_position_from_view)
+        except Exception:
+            try:
+                self._sync_global_terminal_hold_position_from_view()
+            except Exception:
+                pass
+        return None
+
+    def _on_global_terminal_pointer_event(self, event=None):
+        self._set_global_terminal_hold_position(True)
+        text_widget = getattr(self, "_global_terminal_text", None)
+        if text_widget is not None and event is not None:
+            try:
+                text_widget.focus_set()
+            except Exception:
+                pass
+            try:
+                text_widget.mark_set(tk.INSERT, f"@{int(event.x)},{int(event.y)}")
+            except Exception:
+                pass
+        return None
+
+    def _on_global_terminal_scroll_event(self, event=None):
+        self._set_global_terminal_hold_position(True)
+        self._schedule_global_terminal_hold_position_sync()
+        return None
+
     def _populate_global_terminal_widget(self):
         text_widget = getattr(self, "_global_terminal_text", None)
         if text_widget is None:
             return
 
         try:
+            state_before = self._capture_terminal_widget_view_state(text_widget)
+            follow_end = bool(
+                (not bool(getattr(self, "_global_terminal_hold_position", False)))
+                and state_before.get("view_at_end")
+            )
             text_widget.configure(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)
             self._configure_global_terminal_tags(text_widget)
@@ -4012,7 +4169,10 @@ class AutoAnnotationApp:
                 self._global_terminal_entries = entries
             for entry in entries:
                 self._insert_global_terminal_entry(text_widget, entry)
-            text_widget.see(tk.END)
+            if follow_end:
+                text_widget.see(tk.END)
+            else:
+                self._restore_terminal_widget_view_state(text_widget, state_before)
         except Exception:
             pass
         finally:
@@ -4138,6 +4298,8 @@ class AutoAnnotationApp:
             bd=0,
             relief=tk.FLAT,
             highlightthickness=0,
+            takefocus=1,
+            cursor="xterm",
         )
         hscrollbar = WebSlimScrollbar(
             body,
@@ -4158,6 +4320,42 @@ class AutoAnnotationApp:
         text_widget.configure(yscrollcommand=scrollbar.set, xscrollcommand=hscrollbar.set)
         text_widget.web_vbar = scrollbar
         text_widget.web_hbar = hscrollbar
+
+        for sequence in ("<Button-1>", "<B1-Motion>"):
+            try:
+                text_widget.bind(sequence, self._on_global_terminal_pointer_event, add="+")
+            except Exception:
+                pass
+
+        for sequence in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>"):
+            try:
+                text_widget.bind(sequence, self._on_global_terminal_scroll_event, add="+")
+            except Exception:
+                pass
+
+        for sequence in (
+            "<ButtonRelease-1>",
+            "<ButtonRelease-2>",
+            "<ButtonRelease-3>",
+            "<ButtonRelease-4>",
+            "<ButtonRelease-5>",
+            "<KeyRelease-Up>",
+            "<KeyRelease-Down>",
+            "<KeyRelease-Prior>",
+            "<KeyRelease-Next>",
+            "<KeyRelease-Home>",
+            "<KeyRelease-End>",
+        ):
+            try:
+                text_widget.bind(sequence, self._schedule_global_terminal_hold_position_sync, add="+")
+            except Exception:
+                pass
+
+        for widget in (scrollbar, hscrollbar):
+            try:
+                widget.bind("<ButtonRelease-1>", self._schedule_global_terminal_hold_position_sync, add="+")
+            except Exception:
+                pass
 
         self._global_terminal_window = window
         self._global_terminal_shell = shell
@@ -4215,6 +4413,7 @@ class AutoAnnotationApp:
     def clear_global_terminal(self):
         self._global_terminal_entries = []
         self._global_terminal_lines = []
+        self._set_global_terminal_hold_position(False)
         self._populate_global_terminal_widget()
 
     def append_global_terminal_entries(self, entries):
@@ -4244,6 +4443,11 @@ class AutoAnnotationApp:
                 return
 
             try:
+                state_before = self._capture_terminal_widget_view_state(text_widget)
+                follow_end = bool(
+                    (not bool(getattr(self, "_global_terminal_hold_position", False)))
+                    and state_before.get("view_at_end")
+                )
                 text_widget.configure(state=tk.NORMAL)
                 self._configure_global_terminal_tags(text_widget)
                 if overflow > 0:
@@ -4253,7 +4457,10 @@ class AutoAnnotationApp:
                 else:
                     for entry in normalized_entries:
                         self._insert_global_terminal_entry(text_widget, entry)
-                text_widget.see(tk.END)
+                if follow_end:
+                    text_widget.see(tk.END)
+                else:
+                    self._restore_terminal_widget_view_state(text_widget, state_before)
             except Exception:
                 pass
             finally:
@@ -4573,10 +4780,10 @@ class AutoAnnotationApp:
 
         Zasada:
         - tryb swobodny: wszystko dostępne
-        - tryb aktywnego projektu: ręcznie klikalne są tylko:
-        * Wizard kampanii
-        * Help
-        * aktualnie OTWARTA zakładka robocza (jeśli weszliśmy tam z wizarda)
+        - tryb aktywnego projektu:
+        * Help jest zawsze dostępny
+        * aktualnie otwarta zakładka robocza pozostaje aktywna
+        * Wizard Z1 wraca tylko przez dedykowane CTA w module
         """
 
         from ..campaign_manager import CAMPAIGN
@@ -4610,10 +4817,12 @@ class AutoAnnotationApp:
 
         selected_key = self._get_selected_tab_key()
 
-        allowed = {"campaign", "help"}
+        allowed = {"help"}
+        if selected_key == "campaign" or active_step_tab_key == "campaign":
+            allowed.add("campaign")
 
-        # jeżeli użytkownik jest już w zakładce roboczej, zostaw ją aktywną
-        # ale nie odblokowuj innych roboczych tabów
+        # Jeżeli użytkownik jest już w zakładce roboczej, zostaw ją aktywną,
+        # ale nie odblokowuj Z1 do ręcznego kliknięcia.
         if selected_key in {"annotation", "characters", "training"}:
             allowed.add(selected_key)
 
@@ -4721,9 +4930,9 @@ class AutoAnnotationApp:
         selected_key = self._get_selected_tab_key()
         if selected_key == "annotation":
             try:
+                annotation_tab = getattr(self, "tabs", {}).get("annotation")
                 from ..campaign_manager import CAMPAIGN
                 if not self.campaign_free_mode and CAMPAIGN.get_active_project_name():
-                    annotation_tab = getattr(self, "tabs", {}).get("annotation")
                     ensure_context = (
                         getattr(annotation_tab, "ensure_campaign_context_ready_for_active_project", None)
                         if annotation_tab is not None
@@ -4731,6 +4940,14 @@ class AutoAnnotationApp:
                     )
                     if callable(ensure_context):
                         self.root.after_idle(ensure_context)
+                else:
+                    ensure_preview = (
+                        getattr(annotation_tab, "ensure_free_mode_session_preview_ready", None)
+                        if annotation_tab is not None
+                        else None
+                    )
+                    if callable(ensure_preview):
+                        self.root.after_idle(ensure_preview)
             except Exception:
                 pass
         if selected_key in {"annotation", "characters", "training"}:
