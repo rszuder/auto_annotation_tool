@@ -1,9 +1,9 @@
-# Runtime dependencies for Auto-Annotation Tool
-# Install manually with:
+# Zależności uruchomieniowe dla Auto-Annotation Tool
+# Zainstaluj ręcznie poleceniem:
 #   python -m pip install -r requirements-runtime.txt
 #
-# Tkinter is not listed here because it is usually delivered with Python
-# itself (Windows installer / Tcl-Tk component), not via pip.
+# Tkinter nie jest tu wymieniony, ponieważ zazwyczaj jest dostarczany
+# razem z Pythonem (instalator Windows / komponent Tcl-Tk), a nie przez pip.
 
 numpy
 opencv-python
