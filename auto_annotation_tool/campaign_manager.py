@@ -21,6 +21,7 @@ class CampaignManager:
     def __init__(self):
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
         self.state = self._load_state()
+        self._plate_approved_stats_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
 
     @staticmethod
     def _iter_project_workspace_dirs(root: Path) -> list[Path]:
@@ -1131,6 +1132,10 @@ class CampaignManager:
         project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = ""
         self.save_state()
+        try:
+            self.clear_project_iteration_ui_snapshots(act)
+        except Exception:
+            pass
         if start_mode != "reuse_input":
             try:
                 self.clear_latest_ingest_plan(act)
@@ -1262,6 +1267,31 @@ class CampaignManager:
         state_dir = self.get_project_root_dir(project_name) / "_campaign_state"
         state_dir.mkdir(parents=True, exist_ok=True)
         return state_dir
+
+    def clear_project_iteration_ui_snapshots(self, project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+
+        state_dir = self.get_project_state_dir(project_name)
+        if state_dir is None:
+            return False
+
+        removed_any = False
+        for snapshot_name in (
+            "annotation_ui_state.json",
+        ):
+            snapshot_path = state_dir / snapshot_name
+            try:
+                if snapshot_path.exists():
+                    snapshot_path.unlink()
+                    removed_any = True
+            except Exception as e:
+                logger.debug(
+                    f"Nie udało się usunąć snapshotu iteracji {snapshot_path}: {e}"
+                )
+
+        return removed_any
 
     def get_project_ingest_state_dir(self, project_name: str = None) -> Path | None:
         state_dir = self.get_project_state_dir(project_name)
@@ -1477,8 +1507,36 @@ class CampaignManager:
         return result
 
     def get_plate_approved_set_stats(self, project_name: str = None) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {
+                "project": "",
+                "updated_at": "",
+                "images": 0,
+                "plates": 0,
+                "manual_images": 0,
+                "manual_plates": 0,
+                "auto_accepted_images": 0,
+                "auto_accepted_plates": 0,
+            }
+
+        cache_key = None
+        manifest_path = self.get_plate_approved_set_path(project_name)
+        if manifest_path is not None and manifest_path.exists():
+            try:
+                stat = manifest_path.stat()
+                cache_key = (project_name, int(getattr(stat, "st_mtime_ns", 0) or 0), int(getattr(stat, "st_size", 0) or 0))
+            except Exception:
+                cache_key = None
+        if cache_key is not None:
+            cached = self._plate_approved_stats_cache.get(cache_key)
+            if isinstance(cached, dict):
+                return dict(cached)
+
         manifest = self.load_plate_approved_set(project_name)
-        entries = self.list_plate_approved_entries(project_name)
+        entries = manifest.get("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
 
         stats = {
             "project": str(manifest.get("project", "") or "").strip(),
@@ -1491,7 +1549,7 @@ class CampaignManager:
             "auto_accepted_plates": 0,
         }
 
-        for entry in entries:
+        for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
 
@@ -1518,6 +1576,9 @@ class CampaignManager:
             else:
                 stats["manual_images"] += 1
                 stats["manual_plates"] += int(valid_plate_count)
+
+        if cache_key is not None:
+            self._plate_approved_stats_cache[cache_key] = dict(stats)
 
         return stats
 

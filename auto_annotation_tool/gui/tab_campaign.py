@@ -6079,6 +6079,28 @@ class CampaignTab:
             step1_status = "approved"
             step1_approved = True
 
+        if self._should_reset_stale_char_iteration_state(
+            current_step=curr_step,
+            step2_status=step2_status,
+            step3_status=step3_status,
+            iteration_target=iteration_target,
+        ):
+            try:
+                CAMPAIGN.reset_step3()
+                CAMPAIGN.reset_step2()
+                CAMPAIGN.set_current_step(2)
+                CAMPAIGN.set_iteration_target("")
+                logger.debug(
+                    "[CampaignTab] Wykryto przestarzały stan toru znaków dla nowej iteracji. "
+                    "Zresetowano E2/E3 do czystego wejścia iteracji."
+                )
+            except Exception as e:
+                logger.debug(f"Nie udało się zresetować przestarzałego stanu toru znaków: {e}")
+            curr_step = 2
+            step2_status = "pending"
+            step3_status = "pending"
+            iteration_target = ""
+
         default_iteration_target = self._get_default_step2_iteration_target(
             current_step=curr_step,
             step1_status=step1_status,
@@ -6590,9 +6612,15 @@ class CampaignTab:
         step4_gate_blocked = bool(plate_step4_blocked or char_step4_blocked)
         step4_finish_state = {}
         try:
-            step4_finish_state = CAMPAIGN.get_step4_finish_state() or {}
+            if training_tab is not None and hasattr(training_tab, "get_campaign_step4_finish_state"):
+                step4_finish_state = training_tab.get_campaign_step4_finish_state(iteration_target=iteration_target) or {}
+            else:
+                step4_finish_state = CAMPAIGN.get_step4_finish_state() or {}
         except Exception:
-            step4_finish_state = {}
+            try:
+                step4_finish_state = CAMPAIGN.get_step4_finish_state() or {}
+            except Exception:
+                step4_finish_state = {}
         step4_finish_ready = bool(step4_finish_state.get("ready", False))
         step4_finish_target = self._normalize_iteration_target(step4_finish_state.get("target", ""))
         if not step4_finish_target:
@@ -7472,6 +7500,7 @@ class CampaignTab:
         normalized_target = self._normalize_iteration_target(iteration_target)
         normalized_step2_status = str(step2_status or "").strip().lower()
         normalized_step3_status = str(step3_status or "").strip().lower()
+        step2_approved = normalized_step2_status == "approved"
         ready_source = dict(char_ready_source or {})
         repair_guidance = dict(char_repair_guidance or {})
         step4_gate = dict(char_step4_gate or {})
@@ -7626,7 +7655,7 @@ class CampaignTab:
             body_mode = ""
             body_visible = False
         elif int(current_step or 0) == 3 and not can_approve_step3:
-            if ready_source:
+            if ready_source and step2_approved:
                 state = "in_progress"
                 summary = "Źródło tablic jest gotowe, ale etap E3 czeka jeszcze na ponowne wejście do Z3."
                 details = (
@@ -7692,7 +7721,7 @@ class CampaignTab:
                 state = "in_progress"
                 summary = "Pracujesz teraz w Z3: wycinanie tablic, OCR, korekty i eksport."
                 details = "Wizard pokazuje tylko stan etapu. Cała praca dzieje się w zakładce Znaki."
-        elif normalized_step2_status == "approved" or ready_source:
+        elif step2_approved:
             state = "ready"
             summary = "Z3 jest gotowe do uruchomienia."
             details = "Źródła tablic są już przygotowane i możesz zacząć pracę nad znakami."
@@ -7711,7 +7740,16 @@ class CampaignTab:
                         "Po wejsciu do Z3 model znaków projektu będzie już ustawiony automatycznie."
                     )
 
-        if normalized_target == "char" and int(current_step or 0) < 3 and normalized_step2_status != "approved":
+        if normalized_target == "char" and not step2_approved and state in {"in_progress", "ready"}:
+            state = "locked"
+            summary = "Z3 odblokuje się po decyzji i zatwierdzeniu E2."
+            details = "Gotowe źródło tablic nie wystarcza jeszcze do wejścia w E3. Najpierw formalnie zamknij E2."
+            body_mode = ""
+            body_visible = False
+            primary_cta = None
+            secondary_cta = None
+
+        if normalized_target == "char" and int(current_step or 0) < 3 and not step2_approved:
             state = "locked"
             summary = "Z3 odblokuje się po decyzji i zatwierdzeniu E2."
             details = "Najpierw skorzystaj z prowadzenia w E2 i przygotuj albo zatwierdz tablice dla toru znaków."
@@ -8245,6 +8283,68 @@ class CampaignTab:
             or xml_path
             or images_dir
         )
+
+    @staticmethod
+    def _campaign_paths_equivalent(path_a, path_b) -> bool:
+        text_a = str(path_a or "").strip()
+        text_b = str(path_b or "").strip()
+        if not text_a or not text_b:
+            return False
+        try:
+            return Path(text_a).resolve() == Path(text_b).resolve()
+        except Exception:
+            return text_a == text_b
+
+    def _should_reset_stale_char_iteration_state(
+        self,
+        *,
+        current_step: int,
+        step2_status: str,
+        step3_status: str,
+        iteration_target: str,
+    ) -> bool:
+        try:
+            suppress_until = float(getattr(self, "_suppress_stale_char_iteration_reset_until", 0.0) or 0.0)
+        except Exception:
+            suppress_until = 0.0
+        if suppress_until > 0.0 and perf_counter() < suppress_until:
+            return False
+
+        if self._normalize_iteration_target(iteration_target) != "char":
+            return False
+
+        normalized_step2_status = str(step2_status or "").strip().lower()
+        normalized_step3_status = str(step3_status or "").strip().lower()
+        if (
+            int(current_step or 0) < 3
+            and normalized_step2_status not in {"approved", "generated"}
+            and normalized_step3_status == "pending"
+        ):
+            return False
+
+        try:
+            if str(CAMPAIGN.get_step2_staging_run() or "").strip():
+                return False
+        except Exception:
+            pass
+
+        try:
+            current_iter_dir = CAMPAIGN.get_iteration_raw_dir()
+        except Exception:
+            current_iter_dir = None
+        if current_iter_dir is None:
+            return False
+
+        try:
+            stored_manual_source = CAMPAIGN.get_last_plate_manual_source() or {}
+        except Exception:
+            stored_manual_source = {}
+
+        source_input = str((stored_manual_source or {}).get("source_input_path") or "").strip()
+        if not source_input:
+            return False
+
+        return not self._campaign_paths_equivalent(current_iter_dir, source_input)
 
     def _get_campaign_step_title(self, step_num: int, target: str) -> str:
         if step_num == 2:
@@ -9819,6 +9919,11 @@ class CampaignTab:
                 ready_run_name = Path(ready_run_dir).name
         except Exception:
             ready_run_name = ""
+
+        try:
+            self._suppress_stale_char_iteration_reset_until = perf_counter() + 2.5
+        except Exception:
+            pass
 
         CAMPAIGN.approve_step2()
         if CAMPAIGN.get_current_step() < 3:

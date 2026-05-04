@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
+from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import get_image_size, cleanup_gpu_memory
 from .base import BaseAnnotator
 
@@ -215,13 +216,32 @@ class CombinedAnnotator(BaseAnnotator):
             if polygon is None:
                 polygon = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
             
-            plates.append(Detection(
+            detection = Detection(
                 label="plate",
                 confidence=float(conf),
                 bbox=(x1, y1, x2, y2),
                 keypoints=kpts_list,
                 polygon=polygon
-            ))
+            )
+            try:
+                fit_metrics = compute_plate_polygon_fit_metrics(
+                    float(conf),
+                    polygon,
+                    (x1, y1, x2, y2),
+                    keypoints=kpts_list,
+                    image_size=(width, height),
+                )
+                detection.attributes.update({
+                    "fit_score": f"{float(fit_metrics.get('fit_score', 0.0) or 0.0):.3f}",
+                    "fit_label": str(fit_metrics.get("fit_label") or "").strip(),
+                    "fit_keypoint_score": f"{float(fit_metrics.get('keypoint_score', 0.0) or 0.0):.3f}",
+                    "fit_shape_score": f"{float(fit_metrics.get('shape_score', 0.0) or 0.0):.3f}",
+                    "fit_bbox_score": f"{float(fit_metrics.get('bbox_alignment_score', 0.0) or 0.0):.3f}",
+                    "fit_size_score": f"{float(fit_metrics.get('size_score', 0.0) or 0.0):.3f}",
+                })
+            except Exception:
+                pass
+            plates.append(detection)
 
         deduplicated = self._suppress_overlapping_detections(
             plates,

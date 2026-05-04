@@ -152,6 +152,8 @@ class AutoAnnotationApp:
         self._faulthandler_stream = None
         self.root.title(f"{CONFIG.APP_NAME} v{CONFIG.VERSION}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self.root.bind("<Unmap>", self._on_root_unmap, add="+")
+        self.root.bind("<Map>", self._on_root_map, add="+")
         self._enable_fatal_crash_logging()
         
         self.icon_manager = IconManager
@@ -205,6 +207,8 @@ class AutoAnnotationApp:
         self._global_terminal_visible = False
         self._global_terminal_geometry_initialized = False
         self._global_terminal_hold_position = False
+        self._window_restore_after_id = None
+        self._window_restore_topmost_after_id = None
         self.tabs = {}
         self._closing_in_progress = False
         self.startup_overlay_frame = None
@@ -238,7 +242,141 @@ class AutoAnnotationApp:
         self.campaign_mode_active = False
         # Ręczne wyjście z projektu ma pierwszeństwo nad automatycznym trybem kampanii.
         self.campaign_free_mode = False
-    
+        self._finish_app_init(root)
+
+    def _release_window_grabs_for_recovery(self):
+        seen = set()
+        candidates = []
+        try:
+            current_grab = self.root.grab_current()
+        except Exception:
+            current_grab = None
+        if current_grab is not None:
+            candidates.append(current_grab)
+        candidates.extend(
+            [
+                self.root,
+                getattr(self, "startup_overlay_window", None),
+                getattr(self, "startup_overlay_frame", None),
+                getattr(self, "help_overlay_frame", None),
+                getattr(self, "_global_terminal_window", None),
+            ]
+        )
+        try:
+            candidates.extend(list(self.root.winfo_children()))
+        except Exception:
+            pass
+
+        for widget in candidates:
+            if widget is None:
+                continue
+            key = str(widget)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                widget.grab_release()
+            except Exception:
+                pass
+
+        try:
+            self.root.grab_release()
+        except Exception:
+            pass
+
+    def _release_preview_fullscreens_for_recovery(self):
+        for tab in list(getattr(self, "tabs", {}).values()):
+            try:
+                if bool(getattr(tab, "_preview_fullscreen_active", False)):
+                    exit_fullscreen = getattr(tab, "_set_preview_fullscreen", None)
+                    if callable(exit_fullscreen):
+                        exit_fullscreen(False)
+            except Exception as e:
+                logger.debug(f"Nie udało się zamknąć fullscreen preview podczas recovery okna: {e}")
+
+    def _on_root_unmap(self, event=None):
+        if getattr(event, "widget", None) is not self.root:
+            return None
+        try:
+            root_state = str(self.root.state())
+        except Exception:
+            root_state = ""
+        if root_state != "iconic":
+            return None
+        self._release_window_grabs_for_recovery()
+        try:
+            if bool(getattr(self, "_help_overlay_forced_visible", False)):
+                self.hide_context_help_overlay()
+        except Exception:
+            pass
+        self._release_preview_fullscreens_for_recovery()
+        return None
+
+    def _on_root_map(self, event=None):
+        if getattr(event, "widget", None) is not self.root:
+            return None
+        try:
+            if self._window_restore_after_id is not None:
+                self.root.after_cancel(self._window_restore_after_id)
+        except Exception:
+            pass
+        try:
+            self._window_restore_after_id = self.root.after(60, self._recover_root_after_map)
+        except Exception:
+            self._window_restore_after_id = None
+            self._recover_root_after_map()
+        return None
+
+    def _recover_root_after_map(self):
+        self._window_restore_after_id = None
+        try:
+            root_state = str(self.root.state())
+        except Exception:
+            root_state = ""
+        if root_state == "iconic":
+            return
+
+        self._release_window_grabs_for_recovery()
+        try:
+            if bool(getattr(self, "_help_overlay_forced_visible", False)):
+                self.hide_context_help_overlay()
+        except Exception:
+            pass
+
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
+
+        try:
+            self.root.lift()
+        except Exception:
+            pass
+
+        try:
+            if str(self.root.tk.call("tk", "windowingsystem")).lower() == "win32":
+                self.root.attributes("-topmost", True)
+                try:
+                    if self._window_restore_topmost_after_id is not None:
+                        self.root.after_cancel(self._window_restore_topmost_after_id)
+                except Exception:
+                    pass
+                self._window_restore_topmost_after_id = self.root.after(
+                    180,
+                    lambda: self.root.attributes("-topmost", False),
+                )
+        except Exception:
+            pass
+
+        try:
+            self.root.focus_force()
+        except Exception:
+            try:
+                self.root.focus_set()
+            except Exception:
+                pass
+
+    def _finish_app_init(self, root):
         self._set_startup_progress(16, "Budowanie menu...")
         self._create_menu()
         self._set_startup_progress(24, "Konfiguracja okien dialogowych...")

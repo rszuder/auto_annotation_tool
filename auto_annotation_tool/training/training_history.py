@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Historia treningów.
+Historia treningĂłw.
 """
 
 import json
@@ -42,12 +42,12 @@ class TrainingRun:
     device: str = "auto"
     lr0: float = 0.01
     
-    # Postęp
+    # PostÄ™p
     current_epoch: int = 0
     best_map50: float = 0.0
     best_map50_95: float = 0.0
     
-    # Ścieżki
+    # ĹšcieĹĽki
     output_dir: str = ""
     best_weights: str = ""
     last_weights: str = ""
@@ -60,7 +60,7 @@ class TrainingRun:
     # Metryki
     metrics_history: List[Dict] = field(default_factory=list)
     
-    # Błędy
+    # BĹ‚Ä™dy
     error_message: str = ""
 
     # Raporty
@@ -111,7 +111,7 @@ class TrainingRun:
 
 
 class TrainingHistory:
-    """Zarządza historią treningów."""
+    """ZarzÄ…dza historiÄ… treningĂłw."""
     
     HISTORY_FILE = "training_history.json"
     TARGET_DIRS = {
@@ -142,6 +142,81 @@ class TrainingHistory:
             runs[run_id] = TrainingRun.from_dict(run_data)
 
         return runs
+
+    @staticmethod
+    def _parse_iso_datetime(value: str | None) -> Optional[datetime]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+    def _get_run_activity_timestamp(self, run: TrainingRun) -> Optional[datetime]:
+        candidates: List[datetime] = []
+        for raw in (
+            getattr(run, "paused_at", None),
+            getattr(run, "finished_at", None),
+            getattr(run, "started_at", None),
+            getattr(run, "created_at", None),
+        ):
+            parsed = self._parse_iso_datetime(raw)
+            if parsed is not None:
+                candidates.append(parsed)
+
+        try:
+            output_dir = Path(str(getattr(run, "output_dir", "") or "").strip())
+            if output_dir.exists():
+                candidates.append(datetime.fromtimestamp(output_dir.stat().st_mtime))
+        except Exception:
+            pass
+
+        return max(candidates) if candidates else None
+
+    def _reconcile_stale_running_runs(self) -> bool:
+        changed = False
+        now = datetime.now()
+
+        for run in self.runs.values():
+            if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.RUNNING.value:
+                continue
+
+            last_activity = self._get_run_activity_timestamp(run)
+            if last_activity is not None:
+                age_seconds = max(0.0, (now - last_activity).total_seconds())
+                if age_seconds < 180.0:
+                    continue
+
+            train_dir = Path(str(getattr(run, "output_dir", "") or "").strip()) / "train"
+            weights_dir = train_dir / "weights"
+            best_weights = weights_dir / "best.pt"
+            last_weights = weights_dir / "last.pt"
+
+            run.status = TrainingStatus.FAILED.value
+            run.finished_at = (last_activity or now).isoformat()
+            run.best_weights = str(best_weights) if best_weights.exists() else str(getattr(run, "best_weights", "") or "")
+            run.last_weights = str(last_weights) if last_weights.exists() else str(getattr(run, "last_weights", "") or "")
+
+            if not str(getattr(run, "error_message", "") or "").strip():
+                if last_weights.exists():
+                    run.error_message = (
+                        "Osierocony wpis historii: run miaĹ‚ status 'running', "
+                        "ale aktywny trening juĹĽ nie istniaĹ‚. Zachowano checkpoint do wznowienia."
+                    )
+                else:
+                    run.error_message = (
+                        "Osierocony wpis historii: run miaĹ‚ status 'running', "
+                        "ale aktywny trening juĹĽ nie istniaĹ‚ i nie pozostawiĹ‚ checkpointu."
+                    )
+
+            changed = True
+            logger.warning(
+                "DomkniÄ™to osierocony run treningu jako FAILED: "
+                f"{run.id} | output={getattr(run, 'output_dir', '')}"
+            )
+
+        return changed
 
     def _get_legacy_history_files(self) -> List[Path]:
         target_scope = self._get_target_scope()
@@ -221,13 +296,11 @@ class TrainingHistory:
         return bool(run_target == target_scope)
     
     def _load(self):
-        """Ładuje historię."""
+        """Laduje historie."""
         try:
             self.runs = self._load_runs_from_file(self.history_file)
 
             imported_legacy = 0
-            # Legacy z katalogu nadrzednego importujemy tylko jako jednorazowy fallback,
-            # gdy scoped history jeszcze nie istnieje albo jest pusta.
             if not self.runs:
                 for legacy_file in self._get_legacy_history_files():
                     for run_id, run in self._load_runs_from_file(legacy_file).items():
@@ -238,18 +311,21 @@ class TrainingHistory:
 
             if imported_legacy:
                 logger.info(
-                    f"Zaimportowano {imported_legacy} treningów ze starszej struktury do: {self.history_dir}"
+                    f"Zaimportowano {imported_legacy} treningow ze starszej struktury do: {self.history_dir}"
                 )
                 self._save()
 
-            logger.info(f"Załadowano {len(self.runs)} treningów z: {self.history_dir}")
+            if self._reconcile_stale_running_runs():
+                self._save()
+
+            logger.info(f"Zaladowano {len(self.runs)} treningow z: {self.history_dir}")
 
         except Exception as e:
-            logger.error(f"Błąd ładowania historii: {e}")
+            logger.error(f"Blad ladowania historii: {e}")
             self.runs = {}
-    
+
     def _save(self):
-        """Zapisuje historię."""
+        """Zapisuje historiÄ™."""
         try:
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
@@ -262,7 +338,7 @@ class TrainingHistory:
                 json.dump(data, f, indent=2, ensure_ascii=False)
                 
         except Exception as e:
-            logger.error(f"Błąd zapisywania: {e}")
+            logger.error(f"BĹ‚Ä…d zapisywania: {e}")
     
     def create_run(self, name: str, **kwargs) -> TrainingRun:
         """Tworzy nowy trening."""
@@ -345,3 +421,4 @@ class TrainingHistory:
         
         del self.runs[run_id]
         self._save()
+
