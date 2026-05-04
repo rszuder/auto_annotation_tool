@@ -1,4 +1,4 @@
-# Przebudowa Wizarda
+﻿# Przebudowa Wizarda
 
 ## Cel
 

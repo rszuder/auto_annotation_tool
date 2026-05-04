@@ -222,6 +222,16 @@ class ZoomableCanvas(tk.Canvas):
         except Exception:
             pass
 
+    def set_image_preserve_view(self, pil_image, *, redraw: bool = True):
+        """Ustaw nowy obraz bez zerowania zoomu i pan'u."""
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._middle_click_zoom_restore_state = None
+        self.original_image = pil_image
+        self._apply_clamped_pan()
+        if redraw:
+            self._update_display()
+
     def set_overlay_renderer(self, renderer):
         """Ustaw callback rysujący overlay po wyrenderowaniu obrazu."""
         self.overlay_renderer = renderer

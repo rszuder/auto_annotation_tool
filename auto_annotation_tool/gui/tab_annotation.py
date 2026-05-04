@@ -22794,6 +22794,75 @@ class AnnotationTab:
         except Exception:
             pass
 
+    def _select_preview_index_for_super_correction(self, idx: int):
+        if not self.current_annotations:
+            return
+        select_started = time.perf_counter()
+        self._defer_preview_autosave_for_navigation(delay_ms=700)
+        safe_idx = max(0, min(int(idx), len(self.current_annotations) - 1))
+        previous_idx = self.current_preview_index
+        display_idx = self._get_preview_display_index(safe_idx)
+        if display_idx is None:
+            display_idx = max(0, min(safe_idx, max(0, self.preview_listbox.size() - 1)))
+        self._clear_listbox_selection_fast(self.preview_listbox)
+        self.preview_listbox.selection_set(display_idx)
+        self.preview_listbox.activate(display_idx)
+        self.preview_listbox.see(display_idx)
+        self.current_preview_index = safe_idx
+        self._preview_session_restore_index = safe_idx
+        self._preview_session_restore_filename = str(getattr(self.current_annotations[safe_idx], "filename", "") or "")
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
+        ann = self._get_preview_annotation()
+        if ann is None:
+            return
+        try:
+            self.preview_canvas.grab_release()
+        except Exception:
+            pass
+        self._preview_drag_state = None
+        self._preview_pending_vertex_hit = None
+        self._preview_draw_mode = False
+        self._preview_draw_points = []
+        self._preview_delete_mode = False
+        self._preview_delete_candidate_idx = None
+        self._preview_polygon_focus_restore_state = None
+        self._preview_focus_target = None
+        self._push_preview_debug_event(
+            "select",
+            f"idx={self.current_preview_index if self.current_preview_index is not None else '-'} file={getattr(ann, 'filename', '-')}"
+        )
+        img_path = self._resolve_preview_image_path(ann)
+        if img_path is None or not img_path.exists():
+            self.preview_canvas.clear_image()
+            self.preview_canvas.create_text(20, 20, text="Plik nie istnieje na dysku!", fill="red", anchor="nw")
+            self._update_preview_toolbar_state(refresh_summary=False)
+            return
+        try:
+            img = cv2.imread(str(img_path))
+            if img is None:
+                raise ValueError("Nie można załadować obrazu do podglądu.")
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._cancel_preview_layout_restore_jobs()
+            self._preview_force_fit_after_resize = False
+            self.preview_canvas.set_image_preserve_view(Image.fromarray(img_rgb), redraw=False)
+        except Exception as e:
+            logger.error(f"Błąd rysowania podglądu YOLO: {e}")
+            self.preview_canvas.clear_image()
+            self.preview_canvas.create_text(20, 20, text=f"Błąd podglądu: {e}", fill="red", anchor="nw")
+        self._update_preview_edit_status()
+        self._update_preview_toolbar_state(refresh_summary=False)
+        elapsed_ms = max(0.0, (time.perf_counter() - select_started) * 1000.0)
+        if elapsed_ms >= 20.0:
+            logger.debug(
+                "[AnnotationTab][PERF] select_preview_index_for_super_correction: "
+                f"{elapsed_ms:.1f} ms | idx={safe_idx} total={len(self.current_annotations or [])}"
+            )
+        try:
+            self.preview_canvas.focus_set()
+        except Exception:
+            pass
+
     def _select_preview_relative(self, step: int):
         if not self.current_annotations:
             return "break"
@@ -22895,9 +22964,7 @@ class AnnotationTab:
             target_plates = self._get_plate_detections(target_ann)
             if not target_plates:
                 continue
-            self._cancel_preview_layout_restore_jobs()
-            self._preview_force_fit_after_resize = False
-            self._select_preview_index(target_actual, reset_view=False)
+            self._select_preview_index_for_super_correction(target_actual)
             start_plate_idx = 0 if direction > 0 else (len(target_plates) - 1)
             self._focus_preview_plate(
                 int(start_plate_idx),
