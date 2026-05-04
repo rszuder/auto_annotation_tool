@@ -15,6 +15,9 @@ for env_name in (
 ):
     os.environ.setdefault(env_name, "1")
 
+# Pomaga ograniczyć fragmentację alokacji CUDA w dłuższych sesjach treningowych.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 
 def main():
     try:

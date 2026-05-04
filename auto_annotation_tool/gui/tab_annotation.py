@@ -37,6 +37,11 @@ from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SE
 from ..icons import IconManager
 from ..annotators import PlateAnnotator, CombinedAnnotator, VehicleAnnotator
 from ..exporters import CVATExporter, ReportGenerator
+from ..quality_metrics import (
+    compute_character_box_fit_metrics,
+    compute_plate_polygon_fit_metrics,
+)
+from ..project_cache import PROJECT_CACHE
 from ..training import DatasetCreator
 from ..utils import count_images_in_directory, format_duration, get_image_files, get_image_size
 from ..validators import validate_model_file, format_yolo_model_identity
@@ -177,6 +182,10 @@ class AnnotationTab:
         self._preview_pending_vertex_hit = None
         self._preview_corner_drag_modifier_down = False
         self._preview_last_modifier_press_at = 0.0
+        self._preview_focus_zoom_modifier_down = False
+        self._preview_focus_zoom_modifier_consumed = False
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
         self._preview_draw_mode = False
         self._preview_draw_points = []
         self._preview_delete_mode = False
@@ -185,6 +194,7 @@ class AnnotationTab:
         self._preview_autosave_after_id = None
         self._preview_drag_refresh_after_id = None
         self._preview_fullscreen_active = False
+        self._preview_controls_legend_render_key = None
         self._preview_fullscreen_restore_log_visible = False
         self._preview_fullscreen_restore_root_state = False
         self._preview_fullscreen_restore_window_state = "normal"
@@ -267,6 +277,10 @@ class AnnotationTab:
             "Nazwa pliku A-Z",
         )
         self.preview_list_sort_var = tk.StringVar(value=self._preview_list_sort_options[0])
+        self.preview_filter_conf_var = tk.DoubleVar(value=0.0)
+        self.preview_filter_fit_var = tk.DoubleVar(value=0.0)
+        self._preview_filter_conf_applied = 0.0
+        self._preview_filter_fit_applied = 0.0
         self.preview_debug_var = tk.StringVar(value="DEBUG Z2 | oczekiwanie na zdarzenia")
         self.preview_fullscreen_hint_var = tk.StringVar(value="")
 
@@ -325,6 +339,7 @@ class AnnotationTab:
         self.workflow_intro_var = tk.StringVar(value="")
         self.workflow_start_intro_var = tk.StringVar(value="")
         self.workflow_action_hint_var = tk.StringVar(value="")
+        self.run_intro_var = tk.StringVar(value="")
         self.workflow_conf_title_var = tk.StringVar(value="")
         self.workflow_conf_hint_var = tk.StringVar(value="")
         self.workflow_vehicle_model_title_var = tk.StringVar(value="")
@@ -1397,10 +1412,11 @@ class AnnotationTab:
                         continue
 
                     try:
-                        run_paths = list(root.rglob("run_*"))
+                        run_paths = PROJECT_CACHE.list_annotation_run_dirs(root, require_xml=False)
                     except Exception:
                         continue
 
+                    deleted_any = False
                     for run_dir in run_paths:
                         try:
                             if not run_dir.is_dir():
@@ -1436,8 +1452,12 @@ class AnnotationTab:
                         try:
                             shutil.rmtree(run_dir)
                             result["removed_runs"] += 1
+                            deleted_any = True
                         except Exception as e:
                             logger.debug(f"Nie udalo sie usunac runu po zmianie toru E2 ({run_dir}): {e}")
+
+                    if deleted_any:
+                        PROJECT_CACHE.invalidate_annotation_run_dirs(root)
 
                 stage_root = CAMPAIGN.get_staging_dir("plate_stage")
                 stage_dir = self._get_manual_plate_stage_dir()
@@ -1916,6 +1936,8 @@ class AnnotationTab:
             if target not in {"plate", "char"}:
                 return result
 
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+            step2_status = str(CAMPAIGN.get_step2_status() or "").strip().lower()
             plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
         except Exception:
             return result
@@ -1931,7 +1953,7 @@ class AnnotationTab:
             plate_model_ready=bool(plate_model_path and Path(plate_model_path).exists()),
         )
 
-        if target == "char":
+        if target == "char" and (current_step >= 3 or step2_status == "approved"):
             try:
                 effective_source = dict(self._build_campaign_char_effective_source() or {})
             except Exception:
@@ -3207,33 +3229,12 @@ class AnnotationTab:
             except Exception:
                 pass
 
-            restore_idx = None
-            restore_filename = str(getattr(self, "_preview_session_restore_filename", "") or "").strip()
-            if restore_filename:
-                for idx, ann in enumerate(annotations):
-                    if str(getattr(ann, "filename", "") or "") == restore_filename:
-                        restore_idx = idx
-                        break
-            if restore_idx is None:
-                saved_idx = getattr(self, "_preview_session_restore_index", None)
-                if isinstance(saved_idx, int) and 0 <= int(saved_idx) < len(annotations):
-                    restore_idx = int(saved_idx)
-            if restore_idx is None:
-                manifest_restore_filename = str(manifest.get("resume_preview_filename") or "").strip()
-                if manifest_restore_filename:
-                    for idx, ann in enumerate(annotations):
-                        if str(getattr(ann, "filename", "") or "") == manifest_restore_filename:
-                            restore_idx = idx
-                            break
-            if restore_idx is None:
-                try:
-                    manifest_restore_idx = int(manifest.get("resume_preview_index", -1))
-                except (TypeError, ValueError):
-                    manifest_restore_idx = -1
-                if 0 <= manifest_restore_idx < len(annotations):
-                    restore_idx = manifest_restore_idx
-            if restore_idx is None and annotations:
-                restore_idx = 0
+            restore_idx = self._compute_annotation_run_restore_index(
+                annotations,
+                manifest,
+                restore_filename=str(getattr(self, "_preview_session_restore_filename", "") or "").strip(),
+                restore_index=getattr(self, "_preview_session_restore_index", None),
+            )
 
             self.current_preview_index = restore_idx
             self._preview_session_restore_index = restore_idx
@@ -3434,6 +3435,9 @@ class AnnotationTab:
             except Exception:
                 return False
 
+        expected_preview_input = self._resolve_existing_dir(snapshot_input or current_input)
+        preview_source_mismatch = False
+
         self._append_z2_trace(
             "apply-project-snapshot-start",
             f"restore_preview={int(bool(restore_preview))} state_project={str(state.get('project') or '').strip()}",
@@ -3442,6 +3446,27 @@ class AnnotationTab:
         try:
             safe_run_dir = self._resolve_safe_annotation_run_dir(state.get("plate_dataset_run"), require_xml=True)
             safe_last_preview_run_dir = self._resolve_safe_annotation_run_dir(state.get("last_preview_run_dir"), require_xml=True)
+            if expected_preview_input is not None:
+                if safe_run_dir is not None and not self._annotation_run_matches_expected_input_dir(
+                    safe_run_dir,
+                    expected_preview_input,
+                ):
+                    preview_source_mismatch = True
+                    self._append_z2_trace(
+                        "apply-project-snapshot-run-mismatch",
+                        f"plate_dataset_run={safe_run_dir} expected={expected_preview_input}",
+                    )
+                    safe_run_dir = None
+                if safe_last_preview_run_dir is not None and not self._annotation_run_matches_expected_input_dir(
+                    safe_last_preview_run_dir,
+                    expected_preview_input,
+                ):
+                    preview_source_mismatch = True
+                    self._append_z2_trace(
+                        "apply-project-snapshot-preview-mismatch",
+                        f"last_preview_run_dir={safe_last_preview_run_dir} expected={expected_preview_input}",
+                    )
+                    safe_last_preview_run_dir = None
             if snapshot_uses_stage:
                 self.input_dir_var.set(snapshot_input)
             self.mode_var.set(self._normalize_mode_value(state.get("mode")))
@@ -3453,7 +3478,15 @@ class AnnotationTab:
             self.device_var.set(str(state.get("device") or "auto").strip() or "auto")
             self.conf_var.set(float(state.get("conf", CONFIG.DEFAULT_CONFIDENCE)))
             self.plate_dataset_run_var.set(str(safe_run_dir or ""))
-            self.plate_dataset_images_var.set(str(state.get("plate_dataset_images") or "").strip())
+            snapshot_plate_images = str(state.get("plate_dataset_images") or "").strip()
+            if (
+                expected_preview_input is not None
+                and snapshot_plate_images
+                and not self._paths_equivalent(snapshot_plate_images, expected_preview_input)
+                and not self._is_manual_plate_stage_input(snapshot_plate_images)
+            ):
+                snapshot_plate_images = str(expected_preview_input)
+            self.plate_dataset_images_var.set(snapshot_plate_images)
             self.plate_train_pct.set(float(state.get("plate_train_pct", 80.0)))
             self.plate_val_pct.set(float(state.get("plate_val_pct", 10.0)))
             self.manual_xml_template_var.set(bool(state.get("manual_xml_template", False)))
@@ -3538,6 +3571,8 @@ class AnnotationTab:
                 )
             ):
                 suppress_preview_restore = True
+            if preview_source_mismatch:
+                suppress_preview_restore = True
 
             if suppress_preview_restore:
                 safe_run_dir = None
@@ -3548,6 +3583,8 @@ class AnnotationTab:
                 self.current_annotation_xml_path = None
                 self.current_annotations = []
                 self._preview_image_path_map = {}
+                if expected_preview_input is not None:
+                    self.plate_dataset_images_var.set(str(expected_preview_input))
                 self.workflow_route_var.set("")
                 self.workflow_step_var.set("")
                 self.manual_xml_template_var.set(False)
@@ -4143,33 +4180,12 @@ class AnnotationTab:
             self._restore_campaign_step2_generated_from_run(run_dir, only_when_pending=True)
         except Exception:
             pass
-        restore_idx = None
-        restore_filename = str(getattr(self, "_preview_session_restore_filename", "") or "").strip()
-        if restore_filename:
-            for idx, ann in enumerate(annotations):
-                if str(getattr(ann, "filename", "") or "") == restore_filename:
-                    restore_idx = idx
-                    break
-        if restore_idx is None:
-            saved_idx = getattr(self, "_preview_session_restore_index", None)
-            if isinstance(saved_idx, int) and 0 <= int(saved_idx) < len(annotations):
-                restore_idx = int(saved_idx)
-        if restore_idx is None:
-            manifest_restore_filename = str(manifest.get("resume_preview_filename") or "").strip()
-            if manifest_restore_filename:
-                for idx, ann in enumerate(annotations):
-                    if str(getattr(ann, "filename", "") or "") == manifest_restore_filename:
-                        restore_idx = idx
-                        break
-        if restore_idx is None:
-            try:
-                manifest_restore_idx = int(manifest.get("resume_preview_index", -1))
-            except (TypeError, ValueError):
-                manifest_restore_idx = -1
-            if 0 <= manifest_restore_idx < len(annotations):
-                restore_idx = manifest_restore_idx
-        if restore_idx is None and annotations:
-            restore_idx = 0
+        restore_idx = self._compute_annotation_run_restore_index(
+            annotations,
+            manifest,
+            restore_filename=str(getattr(self, "_preview_session_restore_filename", "") or "").strip(),
+            restore_index=getattr(self, "_preview_session_restore_index", None),
+        )
 
         self.current_preview_index = restore_idx
         self._preview_session_restore_index = restore_idx
@@ -4900,6 +4916,123 @@ class AnnotationTab:
         }
         return legacy_map.get(normalized, normalized)
 
+    def _get_preview_metric_filter_input_thresholds(self) -> tuple[float, float]:
+        conf_raw = 0.0
+        fit_raw = 0.0
+        if hasattr(self, "preview_filter_conf_var"):
+            try:
+                conf_raw = self.preview_filter_conf_var._tk.globalgetvar(self.preview_filter_conf_var._name)
+            except Exception:
+                conf_raw = 0.0
+        if hasattr(self, "preview_filter_fit_var"):
+            try:
+                fit_raw = self.preview_filter_fit_var._tk.globalgetvar(self.preview_filter_fit_var._name)
+            except Exception:
+                fit_raw = 0.0
+
+        if str(conf_raw or "").strip() == "":
+            conf_raw = 0.0
+        if str(fit_raw or "").strip() == "":
+            fit_raw = 0.0
+
+        conf_threshold = self._normalize_preview_metric_threshold(conf_raw)
+        fit_threshold = self._normalize_preview_metric_threshold(fit_raw)
+        return conf_threshold, fit_threshold
+
+    def _get_preview_metric_filter_thresholds(self) -> tuple[float, float]:
+        conf_threshold = self._normalize_preview_metric_threshold(
+            getattr(self, "_preview_filter_conf_applied", 0.0)
+        )
+        fit_threshold = self._normalize_preview_metric_threshold(
+            getattr(self, "_preview_filter_fit_applied", 0.0)
+        )
+        return conf_threshold, fit_threshold
+
+    def _preview_annotation_passes_metric_filters(self, ann) -> bool:
+        conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
+        if conf_threshold <= 0.0 and fit_threshold <= 0.0:
+            return True
+
+        quality = self._get_preview_annotation_quality_summary(ann)
+        if int(quality.get("plate_count", 0) or 0) <= 0:
+            return False
+
+        if conf_threshold > 0.0 and float(quality.get("min_confidence", 0.0) or 0.0) < conf_threshold:
+            return False
+        if (
+            fit_threshold > 0.0
+            and int(quality.get("fit_count", 0) or 0) > 0
+            and float(quality.get("min_fit_score", 0.0) or 0.0) < fit_threshold
+        ):
+            return False
+        return True
+
+    def _filter_preview_list_entries(
+        self,
+        entries: list[tuple[int, ImageAnnotation]],
+    ) -> list[tuple[int, ImageAnnotation]]:
+        conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
+        if conf_threshold <= 0.0 and fit_threshold <= 0.0:
+            return list(entries)
+        return [
+            (actual_idx, ann)
+            for actual_idx, ann in list(entries or [])
+            if self._preview_annotation_passes_metric_filters(ann)
+        ]
+
+    def _reset_preview_metric_filters(self):
+        self.preview_filter_conf_var.set(0.0)
+        self.preview_filter_fit_var.set(0.0)
+        self._preview_filter_conf_applied = 0.0
+        self._preview_filter_fit_applied = 0.0
+        self._invalidate_preview_list_frozen_order()
+        self._refresh_preview_list(preserve_selection=True, render_current=False)
+        try:
+            self._load_current_preview_selection(reset_view=False, selection_changed=False)
+        except Exception:
+            pass
+        self._refresh_preview_list_summary()
+        self._update_preview_toolbar_state()
+
+    def _on_preview_metric_filter_changed(self, *_args):
+        return
+
+    def _apply_preview_metric_filters(self):
+        conf_threshold, fit_threshold = self._get_preview_metric_filter_input_thresholds()
+        previous_conf = self._normalize_preview_metric_threshold(getattr(self, "_preview_filter_conf_applied", 0.0))
+        previous_fit = self._normalize_preview_metric_threshold(getattr(self, "_preview_filter_fit_applied", 0.0))
+
+        prospective_entries = self._filter_preview_list_entries(
+            self._build_preview_list_sorted_entries(self._normalize_preview_list_sort_mode())
+        )
+        total_annotations = len(list(self.current_annotations or []))
+        if total_annotations > 0 and not prospective_entries and (conf_threshold > 0.0 or fit_threshold > 0.0):
+            try:
+                self.preview_filter_conf_var.set(previous_conf)
+                self.preview_filter_fit_var.set(previous_fit)
+            except Exception:
+                pass
+            self._update_preview_edit_status(
+                "Ten filtr ukryłby wszystkie obrazy. Lista została bez zmian, poluzuj progi Det/Fit."
+            )
+            return
+
+        self._preview_filter_conf_applied = conf_threshold
+        self._preview_filter_fit_applied = fit_threshold
+        self._invalidate_preview_list_frozen_order()
+        self._refresh_preview_list(preserve_selection=True, render_current=False)
+        try:
+            self._load_current_preview_selection(reset_view=False, selection_changed=False)
+        except Exception:
+            pass
+        self._refresh_preview_list_summary()
+        self._update_preview_toolbar_state()
+        self._update_preview_edit_status(
+            f"Zastosowano filtr: Det >= {conf_threshold:.2f} | Fit >= {fit_threshold:.2f}."
+            if (conf_threshold > 0.0 or fit_threshold > 0.0)
+            else "Filtr listy został wyłączony."
+        )
+
     def _invalidate_preview_list_frozen_order(self) -> None:
         self._preview_list_frozen_sort_mode = ""
         self._preview_list_frozen_filename_order = []
@@ -4907,6 +5040,8 @@ class AnnotationTab:
         self._preview_list_frozen_bucket_snapshot = {}
 
     def _get_preview_list_context_key(self) -> str:
+        conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
+        filters_key = f"|conf>={conf_threshold:.2f}|fit>={fit_threshold:.2f}"
         safe_run_dir = self._resolve_safe_annotation_run_dir(
             getattr(self, "current_annotation_run_dir", None),
             require_xml=False,
@@ -4915,17 +5050,17 @@ class AnnotationTab:
             safe_run_dir = self._resolve_safe_annotation_run_dir(
                 getattr(self, "last_staging_run_dir", None),
                 require_xml=False,
-            )
+        )
         if safe_run_dir is not None:
-            return str(safe_run_dir)
+            return f"{str(safe_run_dir)}{filters_key}"
 
         current_xml_path = self._get_current_annotation_xml_path()
         if current_xml_path is not None:
             try:
-                return str(current_xml_path.parent)
+                return f"{str(current_xml_path.parent)}{filters_key}"
             except Exception:
-                return str(current_xml_path)
-        return ""
+                return f"{str(current_xml_path)}{filters_key}"
+        return filters_key
 
     def _store_preview_list_frozen_order(
         self,
@@ -6050,6 +6185,18 @@ class AnnotationTab:
             text="2. Wybierz tor i uruchom Z2",
         )
         self.run_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+
+        self.run_intro_lbl = tk.Label(
+            actions_lf,
+            textvariable=self.run_intro_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=360,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.run_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+        self._set_inline_label_state(self.run_intro_lbl, tone="muted", emphasis=False)
 
         self.route_badge_lbl = tk.Label(
             actions_lf,
@@ -7291,16 +7438,71 @@ class AnnotationTab:
         preview_list_controls = ttk.Frame(preview_list_meta, style="Panel.TFrame")
         self.preview_list_controls = preview_list_controls
         preview_list_controls.pack(fill=tk.X, pady=(0, 1))
-        self.preview_list_sort_lbl = tk.Label(
+        self.preview_list_filter_lbl = tk.Label(
             preview_list_controls,
-            text="Legenda i sortowanie listy",
+            text="Filtr listy",
             anchor="w",
             justify=tk.LEFT,
             bd=0,
             highlightthickness=0,
             font=("Segoe UI Semibold", 9),
         )
-        self.preview_list_sort_lbl.pack(anchor=tk.W, pady=(0, 0))
+        self.preview_list_filter_lbl.pack(anchor=tk.W, pady=(0, 0))
+        preview_list_filter_row = ttk.Frame(preview_list_controls, style="Panel.TFrame")
+        self.preview_list_filter_row = preview_list_filter_row
+        preview_list_filter_row.pack(fill=tk.X, pady=(4, 2))
+        ttk.Label(
+            preview_list_filter_row,
+            text="Det >=",
+        ).pack(side=tk.LEFT)
+        self.preview_filter_conf_spin = ttk.Spinbox(
+            preview_list_filter_row,
+            from_=0.0,
+            to=1.0,
+            increment=0.05,
+            width=6,
+            format="%.2f",
+            textvariable=self.preview_filter_conf_var,
+        )
+        self.preview_filter_conf_spin.pack(side=tk.LEFT, padx=(4, 10))
+        ttk.Label(
+            preview_list_filter_row,
+            text="Fit >=",
+        ).pack(side=tk.LEFT)
+        self.preview_filter_fit_spin = ttk.Spinbox(
+            preview_list_filter_row,
+            from_=0.0,
+            to=1.0,
+            increment=0.05,
+            width=6,
+            format="%.2f",
+            textvariable=self.preview_filter_fit_var,
+        )
+        self.preview_filter_fit_spin.pack(side=tk.LEFT, padx=(4, 10))
+        self.preview_filter_reset_btn = ttk.Button(
+            preview_list_filter_row,
+            text="Wyczyść filtry",
+            command=self._reset_preview_metric_filters,
+            padding=(8, 1),
+        )
+        self.preview_filter_reset_btn.pack(side=tk.LEFT)
+        self.preview_apply_filter_btn = ttk.Button(
+            preview_list_filter_row,
+            text="Zastosuj filtr",
+            command=self._apply_preview_metric_filters,
+            padding=(8, 1),
+        )
+        self.preview_apply_filter_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.preview_filter_hint_lbl = tk.Label(
+            preview_list_controls,
+            text="Filtr używa najsłabszej tablicy z obrazu: min confidence i min fit_score.",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI", 8),
+        )
+        self.preview_filter_hint_lbl.pack(anchor=tk.W, pady=(0, 2))
         preview_list_sort_grid = ttk.Frame(preview_list_controls, style="Panel.TFrame")
         self.preview_list_sort_grid = preview_list_sort_grid
         preview_list_sort_grid.pack_forget()
@@ -7374,9 +7576,23 @@ class AnnotationTab:
             "Kolejność alfabetyczna",
         )
 
-        preview_list_legend = ttk.Frame(preview_list_meta, style="Panel.TFrame")
+        preview_list_section = ttk.Frame(preview_list_meta, style="Panel.TFrame")
+        self.preview_list_section = preview_list_section
+        preview_list_section.pack(fill=tk.BOTH, expand=True, pady=(3, 0))
+        self.preview_list_sort_lbl = tk.Label(
+            preview_list_section,
+            text="Legenda i sortowanie listy",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 9),
+        )
+        self.preview_list_sort_lbl.pack(anchor=tk.W, pady=(0, 2))
+
+        preview_list_legend = ttk.Frame(preview_list_section, style="Panel.TFrame")
         self.preview_list_legend = preview_list_legend
-        preview_list_legend.pack(fill=tk.X, pady=(3, 0))
+        preview_list_legend.pack(fill=tk.X, pady=(0, 3))
         preview_list_legend_grid = ttk.Frame(preview_list_legend, style="Panel.TFrame")
         self.preview_list_legend_grid = preview_list_legend_grid
         preview_list_legend_grid.pack(fill=tk.X)
@@ -7458,34 +7674,7 @@ class AnnotationTab:
         self._bind_preview_sort_tile(self.preview_list_legend_corrected_item, "Status: ED, OK, problem")
         self._bind_preview_sort_tile(self.preview_list_legend_problem_item, "Status: problem, ED, OK")
         self._bind_preview_sort_tile(self.preview_list_legend_dirty_item, "Nazwa pliku A-Z")
-        preview_list_bulk_actions = ttk.Frame(preview_list_meta, style="Panel.TFrame")
-        self.preview_list_bulk_actions = preview_list_bulk_actions
-        preview_list_bulk_actions.pack(fill=tk.X, pady=(3, 0))
-        self.preview_mark_ok_btn = ttk.Button(
-            preview_list_bulk_actions,
-            text="Oznacz zaznaczone jako OK",
-            command=lambda: self._set_selected_preview_images_approved(True),
-            state=tk.DISABLED,
-        )
-        self.preview_mark_ok_btn.pack(side=tk.LEFT)
-        self.preview_mark_ok_btn.configure(padding=(8, 1))
-        self.preview_unmark_ok_btn = ttk.Button(
-            preview_list_bulk_actions,
-            text="Cofnij OK",
-            command=lambda: self._set_selected_preview_images_approved(False),
-            state=tk.DISABLED,
-        )
-        self.preview_unmark_ok_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.preview_unmark_ok_btn.configure(padding=(8, 1))
-        self.preview_clear_auto_btn = ttk.Button(
-            preview_list_bulk_actions,
-            text="Wyczyść auto",
-            command=self._clear_selected_preview_auto_plates,
-            state=tk.DISABLED,
-        )
-        self.preview_clear_auto_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.preview_clear_auto_btn.configure(padding=(8, 1))
-        list_frame = ttk.Frame(list_lf)
+        list_frame = ttk.Frame(preview_list_section)
         list_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_listbox = tk.Listbox(
             list_frame,
@@ -7499,9 +7688,31 @@ class AnnotationTab:
         scroll = WebSlimScrollbar(list_frame, command=self.preview_listbox.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_listbox.config(yscrollcommand=scroll.set)
+        self.preview_list_context_menu = tk.Menu(self.preview_listbox, tearoff=0)
+        self.preview_list_context_menu.add_command(
+            label="Zaznacz obrazy po filtrze",
+            command=self._select_all_visible_preview_images,
+        )
+        self.preview_list_context_menu.add_separator()
+        self.preview_list_context_menu.add_command(
+            label="Oznacz zaznaczone jako OK",
+            command=lambda: self._set_selected_preview_images_approved(True),
+        )
+        self.preview_list_context_menu.add_command(
+            label="Cofnij OK",
+            command=lambda: self._set_selected_preview_images_approved(False),
+        )
+        self.preview_list_context_menu.add_separator()
+        self.preview_list_context_menu.add_command(
+            label="Wyczyść auto w całym runie",
+            command=self._clear_selected_preview_auto_plates,
+        )
         self.preview_listbox.bind("<Button-1>", self._on_preview_list_mouse_primary, add=False)
+        self.preview_listbox.bind("<Button-3>", self._on_preview_list_mouse_secondary, add=False)
         self.preview_listbox.bind("<B1-Motion>", lambda _event: "break", add=False)
         self.preview_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
+        self.preview_listbox.bind("<Shift-F10>", self._open_preview_list_context_menu_from_keyboard, add="+")
+        self.preview_listbox.bind("<Menu>", self._open_preview_list_context_menu_from_keyboard, add="+")
         self.preview_listbox.bind("<Up>", lambda _event: self._select_preview_relative(-1), add=False)
         self.preview_listbox.bind("<Down>", lambda _event: self._select_preview_relative(1), add=False)
         self.preview_listbox.bind("<KP_Up>", lambda _event: self._select_preview_relative(-1), add=False)
@@ -7511,7 +7722,6 @@ class AnnotationTab:
         self.preview_listbox.bind("<Button-5>", self._on_preview_listbox_mousewheel, add="+")
         self._refresh_preview_list_legend_theme()
         self._refresh_preview_list_summary()
-
         preview_lf = ttk.LabelFrame(preview_host, text=" Podgląd anotacji ", padding=8)
         self.preview_lf = preview_lf
         preview_lf.pack(fill=tk.BOTH, expand=True)
@@ -9850,15 +10060,12 @@ class AnnotationTab:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+        PROJECT_CACHE.invalidate_json(manifest_path)
 
     def _load_annotation_run_manifest(self, run_dir: Path) -> dict:
         manifest_path = self._annotation_run_manifest_path(run_dir)
-        if not manifest_path.exists():
-            return {}
-        try:
-            return json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        payload = PROJECT_CACHE.load_json(manifest_path, default={})
+        return payload if isinstance(payload, dict) else {}
 
     def _update_annotation_run_manifest(self, run_dir: Path, **fields) -> bool:
         run_dir = self._resolve_safe_annotation_run_dir(run_dir)
@@ -9873,10 +10080,12 @@ class AnnotationTab:
             manifest[key] = value
 
         try:
-            self._annotation_run_manifest_path(run_dir).write_text(
+            manifest_path = self._annotation_run_manifest_path(run_dir)
+            manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            PROJECT_CACHE.invalidate_json(manifest_path)
             try:
                 self._campaign_manual_touched_cache = None
             except Exception:
@@ -11168,7 +11377,7 @@ class AnnotationTab:
             try:
                 if not root.exists() or not root.is_dir():
                     continue
-                run_paths = list(root.rglob("run_*"))
+                run_paths = PROJECT_CACHE.list_annotation_run_dirs(root, require_xml=True)
             except Exception:
                 continue
 
@@ -11277,18 +11486,16 @@ class AnnotationTab:
                 continue
 
             try:
-                for path in root.rglob("run_*"):
-                    if not path.is_dir():
-                        continue
-                    if not (path / "annotations.xml").exists():
-                        continue
-                    try:
-                        stamp = path.stat().st_mtime
-                    except Exception:
-                        stamp = 0
-                    candidates.append((stamp, path.name, path))
+                run_paths = PROJECT_CACHE.list_annotation_run_dirs(root, require_xml=True)
             except Exception:
                 continue
+
+            for path in run_paths:
+                try:
+                    stamp = path.stat().st_mtime
+                except Exception:
+                    stamp = 0
+                candidates.append((stamp, path.name, path))
 
         if not candidates:
             return None
@@ -11338,7 +11545,7 @@ class AnnotationTab:
                 continue
 
             try:
-                run_paths = list(root.rglob("run_*"))
+                run_paths = PROJECT_CACHE.list_annotation_run_dirs(root, require_xml=True)
             except Exception:
                 continue
 
@@ -11948,7 +12155,14 @@ class AnnotationTab:
                     except Exception:
                         available_height = 0
                     if show_preview:
-                        preview_cap = max(280, int(available_height * 0.46)) if available_height > 0 else 420
+                        if available_height > 0:
+                            reserved_preview_height = max(280, int(available_height * 0.52))
+                            preview_cap = min(
+                                max(220, int(available_height * 0.38)),
+                                max(220, int(available_height - reserved_preview_height)),
+                            )
+                        else:
+                            preview_cap = 320
                         target_height = min(target_height, int(preview_cap))
                     else:
                         target_height = min(target_height, 560)
@@ -12252,6 +12466,73 @@ class AnnotationTab:
             return None
         return None
 
+    @staticmethod
+    def _normalize_preview_metric_threshold(value, *, default: float = 0.0) -> float:
+        try:
+            normalized = float(value)
+        except Exception:
+            normalized = float(default)
+        return max(0.0, min(1.0, normalized))
+
+    def _annotation_run_matches_expected_input_dir(self, run_dir, expected_input_dir) -> bool:
+        safe_run_dir = self._resolve_safe_annotation_run_dir(run_dir, require_xml=True)
+        expected_dir = self._resolve_existing_dir(expected_input_dir) or self._path_value_to_path(expected_input_dir)
+        if safe_run_dir is None or expected_dir is None:
+            return True
+
+        try:
+            manifest = self._load_annotation_run_manifest(safe_run_dir)
+        except Exception:
+            return True
+
+        declared_inputs = [
+            str(manifest.get("source_input_dir") or "").strip(),
+            str(manifest.get("imported_source_input_dir") or "").strip(),
+            str(manifest.get("input_dir") or "").strip(),
+        ]
+        declared_inputs = [value for value in declared_inputs if value]
+        if not declared_inputs:
+            return True
+
+        for raw_value in declared_inputs:
+            try:
+                if self._paths_equivalent(raw_value, expected_dir):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _repair_campaign_step2_generated_state_for_input(self, expected_input_dir) -> bool:
+        if self._is_free_mode_session_context():
+            return False
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            if not CAMPAIGN.get_active_project_name():
+                return False
+            if str(CAMPAIGN.get_iteration_target() or "").strip().lower() != "plate":
+                return False
+
+            current_step2_run = self._resolve_safe_annotation_run_dir(
+                CAMPAIGN.get_step2_staging_run(),
+                require_xml=True,
+            )
+            if current_step2_run is None:
+                return False
+
+            if self._annotation_run_matches_expected_input_dir(current_step2_run, expected_input_dir):
+                return False
+
+            self._append_z2_trace(
+                "repair-step2-stale-run",
+                f"run={current_step2_run} expected={expected_input_dir}",
+            )
+            CAMPAIGN.reset_step2()
+            return True
+        except Exception:
+            return False
+
     def _allocate_annotation_run_dir(self, base_out_dir: Path, *, suffix: str = "") -> Path:
         base_out_dir = self._coerce_annotation_output_dir(base_out_dir)
         base_out_dir.mkdir(parents=True, exist_ok=True)
@@ -12263,6 +12544,7 @@ class AnnotationTab:
             run_dir = base_out_dir / f"run_{counter:03d}_{timestamp}{suffix_text}"
             if not run_dir.exists():
                 run_dir.mkdir(parents=True, exist_ok=False)
+                PROJECT_CACHE.invalidate_annotation_run_dirs(base_out_dir)
                 return run_dir
             counter += 1
 
@@ -15037,6 +15319,10 @@ class AnnotationTab:
             plate_bootstrap_model = str(bootstrap.get("plate_model_path") or "").strip()
             restore_run_dir = bootstrap.get("restore_run_dir")
             snapshot_state = self._load_campaign_project_snapshot()
+            try:
+                self._repair_campaign_step2_generated_state_for_input(input_dir)
+            except Exception:
+                pass
             if not self._should_restore_existing_campaign_step2_run(iteration_target):
                 restore_run_dir = None
                 bootstrap["restore_run_dir"] = None
@@ -15161,6 +15447,11 @@ class AnnotationTab:
             folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
             input_dir = folder if folder.exists() else Path(raw_dir)
             base_input_dir = input_dir
+
+            try:
+                self._repair_campaign_step2_generated_state_for_input(base_input_dir)
+            except Exception:
+                pass
 
             strategy = str(entry_strategy or "").strip().lower()
             snapshot_state = self._load_campaign_project_snapshot()
@@ -17872,6 +18163,15 @@ class AnnotationTab:
             pady=((10, 0) if show_route_choice else (0, 0)),
         )
         self._set_widget_packed(
+            self.run_intro_lbl,
+            (show_workflow_steps or show_campaign_context_header or ((not campaign_context) and show_nav_panel))
+            and not (campaign_context and show_manual_review_followup)
+            and bool(str(self.run_intro_var.get() or "").strip()),
+            anchor=tk.W,
+            fill=tk.X,
+            pady=(0, 8),
+        )
+        self._set_widget_packed(
             self.route_badge_lbl,
             (show_workflow_steps or show_campaign_context_header)
             and not (campaign_context and show_manual_review_followup),
@@ -17902,6 +18202,7 @@ class AnnotationTab:
         )
         if hide_compact_route_meta:
             self._set_widget_packed(self.run_title_lbl, False)
+            self._set_widget_packed(self.run_intro_lbl, False)
             self._set_widget_packed(self.route_badge_lbl, False)
             self._set_widget_packed(self.route_summary_lbl, False)
             self._set_widget_packed(self.workflow_action_hint_lbl, False)
@@ -18410,6 +18711,7 @@ class AnnotationTab:
         auto_plate_model_hint_tone = "muted"
         auto_vehicle_choice_title = "3. Dodaj opcjonalne boxowanie pojazdów"
         run_title = "Kreator Z2"
+        run_intro_text = ""
         campaign_reused_manual_count = (
             self._get_campaign_reused_manual_annotation_count()
             if campaign_context
@@ -18581,7 +18883,11 @@ class AnnotationTab:
                 )
                 auto_plate_model_hint_tone = "warning"
         elif route == "manual":
-            run_title = "Korekta ręczna tablic"
+            run_title = (
+                "Ręczna anotacja tablic"
+                if manual_setup and not manual_review_active
+                else "Korekta ręczna tablic"
+            )
             badge_text = "Aktywny tor: anotacja ręczna tablic"
             badge_tone = "warning"
             route_tone = "muted"
@@ -18723,6 +19029,21 @@ class AnnotationTab:
                 manual_template_tone = "muted"
                 manual_vehicle_hint = "Opcjonalne boxy pojazdów są tylko pomocą przy ręcznej pracy."
                 manual_vehicle_tone = "muted"
+                if campaign_context and campaign_iteration_num == 1 and not campaign_reused_manual_count:
+                    run_intro_text = (
+                        "To jest pierwsze bazowe przygotowanie tablic w projekcie. "
+                        "Na tej paczce ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
+                        "który później zatwierdzi E2 i zasili dalszy trening."
+                    )
+                    route_text = (
+                        "To jest pierwszy bazowy zestaw tablic dla projektu. "
+                        "W tej iteracji ręcznie ustawiasz rogi tablic na obrazach z nowej paczki, "
+                        "aby zbudować startowy run Z2 do zatwierdzenia E2 i dalszego treningu."
+                    )
+                    action_text = (
+                        "Otwórz paczkę tej iteracji, narysuj lub popraw tablice ręcznie, "
+                        "a po zapisaniu wyników domkniesz pierwszy etap przygotowania danych."
+                    )
                 if vehicle_assist_enabled:
                     workflow_conf_title = "Pewność pomocniczych boxów pojazdów"
                     workflow_conf_hint = (
@@ -18745,6 +19066,19 @@ class AnnotationTab:
                 )
             if campaign_context and not str(workflow_start_intro or "").strip():
                 workflow_start_intro = "To jest główny krok roboczy tej części Z2."
+            if (
+                campaign_context
+                and not str(run_intro_text or "").strip()
+                and route == "manual"
+                and not manual_review_active
+                and manual_setup
+                and int(campaign_iteration_num or 0) <= 1
+            ):
+                run_intro_text = (
+                    "Tutaj przygotowujesz pierwszy bazowy zestaw tablic dla projektu. "
+                    "Na tej paczce ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
+                    "który później zatwierdzi E2 i posłuży do dalszego treningu."
+                )
 
         prefix_lookup = self._get_z2_thematic_title_prefixes()
 
@@ -18758,6 +19092,19 @@ class AnnotationTab:
         manual_entry_title = self._format_z2_thematic_title(manual_entry_title, prefix_lookup.get("manual_entry"))
         manual_history_title = self._format_z2_thematic_title(manual_history_title, prefix_lookup.get("manual_history"))
         followup_title = self._format_z2_thematic_title(followup_title, prefix_lookup.get("followup"))
+
+        if (
+            campaign_context
+            and not str(run_intro_text or "").strip()
+            and not manual_review_active
+            and int(campaign_iteration_num or 0) <= 1
+            and "Ręczna anotacja tablic" in str(run_title or "")
+        ):
+            run_intro_text = (
+                "To jest pierwsze bazowe przygotowanie tablic w projekcie. "
+                "Na tej paczce ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
+                "który później zatwierdzi E2 i zasili dalszy trening."
+            )
 
         if route == "manual" and current_step == "manual_entry" and manual_template_hint:
             manual_hint = (
@@ -18791,7 +19138,9 @@ class AnnotationTab:
         self.workflow_vehicle_model_title_var.set(workflow_vehicle_title)
         self.workflow_vehicle_model_hint_var.set(workflow_vehicle_hint)
         self.workflow_start_intro_var.set(str(workflow_start_intro or "").strip())
+        self.run_intro_var.set(str(run_intro_text or "").strip())
         self._set_inline_label_state(self.route_badge_lbl, text=badge_text, tone=badge_tone, emphasis=True)
+        self._set_inline_label_state(self.run_intro_lbl, tone="muted", emphasis=False)
         self._set_inline_label_state(self.route_summary_lbl, text=route_text, tone=route_tone, emphasis=False)
         self._set_inline_label_state(self.workflow_start_intro_lbl, tone="muted", emphasis=False)
         self._set_inline_label_state(self.workflow_action_hint_lbl, text=action_text, tone="muted", emphasis=False)
@@ -19639,15 +19988,7 @@ class AnnotationTab:
             self.current_input_dir = in_dir
             self._preview_image_path_map = dict(getattr(self, "_pending_source_image_map", {}) or {})
 
-            base_out_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            counter = 1
-            while True:
-                run_dir = base_out_dir / f"run_{counter:03d}_{timestamp}"
-                if not run_dir.exists(): break
-                counter += 1
-                
-            run_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = self._allocate_annotation_run_dir(base_out_dir)
             cvat_xml_path = run_dir / "annotations.xml"
 
             logger.info(
@@ -19808,14 +20149,19 @@ class AnnotationTab:
     def _preview_list_item_text(self, ann, *, display_index: int | None = None, total_count: int | None = None) -> str:
         dirty_prefix = "*" if ann.filename in self._preview_dirty_images else " "
         status_text = self._preview_annotation_status_tag(ann)
-        approved_prefix = "[OK] " if self._preview_annotation_is_explicitly_approved(ann) else ""
         if display_index is None:
             order_text = "--."
         else:
             width = max(2, len(str(max(1, int(total_count or (display_index + 1))))))
             order_text = f"{int(display_index) + 1:0{width}d}."
         reuse_prefix = f"{self._campaign_reuse_manual_badge()} " if self._preview_annotation_is_reused_from_previous_manual(ann) else ""
-        return f"{dirty_prefix} {order_text} [{status_text}] {approved_prefix}{reuse_prefix}{ann.filename}"
+        quality = self._get_preview_annotation_quality_summary(ann)
+        metrics_suffix = ""
+        if int(quality.get("plate_count", 0) or 0) > 0:
+            metrics_suffix = f" | D{float(quality.get('min_confidence', 0.0) or 0.0):.2f}"
+            if int(quality.get("fit_count", 0) or 0) > 0:
+                metrics_suffix += f" F{float(quality.get('min_fit_score', 0.0) or 0.0):.2f}"
+        return f"{dirty_prefix} {order_text} [{status_text}] {reuse_prefix}{ann.filename}{metrics_suffix}"
 
     def _preview_annotation_is_reused_from_previous_manual(self, ann) -> bool:
         filename = str(getattr(ann, "filename", "") or "").strip()
@@ -19862,7 +20208,12 @@ class AnnotationTab:
         return "--"
 
     def _preview_annotation_status_tag(self, ann) -> str:
-        return self._preview_annotation_origin_tag(ann)
+        origin_tag = self._preview_annotation_origin_tag(ann)
+        if self._preview_annotation_is_explicitly_approved(ann):
+            if origin_tag in {"M", "A"}:
+                return f"{origin_tag}|OK"
+            return "OK"
+        return origin_tag
 
     def _preview_annotation_manual_plate_count(self, ann) -> int:
         if ann is None:
@@ -19899,6 +20250,15 @@ class AnnotationTab:
             if not manually_edited and not manual_source:
                 return True
         return False
+
+    @staticmethod
+    def _plate_detection_is_manual(det: Detection | None) -> bool:
+        if det is None:
+            return False
+        attributes = dict(getattr(det, "attributes", {}) or {})
+        manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
+        manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
+        return bool(manually_edited or manual_source)
 
     def _get_preview_any_auto_in_run(self) -> bool:
         cached = getattr(self, "_preview_any_auto_in_run_cache", None)
@@ -20463,7 +20823,9 @@ class AnnotationTab:
 
     def _get_preview_list_entries(self) -> list[tuple[int, ImageAnnotation]]:
         sort_mode = self._normalize_preview_list_sort_mode()
-        base_entries = self._build_preview_list_sorted_entries(sort_mode)
+        base_entries = self._filter_preview_list_entries(
+            self._build_preview_list_sorted_entries(sort_mode)
+        )
         if not base_entries:
             self._invalidate_preview_list_frozen_order()
             return []
@@ -20526,6 +20888,28 @@ class AnnotationTab:
             if actual_index not in selected_actual_indices:
                 selected_actual_indices.append(int(actual_index))
         return selected_actual_indices
+
+    def _select_all_visible_preview_images(self) -> None:
+        try:
+            total_visible = int(self.preview_listbox.size() or 0)
+        except Exception:
+            total_visible = 0
+
+        if total_visible <= 0:
+            self._update_preview_edit_status("Brak obrazów spełniających bieżący filtr.")
+            return
+
+        try:
+            self._clear_listbox_selection_fast(self.preview_listbox)
+            self.preview_listbox.selection_set(0, tk.END)
+            self.preview_listbox.selection_anchor(0)
+            self.preview_listbox.activate(0)
+            self.preview_listbox.see(0)
+        except Exception:
+            return
+
+        self._update_preview_toolbar_state()
+        self._update_preview_edit_status(f"Zaznaczono obrazy spełniające filtr: {total_visible}.")
 
     def _set_selected_preview_images_approved(self, approved: bool) -> None:
         selected_actual_indices = self._get_selected_preview_actual_indices()
@@ -20643,6 +21027,8 @@ class AnnotationTab:
 
     def _refresh_preview_list_summary(self):
         annotations = list(self.current_annotations or [])
+        visible_entries = list(getattr(self, "_preview_list_display_indices", []) or [])
+        visible_count = int(len(visible_entries))
         campaign_context = not self._is_free_mode_session_context()
         approved_names = self._get_preview_approved_filenames_base()
         reused_manual = 0
@@ -20674,11 +21060,20 @@ class AnnotationTab:
                 project_approved_images = 0
         cumulative_approved_images = int(project_approved_images or 0) + int(approved_images or 0)
         dirty = len(getattr(self, "_preview_dirty_images", set()) or set())
+        conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
+        filter_parts = []
+        if conf_threshold > 0.0:
+            filter_parts.append(f"Det >= {conf_threshold:.2f}")
+        if fit_threshold > 0.0:
+            filter_parts.append(f"Fit >= {fit_threshold:.2f}")
+        filter_text = " | ".join(filter_parts)
         left_summary_text = (
-            f"Oznaczone jako OK w tym runie: {approved_images}"
-            if approved_images > 0
-            else ""
+            f"Widoczne: {visible_count}/{len(annotations)}"
         )
+        if approved_images > 0:
+            left_summary_text += f" | OK w tym runie: {approved_images}"
+        if filter_text:
+            left_summary_text += f" | Filtr: {filter_text}"
         breakdown_summary_text = ""
 
         try:
@@ -20811,6 +21206,8 @@ class AnnotationTab:
         for frame_name in (
             "preview_list_meta",
             "preview_list_controls",
+            "preview_list_filter_row",
+            "preview_list_section",
             "preview_list_sort_grid",
             "preview_list_legend",
             "preview_list_legend_grid",
@@ -20826,7 +21223,9 @@ class AnnotationTab:
 
         for widget_name, fg in (
             ("preview_list_summary_lbl", muted_color),
+            ("preview_list_filter_lbl", muted_color),
             ("preview_list_sort_lbl", muted_color),
+            ("preview_filter_hint_lbl", muted_color),
         ):
             widget = getattr(self, widget_name, None)
             if widget is None:
@@ -20937,7 +21336,135 @@ class AnnotationTab:
         return self.current_annotations[index]
 
     @staticmethod
-    def _get_plate_detections(ann) -> list[Detection]:
+    def _detection_attribute_float(det: Detection, attr_name: str, default: float = 0.0) -> float:
+        if det is None:
+            return float(default)
+        try:
+            raw_value = dict(getattr(det, "attributes", {}) or {}).get(str(attr_name), default)
+        except Exception:
+            raw_value = default
+        try:
+            return float(raw_value)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _serialize_quality_metric_value(value: float) -> str:
+        try:
+            return f"{float(value):.3f}"
+        except Exception:
+            return "0.000"
+
+    def _compute_plate_detection_fit_metrics(self, det: Detection, ann=None) -> dict:
+        polygon = self._detection_polygon(det)
+        bbox = getattr(det, "bbox", None)
+        keypoints = getattr(det, "keypoints", None)
+        image_size = None
+        if ann is not None:
+            try:
+                image_size = (int(getattr(ann, "width", 0) or 0), int(getattr(ann, "height", 0) or 0))
+            except Exception:
+                image_size = None
+        return compute_plate_polygon_fit_metrics(
+            float(getattr(det, "confidence", 0.0) or 0.0),
+            polygon,
+            bbox,
+            keypoints=keypoints,
+            image_size=image_size,
+        )
+
+    @staticmethod
+    def _compute_character_box_fit_metrics_preview(
+        confidence: float,
+        bbox: tuple[float, float, float, float],
+        *,
+        plate_size: tuple[int, int] | None = None,
+        image_size: tuple[int, int] | None = None,
+    ) -> dict:
+        return compute_character_box_fit_metrics(
+            confidence,
+            bbox,
+            plate_size=plate_size,
+            image_size=image_size,
+        )
+
+    def _refresh_plate_detection_quality_metrics(self, det: Detection, ann=None, *, force: bool = False) -> dict:
+        attributes = dict(getattr(det, "attributes", {}) or {})
+        if self._plate_detection_is_manual(det):
+            for key in (
+                "fit_score",
+                "fit_label",
+                "fit_keypoint_score",
+                "fit_shape_score",
+                "fit_bbox_score",
+                "fit_size_score",
+            ):
+                attributes.pop(key, None)
+            det.attributes = attributes
+            return attributes
+
+        if not force and str(attributes.get("fit_score", "") or "").strip():
+            return attributes
+
+        metrics = self._compute_plate_detection_fit_metrics(det, ann)
+        attributes.update({
+            "fit_score": self._serialize_quality_metric_value(metrics.get("fit_score", 0.0)),
+            "fit_label": str(metrics.get("fit_label") or "").strip(),
+            "fit_keypoint_score": self._serialize_quality_metric_value(metrics.get("keypoint_score", 0.0)),
+            "fit_shape_score": self._serialize_quality_metric_value(metrics.get("shape_score", 0.0)),
+            "fit_bbox_score": self._serialize_quality_metric_value(metrics.get("bbox_alignment_score", 0.0)),
+            "fit_size_score": self._serialize_quality_metric_value(metrics.get("size_score", 0.0)),
+        })
+        det.attributes = attributes
+        return attributes
+
+    def _get_plate_detection_fit_score(self, det: Detection, ann=None) -> float | None:
+        attributes = self._refresh_plate_detection_quality_metrics(det, ann)
+        raw_value = str(attributes.get("fit_score", "") or "").strip()
+        if not raw_value:
+            return None
+        try:
+            return float(raw_value)
+        except Exception:
+            return None
+
+    def _get_preview_annotation_quality_summary(self, ann) -> dict:
+        plates = self._get_plate_detections(ann)
+        if not plates:
+            return {
+                "plate_count": 0,
+                "min_confidence": 0.0,
+                "avg_confidence": 0.0,
+                "max_confidence": 0.0,
+                "fit_count": 0,
+                "min_fit_score": 0.0,
+                "avg_fit_score": 0.0,
+                "max_fit_score": 0.0,
+            }
+
+        for det in plates:
+            try:
+                self._refresh_plate_detection_quality_metrics(det, ann)
+            except Exception:
+                continue
+        confidences = [max(0.0, min(1.0, float(getattr(det, "confidence", 0.0) or 0.0))) for det in plates]
+        fit_scores = [
+            score
+            for score in (self._get_plate_detection_fit_score(det, ann) for det in plates)
+            if score is not None
+        ]
+        return {
+            "plate_count": len(plates),
+            "min_confidence": min(confidences) if confidences else 0.0,
+            "avg_confidence": (sum(confidences) / float(len(confidences))) if confidences else 0.0,
+            "max_confidence": max(confidences) if confidences else 0.0,
+            "fit_count": len(fit_scores),
+            "min_fit_score": min(fit_scores) if fit_scores else 0.0,
+            "avg_fit_score": (sum(fit_scores) / float(len(fit_scores))) if fit_scores else 0.0,
+            "max_fit_score": max(fit_scores) if fit_scores else 0.0,
+        }
+
+    def _get_plate_detections(self, ann) -> list[Detection]:
         if ann is None:
             return []
         return [det for det in ann.detections if str(det.label or "").lower() == "plate"]
@@ -21049,20 +21576,75 @@ class AnnotationTab:
         if refresh_list and not was_dirty:
             self._refresh_preview_list(preserve_selection=True, render_current=False)
         elif not was_dirty:
-            self._refresh_preview_list_row_for_actual_index(self.current_preview_index, refresh_summary=True)
+            self._refresh_preview_list_row_for_actual_index(self.current_preview_index, refresh_summary=False)
             self._update_preview_toolbar_state(refresh_summary=False)
 
     def _get_preview_history_image_key(self, ann=None) -> str:
         target_ann = self._get_preview_annotation() if ann is None else ann
         return str(getattr(target_ann, "filename", "") or "").strip()
 
-    def _clone_preview_annotation_history_snapshot(self, ann=None):
+    @staticmethod
+    def _clone_preview_history_detection(det: Detection) -> Detection:
+        keypoints = None
+        if isinstance(getattr(det, "keypoints", None), list):
+            keypoints = [
+                (float(point[0]), float(point[1]), float(point[2]))
+                for point in det.keypoints
+                if isinstance(point, (list, tuple)) and len(point) >= 3
+            ]
+
+        polygon = None
+        if isinstance(getattr(det, "polygon", None), list):
+            polygon = [
+                (float(point[0]), float(point[1]))
+                for point in det.polygon
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+
+        bbox = tuple(getattr(det, "bbox", (0.0, 0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0, 0.0))
+        if len(bbox) >= 4:
+            bbox = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        else:
+            bbox = (0.0, 0.0, 0.0, 0.0)
+
+        return Detection(
+            label=str(getattr(det, "label", "") or ""),
+            confidence=float(getattr(det, "confidence", 0.0) or 0.0),
+            bbox=bbox,
+            keypoints=keypoints,
+            polygon=polygon,
+            text=getattr(det, "text", None),
+            text_confidence=float(getattr(det, "text_confidence", 0.0) or 0.0),
+            attributes=dict(getattr(det, "attributes", {}) or {}),
+        )
+
+    def _clone_preview_history_annotation(self, ann=None):
         target_ann = self._get_preview_annotation() if ann is None else ann
         image_key = self._get_preview_history_image_key(target_ann)
         if target_ann is None or not image_key:
             return None
+
+        detections = []
+        for det in list(getattr(target_ann, "detections", []) or []):
+            if isinstance(det, Detection):
+                detections.append(self._clone_preview_history_detection(det))
+
+        return ImageAnnotation(
+            filename=image_key,
+            width=int(getattr(target_ann, "width", 0) or 0),
+            height=int(getattr(target_ann, "height", 0) or 0),
+            detections=detections,
+            status=getattr(target_ann, "status", AnnotationStatus.SUCCESS),
+            status_message=str(getattr(target_ann, "status_message", "") or ""),
+        )
+
+    def _clone_preview_annotation_history_snapshot(self, ann=None):
+        target_ann = self._get_preview_annotation() if ann is None else ann
+        cloned_ann = self._clone_preview_history_annotation(target_ann)
+        if cloned_ann is None:
+            return None
         return {
-            "annotation": copy.deepcopy(target_ann),
+            "annotation": cloned_ann,
             "selected_plate_idx": self._get_selected_plate_index_for_ann(target_ann),
             "selected_vehicle_idx": self._get_selected_vehicle_index_for_ann(target_ann),
         }
@@ -21114,7 +21696,7 @@ class AnnotationTab:
         if isinstance(snapshot, dict):
             candidate = snapshot.get("annotation")
             if isinstance(candidate, ImageAnnotation):
-                restored_ann = copy.deepcopy(candidate)
+                restored_ann = self._clone_preview_history_annotation(candidate)
         if restored_ann is None:
             return False
 
@@ -21131,6 +21713,10 @@ class AnnotationTab:
             self._set_selected_vehicle_index_for_ann(restored_ann, selected_vehicle_idx)
             self._preview_drag_state = None
             self._preview_pending_vertex_hit = None
+            self._preview_focus_zoom_modifier_down = False
+            self._preview_focus_zoom_modifier_consumed = False
+            self._preview_focus_zoom_click_stage = 0
+            self._preview_focus_zoom_restore_state = None
             self._preview_draw_mode = False
             self._preview_draw_points = []
             self._preview_delete_mode = False
@@ -21194,6 +21780,10 @@ class AnnotationTab:
         self._preview_pending_vertex_hit = None
         self._preview_corner_drag_modifier_down = False
         self._preview_last_modifier_press_at = 0.0
+        self._preview_focus_zoom_modifier_down = False
+        self._preview_focus_zoom_modifier_consumed = False
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
         self._preview_draw_mode = False
         self._preview_draw_points = []
         self._preview_delete_mode = False
@@ -21414,11 +22004,21 @@ class AnnotationTab:
         restore_filename: str = "",
         restore_index: int | None = None,
     ) -> int | None:
+        def _filename_key(value) -> str:
+            return str(value or "").strip().lower()
+
+        def _annotation_has_plate(ann: ImageAnnotation | None) -> bool:
+            try:
+                return bool(self._get_plate_detections(ann))
+            except Exception:
+                return False
+
         resolved_index = None
         safe_restore_filename = str(restore_filename or "").strip()
         if safe_restore_filename:
+            safe_restore_filename_key = _filename_key(safe_restore_filename)
             for idx, ann in enumerate(annotations):
-                if str(getattr(ann, "filename", "") or "") == safe_restore_filename:
+                if _filename_key(getattr(ann, "filename", "")) == safe_restore_filename_key:
                     resolved_index = idx
                     break
         if resolved_index is None and isinstance(restore_index, int) and 0 <= int(restore_index) < len(annotations):
@@ -21426,8 +22026,9 @@ class AnnotationTab:
         if resolved_index is None:
             manifest_restore_filename = str((manifest or {}).get("resume_preview_filename") or "").strip()
             if manifest_restore_filename:
+                manifest_restore_filename_key = _filename_key(manifest_restore_filename)
                 for idx, ann in enumerate(annotations):
-                    if str(getattr(ann, "filename", "") or "") == manifest_restore_filename:
+                    if _filename_key(getattr(ann, "filename", "")) == manifest_restore_filename_key:
                         resolved_index = idx
                         break
         if resolved_index is None:
@@ -21439,6 +22040,33 @@ class AnnotationTab:
                 resolved_index = manifest_restore_idx
         if resolved_index is None and annotations:
             resolved_index = 0
+
+        approved_names = {
+            _filename_key(name)
+            for name in list((manifest or {}).get("approved_filenames") or [])
+            if _filename_key(name)
+        }
+        if (
+            resolved_index is not None
+            and 0 <= int(resolved_index) < len(annotations)
+            and not _annotation_has_plate(annotations[int(resolved_index)])
+        ):
+            fallback_candidates: list[tuple[int, int, int]] = []
+            anchor_index = int(resolved_index)
+            for idx, ann in enumerate(annotations):
+                if not _annotation_has_plate(ann):
+                    continue
+                filename_key = _filename_key(getattr(ann, "filename", ""))
+                is_approved = filename_key in approved_names
+                try:
+                    is_manual = bool(self._preview_annotation_has_manual_touch_direct(ann))
+                except Exception:
+                    is_manual = False
+                priority = 0 if is_approved else (1 if is_manual else 2)
+                fallback_candidates.append((priority, abs(idx - anchor_index), idx))
+            if fallback_candidates:
+                fallback_candidates.sort()
+                resolved_index = int(fallback_candidates[0][2])
         return resolved_index
 
     def _prepare_annotation_run_restore_payload(
@@ -22144,6 +22772,8 @@ class AnnotationTab:
         self.current_preview_index = safe_idx
         self._preview_session_restore_index = safe_idx
         self._preview_session_restore_filename = str(getattr(self.current_annotations[safe_idx], "filename", "") or "")
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
         self._load_current_preview_selection(
             reset_view=True,
             selection_changed=(safe_idx != previous_idx),
@@ -22183,6 +22813,8 @@ class AnnotationTab:
     def _fit_preview_image_to_view(self):
         self._preview_polygon_focus_restore_state = None
         self._preview_focus_target = None
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
         try:
             if self.preview_canvas.original_image is not None:
                 self.preview_canvas.fit_to_view()
@@ -22190,6 +22822,30 @@ class AnnotationTab:
         except Exception:
             pass
         self._push_preview_debug_event("fit", "dopasowano obraz do widoku")
+
+    def _get_preview_focus_zoom_target(self, canvas: ZoomableCanvas) -> float:
+        base_target = float(canvas._get_middle_click_target_zoom())
+        max_zoom = float(getattr(canvas, "max_zoom", base_target) or base_target)
+        stage = int(getattr(self, "_preview_focus_zoom_click_stage", 0) or 0)
+        if stage <= 0:
+            return min(max_zoom, max(base_target + 0.35, base_target * 1.15))
+        return max_zoom
+
+    def _restore_preview_focus_zoom_view(self) -> bool:
+        canvas = getattr(self, "preview_canvas", None)
+        restore_state = getattr(self, "_preview_focus_zoom_restore_state", None)
+        if canvas is None or not isinstance(restore_state, dict):
+            self._preview_focus_zoom_click_stage = 0
+            self._preview_focus_zoom_restore_state = None
+            return False
+        try:
+            canvas._animate_to_view_state(restore_state, duration_ms=180)
+            return True
+        except Exception:
+            return False
+        finally:
+            self._preview_focus_zoom_click_stage = 0
+            self._preview_focus_zoom_restore_state = None
 
     def _get_preview_legend_font(self, size: int, weight: str = "normal"):
         cache = getattr(self, "_preview_legend_font_cache", None)
@@ -22385,6 +23041,9 @@ class AnnotationTab:
             "muted_fill": palette.get("muted_dim", palette.get("muted", "#8f98a3")),
             "entry_fill": blend_hex_colors(panel_alt, panel, 0.28),
             "entry_text": palette.get("fg", "#f3f3f3"),
+            "section_fill": blend_hex_colors(panel_alt, panel, 0.18),
+            "section_title": palette.get("fg", "#f3f3f3"),
+            "section_muted": blend_hex_colors(palette.get("fg", "#f3f3f3"), panel_alt, 0.18),
             "token_fill": field,
             "token_text": palette.get("fg", "#f8fafc"),
             "badge_file_fill": palette.get("surface_info", blend_hex_colors(accent, panel_alt, 0.72)),
@@ -22397,8 +23056,8 @@ class AnnotationTab:
 
     def _measure_preview_legend_token(self, token_kind: str, token_text: str, font_obj) -> float:
         if token_kind == "mouse":
-            return max(48.0, float(font_obj.measure(str(token_text))) + 38.0)
-        return max(26.0, float(font_obj.measure(str(token_text))) + 14.0)
+            return max(36.0, float(font_obj.measure(str(token_text))) + 18.0)
+        return max(22.0, float(font_obj.measure(str(token_text))) + 10.0)
 
     def _draw_preview_legend_badge(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str):
         font_obj = self._get_preview_legend_font(10, "bold")
@@ -22427,9 +23086,9 @@ class AnnotationTab:
         return float(final_bbox[2] - final_bbox[0]), float(final_bbox[3] - final_bbox[1])
 
     def _draw_preview_legend_keycap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str):
-        font_obj = self._get_preview_legend_font(9, "bold")
+        font_obj = self._get_preview_legend_font(7, "bold")
         width = self._measure_preview_legend_token("key", text, font_obj)
-        height = 24.0
+        height = 19.0
         rect_id = canvas.create_rectangle(
             x,
             y,
@@ -22461,102 +23120,57 @@ class AnnotationTab:
         return float(width), float(height)
 
     def _draw_preview_legend_mousecap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str):
-        font_obj = self._get_preview_legend_font(7, "bold")
-        width = self._measure_preview_legend_token("mouse", text, font_obj)
-        height = 24.0
-        rect_id = canvas.create_rectangle(
+        # W Z2 nie udajemy kształtu myszy. LPM/PPM są zwykłymi tokenami jak reszta skrótów.
+        return self._draw_preview_legend_keycap(
+            canvas,
             x,
             y,
-            x + width,
-            y + height,
+            text,
             fill=fill,
             outline=outline,
-            width=1,
-            tags=("preview_legend",)
+            text_fill=text_fill,
         )
-        body_left = x + 7
-        body_top = y + 3
-        body_right = body_left + 16
-        body_bottom = y + 21
-        center_x = (body_left + body_right) / 2.0
-        highlight_left = str(text).upper() == "LPM"
-        highlight_right = str(text).upper() == "PPM"
-        canvas.create_oval(
-            body_left,
-            body_top,
-            body_right,
-            body_bottom,
-            fill="#f7f9fb",
-            outline=outline,
-            width=1,
-            tags=("preview_legend",)
-        )
-        canvas.create_rectangle(
-            body_left + 1,
-            body_top + 1,
-            center_x - 1,
-            body_top + 8,
-            fill=(outline if highlight_left else "#f7f9fb"),
-            outline="",
-            tags=("preview_legend",)
-        )
-        canvas.create_rectangle(
-            center_x + 1,
-            body_top + 1,
-            body_right - 1,
-            body_top + 8,
-            fill=(outline if highlight_right else "#f7f9fb"),
-            outline="",
-            tags=("preview_legend",)
-        )
-        canvas.create_line(
-            center_x,
-            body_top + 1,
-            center_x,
-            body_top + 9,
-            fill=outline,
-            width=1,
-            tags=("preview_legend",)
-        )
-        canvas.create_text(
-            body_right + 8,
-            y + (height / 2.0) + 0.5,
-            text=str(text),
-            fill=text_fill,
-            anchor="w",
-            font=font_obj,
-            tags=("preview_legend",)
-        )
-        canvas.tag_lower(rect_id)
-        return float(width), float(height)
 
-    def _build_preview_legend_entries(self):
+    def _build_preview_legend_sections(self):
         return [
-            {"tokens": [("key", "Q"), ("key", "E")], "connector": "/", "label": "zdjecie", "accent": "#2f80ed"},
-            {"tokens": [("key", "A")], "connector": "", "label": "tablica", "accent": "#14b8a6"},
-            {"tokens": [("key", "Spacja")], "connector": "", "label": "pojazd", "accent": "#16a34a"},
-            {"tokens": [("key", "R")], "connector": "", "label": "plate box", "accent": "#f59e0b"},
-            {"tokens": [("key", "F")], "connector": "", "label": "dopasuj", "accent": "#64748b"},
-            {"tokens": [("key", "W"), ("mouse", "LPM")], "connector": "+", "label": "rog", "accent": "#fb923c"},
-            {"tokens": [("key", "D")], "connector": "", "label": "nowa", "accent": "#22c55e"},
-            {"tokens": [("key", "S")], "connector": "", "label": "zaznacz", "accent": "#ef4444"},
-            {"tokens": [("mouse", "PPM")], "connector": "", "label": "usun tablice", "accent": "#dc2626"},
-            {"tokens": [("key", "Ctrl+Z"), ("key", "Ctrl+Y")], "connector": "/", "label": "historia", "accent": "#a855f7"},
-            {"tokens": [("key", "Ctrl+S")], "connector": "", "label": "zapisz", "accent": "#0ea5e9"},
-            {"tokens": [("key", "Enter"), ("key", "Esc")], "connector": "/", "label": "fullscreen", "accent": "#94a3b8"},
+            {
+                "title": "Nawigacja",
+                "accent": "#2f80ed",
+                "items": [
+                    {"tokens": ["Q", "E"], "connector": "/", "label": "zmiana zdjęcia"},
+                    {"tokens": ["F"], "label": "dopasuj cały obraz"},
+                    {"tokens": ["R", "LPM"], "connector": "+", "label": "płynny zoom x2"},
+                    {"tokens": ["R", "PPM"], "connector": "+", "label": "cofnij zoom"},
+                    {"tokens": ["Enter"], "label": "pełny ekran / wyjście"},
+                ],
+            },
+            {
+                "title": "Fokus",
+                "accent": "#14b8a6",
+                "items": [
+                    {"tokens": ["A"], "label": "tablica +/-"},
+                    {"tokens": ["Spacja"], "label": "pojazd +/-"},
+                    {"tokens": ["R"], "label": "ramka aktywnej tablicy"},
+                ],
+            },
+            {
+                "title": "Edycja",
+                "accent": "#f59e0b",
+                "columns": 2,
+                "items": [
+                    {"tokens": ["W", "LPM"], "connector": "+", "label": "przesuń róg"},
+                    {"tokens": ["D"], "label": "nowa tablica"},
+                    {"tokens": ["S"], "label": "zaznacz polygon"},
+                    {"tokens": ["PPM"], "label": "usuń aktywną"},
+                    {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "label": "historia"},
+                    {"tokens": ["Ctrl+S"], "label": "zapisz"},
+                ],
+            },
         ]
 
     def _refresh_preview_controls_legend(self):
         canvas = getattr(self, "preview_controls_canvas", None)
         if canvas is None:
-            return
-
-        if not bool(getattr(self, "_preview_fullscreen_active", False)):
-            try:
-                canvas.delete("all")
-                canvas.configure(height=1)
-            except Exception:
-                pass
             return
 
         try:
@@ -22565,7 +23179,6 @@ class AnnotationTab:
             pass
 
         width = max(420.0, float(canvas.winfo_width() or 0.0))
-        canvas.delete("all")
         legend_theme = self._get_preview_legend_theme()
         bg_fill = legend_theme["panel_fill"]
         bg_outline = legend_theme["panel_outline"]
@@ -22575,129 +23188,187 @@ class AnnotationTab:
             canvas.configure(bg=legend_theme["canvas_bg"])
         except Exception:
             pass
-        desc_font = self._get_preview_legend_font(9, "normal")
-
+        sections = self._build_preview_legend_sections()
+        legend_mode = "fullscreen" if bool(getattr(self, "_preview_fullscreen_active", False)) else "inline"
+        legend_key = (
+            legend_mode,
+            int(width),
+            str(legend_theme.get("canvas_bg", "")),
+            str(legend_theme.get("panel_fill", "")),
+            str(legend_theme.get("panel_outline", "")),
+            str(legend_theme.get("section_fill", "")),
+            str(legend_theme.get("section_title", "")),
+            str(legend_theme.get("section_muted", "")),
+            len(sections),
+        )
+        if legend_key == getattr(self, "_preview_controls_legend_render_key", None):
+            return
+        canvas.delete("all")
         background_id = canvas.create_rectangle(
             1,
             1,
             width - 2,
-            80,
+            96,
             fill=bg_fill,
             outline=bg_outline,
             width=1,
             tags=("preview_legend",)
         )
 
-        entries = self._build_preview_legend_entries()
-        x = 14.0
-        y = 10.0
-        token_gap = 10.0
-        entry_gap_x = 7.0
-        entry_gap_y = 7.0
-        entry_pad_x = 8.0
-        entry_pad_top = 6.0
-        entry_pad_bottom = 5.0
-        label_gap_y = 4.0
-        label_font = self._get_preview_legend_font(8, "bold")
-        label_height = float(label_font.metrics("linespace"))
-        token_row_height = 24.0
-        entry_height = entry_pad_top + token_row_height + label_gap_y + label_height + entry_pad_bottom
-        bottom = y + entry_height
+        outer_pad_x = 12.0
+        outer_pad_y = 6.0
+        section_gap_x = 8.0
+        section_gap_y = 6.0
+        section_pad_x = 8.0
+        section_pad_y = 6.0
+        title_gap_y = 4.0
+        item_gap_y = 4.0
+        item_col_gap = 8.0
+        token_gap = 4.0
+        label_gap_x = 6.0
+        item_row_height = 18.0
+        title_font = self._get_preview_legend_font(7, "bold")
+        desc_font = self._get_preview_legend_font(7, "normal")
 
-        for entry in entries:
-            token_specs = list(entry.get("tokens", []))
-            connector_text = str(entry.get("connector", "") or "")
-            accent = str(entry.get("accent", "#3498db"))
-            label = str(entry.get("label", "") or "")
-            token_widths = []
-            token_width = 0.0
-            for idx, (token_kind, token_text) in enumerate(token_specs):
-                if idx > 0:
-                    token_width += token_gap
-                token_font = self._get_preview_legend_font(7 if token_kind == "mouse" else 9, "bold")
-                current_width = self._measure_preview_legend_token(token_kind, token_text, token_font)
-                token_widths.append(float(current_width))
-                token_width += float(current_width)
-            label_width = float(label_font.measure(label))
-            content_width = max(token_width, label_width)
-            entry_width = content_width + (entry_pad_x * 2.0)
+        if width >= 920.0:
+            column_count = 3
+        elif width >= 620.0:
+            column_count = 2
+        else:
+            column_count = 1
 
-            if x > 14.0 and (x + entry_width) > (width - 18.0):
-                x = 14.0
-                y += entry_height + entry_gap_y
+        column_count = max(1, min(column_count, len(sections)))
+        section_width = max(
+            180.0,
+            (width - (outer_pad_x * 2.0) - (section_gap_x * (column_count - 1))) / float(column_count),
+        )
 
-            entry_rect = canvas.create_rectangle(
-                x,
-                y,
-                x + entry_width,
-                y + entry_height,
-                fill=legend_theme["entry_fill"],
+        section_heights = []
+        for section in sections:
+            item_count = len(section.get("items", []))
+            item_columns = max(1, int(section.get("columns", 1) or 1))
+            item_rows = max(1, (item_count + item_columns - 1) // item_columns)
+            section_height = (
+                section_pad_y
+                + float(title_font.metrics("linespace"))
+                + title_gap_y
+                + item_rows * item_row_height
+                + max(0, item_rows - 1) * item_gap_y
+                + section_pad_y
+            )
+            section_heights.append(section_height)
+
+        row_heights = []
+        for start_idx in range(0, len(sections), column_count):
+            row_heights.append(max(section_heights[start_idx:start_idx + column_count]))
+
+        y_offsets = []
+        current_y = outer_pad_y
+        for row_height in row_heights:
+            y_offsets.append(current_y)
+            current_y += row_height + section_gap_y
+
+        max_bottom = outer_pad_y
+        for idx, section in enumerate(sections):
+            row_idx = idx // column_count
+            col_idx = idx % column_count
+            section_x = outer_pad_x + (col_idx * (section_width + section_gap_x))
+            section_y = y_offsets[row_idx]
+            section_height = section_heights[idx]
+            accent = str(section.get("accent", "#3498db"))
+            item_columns = max(1, int(section.get("columns", 1) or 1))
+            item_width = max(
+                76.0,
+                (
+                    (section_width - (section_pad_x * 2.0))
+                    - (item_col_gap * (item_columns - 1))
+                ) / float(item_columns),
+            )
+
+            section_rect = canvas.create_rectangle(
+                section_x,
+                section_y,
+                section_x + section_width,
+                section_y + section_height,
+                fill=legend_theme["section_fill"],
                 outline=accent,
                 width=1,
                 tags=("preview_legend",)
             )
-
-            token_x = x + entry_pad_x + max(0.0, (content_width - token_width) / 2.0)
-            token_y = y + entry_pad_top
-            prev_right = None
-            for idx, (token_kind, token_text) in enumerate(token_specs):
-                if idx > 0:
-                    if connector_text:
-                        plus_x = float(prev_right) + (token_gap / 2.0)
-                        canvas.create_text(
-                            plus_x,
-                            token_y + 13.5,
-                            text=connector_text,
-                            fill=plus_fill,
-                            anchor="center",
-                            font=self._get_preview_legend_font(8, "bold"),
-                            tags=("preview_legend",)
-                        )
-                token_w = token_widths[idx]
-                if token_kind == "mouse":
-                    _drawn_w, _token_h = self._draw_preview_legend_mousecap(
-                        canvas,
-                        token_x,
-                        token_y,
-                        token_text,
-                        fill=legend_theme["token_fill"],
-                        outline=accent,
-                        text_fill=legend_theme["token_text"],
-                    )
-                else:
-                    _drawn_w, _token_h = self._draw_preview_legend_keycap(
-                        canvas,
-                        token_x,
-                        token_y,
-                        token_text,
-                        fill=legend_theme["token_fill"],
-                        outline=accent,
-                        text_fill=legend_theme["token_text"],
-                    )
-                prev_right = token_x + token_w
-                if idx < (len(token_specs) - 1):
-                    token_x = prev_right + token_gap
+            canvas.tag_lower(section_rect)
 
             canvas.create_text(
-                x + (entry_width / 2.0),
-                y + entry_pad_top + token_row_height + label_gap_y + (label_height / 2.0),
-                text=label,
-                fill=legend_theme["entry_text"],
-                anchor="center",
-                font=label_font,
+                section_x + section_pad_x,
+                section_y + section_pad_y,
+                text=str(section.get("title", "")),
+                fill=legend_theme["section_title"],
+                anchor="nw",
+                font=title_font,
                 tags=("preview_legend",)
             )
-            canvas.tag_lower(entry_rect)
-            bottom = max(bottom, y + entry_height)
-            x += entry_width + entry_gap_x
 
-        total_height = max(62.0, bottom + 10.0)
+            item_y = section_y + section_pad_y + float(title_font.metrics("linespace")) + title_gap_y
+            for item_idx, item in enumerate(section.get("items", [])):
+                local_row = item_idx // item_columns
+                local_col = item_idx % item_columns
+                item_x = section_x + section_pad_x + (local_col * (item_width + item_col_gap))
+                row_y = item_y + (local_row * (item_row_height + item_gap_y))
+                tokens = [str(token) for token in item.get("tokens", [])]
+                connector = str(item.get("connector", "") or "")
+                label = str(item.get("label", "") or "")
+                token_x = item_x
+                prev_right = None
+
+                for token_idx, token_text in enumerate(tokens):
+                    if token_idx > 0 and connector:
+                        connector_x = float(prev_right) + (token_gap / 2.0)
+                        canvas.create_text(
+                            connector_x,
+                            row_y + (item_row_height / 2.0),
+                            text=connector,
+                            fill=plus_fill,
+                            anchor="center",
+                            font=self._get_preview_legend_font(6, "bold"),
+                            tags=("preview_legend",)
+                        )
+                    token_w, _token_h = self._draw_preview_legend_keycap(
+                        canvas,
+                        token_x,
+                        row_y,
+                        token_text,
+                        fill=legend_theme["token_fill"],
+                        outline=accent,
+                        text_fill=legend_theme["token_text"],
+                    )
+                    prev_right = token_x + float(token_w)
+                    if token_idx < (len(tokens) - 1):
+                        token_x = prev_right + token_gap
+
+                label_x = min(
+                    item_x + item_width - 48.0,
+                    max(item_x + 54.0, float(prev_right or token_x) + label_gap_x),
+                )
+                canvas.create_text(
+                    label_x,
+                    row_y + (item_row_height / 2.0),
+                    text=label,
+                    fill=legend_theme["section_muted"],
+                    anchor="w",
+                    width=max(34.0, (item_x + item_width) - label_x),
+                    font=desc_font,
+                    tags=("preview_legend",)
+                )
+
+            max_bottom = max(max_bottom, section_y + section_height)
+
+        total_height = max(86.0, max_bottom + outer_pad_y)
         canvas.coords(background_id, 1, 1, width - 2, total_height - 2)
         try:
             canvas.configure(height=int(total_height))
         except Exception:
             pass
         canvas.tag_lower(background_id)
+        self._preview_controls_legend_render_key = legend_key
 
     def _get_preview_focus_image_key(self, ann=None) -> str:
         target_ann = self._get_preview_annotation() if ann is None else ann
@@ -23172,7 +23843,12 @@ class AnnotationTab:
         if allow_when_fullscreen and bool(getattr(self, "_preview_fullscreen_active", False)):
             return True
 
-        if self._preview_drag_state is not None or self._preview_corner_drag_modifier_down or self._preview_delete_mode:
+        if (
+            self._preview_drag_state is not None
+            or self._preview_corner_drag_modifier_down
+            or self._preview_focus_zoom_modifier_down
+            or self._preview_delete_mode
+        ):
             return True
 
         target_widget = getattr(event, "widget", None)
@@ -23231,7 +23907,11 @@ class AnnotationTab:
             top_shell.grid_configure(
                 row=0,
                 column=0,
-                sticky=("nsew" if (free_mode_expand_top or show_preview) else "ew"),
+                sticky=(
+                    "nsew"
+                    if free_mode_expand_top
+                    else ("ew" if compact_layout and show_preview else ("nsew" if show_preview else "ew"))
+                ),
             )
         except Exception:
             pass
@@ -23253,6 +23933,8 @@ class AnnotationTab:
 
     def _bind_preview_shortcuts(self):
         bindings = (
+            ("<Button-2>", self._on_preview_middle_click_zoom_shortcut),
+            ("<ButtonRelease-2>", self._on_preview_middle_click_zoom_shortcut),
             ("<KeyPress-w>", self._on_preview_edit_modifier_press),
             ("<KeyPress-W>", self._on_preview_edit_modifier_press),
             ("<KeyRelease-w>", self._on_preview_edit_modifier_release),
@@ -23261,8 +23943,10 @@ class AnnotationTab:
             ("<KeyPress-D>", self._on_preview_draw_toggle_shortcut),
             ("<KeyPress-s>", self._on_preview_delete_mode_shortcut),
             ("<KeyPress-S>", self._on_preview_delete_mode_shortcut),
-            ("<KeyPress-r>", self._on_preview_focus_toggle_shortcut),
-            ("<KeyPress-R>", self._on_preview_focus_toggle_shortcut),
+            ("<KeyPress-r>", self._on_preview_focus_zoom_modifier_press),
+            ("<KeyPress-R>", self._on_preview_focus_zoom_modifier_press),
+            ("<KeyRelease-r>", self._on_preview_focus_zoom_modifier_release),
+            ("<KeyRelease-R>", self._on_preview_focus_zoom_modifier_release),
             ("<KeyPress-f>", self._on_preview_fit_shortcut),
             ("<KeyPress-F>", self._on_preview_fit_shortcut),
             ("<KeyPress-a>", self._on_preview_cycle_plate_shortcut),
@@ -23301,6 +23985,17 @@ class AnnotationTab:
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
         return self._select_preview_relative(1)
+
+    def _on_preview_middle_click_zoom_shortcut(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        canvas = getattr(self, "preview_canvas", None)
+        if canvas is None:
+            return None
+        try:
+            return canvas._on_middle_click_zoom(event)
+        except Exception:
+            return "break"
 
     def _on_preview_edit_modifier_press(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
@@ -23372,6 +24067,27 @@ class AnnotationTab:
         self._update_preview_edit_status()
         return "break"
 
+    def _on_preview_focus_zoom_modifier_press(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        if bool(getattr(self, "_preview_focus_zoom_modifier_down", False)):
+            return "break"
+        self._preview_focus_zoom_modifier_down = True
+        self._preview_focus_zoom_modifier_consumed = False
+        self._sync_preview_canvas_cursor()
+        return "break"
+
+    def _on_preview_focus_zoom_modifier_release(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        was_consumed = bool(getattr(self, "_preview_focus_zoom_modifier_consumed", False))
+        self._preview_focus_zoom_modifier_down = False
+        self._preview_focus_zoom_modifier_consumed = False
+        self._sync_preview_canvas_cursor()
+        if was_consumed:
+            return "break"
+        return self._on_preview_focus_toggle_shortcut(event)
+
     def _on_preview_focus_toggle_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
@@ -23382,6 +24098,7 @@ class AnnotationTab:
             return "break"
 
         if self._preview_focus_restore_matches_current_image():
+            self._preview_focus_zoom_click_stage = 0
             self._restore_preview_focus_view(
                 "Przywrócono poprzedni kadr. R ponownie zbliża aktywny polygon."
             )
@@ -23400,6 +24117,7 @@ class AnnotationTab:
             push_debug=True,
             status_message="Widok został dopasowany do aktywnego polygonu. R wraca do poprzedniego kadru, A przełącza tablice.",
         ) or self._update_preview_edit_status("Nie udalo sie dopasowac widoku do aktywnego polygonu.")
+        self._preview_focus_zoom_click_stage = 0
         return "break"
 
     def _on_preview_cycle_plate_shortcut(self, event=None):
@@ -23481,7 +24199,7 @@ class AnnotationTab:
     def _on_preview_enter_fullscreen_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
-        self._set_preview_fullscreen(True)
+        self._toggle_preview_fullscreen()
         return "break"
 
     def _on_preview_escape_shortcut(self, event=None):
@@ -23537,8 +24255,12 @@ class AnnotationTab:
             return
 
         try:
-            if preview_hint_frame is not None and str(preview_hint_frame.winfo_manager()):
-                preview_hint_frame.pack_forget()
+            if preview_hint_frame is not None:
+                if not str(preview_hint_frame.winfo_manager()):
+                    preview_hint_frame.pack(fill=tk.X, pady=(0, 8), before=canvas_frame)
+                else:
+                    preview_hint_frame.pack_configure(fill=tk.X, pady=(0, 8), before=canvas_frame)
+                self._refresh_preview_controls_legend()
         except Exception:
             pass
         try:
@@ -23859,6 +24581,10 @@ class AnnotationTab:
             pass
 
         self._preview_pending_vertex_hit = None
+        self._preview_focus_zoom_modifier_down = False
+        self._preview_focus_zoom_modifier_consumed = False
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
         if self._preview_drag_state is not None:
             self._finish_preview_vertex_drag(
                 mark_dirty=bool(self._preview_drag_state.get("was_moved", False))
@@ -23881,6 +24607,9 @@ class AnnotationTab:
         if self._preview_pending_vertex_hit is not None:
             return True
 
+        if self._preview_focus_zoom_modifier_down:
+            return True
+
         return bool(self._preview_corner_drag_modifier_down)
 
     def on_zoomable_canvas_zoom(self, canvas: ZoomableCanvas, event):
@@ -23896,6 +24625,8 @@ class AnnotationTab:
         if bool(getattr(self, "_preview_draw_mode", False)):
             return "crosshair"
         if bool(getattr(self, "_preview_corner_drag_modifier_down", False)):
+            return "crosshair"
+        if bool(getattr(self, "_preview_focus_zoom_modifier_down", False)):
             return "crosshair"
         return "arrow"
 
@@ -24071,19 +24802,29 @@ class AnnotationTab:
             if hasattr(self, "preview_fullscreen_btn"):
                 self.preview_fullscreen_btn.configure(
                     state=(tk.NORMAL if (has_image and not scope_selection_mode_active) else tk.DISABLED),
-                    text=("Wyjdź z pełnego ekranu (Esc)" if self._preview_fullscreen_active else "Pełny ekran (Enter)")
+                    text=("Wyjdź z pełnego ekranu (Enter)" if self._preview_fullscreen_active else "Pełny ekran (Enter)")
+                )
+            if hasattr(self, "preview_apply_filter_btn"):
+                self.preview_apply_filter_btn.configure(
+                    state=(tk.NORMAL if (display_total > 0 and not scope_selection_mode_active) else tk.DISABLED)
                 )
             if hasattr(self, "preview_move_stage_btn"):
                 self.preview_move_stage_btn.configure(state=(tk.NORMAL if (can_move_to_stage and not scope_selection_mode_active) else tk.DISABLED))
             if hasattr(self, "preview_delete_image_btn"):
                 self.preview_delete_image_btn.configure(state=(tk.NORMAL if (can_edit and not scope_selection_mode_active) else tk.DISABLED))
             self.preview_save_btn.configure(state=(tk.NORMAL if (can_edit and has_dirty and not scope_selection_mode_active) else tk.DISABLED))
-            if hasattr(self, "preview_mark_ok_btn"):
-                self.preview_mark_ok_btn.configure(state=(tk.NORMAL if (has_group_selection and any_selected_unapproved and not scope_selection_mode_active) else tk.DISABLED))
-            if hasattr(self, "preview_unmark_ok_btn"):
-                self.preview_unmark_ok_btn.configure(state=(tk.NORMAL if (has_group_selection and any_selected_approved and not scope_selection_mode_active) else tk.DISABLED))
-            if hasattr(self, "preview_clear_auto_btn"):
-                self.preview_clear_auto_btn.configure(state=(tk.NORMAL if (can_edit and any_auto_in_run and not scope_selection_mode_active) else tk.DISABLED))
+        except Exception:
+            pass
+
+        try:
+            self._refresh_preview_list_context_menu_state(
+                has_visible_rows=bool(display_total > 0),
+                has_group_selection=bool(has_group_selection),
+                any_selected_unapproved=bool(any_selected_unapproved),
+                any_selected_approved=bool(any_selected_approved),
+                can_clear_auto=bool(can_edit and any_auto_in_run),
+                scope_selection_mode_active=bool(scope_selection_mode_active),
+            )
         except Exception:
             pass
 
@@ -24093,7 +24834,7 @@ class AnnotationTab:
                 self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="info", emphasis=False)
             elif has_image:
                 self.preview_fullscreen_hint_var.set(
-                    "Pełny ekran włączysz klawiszem Enter. Po włączeniu zobaczysz pasek skrótów, a Esc przywraca zwykły widok."
+                    "Enter przełącza pełny ekran. Po wejściu zobaczysz pasek skrótów nad canvase."
                 )
                 self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="info", emphasis=False)
             else:
@@ -24136,19 +24877,31 @@ class AnnotationTab:
             "nowy run autoanotacji nadpisze poprzednie ręczne oznaczenia."
         )
 
-    def _update_preview_edit_status(self, extra_message: str | None = None):
+    def _update_preview_edit_status(
+        self,
+        extra_message: str | None = None,
+        *,
+        refresh_toolbar: bool = True,
+        refresh_debug: bool = True,
+        refresh_legend: bool = False,
+    ):
         if extra_message:
             self.preview_edit_status_var.set(extra_message)
-            self._update_preview_toolbar_state()
-            self._refresh_preview_debug_status()
-            self._refresh_preview_controls_legend()
+            if refresh_toolbar:
+                self._update_preview_toolbar_state(refresh_summary=False)
+            if refresh_debug:
+                self._refresh_preview_debug_status()
+            if refresh_legend:
+                self._refresh_preview_controls_legend()
             return
 
         ann = self._get_preview_annotation()
         if ann is None:
             self.preview_edit_status_var.set("Po zakończeniu anotacji tutaj poprawisz rogi tablic.")
-            self._update_preview_toolbar_state()
-            self._refresh_preview_controls_legend()
+            if refresh_toolbar:
+                self._update_preview_toolbar_state(refresh_summary=False)
+            if refresh_legend:
+                self._refresh_preview_controls_legend()
             return
 
         if not self._preview_is_editable():
@@ -24156,9 +24909,12 @@ class AnnotationTab:
                 f"{ann.filename} | tryb tylko do podglądu. Najpierw kliknij {self._get_step2_start_action_reference()}, aby przygotować annotations.xml albo uruchomić autoanotację."
                 f"{self._preview_campaign_reuse_manual_note(ann, editable=False)}"
             )
-            self._update_preview_toolbar_state()
-            self._refresh_preview_debug_status()
-            self._refresh_preview_controls_legend()
+            if refresh_toolbar:
+                self._update_preview_toolbar_state(refresh_summary=False)
+            if refresh_debug:
+                self._refresh_preview_debug_status()
+            if refresh_legend:
+                self._refresh_preview_controls_legend()
             return
 
         plates = self._get_plate_detections(ann)
@@ -24209,20 +24965,23 @@ class AnnotationTab:
                 else "Przytrzymaj W i przeciągnij róg, aby poprawić geometrię."
             )
             fullscreen_hint = (
-                "Esc wychodzi z pełnego ekranu."
+                "Enter wychodzi z pełnego ekranu."
                 if self._preview_fullscreen_active
-                else "Enter włącza pełny ekran."
+                else "Enter przełącza pełny ekran."
             )
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
                 f"Kliknij polygon, aby go wybrać. {drag_hint} "
-                f"Q/E przełączają zdjęcia, A przełącza tablice, Spacja kadruje pojazdy, R kadruje aktywny polygon, F dopasowuje widok, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki. {fullscreen_hint}{vehicle_hint}"
+                f"Q/E przełączają zdjęcia, A przełącza tablice, Spacja kadruje pojazdy, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki. {fullscreen_hint}{vehicle_hint}"
                 f"{self._preview_campaign_reuse_manual_note(ann, editable=True)}"
             )
 
-        self._update_preview_toolbar_state()
-        self._refresh_preview_debug_status()
-        self._refresh_preview_controls_legend()
+        if refresh_toolbar:
+            self._update_preview_toolbar_state(refresh_summary=False)
+        if refresh_debug:
+            self._refresh_preview_debug_status()
+        if refresh_legend:
+            self._refresh_preview_controls_legend()
 
     def _load_current_preview_selection(
         self,
@@ -24293,7 +25052,9 @@ class AnnotationTab:
                 if rerender_image:
                     self.preview_canvas._update_display()
                 else:
-                    self.preview_canvas.refresh_overlay_only()
+                    self.preview_canvas.refresh_overlay_only(
+                        skip_info=bool(getattr(self, "_preview_drag_state", None))
+                    )
         except Exception:
             pass
 
@@ -24306,7 +25067,7 @@ class AnnotationTab:
                 pass
         self._preview_drag_refresh_after_id = None
 
-    def _schedule_preview_drag_refresh(self, delay_ms: int = 0):
+    def _schedule_preview_drag_refresh(self, delay_ms: int = 24):
         if getattr(self, "_preview_drag_refresh_after_id", None):
             return
 
@@ -24345,27 +25106,27 @@ class AnnotationTab:
             else None
         )
 
-        for vehicle_idx, det in enumerate(vehicle_detections):
-            if drag_active and selected_vehicle_idx is not None and vehicle_idx != selected_vehicle_idx:
-                continue
-            x1, y1, x2, y2 = det.bbox
-            cx1, cy1 = canvas.image_to_canvas_coords(x1, y1)
-            cx2, cy2 = canvas.image_to_canvas_coords(x2, y2)
-            is_selected_vehicle = selected_vehicle_idx == vehicle_idx
-            vehicle_outline = active_color if is_selected_vehicle else vehicle_color
-            vehicle_width = 3 if is_selected_vehicle else 2
-            vehicle_dash = None if is_selected_vehicle else (6, 4)
-            canvas.create_rectangle(
-                cx1,
-                cy1,
-                cx2,
-                cy2,
-                outline=vehicle_outline,
-                width=vehicle_width,
-                dash=vehicle_dash,
-                tags=("preview_overlay",)
-            )
-            if not drag_active:
+        if not drag_active:
+            for vehicle_idx, det in enumerate(vehicle_detections):
+                if drag_active and selected_vehicle_idx is not None and vehicle_idx != selected_vehicle_idx:
+                    continue
+                x1, y1, x2, y2 = det.bbox
+                cx1, cy1 = canvas.image_to_canvas_coords(x1, y1)
+                cx2, cy2 = canvas.image_to_canvas_coords(x2, y2)
+                is_selected_vehicle = selected_vehicle_idx == vehicle_idx
+                vehicle_outline = active_color if is_selected_vehicle else vehicle_color
+                vehicle_width = 3 if is_selected_vehicle else 2
+                vehicle_dash = None if is_selected_vehicle else (6, 4)
+                canvas.create_rectangle(
+                    cx1,
+                    cy1,
+                    cx2,
+                    cy2,
+                    outline=vehicle_outline,
+                    width=vehicle_width,
+                    dash=vehicle_dash,
+                    tags=("preview_overlay",)
+                )
                 canvas.create_text(
                     cx1 + 6,
                     max(10, cy1 - 8),
@@ -24377,6 +25138,8 @@ class AnnotationTab:
                 )
 
         for plate_idx, det in enumerate(plate_detections):
+            if drag_active and selected_plate_idx is not None and plate_idx != selected_plate_idx:
+                continue
             polygon = self._detection_polygon(det)
             points = []
             for px, py in polygon:
@@ -24409,24 +25172,35 @@ class AnnotationTab:
             if not drag_active:
                 min_x = min(points[0::2]) if points else 0
                 min_y = min(points[1::2]) if points else 0
-                canvas.create_rectangle(
-                    min_x,
-                    max(0, min_y - 22),
-                    min_x + 104,
-                    max(18, min_y - 2),
-                    outline="",
-                    fill=label_bg,
-                    tags=("preview_overlay",)
-                )
-                canvas.create_text(
+                fit_score = self._get_plate_detection_fit_score(det, ann)
+                label_text = f"Det {float(getattr(det, 'confidence', 0.0) or 0.0):.2f}"
+                if fit_score is not None:
+                    label_text += f" | Fit {fit_score:.2f}"
+                label_id = canvas.create_text(
                     min_x + 6,
                     max(10, min_y - 7),
-                    text=f"Plate {det.confidence:.2f}",
+                    text=label_text,
                     fill=label_fill,
                     anchor="sw",
                     font=("Segoe UI", 9, "bold"),
                     tags=("preview_overlay",)
                 )
+                label_bbox = canvas.bbox(label_id) or (
+                    min_x,
+                    max(0, min_y - 22),
+                    min_x + 132,
+                    max(18, min_y - 2),
+                )
+                rect_id = canvas.create_rectangle(
+                    min_x,
+                    max(0, min_y - 22),
+                    max(min_x + 132, float(label_bbox[2]) + 8.0),
+                    max(18, min_y - 2),
+                    outline="",
+                    fill=label_bg,
+                    tags=("preview_overlay",)
+                )
+                canvas.tag_lower(rect_id, label_id)
 
             if is_selected and not is_delete_candidate:
                 zoom_level = max(0.01, float(getattr(canvas, "zoom_level", 1.0) or 1.0))
@@ -24443,14 +25217,15 @@ class AnnotationTab:
                         width=1,
                         tags=("preview_overlay",)
                     )
-                    canvas.create_text(
-                        cx,
-                        cy - 12,
-                        text=str(vertex_idx + 1),
-                        fill=active_color,
-                        font=("Segoe UI", 8, "bold"),
-                        tags=("preview_overlay",)
-                    )
+                    if not drag_active:
+                        canvas.create_text(
+                            cx,
+                            cy - 12,
+                            text=str(vertex_idx + 1),
+                            fill=active_color,
+                            font=("Segoe UI", 8, "bold"),
+                            tags=("preview_overlay",)
+                        )
 
         if self._preview_draw_mode and self._preview_draw_points:
             draw_points = []
@@ -24511,7 +25286,7 @@ class AnnotationTab:
             hint_text = "Do recznej edycji wlacz pelny ekran klawiszem Enter."
             accent = "#f39c12"
         else:
-            hint_text = "Pełny ekran podglądu włączysz klawiszem Enter."
+            hint_text = "Enter przełącza pełny ekran podglądu."
             accent = "#3498db"
 
         text_width = max(240, min(canvas_width - 72, 640))
@@ -24585,7 +25360,7 @@ class AnnotationTab:
             )
             base = (
                 f"Tablica {plate_no}/{len(plates)}. {drag_hint} "
-                "A zmienia tablice, Spacja pojazdy, R kadr, F dopasuj, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
+                "A zmienia tablice, Spacja pojazdy, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasuj cały obraz, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
             )
 
         return f"{base}{vehicle_suffix}"
@@ -24915,7 +25690,7 @@ class AnnotationTab:
             self._preview_drag_state = None
             self._preview_pending_vertex_hit = None
             self._refresh_preview_canvas()
-            self._update_preview_edit_status()
+            self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
             return False
 
         plate_detections = self._get_plate_detections(ann)
@@ -24944,13 +25719,13 @@ class AnnotationTab:
         self._preview_drag_state = None
         self._preview_pending_vertex_hit = None
         self._refresh_preview_canvas()
-        self._update_preview_edit_status()
+        self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
         if mark_dirty:
             # Przytrzymane W oznacza sesje szybkiej korekty wielu rogĂłw.
             # Nie zapisujemy wtedy po kazdym puszczeniu myszy, bo to wcinalo
             # sie w chwyt kolejnego punktu. Zapis wraca po puszczeniu W.
             if not self._preview_modifier_active():
-                self._schedule_preview_autosave(delay_ms=260)
+                self._schedule_preview_autosave(delay_ms=900)
         try:
             self.preview_canvas.focus_set()
         except Exception:
@@ -25069,9 +25844,12 @@ class AnnotationTab:
         self._preview_draw_points = []
         self._refresh_preview_canvas()
         self._push_preview_debug_event("add", f"p{len(plates)}")
-        self._persist_preview_structural_change(
-            "Dodano nowy polygon tablicy i zapisano go do annotations.xml.",
-            "Dodano nowy polygon tablicy, ale nie udalo sie od razu zapisac annotations.xml. Uzyj Ctrl+S."
+        self._update_preview_edit_status(
+            "Dodano nowy polygon tablicy. Mozesz od razu poprawic rogi; zapis nastapi za chwile."
+        )
+        self._schedule_preview_autosave(
+            delay_ms=1200,
+            status_message="Zapisano nowy polygon tablicy do annotations.xml.",
         )
 
     def _get_current_annotation_xml_path(self) -> Path | None:
@@ -25131,16 +25909,17 @@ class AnnotationTab:
                 pass
         self._preview_autosave_after_id = None
 
-    def _schedule_preview_autosave(self, delay_ms: int = 120):
+    def _schedule_preview_autosave(self, delay_ms: int = 900, *, status_message: str | None = None):
         self._cancel_preview_autosave()
         try:
             self._preview_autosave_after_id = self.frame.after(
                 int(delay_ms),
                 lambda: self._save_preview_edits(
                     interactive=False,
-                    status_message="Zapisano korekte polygonu do annotations.xml.",
+                    status_message=status_message or "Zapisano korekte polygonu do annotations.xml.",
                     refresh_list=False,
                     refresh_workflow=False,
+                    refresh_export_sources=False,
                 ),
             )
         except Exception:
@@ -25236,6 +26015,7 @@ class AnnotationTab:
         status_message: str | None = None,
         refresh_list: bool = True,
         refresh_workflow: bool = True,
+        refresh_export_sources: bool = True,
     ):
         self._cancel_preview_autosave()
 
@@ -25306,7 +26086,8 @@ class AnnotationTab:
         else:
             self._refresh_preview_list_row_for_actual_index(saved_preview_index, refresh_summary=True)
 
-        self._refresh_plate_dataset_export_sources()
+        if refresh_export_sources:
+            self._refresh_plate_dataset_export_sources()
         if refresh_workflow:
             self._refresh_step2_action_states()
             self._refresh_free_mode_workflow_ui()
@@ -25449,6 +26230,22 @@ class AnnotationTab:
         canvas_x = float(canvas.canvasx(getattr(event, "x", 0.0)))
         canvas_y = float(canvas.canvasy(getattr(event, "y", 0.0)))
 
+        if bool(getattr(self, "_preview_focus_zoom_modifier_down", False)):
+            self._preview_focus_zoom_modifier_consumed = True
+            if self._restore_preview_focus_zoom_view():
+                self._update_preview_edit_status(
+                    "Przywrócono kadr sprzed płynnego zoomu.",
+                    refresh_toolbar=False,
+                    refresh_debug=False,
+                )
+            else:
+                self._update_preview_edit_status(
+                    "Brak wcześniejszego kadru do przywrócenia dla R + PPM.",
+                    refresh_toolbar=False,
+                    refresh_debug=False,
+                )
+            return "break"
+
         if self._preview_draw_mode:
             self._preview_draw_mode = False
             self._preview_draw_points = []
@@ -25538,6 +26335,23 @@ class AnnotationTab:
             )
             return True
 
+        if bool(getattr(self, "_preview_focus_zoom_modifier_down", False)):
+            self._preview_focus_zoom_modifier_consumed = True
+            if not canvas.point_is_inside_image(canvas_x, canvas_y):
+                return True
+            try:
+                if int(getattr(self, "_preview_focus_zoom_click_stage", 0) or 0) <= 0:
+                    self._preview_focus_zoom_restore_state = canvas.get_view_state()
+                target_zoom = float(self._get_preview_focus_zoom_target(canvas))
+                canvas._animate_zoom_to(canvas_x, canvas_y, target_zoom, duration_ms=170)
+                self._preview_focus_zoom_click_stage = min(
+                    2,
+                    int(getattr(self, "_preview_focus_zoom_click_stage", 0) or 0) + 1,
+                )
+            except Exception:
+                pass
+            return True
+
         if self._preview_modifier_active():
             drag_target = self._resolve_preview_drag_target(canvas_x, canvas_y)
             if drag_target is not None:
@@ -25556,7 +26370,9 @@ class AnnotationTab:
                 if previously_selected_plate != int(plate_idx):
                     self._refresh_preview_canvas()
                 self._update_preview_edit_status(
-                    "Tryb W aktywny: uchwyt złapany. Przeciągnij mysz, aby poprawić róg."
+                    "Tryb W aktywny: uchwyt złapany. Przeciągnij mysz, aby poprawić róg.",
+                    refresh_toolbar=False,
+                    refresh_debug=False,
                 )
                 return True
 
@@ -25575,7 +26391,9 @@ class AnnotationTab:
             )
             self._refresh_preview_canvas()
             self._update_preview_edit_status(
-                "Aby przesuwać rogi tablicy, przytrzymaj W i przeciągaj uchwyt myszą."
+                "Aby przesuwać rogi tablicy, przytrzymaj W i przeciągaj uchwyt myszą.",
+                refresh_toolbar=False,
+                refresh_debug=False,
             )
             return True
 
@@ -25591,7 +26409,7 @@ class AnnotationTab:
                 )
             )
             self._refresh_preview_canvas()
-            self._update_preview_edit_status()
+            self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
             return True
 
         vehicle_hit = self._find_preview_vehicle_hit(canvas_x, canvas_y)
@@ -25608,7 +26426,9 @@ class AnnotationTab:
             self._refresh_preview_canvas()
             self._update_preview_edit_status(
                 f"Wybrano pojazd {int(vehicle_hit) + 1}/{len(self._get_vehicle_detections(ann))}. "
-                "Spacja kadruje ten pojazd i przeskakuje do kolejnych aut."
+                "Spacja kadruje ten pojazd i przeskakuje do kolejnych aut.",
+                refresh_toolbar=False,
+                refresh_debug=False,
             )
             return False
 
@@ -25622,7 +26442,9 @@ class AnnotationTab:
                 )
             )
             self._update_preview_edit_status(
-                "Tryb W aktywny: obraz jest zablokowany. Kliknij bezpośrednio uchwyt rogu, aby przesunąć wierzchołek."
+                "Tryb W aktywny: obraz jest zablokowany. Kliknij bezpośrednio uchwyt rogu, aby przesunąć wierzchołek.",
+                refresh_toolbar=False,
+                refresh_debug=False,
             )
             return True
 
@@ -25652,8 +26474,10 @@ class AnnotationTab:
                 anchor_canvas_x = float(pending_hit.get("anchor_canvas_x", canvas_x))
                 anchor_canvas_y = float(pending_hit.get("anchor_canvas_y", canvas_y))
                 if plate_idx >= 0 and vertex_idx >= 0:
+                    previously_selected_plate = self._get_selected_plate_index_for_ann(ann)
                     self._set_selected_plate_index_for_ann(ann, plate_idx)
-                    self._refresh_preview_canvas()
+                    if previously_selected_plate != int(plate_idx):
+                        self._refresh_preview_canvas()
                     self._begin_preview_vertex_drag(plate_idx, vertex_idx, anchor_canvas_x, anchor_canvas_y)
                     self._push_preview_debug_event(
                         "drag-begin",
@@ -25840,6 +26664,125 @@ class AnnotationTab:
 
         self._on_preview_select(None)
         return "break"
+
+    def _refresh_preview_list_context_menu_state(
+        self,
+        *,
+        has_visible_rows: bool,
+        has_group_selection: bool,
+        any_selected_unapproved: bool,
+        any_selected_approved: bool,
+        can_clear_auto: bool,
+        scope_selection_mode_active: bool,
+    ) -> None:
+        menu = getattr(self, "preview_list_context_menu", None)
+        if menu is None:
+            return
+
+        def _state(enabled: bool) -> str:
+            return tk.NORMAL if enabled else tk.DISABLED
+
+        try:
+            menu.entryconfigure("Zaznacz obrazy po filtrze", state=_state(has_visible_rows and not scope_selection_mode_active))
+        except Exception:
+            pass
+        try:
+            menu.entryconfigure(
+                "Oznacz zaznaczone jako OK",
+                state=_state(has_group_selection and any_selected_unapproved and not scope_selection_mode_active),
+            )
+        except Exception:
+            pass
+        try:
+            menu.entryconfigure(
+                "Cofnij OK",
+                state=_state(has_group_selection and any_selected_approved and not scope_selection_mode_active),
+            )
+        except Exception:
+            pass
+        try:
+            menu.entryconfigure(
+                "Wyczyść auto w całym runie",
+                state=_state(can_clear_auto and not scope_selection_mode_active),
+            )
+        except Exception:
+            pass
+
+    def _show_preview_list_context_menu(self, x_root: int, y_root: int) -> str:
+        menu = getattr(self, "preview_list_context_menu", None)
+        if menu is None:
+            return "break"
+
+        try:
+            menu.tk_popup(int(x_root), int(y_root))
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def _open_preview_list_context_menu_from_keyboard(self, _event=None):
+        listbox = getattr(self, "preview_listbox", None)
+        if listbox is None:
+            return "break"
+
+        try:
+            selected = list(listbox.curselection() or ())
+        except Exception:
+            selected = []
+        if selected:
+            target_index = int(selected[-1])
+        else:
+            try:
+                target_index = int(listbox.index(tk.ACTIVE))
+            except Exception:
+                target_index = 0
+        try:
+            bbox = listbox.bbox(target_index)
+        except Exception:
+            bbox = None
+        if bbox:
+            x_root = int(listbox.winfo_rootx() + bbox[0] + min(40, max(16, bbox[2] // 2)))
+            y_root = int(listbox.winfo_rooty() + bbox[1] + bbox[3])
+        else:
+            x_root = int(listbox.winfo_rootx() + 24)
+            y_root = int(listbox.winfo_rooty() + 24)
+        return self._show_preview_list_context_menu(x_root, y_root)
+
+    def _on_preview_list_mouse_secondary(self, event):
+        try:
+            self._on_preview_canvas_focus_out()
+        except Exception:
+            pass
+        try:
+            self.preview_listbox.focus_set()
+        except Exception:
+            pass
+
+        try:
+            target_index = int(self.preview_listbox.nearest(getattr(event, "y", 0)))
+            size = int(self.preview_listbox.size() or 0)
+        except Exception:
+            return "break"
+
+        if size > 0 and 0 <= target_index < size:
+            try:
+                if not self.preview_listbox.selection_includes(target_index):
+                    self._clear_listbox_selection_fast(self.preview_listbox)
+                    self.preview_listbox.selection_set(target_index)
+                    self.preview_listbox.selection_anchor(target_index)
+                    self.preview_listbox.activate(target_index)
+                    self.preview_listbox.see(target_index)
+                    self._on_preview_select(None)
+                else:
+                    self.preview_listbox.activate(target_index)
+            except Exception:
+                pass
+
+        x_root = int(getattr(event, "x_root", 0) or 0)
+        y_root = int(getattr(event, "y_root", 0) or 0)
+        return self._show_preview_list_context_menu(x_root, y_root)
 
     def _on_preview_select(self, event):
         select_started = time.perf_counter()

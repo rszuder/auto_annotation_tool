@@ -308,6 +308,13 @@ class TrainingTab:
         self._ui_dispatch_queue = queue.Queue()
         self._ui_dispatch_after_id = None
         self._train_pane_layout_initialized = False
+        self._training_started_monotonic = None
+        self._training_started_wall_clock = None
+        self._training_eta_seconds = None
+        self._training_last_epoch = 0
+        self._training_last_total_epochs = 0
+        self._training_last_batch = 0
+        self._training_last_total_batches = 0
 
         self.is_processing = False
         self.dataset_build_is_running = False
@@ -472,7 +479,7 @@ class TrainingTab:
         if widget is None:
             return
 
-        payload = "" if text is None else str(text)
+        payload = self._sanitize_training_text(text)
         if not payload:
             return
 
@@ -495,7 +502,7 @@ class TrainingTab:
 
     def _append_train_log(self, message: str, mirror_global: bool = True):
         """Bezpieczne dopisywanie linii do konsoli treningu z dowolnego wątku."""
-        text = "" if message is None else str(message)
+        text = self._sanitize_training_text(message)
         if not text:
             return
         if not text.endswith("\n"):
@@ -522,6 +529,20 @@ class TrainingTab:
         if not text:
             return
         self._append_train_log(f"[RANKING] {text}")
+
+    @staticmethod
+    def _sanitize_training_text(message) -> str:
+        text = "" if message is None else str(message)
+        if not text:
+            return ""
+        if any(token in text for token in ("Ä", "Å", "Ĺ", "Ă", "â")):
+            try:
+                repaired = text.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+                if repaired and repaired.count("?") <= text.count("?"):
+                    text = repaired
+            except Exception:
+                pass
+        return text
 
     def _start_ranking_watchdog(self, stage: str):
         self._stop_ranking_watchdog()
@@ -983,11 +1004,15 @@ class TrainingTab:
             72,
         )
         best_weights = self._shorten_training_text(Path(getattr(run, "best_weights", "") or "").name or "-", 36)
+        last_weights_raw = str(getattr(run, "last_weights", "") or "").strip()
+        last_weights_name = self._shorten_training_text(Path(last_weights_raw).name or "-", 36) if last_weights_raw else "-"
         base_model = self._shorten_training_text(Path(getattr(run, "base_model", "") or "").name or "-", 36)
         created_at = str(getattr(run, "created_at", "") or "").replace("T", " ")
+        resumable = self._is_history_run_resume_allowed(run)
+        technically_resumable = self._is_history_run_resumable(run)
 
         return [
-            ("Status", str(getattr(run, "status", "-") or "-")),
+            ("Status", self._format_history_run_status_label(run)),
             ("Dataset", dataset_display),
             ("Model bazowy", base_model),
             ("Postep", f"{int(getattr(run, 'current_epoch', 0) or 0)}/{int(getattr(run, 'epochs', 0) or 0)} epok"),
@@ -1001,6 +1026,15 @@ class TrainingTab:
             ),
             ("Urzadzenie", self._shorten_training_text(str(getattr(run, "device", "") or "-"), 28)),
             ("Najlepsze wagi", best_weights),
+            ("Checkpoint last.pt", last_weights_name),
+            (
+                "Wznowienie",
+                "TAK"
+                if resumable
+                else "NIE (archiwalny paused)"
+                if technically_resumable
+                else "NIE",
+            ),
             ("Utworzono", self._shorten_training_text(created_at or "-", 32)),
         ]
 
@@ -1220,6 +1254,38 @@ class TrainingTab:
     def _apply_training_device_recommendation(self):
         self._apply_training_recommended_start_params()
 
+    def _schedule_step4_deferred_model_refresh(self):
+        frame = getattr(self, "frame", None)
+        if frame is None:
+            return
+
+        pending_job = getattr(self, "_step4_deferred_model_refresh_job", None)
+        if pending_job is not None:
+            try:
+                frame.after_cancel(pending_job)
+            except Exception:
+                pass
+
+        def run_refresh():
+            self._step4_deferred_model_refresh_job = None
+            try:
+                self._refresh_base_model_choices()
+            except Exception:
+                pass
+            try:
+                self._apply_training_recommended_start_params()
+            except Exception:
+                pass
+            try:
+                self._refresh_training_execution_summary()
+            except Exception:
+                pass
+
+        try:
+            self._step4_deferred_model_refresh_job = frame.after(25, run_refresh)
+        except Exception:
+            self._step4_deferred_model_refresh_job = None
+
     def _apply_training_recommended_start_params(self):
         recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
         try:
@@ -1426,6 +1492,58 @@ class TrainingTab:
         if is_checkpoint_like and source_display:
             text += f" | checkpoint z: {source_display}"
         return text
+
+    @staticmethod
+    def _get_pose_model_memory_bucket(info: dict | None) -> str:
+        if not isinstance(info, dict):
+            return ""
+        size = str(info.get("yolo_size") or info.get("model_scale") or "").strip().lower()
+        if size in {"n", "s", "m", "l", "x"}:
+            return size
+
+        architecture = str(info.get("architecture_label") or info.get("source_architecture_label") or "").strip().lower()
+        for candidate in ("x", "l", "m", "s", "n"):
+            if f"yolo26{candidate}" in architecture or f"yolo11{candidate}" in architecture or f"yolov8{candidate}" in architecture:
+                return candidate
+        return ""
+
+    def _get_training_gpu_capacity_block_reason(
+        self,
+        *,
+        is_pose_dataset: bool,
+        base_model_info: dict | None,
+        effective_device_profile: dict | None,
+    ) -> str:
+        if not is_pose_dataset:
+            return ""
+        if not isinstance(effective_device_profile, dict):
+            return ""
+
+        try:
+            memory_gb = float(effective_device_profile.get("memory_gb", 0.0) or 0.0)
+        except Exception:
+            memory_gb = 0.0
+        if memory_gb <= 0.0:
+            return ""
+
+        bucket = self._get_pose_model_memory_bucket(base_model_info)
+        if bucket not in {"m", "l", "x"}:
+            return ""
+        if memory_gb > 4.5:
+            return ""
+
+        architecture_label = format_yolo_model_identity(base_model_info) or "ciężki checkpoint YOLO Pose"
+        gpu_name = str(effective_device_profile.get("name") or "GPU").strip()
+        return (
+            f"Wybrany model bazowy to {architecture_label}, a aktywne urządzenie to {gpu_name} "
+            f"z około {memory_gb:.1f} GB VRAM.\n\n"
+            "Ten rozmiar modelu pose na 4 GB VRAM w obecnym środowisku kończy się błędami pamięci CUDA "
+            "jeszcze przed stabilnym startem treningu albo w pierwszych batchach.\n\n"
+            "Aby trening miał realną szansę powodzenia:\n"
+            "1. wybierz mniejszy model pose, najlepiej `yolo11s-pose` albo `yolo26s-pose`,\n"
+            "2. albo uruchom trening na CPU,\n"
+            "3. albo użyj GPU z większym VRAM, jeśli chcesz kontynuować właśnie ten checkpoint."
+        )
 
     def _resolve_training_run_from_model_path(self, model_path: Path | None):
         if model_path is None:
@@ -2149,6 +2267,94 @@ class TrainingTab:
 
         return dict(source or {}) if isinstance(source, dict) else {}
 
+    def _get_step4_training_ui_state_path(self) -> Path | None:
+        root = CAMPAIGN.get_active_project_root_dir() if CAMPAIGN.get_active_project_name() else None
+        if root is None:
+            return None
+        return Path(root) / "_campaign_state" / "training_ui_state.json"
+
+    def _load_step4_training_ui_state(self) -> dict:
+        path = self._get_step4_training_ui_state_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_step4_training_ui_state(self, payload: dict) -> None:
+        path = self._get_step4_training_ui_state_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Nie udało się zapisać stanu UI treningu Z4: {e}")
+
+    def _resolve_saved_step4_training_model_selection(self, target: str | None = None) -> dict:
+        normalized_target = str(target or self.get_campaign_training_target() or "").strip().lower()
+        if normalized_target not in ("char", "plate"):
+            return {}
+        payload = self._load_step4_training_ui_state()
+        models = payload.get("models", {}) if isinstance(payload, dict) else {}
+        if not isinstance(models, dict):
+            return {}
+        entry = models.get(normalized_target, {})
+        return dict(entry or {}) if isinstance(entry, dict) else {}
+
+    def _apply_saved_step4_training_model_selection(self, target: str | None = None) -> bool:
+        normalized_target = str(target or self.get_campaign_training_target() or "").strip().lower()
+        if normalized_target not in ("char", "plate"):
+            return False
+
+        saved = self._resolve_saved_step4_training_model_selection(normalized_target)
+        base_key = str(saved.get("base_model_key", "") or "").strip()
+        custom_path = str(saved.get("base_custom_path", "") or "").strip()
+        if not base_key:
+            return False
+
+        if base_key == "Custom":
+            if not custom_path or not Path(custom_path).exists():
+                return False
+            self.base_model_var.set("Custom")
+            self.base_custom_var.set(custom_path)
+            return True
+
+        choices = self._get_base_model_choices_for_mode(normalized_target)
+        if base_key not in choices:
+            return False
+        self.base_model_var.set(base_key)
+        self.base_custom_var.set("")
+        return True
+
+    def _remember_current_step4_training_model_selection(self) -> None:
+        if not CAMPAIGN.get_active_project_name():
+            return
+        if bool(getattr(self, "_step4_suppress_base_model_state_save", False)):
+            return
+
+        target = str(self.get_campaign_training_target() or "").strip().lower()
+        if target not in ("char", "plate"):
+            return
+
+        base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+        custom_value = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+        payload = self._load_step4_training_ui_state()
+        if not isinstance(payload, dict):
+            payload = {}
+        models = payload.get("models", {})
+        if not isinstance(models, dict):
+            models = {}
+        models[target] = {
+            "base_model_key": base_key,
+            "base_custom_path": custom_value if base_key == "Custom" else "",
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        payload["models"] = models
+        self._save_step4_training_ui_state(payload)
+
     def _resolve_campaign_plate_ready_dataset(self, datasets_dir: Path | None = None) -> dict:
         result = {
             "path": None,
@@ -2323,7 +2529,131 @@ class TrainingTab:
         target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
         return target if target in ("char", "plate") else None
 
-    def _recover_campaign_finish_state_from_history(self, target: str | None = None) -> dict:
+    @staticmethod
+    def _is_finish_eligible_training_status(status: str | None) -> bool:
+        value = str(status or "").strip().lower()
+        return value in {
+            TrainingStatus.COMPLETED.value,
+            TrainingStatus.FAILED.value,
+            TrainingStatus.CANCELLED.value,
+            "stopped",
+        }
+
+    def _get_campaign_history_for_finish_recovery(self) -> TrainingHistory | None:
+        if not CAMPAIGN.get_active_project_name():
+            return None
+
+        runs_dir = CAMPAIGN.get_dir("runs")
+        if runs_dir is None:
+            return None
+
+        try:
+            runs_path = Path(runs_dir).resolve()
+        except Exception:
+            runs_path = Path(runs_dir)
+
+        try:
+            if self.history is not None and str(Path(getattr(self.history, "history_dir", "")).resolve()) == str(runs_path):
+                return self.history
+        except Exception:
+            pass
+
+        try:
+            return TrainingHistory(history_dir=runs_path)
+        except Exception:
+            return None
+
+    def _validate_campaign_finish_run(
+        self,
+        run_id: str,
+        *,
+        target: str | None = None,
+        history: TrainingHistory | None = None,
+    ) -> dict:
+        normalized_target = str(target or self.get_campaign_training_target() or "").strip().lower()
+        if normalized_target not in ("char", "plate"):
+            return {}
+
+        expected_dataset_path = ""
+        if normalized_target == "plate":
+            try:
+                stored_plate_source = dict(CAMPAIGN.get_last_plate_training_source() or {})
+            except Exception:
+                stored_plate_source = {}
+            expected_dataset_path = str(stored_plate_source.get("dataset_path", "") or "").strip()
+
+        history_source = history or self._get_campaign_history_for_finish_recovery()
+        if history_source is None:
+            return {}
+
+        try:
+            run = history_source.get_run(str(run_id or "").strip())
+        except Exception:
+            run = None
+        if run is None:
+            return {}
+
+        status_value = str(getattr(run, "status", "") or "").strip().lower()
+        if not self._is_finish_eligible_training_status(status_value):
+            return {}
+
+        run_target = ""
+        infer_target = getattr(history_source, "_infer_run_target", None)
+        try:
+            if callable(infer_target):
+                run_target = str(infer_target(run) or "").strip().lower()
+        except Exception:
+            run_target = ""
+        if run_target not in ("char", "plate"):
+            try:
+                run_target = str(
+                    self._infer_dataset_target(getattr(run, "dataset_path", "")) or ""
+                ).strip().lower()
+            except Exception:
+                run_target = ""
+        if run_target != normalized_target:
+            return {}
+
+        if expected_dataset_path:
+            try:
+                expected_dataset_resolved = str(Path(expected_dataset_path).resolve())
+            except Exception:
+                expected_dataset_resolved = expected_dataset_path
+            run_dataset_raw = str(getattr(run, "dataset_path", "") or "").strip()
+            try:
+                run_dataset_resolved = str(Path(run_dataset_raw).resolve()) if run_dataset_raw else ""
+            except Exception:
+                run_dataset_resolved = run_dataset_raw
+            if run_dataset_resolved and run_dataset_resolved != expected_dataset_resolved:
+                return {}
+
+        best_weights = str(getattr(run, "best_weights", "") or "").strip()
+        last_weights = str(getattr(run, "last_weights", "") or "").strip()
+        output_dir = str(getattr(run, "output_dir", "") or "").strip()
+        try:
+            has_artifacts = bool(
+                (best_weights and Path(best_weights).exists())
+                or (last_weights and Path(last_weights).exists())
+                or (output_dir and Path(output_dir).exists())
+            )
+        except Exception:
+            has_artifacts = bool(best_weights or last_weights or output_dir)
+        if not has_artifacts:
+            return {}
+
+        return {
+            "ready": True,
+            "run_id": str(getattr(run, "id", "") or "").strip(),
+            "target": normalized_target,
+            "status": status_value,
+        }
+
+    def _recover_campaign_finish_state_from_history(
+        self,
+        target: str | None = None,
+        *,
+        history: TrainingHistory | None = None,
+    ) -> dict:
         if not CAMPAIGN.get_active_project_name():
             return {}
 
@@ -2338,16 +2668,29 @@ class TrainingTab:
         if normalized_target not in ("char", "plate"):
             return {}
 
+        expected_dataset_path = ""
+        if normalized_target == "plate":
+            try:
+                stored_plate_source = dict(CAMPAIGN.get_last_plate_training_source() or {})
+            except Exception:
+                stored_plate_source = {}
+            expected_dataset_path = str(stored_plate_source.get("dataset_path", "") or "").strip()
+            try:
+                expected_dataset_path = str(Path(expected_dataset_path).resolve()) if expected_dataset_path else ""
+            except Exception:
+                pass
+
+        history_source = history or self._get_campaign_history_for_finish_recovery()
         try:
-            all_runs = list(self.history.get_all_runs() or []) if self.history is not None else []
+            all_runs = list(history_source.get_all_runs() or []) if history_source is not None else []
         except Exception:
             all_runs = []
         if not all_runs:
             return {}
 
-        infer_target = getattr(self.history, "_infer_run_target", None)
+        infer_target = getattr(history_source, "_infer_run_target", None)
         for run in all_runs:
-            if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.COMPLETED.value:
+            if not self._is_finish_eligible_training_status(getattr(run, "status", "")):
                 continue
 
             run_target = ""
@@ -2366,6 +2709,15 @@ class TrainingTab:
             if run_target != normalized_target:
                 continue
 
+            if expected_dataset_path:
+                run_dataset_raw = str(getattr(run, "dataset_path", "") or "").strip()
+                try:
+                    run_dataset_path = str(Path(run_dataset_raw).resolve()) if run_dataset_raw else ""
+                except Exception:
+                    run_dataset_path = run_dataset_raw
+                if run_dataset_path and run_dataset_path != expected_dataset_path:
+                    continue
+
             best_weights = str(getattr(run, "best_weights", "") or "").strip()
             output_dir = str(getattr(run, "output_dir", "") or "").strip()
             try:
@@ -2382,9 +2734,62 @@ class TrainingTab:
                 "ready": True,
                 "run_id": str(getattr(run, "id", "") or "").strip(),
                 "target": normalized_target,
+                "status": str(getattr(run, "status", "") or "").strip().lower(),
             }
 
         return {}
+
+    def get_campaign_step4_finish_state(self, *, iteration_target: str | None = None) -> dict:
+        if not CAMPAIGN.get_active_project_name():
+            return {"ready": False, "run_id": "", "target": ""}
+
+        target = str(iteration_target or CAMPAIGN.get_iteration_target() or self.get_campaign_training_target() or "").strip().lower()
+        if target not in ("char", "plate"):
+            target = "char"
+
+        stored = {}
+        try:
+            stored = CAMPAIGN.get_step4_finish_state() or {}
+        except Exception:
+            stored = {}
+
+        history_source = self._get_campaign_history_for_finish_recovery()
+        stored_ready = bool(stored.get("ready", False))
+        stored_run_id = str(stored.get("run_id", "") or "").strip()
+        stored_target = str(stored.get("target", "") or "").strip().lower()
+        if stored_target not in ("char", "plate"):
+            stored_target = target
+
+        if stored_ready and stored_run_id:
+            validated = self._validate_campaign_finish_run(
+                stored_run_id,
+                target=stored_target,
+                history=history_source,
+            )
+            if validated:
+                if stored_target != target and target in ("char", "plate"):
+                    validated["target"] = target
+                return validated
+
+        recovered = self._recover_campaign_finish_state_from_history(target, history=history_source)
+        if recovered:
+            try:
+                CAMPAIGN.set_step4_finish_state(
+                    True,
+                    run_id=str(recovered.get("run_id", "") or "").strip(),
+                    target=str(recovered.get("target", target) or "").strip().lower(),
+                )
+            except Exception:
+                pass
+            return recovered
+
+        if stored_ready or stored_run_id:
+            try:
+                CAMPAIGN.set_step4_finish_state(False)
+            except Exception:
+                pass
+
+        return {"ready": False, "run_id": "", "target": target}
 
     def _build_training_dataset_validation_message(self, dataset_root: Path, msg: str, stats: dict | None = None) -> str:
         stats = stats or {}
@@ -3677,8 +4082,211 @@ class TrainingTab:
                 self.train_epoch_progress_var.set(max(0.0, min(100.0, float(epoch))))
             except Exception:
                 pass
-    
-            #=====================================
+
+    @staticmethod
+    def _format_training_eta(seconds: float | None) -> str:
+        if seconds is None:
+            return "-"
+        try:
+            total_seconds = max(0, int(round(float(seconds))))
+        except Exception:
+            return "-"
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes:02d}m"
+        if minutes > 0:
+            return f"{minutes}m {secs:02d}s"
+        return f"{secs}s"
+
+    def _reset_training_runtime_progress(self) -> None:
+        self._training_started_monotonic = None
+        self._training_started_wall_clock = None
+        self._training_eta_seconds = None
+        self._training_last_epoch = 0
+        self._training_last_total_epochs = 0
+        self._training_last_batch = 0
+        self._training_last_total_batches = 0
+        try:
+            self.train_epoch_progress_measure_lbl.configure(text="Bieżąca epoka")
+        except Exception:
+            pass
+        try:
+            self.train_epoch_progress_hint_lbl.configure(
+                text="Po starcie zobaczysz numer epoki i liczbę batchy w bieżącej epoce."
+            )
+        except Exception:
+            pass
+        try:
+            self.train_progress_measure_lbl.configure(text="Cały run")
+        except Exception:
+            pass
+        try:
+            self.train_progress_hint_lbl.configure(
+                text="Po starcie pojawi się szacowany czas do końca treningu."
+            )
+        except Exception:
+            pass
+
+    def _update_training_progress_meta(
+        self,
+        *,
+        epoch: int | None = None,
+        total_epochs: int | None = None,
+        batch_idx: int | None = None,
+        total_batches: int | None = None,
+        overall_pct: float | None = None,
+        epoch_pct: float | None = None,
+        eta_seconds: float | None = None,
+    ) -> None:
+        if epoch is not None:
+            self._training_last_epoch = max(0, int(epoch))
+        if total_epochs is not None:
+            self._training_last_total_epochs = max(0, int(total_epochs))
+        if batch_idx is not None:
+            self._training_last_batch = max(0, int(batch_idx))
+        if total_batches is not None:
+            self._training_last_total_batches = max(0, int(total_batches))
+        if eta_seconds is not None:
+            self._training_eta_seconds = max(0.0, float(eta_seconds))
+
+        epoch_value = int(self._training_last_epoch or 0)
+        total_epoch_value = int(self._training_last_total_epochs or 0)
+        batch_value = int(self._training_last_batch or 0)
+        total_batch_value = int(self._training_last_total_batches or 0)
+
+        if total_epoch_value > 0 and total_batch_value > 0:
+            epoch_text = f"Epoka {epoch_value}/{total_epoch_value} | batch {batch_value}/{total_batch_value}"
+        elif total_epoch_value > 0:
+            epoch_text = f"Epoka {epoch_value}/{total_epoch_value}"
+        else:
+            epoch_text = "Bieżąca epoka"
+        try:
+            self.train_epoch_progress_measure_lbl.configure(text=epoch_text)
+        except Exception:
+            pass
+
+        if total_batch_value > 0:
+            safe_epoch_pct = max(0.0, min(100.0, float(epoch_pct or 0.0)))
+            epoch_hint = f"Bieżąca epoka: {safe_epoch_pct:.1f}% | batch {batch_value}/{total_batch_value}"
+        else:
+            epoch_hint = "Przygotowanie batchy dla bieżącej epoki..."
+        try:
+            self.train_epoch_progress_hint_lbl.configure(text=epoch_hint)
+        except Exception:
+            pass
+
+        if total_epoch_value > 0:
+            overall_text = f"Cały run {max(0.0, min(100.0, float(overall_pct or 0.0))):.1f}%"
+        else:
+            overall_text = "Cały run"
+        try:
+            self.train_progress_measure_lbl.configure(text=overall_text)
+        except Exception:
+            pass
+
+        eta_text = self._format_training_eta(self._training_eta_seconds)
+        started_text = (
+            self._training_started_wall_clock.strftime("%H:%M:%S")
+            if isinstance(self._training_started_wall_clock, datetime.datetime)
+            else "--:--:--"
+        )
+        try:
+            self.train_progress_hint_lbl.configure(text=f"Start: {started_text} | ETA: {eta_text}")
+        except Exception:
+            pass
+
+    def _is_memory_failure_text(self, message: str | None) -> bool:
+        normalized = str(message or "").strip().lower()
+        if not normalized:
+            return False
+        needles = (
+            "out of memory",
+            "outofmemory",
+            "memory allocation failure",
+            "unable to allocate",
+            "taskalignedassigner",
+            "cuda error: unknown error",
+        )
+        return any(needle in normalized for needle in needles)
+
+    def _is_cuda_runtime_broken_text(self, message: str | None) -> bool:
+        normalized = str(message or "").strip().lower()
+        if not normalized:
+            return False
+        needles = (
+            "cuda error: unknown error",
+            "unable to find an engine to execute this computation",
+            "get was unable to find an engine to execute this computation",
+            "utracił sprawny stan cuda",
+        )
+        return any(needle in normalized for needle in needles)
+
+    def _build_training_failure_message(self, run) -> str:
+        if run is None:
+            return (
+                "Trening zakończył się błędem.\n\n"
+                "Sprawdź terminal procesu i spróbuj ponownie na lżejszych ustawieniach."
+            )
+
+        error_text = self._sanitize_training_text(getattr(run, "error_message", "") or "")
+        lines = [
+            "Co się stało:",
+            "Trening nie został ukończony i run ma status FAILED.",
+            "",
+            "Dlaczego:",
+        ]
+
+        if self._is_memory_failure_text(error_text):
+            lines.append(
+                "Podczas treningu zabrakło pamięci GPU lub pamięci roboczej dla augmentacji i obliczeń YOLO."
+            )
+            lines.extend(
+                [
+                    "",
+                    "Co możesz zrobić:",
+                    "1. Ustaw batch = 1.",
+                    "2. Zmniejsz rozdzielczość wejściową do 512.",
+                    "3. Jeśli to nadal za dużo, użyj lżejszego modelu bazowego n/s zamiast m/l/x.",
+                    "4. Zamknij inne procesy używające GPU i spróbuj ponownie.",
+                ]
+            )
+            if self._is_cuda_runtime_broken_text(error_text):
+                lines.extend(
+                    [
+                        "5. Zamknij i uruchom ponownie aplikację przed kolejną próbą na GPU.",
+                    ]
+                )
+        else:
+            lines.append(
+                "Run zakończył się wyjątkiem po stronie Ultralytics, CUDA albo konfiguracji treningu."
+            )
+            lines.extend(
+                [
+                    "",
+                    "Co możesz zrobić:",
+                    "1. Sprawdź terminal procesu i ostatni traceback.",
+                    "2. Spróbuj ponownie na mniejszym batchu lub niższym imgsz.",
+                    "3. Jeśli wznawiasz z checkpointu, upewnij się, że dataset i model nadal istnieją.",
+                ]
+            )
+            if self._is_cuda_runtime_broken_text(error_text):
+                lines.append("4. Zamknij i uruchom ponownie aplikację przed następną próbą GPU.")
+
+        lines.extend(
+            [
+                "",
+                f"Run: {getattr(run, 'name', '-')}",
+                f"Model bazowy: {getattr(run, 'base_model', '-')}",
+                f"Dataset: {getattr(run, 'dataset_path', '-')}",
+                f"Parametry: batch={int(getattr(run, 'batch_size', 0) or 0)}, imgsz={int(getattr(run, 'img_size', 0) or 0)}, lr0={float(getattr(run, 'lr0', 0.0) or 0.0):.4f}",
+            ]
+        )
+        if error_text:
+            lines.extend(["", "Szczegóły błędu:", error_text.strip()])
+        return "\n".join(lines).strip()
+
+    #=====================================
     def set_campaign_context(self, runs_dir=None, datasets_dir=None):
         """
         Przełącza TrainingTab na katalogi aktywnego projektu
@@ -3983,38 +4591,43 @@ class TrainingTab:
             self.split_src_var.set("")
             self.split_out_var.set(str(datasets_dir / "[BRAK_DATASETU_ZRODLOWEGO]"))
 
-        if target == "plate":
-            plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-            preferred_pose = "yolo11s-pose"
-            try:
-                pose_choices = self._get_base_model_choices_for_mode("plate")
-            except Exception:
-                pose_choices = []
+        self._step4_suppress_base_model_state_save = True
+        try:
+            restored_saved_selection = self._apply_saved_step4_training_model_selection(target)
+            if not restored_saved_selection:
+                if target == "plate":
+                    plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
+                    preferred_pose = "yolo11s-pose"
+                    try:
+                        pose_choices = self._get_base_model_choices_for_mode("plate")
+                    except Exception:
+                        pose_choices = []
 
-            if plate_model and Path(plate_model).exists():
-                self.base_model_var.set("Custom")
-                self.base_custom_var.set(plate_model)
-            else:
-                self.base_model_var.set(
-                    preferred_pose if preferred_pose in pose_choices else self._get_default_base_model_for_mode("plate")
-                )
-                self.base_custom_var.set("")
-        else:
-            char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-            if char_model and Path(char_model).exists():
-                self.base_model_var.set("Custom")
-                self.base_custom_var.set(char_model)
-            else:
-                self.base_model_var.set(self._get_default_base_model_for_mode("char"))
-                self.base_custom_var.set("")
+                    if plate_model and Path(plate_model).exists():
+                        self.base_model_var.set("Custom")
+                        self.base_custom_var.set(plate_model)
+                    else:
+                        self.base_model_var.set(
+                            preferred_pose if preferred_pose in pose_choices else self._get_default_base_model_for_mode("plate")
+                        )
+                        self.base_custom_var.set("")
+                else:
+                    char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
+                    if char_model and Path(char_model).exists():
+                        self.base_model_var.set("Custom")
+                        self.base_custom_var.set(char_model)
+                    else:
+                        self.base_model_var.set(self._get_default_base_model_for_mode("char"))
+                        self.base_custom_var.set("")
+        finally:
+            self._step4_suppress_base_model_state_save = False
 
         try:
-            self._on_base_model_change()
+            self._refresh_training_start_state()
         except Exception:
             pass
-
         try:
-            self._apply_training_recommended_start_params()
+            self._schedule_step4_deferred_model_refresh()
         except Exception:
             pass
 
@@ -4118,25 +4731,26 @@ class TrainingTab:
                 elif ready_candidates:
                     ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
 
-        try:
-            auto_dir = CAMPAIGN.get_dir("auto_ann")
-            if auto_dir is not None:
-                xml_files = list(Path(auto_dir).rglob("annotations.xml"))
-                if xml_files:
-                    latest_xml_path = max(xml_files, key=lambda p: p.stat().st_mtime)
-                    latest_xml = str(latest_xml_path)
-                    manifest_path = latest_xml_path.parent / "run_manifest.json"
-                    if manifest_path.exists():
-                        try:
-                            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            manifest = {}
-                        manifest_input = str(manifest.get("input_dir") or "").strip() if isinstance(manifest, dict) else ""
-                        if manifest_input and Path(manifest_input).exists():
-                            latest_xml_images = manifest_input
-        except Exception:
-            latest_xml = ""
-            latest_xml_images = ""
+        if remembered_target != "plate":
+            try:
+                auto_dir = CAMPAIGN.get_dir("auto_ann")
+                if auto_dir is not None:
+                    xml_files = list(Path(auto_dir).rglob("annotations.xml"))
+                    if xml_files:
+                        latest_xml_path = max(xml_files, key=lambda p: p.stat().st_mtime)
+                        latest_xml = str(latest_xml_path)
+                        manifest_path = latest_xml_path.parent / "run_manifest.json"
+                        if manifest_path.exists():
+                            try:
+                                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                            except Exception:
+                                manifest = {}
+                            manifest_input = str(manifest.get("input_dir") or "").strip() if isinstance(manifest, dict) else ""
+                            if manifest_input and Path(manifest_input).exists():
+                                latest_xml_images = manifest_input
+            except Exception:
+                latest_xml = ""
+                latest_xml_images = ""
 
         try:
             raw_dir = CAMPAIGN.get_dir("raw")
@@ -4183,9 +4797,12 @@ class TrainingTab:
 
         finish_state = {}
         try:
-            finish_state = CAMPAIGN.get_step4_finish_state() or {}
+            finish_state = self.get_campaign_step4_finish_state(iteration_target=active_target) or {}
         except Exception:
-            finish_state = {}
+            try:
+                finish_state = CAMPAIGN.get_step4_finish_state() or {}
+            except Exception:
+                finish_state = {}
         try:
             current_campaign_step = int(CAMPAIGN.get_current_step() or 0)
         except Exception:
@@ -4264,28 +4881,35 @@ class TrainingTab:
             pass
 
         try:
-            if active_target == "plate":
-                plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-                if plate_model and Path(plate_model).exists():
-                    self.base_model_var.set("Custom")
-                    self.base_custom_var.set(plate_model)
+            self._step4_suppress_base_model_state_save = True
+            if not self._apply_saved_step4_training_model_selection(active_target):
+                if active_target == "plate":
+                    plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
+                    if plate_model and Path(plate_model).exists():
+                        self.base_model_var.set("Custom")
+                        self.base_custom_var.set(plate_model)
+                    else:
+                        self.base_model_var.set(self._get_default_base_model_for_mode("plate"))
+                        self.base_custom_var.set("")
                 else:
-                    self.base_model_var.set(self._get_default_base_model_for_mode("plate"))
-                    self.base_custom_var.set("")
-            else:
-                char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-                if char_model and Path(char_model).exists():
-                    self.base_model_var.set("Custom")
-                    self.base_custom_var.set(char_model)
-                else:
-                    self.base_model_var.set(self._get_default_base_model_for_mode("char"))
-                    self.base_custom_var.set("")
-            self._on_base_model_change()
+                    char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
+                    if char_model and Path(char_model).exists():
+                        self.base_model_var.set("Custom")
+                        self.base_custom_var.set(char_model)
+                    else:
+                        self.base_model_var.set(self._get_default_base_model_for_mode("char"))
+                        self.base_custom_var.set("")
         except Exception:
             pass
+        finally:
+            self._step4_suppress_base_model_state_save = False
 
         try:
-            self._apply_training_recommended_start_params()
+            self._refresh_training_start_state()
+        except Exception:
+            pass
+        try:
+            self._schedule_step4_deferred_model_refresh()
         except Exception:
             pass
 
@@ -6530,9 +7154,24 @@ class TrainingTab:
         else:
             target_label = "projektu"
 
-        success = bool(run and str(getattr(run, "status", "") or "").strip().lower() == TrainingStatus.COMPLETED.value)
+        status_value = str(getattr(run, "status", "") or "").strip().lower() if run is not None else ""
+        success = bool(status_value == TrainingStatus.COMPLETED.value)
         title = "Podsumowanie treningu"
         tone = "success" if success else "warning"
+
+        if status_value == TrainingStatus.FAILED.value:
+            title = "Trening zakończony błędem"
+            tone = "error"
+            try:
+                self.app.themed_error(
+                    title,
+                    self._build_training_failure_message(run),
+                    parent=self.frame,
+                )
+                self._last_training_completion_summary_run_id = run_id
+            except Exception:
+                pass
+            return
 
         lines = []
         if run is not None:
@@ -6591,8 +7230,43 @@ class TrainingTab:
             except Exception:
                 pass
 
+            run_status = ""
+            try:
+                if self.current_run_id:
+                    current_run = self.history.get_run(str(self.current_run_id))
+                    run_status = str(getattr(current_run, "status", "") or "").strip().lower()
+            except Exception:
+                run_status = ""
+
             campaign_active = bool(CAMPAIGN.get_active_project_name())
             can_finish_step4 = campaign_active and bool(self.current_run_id)
+
+            if run_status == TrainingStatus.PAUSED.value:
+                self._step4_campaign_finish_ready = False
+                try:
+                    if CAMPAIGN.get_active_project_name():
+                        CAMPAIGN.set_step4_finish_state(False)
+                except Exception:
+                    pass
+                self._set_training_ui_idle_state(
+                    "Trening wstrzymany. Ten run możesz wznowić później.",
+                    "#d35400"
+                )
+                try:
+                    self._append_train_log(
+                        "[KAMPANIA] Run został wstrzymany. Etap 4 nie został jeszcze domknięty."
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._refresh_step4_campaign_navigation_ui()
+                except Exception:
+                    pass
+                try:
+                    self._show_training_completion_summary(promoted=False, can_finish_step4=False)
+                except Exception:
+                    pass
+                return
 
             if can_finish_step4 and promoted:
                 self._step4_campaign_finish_ready = True
@@ -6693,6 +7367,11 @@ class TrainingTab:
             pass
 
         try:
+            self.btn_pause_train.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+
+        try:
             self.btn_stop_train.configure(state=tk.NORMAL)
         except Exception:
             pass
@@ -6712,6 +7391,11 @@ class TrainingTab:
             pass
 
         try:
+            self.btn_pause_train.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        try:
             self.btn_stop_train.configure(state=tk.DISABLED)
         except Exception:
             pass
@@ -6721,6 +7405,10 @@ class TrainingTab:
                 text=status_text,
                 foreground=color
             )
+        except Exception:
+            pass
+        try:
+            self._reset_training_runtime_progress()
         except Exception:
             pass
 
@@ -7033,6 +7721,18 @@ class TrainingTab:
 
         batch = max(1, min(batch_ceiling, int(batch)))
 
+        # Dodatkowy bezpiecznik dla cięższych checkpointów pose na mniejszym VRAM.
+        # W praktyce właśnie takie konfiguracje najczęściej wywracają się na plate/pose
+        # przy mosaic=1 jeszcze przed końcem pierwszej epoki.
+        if (
+            target == "plate"
+            and model_bucket in {"m", "l", "x"}
+            and memory_gb <= 6.5
+            and total_images >= 1000
+        ):
+            batch = 1
+            imgsz = min(int(imgsz), 512)
+
         lr0 = 0.0100 if target == "char" else 0.0080
         if batch <= 2:
             lr0 *= 0.55
@@ -7155,6 +7855,80 @@ class TrainingTab:
         except Exception:
             pass
 
+    @staticmethod
+    def _is_history_run_resumable(run) -> bool:
+        if run is None:
+            return False
+        status_value = str(getattr(run, "status", "") or "").strip().lower()
+        if status_value not in {TrainingStatus.PAUSED.value, TrainingStatus.FAILED.value}:
+            return False
+        last_weights = str(getattr(run, "last_weights", "") or "").strip()
+        return bool(last_weights and Path(last_weights).exists())
+
+    def _get_latest_campaign_resumable_run_id(self) -> str:
+        if not CAMPAIGN.get_active_project_name():
+            return ""
+
+        try:
+            runs = list(self.history.get_all_runs() or [])
+        except Exception:
+            runs = []
+
+        for run in runs:
+            if not self._is_history_run_resumable(run):
+                continue
+            if not self._does_history_run_match_active_campaign_target(run):
+                continue
+            return str(getattr(run, "id", "") or "").strip()
+        return ""
+
+    def _is_history_run_resume_allowed(self, run) -> bool:
+        if not self._is_history_run_resumable(run):
+            return False
+        if not self._does_history_run_match_active_campaign_target(run):
+            return False
+        if not CAMPAIGN.get_active_project_name():
+            return True
+        return bool(str(getattr(run, "id", "") or "").strip() == self._get_latest_campaign_resumable_run_id())
+
+    def _format_history_run_status_label(self, run) -> str:
+        if run is None:
+            return "-"
+        status_value = str(getattr(run, "status", "") or "").strip().lower()
+        if status_value == TrainingStatus.PAUSED.value:
+            if self._is_history_run_resume_allowed(run):
+                return "paused (resume)"
+            if self._is_history_run_resumable(run):
+                return "paused (archiwalny)"
+            return "paused (brak last.pt)"
+        return str(getattr(run, "status", "-") or "-")
+
+    def _does_history_run_match_active_campaign_target(self, run) -> bool:
+        if run is None:
+            return False
+        if not CAMPAIGN.get_active_project_name():
+            return True
+
+        active_target = str(self.get_campaign_training_target() or CAMPAIGN.get_iteration_target() or "").strip().lower()
+        if active_target not in {"char", "plate"}:
+            return True
+
+        run_target = ""
+        try:
+            infer_target = getattr(self.history, "_infer_run_target", None)
+            if callable(infer_target):
+                run_target = str(infer_target(run) or "").strip().lower()
+        except Exception:
+            run_target = ""
+        if run_target not in {"char", "plate"}:
+            try:
+                run_target = str(
+                    self._infer_dataset_target(getattr(run, "dataset_path", "")) or ""
+                ).strip().lower()
+            except Exception:
+                run_target = ""
+        return bool(run_target == active_target)
+
     def _device_to_ultralytics(self, device_str: str):
         effective_raw, _ = self._get_effective_training_device_profile(device_str)
         if effective_raw == "cpu":
@@ -7177,22 +7951,19 @@ class TrainingTab:
         sel = self.tree.selection()
         if not sel: 
             return None
-            
-        item = self.tree.item(sel[0])
-        # Wartość z drzewa traktujemy zawsze jako zwykły tekst.
-        corrupted_id = str(item["values"][0])
-        
-        # Porównujemy identyfikatory po usunięciu znaków specjalnych.
+
+        item_id = str(sel[0] or "").strip()
+        if not item_id:
+            return None
+
+        run = self.history.get_run(item_id)
+        if run is not None:
+            return run
+
+        # Fallback dla starszych wpisów / ewentualnych niespójności.
         for db_key, run_obj in self.history.runs.items():
-            # Usuwamy wszystkie znaki poza literami i cyframi.
-            clean_db_key = "".join(filter(str.isalnum, db_key))
-            clean_ui_key = "".join(filter(str.isalnum, corrupted_id))
-            
-            # Jeśli "rdzeń" klucza się zgadza, to znaczy że znaleźliśmy nasz trening!
-            if clean_db_key == clean_ui_key:
+            if str(db_key or "").strip() == item_id:
                 return run_obj
-                
-        # Zachowaj prosty fallback na wypadek rozbieżności w formacie identyfikatora.
         return None
 
     def _build_ui(self):
@@ -7914,6 +8685,8 @@ class TrainingTab:
         self.base_model_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
         self.base_custom_var.trace_add("write", lambda *args: self._refresh_training_start_state())
         self.base_custom_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
+        self.base_model_var.trace_add("write", lambda *args: self._remember_current_step4_training_model_selection())
+        self.base_custom_var.trace_add("write", lambda *args: self._remember_current_step4_training_model_selection())
         self._refresh_base_model_choices()
         auto_name() # Inicjalizacja pierwszego wpisu        
         self._refresh_step4_training_inputs_mode_ui()
@@ -8251,15 +9024,24 @@ class TrainingTab:
             style="Accent.TButton"
         )
         self.btn_start_train.pack(fill=tk.X)
-        
+
+        self.btn_pause_train = ttk.Button(
+            self.btn_step4_start_train_frame,
+            text="Pauza",
+            command=self._pause_training,
+            state=tk.DISABLED,
+            width=12,
+        )
+        self.btn_pause_train.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
         self.btn_stop_train = ttk.Button(
             self.btn_step4_start_train_frame,
-            text="Zatrzymaj",
+            text="Stop",
             command=self._stop_training,
             state=tk.DISABLED,
-            width=14,
+            width=12,
         )
-        self.btn_stop_train.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.btn_stop_train.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         self.train_epoch_progress_var = tk.DoubleVar(value=0.0)
         self.train_progress_var = tk.DoubleVar(value=0.0)
@@ -8291,7 +9073,7 @@ class TrainingTab:
         self.train_epoch_progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.train_epoch_progress_measure_lbl = tk.Label(
             self.train_epoch_progress_row,
-            text="Biezaca epoka (partie danych)",
+            text="Bieżąca epoka (partie danych)",
             font=("Segoe UI", 8),
             anchor=tk.E,
             justify=tk.RIGHT,
@@ -8304,7 +9086,7 @@ class TrainingTab:
         self.train_epoch_progress_measure_lbl.pack(side=tk.LEFT)
         self.train_epoch_progress_hint_lbl = tk.Label(
             self.train_progress_shell,
-            text="Pokazuje, ile partii danych zostalo wykonanych w aktualnej epoce.",
+            text="Pokazuje, ile partii danych zostało wykonanych w aktualnej epoce.",
             font=("Segoe UI", 8),
             anchor=tk.W,
             justify=tk.LEFT,
@@ -8336,7 +9118,7 @@ class TrainingTab:
         self.train_progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.train_progress_measure_lbl = tk.Label(
             self.train_overall_progress_row,
-            text="Caly run (epoki)",
+            text="Cały run (epoki)",
             font=("Segoe UI", 8),
             anchor=tk.E,
             justify=tk.RIGHT,
@@ -8349,7 +9131,7 @@ class TrainingTab:
         self.train_progress_measure_lbl.pack(side=tk.LEFT)
         self.train_progress_hint_lbl = tk.Label(
             self.train_progress_shell,
-            text="Pokazuje, ile epok calego runu zostalo juz domknietych wzgledem planu.",
+            text="Pokazuje, ile epok całego runu zostało już domkniętych względem planu.",
             font=("Segoe UI", 8),
             anchor=tk.W,
             justify=tk.LEFT,
@@ -8482,14 +9264,13 @@ class TrainingTab:
 
         hist_tree_shell = ttk.LabelFrame(hist_top, text=" Historia runow ", padding=6)
         hist_tree_shell.pack(fill=tk.BOTH, expand=True)
-        columns = ("ID", "Kategoria", "Nazwa", "Status", "Epoki", "Best mAP50-95", "Czas")
+        columns = ("Tor", "Run", "Status", "Epoki", "Best mAP50-95", "Czas")
         self.tree = ttk.Treeview(hist_tree_shell, columns=columns, show="headings", height=10)
         for c in columns:
             self.tree.heading(c, text=c)
-        self.tree.column("ID", width=104, stretch=False)
-        self.tree.column("Kategoria", width=82, stretch=False, anchor=tk.CENTER)
-        self.tree.column("Nazwa", width=156, stretch=True)
-        self.tree.column("Status", width=84, stretch=False)
+        self.tree.column("Tor", width=92, stretch=False, anchor=tk.CENTER)
+        self.tree.column("Run", width=210, stretch=True)
+        self.tree.column("Status", width=148, stretch=False)
         self.tree.column("Epoki", width=64, stretch=False)
         self.tree.column("Best mAP50-95", width=102, stretch=False, anchor=tk.CENTER)
         self.tree.column("Czas", width=76, stretch=False)
@@ -8502,6 +9283,7 @@ class TrainingTab:
         self.tree.bind("<Double-1>", self._open_selected_run_analysis, add="+")
         self.tree.bind("<Button-3>", self._show_history_context_menu, add="+")
         self.history_context_menu = tk.Menu(self.tree, tearoff=0)
+        self.history_context_menu.add_command(label="Wznów trening", command=self._resume_selected_run)
         self.history_context_menu.add_command(label="Otwórz folder", command=self._open_run_folder)
         self.history_context_menu.add_command(label="Usun", command=self._delete_selected)
 
@@ -10124,6 +10906,7 @@ class TrainingTab:
         base_key = self.base_model_var.get().strip()
         base_model = self.base_custom_var.get().strip() if base_key == "Custom" else base_key
         base_model_display = self._resolve_selected_training_base_model_display()
+        _base_model_info_path, base_model_info = self._resolve_selected_training_base_model_info()
         device = self._device_to_ultralytics(self.device_var.get())
 
         # Rozpoznaj, czy wybrany model jest modelem pose.
@@ -10144,6 +10927,17 @@ class TrainingTab:
                 "Dla znaków tablic wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
             )
 
+        try:
+            requested_imgsz = int(self.imgsz_var.get() or 0)
+        except Exception:
+            requested_imgsz = 0
+        if is_pose_dataset and requested_imgsz < 256:
+            return messagebox.showerror(
+                "Zbyt mała rozdzielczość wejściowa",
+                "Dla treningu POSE rozdzielczość wejściowa musi mieć co najmniej 256 px.\n\n"
+                "Praktyczny bezpieczny start dla tego projektu to zwykle 512 albo 640."
+            )
+
         # Zapisz czytelny nagłówek sesji w terminalu procesu.
         selected_device_display = self._normalize_training_device_choice(self.device_var.get())
         effective_device_raw, effective_device_profile = self._get_effective_training_device_profile(selected_device_display)
@@ -10154,6 +10948,22 @@ class TrainingTab:
             )
         else:
             effective_device_desc = "CPU"
+
+        gpu_capacity_block_reason = self._get_training_gpu_capacity_block_reason(
+            is_pose_dataset=bool(is_pose_dataset),
+            base_model_info=base_model_info,
+            effective_device_profile=effective_device_profile,
+        )
+        if gpu_capacity_block_reason and device != "cpu":
+            self._append_train_log("[BLOKADA STARTU] " + gpu_capacity_block_reason.replace("\n", " "))
+            self.train_progress_label.configure(
+                text="Wybrany model jest zbyt ciężki dla aktywnego GPU.",
+                foreground="#c0392b"
+            )
+            return messagebox.showerror(
+                "Model zbyt ciężki dla GPU",
+                gpu_capacity_block_reason
+            )
 
         self._append_train_log("=" * 70)
         self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
@@ -10216,10 +11026,14 @@ class TrainingTab:
         except Exception:
             pass
         self._set_train_progress_values(overall=0.0, epoch=0.0)
+        self._reset_training_runtime_progress()
         self._set_train_live_metrics(None)
         self.btn_start_train.configure(state=tk.DISABLED)
+        self.btn_pause_train.configure(state=tk.NORMAL)
         self.btn_stop_train.configure(state=tk.NORMAL)
         self.train_progress_label.configure(text=f"Run treningu uruchomiony: {run_id}")
+        self._training_started_monotonic = time.perf_counter()
+        self._training_started_wall_clock = datetime.datetime.now()
 
         try:
             self._refresh_step4_campaign_navigation_ui()
@@ -10248,13 +11062,35 @@ class TrainingTab:
 
         self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
 
+    def _pause_training(self):
+        self.trainer.pause_training()
+        self.btn_pause_train.configure(state=tk.DISABLED)
+        self.btn_stop_train.configure(state=tk.DISABLED)
+        self.train_progress_label.configure(
+            text="Wstrzymywanie treningu...",
+            foreground="#d35400"
+        )
+
     def _stop_training(self):
         self.trainer.stop_training()
+        self.btn_pause_train.configure(state=tk.DISABLED)
         self.btn_stop_train.configure(state=tk.DISABLED)
         self.train_progress_label.configure(
             text="Zatrzymywanie treningu...",
             foreground="#c0392b"
         )
+
+    def _resolve_training_end_feedback(self, success: bool, msg: str) -> tuple[str, str]:
+        normalized = str(msg or "").strip().lower()
+        if success:
+            return "Trening zakończony.", "#2c3e50"
+        if normalized == "wstrzymano":
+            return "Trening wstrzymany.", "#d35400"
+        if normalized == "zatrzymano":
+            return "Trening zatrzymany.", "#c0392b"
+        if self._is_memory_failure_text(msg):
+            return "Trening przerwany przez błąd pamięci.", "#c0392b"
+        return "Trening zakończony błędem.", "#c0392b"
 
     def _bind_trainer_callbacks(self):
         def on_batch_progress(epoch, batch_idx, total_batches, batch_pct):
@@ -10268,8 +11104,31 @@ class TrainingTab:
             else:
                 status_text = f"Trwa trening: Epoka {epoch}/{run.epochs} | przygotowanie partii"
 
+            started = getattr(self, "_training_started_monotonic", None)
+            if started is None:
+                self._training_started_monotonic = time.perf_counter()
+                self._training_started_wall_clock = datetime.datetime.now()
+                started = self._training_started_monotonic
+            eta_seconds = None
+            try:
+                overall_fraction = max(0.0, min(1.0, float(overall_pct) / 100.0))
+                if started is not None and overall_fraction >= 0.01:
+                    elapsed = max(0.001, time.perf_counter() - float(started))
+                    eta_seconds = max(0.0, (elapsed / overall_fraction) - elapsed)
+            except Exception:
+                eta_seconds = None
+
             def update_ui():
                 self._set_train_progress_values(overall=overall_pct, epoch=batch_pct)
+                self._update_training_progress_meta(
+                    epoch=int(epoch),
+                    total_epochs=int(run.epochs),
+                    batch_idx=int(batch_idx),
+                    total_batches=int(total_batches),
+                    overall_pct=float(overall_pct),
+                    epoch_pct=float(batch_pct),
+                    eta_seconds=eta_seconds,
+                )
                 self.train_progress_label.configure(text=status_text)
 
             self._ui(update_ui)
@@ -10303,6 +11162,15 @@ class TrainingTab:
             # Aktualizacja UI w głównym wątku
             def update_ui():
                 self._set_train_progress_values(overall=pct, epoch=100.0)
+                self._update_training_progress_meta(
+                    epoch=int(epoch),
+                    total_epochs=int(run.epochs),
+                    batch_idx=int(getattr(self, "_training_last_total_batches", 0) or 0),
+                    total_batches=int(getattr(self, "_training_last_total_batches", 0) or 0),
+                    overall_pct=float(pct),
+                    epoch_pct=100.0,
+                    eta_seconds=0.0,
+                )
                 self.train_progress_label.configure(text=f"Trwa trening: Zakonczono epoke {epoch}/{run.epochs}")
                 self._set_training_metric_interpretation(interpretation)
                 self._set_train_live_metrics(metrics)
@@ -10313,23 +11181,29 @@ class TrainingTab:
             self._ui(update_ui)
 
         def on_end(success, msg):
-            end_line = f"[KONIEC] {'SUKCES' if success else 'BŁĄD/STOP'} | {msg}"
+            safe_msg = self._sanitize_training_text(msg)
+            end_line = f"[KONIEC] {'SUKCES' if success else 'BŁĄD/STOP'} | {safe_msg}"
             self._append_train_log(end_line)
             final_interpretation = self._build_training_metric_interpretation(getattr(self, "_latest_training_metrics", {}))
             if getattr(self, "_latest_training_metrics", {}):
                 self._append_train_log(f"[OCENA] {final_interpretation}")
             self._end_step4_operation("z4.training.run")
 
+            status_text, status_color = self._resolve_training_end_feedback(success, safe_msg)
+
             self._ui(lambda: self.btn_start_train.configure(state=tk.NORMAL))
+            self._ui(lambda: self.btn_pause_train.configure(state=tk.DISABLED))
             self._ui(lambda: self.btn_stop_train.configure(state=tk.DISABLED))
             if success:
                 self._ui(lambda: self._set_train_progress_values(overall=100.0, epoch=100.0))
             self._ui(lambda: self._set_training_metric_interpretation(final_interpretation))
             self._ui(lambda: self._set_train_live_metrics(getattr(self, "_latest_training_metrics", {})))
             self._ui(lambda: self.train_progress_label.configure(
-                text="Trening zakończony." if success else "Trening zatrzymany / zakończony błędem.",
-                foreground="#2c3e50" if success else "#c0392b"
+                text=status_text,
+                foreground=status_color,
             ))
+            if not success:
+                self._ui(lambda: self._update_training_progress_meta(eta_seconds=0.0))
             self._ui(lambda: self._load_history())
             self._ui(self._refresh_training_start_state)
 
@@ -10360,12 +11234,23 @@ class TrainingTab:
                 except Exception:
                     run_target = ""
             target_label = self._format_history_run_target_label(run_target)
+            run_name = str(getattr(run, "name", "") or "").strip()
+            created_at = str(getattr(run, "created_at", "") or "").strip()
+            created_short = ""
+            if created_at:
+                try:
+                    created_short = datetime.datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
+                except Exception:
+                    created_short = created_at.replace("T", " ")[:16]
+            if created_short:
+                run_label = self._shorten_training_text(f"{run_name} | {created_short}", 34)
+            else:
+                run_label = self._shorten_training_text(run_name or str(getattr(run, "id", "") or ""), 34)
             
-            self.tree.insert("", tk.END, values=(
-                str(run.id), 
+            self.tree.insert("", tk.END, iid=str(run.id), values=(
                 target_label,
-                str(run.name)[:30], 
-                str(run.status), 
+                run_label,
+                self._format_history_run_status_label(run),
                 f"{run.current_epoch}/{run.epochs}", 
                 f"{float(best_map):.3f}", 
                 str(run.duration_str)
@@ -10377,7 +11262,7 @@ class TrainingTab:
                     values = self.tree.item(item_id, "values")
                 except Exception:
                     values = ()
-                if values and str(values[0]) == str(selected_run_id):
+                if str(item_id) == str(selected_run_id):
                     try:
                         self.tree.selection_set(item_id)
                         self.tree.focus(item_id)
@@ -10397,6 +11282,93 @@ class TrainingTab:
         run = self._selected_run()
         if run and Path(run.output_dir).exists():
             self._open_path(Path(run.output_dir))
+
+    def _resume_selected_run(self):
+        run = self._selected_run()
+        if run is None:
+            return
+
+        if not self._is_history_run_resume_allowed(run):
+            if self._is_history_run_resumable(run) and CAMPAIGN.get_active_project_name():
+                return messagebox.showerror(
+                    "Wznowienie niedostępne",
+                    "W kampanii możesz wznowić tylko ostatni wznowialny run aktywnego toru.\n\n"
+                    "Starsze wstrzymane runy pozostają w historii jako archiwum, ale nie są już ścieżką roboczą tej iteracji."
+                )
+
+        if not self._does_history_run_match_active_campaign_target(run):
+            active_target = str(self.get_campaign_training_target() or CAMPAIGN.get_iteration_target() or "").strip().lower()
+            active_label = "tablic" if active_target == "plate" else "znaków" if active_target == "char" else "bieżącego toru"
+            return messagebox.showerror(
+                "Niezgodny tor wznowienia",
+                "Wybrany run należy do innego toru treningu niż aktualnie otwarty etap E4.\n\n"
+                f"W tej chwili możesz wznowić tylko runy dla toru {active_label}."
+            )
+
+        last_weights = str(getattr(run, "last_weights", "") or "").strip()
+        if not last_weights or not Path(last_weights).exists():
+            return messagebox.showerror(
+                "Brak checkpointu do wznowienia",
+                "Wybrany run nie ma poprawnego pliku last.pt.\n\n"
+                "Tego treningu nie da się wznowić od miejsca pauzy."
+            )
+
+        if not self._begin_step4_operation("z4.training.run", "Z4: wznowienie treningu"):
+            return
+
+        try:
+            resumed_run_id = self.trainer.resume_training(str(run.id))
+        except Exception as e:
+            self._end_step4_operation("z4.training.run")
+            logger.exception("Nie udało się wznowić treningu")
+            return messagebox.showerror("Błąd wznowienia", f"Nie udało się wznowić treningu:\n{e}")
+
+        if not resumed_run_id:
+            self._end_step4_operation("z4.training.run")
+            return messagebox.showerror(
+                "Nie udało się wznowić treningu",
+                "Wznowienie treningu nie wystartowało.\n\n"
+                "Sprawdź, czy run nadal ma poprawny checkpoint `last.pt`."
+            )
+
+        self.current_run_id = resumed_run_id
+        self._last_training_completion_summary_run_id = None
+        self._step4_campaign_finish_ready = False
+        try:
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
+        self._set_train_progress_values(overall=0.0, epoch=0.0)
+        self._reset_training_runtime_progress()
+        self._set_train_live_metrics(None)
+        self.btn_start_train.configure(state=tk.DISABLED)
+        self.btn_pause_train.configure(state=tk.NORMAL)
+        self.btn_stop_train.configure(state=tk.NORMAL)
+        self.train_progress_label.configure(
+            text=f"Wznowiono run treningu: {resumed_run_id}",
+            foreground="#2c3e50"
+        )
+        self._training_started_monotonic = time.perf_counter()
+        self._training_started_wall_clock = datetime.datetime.now()
+        self._append_train_log(f"[RESUME] Wznowiono trening z checkpointu: {last_weights}")
+        if CAMPAIGN.get_active_project_name():
+            self._pending_campaign_model_type = self.get_campaign_training_target()
+        else:
+            self._pending_campaign_model_type = None
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        if self._training_completion_poll_job is not None:
+            try:
+                self.frame.after_cancel(self._training_completion_poll_job)
+            except Exception:
+                pass
+            self._training_completion_poll_job = None
+        self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
 
     def _show_history_context_menu(self, event=None):
         if event is None or not hasattr(self, "tree"):
@@ -10423,6 +11395,13 @@ class TrainingTab:
         menu = getattr(self, "history_context_menu", None)
         if menu is None:
             return
+
+        selected_run = self._selected_run()
+        resumable = bool(selected_run is not None and self._is_history_run_resume_allowed(selected_run))
+        try:
+            menu.entryconfigure("Wznów trening", state=(tk.NORMAL if resumable else tk.DISABLED))
+        except Exception:
+            pass
 
         try:
             menu.tk_popup(event.x_root, event.y_root)

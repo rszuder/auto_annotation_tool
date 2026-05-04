@@ -5,7 +5,12 @@ Trener modeli YOLO Pose.
 """
 
 import gc
+import json
+import os
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Callable, Dict, Tuple
@@ -37,9 +42,19 @@ class YOLOPoseTrainer:
         self.on_batch_progress: Optional[Callable[[int, int, int, float], None]] = None
         self.on_training_end: Optional[Callable[[bool, str], None]] = None
         self.on_progress: Optional[Callable[[float, str], None]] = None
+        self._worker_process: Optional[subprocess.Popen] = None
+        self._worker_monitor_thread: Optional[threading.Thread] = None
+        self._worker_stdout_handle = None
+        self._ipc_dir: Optional[Path] = None
+        self._event_file_path: Optional[Path] = None
+        self._control_file_path: Optional[Path] = None
+        self._job_file_path: Optional[Path] = None
+        self._stdout_log_path: Optional[Path] = None
+        self._last_event_offset: int = 0
+        self._worker_end_event_seen: bool = False
 
     def _reset_runtime_state(self):
-        """CzyĹ›ci stan modelu i pamiÄ™Ä‡ CUDA przed kolejnÄ… prĂłbÄ… treningu."""
+        """Czyści stan modelu i pamięć CUDA przed kolejną próbą treningu."""
         try:
             model_ref = getattr(self, "model", None)
             self.model = None
@@ -87,8 +102,395 @@ class YOLOPoseTrainer:
 
         return max(0, fallback_epoch)
 
+    @staticmethod
+    def _is_training_memory_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        needles = (
+            "out of memory",
+            "outofmemory",
+            "cuda outofmemoryerror",
+            "memory allocation failure",
+            "unable to allocate",
+            "cuda error: unknown error",
+        )
+        return any(needle in text for needle in needles)
+
+    @staticmethod
+    def _is_cuda_runtime_broken_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        needles = (
+            "cuda error: unknown error",
+            "unable to find an engine to execute this computation",
+            "get was unable to find an engine to execute this computation",
+        )
+        return any(needle in text for needle in needles)
+
+    @staticmethod
+    def _next_lower_training_imgsz(value: int) -> int:
+        steps = [384, 416, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280]
+        try:
+            current = int(value or 640)
+        except Exception:
+            current = 640
+        lower_steps = [step for step in steps if step < current]
+        return int(lower_steps[-1] if lower_steps else steps[0])
+
+    def _build_train_args(
+        self,
+        run: TrainingRun,
+        dataset_path,
+        epochs: int,
+        batch_size: int,
+        img_size: int,
+        device,
+        lr0: float,
+        *,
+        amp: bool = True,
+        mosaic: float | None = None,
+        close_mosaic: int | None = None,
+    ) -> Dict:
+        train_args = {
+            "data": str(Path(dataset_path) / "data.yaml"),
+            "epochs": int(epochs),
+            "batch": int(batch_size),
+            "imgsz": int(img_size),
+            "device": 0 if device == "auto" and CUDA_AVAILABLE else device,
+            "lr0": float(lr0),
+            "project": run.output_dir,
+            "name": "train",
+            "exist_ok": True,
+            "pretrained": True,
+            "verbose": True,
+            "save": True,
+            "save_period": 10,
+            "patience": 50,
+            # Plotting bywa niestabilny w tym środowisku i nie jest potrzebny
+            # do samego przebiegu treningu ani zapisu wag.
+            "plots": False,
+            "workers": 0,
+            "amp": bool(amp),
+        }
+        if mosaic is not None:
+            train_args["mosaic"] = float(mosaic)
+        if close_mosaic is not None:
+            train_args["close_mosaic"] = int(close_mosaic)
+        return train_args
+
+    def _get_dataset_runtime_profile(self, dataset_path) -> Dict:
+        profile = {
+            "ok": False,
+            "train_images": 0,
+            "val_images": 0,
+            "test_images": 0,
+            "is_pose": False,
+        }
+        try:
+            ok, _msg, stats = self.validate_dataset(Path(dataset_path))
+            profile["ok"] = bool(ok)
+            profile["train_images"] = int((stats or {}).get("train_images", 0) or 0)
+            profile["val_images"] = int((stats or {}).get("val_images", 0) or 0)
+            profile["test_images"] = int((stats or {}).get("test_images", 0) or 0)
+            profile["is_pose"] = bool((stats or {}).get("kpt_shape"))
+        except Exception:
+            pass
+        return profile
+
+    def _close_worker_stdout_handle(self):
+        handle = getattr(self, "_worker_stdout_handle", None)
+        self._worker_stdout_handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+    def _reset_worker_ipc_state(self):
+        self._close_worker_stdout_handle()
+        self._worker_process = None
+        self._worker_monitor_thread = None
+        self._ipc_dir = None
+        self._event_file_path = None
+        self._control_file_path = None
+        self._job_file_path = None
+        self._stdout_log_path = None
+        self._last_event_offset = 0
+        self._worker_end_event_seen = False
+
+    def _prepare_worker_ipc(self, run: TrainingRun) -> Dict[str, str]:
+        ipc_dir = Path(run.output_dir) / "_ipc"
+        ipc_dir.mkdir(parents=True, exist_ok=True)
+        event_path = ipc_dir / "events.jsonl"
+        control_path = ipc_dir / "control.json"
+        job_path = ipc_dir / "job.json"
+        stdout_path = ipc_dir / "worker_stdout.log"
+
+        try:
+            event_path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            stdout_path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        control_path.write_text(
+            json.dumps({"pause": False, "stop": False}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        self._ipc_dir = ipc_dir
+        self._event_file_path = event_path
+        self._control_file_path = control_path
+        self._job_file_path = job_path
+        self._stdout_log_path = stdout_path
+        self._last_event_offset = 0
+        self._worker_end_event_seen = False
+
+        return {
+            "ipc_dir": str(ipc_dir),
+            "event_file": str(event_path),
+            "control_file": str(control_path),
+            "job_file": str(job_path),
+            "stdout_log": str(stdout_path),
+        }
+
+    def _write_worker_control(self, *, pause: bool | None = None, stop: bool | None = None):
+        control_path = getattr(self, "_control_file_path", None)
+        if control_path is None:
+            return
+
+        payload = {"pause": False, "stop": False}
+        try:
+            if Path(control_path).exists():
+                payload = json.loads(Path(control_path).read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    payload = {"pause": False, "stop": False}
+        except Exception:
+            payload = {"pause": False, "stop": False}
+
+        if pause is not None:
+            payload["pause"] = bool(pause)
+        if stop is not None:
+            payload["stop"] = bool(stop)
+
+        try:
+            Path(control_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Nie udało się zapisać sterowania workerem treningu: {e}")
+
+    def _emit_worker_event(self, event: Dict):
+        event_type = str((event or {}).get("type") or "").strip().lower()
+        if not event_type:
+            return
+
+        if event_type == "batch_progress":
+            if self.on_batch_progress:
+                try:
+                    self.on_batch_progress(
+                        int(event.get("epoch", 0) or 0),
+                        int(event.get("batch_idx", 0) or 0),
+                        int(event.get("total_batches", 0) or 0),
+                        float(event.get("batch_pct", 0.0) or 0.0),
+                    )
+                except Exception:
+                    pass
+            return
+
+        if event_type == "epoch_end":
+            if self.current_run is not None:
+                try:
+                    self.current_run.current_epoch = int(event.get("epoch", 0) or getattr(self.current_run, "current_epoch", 0) or 0)
+                except Exception:
+                    pass
+            if self.on_epoch_end:
+                try:
+                    self.on_epoch_end(
+                        int(event.get("epoch", 0) or 0),
+                        dict(event.get("metrics") or {}),
+                    )
+                except Exception:
+                    pass
+            return
+
+        if event_type == "progress":
+            if self.on_progress:
+                try:
+                    self.on_progress(
+                        float(event.get("percent", 0.0) or 0.0),
+                        str(event.get("message", "") or "").strip(),
+                    )
+                except Exception:
+                    pass
+            return
+
+        if event_type == "training_end":
+            self._worker_end_event_seen = True
+            if self.on_training_end:
+                try:
+                    self.on_training_end(
+                        bool(event.get("success", False)),
+                        str(event.get("message", "") or "").strip(),
+                    )
+                except Exception:
+                    pass
+            return
+
+    def _drain_worker_events(self):
+        event_path = getattr(self, "_event_file_path", None)
+        if event_path is None:
+            return
+
+        path_obj = Path(event_path)
+        if not path_obj.exists():
+            return
+
+        try:
+            with path_obj.open("r", encoding="utf-8") as handle:
+                handle.seek(int(getattr(self, "_last_event_offset", 0) or 0))
+                while True:
+                    line = handle.readline()
+                    if not line:
+                        break
+                    self._last_event_offset = handle.tell()
+                    raw = str(line or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(event, dict):
+                        self._emit_worker_event(event)
+        except Exception as e:
+            logger.debug(f"Nie udało się odczytać zdarzeń workera treningu: {e}")
+
+    def _reload_history_from_disk(self):
+        try:
+            refreshed = TrainingHistory(history_dir=self.history.history_dir)
+        except Exception:
+            return
+        self.history = refreshed
+        if self.current_run is not None:
+            try:
+                self.current_run = self.history.get_run(self.current_run.id) or self.current_run
+            except Exception:
+                pass
+
+    def _finalize_worker_exit_without_end_event(self, return_code: int | None):
+        run = self.current_run
+        if run is None:
+            return
+
+        self._reload_history_from_disk()
+        try:
+            refreshed_run = self.history.get_run(run.id)
+        except Exception:
+            refreshed_run = None
+        if refreshed_run is not None:
+            run = refreshed_run
+            self.current_run = refreshed_run
+
+        status_value = str(getattr(run, "status", "") or "").strip().lower()
+        if status_value == TrainingStatus.RUNNING.value:
+            message = (
+                "Proces treningu zakończył się nieoczekiwanie poza GUI. "
+                f"Kod wyjścia workera: {return_code if return_code is not None else 'brak'}."
+            )
+            if return_code and int(return_code) < 0:
+                message += " Worker został przerwany przez błąd natywny biblioteki treningowej."
+            self.history.update_run(
+                run.id,
+                status=TrainingStatus.FAILED.value,
+                finished_at=datetime.now().isoformat(),
+                error_message=message,
+            )
+            try:
+                self.current_run = self.history.get_run(run.id) or self.current_run
+            except Exception:
+                pass
+            status_value = TrainingStatus.FAILED.value
+
+        if self.on_training_end:
+            final_message = str(getattr(self.current_run, "error_message", "") or "").strip()
+            if status_value == TrainingStatus.COMPLETED.value:
+                final_message = "Trening zakończony"
+                success = True
+            elif status_value == TrainingStatus.PAUSED.value:
+                final_message = final_message or "Wstrzymano"
+                success = False
+            elif status_value == TrainingStatus.CANCELLED.value:
+                final_message = final_message or "Zatrzymano"
+                success = False
+            else:
+                final_message = final_message or "Trening zakończony błędem"
+                success = False
+            try:
+                self.on_training_end(success, final_message)
+            except Exception:
+                pass
+
+    def _monitor_worker_process(self, process: subprocess.Popen):
+        try:
+            while True:
+                self._drain_worker_events()
+                return_code = process.poll()
+                if return_code is not None:
+                    break
+                time.sleep(0.25)
+
+            self._drain_worker_events()
+            self._reload_history_from_disk()
+            if not self._worker_end_event_seen:
+                self._finalize_worker_exit_without_end_event(process.returncode)
+        finally:
+            self.is_training = False
+            self._close_worker_stdout_handle()
+            self._worker_process = None
+            self._worker_monitor_thread = None
+
     def get_available_models(self) -> Dict:
         return AVAILABLE_POSE_MODELS
+
+    def _resolve_run_id_from_resume_checkpoint(self, resume_from: str) -> str:
+        raw_path = str(resume_from or "").strip()
+        if not raw_path:
+            return ""
+
+        try:
+            resume_path = Path(raw_path)
+        except Exception:
+            return ""
+
+        candidate_dirs = [
+            resume_path.parent.parent.parent,
+            resume_path.parent.parent,
+            resume_path.parent,
+        ]
+        for candidate in candidate_dirs:
+            run_id = str(getattr(candidate, "name", "") or "").strip()
+            if run_id and self.history.get_run(run_id) is not None:
+                return run_id
+
+        try:
+            resolved_checkpoint = str(resume_path.resolve())
+        except Exception:
+            resolved_checkpoint = raw_path
+
+        for run_id, run in getattr(self.history, "runs", {}).items():
+            last_weights = str(getattr(run, "last_weights", "") or "").strip()
+            if not last_weights:
+                continue
+            try:
+                resolved_last = str(Path(last_weights).resolve())
+            except Exception:
+                resolved_last = last_weights
+            if resolved_last == resolved_checkpoint:
+                return str(run_id or "").strip()
+
+        return ""
 
     def get_latest_pose_model(self) -> str:
         priority = [
@@ -124,14 +526,14 @@ class YOLOPoseTrainer:
         try:
             config = safe_load_yaml(yaml_file)
 
-            # Dataset detekcyjny nie musi definiowaÄ‡ kpt_shape.
+            # Dataset detekcyjny nie musi definiować kpt_shape.
             if "kpt_shape" in config:
                 stats["kpt_shape"] = config["kpt_shape"]
 
             stats["nc"] = config.get("nc", 1)
 
         except Exception as e:
-            return False, f"BĹ‚Ä…d: {e}", stats
+            return False, f"Błąd: {e}", stats
 
         for split in ["train", "val"]:
             img_dir = dataset_path / "images" / split
@@ -141,7 +543,7 @@ class YOLOPoseTrainer:
             count = sum(1 for f in img_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS)
             stats[f"{split}_images"] = count
             if count == 0:
-                return False, f"Brak obrazĂłw w images/{split}", stats
+                return False, f"Brak obrazów w images/{split}", stats
 
         test_dir = dataset_path / "images" / "test"
         if test_dir.exists():
@@ -165,11 +567,11 @@ class YOLOPoseTrainer:
         **kwargs,
     ) -> Optional[str]:
         if not YOLO_AVAILABLE:
-            logger.error("YOLO niedostÄ™pny")
+            logger.error("YOLO niedostępny")
             return None
 
         if self.is_training:
-            logger.warning("Trening juĹĽ trwa")
+            logger.warning("Trening już trwa")
             return None
 
         is_valid, msg, _ = self.validate_dataset(Path(dataset_path))
@@ -178,8 +580,9 @@ class YOLOPoseTrainer:
             return None
 
         self._reset_runtime_state()
+        self._reset_worker_ipc_state()
 
-        # base_model moĹĽe byÄ‡: klucz (np. yolo26m-pose) albo Ĺ›cieĹĽka do .pt
+        # base_model może być: klucz (np. yolo26m-pose) albo ścieżka do .pt
         model_file = base_model
         if base_model in AVAILABLE_POSE_MODELS:
             model_file = AVAILABLE_POSE_MODELS[base_model]["file"]
@@ -187,10 +590,11 @@ class YOLOPoseTrainer:
             model_file = f"{base_model}.pt"
 
         if resume_from:
-            run_id = Path(resume_from).parent.parent.name
+            run_id = self._resolve_run_id_from_resume_checkpoint(resume_from)
+            logger.info(f"Rozpoznany run do wznowienia z checkpointu: {run_id or '[BRAK]'} | checkpoint={resume_from}")
             self.current_run = self.history.get_run(run_id)
             if not self.current_run:
-                logger.error(f"Nie znaleziono: {run_id}")
+                logger.error(f"Nie znaleziono runu: {run_id}")
                 return None
 
             self.history.update_run(
@@ -213,13 +617,49 @@ class YOLOPoseTrainer:
         self.is_training = True
         self.should_pause = False
         self.should_stop = False
-
-        thread = threading.Thread(
-            target=self._training_loop,
-            args=(model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from),
-            daemon=True,
+        ipc_paths = self._prepare_worker_ipc(self.current_run)
+        job_payload = {
+            "history_dir": str(self.history.history_dir),
+            "run_id": str(self.current_run.id),
+            "model_file": str(model_file),
+            "dataset_path": str(dataset_path),
+            "epochs": int(epochs),
+            "batch_size": int(batch_size),
+            "img_size": int(img_size),
+            "device": device,
+            "lr0": float(lr0),
+            "resume_from": str(resume_from or ""),
+            "event_file": ipc_paths["event_file"],
+            "control_file": ipc_paths["control_file"],
+        }
+        Path(ipc_paths["job_file"]).write_text(
+            json.dumps(job_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
-        thread.start()
+
+        worker_module = "auto_annotation_tool.training.training_worker"
+        try:
+            stdout_handle = open(ipc_paths["stdout_log"], "a", encoding="utf-8", errors="replace")
+            env = os.environ.copy()
+            env.setdefault("PYTHONFAULTHANDLER", "1")
+            process = subprocess.Popen(
+                [sys.executable, "-m", worker_module, ipc_paths["job_file"]],
+                cwd=str(Path(CONFIG.WORKSPACE_DIR).parent),
+                stdout=stdout_handle,
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+        except Exception:
+            self.is_training = False
+            self._close_worker_stdout_handle()
+            self._reset_worker_ipc_state()
+            raise
+
+        self._worker_stdout_handle = stdout_handle
+        self._worker_process = process
+        monitor = threading.Thread(target=self._monitor_worker_process, args=(process,), daemon=True)
+        self._worker_monitor_thread = monitor
+        monitor.start()
 
         return self.current_run.id
 
@@ -228,38 +668,23 @@ class YOLOPoseTrainer:
         try:
             self._reset_runtime_state()
             is_resuming = bool(resume_from and Path(resume_from).exists())
-
-            if is_resuming:
-                logger.info(f"Wznawiam z: {resume_from}")
-                self.model = YOLO(resume_from)
-            else:
-                logger.info(f"ĹadujÄ™: {model_file}")
-                self.model = YOLO(model_file)
+            dataset_profile = self._get_dataset_runtime_profile(dataset_path)
+            disable_mosaic_from_start = bool(
+                not is_resuming
+                and bool(dataset_profile.get("is_pose"))
+                and int(dataset_profile.get("train_images", 0) or 0) >= 1000
+            )
+            if disable_mosaic_from_start:
+                logger.info(
+                    "Duży dataset POSE tablic wykryty. Startuję trening bez mosaic, "
+                    "aby ograniczyć ryzyko awarii pamięci po stronie augmentacji."
+                )
 
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.RUNNING.value,
                 started_at=datetime.now().isoformat(),
             )
-
-            train_args = {
-                "data": str(Path(dataset_path) / "data.yaml"),
-                "epochs": epochs,
-                "batch": batch_size,
-                "imgsz": img_size,
-                "device": 0 if device == "auto" and CUDA_AVAILABLE else device,
-                "lr0": lr0,
-                "project": run.output_dir,
-                "name": "train",
-                "exist_ok": True,
-                "pretrained": True,
-                "verbose": True,
-                "save": True,
-                "save_period": 10,
-                "patience": 50,
-                "plots": True,
-                "workers": 0,
-            }
 
             batch_state = {"epoch": -1, "batch": 0}
 
@@ -331,15 +756,118 @@ class YOLOPoseTrainer:
                 if self.on_progress:
                     self.on_progress((epoch / epochs) * 100, f"Epoka {epoch}/{epochs}")
 
-            self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
-            self.model.add_callback("on_train_batch_end", on_train_batch_end)
-            self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
-            logger.info("Rozpoczynam trening...")
-            # Ultralytics oczekuje samej flagi resume=True przy wznawianiu treningu.
-            if is_resuming:
-                self.model.train(resume=True)
-            else:
-                self.model.train(**train_args)
+            training_attempts = [
+                {
+                    "batch_size": int(batch_size),
+                    "img_size": int(img_size),
+                    "lr0": float(lr0),
+                    "amp": True,
+                    "mosaic": (0.0 if disable_mosaic_from_start else None),
+                    "close_mosaic": (0 if disable_mosaic_from_start else None),
+                    "label": "start",
+                }
+            ]
+            used_memory_fallback = False
+            if not is_resuming:
+                fallback_batch = 1 if int(batch_size) <= 2 else max(1, int(batch_size) // 2)
+                fallback_img_size = (
+                    512
+                    if int(img_size) >= 640
+                    else self._next_lower_training_imgsz(int(img_size))
+                )
+                fallback_lr0 = round(max(0.0025, float(lr0) * 0.85), 4)
+                fallback_attempt = {
+                    "batch_size": int(fallback_batch),
+                    "img_size": int(fallback_img_size),
+                    "lr0": float(fallback_lr0),
+                    "amp": False,
+                    "mosaic": 0.0,
+                    "close_mosaic": 0,
+                    "label": "oom_fallback",
+                }
+                if fallback_attempt != training_attempts[0]:
+                    training_attempts.append(fallback_attempt)
+
+            last_training_error = None
+            for attempt_index, attempt in enumerate(training_attempts):
+                if is_resuming:
+                    logger.info(f"Wznawiam z: {resume_from}")
+                    self.model = YOLO(resume_from)
+                else:
+                    logger.info(f"Ładuję: {model_file}")
+                    self.model = YOLO(model_file)
+
+                self.history.update_run(
+                    run.id,
+                    batch_size=int(attempt["batch_size"]),
+                    img_size=int(attempt["img_size"]),
+                    lr0=float(attempt["lr0"]),
+                )
+                try:
+                    run.batch_size = int(attempt["batch_size"])
+                    run.img_size = int(attempt["img_size"])
+                    run.lr0 = float(attempt["lr0"])
+                except Exception:
+                    pass
+
+                self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
+                self.model.add_callback("on_train_batch_end", on_train_batch_end)
+                self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
+
+                if attempt_index > 0:
+                    retry_msg = (
+                        "Wykryto problem pamięci. Ponawiam trening na lżejszych ustawieniach: "
+                        f"batch={int(attempt['batch_size'])}, imgsz={int(attempt['img_size'])}, "
+                        f"mosaic=0, amp=off."
+                    )
+                    logger.warning(retry_msg)
+                    if self.on_progress:
+                        self.on_progress(0.0, retry_msg)
+
+                logger.info("Rozpoczynam trening...")
+                try:
+                    if is_resuming:
+                        # Ultralytics oczekuje samej flagi resume=True przy wznawianiu treningu.
+                        self.model.train(resume=True)
+                    else:
+                        train_args = self._build_train_args(
+                            run,
+                            dataset_path,
+                            epochs,
+                            int(attempt["batch_size"]),
+                            int(attempt["img_size"]),
+                            device,
+                            float(attempt["lr0"]),
+                            amp=bool(attempt["amp"]),
+                            mosaic=attempt.get("mosaic"),
+                            close_mosaic=attempt.get("close_mosaic"),
+                        )
+                        self.model.train(**train_args)
+                    last_training_error = None
+                    break
+                except Exception as train_error:
+                    last_training_error = train_error
+                    can_retry = (
+                        attempt_index < (len(training_attempts) - 1)
+                        and not is_resuming
+                        and not self.should_stop
+                        and not self.should_pause
+                        and self._is_training_memory_error(train_error)
+                        and not self._is_cuda_runtime_broken_error(train_error)
+                    )
+                    if can_retry:
+                        used_memory_fallback = True
+                        logger.warning(
+                            "Trening przerwany przez błąd pamięci na ustawieniach: "
+                            f"batch={int(attempt['batch_size'])}, imgsz={int(attempt['img_size'])}. "
+                            "Czyszczę stan i próbuję ponownie."
+                        )
+                        self._reset_runtime_state()
+                        continue
+                    raise
+
+            if last_training_error is not None:
+                raise last_training_error
 
             runtime_epoch = self._resolve_runtime_epoch()
             if self.should_stop or self.should_pause:
@@ -357,7 +885,7 @@ class YOLOPoseTrainer:
                     update_payload["finished_at"] = datetime.now().isoformat()
                 self.history.update_run(run.id, **update_payload)
                 logger.info(
-                    f"Trening zakonczony przed czasem: status={interrupted_status}, epoka={runtime_epoch}/{epochs}"
+                    f"Trening zakończony przed czasem: status={interrupted_status}, epoka={runtime_epoch}/{epochs}"
                 )
                 if self.on_training_end:
                     self.on_training_end(False, "Wstrzymano" if self.should_pause else "Zatrzymano")
@@ -375,7 +903,7 @@ class YOLOPoseTrainer:
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=max(epochs, self._resolve_runtime_epoch()),
             )
-            # BĹ‚Ä™dy eksportu modelu nie powinny przerywaÄ‡ zakoĹ„czonego treningu.
+            # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
             try:
                 if best_weights.exists():
                     import shutil
@@ -392,7 +920,7 @@ class YOLOPoseTrainer:
 
                     project_models_dir = Path(project_models_dir)
 
-                    # UporzÄ…dkuj modele wedĹ‚ug typu zadania w nowym drzewie trained/<target>.
+                    # Uporządkuj modele według typu zadania w nowym drzewie trained/<target>.
                     trained_root = project_models_dir / "trained"
                     if is_pose:
                         target_dir = trained_root / "plates"
@@ -425,14 +953,14 @@ class YOLOPoseTrainer:
                     if active_proj:
                         if is_pose:
                             CAMPAIGN.set_global_model("plate", str(target_path))
-                            logger.info("MenadĹĽer Kampanii: Zaktualizowano model TABLIC.")
+                            logger.info("Menadżer Kampanii: Zaktualizowano model TABLIC.")
                         else:
                             if task_tag == "char":
                                 CAMPAIGN.set_global_model("char", str(target_path))
-                                logger.info("MenadĹĽer Kampanii: Zaktualizowano model ZNAKĂ“W.")
+                                logger.info("Menadżer Kampanii: Zaktualizowano model ZNAKÓW.")
                             else:
                                 CAMPAIGN.set_global_model("vehicle", str(target_path))
-                                logger.info("MenadĹĽer Kampanii: Zaktualizowano model POJAZDĂ“W.")
+                                logger.info("Menadżer Kampanii: Zaktualizowano model POJAZDÓW.")
 
                         # Sam udany trening nie domyka jeszcze iteracji kampanii.
                         # O zakończeniu etapu decyduje dopiero jawna akcja użytkownika w Z4.
@@ -440,12 +968,12 @@ class YOLOPoseTrainer:
                             logger.info("Menadzer Kampanii: Zapisano aktywny model projektu. Oczekiwanie na ręczne domknięcie iteracji w Z4.")
 
             except Exception as export_err:
-                logger.warning(f"Nie udaĹ‚o siÄ™ wyeksportowaÄ‡ best.pt do katalogu modeli projektu: {export_err}")
+                logger.warning(f"Nie udało się wyeksportować best.pt do katalogu modeli projektu: {export_err}")
 
-            logger.info(f"Trening zakoĹ„czony: {run.id}")
+            logger.info(f"Trening zakończony: {run.id}")
 
             if self.on_training_end:
-                self.on_training_end(True, "Trening zakoĹ„czony")
+                self.on_training_end(True, "Trening zakończony")
 
         except InterruptedError as e:
             status = TrainingStatus.PAUSED.value if self.should_pause else TrainingStatus.CANCELLED.value
@@ -470,21 +998,35 @@ class YOLOPoseTrainer:
                 self.on_training_end(False, str(e))
 
         except Exception as e:
-            if "out of memory" in str(e).lower():
-                logger.warning("Wykryto bĹ‚Ä…d VRAM. CzyszczÄ™ pamiÄ™Ä‡ CUDA przed kolejnÄ… prĂłbÄ… treningu.")
+            if self._is_training_memory_error(e):
+                logger.warning("Wykryto błąd pamięci. Czyszczę pamięć CUDA przed kolejną próbą treningu.")
                 self._reset_runtime_state()
 
-            logger.exception("BĹ‚Ä…d treningu")
+            logger.exception("Błąd treningu")
+            error_text = str(e)
+            if self._is_cuda_runtime_broken_error(e):
+                error_text = (
+                    "Bieżący proces treningu utracił sprawny stan CUDA. "
+                    "Po takim błędzie kolejne próby GPU w tej samej sesji aplikacji mogą dalej się wywracać. "
+                    "Zamknij i uruchom ponownie aplikację przed następną próbą na GPU.\n"
+                    + error_text
+                )
+            if self._is_training_memory_error(e) and used_memory_fallback:
+                error_text = (
+                    "Trening został przerwany przez błąd pamięci mimo automatycznej próby "
+                    "lżejszych ustawień (mniejszy batch, mniejszy imgsz, mosaic=0, amp=off).\n"
+                    + error_text
+                )
 
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.FAILED.value,
                 finished_at=datetime.now().isoformat(),
-                error_message=str(e),
+                error_message=error_text,
             )
 
             if self.on_training_end:
-                self.on_training_end(False, str(e))
+                self.on_training_end(False, error_text)
 
         finally:
             self.is_training = False
@@ -495,6 +1037,13 @@ class YOLOPoseTrainer:
             run = self.current_run
             checkpoint = Path(run.output_dir) / "train" / "weights" / "last.pt"
 
+            try:
+                save_model = getattr(trainer, "save_model", None)
+                if callable(save_model):
+                    save_model()
+            except Exception as save_err:
+                logger.warning(f"Nie udało się wymusić zapisu checkpointu pauzy: {save_err}")
+
             self.history.update_run(
                 run.id,
                 last_weights=str(checkpoint),
@@ -504,16 +1053,18 @@ class YOLOPoseTrainer:
             logger.info(f"Checkpoint: {checkpoint}")
 
         except Exception as e:
-            logger.error(f"BĹ‚Ä…d checkpoint: {e}")
+            logger.error(f"Błąd checkpointu: {e}")
 
     def pause_training(self):
         if self.is_training:
             self.should_pause = True
+            self._write_worker_control(pause=True)
             logger.info("Pauza...")
 
     def stop_training(self):
         if self.is_training:
             self.should_stop = True
+            self._write_worker_control(stop=True)
             try:
                 trainer = getattr(self.model, "trainer", None)
                 if trainer is not None:
@@ -528,7 +1079,7 @@ class YOLOPoseTrainer:
             return None
 
         if run.status not in [TrainingStatus.PAUSED.value, TrainingStatus.FAILED.value]:
-            logger.error(f"Nie moĹĽna wznowiÄ‡: {run.status}")
+            logger.error(f"Nie można wznowić: {run.status}")
             return None
 
         if not run.last_weights or not Path(run.last_weights).exists():

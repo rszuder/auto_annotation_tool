@@ -6,6 +6,7 @@ Zastosowanie: Podgląd w zakładce Prostowania Tablic.
 """
 
 import math
+import time
 import tkinter as tk
 from types import SimpleNamespace
 from PIL import Image, ImageTk
@@ -21,8 +22,8 @@ class ZoomableCanvas(tk.Canvas):
         self.zoom_level = 1.0
         self.min_zoom = 0.1
         self.max_zoom = 5.0
-        self.zoom_step = 1.15  # 15% na każde tik
-        
+        self.zoom_step = 1.12
+
         # Oryginalne dane
         self.original_image = None  # PIL Image
         self.photo_image = None     # ImageTk.PhotoImage
@@ -31,6 +32,13 @@ class ZoomableCanvas(tk.Canvas):
         self.interaction_delegate = None
         self._render_region = None
         self._pan_buffered_move_active = False
+        self._deferred_display_after_id = None
+        self._deferred_display_fast_mode = False
+        self._final_quality_after_id = None
+        self._zoom_animation_after_id = None
+        self._middle_click_zoom_restore_state = None
+        self._middle_click_zoom_last_trigger_at = 0.0
+        self._middle_click_zoom_ignore_release_until = 0.0
         
         # Pan'u - przesuwanie widoku
         self.pan_data = {
@@ -48,6 +56,8 @@ class ZoomableCanvas(tk.Canvas):
         self.bind("<MouseWheel>", self._on_mousewheel)  # Windows
         self.bind("<Button-4>", self._on_mousewheel)     # Linux scroll up
         self.bind("<Button-5>", self._on_mousewheel)     # Linux scroll down
+        self.bind("<Button-2>", self._on_middle_click_zoom)
+        self.bind("<ButtonRelease-2>", self._on_middle_click_zoom)
         
         # Bind'y - Pan (przeciąganie LPM)
         self.bind("<Button-1>", self._on_pan_press)
@@ -138,7 +148,7 @@ class ZoomableCanvas(tk.Canvas):
             float(visible_bottom),
         )
 
-    def _get_visible_image_region(self):
+    def _get_visible_image_region(self, *, interaction_fast: bool = False):
         if self.original_image is None:
             return None
 
@@ -155,8 +165,12 @@ class ZoomableCanvas(tk.Canvas):
 
         visible_left, visible_top, visible_right, visible_bottom = exact_bounds
 
-        buffer_canvas_x = min(max(64.0, float(canvas_width) * 0.35), 240.0)
-        buffer_canvas_y = min(max(64.0, float(canvas_height) * 0.35), 240.0)
+        if interaction_fast:
+            buffer_canvas_x = min(max(28.0, float(canvas_width) * 0.12), 96.0)
+            buffer_canvas_y = min(max(28.0, float(canvas_height) * 0.12), 96.0)
+        else:
+            buffer_canvas_x = min(max(64.0, float(canvas_width) * 0.35), 240.0)
+            buffer_canvas_y = min(max(64.0, float(canvas_height) * 0.35), 240.0)
         buffer_img_x = buffer_canvas_x / zoom
         buffer_img_y = buffer_canvas_y / zoom
 
@@ -179,6 +193,9 @@ class ZoomableCanvas(tk.Canvas):
     
     def set_image(self, pil_image):
         """Ustaw nowy obraz (PIL.Image) i wyczyść zoom/pan."""
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._middle_click_zoom_restore_state = None
         self.original_image = pil_image
         self.zoom_level = 1.0
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
@@ -186,6 +203,9 @@ class ZoomableCanvas(tk.Canvas):
 
     def clear_image(self):
         """Wyczysc aktualny obraz i zresetuj stan widoku."""
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._middle_click_zoom_restore_state = None
         self.original_image = None
         self.photo_image = None
         self.image_id = None
@@ -318,12 +338,101 @@ class ZoomableCanvas(tk.Canvas):
         data["norm_source"] = norm_source
         data["normalized_from_root"] = corrected
         return SimpleNamespace(**data)
+
+    def _cancel_deferred_display(self):
+        pending = getattr(self, "_deferred_display_after_id", None)
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._deferred_display_after_id = None
+        self._deferred_display_fast_mode = False
+        self._cancel_final_quality_display()
+
+    def _cancel_final_quality_display(self):
+        pending = getattr(self, "_final_quality_after_id", None)
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._final_quality_after_id = None
+
+    def _schedule_final_quality_display(self, delay_ms: int = 110):
+        if self.original_image is None:
+            return
+
+        self._cancel_final_quality_display()
+
+        def _run():
+            self._final_quality_after_id = None
+            self._update_display(interaction_fast=False)
+
+        try:
+            self._final_quality_after_id = self.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            self._final_quality_after_id = None
+            self._update_display(interaction_fast=False)
+
+    def _cancel_zoom_animation(self):
+        pending = getattr(self, "_zoom_animation_after_id", None)
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._zoom_animation_after_id = None
+
+    def _get_wheel_zoom_base(self) -> float:
+        zoom = max(0.01, float(self.zoom_level))
+        if zoom < 0.35:
+            return 1.22
+        if zoom < 0.70:
+            return 1.18
+        if zoom < 1.20:
+            return 1.14
+        if zoom < 2.00:
+            return 1.10
+        if zoom < 3.20:
+            return 1.08
+        return 1.06
+
+    def _schedule_deferred_display(self, delay_ms: int = 16, *, interaction_fast: bool = False):
+        if self.original_image is None:
+            return
+        if interaction_fast:
+            self._schedule_final_quality_display(delay_ms=110)
+        else:
+            self._cancel_final_quality_display()
+
+        if getattr(self, "_deferred_display_after_id", None):
+            self._deferred_display_fast_mode = bool(
+                getattr(self, "_deferred_display_fast_mode", False) and interaction_fast
+            )
+            return
+
+        self._deferred_display_fast_mode = bool(interaction_fast)
+
+        def _run():
+            interaction_fast_local = bool(getattr(self, "_deferred_display_fast_mode", False))
+            self._deferred_display_after_id = None
+            self._deferred_display_fast_mode = False
+            self._update_display(interaction_fast=interaction_fast_local)
+
+        try:
+            self._deferred_display_after_id = self.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            self._deferred_display_after_id = None
+            self._deferred_display_fast_mode = False
+            self._update_display(interaction_fast=bool(interaction_fast))
     
     def _on_mousewheel(self, event):
         """Obsługa zoom'u kółkiem myszy."""
         if self.original_image is None:
             return
 
+        self._cancel_zoom_animation()
         event = self._normalize_pointer_event(event)
         anchor_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
         anchor_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
@@ -331,7 +440,7 @@ class ZoomableCanvas(tk.Canvas):
 
         raw_delta = event.delta if hasattr(event, 'delta') else (-event.num + 5) * 120
         steps = max(1, int(abs(raw_delta) / 120)) if raw_delta else 1
-        zoom_factor = float(self.zoom_step) ** steps
+        zoom_factor = float(self._get_wheel_zoom_base()) ** steps
 
         if raw_delta < 0:
             new_zoom = float(self.zoom_level) / zoom_factor
@@ -346,11 +455,199 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data['x'] = anchor_x - (float(img_x) * float(self.zoom_level))
         self.pan_data['y'] = anchor_y - (float(img_y) * float(self.zoom_level))
         self._apply_clamped_pan()
-        self._update_display()
+        self._schedule_deferred_display(delay_ms=16, interaction_fast=True)
         self._delegate_interaction("zoom", event)
+
+    def _get_middle_click_target_zoom(self) -> float:
+        zoom = max(0.01, float(self.zoom_level))
+        if zoom < 0.45:
+            return min(self.max_zoom, 1.8)
+        if zoom < 0.90:
+            return min(self.max_zoom, 2.6)
+        if zoom < 1.50:
+            return min(self.max_zoom, 3.3)
+        if zoom < 2.50:
+            return min(self.max_zoom, 4.1)
+        return min(self.max_zoom, zoom * 1.18)
+
+    @staticmethod
+    def _ease_out_cubic(t: float) -> float:
+        clamped = min(1.0, max(0.0, float(t)))
+        return 1.0 - ((1.0 - clamped) ** 3)
+
+    @staticmethod
+    def _event_is_button_release(event) -> bool:
+        try:
+            event_type = getattr(event, "type", None)
+            if str(event_type) in {"5", "ButtonRelease"}:
+                return True
+            return int(event_type) == 5
+        except Exception:
+            return False
+
+    def _animate_zoom_to(self, anchor_canvas_x: float, anchor_canvas_y: float, target_zoom: float, *, duration_ms: int = 170):
+        if self.original_image is None:
+            return
+
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._cancel_final_quality_display()
+
+        start_zoom = float(self.zoom_level)
+        target_zoom = max(self.min_zoom, min(self.max_zoom, float(target_zoom)))
+        if abs(target_zoom - start_zoom) < 1e-6:
+            return
+
+        anchor_img_x, anchor_img_y = self.canvas_to_image_coords(anchor_canvas_x, anchor_canvas_y, clamp=False)
+        frame_count = max(5, min(12, int(max(1, duration_ms) / 16)))
+        frame_index = 0
+
+        def _run_frame():
+            nonlocal frame_index
+            frame_index += 1
+            progress = float(frame_index) / float(frame_count)
+            eased = self._ease_out_cubic(progress)
+            current_zoom = start_zoom + ((target_zoom - start_zoom) * eased)
+            self.zoom_level = max(self.min_zoom, min(self.max_zoom, float(current_zoom)))
+            self.pan_data['x'] = float(anchor_canvas_x) - (float(anchor_img_x) * float(self.zoom_level))
+            self.pan_data['y'] = float(anchor_canvas_y) - (float(anchor_img_y) * float(self.zoom_level))
+            self._apply_clamped_pan()
+
+            if frame_index >= frame_count:
+                self._zoom_animation_after_id = None
+                self._update_display(interaction_fast=False)
+                return
+
+            self._update_display(interaction_fast=True)
+            try:
+                self._zoom_animation_after_id = self.after(14, _run_frame)
+            except Exception:
+                self._zoom_animation_after_id = None
+                self._update_display(interaction_fast=False)
+
+        _run_frame()
+
+    def _get_view_state_center(self, view_state):
+        if not isinstance(view_state, dict):
+            return None
+
+        try:
+            zoom_level = float(view_state.get("zoom_level", self.zoom_level))
+        except Exception:
+            zoom_level = float(self.zoom_level)
+        zoom_level = max(self.min_zoom, min(self.max_zoom, zoom_level))
+
+        if "center_img_x" in view_state and "center_img_y" in view_state:
+            try:
+                return (
+                    float(view_state.get("center_img_x", 0.0)),
+                    float(view_state.get("center_img_y", 0.0)),
+                    float(zoom_level),
+                )
+            except Exception:
+                return None
+
+        try:
+            canvas_width = max(1.0, float(self.winfo_width()))
+            canvas_height = max(1.0, float(self.winfo_height()))
+            origin_x = float(view_state.get("origin_x", self.pan_data.get('x', 0.0)))
+            origin_y = float(view_state.get("origin_y", self.pan_data.get('y', 0.0)))
+            center_img_x = ((canvas_width / 2.0) - origin_x) / max(1e-9, float(zoom_level))
+            center_img_y = ((canvas_height / 2.0) - origin_y) / max(1e-9, float(zoom_level))
+            return (float(center_img_x), float(center_img_y), float(zoom_level))
+        except Exception:
+            return None
+
+    def _animate_to_view_state(self, view_state, *, duration_ms: int = 170):
+        if self.original_image is None:
+            return
+
+        current_state = self.get_view_state()
+        current_center = self._get_view_state_center(current_state)
+        target_center = self._get_view_state_center(view_state)
+        if current_center is None or target_center is None:
+            try:
+                self.set_view_state(view_state, redraw=True)
+            except Exception:
+                pass
+            return
+
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._cancel_final_quality_display()
+
+        start_center_x, start_center_y, start_zoom = current_center
+        target_center_x, target_center_y, target_zoom = target_center
+        frame_count = max(5, min(12, int(max(1, duration_ms) / 16)))
+        frame_index = 0
+
+        def _run_frame():
+            nonlocal frame_index
+            frame_index += 1
+            progress = float(frame_index) / float(frame_count)
+            eased = self._ease_out_cubic(progress)
+            current_zoom = start_zoom + ((target_zoom - start_zoom) * eased)
+            current_center_x2 = start_center_x + ((target_center_x - start_center_x) * eased)
+            current_center_y2 = start_center_y + ((target_center_y - start_center_y) * eased)
+
+            self.zoom_level = max(self.min_zoom, min(self.max_zoom, float(current_zoom)))
+            canvas_width = max(1.0, float(self.winfo_width()))
+            canvas_height = max(1.0, float(self.winfo_height()))
+            self.pan_data['x'] = (canvas_width / 2.0) - (float(current_center_x2) * float(self.zoom_level))
+            self.pan_data['y'] = (canvas_height / 2.0) - (float(current_center_y2) * float(self.zoom_level))
+            self._apply_clamped_pan()
+
+            if frame_index >= frame_count:
+                self._zoom_animation_after_id = None
+                self._update_display(interaction_fast=False)
+                return
+
+            self._update_display(interaction_fast=True)
+            try:
+                self._zoom_animation_after_id = self.after(14, _run_frame)
+            except Exception:
+                self._zoom_animation_after_id = None
+                self._update_display(interaction_fast=False)
+
+        _run_frame()
+
+    def _on_middle_click_zoom(self, event):
+        if self.original_image is None:
+            return "break"
+
+        now = time.monotonic()
+        is_release = self._event_is_button_release(event)
+        if is_release:
+            ignore_until = float(getattr(self, "_middle_click_zoom_ignore_release_until", 0.0) or 0.0)
+            if now <= ignore_until:
+                self._middle_click_zoom_ignore_release_until = 0.0
+                return "break"
+
+        if (now - float(getattr(self, "_middle_click_zoom_last_trigger_at", 0.0) or 0.0)) < 0.12:
+            return "break"
+        self._middle_click_zoom_last_trigger_at = now
+        if not is_release:
+            self._middle_click_zoom_ignore_release_until = now + 0.45
+
+        event = self._normalize_pointer_event(event)
+        restore_state = getattr(self, "_middle_click_zoom_restore_state", None)
+        if isinstance(restore_state, dict):
+            self._middle_click_zoom_restore_state = None
+            self._animate_to_view_state(restore_state, duration_ms=180)
+            self._delegate_interaction("zoom", event)
+            return "break"
+
+        anchor_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
+        anchor_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
+        self._middle_click_zoom_restore_state = self.get_view_state()
+        target_zoom = self._get_middle_click_target_zoom()
+        self._animate_zoom_to(anchor_x, anchor_y, target_zoom, duration_ms=170)
+        self._delegate_interaction("zoom", event)
+        return "break"
     
     def _on_pan_press(self, event):
         """Początek przeciągania (naciśnięcie LPM)."""
+        self._cancel_zoom_animation()
         event = self._normalize_pointer_event(event)
         if self._delegate_interaction("press", event):
             return
@@ -395,7 +692,7 @@ class ZoomableCanvas(tk.Canvas):
             return
 
         if not self._apply_buffered_pan_move(applied_dx, applied_dy):
-            self._update_display()
+            self._schedule_deferred_display(delay_ms=16, interaction_fast=True)
     
     def _on_pan_release(self, event):
         """Koniec przeciągania (zwolnienie LPM)."""
@@ -411,7 +708,7 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data['press_y'] = None
         self.config(cursor=self.current_cursor)
         if self._pan_buffered_move_active:
-            self._update_display()
+            self._schedule_deferred_display(delay_ms=0, interaction_fast=False)
     
     def _on_reset_view(self, event):
         """Reset zoom i pan (naciśnięcie Home lub R)."""
@@ -426,11 +723,11 @@ class ZoomableCanvas(tk.Canvas):
         self.show_info = not self.show_info
         self._update_display()
     
-    def _update_display(self):
+    def _update_display(self, interaction_fast: bool = False):
         """Aktualizuj canvas z nowym zoom'em i pan'em."""
         if self.original_image is None:
             return
-        self._update_display_visible_region()
+        self._update_display_visible_region(interaction_fast=interaction_fast)
         return
         
         # Skaluj obraz
@@ -465,14 +762,14 @@ class ZoomableCanvas(tk.Canvas):
 
         self._draw_overlay()
 
-    def _update_display_visible_region(self):
+    def _update_display_visible_region(self, interaction_fast: bool = False):
         """Renderuj tylko widoczny fragment obrazu zamiast skalowac calosc."""
         if self.original_image is None:
             return
 
         self._apply_clamped_pan()
 
-        visible_region = self._get_visible_image_region()
+        visible_region = self._get_visible_image_region(interaction_fast=interaction_fast)
         full_width, full_height = self._get_full_image_size()
         origin_x = float(self.pan_data.get('x', 0.0))
         origin_y = float(self.pan_data.get('y', 0.0))
@@ -486,9 +783,10 @@ class ZoomableCanvas(tk.Canvas):
         if visible_region is not None:
             crop_box = visible_region["crop_box"]
             cropped = self.original_image.crop(crop_box)
+            resampling = Image.Resampling.NEAREST if interaction_fast else Image.Resampling.BILINEAR
             scaled = cropped.resize(
                 (int(visible_region["draw_width"]), int(visible_region["draw_height"])),
-                Image.Resampling.BILINEAR
+                resampling
             )
             self.photo_image = ImageTk.PhotoImage(scaled)
             self.image_id = self.create_image(
@@ -565,7 +863,7 @@ class ZoomableCanvas(tk.Canvas):
         self._pan_buffered_move_active = True
         return True
 
-    def _draw_overlay(self):
+    def _draw_overlay(self, *, skip_info: bool = False):
         if self.original_image is None:
             return
 
@@ -576,12 +874,12 @@ class ZoomableCanvas(tk.Canvas):
             except Exception:
                 pass
 
-        if self.show_info:
+        if self.show_info and not skip_info:
             vx = self.canvasx(10)
             vy = self.canvasy(10)
             
             info_text = f"Zoom: {self.zoom_level:.2f}x"
-            help_text = "[Scroll: Zoom] [Drag: Pan] [R: Reset] [I: Ukryj]"
+            help_text = "[Scroll: Zoom] [MMB: Zoom/Back] [Drag: Pan] [R: Reset] [I: Ukryj]"
             vy_help = self.canvasy(30)
 
             offsets = [(-2, -2), (0, -2), (2, -2), (-2, 0), (2, 0), (-2, 2), (0, 2), (2, 2)]
@@ -594,7 +892,7 @@ class ZoomableCanvas(tk.Canvas):
                 self.create_text(vx + dx, vy_help + dy, text=help_text, fill="black", font=("Arial", 9, "bold"), anchor="nw", tags="info")
             self.create_text(vx, vy_help, text=help_text, fill="white", font=("Arial", 9, "bold"), anchor="nw", tags="info")
 
-    def refresh_overlay_only(self):
+    def refresh_overlay_only(self, *, skip_info: bool = False):
         """Przerysuj tylko overlay bez ponownego skalowania całego obrazu."""
         if self.original_image is None:
             return
@@ -604,8 +902,9 @@ class ZoomableCanvas(tk.Canvas):
             return
 
         self.delete("preview_overlay")
-        self.delete("info")
-        self._draw_overlay()
+        if not skip_info:
+            self.delete("info")
+        self._draw_overlay(skip_info=skip_info)
     
     def get_zoom_level(self):
         """Zwróć obecny poziom zoom'u."""

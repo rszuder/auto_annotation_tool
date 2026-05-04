@@ -29,6 +29,7 @@ from ..character_recognition import PlateGenerator, CharacterDetector, Character
 from ..ocr import PlateOCR
 from ..data_models import ImageAnnotation, Detection
 from ..training.dataset_splitter import DatasetSplitter
+from ..project_cache import PROJECT_CACHE
 from ..validators import validate_yolo_dataset
 from .help_manager import HELP
 from .guided_action_card import GuidedActionCard
@@ -16880,12 +16881,7 @@ class CharacterAnnotationTab:
 
     def _load_annotation_run_manifest(self, run_dir: Path) -> dict:
         manifest_path = self._annotation_run_manifest_path(run_dir)
-        if not manifest_path.exists():
-            return {}
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        payload = PROJECT_CACHE.load_json(manifest_path, default={})
         return payload if isinstance(payload, dict) else {}
 
     def _get_annotation_tab(self):

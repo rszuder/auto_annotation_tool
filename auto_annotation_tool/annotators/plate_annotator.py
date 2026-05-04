@@ -10,6 +10,7 @@ import numpy as np
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO, CV2_AVAILABLE, cv2
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
+from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import get_image_size, cleanup_gpu_memory
 from ..rectification import PlateRectifier
 from ..ocr import PlateOCR
@@ -299,6 +300,24 @@ class PlateAnnotator(BaseAnnotator):
                     text_confidence=ocr_conf,
                     attributes=ocr_attrs
                 )
+                try:
+                    fit_metrics = compute_plate_polygon_fit_metrics(
+                        float(conf),
+                        polygon,
+                        (x1, y1, x2, y2),
+                        keypoints=kpts_list,
+                        image_size=(width, height),
+                    )
+                    detection.attributes.update({
+                        "fit_score": f"{float(fit_metrics.get('fit_score', 0.0) or 0.0):.3f}",
+                        "fit_label": str(fit_metrics.get("fit_label") or "").strip(),
+                        "fit_keypoint_score": f"{float(fit_metrics.get('keypoint_score', 0.0) or 0.0):.3f}",
+                        "fit_shape_score": f"{float(fit_metrics.get('shape_score', 0.0) or 0.0):.3f}",
+                        "fit_bbox_score": f"{float(fit_metrics.get('bbox_alignment_score', 0.0) or 0.0):.3f}",
+                        "fit_size_score": f"{float(fit_metrics.get('size_score', 0.0) or 0.0):.3f}",
+                    })
+                except Exception:
+                    pass
                 
                 annotation.detections.append(detection)
 
