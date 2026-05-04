@@ -186,6 +186,8 @@ class AnnotationTab:
         self._preview_focus_zoom_modifier_consumed = False
         self._preview_focus_zoom_click_stage = 0
         self._preview_focus_zoom_restore_state = None
+        self._preview_super_correction_active = False
+        self._preview_shortcut_event_guard = {}
         self._preview_draw_mode = False
         self._preview_draw_points = []
         self._preview_delete_mode = False
@@ -21784,6 +21786,7 @@ class AnnotationTab:
         self._preview_focus_zoom_modifier_consumed = False
         self._preview_focus_zoom_click_stage = 0
         self._preview_focus_zoom_restore_state = None
+        self._preview_super_correction_active = False
         self._preview_draw_mode = False
         self._preview_draw_points = []
         self._preview_delete_mode = False
@@ -22755,7 +22758,7 @@ class AnnotationTab:
                 pass
         return False
 
-    def _select_preview_index(self, idx: int):
+    def _select_preview_index(self, idx: int, *, reset_view: bool = True):
         if not self.current_annotations:
             return
         select_started = time.perf_counter()
@@ -22775,7 +22778,7 @@ class AnnotationTab:
         self._preview_focus_zoom_click_stage = 0
         self._preview_focus_zoom_restore_state = None
         self._load_current_preview_selection(
-            reset_view=True,
+            reset_view=bool(reset_view),
             selection_changed=(safe_idx != previous_idx),
             refresh_summary=False,
         )
@@ -22808,6 +22811,111 @@ class AnnotationTab:
         if target_actual is None:
             return "break"
         self._select_preview_index(target_actual)
+        return "break"
+
+    def _get_preview_navigation_actual_indices(self) -> list[int]:
+        display_indices = list(getattr(self, "_preview_list_display_indices", []) or [])
+        if display_indices:
+            resolved = []
+            for display_idx in display_indices:
+                actual_idx = self._get_preview_actual_index_from_display(display_idx)
+                if actual_idx is None:
+                    continue
+                resolved.append(int(actual_idx))
+            if resolved:
+                return resolved
+        return list(range(len(self.current_annotations or [])))
+
+    def _build_preview_global_plate_sequence(self) -> list[tuple[int, int]]:
+        sequence: list[tuple[int, int]] = []
+        for actual_idx in self._get_preview_navigation_actual_indices():
+            if actual_idx < 0 or actual_idx >= len(self.current_annotations or []):
+                continue
+            ann = self.current_annotations[int(actual_idx)]
+            plates = self._get_plate_detections(ann)
+            for plate_idx in range(len(plates)):
+                sequence.append((int(actual_idx), int(plate_idx)))
+        return sequence
+
+    def _select_preview_global_plate_relative(self, step: int):
+        if not self.current_annotations:
+            return "break"
+
+        direction = -1 if int(step) < 0 else 1
+        nav_indices = self._get_preview_navigation_actual_indices()
+        if not nav_indices:
+            self._update_preview_edit_status(
+                "Super korekta jest włączona, ale w tej puli nie ma żadnych tablic do przechodzenia.",
+                refresh_toolbar=False,
+                refresh_debug=False,
+            )
+            return "break"
+
+        current_actual = self.current_preview_index
+        if current_actual is None or int(current_actual) not in nav_indices:
+            current_nav_pos = -1 if direction > 0 else len(nav_indices)
+        else:
+            current_nav_pos = nav_indices.index(int(current_actual))
+
+        current_ann = None
+        current_plates = []
+        if current_actual is not None and 0 <= int(current_actual) < len(self.current_annotations):
+            current_ann = self.current_annotations[int(current_actual)]
+            current_plates = self._get_plate_detections(current_ann)
+
+        if current_plates:
+            current_plate_idx = self._get_selected_plate_index_for_ann(current_ann)
+            if current_plate_idx is None:
+                current_plate_idx = 0
+            next_plate_idx = int(current_plate_idx) + direction
+            if 0 <= next_plate_idx < len(current_plates):
+                image_ord = current_nav_pos + 1 if current_nav_pos >= 0 else 1
+                image_total = len(nav_indices)
+                self._focus_preview_plate(
+                    int(next_plate_idx),
+                    store_restore=False,
+                    push_debug=True,
+                    status_message=(
+                        f"Super korekta: tablica {int(next_plate_idx) + 1}/{len(current_plates)} na obrazie {image_ord}/{image_total}. "
+                        "Q/E przechodzą po kolejnych tablicach, A przełącza lokalnie, Y wyłącza tryb."
+                    ),
+                )
+                return "break"
+
+        if direction > 0:
+            candidate_positions = range(max(0, current_nav_pos + 1), len(nav_indices))
+        else:
+            candidate_positions = range(min(len(nav_indices) - 1, current_nav_pos - 1), -1, -1)
+
+        for nav_pos in candidate_positions:
+            target_actual = int(nav_indices[nav_pos])
+            if target_actual < 0 or target_actual >= len(self.current_annotations):
+                continue
+            target_ann = self.current_annotations[target_actual]
+            target_plates = self._get_plate_detections(target_ann)
+            if not target_plates:
+                continue
+            self._cancel_preview_layout_restore_jobs()
+            self._preview_force_fit_after_resize = False
+            self._select_preview_index(target_actual, reset_view=False)
+            start_plate_idx = 0 if direction > 0 else (len(target_plates) - 1)
+            self._focus_preview_plate(
+                int(start_plate_idx),
+                store_restore=False,
+                push_debug=True,
+                status_message=(
+                    f"Super korekta: tablica {int(start_plate_idx) + 1}/{len(target_plates)} na obrazie {nav_pos + 1}/{len(nav_indices)}. "
+                    "Q/E przechodzą po kolejnych tablicach, A przełącza lokalnie, Y wyłącza tryb."
+                ),
+            )
+            return "break"
+
+        boundary_label = "Pierwsza tablica" if direction < 0 else "Ostatnia tablica"
+        self._update_preview_edit_status(
+            f"{boundary_label} w aktualnej puli. Y wyłącza super korektę.",
+            refresh_toolbar=False,
+            refresh_debug=False,
+        )
         return "break"
 
     def _fit_preview_image_to_view(self):
@@ -23136,12 +23244,14 @@ class AnnotationTab:
             {
                 "title": "Nawigacja",
                 "accent": "#2f80ed",
+                "columns": 2,
                 "items": [
-                    {"tokens": ["Q", "E"], "connector": "/", "label": "zmiana zdjęcia"},
+                    {"tokens": ["Q", "E"], "connector": "/", "label": "nawigacja"},
                     {"tokens": ["F"], "label": "dopasuj cały obraz"},
                     {"tokens": ["R", "LPM"], "connector": "+", "label": "płynny zoom x2"},
                     {"tokens": ["R", "PPM"], "connector": "+", "label": "cofnij zoom"},
                     {"tokens": ["Enter"], "label": "pełny ekran / wyjście"},
+                    {"tokens": ["Y"], "label": "super korekta"},
                 ],
             },
             {
@@ -23328,7 +23438,7 @@ class AnnotationTab:
                             text=connector,
                             fill=plus_fill,
                             anchor="center",
-                            font=self._get_preview_legend_font(6, "bold"),
+                            font=self._get_preview_legend_font((8 if connector == "+" else 6), "bold"),
                             tags=("preview_legend",)
                         )
                     token_w, _token_h = self._draw_preview_legend_keycap(
@@ -23877,6 +23987,25 @@ class AnnotationTab:
 
         return False
 
+    def _preview_shortcut_is_duplicate(self, event, action_key: str) -> bool:
+        if event is None:
+            return False
+        try:
+            serial = int(getattr(event, "serial", 0) or 0)
+        except Exception:
+            serial = 0
+        try:
+            event_time = int(getattr(event, "time", 0) or 0)
+        except Exception:
+            event_time = 0
+        signature = (str(action_key), serial, event_time)
+        guard = dict(getattr(self, "_preview_shortcut_event_guard", {}) or {})
+        if signature == guard.get(str(action_key)):
+            return True
+        guard[str(action_key)] = signature
+        self._preview_shortcut_event_guard = guard
+        return False
+
     @staticmethod
     def _pane_has_child(pane, child) -> bool:
         try:
@@ -23951,6 +24080,8 @@ class AnnotationTab:
             ("<KeyPress-F>", self._on_preview_fit_shortcut),
             ("<KeyPress-a>", self._on_preview_cycle_plate_shortcut),
             ("<KeyPress-A>", self._on_preview_cycle_plate_shortcut),
+            ("<KeyPress-y>", self._on_preview_toggle_super_correction_shortcut),
+            ("<KeyPress-Y>", self._on_preview_toggle_super_correction_shortcut),
             ("<KeyPress-space>", self._on_preview_cycle_vehicle_shortcut),
             ("<KeyPress-q>", self._on_preview_prev_shortcut),
             ("<KeyPress-Q>", self._on_preview_prev_shortcut),
@@ -23979,11 +24110,19 @@ class AnnotationTab:
     def _on_preview_prev_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
+        if self._preview_shortcut_is_duplicate(event, "preview-prev"):
+            return "break"
+        if bool(getattr(self, "_preview_super_correction_active", False)):
+            return self._select_preview_global_plate_relative(-1)
         return self._select_preview_relative(-1)
 
     def _on_preview_next_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
+        if self._preview_shortcut_is_duplicate(event, "preview-next"):
+            return "break"
+        if bool(getattr(self, "_preview_super_correction_active", False)):
+            return self._select_preview_global_plate_relative(1)
         return self._select_preview_relative(1)
 
     def _on_preview_middle_click_zoom_shortcut(self, event=None):
@@ -24115,7 +24254,14 @@ class AnnotationTab:
             selected_idx,
             store_restore=True,
             push_debug=True,
-            status_message="Widok został dopasowany do aktywnego polygonu. R wraca do poprzedniego kadru, A przełącza tablice.",
+            status_message=(
+                "Widok został dopasowany do aktywnego polygonu. "
+                + (
+                    "Q/E przechodzą po tablicach globalnie, A przełącza lokalnie, Y wyłącza super korektę."
+                    if bool(getattr(self, "_preview_super_correction_active", False))
+                    else "R wraca do poprzedniego kadru, A przełącza tablice."
+                )
+            ),
         ) or self._update_preview_edit_status("Nie udalo sie dopasowac widoku do aktywnego polygonu.")
         self._preview_focus_zoom_click_stage = 0
         return "break"
@@ -24123,6 +24269,8 @@ class AnnotationTab:
     def _on_preview_cycle_plate_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
+        if self._preview_shortcut_is_duplicate(event, "preview-cycle-plate"):
+            return "break"
         if self._preview_draw_mode:
             self._update_preview_edit_status(
                 "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem A."
@@ -24149,12 +24297,65 @@ class AnnotationTab:
             push_debug=False,
             status_message=(
                 f"Aktywna tablica {int(target_idx) + 1}/{len(plates)}. "
-                "A przełącza kolejne polygony, R wraca do poprzedniego kadru."
+                + (
+                    "Q/E przechodzą po tablicach globalnie, A przełącza lokalnie, Y wyłącza super korektę."
+                    if bool(getattr(self, "_preview_super_correction_active", False))
+                    else "A przełącza kolejne polygony, R wraca do poprzedniego kadru."
+                )
             ),
         ):
             self._push_preview_debug_event("cycle-plate", f"p{int(target_idx) + 1}/{len(plates)}")
         else:
             self._update_preview_edit_status("Nie udalo sie dopasowac widoku do wybranej tablicy.")
+        return "break"
+
+    def _on_preview_toggle_super_correction_shortcut(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        if self._preview_shortcut_is_duplicate(event, "preview-toggle-super-correction"):
+            return "break"
+        if self._preview_draw_mode:
+            self._update_preview_edit_status(
+                "Dokoncz albo anuluj rysowanie nowego polygonu przed użyciem Y."
+            )
+            return "break"
+        if self._preview_delete_mode:
+            self._update_preview_edit_status(
+                "Wyłącz tryb usuwania przed użyciem Y."
+            )
+            return "break"
+
+        ann = self._get_preview_annotation()
+        plates = self._get_plate_detections(ann) if ann is not None else []
+        next_state = not bool(getattr(self, "_preview_super_correction_active", False))
+        self._preview_super_correction_active = next_state
+        if not next_state:
+            self._refresh_preview_canvas()
+            self._update_preview_edit_status(
+                "Super korekta wyłączona. Q/E znowu przełączają zdjęcia.",
+                refresh_legend=True,
+            )
+            return "break"
+
+        if plates:
+            selected_idx = self._get_selected_plate_index_for_ann(ann)
+            if selected_idx is None:
+                selected_idx = 0
+            self._focus_preview_plate(
+                selected_idx,
+                store_restore=False,
+                push_debug=True,
+                status_message=(
+                    f"Super korekta włączona. Q/E przechodzą teraz po tablicach globalnie, "
+                    f"A nadal przełącza tablice lokalnie, Y wyłącza tryb."
+                ),
+            )
+        else:
+            self._refresh_preview_canvas()
+            self._update_preview_edit_status(
+                "Super korekta włączona. Q/E będą szukać kolejnych zdjęć z tablicami, Y wyłącza tryb.",
+                refresh_legend=True,
+            )
         return "break"
 
     def _on_preview_cycle_vehicle_shortcut(self, event=None):
@@ -24954,15 +25155,25 @@ class AnnotationTab:
         else:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else selected_idx + 1
+            nav_hint = (
+                "Q/E przechodzą po tablicach globalnie."
+                if bool(getattr(self, "_preview_super_correction_active", False))
+                else "Q/E przełączają zdjęcia."
+            )
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
                 "Kliknij polygon, aby go wybrać, przeciągnij róg, aby poprawić geometrię. "
-                "Q/E przełączają zdjęcia."
+                f"{nav_hint}"
             )
             drag_hint = (
                 "W wciśnięte: możesz przeciągać rogi."
                 if self._preview_corner_drag_modifier_down
                 else "Przytrzymaj W i przeciągnij róg, aby poprawić geometrię."
+            )
+            super_hint = (
+                "Y wyłącza super korektę."
+                if bool(getattr(self, "_preview_super_correction_active", False))
+                else "Y włącza super korektę."
             )
             fullscreen_hint = (
                 "Enter wychodzi z pełnego ekranu."
@@ -24972,7 +25183,7 @@ class AnnotationTab:
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
                 f"Kliknij polygon, aby go wybrać. {drag_hint} "
-                f"Q/E przełączają zdjęcia, A przełącza tablice, Spacja kadruje pojazdy, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki. {fullscreen_hint}{vehicle_hint}"
+                f"{nav_hint} A przełącza tablice lokalnie, Spacja kadruje pojazdy, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
                 f"{self._preview_campaign_reuse_manual_note(ann, editable=True)}"
             )
 
@@ -25105,6 +25316,42 @@ class AnnotationTab:
             if self._preview_delete_mode and self._preview_delete_candidate_idx is not None
             else None
         )
+
+        try:
+            overlay_state_text = (
+                "Superkorekta: WŁĄCZONA"
+                if bool(getattr(self, "_preview_super_correction_active", False))
+                else "Superkorekta: wyłączona"
+            )
+            overlay_state_fill = "#1f8f6b" if bool(getattr(self, "_preview_super_correction_active", False)) else "#555555"
+            overlay_state_text_fill = "#ffffff" if bool(getattr(self, "_preview_super_correction_active", False)) else "#f2f2f2"
+            canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
+            state_anchor_x = max(14.0, canvas_width - 16.0)
+            state_anchor_y = 14.0
+            state_text_id = canvas.create_text(
+                state_anchor_x,
+                state_anchor_y,
+                text=overlay_state_text,
+                fill=overlay_state_text_fill,
+                anchor="ne",
+                font=("Segoe UI", 8, "bold"),
+                tags=("preview_overlay",),
+            )
+            x1, y1, x2, y2 = canvas.bbox(state_text_id)
+            pad_x = 8.0
+            pad_y = 4.0
+            state_bg_id = canvas.create_rectangle(
+                x1 - pad_x,
+                y1 - pad_y,
+                x2 + pad_x,
+                y2 + pad_y,
+                outline="",
+                fill=overlay_state_fill,
+                tags=("preview_overlay",),
+            )
+            canvas.tag_lower(state_bg_id, state_text_id)
+        except Exception:
+            pass
 
         if not drag_active:
             for vehicle_idx, det in enumerate(vehicle_detections):
@@ -25353,6 +25600,16 @@ class AnnotationTab:
         else:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
+            nav_hint = (
+                "Q/E tablica globalnie"
+                if bool(getattr(self, "_preview_super_correction_active", False))
+                else "Q/E zdjęcia"
+            )
+            super_hint = (
+                "Y wyłącz"
+                if bool(getattr(self, "_preview_super_correction_active", False))
+                else "Y super korekta"
+            )
             drag_hint = (
                 "Przeciagnij rog aktywnej tablicy."
                 if self._preview_corner_drag_modifier_down
@@ -25360,7 +25617,7 @@ class AnnotationTab:
             )
             base = (
                 f"Tablica {plate_no}/{len(plates)}. {drag_hint} "
-                "A zmienia tablice, Spacja pojazdy, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasuj cały obraz, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
+                f"A zmienia tablice lokalnie, {nav_hint}, Spacja pojazdy, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasuj cały obraz, {super_hint}, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
             )
 
         return f"{base}{vehicle_suffix}"
