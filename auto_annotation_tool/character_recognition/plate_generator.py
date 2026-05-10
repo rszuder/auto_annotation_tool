@@ -96,9 +96,14 @@ class PlateGenerator:
                         ]
                         
                         w_est, h_est = PlateRectifier.polygon_wh_px(local_polygon)
-                        h = max(40, int(h_est))  
-                        
-                        aspect_ratio = float(w_est) / float(h)
+                        # Ważne: o typie tablicy decydujemy na podstawie NATURALNYCH
+                        # proporcji polygonu, a nie na podstawie wysokości podbitej
+                        # do minimalnego rozmiaru roboczego. Wcześniej clamp `h>=40`
+                        # sztucznie obniżał aspect ratio małych, ale długich tablic
+                        # i błędnie klasyfikował je jako "square".
+                        native_h = max(1.0, float(h_est))
+                        aspect_ratio = float(w_est) / native_h
+                        h = max(40, int(round(native_h)))
                         
                         # --- 1. PROSTOWANIE Z ZACHOWANIEM NATURALNYCH PROPORCJI ---
                         if aspect_ratio < 2.5:

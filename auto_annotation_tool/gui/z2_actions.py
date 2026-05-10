@@ -42,6 +42,42 @@ class Z2Action:
     def get_description(self, ctx: Z2ActionContext) -> str:
         return ""
 
+    label = "Praca ręczna na runie Z2"
+
+    def get_description(self, ctx: Z2ActionContext) -> str:
+        if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
+                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                )
+            return (
+                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
+                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
+            )
+        return (
+            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
+            "albo wskaż dowolny run Z2 do korekty."
+        )
+
+    label = "Praca ręczna na runie Z2"
+
+    def get_description(self, ctx: Z2ActionContext) -> str:
+        if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
+                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                )
+            return (
+                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
+                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
+            )
+        return (
+            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
+            "albo wskaż dowolny run Z2 do korekty."
+        )
+
     def activate(self, host, ctx: Z2ActionContext) -> None:
         raise NotImplementedError
 
@@ -70,6 +106,24 @@ class PlateManualAction(Z2Action):
                 except Exception:
                     return True
         return True
+
+    label = "Praca ręczna na runie Z2"
+
+    def get_description(self, ctx: Z2ActionContext) -> str:
+        if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
+                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                )
+            return (
+                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
+                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
+            )
+        return (
+            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
+            "albo wskaż dowolny run Z2 do korekty."
+        )
     label = "Anotacja ręczna tablic"
 
     def get_description(self, ctx: Z2ActionContext) -> str:
@@ -217,6 +271,27 @@ class PlateManualAction(Z2Action):
         host._select_free_mode_route("manual")
 
 
+def _plate_manual_action_description_override(self, ctx: Z2ActionContext) -> str:
+    if ctx.mode == "campaign":
+        if ctx.campaign_repair_mode:
+            return (
+                "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
+                "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+            )
+        return (
+            "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
+            "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
+        )
+    return (
+        "Utwórz nowy run ręczny, otwórz lokalny run z historii "
+        "albo wskaż dowolny run Z2 do korekty."
+    )
+
+
+PlateManualAction.label = "Praca ręczna na runie Z2"
+PlateManualAction.get_description = _plate_manual_action_description_override
+
+
 class PlateAutoAction(Z2Action):
     id = "plate_auto"
     label = "Autoanotacja tablic"
@@ -225,7 +300,7 @@ class PlateAutoAction(Z2Action):
         if ctx.mode == "campaign":
             if ctx.campaign_repair_mode:
                 return False
-            return bool(ctx.has_plate_model)
+            return True
         return True
 
     def is_enabled(self, ctx: Z2ActionContext) -> bool:
@@ -234,7 +309,7 @@ class PlateAutoAction(Z2Action):
         if ctx.mode == "campaign":
             if ctx.campaign_repair_mode:
                 return False
-            return bool(ctx.has_plate_model)
+            return True
         return True
 
     def get_description(self, ctx: Z2ActionContext) -> str:
@@ -250,8 +325,8 @@ class PlateAutoAction(Z2Action):
                     "a potem od razu otwiera wynik do ręcznej korekty w tym samym Z2."
                 )
             return (
-                "Opcja pojawi się, gdy projekt ma aktywny model tablic. "
-                "Do tego czasu pracujesz ręcznie na obrazach widocznych na liście wyników anotacji."
+                "Możesz uruchomić autoanotację nawet bez aktywnego modelu projektu. "
+                "Przy starcie wybierzesz wtedy model tylko dla tego runu Z2 albo od razu ustawisz go jako model projektu."
             )
         return "Uruchom YOLO, zapisz run anotacji Z2 w workspace i przejdź potem do korekty oraz splitu."
 

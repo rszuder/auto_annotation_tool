@@ -5,6 +5,7 @@ Menadżer Kampanii ALPR (Active Learning Wizard) - Wersja Multi-Project.
 Zarządza listą projektów, iteracjami i fizycznym czyszczeniem dysku.
 """
 
+import hashlib
 import json
 import uuid
 import re
@@ -22,6 +23,7 @@ class CampaignManager:
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
         self.state = self._load_state()
         self._plate_approved_stats_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
+        self._artifact_registry_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
 
     @staticmethod
     def _iter_project_workspace_dirs(root: Path) -> list[Path]:
@@ -57,6 +59,9 @@ class CampaignManager:
             "master_pool_dir": "",
             "ingest_batch_size": 200,
             "project_start_mode": "",
+            "project_start_scope_plate_run": "",
+            "project_start_scope_plate_model": "",
+            "project_start_scope_char_model": "",
             "step1_status": "pending",
             "iteration_target": "",
             "last_iteration_target": "",
@@ -69,11 +74,13 @@ class CampaignManager:
             "step4_finish_ready": False,
             "step4_last_run_id": "",
             "step4_last_target": "",
+            "step4_last_iteration": 0,
             "step3_extract_entry_mode": "",
             "step3_extract_workflow_step": "entry",
             "step3_extract_annotation_run_dir": "",
             "step3_extract_xml_path": "",
             "step3_extract_images_dir": "",
+            "step3_preview_dir": "",
             "project_status": "active",
             "project_paused_at": "",
             "project_completed_at": "",
@@ -99,6 +106,9 @@ class CampaignManager:
             "current_iteration": 1,
             "current_step": 1,
             "project_start_mode": "",
+            "project_start_scope_plate_run": "",
+            "project_start_scope_plate_model": "",
+            "project_start_scope_char_model": "",
             "step1_status": "pending",
             "step2_status": "pending",
             "step2_staging_run": "",
@@ -113,6 +123,7 @@ class CampaignManager:
             "step4_finish_ready": False,
             "step4_last_run_id": "",
             "step4_last_target": "",
+            "step4_last_iteration": 0,
             "best_vehicle_model": "",
             "best_plate_model": "",
             "best_char_model": "",
@@ -125,6 +136,7 @@ class CampaignManager:
             "step3_extract_annotation_run_dir": "",
             "step3_extract_xml_path": "",
             "step3_extract_images_dir": "",
+            "step3_preview_dir": "",
             "project_status": "active",
             "project_paused_at": "",
             "project_completed_at": "",
@@ -326,6 +338,49 @@ class CampaignManager:
         return self._normalize_project_start_mode(raw_value)
 
     @staticmethod
+    def _normalize_project_start_asset_scope(scope: str | None) -> str:
+        value = str(scope or "").strip().lower()
+        if value in {"project", "freemode", "na"}:
+            return value
+        return ""
+
+    @staticmethod
+    def _project_start_asset_scope_state_key(row_key: str | None) -> str:
+        normalized = str(row_key or "").strip().lower()
+        mapping = {
+            "plate_run": "project_start_scope_plate_run",
+            "plate_model": "project_start_scope_plate_model",
+            "char_model": "project_start_scope_char_model",
+        }
+        return str(mapping.get(normalized) or "").strip()
+
+    def set_project_start_asset_scope(self, row_key: str, scope: str | None, project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+
+        state_key = self._project_start_asset_scope_state_key(row_key)
+        if not state_key:
+            return False
+
+        normalized = self._normalize_project_start_asset_scope(scope)
+        self.state["projects"][project_name][state_key] = normalized
+        self.save_state()
+        return True
+
+    def get_project_start_asset_scope(self, row_key: str, project_name: str = None) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+
+        state_key = self._project_start_asset_scope_state_key(row_key)
+        if not state_key:
+            return ""
+
+        raw_value = self.state["projects"][project_name].get(state_key, "")
+        return self._normalize_project_start_asset_scope(raw_value)
+
+    @staticmethod
     def _normalize_iteration_target(target: str | None) -> str:
         value = str(target or "").strip().lower()
         if value in {"plate", "plates", "tablica", "tablice", "pose"}:
@@ -510,6 +565,7 @@ class CampaignManager:
         self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
         self.state["projects"][act]["step3_extract_xml_path"] = ""
         self.state["projects"][act]["step3_extract_images_dir"] = ""
+        self.state["projects"][act]["step3_preview_dir"] = ""
         self.save_state()
 
     def get_step3_status(self) -> str:
@@ -585,6 +641,7 @@ class CampaignManager:
         self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
         self.state["projects"][act]["step3_extract_xml_path"] = ""
         self.state["projects"][act]["step3_extract_images_dir"] = ""
+        self.state["projects"][act]["step3_preview_dir"] = ""
         self.save_state()
 
     def get_step3_extract_state(self) -> Dict[str, str]:
@@ -606,6 +663,37 @@ class CampaignManager:
             "xml_path": str(project_data.get("step3_extract_xml_path", "") or "").strip(),
             "images_dir": str(project_data.get("step3_extract_images_dir", "") or "").strip(),
         }
+
+    def get_step3_preview_dir(self) -> str:
+        act = self.get_active_project_name()
+        if not act:
+            return ""
+        value = str(self.state["projects"][act].get("step3_preview_dir", "") or "").strip()
+        if value:
+            return value
+
+        try:
+            if self.state_file.exists():
+                loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
+                project_data = dict((loaded.get("projects") or {}).get(act) or {})
+                fallback_value = str(project_data.get("step3_preview_dir", "") or "").strip()
+                if fallback_value:
+                    try:
+                        self.state["projects"][act]["step3_preview_dir"] = fallback_value
+                    except Exception:
+                        pass
+                    return fallback_value
+        except Exception:
+            pass
+
+        return ""
+
+    def set_step3_preview_dir(self, preview_dir: str | None) -> None:
+        act = self.get_active_project_name()
+        if not act:
+            return
+        self.state["projects"][act]["step3_preview_dir"] = str(preview_dir or "").strip()
+        self.save_state()
 
     def set_step3_extract_state(
         self,
@@ -1194,6 +1282,7 @@ class CampaignManager:
         *,
         run_id: str = "",
         target: str = "",
+        iteration_num: int | None = None,
     ) -> None:
         act = self.get_active_project_name()
         if not act:
@@ -1201,9 +1290,15 @@ class CampaignManager:
 
         project_data = self.state["projects"][act]
         is_ready = bool(ready)
+        if iteration_num is None:
+            try:
+                iteration_num = int(project_data.get("current_iteration", 1) or 1)
+            except Exception:
+                iteration_num = 1
         project_data["step4_finish_ready"] = is_ready
         project_data["step4_last_run_id"] = str(run_id or "").strip() if is_ready else ""
         project_data["step4_last_target"] = self._normalize_iteration_target(target) if is_ready else ""
+        project_data["step4_last_iteration"] = int(iteration_num or 0) if is_ready else 0
         self.save_state()
 
     def get_step4_finish_state(self) -> Dict[str, Any]:
@@ -1213,6 +1308,7 @@ class CampaignManager:
                 "ready": False,
                 "run_id": "",
                 "target": "",
+                "iteration": 0,
             }
 
         project_data = self.state["projects"].get(act, {})
@@ -1220,6 +1316,7 @@ class CampaignManager:
             "ready": bool(project_data.get("step4_finish_ready", False)),
             "run_id": str(project_data.get("step4_last_run_id", "") or "").strip(),
             "target": self._normalize_iteration_target(project_data.get("step4_last_target", "")),
+            "iteration": int(project_data.get("step4_last_iteration", 0) or 0),
         }
 
     def set_last_plate_manual_source(
@@ -1301,6 +1398,357 @@ class CampaignManager:
         ingest_dir = state_dir / "ingest"
         ingest_dir.mkdir(parents=True, exist_ok=True)
         return ingest_dir
+
+    def get_artifact_registry_path(self, project_name: str = None) -> Path | None:
+        state_dir = self.get_project_state_dir(project_name)
+        if state_dir is None:
+            return None
+        return state_dir / "artifact_registry.json"
+
+    @staticmethod
+    def _safe_registry_path_value(path_like) -> str:
+        raw_value = str(path_like or "").strip()
+        if not raw_value:
+            return ""
+        try:
+            return str(Path(raw_value).resolve())
+        except Exception:
+            return raw_value
+
+    @staticmethod
+    def _build_registry_path_token(path_like) -> str:
+        raw_value = str(path_like or "").strip()
+        if not raw_value:
+            return ""
+        try:
+            path = Path(raw_value)
+        except Exception:
+            return raw_value
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = raw_value
+        try:
+            stat = path.stat()
+            return (
+                f"{resolved}|"
+                f"{int(getattr(stat, 'st_mtime_ns', 0) or 0)}|"
+                f"{int(getattr(stat, 'st_size', 0) or 0)}"
+            )
+        except Exception:
+            return resolved
+
+    @staticmethod
+    def _normalize_image_set_name(name_like) -> str:
+        raw_value = str(name_like or "").strip()
+        if not raw_value:
+            return ""
+        raw_value = raw_value.replace("\\", "/")
+        try:
+            return str(Path(raw_value).name or "").strip().lower()
+        except Exception:
+            return str(raw_value.rsplit("/", 1)[-1] or "").strip().lower()
+
+    def build_image_name_set_token(
+        self,
+        image_names: List[str] | None = None,
+        *,
+        images_dir: str | Path | None = None,
+    ) -> str:
+        normalized_names: list[str] = []
+
+        for raw_name in list(image_names or []):
+            normalized = self._normalize_image_set_name(raw_name)
+            if normalized:
+                normalized_names.append(normalized)
+
+        if not normalized_names and images_dir:
+            try:
+                images_root = Path(images_dir)
+            except Exception:
+                images_root = None
+            if images_root is not None:
+                try:
+                    if images_root.exists() and images_root.is_dir():
+                        for image_path in images_root.rglob("*"):
+                            try:
+                                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                                    normalized = self._normalize_image_set_name(image_path.name)
+                                    if normalized:
+                                        normalized_names.append(normalized)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+
+        unique_names = sorted(set(normalized_names))
+        if not unique_names:
+            return ""
+
+        digest = hashlib.sha1("\n".join(unique_names).encode("utf-8")).hexdigest()[:20]
+        return f"iset_{len(unique_names):05d}_{digest}"
+
+    @staticmethod
+    def _deep_merge_registry_dict(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in dict(updates or {}).items():
+            if isinstance(value, dict):
+                current = base.get(key)
+                if not isinstance(current, dict):
+                    current = {}
+                base[key] = CampaignManager._deep_merge_registry_dict(dict(current), value)
+            else:
+                base[key] = value
+        return base
+
+    def load_artifact_registry(self, project_name: str = None) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {
+                "project": "",
+                "updated_at": "",
+                "packages": {},
+                "iteration_index": {},
+                "iteration_state": {},
+            }
+
+        registry_path = self.get_artifact_registry_path(project_name)
+        if registry_path is None or not registry_path.exists():
+            return {
+                "project": project_name,
+                "updated_at": "",
+                "packages": {},
+                "iteration_index": {},
+                "iteration_state": {},
+            }
+
+        cache_key = None
+        try:
+            stat = registry_path.stat()
+            cache_key = (
+                project_name,
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(getattr(stat, "st_size", 0) or 0),
+            )
+        except Exception:
+            cache_key = None
+
+        if cache_key is not None:
+            cached = self._artifact_registry_cache.get(cache_key)
+            if isinstance(cached, dict):
+                return dict(cached)
+
+        payload = self._read_json_file(registry_path)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["project"] = str(payload.get("project") or project_name).strip()
+        if not isinstance(payload.get("packages"), dict):
+            payload["packages"] = {}
+        if not isinstance(payload.get("iteration_index"), dict):
+            payload["iteration_index"] = {}
+        if not isinstance(payload.get("iteration_state"), dict):
+            payload["iteration_state"] = {}
+
+        if cache_key is not None:
+            self._artifact_registry_cache[cache_key] = dict(payload)
+        return payload
+
+    def save_artifact_registry(self, payload: Dict[str, Any], project_name: str = None) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+        registry_path = self.get_artifact_registry_path(project_name)
+        if registry_path is None:
+            return False
+        safe_payload = dict(payload or {})
+        safe_payload["project"] = project_name
+        safe_payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        if not isinstance(safe_payload.get("packages"), dict):
+            safe_payload["packages"] = {}
+        if not isinstance(safe_payload.get("iteration_index"), dict):
+            safe_payload["iteration_index"] = {}
+        if not isinstance(safe_payload.get("iteration_state"), dict):
+            safe_payload["iteration_state"] = {}
+        ok = self._write_json_file(registry_path, safe_payload)
+        if ok:
+            self._artifact_registry_cache.clear()
+        return ok
+
+    def upsert_iteration_state(
+        self,
+        *,
+        iteration_num: int | None = None,
+        updates: Dict[str, Any] | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        registry = self.load_artifact_registry(project_name)
+        iteration_state = registry.setdefault("iteration_state", {})
+        if not isinstance(iteration_state, dict):
+            iteration_state = {}
+            registry["iteration_state"] = iteration_state
+
+        entry = dict(iteration_state.get(str(iter_value)) or {})
+        entry.setdefault("project", project_name)
+        entry.setdefault("iteration", iter_value)
+        entry.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
+        entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        updates_dict = dict(updates or {})
+        if updates_dict:
+            entry = self._deep_merge_registry_dict(entry, updates_dict)
+
+        iteration_state[str(iter_value)] = entry
+        if not self.save_artifact_registry(registry, project_name):
+            return {}
+        return dict(entry)
+
+    def get_iteration_state(
+        self,
+        *,
+        iteration_num: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        registry = self.load_artifact_registry(project_name)
+        iteration_state = registry.get("iteration_state", {})
+        if not isinstance(iteration_state, dict):
+            return {}
+        entry = iteration_state.get(str(iter_value))
+        return dict(entry) if isinstance(entry, dict) else {}
+
+    def build_iteration_artifact_package_id(
+        self,
+        images_dir: str | Path | None = None,
+        *,
+        iteration_num: int | None = None,
+        image_set_token: str | None = None,
+        project_name: str = None,
+    ) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+        normalized_images_dir = self._safe_registry_path_value(images_dir)
+        normalized_image_set_token = str(image_set_token or "").strip()
+        if normalized_images_dir and normalized_image_set_token:
+            digest = hashlib.sha1(
+                f"{normalized_images_dir.lower()}::{normalized_image_set_token}".encode("utf-8")
+            ).hexdigest()[:16]
+            return f"pkg_{digest}"
+        if normalized_images_dir:
+            digest = hashlib.sha1(normalized_images_dir.lower().encode("utf-8")).hexdigest()[:16]
+            return f"pkg_{digest}"
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        digest = hashlib.sha1(f"{project_name.lower()}::{iter_value}".encode("utf-8")).hexdigest()[:16]
+        return f"iter_{iter_value:03d}_{digest}"
+
+    def upsert_iteration_artifact_bundle(
+        self,
+        *,
+        images_dir: str | Path | None = None,
+        iteration_num: int | None = None,
+        image_set_token: str | None = None,
+        updates: Dict[str, Any] | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        normalized_images_dir = self._safe_registry_path_value(images_dir or self.get_master_pool_dir(project_name))
+        registry = self.load_artifact_registry(project_name)
+        packages = registry.setdefault("packages", {})
+        iteration_index = registry.setdefault("iteration_index", {})
+        existing_package_id = str((iteration_index or {}).get(str(iter_value), "") or "").strip()
+        existing_package = dict(packages.get(existing_package_id) or {}) if existing_package_id else {}
+        updates_dict = dict(updates or {})
+        updates_image_source = dict(updates_dict.get("image_source") or {})
+        resolved_image_set_token = str(
+            image_set_token
+            or updates_image_source.get("image_set_token")
+            or dict(existing_package.get("image_source") or {}).get("image_set_token")
+            or ""
+        ).strip()
+
+        package_id = self.build_iteration_artifact_package_id(
+            normalized_images_dir,
+            iteration_num=iter_value,
+            image_set_token=resolved_image_set_token,
+            project_name=project_name,
+        )
+        if not package_id:
+            return {}
+
+        package = dict(packages.get(package_id) or existing_package or {})
+        package.setdefault("package_id", package_id)
+        package.setdefault("project", project_name)
+        package.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
+        package["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        package["iteration_first_seen"] = int(package.get("iteration_first_seen", iter_value) or iter_value)
+        package["iteration_last_seen"] = int(iter_value)
+        package["images_dir"] = normalized_images_dir or str(package.get("images_dir", "") or "").strip()
+        package["images_token"] = self._build_registry_path_token(package.get("images_dir"))
+        iterations = {
+            int(value)
+            for value in list(package.get("iterations") or [])
+            if str(value).strip().isdigit()
+        }
+        iterations.add(iter_value)
+        package["iterations"] = sorted(iterations)
+
+        if updates_dict:
+            package = self._deep_merge_registry_dict(package, updates_dict)
+
+        if existing_package_id and existing_package_id != package_id:
+            try:
+                packages.pop(existing_package_id, None)
+            except Exception:
+                pass
+        packages[package_id] = package
+        iteration_index[str(iter_value)] = package_id
+        if not self.save_artifact_registry(registry, project_name):
+            return {}
+        return dict(package)
+
+    def get_iteration_artifact_bundle(
+        self,
+        *,
+        images_dir: str | Path | None = None,
+        iteration_num: int | None = None,
+        image_set_token: str | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+        registry = self.load_artifact_registry(project_name)
+        packages = registry.get("packages", {})
+        if not isinstance(packages, dict):
+            return {}
+
+        normalized_images_dir = self._safe_registry_path_value(images_dir)
+        if normalized_images_dir:
+            package_id = self.build_iteration_artifact_package_id(
+                normalized_images_dir,
+                iteration_num=iteration_num,
+                image_set_token=image_set_token,
+                project_name=project_name,
+            )
+            package = packages.get(package_id)
+            if isinstance(package, dict):
+                return dict(package)
+
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        package_id = str((registry.get("iteration_index") or {}).get(str(iter_value), "") or "").strip()
+        package = packages.get(package_id)
+        return dict(package) if isinstance(package, dict) else {}
 
     def get_active_project_root_dir(self) -> Path | None:
         act = self.get_active_project_name()
@@ -1896,6 +2344,9 @@ class CampaignManager:
             "target_dir": str(target_dir.resolve()),
             "master_pool_dir": str(master_pool_dir.resolve()) if master_pool_dir else "",
             "selected_count": len(selected_images),
+            "image_set_token": self.build_image_name_set_token(
+                [str(item.get("name") or "").strip() for item in selected_images]
+            ),
             "char_histogram": {k: int(v) for k, v in total_hist.items() if int(v) > 0},
             "selected_images": selected_images,
             "proposal_summary": proposal_summary or {},
