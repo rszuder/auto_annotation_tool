@@ -1183,13 +1183,7 @@ class AutoAnnotationApp:
         return bool(self.campaign_free_mode) or not active_project
 
     def _load_active_main_tab_preference(self) -> str:
-        try:
-            if not SESSION:
-                return "annotation"
-            saved = str(SESSION.get("ui", "active_main_tab", "annotation") or "").strip()
-            return saved if saved in self.tabs else "annotation"
-        except Exception:
-            return "annotation"
+        return "campaign" if "campaign" in self.tabs else "annotation"
 
     def _save_active_main_tab_preference(self, tab_key: str | None = None):
         try:
@@ -1206,9 +1200,6 @@ class AutoAnnotationApp:
             logger.debug(f"Nie udalo sie zapisac ostatniej zakladki: {e}")
 
     def _restore_active_main_tab_preference(self):
-        if not self._is_free_mode_session_context():
-            return
-
         tab_key = self._load_active_main_tab_preference()
         if tab_key not in self.tabs:
             return
@@ -2411,6 +2402,24 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
+    def _build_themed_dialog_surface(self, dialog, *, tone: str = "info"):
+        palette = self.palette
+        tone_colors = {
+            "info": palette["accent"],
+            "warning": palette["warning"],
+            "error": palette["error"],
+            "success": palette["success"],
+        }
+        header_color = tone_colors.get(tone, palette["accent"])
+        dialog.configure(bg=palette["panel"])
+
+        accent_bar = tk.Frame(dialog, bg=header_color, height=5, bd=0, highlightthickness=0)
+        accent_bar.pack(fill=tk.X, side=tk.TOP)
+
+        body = tk.Frame(dialog, bg=palette["panel"], bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True)
+        return body
+
     def themed_message_dialog(
         self,
         title: str,
@@ -2424,35 +2433,10 @@ class AutoAnnotationApp:
         buttons = list(buttons or ["OK"])
         default_button = default_button or buttons[0]
         palette = self.palette
-        tone_colors = {
-            "info": palette["accent"],
-            "warning": palette["warning"],
-            "error": palette["error"],
-            "success": palette["success"],
-        }
-        header_color = tone_colors.get(tone, palette["accent"])
 
-        dialog = tk.Toplevel(self.root)
+        dialog = tk.Toplevel(parent or self.root)
         self.style_dialog_window(dialog, title=title, geometry="520x240", parent=parent)
-
-        shell = tk.Frame(dialog, bg=palette["bg"], bd=1, highlightthickness=1, highlightbackground=palette["border"])
-        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
-
-        header = tk.Frame(shell, bg=header_color, height=8)
-        header.pack(fill=tk.X)
-
-        body = tk.Frame(shell, bg=palette["panel"])
-        body.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(
-            body,
-            text=title,
-            bg=palette["panel"],
-            fg=palette["fg"],
-            font=("Segoe UI", 11, "bold"),
-            anchor="w",
-            justify=tk.LEFT,
-        ).pack(fill=tk.X, padx=16, pady=(16, 8))
+        body = self._build_themed_dialog_surface(dialog, tone=tone)
 
         tk.Label(
             body,
@@ -2463,12 +2447,12 @@ class AutoAnnotationApp:
             wraplength=wraplength,
             justify=tk.LEFT,
             anchor="w",
-        ).pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        ).pack(fill=tk.BOTH, expand=True, padx=18, pady=(18, 16))
 
         result = {"value": None}
 
         btn_row = tk.Frame(body, bg=palette["panel"])
-        btn_row.pack(fill=tk.X, padx=16, pady=(0, 16))
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 18))
 
         def close_with(value):
             result["value"] = value
@@ -2582,23 +2566,9 @@ class AutoAnnotationApp:
         initial_value: str = "",
     ):
         palette = self.palette
-        dialog = tk.Toplevel(self.root)
+        dialog = tk.Toplevel(parent or self.root)
         self.style_dialog_window(dialog, title=title, geometry="520x240", parent=parent)
-
-        shell = tk.Frame(dialog, bg=palette["bg"], bd=1, highlightthickness=1, highlightbackground=palette["border"])
-        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
-
-        body = tk.Frame(shell, bg=palette["panel"])
-        body.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(
-            body,
-            text=title,
-            bg=palette["panel"],
-            fg=palette["fg"],
-            font=("Segoe UI", 11, "bold"),
-            anchor="w",
-        ).pack(fill=tk.X, padx=16, pady=(16, 8))
+        body = self._build_themed_dialog_surface(dialog, tone="info")
 
         tk.Label(
             body,
@@ -2609,11 +2579,11 @@ class AutoAnnotationApp:
             wraplength=440,
             justify=tk.LEFT,
             anchor="w",
-        ).pack(fill=tk.X, padx=16, pady=(0, 8))
+        ).pack(fill=tk.X, padx=18, pady=(18, 8))
 
         value_var = tk.StringVar(value=initial_value)
         entry = ttk.Entry(body, textvariable=value_var)
-        entry.pack(fill=tk.X, padx=16, pady=(0, 16))
+        entry.pack(fill=tk.X, padx=18, pady=(0, 16))
         entry.focus_set()
         entry.selection_range(0, tk.END)
 
@@ -2627,7 +2597,7 @@ class AutoAnnotationApp:
             dialog.destroy()
 
         btn_row = tk.Frame(body, bg=palette["panel"])
-        btn_row.pack(fill=tk.X, padx=16, pady=(0, 16))
+        btn_row.pack(fill=tk.X, padx=18, pady=(0, 18))
         ttk.Button(btn_row, text=action_label, command=accept, style="Accent.TButton").pack(side=tk.RIGHT)
         ttk.Button(btn_row, text="Anuluj", command=cancel).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -5088,6 +5058,18 @@ class AutoAnnotationApp:
                         self.root.after_idle(ensure_preview)
             except Exception:
                 pass
+        elif selected_key == "training":
+            try:
+                training_tab = getattr(self, "tabs", {}).get("training")
+                ensure_layout = (
+                    getattr(training_tab, "ensure_visible_layout_ready", None)
+                    if training_tab is not None
+                    else None
+                )
+                if callable(ensure_layout):
+                    self.root.after_idle(ensure_layout)
+            except Exception:
+                pass
         if selected_key in {"annotation", "characters", "training"}:
             self._last_allowed_main_tab_key = selected_key
         self._save_active_main_tab_preference()
@@ -5124,6 +5106,25 @@ class AutoAnnotationApp:
             except Exception:
                 pass
 
+            for attr_name in (
+                "_window_restore_after_id",
+                "_window_restore_topmost_after_id",
+                "_theme_refresh_after_id",
+                "_startup_finalize_after_id",
+                "_help_overlay_place_after_id",
+            ):
+                pending = getattr(self, attr_name, None)
+                if not pending:
+                    continue
+                try:
+                    self.root.after_cancel(pending)
+                except Exception:
+                    pass
+                try:
+                    setattr(self, attr_name, None)
+                except Exception:
+                    pass
+
             for tab_name, tab in getattr(self, "tabs", {}).items():
                 try:
                     flush_session = getattr(tab, "flush_free_mode_session_state", None)
@@ -5146,9 +5147,23 @@ class AutoAnnotationApp:
                     pass
 
                 try:
+                    on_app_close = getattr(tab, "_on_app_close", None)
+                    if callable(on_app_close):
+                        try:
+                            on_app_close(None)
+                        except TypeError:
+                            on_app_close()
+                except Exception:
+                    pass
+
+                try:
                     trainer = getattr(tab, "trainer", None)
-                    if trainer is not None and hasattr(trainer, "stop_training"):
-                        trainer.stop_training()
+                    if trainer is not None:
+                        shutdown = getattr(trainer, "shutdown", None)
+                        if callable(shutdown):
+                            shutdown()
+                        elif hasattr(trainer, "stop_training"):
+                            trainer.stop_training()
                 except Exception:
                     pass
 

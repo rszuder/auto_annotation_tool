@@ -30,6 +30,7 @@ from ..ocr import PlateOCR
 from ..data_models import ImageAnnotation, Detection
 from ..training.dataset_splitter import DatasetSplitter
 from ..project_cache import PROJECT_CACHE
+from ..utils import cleanup_gpu_memory
 from ..validators import validate_yolo_dataset
 from .help_manager import HELP
 from .guided_action_card import GuidedActionCard
@@ -262,6 +263,13 @@ class SlimProgressBar(tk.Canvas):
 
 
 class CharacterAnnotationTab:
+    def release_gpu_resources_for_training(self) -> None:
+        """Zwalnia pamięć GPU używaną chwilowo przez OCR/YOLO w Z3."""
+        try:
+            cleanup_gpu_memory()
+        except Exception as e:
+            logger.debug(f"Nie udało się wyczyścić pamięci GPU po Z3: {e}")
+
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
@@ -1070,13 +1078,20 @@ class CharacterAnnotationTab:
 
     def _capture_preview_reextract_seed_metadata(self) -> dict:
         seed_source = {}
+        preview_dir = None
         if isinstance(getattr(self, "preview_metadata", None), dict) and self.preview_metadata:
             seed_source = copy.deepcopy(self.preview_metadata)
+            try:
+                preview_dir_raw = str(self.preview_dir_var.get() or "").strip()
+                preview_dir = Path(preview_dir_raw) if preview_dir_raw else None
+            except Exception:
+                preview_dir = None
         else:
             preview_dir_raw = str(self.preview_dir_var.get() or "").strip()
             if preview_dir_raw:
                 meta_path = Path(preview_dir_raw) / "metadata.json"
                 seed_source = self._load_json_file_safely(meta_path)
+                preview_dir = Path(preview_dir_raw)
 
         if not isinstance(seed_source, dict):
             return {}
@@ -1088,7 +1103,14 @@ class CharacterAnnotationTab:
             match_key = self._build_preview_plate_reextract_match_key(raw_data)
             if not match_key or match_key in seed_lookup:
                 continue
-            seed_lookup[match_key] = copy.deepcopy(raw_data)
+            seed_payload = copy.deepcopy(raw_data)
+            try:
+                seed_size = self._get_preview_plate_image_size(preview_dir, str(_pid or "").strip())
+            except Exception:
+                seed_size = None
+            if seed_size:
+                seed_payload["_seed_image_size"] = [int(seed_size[0]), int(seed_size[1])]
+            seed_lookup[match_key] = seed_payload
         return seed_lookup
 
     @staticmethod
@@ -1146,12 +1168,76 @@ class CharacterAnnotationTab:
                 match_key = self._build_preview_plate_reextract_match_key(raw_data)
                 if not match_key or match_key in seed_lookup:
                     continue
-                seed_lookup[match_key] = copy.deepcopy(raw_data)
+                seed_payload = copy.deepcopy(raw_data)
+                try:
+                    seed_size = self._get_preview_plate_image_size(meta_path.parent, str(_pid or "").strip())
+                except Exception:
+                    seed_size = None
+                if seed_size:
+                    seed_payload["_seed_image_size"] = [int(seed_size[0]), int(seed_size[1])]
+                seed_lookup[match_key] = seed_payload
             if seed_lookup:
                 # najnowszy sensowny run zwykle wystarcza; jeśli już coś znaleźliśmy,
                 # nie schodzimy dalej, żeby nie mieszać bardzo starych poprawek.
                 break
         return seed_lookup
+
+    def _scale_preview_char_records_to_new_size(self, records, from_size, to_size):
+        if not isinstance(records, list):
+            return copy.deepcopy(records)
+        try:
+            from_w, from_h = (float(from_size[0]), float(from_size[1]))
+            to_w, to_h = (float(to_size[0]), float(to_size[1]))
+        except Exception:
+            return copy.deepcopy(records)
+
+        if from_w <= 0 or from_h <= 0 or to_w <= 0 or to_h <= 0:
+            return copy.deepcopy(records)
+
+        scale_x = to_w / from_w
+        scale_y = to_h / from_h
+        scaled_records = []
+        for rec in list(records or []):
+            cloned = copy.deepcopy(rec)
+            bbox = self._char_record_bbox(cloned)
+            if not bbox:
+                scaled_records.append(cloned)
+                continue
+            x1, y1, x2, y2 = bbox
+            scaled_bbox = [
+                max(0.0, min(to_w, float(x1) * scale_x)),
+                max(0.0, min(to_h, float(y1) * scale_y)),
+                max(0.0, min(to_w, float(x2) * scale_x)),
+                max(0.0, min(to_h, float(y2) * scale_y)),
+            ]
+            if scaled_bbox[2] < scaled_bbox[0]:
+                scaled_bbox[0], scaled_bbox[2] = scaled_bbox[2], scaled_bbox[0]
+            if scaled_bbox[3] < scaled_bbox[1]:
+                scaled_bbox[1], scaled_bbox[3] = scaled_bbox[3], scaled_bbox[1]
+            if isinstance(cloned, dict):
+                cloned["bbox"] = [float(v) for v in scaled_bbox]
+            else:
+                try:
+                    cloned.bbox = tuple(float(v) for v in scaled_bbox)
+                except Exception:
+                    pass
+            scaled_records.append(cloned)
+        return scaled_records
+
+    def _adapt_reextract_seed_payload_to_current_preview(self, previous: dict, preview_dir: Path, pid: str) -> dict:
+        adapted = copy.deepcopy(previous)
+        from_size = adapted.get("_seed_image_size")
+        to_size = self._get_preview_plate_image_size(preview_dir, pid)
+        if from_size and to_size and list(from_size) != [int(to_size[0]), int(to_size[1])]:
+            for key_name in ("characters", "yolo_detections", "yolo_nms_detections", "yolo_raw_detections"):
+                if key_name in adapted:
+                    adapted[key_name] = self._scale_preview_char_records_to_new_size(
+                        adapted.get(key_name),
+                        from_size,
+                        to_size,
+                    )
+        adapted.pop("_seed_image_size", None)
+        return adapted
 
     def _merge_reextract_seed_metadata_into_preview(self, preview_dir: Path | None, seed_lookup: dict | None = None) -> dict:
         if preview_dir is None:
@@ -1193,6 +1279,11 @@ class CharacterAnnotationTab:
             previous = previous_lookup.get(match_key)
             if not isinstance(previous, dict):
                 continue
+            previous = self._adapt_reextract_seed_payload_to_current_preview(
+                previous,
+                Path(preview_dir),
+                str(pid or "").strip(),
+            )
             for key_name in preserve_keys:
                 if key_name in previous:
                     raw_data[key_name] = copy.deepcopy(previous.get(key_name))
@@ -2783,11 +2874,11 @@ class CharacterAnnotationTab:
     def _prompt_preview_char_symbol(self, initial_value: str = ""):
         current_value = self._sanitize_preview_char_symbol(initial_value)
         while True:
-            value = simpledialog.askstring(
-                "Znak tablicy",
-                "Podaj pojedynczy znak [0-9, A-Z]:",
-                parent=self.frame,
-                initialvalue=current_value,
+            value = self._prompt_dark_text_input(
+                title="Znak tablicy",
+                prompt="Podaj pojedynczy znak [0-9, A-Z]:",
+                initial_value=current_value,
+                width=420,
             )
             if value is None:
                 return None
@@ -2795,6 +2886,129 @@ class CharacterAnnotationTab:
             if normalized:
                 return normalized
             messagebox.showerror("Nieprawidlowy znak", "Wpisz pojedynczy znak z zakresu 0-9 lub A-Z.")
+
+    def _prompt_dark_text_input(
+        self,
+        *,
+        title: str,
+        prompt: str,
+        initial_value: str = "",
+        width: int = 520,
+    ) -> str | None:
+        result = {"value": None}
+        palette = getattr(self.app, "palette", {}) or {}
+
+        dialog = tk.Toplevel(self.frame)
+        try:
+            dialog.withdraw()
+        except Exception:
+            pass
+
+        dialog_styler = getattr(self.app, "style_dialog_window", None)
+        if callable(dialog_styler):
+            try:
+                dialog_styler(
+                    dialog,
+                    title=str(title or "").strip(),
+                    geometry=f"{int(max(420, width))}x220",
+                    parent=self.frame,
+                )
+            except Exception:
+                try:
+                    dialog.title(str(title or "").strip())
+                    dialog.resizable(False, False)
+                except Exception:
+                    pass
+        else:
+            try:
+                dialog.title(str(title or "").strip())
+                dialog.resizable(False, False)
+            except Exception:
+                pass
+
+        panel_bg = palette.get("panel", "#252526")
+        field_bg = palette.get("field", palette.get("panel_alt", "#2d2d30"))
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+
+        try:
+            dialog.configure(bg=panel_bg, highlightbackground=panel_bg, highlightcolor=panel_bg)
+        except Exception:
+            pass
+
+        body_surface_builder = getattr(self.app, "_build_themed_dialog_surface", None)
+        if callable(body_surface_builder):
+            try:
+                body_surface = body_surface_builder(dialog, tone="info")
+            except Exception:
+                body_surface = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+                body_surface.pack(fill=tk.BOTH, expand=True)
+        else:
+            body_surface = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+            body_surface.pack(fill=tk.BOTH, expand=True)
+
+        body = tk.Frame(body_surface, bg=panel_bg, bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        tk.Label(
+            body,
+            text=str(prompt or "").strip(),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=max(360, int(width) - 100),
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        entry = tk.Entry(
+            body,
+            bd=0,
+            highlightthickness=1,
+            relief=tk.FLAT,
+            bg=field_bg,
+            fg=fg,
+            insertbackground=fg,
+            highlightbackground=border,
+            highlightcolor=border,
+        )
+        entry.pack(fill=tk.X, pady=(12, 0), ipady=6)
+        try:
+            entry.insert(0, str(initial_value or ""))
+            entry.selection_range(0, tk.END)
+        except Exception:
+            pass
+
+        buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        buttons.pack(fill=tk.X, pady=(16, 0))
+
+        def _close(value):
+            result["value"] = value
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(buttons, text="Anuluj", command=lambda: _close(None)).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="OK", command=lambda: _close(entry.get())).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            dialog.bind("<Return>", lambda _e: _close(entry.get()))
+            dialog.bind("<Escape>", lambda _e: _close(None))
+        except Exception:
+            pass
+
+        try:
+            dialog.update_idletasks()
+            dialog.deiconify()
+            dialog.lift()
+            entry.focus_force()
+        except Exception:
+            pass
+
+        dialog.wait_window()
+        return result.get("value")
 
     def _persist_active_preview_characters(self, *, selected_record=None, success_message: str):
         data = self._get_preview_active_data(create=True)
@@ -2867,136 +3081,40 @@ class CharacterAnnotationTab:
         return "break"
 
     def _edit_preview_source_filename(self, event=None):
-        data = self._get_preview_active_data(create=False)
-        if not isinstance(data, dict):
-            self._set_preview_box_info("Najpierw wybierz tablice do korekty nazwy pliku.", "warning")
-            return "break"
-
-        source_path = self._resolve_preview_source_image_path(data)
-        if source_path is None:
-            self._update_preview_edit_status(
-                "Nie udało się odnalezc fizycznego pliku źródłowego do twardej zmiany nazwy.",
-                tone="warning",
-            )
-            self._focus_preview_canvas()
-            return "break"
-
-        current_name = str(source_path.name or self._get_preview_source_filename(data) or "").strip()
-        initial_value = current_name or str(getattr(self, "_preview_active_pid", "") or "")
-        next_value = simpledialog.askstring(
-            "Nazwa pliku źródłowego",
-            "Podaj nowa nazwe pliku źródłowego.\nProgram zmieni fizycznie nazwe pliku w tym samym katalogu.",
-            parent=self.frame,
-            initialvalue=initial_value,
-        )
-        if next_value is None:
-            self._focus_preview_canvas()
-            return "break"
-
-        candidate_name = str(next_value or "").strip()
-        if not candidate_name:
-            self._update_preview_edit_status("Nazwa pliku nie może być pusta.", tone="warning")
-            self._focus_preview_canvas()
-            return "break"
-        if "/" in candidate_name or "\\" in candidate_name:
-            messagebox.showerror("Nieprawidłowa nazwa", "Podaj sama nazwe pliku bez ścieżki katalogu.")
-            self._focus_preview_canvas()
-            return "break"
-
-        current_suffix = str(source_path.suffix or "")
-        if current_suffix and not Path(candidate_name).suffix:
-            candidate_name = f"{candidate_name}{current_suffix}"
-        if candidate_name in {".", ".."}:
-            self._update_preview_edit_status("Podaj poprawna nazwe pliku źródłowego.", tone="warning")
-            self._focus_preview_canvas()
-            return "break"
-        if candidate_name == current_name:
-            self._update_preview_edit_status("Nazwa pliku źródłowego nie ulegla zmianie.", tone="muted")
-            self._focus_preview_canvas()
-            return "break"
-
         try:
-            source_path = source_path.resolve()
+            from ..campaign_manager import CAMPAIGN
+
+            in_campaign = bool(CAMPAIGN.get_active_project_name())
         except Exception:
-            try:
-                source_path = source_path.absolute()
-            except Exception:
-                pass
+            in_campaign = False
 
-        target_path = source_path.with_name(candidate_name)
-        if self._normalize_preview_source_path_key(str(target_path)) == self._normalize_preview_source_path_key(str(source_path)):
-            self._update_preview_edit_status("Nazwa pliku źródłowego nie ulegla zmianie.", tone="muted")
-            self._focus_preview_canvas()
-            return "break"
-        if target_path.exists():
-            messagebox.showerror(
-                "Plik już istnieje",
-                f"Nie można zmienic nazwy, bo w tym katalogu istnieje już plik:\n{target_path.name}",
+        guidance_lines = [
+            "Zmianę nazwy pliku źródłowego wykonuj w Z2, a nie w Z3/PZ2.",
+            "",
+            "Dlaczego:",
+            "• Z2 pracuje jeszcze na obrazie źródłowym i całym workflow tablic.",
+            "• Z3 powinno służyć już do pracy na wyciętych tablicach i znakach.",
+            "",
+            "W Z2 zmienisz nazwę bezpieczniej, zanim dane zostaną użyte w kolejnych etapach.",
+        ]
+        if in_campaign:
+            guidance_lines.extend(
+                [
+                    "",
+                    "Przejdź do wizarda i wróć do Z2, aby wykonać zmianę nazwy na właściwym etapie.",
+                ]
             )
-            self._focus_preview_canvas()
-            return "break"
 
-        try:
-            source_path.rename(target_path)
-        except Exception as exc:
-            messagebox.showerror(
-                "Nie udało się zmienic nazwy pliku",
-                f"Nie można zmienic nazwy pliku źródłowego na dysku:\n{exc}",
-            )
-            self._update_preview_edit_status("Twarda zmiana nazwy pliku nie powiodla się.", tone="warning")
-            self._focus_preview_canvas()
-            return "break"
-
-        old_key = self._normalize_preview_source_path_key(str(source_path))
-        new_path_str = str(target_path)
-        affected_pids = []
-        for pid, raw_data in list(getattr(self, "preview_metadata", {}).items()):
-            if not isinstance(raw_data, dict):
-                continue
-            source_image_value = str(raw_data.get("source_image", "") or "").strip()
-            if self._normalize_preview_source_path_key(source_image_value) != old_key:
-                continue
-
-            affected_pids.append(str(pid))
-            raw_data["source_image"] = new_path_str
-
-            raw_filename = str(raw_data.get("filename", "") or "").strip()
-            if raw_filename:
-                raw_data["filename"] = self._replace_preview_source_filename(raw_filename, candidate_name)
-
-            raw_source_name = str(raw_data.get("source_name", "") or "").strip()
-            if raw_source_name:
-                raw_data["source_name"] = self._replace_preview_source_filename(raw_source_name, candidate_name)
-
-        self._recalculate_preview_statuses_in_metadata(self.preview_metadata)
-
-        for pid in affected_pids:
-            undo_stack = self._get_preview_history_stack("undo", pid, create=False)
-            redo_stack = self._get_preview_history_stack("redo", pid, create=False)
-            if isinstance(undo_stack, list):
-                undo_stack.clear()
-            if isinstance(redo_stack, list):
-                redo_stack.clear()
-
-        self._rebuild_preview_listbox(preserve_selection=True)
-
-        active_chars = self._get_preview_active_character_records(create=False)
-        status_now = self._derive_preview_status_from_data(self._get_preview_active_data(create=False), active_chars)
-        status_suffix = "Status tablicy: OK." if status_now == "perfect" else "Status tablicy: wymaga korekty."
-        affected_count = len(affected_pids) if affected_pids else 1
-        self._refresh_preview_live_metadata_ui(
-            status_message=(
-                f"Zmieniono fizycznie nazwe pliku źródłowego na {candidate_name} "
-                f"i zaktualizowano {affected_count} powiazane rekordy. {status_suffix}"
-            ),
-            status_tone=("success" if status_now == "perfect" else "info"),
-            render_preview=True,
+        messagebox.showinfo(
+            "Zmiana nazwy w Z2",
+            "\n".join(guidance_lines),
+            parent=self.frame.winfo_toplevel() if self.frame is not None else None,
         )
-        try:
-            self.frame.update_idletasks()
-        except Exception:
-            pass
-        self._persist_preview_metadata(success_message=None, refresh_list=False)
+        self._update_preview_edit_status(
+            "Zmianę nazwy pliku źródłowego przenieśliśmy do Z2. W Z3/PZ2 ta operacja jest już tylko informacyjna.",
+            tone="info",
+        )
+        self._focus_preview_canvas()
         return "break"
 
     def _delete_selected_preview_char_box(self, event=None):
@@ -4407,6 +4525,24 @@ class CharacterAnnotationTab:
                 return candidate
         return None
 
+    def _get_preview_plate_image_size(self, preview_dir: Path | None, pid: str) -> tuple[int, int] | None:
+        try:
+            if preview_dir is None:
+                return None
+            images_dir = Path(preview_dir) / "images"
+            img_path = self._find_preview_plate_image_path(images_dir, pid)
+            if img_path is None:
+                return None
+            img = cv2.imread(str(img_path))
+            if img is None:
+                return None
+            h, w = img.shape[:2]
+            if h <= 0 or w <= 0:
+                return None
+            return int(w), int(h)
+        except Exception:
+            return None
+
     def _build_live_ocr_sample_pool(self) -> list[dict]:
         preview_dir_raw = str(self.preview_dir_var.get() or "").strip()
         if not preview_dir_raw or not self.preview_plate_ids:
@@ -4696,7 +4832,26 @@ class CharacterAnnotationTab:
         """
         Przywraca ostatnią paczkę preview projektu, jeśli istnieje.
         """
-        preview_dir = self._find_latest_preview_run_dir(require_plates=require_plates)
+        preview_dir = ""
+        try:
+            saved_preview_dir = str(CAMPAIGN.get_step3_preview_dir() or "").strip()
+        except Exception:
+            saved_preview_dir = ""
+        if saved_preview_dir:
+            try:
+                candidate = Path(saved_preview_dir)
+                if (
+                    candidate.exists()
+                    and candidate.is_dir()
+                    and (candidate / "metadata.json").exists()
+                    and (candidate / "images").exists()
+                    and (not require_plates or self._preview_dir_has_plate_entries(candidate))
+                ):
+                    preview_dir = str(candidate)
+            except Exception:
+                preview_dir = ""
+        if not preview_dir:
+            preview_dir = self._find_latest_preview_run_dir(require_plates=require_plates)
         if not preview_dir:
             return False
 
@@ -5908,6 +6063,37 @@ class CharacterAnnotationTab:
             "selected_char_count": int(selected_char_count),
         }
 
+    def _build_campaign_aware_gold_export_counts(self, *, selected_strategies=None, selected_sources=None):
+        try:
+            in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        except Exception:
+            in_campaign = False
+
+        if in_campaign:
+            contextual = self._build_contextual_gold_export_counts(
+                selected_strategies=selected_strategies,
+                selected_sources=selected_sources,
+            )
+            strategy_counts = dict(contextual.get("strategy_counts", {}) or {})
+            strategy_char_counts = dict(contextual.get("strategy_char_counts", {}) or {})
+            source_counts = dict(contextual.get("source_counts", {}) or {})
+            source_char_counts = dict(contextual.get("source_char_counts", {}) or {})
+            selected_plate_count = int(sum(int(v or 0) for v in strategy_counts.values()))
+            selected_char_count = int(sum(int(v or 0) for v in strategy_char_counts.values()))
+            return {
+                "strategy_counts": strategy_counts,
+                "strategy_char_counts": strategy_char_counts,
+                "source_counts": source_counts,
+                "source_char_counts": source_char_counts,
+                "selected_plate_count": int(selected_plate_count),
+                "selected_char_count": int(selected_char_count),
+            }
+
+        return self._build_merged_gold_export_counts(
+            selected_strategies=selected_strategies,
+            selected_sources=selected_sources,
+        )
+
     def _get_gold_export_meta_candidates(self) -> list[Path]:
         in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
 
@@ -6052,6 +6238,76 @@ class CharacterAnnotationTab:
 
         candidate = str(candidate_text or "").strip().upper()
         return min(self._levenshtein_distance(candidate, truth) for truth in normalized)
+
+    def _fit_detection_count_to_truths(self, detections, true_texts):
+        ordered = self._sort_character_records_by_x(list(detections or []))
+        normalized_truths = [
+            str(item or "").strip().upper()
+            for item in (true_texts or [])
+            if str(item or "").strip()
+        ]
+        if not ordered or not normalized_truths:
+            return ordered, None
+
+        detection_count = len(ordered)
+        if detection_count <= 0:
+            return ordered, None
+
+        if any(len(truth) == detection_count for truth in normalized_truths):
+            return ordered, None
+
+        candidates = [truth for truth in normalized_truths if 0 < len(truth) <= detection_count]
+        if not candidates:
+            return ordered, None
+
+        best_window = None
+        best_details = None
+        best_score = None
+
+        for truth in candidates:
+            expected_len = len(truth)
+            for start_idx in range(0, detection_count - expected_len + 1):
+                window = ordered[start_idx:start_idx + expected_len]
+                candidate_text = self._characters_to_text(window)
+                distance = self._levenshtein_distance(candidate_text, truth)
+                avg_conf = (
+                    sum(self._char_record_confidence(rec) for rec in window) / float(len(window))
+                    if window else 0.0
+                )
+                dropped_left = int(start_idx)
+                dropped_right = int(detection_count - (start_idx + expected_len))
+                score = (distance, -avg_conf, dropped_left + dropped_right, dropped_left)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_window = window
+                    best_details = {
+                        "expected_text": truth,
+                        "window_text": candidate_text,
+                        "original_box_count": int(detection_count),
+                        "trimmed_box_count": int(expected_len),
+                        "trimmed_extra_boxes": int(detection_count - expected_len),
+                        "trimmed_left_boxes": dropped_left,
+                        "trimmed_right_boxes": dropped_right,
+                        "distance": int(distance),
+                    }
+
+        if best_window is None or best_details is None:
+            return ordered, None
+        if int(best_details.get("trimmed_extra_boxes", 0) or 0) <= 0:
+            return ordered, None
+        return list(best_window), best_details
+
+    def _apply_final_truth_count_guard(self, characters, true_texts, fusion_details: dict | None = None):
+        ordered_chars = self._sort_character_records_by_x(list(characters or []))
+        fitted_chars, trim_details = self._fit_detection_count_to_truths(ordered_chars, true_texts)
+        if not isinstance(trim_details, dict) or not trim_details:
+            return ordered_chars, fusion_details
+
+        merged_details = dict(fusion_details or {})
+        merged_details.update(trim_details)
+        merged_details["gt_count_guard_applied"] = True
+        merged_details["gt_count_guard_stage"] = "final_characters"
+        return self._sort_character_records_by_x(list(fitted_chars or [])), merged_details
 
     def _pick_best_true_text(self, candidate_text: str, true_texts, same_length_only: bool = False) -> str:
         normalized = [str(item or "").strip().upper() for item in (true_texts or []) if str(item or "").strip()]
@@ -6285,11 +6541,19 @@ class CharacterAnnotationTab:
             if str(item or "").strip()
         ]
 
+        def apply_truth_count_guard(source_records, strategy_name: str, details: dict | None = None):
+            fitted_records, trim_details = self._fit_detection_count_to_truths(source_records, normalized_truths)
+            if not isinstance(trim_details, dict) or not trim_details:
+                return source_records, strategy_name, details
+            merged_details = dict(details or {})
+            merged_details.update(trim_details)
+            return fitted_records, strategy_name, merged_details
+
         if method == DetectionMethod.OCR:
-            return ordered_ocr or ordered_combined, "ocr_only", None
+            return apply_truth_count_guard(ordered_ocr or ordered_combined, "ocr_only", None)
 
         if method == DetectionMethod.YOLO:
-            return ordered_yolo or ordered_combined, "yolo_only", None
+            return apply_truth_count_guard(ordered_yolo or ordered_combined, "yolo_only", None)
 
         if method == DetectionMethod.YOLO_OCR:
             combined_text = self._characters_to_text(ordered_combined)
@@ -6302,9 +6566,9 @@ class CharacterAnnotationTab:
             if normalized_truths:
                 if combined_text and combined_text in normalized_truths:
                     details.update({"final_text": combined_text})
-                    return ordered_combined, "yolo_box_ocr", details
+                    return apply_truth_count_guard(ordered_combined, "yolo_box_ocr", details)
                 details.update({"distance": self._best_text_distance(combined_text, normalized_truths)})
-                return ordered_combined, "yolo_box_ocr_fallback", details
+                return apply_truth_count_guard(ordered_combined, "yolo_box_ocr_fallback", details)
 
             return ordered_combined, "yolo_box_ocr_no_gt", details
 
@@ -6318,11 +6582,11 @@ class CharacterAnnotationTab:
                     rebuilt, backend_details = self._apply_yolo_box_backend(ordered_ocr, ordered_yolo)
                     if backend_details:
                         details.update(backend_details)
-                        return rebuilt, "ocr_exact", details
-                return ordered_ocr, "ocr_exact", details
+                        return apply_truth_count_guard(rebuilt, "ocr_exact", details)
+                return apply_truth_count_guard(ordered_ocr, "ocr_exact", details)
 
             if yolo_text and yolo_text in normalized_truths:
-                return ordered_yolo, "yolo_exact", {"final_text": yolo_text}
+                return apply_truth_count_guard(ordered_yolo, "yolo_exact", {"final_text": yolo_text})
 
             if int(hybrid_rescue_max_chars or 0) > 0:
                 rescued, rescue_details = self._repair_ocr_with_yolo_boxes(
@@ -6338,8 +6602,8 @@ class CharacterAnnotationTab:
                             if not isinstance(rescue_details, dict):
                                 rescue_details = {}
                             rescue_details.update(backend_details)
-                            return rebuilt, "ocr_yolo_rescue", rescue_details
-                    return rescued, "ocr_yolo_rescue", rescue_details
+                            return apply_truth_count_guard(rebuilt, "ocr_yolo_rescue", rescue_details)
+                    return apply_truth_count_guard(rescued, "ocr_yolo_rescue", rescue_details)
 
             best_source = ordered_ocr or ordered_yolo or ordered_combined
             best_strategy = "ocr_fallback" if ordered_ocr else ("yolo_fallback" if ordered_yolo else "both_combined")
@@ -6358,7 +6622,7 @@ class CharacterAnnotationTab:
                     best_strategy = candidate_strategy
                     best_distance = candidate_distance
 
-            return best_source, best_strategy, {"distance": best_distance}
+            return apply_truth_count_guard(best_source, best_strategy, {"distance": best_distance})
 
         return ordered_combined, "both_combined_no_gt", None
 
@@ -6881,6 +7145,17 @@ class CharacterAnnotationTab:
     def _on_preview_dir_var_write(self, *_args):
         try:
             self._save_local_setting("char_preview_dir", str(self.preview_dir_var.get() or "").strip())
+        except Exception:
+            pass
+        try:
+            if (
+                getattr(self, "_step3_linear_mode", False)
+                and CAMPAIGN.get_active_project_name()
+                and not bool(getattr(self, "_persist_step3_preview_dir_clear_in_progress", False))
+            ):
+                preview_dir_value = str(self.preview_dir_var.get() or "").strip()
+                if preview_dir_value:
+                    CAMPAIGN.set_step3_preview_dir(preview_dir_value)
         except Exception:
             pass
 
@@ -9667,6 +9942,11 @@ class CharacterAnnotationTab:
         status = str(data.get("status", "unknown")).strip().lower()
         chars_txt = self._characters_to_text(data.get("characters", []))
         ordinal = self._get_plate_listbox_ordinal(plate_id)
+        source_bucket = self._get_plate_source_bucket(data) if isinstance(data, dict) else "auto_preview"
+        has_manual = bool(
+            source_bucket in {"local_manual", "cvat_manual"}
+            or any(self._is_manual_character_record(rec, data=data) for rec in list(data.get("characters", []) or []))
+        )
 
         if status == "perfect":
             icon = "🟢"
@@ -9676,7 +9956,14 @@ class CharacterAnnotationTab:
             icon = "⚪"
 
         prefix = f"{ordinal}. " if ordinal is not None else ""
-        label = f"{prefix}{icon} {plate_id}"
+        flags = []
+        if status == "perfect":
+            flags.append("OK")
+        if has_manual:
+            flags.append("M")
+        flag_prefix = f"{'|'.join(flags)}| " if flags else ""
+
+        label = f"{prefix}{flag_prefix}{icon} {plate_id}"
         if chars_txt:
             label += f" [{chars_txt}]"
         return label
@@ -10218,7 +10505,7 @@ class CharacterAnnotationTab:
         try:
             if hasattr(self, "btn_finish_step3"):
                 self.btn_finish_step3.config(
-                    text="Zakończ krok 3",
+                    text="Zakończ etap 3",
                     state=tk.DISABLED,
                     width=NAV_BUTTON_WIDTH,
                 )
@@ -11747,7 +12034,7 @@ class CharacterAnnotationTab:
 
         selected_labels = self._format_selected_gold_export_strategy_labels()
         selected_source_labels = self._format_selected_gold_export_source_labels()
-        contextual = self._build_merged_gold_export_counts(
+        contextual = self._build_campaign_aware_gold_export_counts(
             selected_strategies=selected_strategies,
             selected_sources=selected_sources,
         )
@@ -11888,7 +12175,7 @@ class CharacterAnnotationTab:
                 pass
 
     def _refresh_gold_export_filter_labels(self):
-        contextual = self._build_merged_gold_export_counts(
+        contextual = self._build_campaign_aware_gold_export_counts(
             selected_sources=self._get_selected_gold_export_source_buckets(),
         )
         strategy_counts = contextual.get("strategy_counts", {}) if isinstance(contextual, dict) else {}
@@ -11913,7 +12200,7 @@ class CharacterAnnotationTab:
                 pass
 
     def _refresh_gold_export_source_labels(self):
-        contextual = self._build_merged_gold_export_counts(
+        contextual = self._build_campaign_aware_gold_export_counts(
             selected_strategies=self._get_selected_gold_export_strategy_buckets(),
         )
         source_counts = contextual.get("source_counts", {}) if isinstance(contextual, dict) else {}
@@ -13283,7 +13570,7 @@ class CharacterAnnotationTab:
     def _return_step3_result_to_wizard(self, summary: dict):
         """
         Jeden kontrakt zwrotny do wizarda:
-        - jeśli istnieje gold dataset -> krok 3 jest gotowy do zatwierdzenia
+        - jeśli istnieje gold dataset -> etap 3 jest gotowy do zatwierdzenia
         - jeśli nie -> needs_rework
         """
         gold_ok = bool(summary.get("gold_dataset_created")) and bool(summary.get("gold_dataset_valid", True))
@@ -13292,7 +13579,7 @@ class CharacterAnnotationTab:
             CAMPAIGN.set_current_step(3)
             CAMPAIGN.set_step3_ready()
             status_msg = (
-                "Krok 3 przygotował poprawny dataset znaków. "
+                "Etap 3 przygotował poprawny dataset znaków. "
                 "Wróć do wizarda i zatwierdź E3, aby odblokować etap 4."
             )
             status_kind = "success"
@@ -13300,7 +13587,7 @@ class CharacterAnnotationTab:
             CAMPAIGN.set_current_step(3)
             CAMPAIGN.set_step3_needs_rework()
             status_msg = (
-                "Krok 3 nie utworzył datasetu treningowego. "
+                "Etap 3 nie utworzył datasetu treningowego. "
                 "Wracasz do wizarda w trybie poprawy."
             )
             status_kind = "warning"
@@ -13315,13 +13602,13 @@ class CharacterAnnotationTab:
                 campaign_tab._rebuild_roadmap_ui()
                 campaign_tab._refresh_dashboard()
         except Exception as e:
-            logger.debug(f"Nie udało się odświeżyć Wizarda po kroku 3: {e}")
+            logger.debug(f"Nie udało się odświeżyć Wizarda po etapie 3: {e}")
 
         try:
             self.app.open_controlled_tab("campaign")
             self.app.update_campaign_tab_access()
         except Exception as e:
-            logger.debug(f"Nie udało się wrócić do Wizarda po kroku 3: {e}")
+            logger.debug(f"Nie udało się wrócić do Wizarda po etapie 3: {e}")
 
         try:
             self.app.update_status(status_msg, status_kind)
@@ -13718,7 +14005,7 @@ class CharacterAnnotationTab:
         default_result = {
             "ok": False,
             "reason": "missing_char_dataset",
-            "message": "Aby zakończyć krok 3, przygotuj poprawny dataset znaków z niepustym train i val.",
+            "message": "Aby zakończyć etap 3, przygotuj poprawny dataset znaków z niepustym train i val.",
             "ready_dataset": "",
             "dataset_hint": "",
             "train_images": 0,
@@ -13799,7 +14086,7 @@ class CharacterAnnotationTab:
                 "W PZ3 popraw eksport albo split."
             )
 
-        return "Aby zakończyć krok 3, przygotuj dataset znaków z niepustym train i val."
+        return "Aby zakończyć etap 3, przygotuj dataset znaków z niepustym train i val."
 
     def _set_step3_finish_hint(self, text: str = "", tone: str = "muted"):
         action_card = getattr(self, "step3_finish_action_card", None)
@@ -13825,7 +14112,7 @@ class CharacterAnnotationTab:
 
     def _has_any_step3_export_outputs(self) -> bool:
         """
-        Krok 3 można zakończyć dopiero wtedy, gdy istnieje realny dataset
+        Etap 3 można zakończyć dopiero wtedy, gdy istnieje realny dataset
         treningowy znaków dla etapu 4.
 
         Sam review export do CVAT nie wystarcza.
@@ -13928,7 +14215,7 @@ class CharacterAnnotationTab:
             splash_visible=splash_visible,
             show_detect_back_to_extract=not in_campaign,
             show_detect_to_dataset=(not in_campaign) or (not splash_visible),
-            show_dataset_back_to_detect=not in_campaign,
+            show_dataset_back_to_detect=True,
         )
 
     def _get_step3_finish_action_view_model(self) -> Step3FinishActionViewModel:
@@ -14020,7 +14307,7 @@ class CharacterAnnotationTab:
         existing_selected = mode == "existing"
 
         if perfect_selected:
-            export_pool = self._build_merged_gold_export_counts(
+            export_pool = self._build_campaign_aware_gold_export_counts(
                 selected_strategies=self._get_selected_gold_export_strategy_buckets(),
                 selected_sources=self._get_selected_gold_export_source_buckets(),
             )
@@ -14424,13 +14711,16 @@ class CharacterAnnotationTab:
                 pass
 
         back_to_detect = getattr(self, "btn_back_to_detect", None)
-        if back_to_detect is not None:
+        back_to_detect_frame = getattr(self, "pz3_back_to_detect_frame", None)
+        if back_to_detect is not None and back_to_detect_frame is not None:
             try:
                 if not bool(view_model.show_dataset_back_to_detect):
-                    if str(back_to_detect.winfo_manager()):
-                        back_to_detect.pack_forget()
-                elif not str(back_to_detect.winfo_manager()):
-                    back_to_detect.pack(side=tk.LEFT)
+                    if str(back_to_detect_frame.winfo_manager()):
+                        back_to_detect_frame.pack_forget()
+                elif not str(back_to_detect_frame.winfo_manager()):
+                    back_to_detect_frame.pack(side=tk.LEFT, fill=tk.Y)
+                    if not str(back_to_detect.winfo_manager()):
+                        back_to_detect.pack(side=tk.BOTTOM)
             except Exception:
                 pass
 
@@ -14474,6 +14764,11 @@ class CharacterAnnotationTab:
         folder = default_folder
 
         source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
+        if not source_context:
+            try:
+                source_context = self._get_registry_preferred_step3_source_candidate() or {}
+            except Exception:
+                source_context = {}
         preferred_run_dir = None
         preferred_xml = ""
         preferred_input_dir = None
@@ -14595,11 +14890,25 @@ class CharacterAnnotationTab:
                 )
             except Exception as e:
                 logger.debug(f"Nie udało się ustawić domyslnego wejscia do Z3/PZ1: {e}")
+            try:
+                self._sync_campaign_step3_artifact_registry(
+                    entry_mode="continue",
+                    workflow_step="start",
+                    annotation_run_dir=latest_run_dir,
+                    xml_path=latest_xml,
+                    images_dir=(str(folder) if folder.exists() else ""),
+                )
+            except Exception:
+                pass
 
         self._campaign_chars_dir = str(chars_dir) if chars_dir else None
         self._campaign_datasets_dir = str(datasets_dir) if datasets_dir else None
 
+        registry_bundle = self._get_campaign_iteration_artifact_bundle()
+        registry_char_model = dict(registry_bundle.get("char_model") or {})
         char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
+        if not char_model_path or not Path(char_model_path).exists():
+            char_model_path = str(registry_char_model.get("path") or "").strip()
         if char_model_path and Path(char_model_path).exists():
             self.detection_method_var.set("BOTH")
             self.yolo_model_path_var.set(char_model_path)
@@ -15006,7 +15315,15 @@ class CharacterAnnotationTab:
             self._campaign_step3_reextract_seed_metadata = {}
 
         try:
+            self._persist_step3_preview_dir_clear_in_progress = True
             self.preview_dir_var.set("")
+        except Exception:
+            pass
+        finally:
+            self._persist_step3_preview_dir_clear_in_progress = False
+
+        try:
+            CAMPAIGN.set_step3_preview_dir("")
         except Exception:
             pass
 
@@ -16340,6 +16657,59 @@ class CharacterAnnotationTab:
         except Exception:
             pass
 
+        try:
+            self._sync_campaign_step3_artifact_registry(
+                entry_mode=entry_mode,
+                workflow_step=workflow_step,
+                annotation_run_dir=annotation_run_dir,
+                xml_path=xml_path,
+                images_dir=images_dir,
+            )
+        except Exception:
+            pass
+
+    def _sync_campaign_step3_artifact_registry(
+        self,
+        *,
+        entry_mode: str = "",
+        workflow_step: str = "entry",
+        annotation_run_dir: str = "",
+        xml_path: str = "",
+        images_dir: str = "",
+    ) -> None:
+        if not CAMPAIGN.get_active_project_name():
+            return
+
+        try:
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            iteration_num = 1
+
+        package_images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        if package_images_dir is None:
+            return
+
+        updates = {
+            "step3_extract_source": {
+                "entry_mode": str(entry_mode or "").strip(),
+                "workflow_step": str(workflow_step or "entry").strip() or "entry",
+                "annotation_run_dir": str(annotation_run_dir or "").strip(),
+                "annotation_run_token": CAMPAIGN._build_registry_path_token(annotation_run_dir),
+                "xml_path": str(xml_path or "").strip(),
+                "xml_token": CAMPAIGN._build_registry_path_token(xml_path),
+                "images_dir": str(images_dir or "").strip(),
+                "images_token": CAMPAIGN._build_registry_path_token(images_dir),
+            }
+        }
+        try:
+            CAMPAIGN.upsert_iteration_artifact_bundle(
+                images_dir=package_images_dir,
+                iteration_num=iteration_num,
+                updates=updates,
+            )
+        except Exception:
+            pass
+
     def _restore_step3_extract_state_from_project(self):
         if not CAMPAIGN.get_active_project_name():
             return
@@ -16454,8 +16824,32 @@ class CharacterAnnotationTab:
         has_run = bool(str(self.annotation_run_dir_var.get() or "").strip())
         linear_mode = bool(getattr(self, "_step3_linear_mode", False))
         candidate = self._get_preferred_z2_source_candidate()
+        step3_status = ""
+        if linear_mode:
+            try:
+                from ..campaign_manager import CAMPAIGN
+                step3_status = str(CAMPAIGN.get_step3_status() or "").strip().lower()
+            except Exception:
+                step3_status = ""
 
-        if route == "continue":
+        if linear_mode and step3_status == "needs_rework":
+            source_intro = (
+                "Wróciłeś do etapu 3 po poprawkach tablic w Z2. Z3 nadal pracuje na tej samej iteracji "
+                "i użyje odświeżonego źródła tablic automatycznie."
+            )
+            source_hint = (
+                "Nie musisz ponownie wskazywać runu, XML ani folderu obrazów. "
+                "W tym kroku przebudujesz tylko paczkę tablic potrzebną do dalszej pracy nad znakami."
+            )
+        elif linear_mode:
+            source_intro = (
+                "Kampania ma już przypięte źródło tablic dla tego etapu. "
+                "Nie musisz ręcznie wybierać runu Z2 ani przepisywać ścieżek."
+            )
+            source_hint = (
+                "Gdy źródło tablic będzie spójne, Z3 samo przygotuje paczkę tablic dla PZ2."
+            )
+        elif route == "continue":
             source_intro = "Najpierw wybierz run anotacji Z2. Możesz skorzystac z ostatniego źródła z Z2 albo wskazać folder runu anotacji ręcznie."
             source_hint = "Wybrane pola XML i obrazów są wypelniane na Twoje polecenie z runu anotacji Z2, ale w razie potrzeby możesz je skorygowac."
         else:
@@ -16464,11 +16858,20 @@ class CharacterAnnotationTab:
 
         if linear_mode:
             if has_preview:
-                start_hint = "Źródło tablic dla Z3 jest już gotowe. Za chwilę otwieram PZ2, aby przejść do pracy nad znakami."
+                start_hint = (
+                    "Paczka tablic dla znaków jest już odświeżona. "
+                    "Za chwilę otwieram PZ2, aby kontynuować OCR i korektę znaków."
+                )
             elif source_ready:
-                start_hint = "Korzystam ze źródła tablic przygotowanego przez kampanię. Wyodrębnianie uruchomi się automatycznie, a po nim przejdziesz do PZ2."
+                start_hint = (
+                    "Źródło tablic tej iteracji jest już gotowe. "
+                    "Wyodrębnianie uruchomi się automatycznie i odświeży paczkę tablic dla PZ2."
+                )
             else:
-                start_hint = "Kampania przygotowuje źródło tablic dla Z3. Gdy źródła będą spójne, wyodrębnianie uruchomi się automatycznie."
+                start_hint = (
+                    "Czekam na spójne źródło tablic dla tej iteracji. "
+                    "Gdy będzie gotowe, ponowne wycinanie uruchomi się automatycznie."
+                )
         elif route == "continue":
             if has_run and source_ready:
                 run_name = Path(str(self.annotation_run_dir_var.get() or "")).name
@@ -16488,7 +16891,16 @@ class CharacterAnnotationTab:
                 else "Najpierw potwierdz zgodnosc zrodel, a potem uruchom wyodrebnianie."
             )
 
-        if route == "continue":
+        if linear_mode and step3_status == "needs_rework":
+            run_hint = (
+                "Źródło tablic dla tej iteracji jest już podpięte automatycznie. "
+                "Po tym kroku odświeżysz paczkę tablic, a potem wrócisz do OCR i korekty znaków."
+            )
+            run_hint_tone = "success"
+        elif linear_mode:
+            run_hint = "Źródło tablic dla tej iteracji jest obsługiwane automatycznie przez kampanię."
+            run_hint_tone = "success"
+        elif route == "continue":
             if has_run:
                 run_name = Path(str(self.annotation_run_dir_var.get() or "")).name
                 run_hint = f"Wybrany run anotacji: {run_name}. Na jego podstawie uzupelnisz annotations.xml i katalog obrazów."
@@ -16518,6 +16930,31 @@ class CharacterAnnotationTab:
             step_state["source"] = "done"
             step_state["start"] = "done" if has_preview else "active"
 
+        if linear_mode:
+            source_title = "Potwierdź źródło tablic"
+            start_title = "Przebuduj paczkę tablic"
+            entry_card_description = "Kampania prowadzi ten etap na gotowym źródle tablic."
+            source_card_description = "Źródło tablic tej iteracji jest obsługiwane automatycznie."
+            start_card_description = (
+                "Paczka tablic dla PZ2 jest już odświeżona." if has_preview
+                else "Odśwież paczkę tablic, aby wrócić do OCR i korekty znaków."
+            )
+        else:
+            source_title = "Źródła wejscia"
+            start_title = "Uruchom wyodrebnianie"
+            entry_card_description = (
+                "Kontynuacja po runie anotacji Z2." if route == "continue"
+                else "Wskazesz annotations.xml i obrazy."
+            )
+            source_card_description = (
+                "Run anotacji jest gotowy do podpiecia." if route == "continue" and has_run
+                else "Powiaz annotations.xml z katalogiem obrazów."
+            )
+            start_card_description = (
+                "Katalog wyodrebnionych tablic do PZ2 jest już gotowy." if has_preview
+                else "Wytnij tablice i przygotuj preview do PZ2."
+            )
+
         next_enabled = False
         if current == "entry":
             next_enabled = bool(route)
@@ -16531,8 +16968,8 @@ class CharacterAnnotationTab:
             show_entry=(current == "entry" and not linear_mode),
             show_source=(current == "source" and (route == "manual" or linear_mode)),
             show_start=(current == "start" or (linear_mode and current == "entry")),
-            source_title=("2. Potwierdz Źródła" if linear_mode else "Źródła wejscia"),
-            start_title=("3. Uruchom Wyodrebnianie" if linear_mode else "Uruchom wyodrebnianie"),
+            source_title=source_title,
+            start_title=start_title,
             source_intro=source_intro,
             source_hint=source_hint,
             run_hint=run_hint,
@@ -16552,25 +16989,19 @@ class CharacterAnnotationTab:
                     key="entry",
                     state=str(step_state.get("entry", "pending")),
                     title="Wybierz wejście",
-                    description=("Kontynuacja po runie anotacji Z2." if route == "continue" else "Wskazesz annotations.xml i obrazy."),
+                    description=entry_card_description,
                 ),
                 Step3ExtractStepCardViewModel(
                     key="source",
                     state=str(step_state.get("source", "pending")),
                     title="Potwierdź źródła",
-                    description=(
-                        "Run anotacji jest gotowy do podpiecia." if route == "continue" and has_run
-                        else "Powiaz annotations.xml z katalogiem obrazów."
-                    ),
+                    description=source_card_description,
                 ),
                 Step3ExtractStepCardViewModel(
                     key="start",
                     state=str(step_state.get("start", "pending")),
                     title="Uruchom wyodrebnianie",
-                    description=(
-                        "Katalog wyodrebnionych tablic do PZ2 jest już gotowy." if has_preview
-                        else "Wytnij tablice i przygotuj preview do PZ2."
-                    ),
+                    description=start_card_description,
                 ),
             ],
         )
@@ -16884,6 +17315,74 @@ class CharacterAnnotationTab:
         payload = PROJECT_CACHE.load_json(manifest_path, default={})
         return payload if isinstance(payload, dict) else {}
 
+    def _get_campaign_iteration_artifact_bundle(self) -> dict:
+        if not CAMPAIGN.get_active_project_name():
+            return {}
+
+        try:
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            iteration_num = 1
+
+        package_images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        if package_images_dir is None:
+            return {}
+
+        try:
+            return dict(
+                CAMPAIGN.get_iteration_artifact_bundle(
+                    images_dir=package_images_dir,
+                    iteration_num=iteration_num,
+                ) or {}
+            )
+        except Exception:
+            return {}
+
+    def _get_registry_preferred_step3_source_candidate(self) -> dict | None:
+        bundle = self._get_campaign_iteration_artifact_bundle()
+        if not bundle:
+            return None
+
+        candidate_specs = [
+            (
+                "step3_extract_source",
+                dict(bundle.get("step3_extract_source") or {}),
+                "zapisane źródło etapu Z3",
+                "annotation_run_dir",
+            ),
+            (
+                "char_effective_source",
+                dict(bundle.get("char_effective_source") or {}),
+                "gotowe źródło znaków z rejestru",
+                "run_dir",
+            ),
+            (
+                "plate_source",
+                dict(bundle.get("plate_source") or {}),
+                "źródło tablic z rejestru projektu",
+                "run_dir",
+            ),
+        ]
+
+        for _scope_name, raw_entry, label, run_key in candidate_specs:
+            run_dir = str(raw_entry.get(run_key) or "").strip()
+            xml_path = str(raw_entry.get("xml_path") or "").strip()
+            images_dir = str(raw_entry.get("images_dir") or "").strip()
+            if not any((run_dir, xml_path, images_dir)):
+                continue
+            try:
+                run_name = Path(run_dir).name if run_dir else ""
+            except Exception:
+                run_name = ""
+            return {
+                "run_dir": run_dir,
+                "xml_path": xml_path,
+                "images_dir": images_dir,
+                "label": f"{label}: {run_name}" if run_name else label,
+            }
+
+        return None
+
     def _get_annotation_tab(self):
         try:
             return getattr(self.app, "tabs", {}).get("annotation")
@@ -17033,6 +17532,10 @@ class CharacterAnnotationTab:
                         if run_dir is not None else "biezace źródło z runu anotacji Z2"
                     ),
                 }
+
+        registry_candidate = self._get_registry_preferred_step3_source_candidate()
+        if registry_candidate:
+            return registry_candidate
 
         try:
             stored_source = CAMPAIGN.get_last_plate_manual_source()
@@ -19773,13 +20276,34 @@ class CharacterAnnotationTab:
             emphasis=False
         )
 
+        manual_guard_text = (
+            "Detekcja nie nadpisze ręcznych boxów. Zachowane manuale mogą zostać "
+            "utrzymane, a automat tylko uzupełni lub odświeży pozostałe znaki."
+        )
+        self.detect_manual_guard_lbl = tk.Label(
+            self.detect_run_status_frame,
+            text=manual_guard_text,
+            anchor="w",
+            justify="left",
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.detect_manual_guard_lbl.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self._set_inline_status_label_state(
+            self.detect_manual_guard_lbl,
+            text=manual_guard_text,
+            tone="muted",
+            emphasis=False,
+        )
+
         self.test_progress_row = tk.Frame(
             self.detect_run_status_frame,
             bg=palette.get("panel", "#252526"),
             bd=0,
             highlightthickness=0,
         )
-        self.test_progress_row.grid(row=1, column=0, sticky="w")
+        self.test_progress_row.grid(row=2, column=0, sticky="w")
 
         self.test_progress = SlimProgressBar(
             self.test_progress_row,
@@ -20730,7 +21254,8 @@ class CharacterAnnotationTab:
     # =========================================================
 
     def _run_fast_ocr_test(self):
-        if not self.preview_plate_ids:
+        all_plate_ids = self._get_sorted_preview_plate_ids(list(getattr(self, "preview_metadata", {}).keys()))
+        if not all_plate_ids:
             return messagebox.showinfo("Brak", "Wczytaj katalog wyodrebnionych tablic.")
 
         if self.fast_test_running:
@@ -20746,7 +21271,7 @@ class CharacterAnnotationTab:
             return
         self._set_test_status(self._compose_detection_method_status("start detekcji"), "info")
         self.test_progress.config(value=0)
-        self._set_test_progress_counter(0, len(self.preview_plate_ids), perfect_count=0)
+        self._set_test_progress_counter(0, len(all_plate_ids), perfect_count=0)
 
         self.fast_test_stop.clear()
         self.fast_test_running = True
@@ -20821,14 +21346,14 @@ class CharacterAnnotationTab:
 
         def worker():
             local_meta = dict(self.preview_metadata) if isinstance(self.preview_metadata, dict) else {}
-            total = len(self.preview_plate_ids)
+            total = len(all_plate_ids)
             stat_perfect = 0
             yolo_raw_total = 0
             yolo_nms_total = 0
             yolo_filtered_total = 0
 
             try:
-                for idx, pid in enumerate(self.preview_plate_ids):
+                for idx, pid in enumerate(all_plate_ids):
                     if self.fast_test_stop.is_set() or session_token != self._project_reset_token:
                         break
 
@@ -20939,6 +21464,15 @@ class CharacterAnnotationTab:
                             final_chars = c_clean
                             final_strategy = str(fusion_strategy or "")
 
+                    # Ostateczny guard GT musi działać już po merge/preserve,
+                    # żeby stare manuale albo perfect-preserve nie przywracały
+                    # nadmiarowych boxów do finalnego metadata.
+                    final_chars, fusion_details = self._apply_final_truth_count_guard(
+                        final_chars,
+                        true_texts,
+                        fusion_details if isinstance(fusion_details, dict) else None,
+                    )
+
                     # WAŻNE: sortujemy znaki po X PRZED zapisem do metadata
 
                     local_meta[pid]["characters"] = final_chars
@@ -20979,6 +21513,18 @@ class CharacterAnnotationTab:
                         self._log(
                             self.test_log_text,
                             f"[HYBRID] {pid}: YOLO poprawilo pozycje {int(fusion_details.get('box_backend_count', 0))} boxow.",
+                            "INFO"
+                        )
+
+                    if isinstance(fusion_details, dict) and int(fusion_details.get("trimmed_extra_boxes", 0) or 0) > 0:
+                        trim_stage = str(fusion_details.get("gt_count_guard_stage", "") or "").strip().lower()
+                        stage_suffix = " po merge" if trim_stage == "final_characters" else ""
+                        self._log(
+                            self.test_log_text,
+                            f"[GT] {pid}: przycięto nadmiarowe boxy do długości GT "
+                            f"{stage_suffix}"
+                            f"({int(fusion_details.get('original_box_count', 0) or 0)} -> "
+                            f"{int(fusion_details.get('trimmed_box_count', 0) or 0)}).",
                             "INFO"
                         )
 
@@ -21045,7 +21591,7 @@ class CharacterAnnotationTab:
                 self._atomic_write_json(meta_file, local_meta)
 
                 plates_with_chars = sum(
-                    1 for pid in self.preview_plate_ids
+                    1 for pid in all_plate_ids
                     if isinstance(local_meta.get(pid), dict) and local_meta[pid].get("characters")
                 )
                 self._log(
@@ -21084,6 +21630,28 @@ class CharacterAnnotationTab:
                 self._log(self.test_log_text, f"\n❌ BŁĄD: {e}", "ERROR")
 
             finally:
+                try:
+                    if ocr_engine is not None:
+                        try:
+                            ocr_engine.unload()
+                        except Exception:
+                            pass
+                    detector.ocr_engine = None
+                except Exception:
+                    pass
+                try:
+                    detector.yolo_model = None
+                except Exception:
+                    pass
+                try:
+                    yolo_model = None
+                except Exception:
+                    pass
+                try:
+                    cleanup_gpu_memory()
+                except Exception as cleanup_err:
+                    logger.debug(f"Nie udało się zwolnić GPU po PZ2: {cleanup_err}")
+
                 def finalize():
                     if session_token != self._project_reset_token:
                         return
@@ -22696,13 +23264,21 @@ class CharacterAnnotationTab:
         nav.grid(row=1, column=0, sticky="ew", padx=12, pady=(8, 10))
         self.pz3_export_nav = nav
 
-        self.btn_back_to_detect = ttk.Button(
+        self.pz3_back_to_detect_frame = tk.Frame(
             nav,
+            bg=export_shell_fill,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.pz3_back_to_detect_frame.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.btn_back_to_detect = ttk.Button(
+            self.pz3_back_to_detect_frame,
             text="Wstecz do PZ2",
             command=self.back_to_substep_2,
             style="WorkflowCard.TButton",
         )
-        self.btn_back_to_detect.pack(side=tk.LEFT)
+        self.btn_back_to_detect.pack(side=tk.BOTTOM)
         self.btn_back_to_detect.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         self.pz3_nav_actions_frame = tk.Frame(
@@ -22718,7 +23294,7 @@ class CharacterAnnotationTab:
             title="Akcja etapu",
             description="",
             description_tone="muted",
-            button_text="Zakończ krok 3",
+            button_text="Zakończ etap 3",
             button_command=self._finalize_step3_from_existing_outputs,
             button_style="WorkflowCard.TButton",
             button_state=tk.DISABLED,
@@ -23183,6 +23759,39 @@ class CharacterAnnotationTab:
                 self.app.update_status(
                     "Paczka YOLO została utworzona poprawnie. Możesz zakończyć ten krok przyciskiem finish.",
                     "info"
+                )
+            except Exception:
+                pass
+            try:
+                modal_lines = [
+                    "Utworzono dataset YOLO znaków.",
+                    "",
+                    f"Katalog: {yolo_out}",
+                ]
+                if split_enabled:
+                    modal_lines.append(
+                        f"Split: train={int(split_stats.get('train', 0) or 0)}, "
+                        f"val={int(split_stats.get('val', 0) or 0)}, "
+                        f"test={int(split_stats.get('test', 0) or 0)}"
+                    )
+                else:
+                    modal_lines.append("Split: wyłączony (flat images/labels)")
+                modal_lines.extend(
+                    [
+                        "",
+                        (
+                            "Możesz wrócić do wizarda i zatwierdzić etap 3 "
+                            "albo zostać w Z3 / PZ3 i wykonać kolejny eksport."
+                            if self._step3_linear_mode and CAMPAIGN.get_active_project_name()
+                            else "Możesz przejść do Z4, aby użyć datasetu w treningu, albo zostać w Z3 / PZ3 i wykonać kolejny eksport."
+                        ),
+                    ]
+                )
+                self.app.themed_info(
+                    "Eksport zakończony",
+                    "\n".join(modal_lines),
+                    parent=self.frame,
+                    tone="success",
                 )
             except Exception:
                 pass

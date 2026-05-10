@@ -115,6 +115,65 @@ def format_yolo_model_identity(info: Dict | None, *, include_ultralytics_version
     return " | ".join(parts)
 
 
+def _resolve_nested_source_model_identity(
+    source_model_value: str | Path | None,
+    *,
+    task_hint: str = "",
+    visited: set[str] | None = None,
+) -> Dict:
+    text = str(source_model_value or "").strip()
+    if not text:
+        return {}
+
+    direct_identity = _infer_yolo_identity_from_text(text, task_hint=task_hint)
+    if direct_identity:
+        return direct_identity
+
+    try:
+        source_path = Path(text)
+    except Exception:
+        return {}
+
+    if source_path.suffix.lower() != ".pt" or not source_path.exists():
+        return {}
+
+    try:
+        normalized_path = str(source_path.resolve())
+    except Exception:
+        normalized_path = str(source_path)
+
+    visited_set = set(visited or set())
+    if normalized_path in visited_set:
+        return {}
+    visited_set.add(normalized_path)
+
+    try:
+        ok, _msg, nested_info = validate_model_file(source_path, _visited=visited_set)
+    except Exception:
+        return {}
+    if not ok or not isinstance(nested_info, dict):
+        return {}
+
+    resolved: Dict = {}
+    for key_name in (
+        "yolo_family",
+        "yolo_version",
+        "yolo_size",
+        "yolo_variant",
+        "model_scale",
+        "architecture_label",
+    ):
+        value = nested_info.get(key_name)
+        if value:
+            resolved[key_name] = value
+
+    if not resolved:
+        nested_source_arch = str(nested_info.get("source_architecture_label") or "").strip()
+        if nested_source_arch:
+            resolved["architecture_label"] = nested_source_arch
+    return resolved
+
+
 def validate_yolo_dataset(dataset_path: Path) -> Tuple[bool, str, Dict]:
     """Waliduje dataset YOLO."""
     stats = {
@@ -174,7 +233,7 @@ def validate_yolo_dataset(dataset_path: Path) -> Tuple[bool, str, Dict]:
     return True, "Dataset OK", stats
 
 
-def validate_model_file(model_path: Path) -> Tuple[bool, str, Dict]:
+def validate_model_file(model_path: Path, _visited: set[str] | None = None) -> Tuple[bool, str, Dict]:
     """Waliduje plik modelu .pt."""
     info = _empty_model_info()
 
@@ -236,6 +295,12 @@ def validate_model_file(model_path: Path) -> Tuple[bool, str, Dict]:
                         info["source_model_name"] or info["source_model"],
                         task_hint=str(info.get("task") or info.get("type") or ""),
                     )
+                    if not source_identity:
+                        source_identity = _resolve_nested_source_model_identity(
+                            info["source_model"],
+                            task_hint=str(info.get("task") or info.get("type") or ""),
+                            visited=_visited,
+                        )
                     info["source_architecture_label"] = str(source_identity.get("architecture_label") or "").strip()
 
         task_hint = str(info.get("task") or info.get("type") or "").strip()
@@ -249,6 +314,15 @@ def validate_model_file(model_path: Path) -> Tuple[bool, str, Dict]:
             if inferred:
                 info.update({key: value for key, value in inferred.items() if value})
                 break
+
+        if not str(info.get("architecture_label") or "").strip() and info.get("source_model"):
+            nested_identity = _resolve_nested_source_model_identity(
+                info.get("source_model"),
+                task_hint=task_hint,
+                visited=_visited,
+            )
+            if nested_identity:
+                info.update({key: value for key, value in nested_identity.items() if value})
 
         if hasattr(model, "names"):
             if isinstance(model.names, dict):

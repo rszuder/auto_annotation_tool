@@ -123,21 +123,100 @@ class CharacterDetector:
             
         detections.sort(key=lambda d: d.bbox[0])
         return detections
-    
-    def _detect_with_ocr(self, plate_image: np.ndarray) -> List[CharacterDetection]:
+
+    @staticmethod
+    def _refine_ocr_segment_bbox(
+        processed_img: np.ndarray,
+        *,
+        seg_x1: float,
+        seg_x2: float,
+        y1: float,
+        y2: float,
+        scale_x: float,
+        scale_y: float,
+        orig_w: int,
+        orig_h: int,
+    ) -> tuple[float, float, float, float] | None:
+        if processed_img is None or getattr(processed_img, "size", 0) == 0:
+            return None
+
+        try:
+            proc_h, proc_w = processed_img.shape[:2]
+            px1 = max(0, min(proc_w, int(np.floor(float(seg_x1)))))
+            px2 = max(0, min(proc_w, int(np.ceil(float(seg_x2)))))
+            py1 = max(0, min(proc_h, int(np.floor(float(y1)))))
+            py2 = max(0, min(proc_h, int(np.ceil(float(y2)))))
+        except Exception:
+            return None
+
+        if px2 <= px1 or py2 <= py1:
+            return None
+
+        roi = processed_img[py1:py2, px1:px2]
+        if roi is None or getattr(roi, "size", 0) == 0:
+            return None
+
+        try:
+            if len(roi.shape) == 3:
+                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            else:
+                roi_gray = roi
+        except Exception:
+            roi_gray = roi if len(getattr(roi, "shape", ())) == 2 else None
+        if roi_gray is None or getattr(roi_gray, "size", 0) == 0:
+            return None
+
+        # OCR preprocess zwykle kończy na jasnym tle i ciemnych znakach.
+        # Szukamy realnego "atramentu" zamiast brać pełną wysokość wspólnego boxu.
+        try:
+            foreground_mask = roi_gray < 245
+            rows = np.where(foreground_mask.any(axis=1))[0]
+            cols = np.where(foreground_mask.any(axis=0))[0]
+        except Exception:
+            return None
+
+        if len(rows) == 0 or len(cols) == 0:
+            return None
+
+        top = int(rows[0])
+        bottom = int(rows[-1]) + 1
+        left = int(cols[0])
+        right = int(cols[-1]) + 1
+
+        # Drobny margines, żeby nie obcinać końcówek znaków.
+        pad_x = 1
+        pad_y = 1
+        top = max(0, top - pad_y)
+        bottom = min(roi_gray.shape[0], bottom + pad_y)
+        left = max(0, left - pad_x)
+        right = min(roi_gray.shape[1], right + pad_x)
+
+        refined_x1 = max(0.0, min(float(orig_w), float((px1 + left) * scale_x)))
+        refined_x2 = max(0.0, min(float(orig_w), float((px1 + right) * scale_x)))
+        refined_y1 = max(0.0, min(float(orig_h), float((py1 + top) * scale_y)))
+        refined_y2 = max(0.0, min(float(orig_h), float((py1 + bottom) * scale_y)))
+
+        if refined_x2 <= refined_x1:
+            refined_x2 = min(float(orig_w), refined_x1 + 1.0)
+        if refined_y2 <= refined_y1:
+            refined_y2 = min(float(orig_h), refined_y1 + 1.0)
+
+        return (refined_x1, refined_y1, refined_x2, refined_y2)
+
+    def _run_ocr_detection_pass(self, plate_image: np.ndarray) -> List[CharacterDetection]:
         if self.ocr_engine is None or not getattr(self.ocr_engine, 'is_loaded', False):
             return []
-        
+
         try:
             orig_h, orig_w = plate_image.shape[:2]
-            
+
             prep_kwargs = getattr(self.ocr_engine, 'custom_prep_params', {})
             if hasattr(self.ocr_engine, 'preprocess_plate'):
                 clean_kwargs = {k: v for k, v in prep_kwargs.items() if k != "padding_pct"}
                 processed_img = self.ocr_engine.preprocess_plate(plate_image, **clean_kwargs)
             else:
                 processed_img = plate_image
-                
+
             proc_h, proc_w = processed_img.shape[:2]
             scale_x = orig_w / float(proc_w) if proc_w > 0 else 1.0
             scale_y = orig_h / float(proc_h) if proc_h > 0 else 1.0
@@ -145,62 +224,117 @@ class CharacterDetector:
             padding_pct = prep_kwargs.get("padding_pct", 20)
             pad_y = int(proc_h * (padding_pct / 100.0))
             pad_x = int(proc_w * (padding_pct / 100.0))
-            
+
             if len(processed_img.shape) == 2:
                 padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=255)
             else:
                 padded_img = cv2.copyMakeBorder(processed_img, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-            
+
             if hasattr(self.ocr_engine, 'read_text_aggressive'):
                 results = self.ocr_engine.read_text_aggressive(padded_img)
             else:
                 results = self.ocr_engine.reader.readtext(
-                    padded_img, 
+                    padded_img,
                     allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
                     mag_ratio=1.5, text_threshold=0.2, link_threshold=0.4
                 )
-            
+
             detections = []
-            
+
             for (bbox_ocr, text, conf) in results:
                 threshold = getattr(self.ocr_engine, 'confidence_threshold', 0.15)
                 if conf < threshold:
                     continue
-                
+
                 text_clean = "".join([c for c in text if c.isalnum()]).upper()
                 if not text_clean:
                     continue
-                
+
                 x_coords = [p[0] - pad_x for p in bbox_ocr]
                 y_coords = [p[1] - pad_y for p in bbox_ocr]
-                
+
                 x1_orig = int(min(x_coords) * scale_x)
                 x2_orig = int(max(x_coords) * scale_x)
                 y1_orig = int(min(y_coords) * scale_y)
                 y2_orig = int(max(y_coords) * scale_y)
-                
-                # Zabezpieczenie przed ujemnymi ramkami
+
                 x1 = max(0, min(orig_w, x1_orig))
                 x2 = max(0, min(orig_w, x2_orig))
                 y1 = max(0, min(orig_h, y1_orig))
                 y2 = max(0, min(orig_h, y2_orig))
-                
-                # USUNIĘTE AGRESYWNE ODCIĘCIE: Jeśli ramka ma 0 pikseli, po prostu wymuszamy żeby miała chociaż 1 piksel szerokości
-                if x2 <= x1: x2 = x1 + 1
-                if y2 <= y1: y2 = y1 + 1
-                
+
+                if x2 <= x1:
+                    x2 = x1 + 1
+                if y2 <= y1:
+                    y2 = y1 + 1
+
                 char_width = (x2 - x1) / len(text_clean)
                 for i, char in enumerate(text_clean):
                     char_x1 = x1 + (i * char_width)
                     char_x2 = char_x1 + char_width
-                    det = CharacterDetection(character=char, bbox=(char_x1, y1, char_x2, y2), confidence=float(conf), method="ocr")
+                    refined_bbox = self._refine_ocr_segment_bbox(
+                        processed_img,
+                        seg_x1=(min(x_coords) + (i * ((max(x_coords) - min(x_coords)) / len(text_clean)))),
+                        seg_x2=(min(x_coords) + ((i + 1) * ((max(x_coords) - min(x_coords)) / len(text_clean)))),
+                        y1=min(y_coords),
+                        y2=max(y_coords),
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                        orig_w=orig_w,
+                        orig_h=orig_h,
+                    )
+                    if refined_bbox is None:
+                        refined_bbox = (char_x1, y1, char_x2, y2)
+                    det = CharacterDetection(character=char, bbox=refined_bbox, confidence=float(conf), method="ocr")
                     detections.append(det)
-            
+
             return detections
-        
+
         except Exception as e:
             logger.error(f"Błąd OCR detection: {e}")
             return []
+    
+    def _detect_with_ocr(self, plate_image: np.ndarray) -> List[CharacterDetection]:
+        if self.ocr_engine is None or not getattr(self.ocr_engine, 'is_loaded', False):
+            return []
+        detections = self._run_ocr_detection_pass(plate_image)
+        if detections:
+            return detections
+
+        try:
+            orig_h, orig_w = plate_image.shape[:2]
+        except Exception:
+            return detections
+
+        # Fallback ratunkowy: jeśli crop ma "wysoki" profil (np. długi numer
+        # błędnie wyeksportowany jak tablica square 256x128), kompresujemy go
+        # pionowo i dajemy OCR drugi przebieg. Pomaga to odzyskać długie
+        # tablice bez psucia zwykłej ścieżki.
+        try:
+            aspect_ratio = (float(orig_w) / float(orig_h)) if orig_h > 0 else 0.0
+            if orig_h >= 96 and aspect_ratio <= 2.3:
+                rescue_h = max(56, min(72, int(round(orig_h * 0.5))))
+                rescue_img = cv2.resize(plate_image, (int(orig_w), int(rescue_h)), interpolation=cv2.INTER_CUBIC)
+                rescue_detections = self._run_ocr_detection_pass(rescue_img)
+                if rescue_detections:
+                    scale_back_y = float(orig_h) / float(rescue_h)
+                    normalized = []
+                    for det in rescue_detections:
+                        x1, y1, x2, y2 = det.bbox
+                        normalized.append(
+                            CharacterDetection(
+                                character=str(det.character),
+                                bbox=(float(x1), float(y1) * scale_back_y, float(x2), float(y2) * scale_back_y),
+                                confidence=float(det.confidence),
+                                method=str(det.method),
+                                source_tag="ocr_tall_rescue",
+                            )
+                        )
+                    return normalized
+        except Exception as e:
+            logger.debug(f"Fallback OCR tall rescue nie powiódł się: {e}")
+
+        return detections
         
     def _detect_with_yolo(self, plate_image: np.ndarray) -> List[CharacterDetection]:
         if self.yolo_model is None:

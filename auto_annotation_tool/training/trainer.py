@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Callable, Dict, Tuple
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE, AVAILABLE_POSE_MODELS
+from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE, AVAILABLE_POSE_MODELS, torch
 from ..utils import cleanup_gpu_memory, safe_load_yaml
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
@@ -24,12 +24,102 @@ if YOLO_AVAILABLE:
     from ultralytics import YOLO
 
 
+_ULTRALYTICS_SAVE_MODEL_PATCHED = False
+
+
+def _patch_ultralytics_save_model_closed_file_bug():
+    global _ULTRALYTICS_SAVE_MODEL_PATCHED
+    if _ULTRALYTICS_SAVE_MODEL_PATCHED or not YOLO_AVAILABLE:
+        return
+
+    try:
+        from ultralytics.engine.trainer import BaseTrainer
+    except Exception:
+        return
+
+    original = getattr(BaseTrainer, "save_model", None)
+    if not callable(original):
+        return
+    if getattr(original, "_aat_closed_file_patch", False):
+        _ULTRALYTICS_SAVE_MODEL_PATCHED = True
+        return
+
+    original_globals = getattr(original, "__globals__", {}) or {}
+    torch_mod = original_globals.get("torch")
+    deepcopy_fn = original_globals.get("deepcopy")
+    unwrap_model_fn = original_globals.get("unwrap_model")
+    convert_opt_state = original_globals.get("convert_optimizer_state_dict_to_fp16")
+    datetime_mod = original_globals.get("datetime")
+    ultralytics_version = original_globals.get("__version__", "")
+    git_meta = original_globals.get("GIT")
+    if not all([torch_mod, deepcopy_fn, unwrap_model_fn, convert_opt_state, datetime_mod]):
+        return
+
+    def _safe_torch_save_to_path(payload: dict, path_obj: Path):
+        tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        torch_mod.save(payload, str(tmp_path))
+        os.replace(str(tmp_path), str(path_obj))
+
+    def _fallback_save_model(self):
+        ckpt = {
+            "epoch": self.epoch,
+            "best_fitness": self.best_fitness,
+            "model": None,
+            "ema": deepcopy_fn(unwrap_model_fn(self.ema.ema)).half(),
+            "updates": self.ema.updates,
+            "optimizer": convert_opt_state(deepcopy_fn(self.optimizer.state_dict())),
+            "scaler": self.scaler.state_dict(),
+            "train_args": vars(self.args),
+            "train_metrics": {**getattr(self, "metrics", {}), **{"fitness": self.fitness}},
+            "train_results": self.read_results_csv(),
+            "date": datetime_mod.now().isoformat(),
+            "version": ultralytics_version,
+            "git": {
+                "root": str(getattr(git_meta, "root", "")),
+                "branch": str(getattr(git_meta, "branch", "")),
+                "commit": str(getattr(git_meta, "commit", "")),
+                "origin": str(getattr(git_meta, "origin", "")),
+            },
+            "license": "AGPL-3.0 (https://ultralytics.com/license)",
+            "docs": "https://docs.ultralytics.com",
+        }
+
+        self.wdir.mkdir(parents=True, exist_ok=True)
+        _safe_torch_save_to_path(ckpt, Path(self.last))
+        if self.best_fitness == self.fitness:
+            _safe_torch_save_to_path(ckpt, Path(self.best))
+        if (self.save_period > 0) and (self.epoch % self.save_period == 0):
+            _safe_torch_save_to_path(ckpt, Path(self.wdir) / f"epoch{self.epoch}.pt")
+
+    def patched_save_model(self):
+        try:
+            return original(self)
+        except ValueError as e:
+            if "closed file" not in str(e or "").lower():
+                raise
+            logger.warning(
+                "Ultralytics save_model() wywalił się na 'closed file'. "
+                "Uruchamiam bezpieczny fallback zapisu checkpointu bez BytesIO."
+            )
+            return _fallback_save_model(self)
+
+    setattr(patched_save_model, "_aat_closed_file_patch", True)
+    BaseTrainer.save_model = patched_save_model
+    _ULTRALYTICS_SAVE_MODEL_PATCHED = True
+
+
 class YOLOPoseTrainer:
     """
     Trener modeli YOLO Pose.
     """
 
     def __init__(self, history: TrainingHistory = None):
+        _patch_ultralytics_save_model_closed_file_bug()
         self.history = history or TrainingHistory()
         self.current_run: Optional[TrainingRun] = None
         self.model: Optional["YOLO"] = None
@@ -52,6 +142,50 @@ class YOLOPoseTrainer:
         self._stdout_log_path: Optional[Path] = None
         self._last_event_offset: int = 0
         self._worker_end_event_seen: bool = False
+
+    def _apply_ultralytics_runtime_safety_overrides(self, *, device, is_pose: bool) -> None:
+        """Ogranicza znane źródła niestabilności w workerze treningowym."""
+        try:
+            from ultralytics import SETTINGS as ULTRALYTICS_SETTINGS
+
+            try:
+                if bool(ULTRALYTICS_SETTINGS.get("sync", True)):
+                    ULTRALYTICS_SETTINGS.update({"sync": False})
+                    logger.info("Wyłączono sync/telemetrię Ultralytics w workerze treningowym.")
+            except Exception:
+                pass
+        except Exception:
+            ULTRALYTICS_SETTINGS = None
+
+        try:
+            from ultralytics.utils.events import events as ultralytics_events
+
+            ultralytics_events.enabled = False
+        except Exception:
+            pass
+
+        if str(device).strip().lower() != "cpu":
+            return
+
+        try:
+            if torch is not None:
+                try:
+                    torch.backends.mkldnn.enabled = False
+                    logger.info("CPU training: wyłączono MKLDNN dla stabilności.")
+                except Exception:
+                    pass
+
+                try:
+                    torch.set_num_threads(1)
+                except Exception:
+                    pass
+                try:
+                    torch.set_num_interop_threads(1)
+                except Exception:
+                    pass
+                logger.info("CPU training: ograniczono wątki PyTorch do 1/1.")
+        except Exception as e:
+            logger.debug(f"Nie udało się zastosować CPU safety overrides: {e}")
 
     def _reset_runtime_state(self):
         """Czyści stan modelu i pamięć CUDA przed kolejną próbą treningu."""
@@ -113,6 +247,8 @@ class YOLOPoseTrainer:
             "cuda outofmemoryerror",
             "memory allocation failure",
             "unable to allocate",
+            "defaultcpuallocator: not enough memory",
+            "not enough memory",
             "cuda error: unknown error",
         )
         return any(needle in text for needle in needles)
@@ -131,7 +267,7 @@ class YOLOPoseTrainer:
 
     @staticmethod
     def _next_lower_training_imgsz(value: int) -> int:
-        steps = [384, 416, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280]
+        steps = [256, 320, 384, 416, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280]
         try:
             current = int(value or 640)
         except Exception:
@@ -168,9 +304,10 @@ class YOLOPoseTrainer:
             "save": True,
             "save_period": 10,
             "patience": 50,
-            # Plotting bywa niestabilny w tym środowisku i nie jest potrzebny
-            # do samego przebiegu treningu ani zapisu wag.
-            "plots": False,
+            # W Z4 użytkownik oczekuje pełnych artefaktów analitycznych Ultralytics
+            # (results.png, confusion_matrix.png, krzywe PR/F1 itd.), więc
+            # generowanie wykresów pozostaje domyślnie włączone.
+            "plots": (False if str(device).strip().lower() == "cpu" else True),
             "workers": 0,
             "amp": bool(amp),
         }
@@ -674,10 +811,26 @@ class YOLOPoseTrainer:
                 and bool(dataset_profile.get("is_pose"))
                 and int(dataset_profile.get("train_images", 0) or 0) >= 1000
             )
+            self._apply_ultralytics_runtime_safety_overrides(
+                device=device,
+                is_pose=bool(dataset_profile.get("is_pose")),
+            )
+            start_with_safe_pose_profile = bool(
+                not is_resuming
+                and bool(dataset_profile.get("is_pose"))
+                and int(batch_size) <= 1
+                and int(img_size) <= 448
+            )
             if disable_mosaic_from_start:
                 logger.info(
                     "Duży dataset POSE tablic wykryty. Startuję trening bez mosaic, "
                     "aby ograniczyć ryzyko awarii pamięci po stronie augmentacji."
+                )
+            elif start_with_safe_pose_profile:
+                logger.info(
+                    "Wykryto ostrożny profil startowy dla POSE tablic "
+                    "(batch=1 i mały imgsz). Startuję od razu bez mosaic i bez AMP, "
+                    "żeby nie czekać na pierwszy OOM."
                 )
 
             self.history.update_run(
@@ -761,9 +914,9 @@ class YOLOPoseTrainer:
                     "batch_size": int(batch_size),
                     "img_size": int(img_size),
                     "lr0": float(lr0),
-                    "amp": True,
-                    "mosaic": (0.0 if disable_mosaic_from_start else None),
-                    "close_mosaic": (0 if disable_mosaic_from_start else None),
+                    "amp": (False if start_with_safe_pose_profile else True),
+                    "mosaic": (0.0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
+                    "close_mosaic": (0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
                     "label": "start",
                 }
             ]
@@ -847,6 +1000,7 @@ class YOLOPoseTrainer:
                     break
                 except Exception as train_error:
                     last_training_error = train_error
+                    progressed_batches = int(batch_state.get("batch", 0) or 0) > 0
                     can_retry = (
                         attempt_index < (len(training_attempts) - 1)
                         and not is_resuming
@@ -854,6 +1008,7 @@ class YOLOPoseTrainer:
                         and not self.should_pause
                         and self._is_training_memory_error(train_error)
                         and not self._is_cuda_runtime_broken_error(train_error)
+                        and not progressed_batches
                     )
                     if can_retry:
                         used_memory_fallback = True
@@ -864,6 +1019,15 @@ class YOLOPoseTrainer:
                         )
                         self._reset_runtime_state()
                         continue
+                    if progressed_batches and self._is_training_memory_error(train_error):
+                        last_training_error = RuntimeError(
+                            "Trening napotkał błąd pamięci (out of memory) już w trakcie realnej pracy na batchach. "
+                            "Nie ponawiam próby w tym samym workerze, bo po takim OOM kolejne "
+                            "starty w tym samym procesie często kończą się fałszywymi błędami "
+                            "alokatora CPU/CUDA. Uruchom ponownie trening na lżejszych ustawieniach "
+                            "(najlepiej w świeżym workerze)."
+                        )
+                        raise last_training_error
                     raise
 
             if last_training_error is not None:
@@ -1072,6 +1236,53 @@ class YOLOPoseTrainer:
             except Exception:
                 pass
             logger.info("Stop...")
+
+    def shutdown(self, wait_timeout: float = 0.8, terminate_timeout: float = 1.5, kill_timeout: float = 1.5):
+        self.should_pause = False
+        self.should_stop = True
+
+        try:
+            self._write_worker_control(pause=False, stop=True)
+        except Exception:
+            pass
+
+        try:
+            trainer = getattr(self.model, "trainer", None)
+            if trainer is not None:
+                setattr(trainer, "stop", True)
+        except Exception:
+            pass
+
+        process = getattr(self, "_worker_process", None)
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=max(0.0, float(wait_timeout or 0.0)))
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Treningowy worker nie zamknął się po miękkim stopie. Wysyłam terminate().")
+                        try:
+                            process.terminate()
+                        except Exception:
+                            pass
+                        try:
+                            process.wait(timeout=max(0.0, float(terminate_timeout or 0.0)))
+                        except subprocess.TimeoutExpired:
+                            logger.warning("Treningowy worker nadal żyje. Wysyłam kill().")
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                            try:
+                                process.wait(timeout=max(0.0, float(kill_timeout or 0.0)))
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.debug(f"Nie udało się domknąć worker process podczas shutdownu: {e}")
+
+        self.is_training = False
+        self._reset_worker_ipc_state()
+        self._reset_runtime_state()
 
     def resume_training(self, run_id: str) -> Optional[str]:
         run = self.history.get_run(run_id)
