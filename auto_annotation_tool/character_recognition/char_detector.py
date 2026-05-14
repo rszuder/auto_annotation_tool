@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..config import logger, CV2_AVAILABLE, cv2
+from ..utils import cleanup_gpu_memory
 
 
 class DetectionMethod(Enum):
@@ -93,6 +94,9 @@ class CharacterDetector:
         self.last_yolo_nms_detections: List[CharacterDetection] = []
         self.last_yolo_detections: List[CharacterDetection] = []
         self.last_yolo_ocr_detections: List[CharacterDetection] = []
+        self._cuda_runtime_broken = False
+        self._cuda_runtime_break_reason = ""
+        self._cuda_runtime_fallback_logged = False
     
     def detect(self, plate_image: np.ndarray) -> List[CharacterDetection]:
         detections = []
@@ -113,16 +117,102 @@ class CharacterDetector:
                     or list(self.last_yolo_detections)
                     or list(self.last_yolo_raw_detections)
                 )
-                self.last_yolo_ocr_detections = self._detect_with_yolo_boxes_and_ocr(
-                    plate_image,
-                    yolo_boxes_for_ocr,
-                )
-                detections.extend(self.last_yolo_ocr_detections)
+                if yolo_boxes_for_ocr:
+                    self.last_yolo_ocr_detections = self._detect_with_yolo_boxes_and_ocr(
+                        plate_image,
+                        yolo_boxes_for_ocr,
+                    )
+                    detections.extend(self.last_yolo_ocr_detections)
+                elif self._cuda_runtime_broken and self.ocr_engine is not None and getattr(self.ocr_engine, "is_loaded", False):
+                    # Jeśli YOLO padło na GPU, nie zostawiaj reszty paczki bez żadnego wyniku.
+                    self.last_ocr_detections = self._detect_with_ocr(plate_image)
+                    detections.extend(self.last_ocr_detections)
             else:
                 detections.extend(self.last_yolo_detections)
             
         detections.sort(key=lambda d: d.bbox[0])
         return detections
+
+    @staticmethod
+    def _is_cuda_runtime_error(error: Exception | str | None) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        tokens = (
+            "cuda error",
+            "out of memory",
+            "cuda out of memory",
+            "cublas",
+            "cudnn",
+            "device-side assert",
+            "device-side assertion",
+            "illegal memory access",
+            "no kernel image is available",
+            "unspecified launch failure",
+        )
+        return any(token in text for token in tokens)
+
+    def _ocr_runs_on_cuda(self) -> bool:
+        engine = getattr(self, "ocr_engine", None)
+        if engine is None:
+            return False
+        try:
+            device = str(getattr(engine, "device", "") or "").strip().lower()
+        except Exception:
+            device = ""
+        return device.startswith("cuda")
+
+    def _handle_cuda_runtime_failure(self, backend: str, error: Exception) -> bool:
+        if not self._is_cuda_runtime_error(error):
+            return False
+
+        self._cuda_runtime_broken = True
+        self._cuda_runtime_break_reason = str(error or "").strip()
+
+        if backend == "yolo":
+            try:
+                self.yolo_model = None
+            except Exception:
+                pass
+            self.last_yolo_raw_detections = []
+            self.last_yolo_nms_detections = []
+            self.last_yolo_detections = []
+            self.last_yolo_ocr_detections = []
+
+        cpu_fallback_ready = False
+        engine = getattr(self, "ocr_engine", None)
+        if engine is not None and self._ocr_runs_on_cuda():
+            try:
+                cpu_fallback_ready = bool(engine.fallback_to_cpu())
+            except Exception as fallback_error:
+                logger.debug(f"Fallback OCR->CPU nie powiódł się: {fallback_error}")
+                cpu_fallback_ready = False
+            if not cpu_fallback_ready:
+                try:
+                    engine.unload()
+                except Exception:
+                    pass
+                self.ocr_engine = None
+
+        try:
+            cleanup_gpu_memory()
+        except Exception:
+            pass
+
+        if not self._cuda_runtime_fallback_logged:
+            if cpu_fallback_ready:
+                logger.warning(
+                    "Detekcja znaków napotkała awarię CUDA. OCR przełączono na CPU, "
+                    "a backend YOLO znaków zostanie pominięty do końca tego przebiegu."
+                )
+            else:
+                logger.warning(
+                    "Detekcja znaków napotkała awarię CUDA. Backendy GPU dla tego przebiegu "
+                    "zostały wyłączone, aby zatrzymać lawinę błędów."
+                )
+            self._cuda_runtime_fallback_logged = True
+
+        return cpu_fallback_ready
 
     @staticmethod
     def _refine_ocr_segment_bbox(
@@ -203,7 +293,7 @@ class CharacterDetector:
 
         return (refined_x1, refined_y1, refined_x2, refined_y2)
 
-    def _run_ocr_detection_pass(self, plate_image: np.ndarray) -> List[CharacterDetection]:
+    def _run_ocr_detection_pass(self, plate_image: np.ndarray, *, allow_cpu_fallback: bool = True) -> List[CharacterDetection]:
         if self.ocr_engine is None or not getattr(self.ocr_engine, 'is_loaded', False):
             return []
 
@@ -292,6 +382,9 @@ class CharacterDetector:
 
         except Exception as e:
             logger.error(f"Błąd OCR detection: {e}")
+            fallback_ready = self._handle_cuda_runtime_failure("ocr", e)
+            if allow_cpu_fallback and fallback_ready and self.ocr_engine is not None and getattr(self.ocr_engine, "is_loaded", False):
+                return self._run_ocr_detection_pass(plate_image, allow_cpu_fallback=False)
             return []
     
     def _detect_with_ocr(self, plate_image: np.ndarray) -> List[CharacterDetection]:
@@ -372,6 +465,7 @@ class CharacterDetector:
             return self._filter_yolo_sequence_consistency(deduplicated)
         except Exception as e:
             logger.error(f"Błąd YOLO detection na znakach: {e}")
+            self._handle_cuda_runtime_failure("yolo", e)
             return []
 
     def _expand_crop_bbox(
@@ -403,7 +497,7 @@ class CharacterDetector:
 
         return crop_x1, crop_y1, crop_x2, crop_y2
 
-    def _recognize_char_from_crop_with_ocr(self, char_image: np.ndarray) -> Tuple[str, float]:
+    def _recognize_char_from_crop_with_ocr(self, char_image: np.ndarray, *, allow_cpu_fallback: bool = True) -> Tuple[str, float]:
         if self.ocr_engine is None or not getattr(self.ocr_engine, "is_loaded", False):
             return "", 0.0
         if char_image is None or getattr(char_image, "size", 0) == 0:
@@ -448,6 +542,9 @@ class CharacterDetector:
                 )
         except Exception as e:
             logger.debug(f"Błąd OCR dla cropa znaku: {e}")
+            fallback_ready = self._handle_cuda_runtime_failure("ocr", e)
+            if allow_cpu_fallback and fallback_ready and self.ocr_engine is not None and getattr(self.ocr_engine, "is_loaded", False):
+                return self._recognize_char_from_crop_with_ocr(char_image, allow_cpu_fallback=False)
             return "", 0.0
 
         best_char = ""

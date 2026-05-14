@@ -61,6 +61,67 @@ class PlateOCR:
             logger.error(f"[ERR] Błąd ładowania EasyOCR: {e}")
             self.is_loaded = False
             
+    @staticmethod
+    def _is_memory_allocation_error(error: Exception | str | None) -> bool:
+        if isinstance(error, MemoryError):
+            return True
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        return (
+            "unable to allocate" in text
+            or "out of memory" in text
+            or "std::bad_alloc" in text
+            or "bad allocation" in text
+        )
+
+    def _downscale_for_low_memory(
+        self,
+        image: np.ndarray,
+        *,
+        max_width: int = 960,
+        max_height: int = 192,
+    ) -> np.ndarray:
+        if not CV2_AVAILABLE or image is None or getattr(image, "size", 0) == 0:
+            return image
+
+        try:
+            h, w = image.shape[:2]
+        except Exception:
+            return image
+
+        if h <= 0 or w <= 0:
+            return image
+
+        scale = min(float(max_width) / float(w), float(max_height) / float(h), 1.0)
+        if scale >= 0.999:
+            return image
+
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        interpolation_mode = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        return cv2.resize(image, (new_w, new_h), interpolation=interpolation_mode)
+
+    def _readtext_with_profile(
+        self,
+        image: np.ndarray,
+        *,
+        mag_ratio: float,
+        text_threshold: float,
+        link_threshold: float,
+        width_ths: float,
+        decoder: str,
+    ):
+        return self.reader.readtext(
+            image,
+            allowlist=self.allowlist,
+            mag_ratio=float(mag_ratio),
+            text_threshold=float(text_threshold),
+            link_threshold=float(link_threshold),
+            width_ths=float(width_ths),
+            decoder=str(decoder),
+        )
+
     def preprocess_plate(self, image: np.ndarray, 
                          target_height: int = 80,
                          manual_angle: float = 0.0,
@@ -141,17 +202,50 @@ class PlateOCR:
         """
         Zwraca wyjście z EasyOCR używając agresywnych parametrów.
         """
-        if not self.is_loaded: return []
-        
-        return self.reader.readtext(
-            image, 
-            allowlist=self.allowlist,
-            mag_ratio=2.0,
-            text_threshold=0.3,
-            link_threshold=0.6,
-            width_ths=0.8,
-            decoder='beamsearch' 
-        )
+        if not self.is_loaded:
+            return []
+
+        try:
+            return self._readtext_with_profile(
+                image,
+                mag_ratio=2.0,
+                text_threshold=0.3,
+                link_threshold=0.6,
+                width_ths=0.8,
+                decoder='beamsearch',
+            )
+        except Exception as e:
+            if not self._is_memory_allocation_error(e):
+                raise
+
+            logger.warning(
+                "OCR zabrakło pamięci w trybie agresywnym. "
+                "Powtarzam odczyt w lżejszym profilu."
+            )
+
+            fallback_image = self._downscale_for_low_memory(image, max_width=960, max_height=192)
+            try:
+                return self._readtext_with_profile(
+                    fallback_image,
+                    mag_ratio=1.0,
+                    text_threshold=0.35,
+                    link_threshold=0.6,
+                    width_ths=0.75,
+                    decoder='greedy',
+                )
+            except Exception as retry_error:
+                if not self._is_memory_allocation_error(retry_error):
+                    raise
+
+                second_image = self._downscale_for_low_memory(fallback_image, max_width=720, max_height=160)
+                return self._readtext_with_profile(
+                    second_image,
+                    mag_ratio=1.0,
+                    text_threshold=0.4,
+                    link_threshold=0.65,
+                    width_ths=0.7,
+                    decoder='greedy',
+                )
         
     def _rotate_image(self, image: np.ndarray, angle: float) -> np.ndarray:
         """Obraca obraz o podany kąt (z zachowaniem wypełnienia krawędzi)."""
@@ -202,3 +296,23 @@ class PlateOCR:
                 cleanup_gpu_memory()
             except Exception:
                 pass
+
+    def fallback_to_cpu(self) -> bool:
+        current_device = str(getattr(self, "device", "") or "").strip().lower()
+        if current_device == "cpu" and bool(getattr(self, "is_loaded", False)) and self.reader is not None:
+            return True
+
+        try:
+            self.unload()
+        except Exception:
+            pass
+
+        self.device = "cpu"
+        try:
+            self._load_reader()
+        except Exception as e:
+            logger.error(f"[ERR] Nie udało się przełączyć OCR na CPU: {e}")
+            self.reader = None
+            self.is_loaded = False
+
+        return bool(self.is_loaded and self.reader is not None)
