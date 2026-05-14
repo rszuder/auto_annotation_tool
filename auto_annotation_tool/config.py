@@ -132,6 +132,7 @@ class Config:
     DIR_4_DATASETS_PLATES: Path = DIR_4_DATASETS / "plates"
     DIR_4_DATASETS_CHARS: Path = DIR_4_DATASETS / "chars"
     DIR_4_DATASETS_VEHICLES: Path = DIR_4_DATASETS / "vehicles"
+    DIR_4_DATASETS_CHAR_CLASSIFICATION: Path = DIR_4_DATASETS / "4_char_classification"
 
     DIR_5_RUNS_PLATES: Path = DIR_5_RUNS / "plates"
     DIR_5_RUNS_CHARS: Path = DIR_5_RUNS / "chars"
@@ -191,6 +192,9 @@ class Config:
         if normalized == "vehicle":
             return self.DIR_4_DATASETS_VEHICLES
         return self.DIR_4_DATASETS_CHARS
+
+    def get_char_classification_datasets_dir(self) -> Path:
+        return self.DIR_4_DATASETS_CHAR_CLASSIFICATION
 
     def get_training_runs_dir(self, target: str | None = None) -> Path:
         normalized = self.normalize_task_target(target)
@@ -266,6 +270,7 @@ class Config:
             self.DIR_2_AUTO_ANN, 
             self.DIR_3_CHARS,
             self.DIR_4_DATASETS, 
+            self.DIR_4_DATASETS_CHAR_CLASSIFICATION,
             self.DIR_5_RUNS, 
             self.DIR_6_MODELS, 
             self.DIR_7_RANKINGS, 
@@ -284,6 +289,7 @@ class Config:
                 "2_auto_annotations   : Wyniki autoanotacji, uporządkowane dalej na plates/ oraz chars/.\n"
                 "3_cropped_characters : Tu lądują wycięte tablice i wyniki OCR z Zakładki nr 2.\n"
                 "4_training_datasets  : Gotowe datasety YOLO, porządkowane na plates/, chars/ i vehicles/.\n"
+                "  4_char_classification : Datasety OCR/klasyfikacji znaków (manifest.json), nie wejście Z4 YOLO.\n"
                 "5_training_runs      : Logi i artefakty treningu, także rozdzielone na plates/, chars/ i vehicles/.\n"
                 "6_models             : Modele bazowe w base/, wytrenowane w trained/, dodatkowo rozdzielone według toru.\n"
                 "7_rankings           : Raporty z testów i walidacji, rozdzielone według typu modelu.\n"

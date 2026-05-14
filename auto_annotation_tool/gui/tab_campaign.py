@@ -26,7 +26,8 @@ from ..icons import IconManager
 from ..project_cache import PROJECT_CACHE
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
-from .z2_view_models import Step2CtaViewModel, Step2RouteChoiceViewModel, Step2ViewModel, Step3ViewModel
+from .z2_view_models import Step2CtaViewModel, Step2RouteChoiceViewModel, Step2ViewModel
+from .z3_view_models import Step3ViewModel
 
 
 @dataclass
@@ -175,13 +176,16 @@ class CampaignTab:
         self._startup_ui_ready = True
 
     def _get_project_list_selection_bg(self) -> str:
-        palette = getattr(self.app, "palette", {})
-        success = palette.get("success", "#27ae60")
-        panel = palette.get("panel", "#252526")
         try:
-            return blend_hex_colors(success, panel, 0.22)
+            return self.app.get_list_selection_colors()[0]
         except Exception:
-            return "#1f6f43"
+            return "#f8fafc"
+
+    def _get_project_list_selection_fg(self) -> str:
+        try:
+            return self.app.get_list_selection_colors()[1]
+        except Exception:
+            return "#111827"
 
     def _get_campaign_green_accent(self) -> str:
         palette = getattr(self.app, "palette", {})
@@ -1560,7 +1564,7 @@ class CampaignTab:
             bg=palette.get("field", "#1a1a1a"),
             fg=palette.get("fg", "#f3f3f3"),
             selectbackground=self._get_project_list_selection_bg(),
-            selectforeground="#ffffff",
+            selectforeground=self._get_project_list_selection_fg(),
             activestyle="none",
             bd=0,
             highlightthickness=1,
@@ -5842,7 +5846,7 @@ class CampaignTab:
                     bg=palette.get("field", "#1a1a1a"),
                     fg=fg,
                     selectbackground=self._get_project_list_selection_bg(),
-                    selectforeground="#ffffff",
+                    selectforeground=self._get_project_list_selection_fg(),
                     highlightbackground=green,
                     highlightcolor=green,
                 )
@@ -5913,11 +5917,12 @@ class CampaignTab:
 
         try:
             if self.ingest_plan_listbox is not None:
+                select_bg, select_fg = self.app.get_list_selection_colors()
                 self.ingest_plan_listbox.config(
                     bg=palette.get("field", "#1a1a1a"),
                     fg=fg,
-                    selectbackground=palette.get("accent", "#2980b9"),
-                    selectforeground="#ffffff",
+                    selectbackground=select_bg,
+                    selectforeground=select_fg,
                     highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
                     highlightcolor=palette.get("accent", "#2980b9"),
                 )
@@ -6011,6 +6016,7 @@ class CampaignTab:
 
         scroll = WebSlimScrollbar(list_frame, orient=tk.VERTICAL)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        select_bg, select_fg = self.app.get_list_selection_colors()
 
         project_list = tk.Listbox(
             list_frame,
@@ -6018,8 +6024,8 @@ class CampaignTab:
             font=("Segoe UI", 10),
             bg=palette["field"],
             fg=palette["fg"],
-            selectbackground=palette["accent"],
-            selectforeground="#ffffff",
+            selectbackground=select_bg,
+            selectforeground=select_fg,
             activestyle="none",
             bd=0,
             highlightthickness=1,
@@ -9641,6 +9647,7 @@ class CampaignTab:
             return {}
 
         plate_source = dict(bundle.get("plate_source") or {})
+        step2_active_run = dict(bundle.get("step2_active_run") or {})
         plate_model = dict(bundle.get("plate_model") or {})
         char_effective = dict(bundle.get("char_effective_source") or {})
         route_hints = dict(bundle.get("route_hints") or {})
@@ -9662,7 +9669,8 @@ class CampaignTab:
         try:
             effective_input_dir = Path(
                 str(
-                    plate_source.get("images_dir")
+                    step2_active_run.get("images_dir")
+                    or plate_source.get("images_dir")
                     or image_source.get("master_pool_dir")
                     or CAMPAIGN.get_iteration_raw_dir(iteration_num)
                     or ""
@@ -9692,6 +9700,20 @@ class CampaignTab:
         }
 
         if target == "plate":
+            active_run_dir_raw = str(step2_active_run.get("run_dir") or "").strip()
+            active_xml_path_raw = str(step2_active_run.get("xml_path") or "").strip()
+            try:
+                active_run_dir = Path(active_run_dir_raw) if active_run_dir_raw else None
+            except Exception:
+                active_run_dir = None
+            if active_run_dir is not None and (not active_run_dir.exists() or not active_run_dir.is_dir()):
+                active_run_dir = None
+            active_xml_ok = False
+            if active_xml_path_raw:
+                try:
+                    active_xml_ok = Path(active_xml_path_raw).exists()
+                except Exception:
+                    active_xml_ok = False
             run_dir_raw = str(plate_source.get("run_dir") or "").strip()
             xml_path_raw = str(plate_source.get("xml_path") or "").strip()
             try:
@@ -9707,14 +9729,26 @@ class CampaignTab:
                 except Exception:
                     xml_ok = False
             restore_run_dir = run_dir if (run_dir is not None and xml_ok and plate_source_usable) else None
+            if active_run_dir is not None and active_xml_ok:
+                restore_run_dir = active_run_dir
             result["restore_run_dir"] = restore_run_dir
             result["run_name"] = str(getattr(restore_run_dir, "name", "") or "").strip()
             result["has_source"] = bool(restore_run_dir is not None)
             result["ready"] = bool(restore_run_dir is not None)
             result["manual_template"] = bool(not restore_run_dir and not plate_model_ready)
             result["input_source"] = (
-                str(plate_source.get("input_source") or "").strip()
-                or ("registry_plate_source" if restore_run_dir is not None else "registry")
+                str(
+                    (
+                        step2_active_run.get("input_source")
+                        if restore_run_dir is not None and active_run_dir is not None
+                        else plate_source.get("input_source")
+                    ) or ""
+                ).strip()
+                or (
+                    "registry_step2_active_run"
+                    if restore_run_dir is not None and active_run_dir is not None
+                    else ("registry_plate_source" if restore_run_dir is not None else "registry")
+                )
             )
             result["bootstrap"] = {
                 "restore_run_dir": restore_run_dir,
@@ -10664,6 +10698,31 @@ class CampaignTab:
 
         if preview_dir is None:
             try:
+                bundle = dict(
+                    CAMPAIGN.get_iteration_artifact_bundle(
+                        images_dir=CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(),
+                        iteration_num=int(CAMPAIGN.get_current_iteration_num() or 1),
+                    ) or {}
+                )
+            except Exception:
+                bundle = {}
+            preview_entry = dict(bundle.get("step3_preview_source") or {})
+            preview_dir_raw = str(preview_entry.get("preview_dir") or "").strip()
+            if preview_dir_raw:
+                try:
+                    candidate = Path(preview_dir_raw)
+                    if (
+                        candidate.exists()
+                        and candidate.is_dir()
+                        and (candidate / "metadata.json").exists()
+                        and (candidate / "images").exists()
+                    ):
+                        preview_dir = candidate
+                except Exception:
+                    preview_dir = None
+
+        if preview_dir is None:
+            try:
                 saved_preview_dir = str(CAMPAIGN.get_step3_preview_dir() or "").strip()
             except Exception:
                 saved_preview_dir = ""
@@ -10754,85 +10813,10 @@ class CampaignTab:
         }
 
     def _get_pending_step3_char_union_state(self) -> dict:
-        preview_state = self._get_active_step3_preview_source_state()
-        preview_source_names = {
-            str(name or "").strip().lower()
-            for name in set(preview_state.get("source_names") or set())
-            if str(name or "").strip()
-        }
-        if not preview_state and not preview_source_names:
+        try:
+            return dict(CAMPAIGN.get_step3_char_source_state() or {})
+        except Exception:
             return {}
-
-        annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-        if annotation_tab is None:
-            return preview_state
-
-        plate_state = dict(self._get_annotation_step2_source_state_from_registry("plate") or {})
-        raw_run_dir = plate_state.get("restore_run_dir")
-        try:
-            safe_run_dir = annotation_tab._resolve_safe_annotation_run_dir(raw_run_dir, require_xml=True)
-        except Exception:
-            safe_run_dir = None
-        if safe_run_dir is None:
-            return preview_state
-
-        try:
-            same_run_loaded = bool(
-                getattr(annotation_tab, "current_annotation_run_dir", None) is not None
-                and getattr(annotation_tab, "current_annotations", None)
-                and annotation_tab._paths_equivalent(annotation_tab.current_annotation_run_dir, safe_run_dir)
-            )
-        except Exception:
-            same_run_loaded = False
-
-        try:
-            if same_run_loaded:
-                approved_names = {
-                    str(name or "").strip().lower()
-                    for name in set(annotation_tab._get_preview_approved_filenames() or set())
-                    if str(name or "").strip()
-                }
-                annotations = list(getattr(annotation_tab, "current_annotations", None) or [])
-            else:
-                approved_names = {
-                    str(name or "").strip().lower()
-                    for name in set(annotation_tab._load_annotation_run_approved_filenames(safe_run_dir) or set())
-                    if str(name or "").strip()
-                }
-                annotations = list(annotation_tab._parse_cvat_preview_annotations(safe_run_dir / "annotations.xml") or [])
-        except Exception:
-            approved_names = set()
-            annotations = []
-
-        union_source_names = set(preview_source_names)
-        images_with_plates = int(preview_state.get("images_with_plates", 0) or 0)
-        total_plates = int(preview_state.get("total_plates", 0) or 0)
-
-        for ann in annotations:
-            image_name = str(getattr(ann, "filename", "") or "").strip().lower()
-            if not image_name or image_name not in approved_names or image_name in union_source_names:
-                continue
-            try:
-                plate_count = int(len(annotation_tab._get_plate_detections(ann)) or 0)
-            except Exception:
-                plate_count = 0
-            if plate_count <= 0:
-                continue
-            union_source_names.add(image_name)
-            images_with_plates += 1
-            total_plates += plate_count
-
-        if not union_source_names and total_plates <= 0:
-            return preview_state
-
-        result = dict(preview_state or {})
-        result.update(
-            source_scope="step3_pending_union",
-            images_with_plates=int(images_with_plates or 0),
-            total_plates=int(total_plates or 0),
-            source_names=set(union_source_names),
-        )
-        return result
 
     def _get_char_route_source_state(self) -> dict:
         result = {
@@ -10857,6 +10841,14 @@ class CampaignTab:
             result["images_with_plates"] = int(pending_union_state.get("images_with_plates", 0) or 0)
             result["total_plates"] = int(pending_union_state.get("total_plates", 0) or 0)
             result["run_name"] = str(pending_union_state.get("run_name") or result.get("run_name") or "").strip()
+            result["project_images_with_plates"] = int(pending_union_state.get("project_images_with_plates", 0) or 0)
+            result["project_total_plates"] = int(pending_union_state.get("project_total_plates", 0) or 0)
+            result["current_images_with_plates"] = int(pending_union_state.get("current_images_with_plates", 0) or 0)
+            result["current_total_plates"] = int(pending_union_state.get("current_total_plates", 0) or 0)
+            result["preview_images_with_plates"] = int(pending_union_state.get("preview_images_with_plates", 0) or 0)
+            result["preview_total_plates"] = int(pending_union_state.get("preview_total_plates", 0) or 0)
+            result["pending_images_with_plates"] = int(pending_union_state.get("pending_images_with_plates", 0) or 0)
+            result["pending_total_plates"] = int(pending_union_state.get("pending_total_plates", 0) or 0)
             result["ready"] = bool(
                 int(result.get("images_with_plates", 0) or 0) >= 2
                 and int(result.get("total_plates", 0) or 0) > 0

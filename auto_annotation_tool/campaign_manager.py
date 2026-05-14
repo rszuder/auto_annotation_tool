@@ -10,6 +10,7 @@ import json
 import uuid
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
 from time import perf_counter
@@ -1953,6 +1954,251 @@ class CampaignManager:
             )
         )
         return result
+
+    @staticmethod
+    def _load_annotation_run_manifest_file(run_dir: Path | None) -> Dict[str, Any]:
+        try:
+            safe_run_dir = Path(run_dir) if run_dir is not None else None
+        except Exception:
+            safe_run_dir = None
+        if safe_run_dir is None:
+            return {}
+        manifest_path = safe_run_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _load_preview_metadata_source_state(preview_dir: Path | None) -> Dict[str, Any]:
+        try:
+            safe_preview_dir = Path(preview_dir) if preview_dir is not None else None
+        except Exception:
+            safe_preview_dir = None
+        if safe_preview_dir is None:
+            return {}
+
+        meta_path = safe_preview_dir / "metadata.json"
+        images_dir = safe_preview_dir / "images"
+        if not meta_path.exists() or not images_dir.exists():
+            return {}
+
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(loaded, dict) or not loaded:
+            return {}
+
+        total_plates = 0
+        source_names: set[str] = set()
+        plates_by_source: dict[str, int] = {}
+        for pid, payload in loaded.items():
+            pid_text = str(pid or "").strip()
+            if not pid_text:
+                continue
+            total_plates += 1
+            source_key = ""
+            if isinstance(payload, dict):
+                source_info = payload.get("source_info") or {}
+                if not isinstance(source_info, dict):
+                    source_info = {}
+                source_key = str(
+                    payload.get("source_image")
+                    or payload.get("source_name")
+                    or source_info.get("image_name")
+                    or pid_text
+                ).strip()
+            if not source_key:
+                source_key = pid_text
+            normalized_source = CampaignManager._normalize_image_set_name(source_key)
+            if not normalized_source:
+                normalized_source = str(source_key or pid_text).strip().lower()
+            if not normalized_source:
+                continue
+            source_names.add(normalized_source)
+            plates_by_source[normalized_source] = int(plates_by_source.get(normalized_source, 0) or 0) + 1
+
+        images_with_plates = int(len(source_names) or total_plates or 0)
+        total_plates = int(total_plates or 0)
+        if total_plates <= 0:
+            return {}
+
+        return {
+            "source_scope": "step3_preview",
+            "run_dir": str(safe_preview_dir.resolve()) if safe_preview_dir.exists() else str(safe_preview_dir),
+            "run_name": str(safe_preview_dir.name or "").strip(),
+            "images_with_plates": images_with_plates,
+            "total_plates": total_plates,
+            "source_names": set(source_names),
+            "plates_by_source": dict(plates_by_source),
+        }
+
+    @staticmethod
+    def _load_run_plate_counts_by_image(run_dir: Path | None, *, image_names: set[str] | None = None) -> Dict[str, int]:
+        try:
+            safe_run_dir = Path(run_dir) if run_dir is not None else None
+        except Exception:
+            safe_run_dir = None
+        if safe_run_dir is None:
+            return {}
+        xml_path = safe_run_dir / "annotations.xml"
+        if not xml_path.exists():
+            return {}
+
+        wanted_names = {
+            CampaignManager._normalize_image_set_name(name)
+            for name in set(image_names or set())
+            if CampaignManager._normalize_image_set_name(name)
+        }
+        try:
+            root = ET.parse(xml_path).getroot()
+        except Exception:
+            return {}
+
+        counts: dict[str, int] = {}
+        for image_node in root.findall(".//image"):
+            image_name = CampaignManager._normalize_image_set_name(image_node.get("name", ""))
+            if not image_name:
+                continue
+            if wanted_names and image_name not in wanted_names:
+                continue
+            plate_count = 0
+            for tag_name in ("polygon", "box"):
+                for det_node in image_node.findall(tag_name):
+                    if str(det_node.get("label", "") or "").strip().lower() == "plate":
+                        plate_count += 1
+            if plate_count <= 0:
+                continue
+            counts[image_name] = int(plate_count)
+        return counts
+
+    def get_step3_char_source_state(
+        self,
+        *,
+        iteration_num: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        try:
+            bundle = dict(self.get_iteration_artifact_bundle(iteration_num=iter_value, project_name=project_name) or {})
+        except Exception:
+            bundle = {}
+
+        preview_entry = dict(bundle.get("step3_preview_source") or {})
+        preview_dir_raw = str(preview_entry.get("preview_dir") or "").strip()
+        if not preview_dir_raw:
+            try:
+                preview_dir_raw = str(self.state["projects"][project_name].get("step3_preview_dir", "") or "").strip()
+            except Exception:
+                preview_dir_raw = ""
+        preview_state = self._load_preview_metadata_source_state(Path(preview_dir_raw) if preview_dir_raw else None)
+
+        step2_entry = dict(bundle.get("step2_active_run") or bundle.get("plate_source") or {})
+        step2_run_raw = str(step2_entry.get("run_dir") or "").strip()
+        step2_run_dir = Path(step2_run_raw) if step2_run_raw else None
+        step2_manifest = self._load_annotation_run_manifest_file(step2_run_dir)
+        approved_names = {
+            self._normalize_image_set_name(name)
+            for name in list(step2_manifest.get("approved_filenames") or [])
+            if self._normalize_image_set_name(name)
+        }
+
+        step2_counts = self._load_run_plate_counts_by_image(step2_run_dir, image_names=approved_names)
+
+        approved_entries = list(self.list_plate_approved_entries(project_name) or [])
+        project_approved_names = {
+            self._normalize_image_set_name(entry.get("image_name", ""))
+            for entry in approved_entries
+            if isinstance(entry, dict) and self._normalize_image_set_name(entry.get("image_name", ""))
+        }
+        project_approved_plates_by_source: dict[str, int] = {}
+        for entry in approved_entries:
+            if not isinstance(entry, dict):
+                continue
+            safe_name = self._normalize_image_set_name(entry.get("image_name", ""))
+            if not safe_name:
+                continue
+            valid_plate_count = 0
+            for plate_entry in list(entry.get("plates") or []):
+                if not isinstance(plate_entry, dict):
+                    continue
+                polygon = list(plate_entry.get("polygon") or [])
+                if len(polygon) >= 4:
+                    valid_plate_count += 1
+            if valid_plate_count <= 0:
+                valid_plate_count = int(entry.get("plate_count", 0) or 0)
+            if valid_plate_count <= 0:
+                continue
+            project_approved_plates_by_source[safe_name] = int(valid_plate_count)
+
+        union_source_names = {
+            str(name or "").strip().lower()
+            for name in set(preview_state.get("source_names") or set())
+            if str(name or "").strip()
+        }
+        union_plates_by_source = {
+            str(name or "").strip().lower(): int(count or 0)
+            for name, count in dict(preview_state.get("plates_by_source") or {}).items()
+            if str(name or "").strip() and int(count or 0) > 0
+        }
+
+        pending_added_names: set[str] = set()
+        pending_added_plates_by_source: dict[str, int] = {}
+        for image_name, plate_count in dict(step2_counts or {}).items():
+            safe_name = str(image_name or "").strip().lower()
+            if not safe_name or plate_count <= 0:
+                continue
+            if safe_name in project_approved_names:
+                continue
+            if safe_name in union_source_names:
+                continue
+            union_source_names.add(safe_name)
+            union_plates_by_source[safe_name] = int(plate_count)
+            pending_added_names.add(safe_name)
+            pending_added_plates_by_source[safe_name] = int(plate_count)
+
+        if not union_source_names and not union_plates_by_source:
+            return {}
+
+        union_project_names = set(union_source_names) & set(project_approved_names)
+        union_project_plates = int(
+            sum(int(project_approved_plates_by_source.get(name, 0) or 0) for name in union_project_names)
+        )
+        union_total_plates = int(sum(int(count or 0) for count in union_plates_by_source.values()))
+        pending_images = int(len(pending_added_names))
+        pending_plates = int(sum(int(count or 0) for count in pending_added_plates_by_source.values()))
+        current_images = max(0, int(len(union_source_names)) - int(len(union_project_names)))
+        current_plates = max(0, int(union_total_plates) - int(union_project_plates))
+
+        return {
+            "source_scope": "step3_pending_union" if pending_images > 0 else str(preview_state.get("source_scope") or "step3_preview"),
+            "images_with_plates": int(len(union_source_names)),
+            "total_plates": int(union_total_plates),
+            "project_images_with_plates": int(len(union_project_names)),
+            "project_total_plates": int(union_project_plates),
+            "current_images_with_plates": int(current_images),
+            "current_total_plates": int(current_plates),
+            "preview_images_with_plates": int(preview_state.get("images_with_plates", 0) or 0),
+            "preview_total_plates": int(preview_state.get("total_plates", 0) or 0),
+            "pending_images_with_plates": int(pending_images),
+            "pending_total_plates": int(pending_plates),
+            "source_names": set(union_source_names),
+            "preview_source_names": set(preview_state.get("source_names") or set()),
+            "pending_source_names": set(pending_added_names),
+            "run_name": str(preview_state.get("run_name") or "").strip(),
+            "run_dir": str(preview_state.get("run_dir") or "").strip(),
+            "ready": bool(int(len(union_source_names)) >= 2 and int(union_total_plates) > 0),
+            "has_source": bool(int(union_total_plates) > 0),
+            "needs_more_tables": bool(int(union_total_plates) > 0 and int(len(union_source_names)) < 2),
+        }
 
     def get_plate_approved_set_stats(self, project_name: str = None) -> Dict[str, Any]:
         project_name = self._resolve_project_name(project_name)

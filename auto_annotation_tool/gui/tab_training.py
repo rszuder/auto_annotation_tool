@@ -20,6 +20,7 @@ import time
 import webbrowser
 import csv
 import textwrap
+import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 import tkinter as tk
@@ -37,7 +38,62 @@ from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
-from .z2_view_models import (
+from .z4_campaign_flow import (
+    build_step4_campaign_navigation_view_model,
+    build_step4_dataset_workflow_view_model,
+    build_step4_training_inputs_view_model,
+    clear_campaign_context,
+    complete_campaign_project,
+    complete_campaign_step4_if_needed,
+    finish_campaign_step4,
+    get_campaign_training_target,
+    open_campaign_step4_entry,
+    poll_training_completion,
+    promote_trained_model_to_campaign_if_needed,
+    return_to_campaign_from_step4,
+    restore_step4_campaign_project_state,
+    set_campaign_context,
+    set_campaign_training_target,
+    show_training_completion_summary,
+)
+from .z4_flow_models import (
+    TrainingInputContext,
+    Z4CampaignRuntimeState,
+    Z4CtaState,
+    Z4FreeModeRuntimeState,
+    Z4LayoutState,
+)
+from .z4_free_mode_flow import (
+    bind_training_route_card,
+    refresh_free_training_route_cards,
+    refresh_free_training_route_ui,
+    set_training_route_card_hover,
+    update_step4_notebook_mode,
+)
+from .z4_shared_ui import (
+    accept_training_input_context,
+    clear_step4_guidance,
+    guide_step4_builder_action,
+    guide_step4_finish_action,
+    guide_step4_next_action,
+    guide_step4_route_selection,
+    mark_step4_dataset_ready,
+    open_step4_dataset_stage,
+    refresh_step4_campaign_builder_inputs_ui,
+    refresh_step4_analysis_tab_visibility,
+    refresh_step4_campaign_navigation_ui,
+    refresh_step4_dataset_mode_ui,
+    refresh_step4_training_inputs_mode_ui,
+    resolve_step4_guidance_buttons,
+    resolve_step4_guidance_frame,
+    set_step4_dataset_mode,
+    set_step4_emphasis,
+    sync_step4_analysis_nav_buttons,
+    step4_dataset_go_back,
+    step4_dataset_go_next,
+    step4_train_go_back,
+)
+from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
     Step4TrainingInputsViewModel,
@@ -660,9 +716,9 @@ class TrainingTab:
         if bool(getattr(self.trainer, "is_training", False)):
             return "trening modelu"
         if bool(getattr(self, "dataset_build_is_running", False)):
-            return "budowa datasetu"
+            return "przygotowanie datasetu tablic"
         if bool(getattr(self, "dataset_split_is_running", False)):
-            return "dzielenie datasetu"
+            return "przygotowanie datasetu znaków"
         if bool(getattr(self, "val_is_running", False)):
             return "walidacja modelu"
         if bool(getattr(self, "rank_is_running", False)):
@@ -1401,6 +1457,50 @@ class TrainingTab:
             return candidate
         return None
 
+    def _looks_like_char_classification_dataset(self, path_like) -> bool:
+        try:
+            path = Path(path_like)
+        except Exception:
+            return False
+
+        if path.is_file():
+            if path.name.lower() == "manifest.json":
+                manifest_path = path
+                root = path.parent
+            else:
+                root = path.parent
+                manifest_path = root / "manifest.json"
+        else:
+            root = path
+            manifest_path = root / "manifest.json"
+
+        if not manifest_path.exists():
+            return False
+
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            dataset_type = str(data.get("dataset_type") or "").strip().lower()
+            if dataset_type == "char_classification":
+                return True
+        except Exception:
+            pass
+
+        try:
+            has_class_splits = all((root / split).exists() for split in ("train", "val", "test"))
+            has_yolo_shape = (root / "images").exists() or (root / "labels").exists() or (root / "data.yaml").exists()
+            return bool(has_class_splits and not has_yolo_shape)
+        except Exception:
+            return False
+
+    def _char_classification_dataset_message(self) -> str:
+        return (
+            "Wybrane źródło wygląda na dataset OCR/klasyfikacyjny znaków (manifest.json). "
+            "Z4/PZ1/PZ2 trenuje tutaj modele YOLO, więc wymaga datasetu YOLO Detect: "
+            "folderu z images/labels oraz data.yaml. Wybierz np. katalog YOLO_MegaDataset_Chars_* "
+            "albo najpierw wygeneruj/wyeksportuj dataset YOLO dla znaków. "
+            "Datasety klasyfikacyjne są odkładane osobno w 4_training_datasets/4_char_classification."
+        )
+
     def _is_training_configuration_ready(self) -> bool:
         if not YOLO_AVAILABLE:
             return False
@@ -1412,6 +1512,9 @@ class TrainingTab:
         yaml_path = self._resolve_training_dataset_yaml_path()
         if yaml_path is None:
             return False
+        if not CAMPAIGN.get_active_project_name():
+            if not self._is_free_training_dataset_variant_selected(yaml_path.parent):
+                return False
 
         selected_target = self._get_selected_training_target()
         inferred_target = self._infer_dataset_target(str(yaml_path.parent))
@@ -2180,6 +2283,142 @@ class TrainingTab:
 
         return candidates
 
+    def _get_free_dataset_variant_choices(self) -> list[dict]:
+        if CAMPAIGN.get_active_project_name():
+            return []
+
+        selected_target = self._get_selected_training_target()
+        candidates = self._find_ready_dataset_candidates(self._get_datasets_base_dir())
+        variants: list[dict] = []
+
+        for path, target, stamp in candidates:
+            if target != selected_target:
+                continue
+            counts = self._get_dataset_split_image_counts(path)
+            total = int(counts.get("total", 0) or 0)
+            try:
+                label_path = self._format_workspace_relative_path(path)
+            except Exception:
+                label_path = str(path)
+            label = (
+                f"{path.name} | train={int(counts.get('train', 0) or 0)}, "
+                f"val={int(counts.get('val', 0) or 0)}, "
+                f"test={int(counts.get('test', 0) or 0)}"
+            )
+            if total <= 0:
+                label = f"{path.name} | data.yaml"
+            variants.append(
+                {
+                    "label": label,
+                    "path": str(path),
+                    "display_path": label_path,
+                    "stamp": float(stamp or 0),
+                }
+            )
+
+        variants.sort(key=lambda item: float(item.get("stamp", 0) or 0), reverse=True)
+        return variants
+
+    def _refresh_dataset_variant_choices(self):
+        combo = getattr(self, "dataset_variant_combo", None)
+        if combo is None:
+            return
+
+        variants = self._get_free_dataset_variant_choices()
+        self._dataset_variant_choices = variants
+        labels = [str(item.get("label") or "") for item in variants]
+
+        try:
+            combo.configure(values=labels)
+        except Exception:
+            pass
+
+        try:
+            if CAMPAIGN.get_active_project_name():
+                combo.configure(state=tk.DISABLED)
+            elif labels:
+                combo.configure(state="readonly")
+            else:
+                combo.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        self._sync_dataset_variant_selection()
+
+    def _normalize_dataset_variant_root(self, value: str | Path | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            path = Path(raw)
+            if path.is_file() and path.name.lower() == "data.yaml":
+                path = path.parent
+            return str(path.resolve())
+        except Exception:
+            return raw
+
+    def _is_free_training_dataset_variant_selected(self, dataset_value: str | Path | None = None) -> bool:
+        if CAMPAIGN.get_active_project_name():
+            return True
+
+        current_root = self._normalize_dataset_variant_root(
+            dataset_value if dataset_value is not None else getattr(self, "dataset_var", tk.StringVar()).get()
+        )
+        if not current_root:
+            return False
+
+        for item in list(self._get_free_dataset_variant_choices() or []):
+            item_root = self._normalize_dataset_variant_root(item.get("path"))
+            if item_root and item_root == current_root:
+                return True
+        return False
+
+    def _sync_dataset_variant_selection(self):
+        var = getattr(self, "dataset_variant_var", None)
+        if var is None:
+            return
+
+        current = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+        current_resolved = self._normalize_dataset_variant_root(current)
+
+        selected_label = ""
+        for item in list(getattr(self, "_dataset_variant_choices", []) or []):
+            item_path = str(item.get("path") or "")
+            item_resolved = self._normalize_dataset_variant_root(item_path)
+            if current_resolved and item_resolved == current_resolved:
+                selected_label = str(item.get("label") or "")
+                break
+
+        try:
+            var.set(selected_label)
+        except Exception:
+            pass
+
+    def _on_dataset_variant_selected(self, event=None):
+        selected = str(getattr(self, "dataset_variant_var", tk.StringVar()).get() or "").strip()
+        if not selected:
+            return
+
+        for item in list(getattr(self, "_dataset_variant_choices", []) or []):
+            if str(item.get("label") or "") != selected:
+                continue
+            path = str(item.get("path") or "").strip()
+            if path:
+                try:
+                    self.dataset_var.set(path)
+                except Exception:
+                    pass
+                try:
+                    self._last_training_input_context = TrainingInputContext(
+                        source="pz2_variant",
+                        target=self._get_selected_training_target(),
+                        dataset_path=path,
+                        ready=True,
+                    )
+                except Exception:
+                    pass
+            return
+
     def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> dict[str, int]:
         counts = {"train": 0, "val": 0, "test": 0, "total": 0}
         if dataset_path is None:
@@ -2711,23 +2950,23 @@ class TrainingTab:
         workspace_dir = self._format_workspace_relative_path(CONFIG.get_datasets_dir(selected_target))
 
         if campaign_active:
-            return (
-                "Tryb projektu: aktywny dataset treningowy jest podstawiany przez workflow kampanii.\n"
-                "To pole pokazuje tylko, z którego datasetu skorzysta trening w tej iteracji."
-            )
+            return "Dataset podstawia workflow kampanii."
 
         if selected_target == "plate":
-            source_hint = "Dla toru tablic wybierz dataset YOLO Pose wyeksportowany w Z2."
+            source_hint = (
+                "Wybierz gotowy wariant YOLO Pose z listy. Jeśli masz tylko XML i obrazy, "
+                "wróć do PZ1 i utwórz z nich nowy wariant treningowy."
+            )
         else:
-            source_hint = "Dla toru znaków wybierz dataset YOLO Detect wyeksportowany w Z3/PZ3."
+            source_hint = (
+                "Wybierz gotowy wariant YOLO Detect z listy. Jeśli masz tylko źródłowy folder YOLO, "
+                "wróć do PZ1 i utwórz z niego wariant splitu. Katalogi CharClassificationDataset_* "
+                "z manifest.json nie są wejściem treningu YOLO w Z4."
+            )
 
         return (
-            "Tryb swobodny: najpierw wybierasz tor treningu, a tutaj wskazujesz gotowy katalog datasetu YOLO.\n"
-            "Plik data.yaml opisuje podziały train/val/test oraz klasy modelu.\n"
             f"{source_hint}\n"
-            f"W strukturze Workspace szukaj go przede wszystkim tutaj: {workspace_dir}\n"
-            "Wskaż cały folder datasetu, w którym znajduje się data.yaml oraz podfoldery images/ i labels/. "
-            "Jeśli dataset nie pasuje do wybranego toru, uruchomienie treningu zostanie zablokowane."
+            f"Warianty są wyszukiwane w: {workspace_dir}"
         )
 
     def _get_preferred_models_dir(self, target: str | None = None) -> Path:
@@ -3333,32 +3572,23 @@ class TrainingTab:
             total_images = int(dataset_counts.get("total", 0) or 0)
             if total_images > 0:
                 return (
-                    f"Aktywny tor kampanii: {selected_label}. "
-                    "Trening skorzysta z datasetu o podziale: "
+                    f"Tor kampanii: {selected_label}. "
                     f"train={dataset_counts.get('train', 0)}, "
                     f"val={dataset_counts.get('val', 0)}, "
                     f"test={dataset_counts.get('test', 0)}, "
                     f"razem={total_images}."
                 )
-            return (
-                f"Aktywny tor kampanii: {selected_label}. "
-                "W kampanii Z4 działa na torze wybranym wcześniej w workflow projektu."
-            )
+            return f"Tor kampanii: {selected_label}."
 
         dataset_value = getattr(self, "dataset_var", None)
         inferred_target = self._infer_dataset_target(dataset_value.get() if dataset_value is not None else "")
         if inferred_target and inferred_target != selected_target:
             inferred_label = self._format_training_target_label(inferred_target)
             return (
-                f"Wybrany tor: {selected_label}. "
-                f"Uwaga: wskazany dataset wygląda raczej na tor {inferred_label}. "
-                "Najlepiej wybierać dataset zgodny z aktywnym torem treningu."
+                f"Tor: {selected_label}. Dataset wygląda na: {inferred_label}."
             )
 
-        return (
-            f"Wybrany tor: {selected_label}. "
-            "Najpierw wybierz tor, potem dopasowany do niego dataset, a na końcu model bazowy tego samego typu."
-        )
+        return f"Tor: {selected_label}."
 
     def _get_base_model_choices_for_mode(self, mode: str | None = None) -> list[str]:
         normalized = CONFIG.normalize_task_target(mode or self._get_selected_training_target())
@@ -3479,7 +3709,635 @@ class TrainingTab:
             return
         self._pick_dir(
             self.dataset_var,
-            initialdir=str(CONFIG.get_datasets_dir(self._get_selected_training_target()))
+            initialdir=self._get_training_dataset_picker_dir(),
+        )
+
+    def _pick_training_dataset_yaml(self):
+        if CAMPAIGN.get_active_project_name():
+            return
+        self._pick_file(
+            self.dataset_var,
+            "*.yaml",
+            initialdir=self._get_training_dataset_picker_dir(),
+        )
+
+    def _prepare_picker_initial_dir(self, path: Path | str | None) -> str:
+        if path is None:
+            return ""
+        try:
+            candidate = Path(path)
+            if candidate.suffix and not candidate.is_dir():
+                candidate = candidate.parent
+            candidate.mkdir(parents=True, exist_ok=True)
+            return str(candidate.resolve())
+        except Exception:
+            try:
+                return str(path)
+            except Exception:
+                return ""
+
+    def _get_current_picker_parent(self, var_name: str) -> str:
+        var = getattr(self, var_name, None)
+        if var is None:
+            return ""
+        try:
+            raw = str(var.get() or "").strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            return ""
+        try:
+            path = Path(raw)
+            if path.is_file():
+                path = path.parent
+            elif not path.exists() and path.suffix:
+                path = path.parent
+            if path.exists() and path.is_dir():
+                return str(path.resolve())
+        except Exception:
+            pass
+        return ""
+
+    def _get_first_picker_dir(self, *candidates: Path | str | None) -> str:
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                path = Path(candidate)
+                if path.exists() and path.is_dir():
+                    return str(path.resolve())
+            except Exception:
+                continue
+        for candidate in candidates:
+            if candidate is not None:
+                return self._prepare_picker_initial_dir(candidate)
+        return ""
+
+    def _get_plate_xml_picker_dir(self) -> str:
+        current = self._get_current_picker_parent("cvat_xml_var")
+        if current:
+            return current
+
+        campaign_auto_dir = None
+        campaign_staging_auto_dir = None
+        try:
+            campaign_auto_dir = CAMPAIGN.get_dir("auto_ann")
+        except Exception:
+            campaign_auto_dir = None
+        try:
+            campaign_staging_auto_dir = CAMPAIGN.get_staging_dir("auto_ann")
+        except Exception:
+            campaign_staging_auto_dir = None
+
+        return self._get_first_picker_dir(
+            campaign_auto_dir,
+            campaign_staging_auto_dir,
+            CONFIG.get_auto_annotations_dir("plate"),
+        )
+
+    def _get_plate_images_picker_dir(self) -> str:
+        current = self._get_current_picker_parent("cvat_images_var")
+        if current:
+            return current
+
+        iteration_raw_dir = None
+        master_pool_dir = None
+        campaign_raw_dir = None
+        try:
+            iteration_raw_dir = CAMPAIGN.get_iteration_raw_dir()
+        except Exception:
+            iteration_raw_dir = None
+        try:
+            master_pool_dir = CAMPAIGN.get_master_pool_dir()
+        except Exception:
+            master_pool_dir = None
+        try:
+            campaign_raw_dir = CAMPAIGN.get_dir("raw")
+        except Exception:
+            campaign_raw_dir = None
+
+        return self._get_first_picker_dir(
+            iteration_raw_dir,
+            master_pool_dir,
+            campaign_raw_dir,
+            CONFIG.DIR_1_RAW,
+        )
+
+    def _get_char_dataset_source_picker_dir(self) -> str:
+        current = self._get_current_picker_parent("split_src_var")
+        if current:
+            return current
+
+        campaign_datasets_dir = None
+        try:
+            campaign_datasets_dir = CAMPAIGN.get_dir("datasets")
+        except Exception:
+            campaign_datasets_dir = None
+
+        return self._get_first_picker_dir(
+            campaign_datasets_dir,
+            CONFIG.get_datasets_dir("char"),
+        )
+
+    def _count_yolo_image_label_pairs(self, source_dir: Path) -> dict:
+        source_dir = Path(source_dir)
+        stats = {
+            "total": 0,
+            "flat": 0,
+            "train": 0,
+            "val": 0,
+            "test": 0,
+            "images_without_labels": 0,
+        }
+        seen_images: set[str] = set()
+
+        for split in ("train", "val", "test", ""):
+            candidates = []
+            if split:
+                candidates.extend(
+                    [
+                        (source_dir / "images" / split, source_dir / "labels" / split),
+                        (source_dir / split / "images", source_dir / split / "labels"),
+                    ]
+                )
+            else:
+                candidates.append((source_dir / "images", source_dir / "labels"))
+
+            for image_dir, label_dir in candidates:
+                if not image_dir.exists() or not image_dir.is_dir():
+                    continue
+
+                for image_path in image_dir.iterdir():
+                    if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                        continue
+                    try:
+                        image_key = str(image_path.resolve())
+                    except Exception:
+                        image_key = str(image_path)
+                    if image_key in seen_images:
+                        continue
+                    seen_images.add(image_key)
+                    label_path = label_dir / f"{image_path.stem}.txt"
+                    if label_path.exists():
+                        key = split or "flat"
+                        stats[key] = int(stats.get(key, 0) or 0) + 1
+                        stats["total"] += 1
+                    else:
+                        stats["images_without_labels"] += 1
+
+        return stats
+
+    def _has_supported_yolo_label_layout(self, source_dir: Path) -> bool:
+        source_dir = Path(source_dir)
+        if (source_dir / "images").exists() and (source_dir / "labels").exists():
+            return True
+        for split in ("train", "val", "test"):
+            if (source_dir / split / "images").exists() and (source_dir / split / "labels").exists():
+                return True
+        return False
+
+    def _find_char_yolo_dataset_root_candidates(self, source_dir: Path, *, max_depth: int = 2) -> list[dict]:
+        source_dir = Path(source_dir)
+        candidates: list[dict] = []
+        seen: set[str] = set()
+
+        def visit(path: Path, depth: int):
+            try:
+                resolved = str(path.resolve())
+            except Exception:
+                resolved = str(path)
+            if resolved in seen:
+                return
+            seen.add(resolved)
+
+            if self._has_supported_yolo_label_layout(path) and not self._looks_like_char_classification_dataset(path):
+                stats = self._count_yolo_image_label_pairs(path)
+                if int(stats.get("total", 0) or 0) > 0:
+                    try:
+                        stamp = float(path.stat().st_mtime)
+                    except Exception:
+                        stamp = 0.0
+                    candidates.append({"path": path, "stats": stats, "stamp": stamp})
+                    return
+
+            if depth >= max_depth:
+                return
+            try:
+                children = [child for child in path.iterdir() if child.is_dir()]
+            except Exception:
+                children = []
+            for child in children:
+                visit(child, depth + 1)
+
+        visit(source_dir, 0)
+        candidates.sort(key=lambda item: float(item.get("stamp", 0) or 0), reverse=True)
+        return candidates
+
+    def _write_char_yolo_data_yaml_if_missing(self, source_dir: Path, *, overwrite: bool = False) -> dict:
+        source_dir = Path(source_dir)
+        yaml_path = source_dir / "data.yaml"
+        if yaml_path.exists() and not overwrite:
+            return {"ok": True, "created": False, "path": yaml_path, "message": ""}
+
+        has_canonical_split_layout = any((source_dir / "images" / split).exists() for split in ("train", "val", "test"))
+        has_nested_split_layout = any((source_dir / split / "images").exists() for split in ("train", "val", "test"))
+        lines = [f"path: {source_dir.resolve().as_posix()}"]
+        if has_nested_split_layout:
+            lines.append("train: train/images")
+            lines.append("val: val/images")
+            if (source_dir / "test" / "images").exists():
+                lines.append("test: test/images")
+        elif has_canonical_split_layout:
+            lines.append("train: images/train")
+            lines.append("val: images/val")
+            if (source_dir / "images" / "test").exists():
+                lines.append("test: images/test")
+        else:
+            lines.append("train: images")
+            lines.append("val: images")
+
+        alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lines.append(f"nc: {len(alphabet)}")
+        lines.append("names:")
+        for class_id, char in enumerate(alphabet):
+            lines.append(f"  {class_id}: '{char}'")
+
+        try:
+            yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "created": False,
+                "path": yaml_path,
+                "message": f"Dataset wygląda poprawnie, ale nie udało się dopisać data.yaml:\n{exc}",
+            }
+
+        return {"ok": True, "created": True, "path": yaml_path, "message": ""}
+
+    def _validate_char_yolo_split_source(
+        self,
+        source_raw: str | Path | None = None,
+        *,
+        create_missing_yaml: bool = False,
+        overwrite_incompatible_yaml: bool = False,
+        resolve_nested_dataset: bool = False,
+    ) -> dict:
+        result = {
+            "ok": False,
+            "src": None,
+            "stats": {},
+            "reason": "",
+            "yaml_created": False,
+            "yaml_rewritten": False,
+            "candidate": None,
+            "candidate_count": 0,
+            "message": (
+                "Wskaż źródło YOLO Detect dla znaków: folder z images/labels albo plik data.yaml. "
+                "Dataset OCR/klasyfikacyjny z manifest.json nie jest wejściem tego kroku."
+            ),
+        }
+
+        raw = str(source_raw if source_raw is not None else getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+        if not raw:
+            return result
+
+        try:
+            src = Path(raw)
+        except Exception:
+            result["message"] = "Nie udało się odczytać ścieżki źródłowego datasetu."
+            return result
+
+        if src.is_file() and src.name.lower() == "data.yaml":
+            src = src.parent
+        elif src.is_file() and src.name.lower() == "manifest.json":
+            result["message"] = self._char_classification_dataset_message()
+            return result
+
+        if self._looks_like_char_classification_dataset(src):
+            result["message"] = self._char_classification_dataset_message()
+            return result
+
+        if not src.exists() or not src.is_dir():
+            result["message"] = "Wskazana ścieżka nie jest katalogiem datasetu YOLO."
+            return result
+
+        if not self._has_supported_yolo_label_layout(src):
+            nested_candidates = self._find_char_yolo_dataset_root_candidates(src)
+            if nested_candidates:
+                best = dict(nested_candidates[0])
+                if not resolve_nested_dataset:
+                    result.update(
+                        {
+                            "src": src,
+                            "stats": dict(best.get("stats") or {}),
+                            "reason": "nested_yolo_dataset_found",
+                            "candidate": best.get("path"),
+                            "candidate_count": len(nested_candidates),
+                            "message": (
+                                "Wskazany folder nie jest bezpośrednim rootem datasetu YOLO, "
+                                "ale znaleziono poprawny dataset YOLO Detect wewnątrz tego katalogu."
+                            ),
+                        }
+                    )
+                    return result
+                src = Path(best.get("path"))
+            else:
+                result["message"] = (
+                    "Wskaż dataset YOLO Detect: folder musi zawierać parę katalogów images/ oraz labels/ "
+                    "w układzie flat, images/train + labels/train albo train/images + train/labels."
+                )
+                return result
+
+        if not self._has_supported_yolo_label_layout(src):
+            result["message"] = (
+                "Wskaż dataset YOLO Detect: folder musi zawierać parę katalogów images/ oraz labels/ "
+                "w układzie flat, images/train + labels/train albo train/images + train/labels."
+            )
+            return result
+
+        stats = self._count_yolo_image_label_pairs(src)
+        if int(stats.get("total", 0) or 0) <= 0:
+            result["message"] = (
+                "Dataset ma strukturę images/labels, ale nie znaleziono par obraz + etykieta .txt. "
+                "Sprawdź, czy pliki w labels/ mają te same nazwy bazowe co obrazy."
+            )
+            return result
+
+        yaml_created = False
+        if not (src / "data.yaml").exists():
+            if not create_missing_yaml:
+                result.update(
+                    {
+                        "src": src,
+                        "stats": stats,
+                        "reason": "missing_yaml",
+                        "message": (
+                            "Dataset ma poprawne pary obraz + etykieta, ale brakuje pliku data.yaml. "
+                            "Ten plik jest wymaganym punktem wejścia dla Z4 i Ultralytics YOLO."
+                        ),
+                    }
+                )
+                return result
+
+            yaml_state = self._write_char_yolo_data_yaml_if_missing(src)
+            if not bool(yaml_state.get("ok")):
+                result["message"] = str(yaml_state.get("message") or "Nie udało się przygotować data.yaml.")
+                return result
+            yaml_created = bool(yaml_state.get("created"))
+
+        yaml_rewritten = False
+        try:
+            inferred_target = str(self._infer_dataset_target(str(src)) or "").strip().lower()
+        except Exception:
+            inferred_target = ""
+        if inferred_target in {"plate", "vehicle"}:
+            if not overwrite_incompatible_yaml:
+                result.update(
+                    {
+                        "src": src,
+                        "stats": stats,
+                        "reason": "incompatible_yaml",
+                        "message": (
+                            "Folder ma poprawne pary obraz + etykieta, ale istniejący data.yaml "
+                            f"opisuje tor {self._format_training_target_label(inferred_target)}, a nie znaki."
+                        ),
+                    }
+                )
+                return result
+            yaml_state = self._write_char_yolo_data_yaml_if_missing(src, overwrite=True)
+            if not bool(yaml_state.get("ok")):
+                result["message"] = str(yaml_state.get("message") or "Nie udało się zastąpić data.yaml.")
+                return result
+            yaml_rewritten = True
+
+        result.update(
+            {
+                "ok": True,
+                "src": src,
+                "stats": stats,
+                "yaml_created": yaml_created,
+                "yaml_rewritten": yaml_rewritten,
+                "message": (
+                    "Źródło YOLO Detect jest poprawne. "
+                    f"Znaleziono {int(stats.get('total', 0) or 0)} par obraz + etykieta."
+                    + (" Dopisano brakujący plik data.yaml." if yaml_created else "")
+                    + (" Zastąpiono niezgodny plik data.yaml." if yaml_rewritten else "")
+                ),
+            }
+        )
+        return result
+
+    def _show_char_split_source_validation_modal(self):
+        info = self._validate_char_yolo_split_source()
+        validation_ok = False
+        created_yaml_after_confirmation = False
+        rewritten_yaml_after_confirmation = False
+        nested_dataset_after_confirmation = False
+
+        while str(info.get("reason") or "") in {"nested_yolo_dataset_found", "missing_yaml", "incompatible_yaml"}:
+            reason = str(info.get("reason") or "")
+            stats = dict(info.get("stats") or {})
+            src = info.get("src")
+            try:
+                display_path = self._format_workspace_relative_path(src)
+            except Exception:
+                display_path = str(src or "")
+            if reason == "nested_yolo_dataset_found":
+                candidate = info.get("candidate")
+                try:
+                    candidate_display = self._format_workspace_relative_path(candidate)
+                except Exception:
+                    candidate_display = str(candidate or "")
+                title = "Znaleziono dataset YOLO w środku"
+                body = (
+                    "Wskazany folder nie jest bezpośrednim rootem datasetu YOLO Detect, "
+                    "ale program znalazł poprawny dataset wewnątrz tego katalogu.\n\n"
+                    f"Wskazany folder: {display_path}\n"
+                    f"Proponowany dataset: {candidate_display}\n"
+                    f"Liczba znalezionych datasetów w środku: {int(info.get('candidate_count', 0) or 0)}\n"
+                    f"Pary obraz + label: {int(stats.get('total', 0) or 0)}\n\n"
+                    "Czy podpiąć ten znaleziony dataset jako źródło PZ1?"
+                )
+                if not messagebox.askyesno(title, body, parent=getattr(self, "frame", None)):
+                    messagebox.showinfo(
+                        "Nie podpięto datasetu",
+                        "Źródło nie zostało zmienione. Wskaż bezpośredni folder datasetu YOLO "
+                        "z katalogami images/labels albo wybierz proponowany dataset przy kolejnym wskazaniu.",
+                        parent=getattr(self, "frame", None),
+                    )
+                    try:
+                        self._refresh_dataset_split_cta_state()
+                    except Exception:
+                        pass
+                    return False
+                try:
+                    self.split_src_var.set(str(candidate))
+                except Exception:
+                    pass
+                nested_dataset_after_confirmation = True
+                info = self._validate_char_yolo_split_source(candidate)
+                continue
+
+            if reason == "missing_yaml":
+                title = "Brak pliku data.yaml"
+                body = (
+                    "Wybrany folder wygląda na dataset YOLO Detect znaków, ale nie ma pliku data.yaml.\n\n"
+                    f"Folder: {display_path}\n"
+                    f"Pary obraz + label: {int(stats.get('total', 0) or 0)}\n\n"
+                    "data.yaml opisuje klasy znaków oraz ścieżki train/val/test i jest wymagany przez Z4/YOLO.\n\n"
+                    "Czy program ma utworzyć brakujący plik data.yaml w tym folderze?"
+                )
+                decline_title = "Nie utworzono data.yaml"
+                decline_body = (
+                    "Plik data.yaml nie został utworzony, więc to źródło pozostaje niegotowe dla PZ1/Z4.\n\n"
+                    "Możesz wybrać inny dataset albo wrócić do tego folderu i ponownie zaakceptować utworzenie pliku."
+                )
+            else:
+                title = "Niezgodny plik data.yaml"
+                body = (
+                    "Wybrany folder ma pary obraz + label dla YOLO, ale istniejący data.yaml nie opisuje toru znaków.\n\n"
+                    f"Folder: {display_path}\n"
+                    f"Pary obraz + label: {int(stats.get('total', 0) or 0)}\n\n"
+                    "To mogło powstać po dawnym fallbacku splitu albo po wskazaniu datasetu z innego toru.\n\n"
+                    "Czy program ma zastąpić data.yaml poprawnym opisem YOLO Detect znaków?"
+                )
+                decline_title = "Nie zastąpiono data.yaml"
+                decline_body = (
+                    "Plik data.yaml nie został zmieniony, więc to źródło pozostaje niegotowe dla toru znaków.\n\n"
+                    "Możesz wybrać inny dataset albo ponownie zaakceptować zastąpienie pliku."
+                )
+            should_create = messagebox.askyesno(
+                title,
+                body,
+                parent=getattr(self, "frame", None),
+            )
+            if should_create:
+                info = self._validate_char_yolo_split_source(
+                    create_missing_yaml=(reason == "missing_yaml"),
+                    overwrite_incompatible_yaml=(reason == "incompatible_yaml"),
+                )
+                created_yaml_after_confirmation = bool(info.get("ok")) and bool(info.get("yaml_created"))
+                rewritten_yaml_after_confirmation = bool(info.get("ok")) and bool(info.get("yaml_rewritten"))
+                continue
+            else:
+                messagebox.showinfo(
+                    decline_title,
+                    decline_body,
+                    parent=getattr(self, "frame", None),
+                )
+                try:
+                    self._refresh_dataset_split_cta_state()
+                except Exception:
+                    pass
+                return False
+
+        if bool(info.get("ok")):
+            validation_ok = True
+            stats = dict(info.get("stats") or {})
+            src = info.get("src")
+            try:
+                display_path = self._format_workspace_relative_path(src)
+            except Exception:
+                display_path = str(src or "")
+            yaml_line = (
+                "\nPlik data.yaml: zastąpiony poprawnym opisem znaków."
+                if bool(info.get("yaml_rewritten"))
+                else
+                "\nPlik data.yaml: utworzony po potwierdzeniu."
+                if bool(info.get("yaml_created"))
+                else "\nPlik data.yaml: obecny."
+            )
+            title = (
+                "Zastąpiono data.yaml"
+                if rewritten_yaml_after_confirmation
+                else "Utworzono data.yaml"
+                if created_yaml_after_confirmation
+                else "Podpięto dataset YOLO"
+                if nested_dataset_after_confirmation
+                else "Źródło YOLO Detect OK"
+            )
+            intro = (
+                "Zastąpiono niezgodny plik data.yaml i źródło datasetu znaków jest gotowe."
+                if rewritten_yaml_after_confirmation
+                else
+                "Utworzono brakujący plik data.yaml i źródło datasetu znaków jest gotowe."
+                if created_yaml_after_confirmation
+                else
+                "Podpięto znaleziony dataset YOLO Detect i źródło datasetu znaków jest gotowe."
+                if nested_dataset_after_confirmation
+                else "Źródło datasetu znaków jest poprawne."
+            )
+            messagebox.showinfo(
+                title,
+                f"{intro}\n\n"
+                f"Folder: {display_path}\n"
+                f"Pary obraz + label: {int(stats.get('total', 0) or 0)}\n"
+                f"train={int(stats.get('train', 0) or 0)}, "
+                f"val={int(stats.get('val', 0) or 0)}, "
+                f"test={int(stats.get('test', 0) or 0)}, "
+                f"flat={int(stats.get('flat', 0) or 0)}"
+                f"{yaml_line}\n\n"
+                "Możesz teraz kliknąć CTA utworzenia wariantu datasetu treningowego.",
+                parent=getattr(self, "frame", None),
+            )
+        else:
+            messagebox.showerror(
+                "Źródło YOLO Detect niegotowe",
+                str(info.get("message") or "Wybrane źródło nie przeszło walidacji."),
+                parent=getattr(self, "frame", None),
+            )
+
+        try:
+            self._refresh_dataset_split_cta_state()
+        except Exception:
+            pass
+        try:
+            self.frame.after_idle(self._refresh_dataset_split_cta_state)
+        except Exception:
+            pass
+        return validation_ok
+
+    def _pick_char_split_source_dir(self):
+        previous_value = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+        selected = self._pick_dir(
+            self.split_src_var,
+            initialdir=self._get_char_dataset_source_picker_dir(),
+        )
+        if selected:
+            if not self._show_char_split_source_validation_modal():
+                try:
+                    self.split_src_var.set(previous_value)
+                except Exception:
+                    pass
+                try:
+                    self._refresh_dataset_split_cta_state()
+                except Exception:
+                    pass
+
+    def _pick_char_split_source_yaml(self):
+        previous_value = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+        selected = self._pick_file(
+            self.split_src_var,
+            "*.yaml",
+            initialdir=self._get_char_dataset_source_picker_dir(),
+        )
+        if selected:
+            if not self._show_char_split_source_validation_modal():
+                try:
+                    self.split_src_var.set(previous_value)
+                except Exception:
+                    pass
+                try:
+                    self._refresh_dataset_split_cta_state()
+                except Exception:
+                    pass
+
+    def _get_training_dataset_picker_dir(self) -> str:
+        current = self._get_current_picker_parent("dataset_var")
+        if current:
+            return current
+        return self._get_first_picker_dir(
+            CONFIG.get_datasets_dir(self._get_selected_training_target()),
         )
 
     def _get_validation_model_picker_dir(self) -> str:
@@ -3828,158 +4686,19 @@ class TrainingTab:
             pass
 
     def _bind_training_route_card(self, widget, mode: str):
-        if widget is None:
-            return
-
-        try:
-            widget.configure(cursor="hand2")
-        except Exception:
-            pass
-
-        try:
-            widget.bind("<Button-1>", lambda _e, m=mode: self._set_step4_dataset_mode(m), add="+")
-            widget.bind("<Enter>", lambda _e, m=mode: self._set_training_route_card_hover(m, True), add="+")
-            widget.bind("<Leave>", lambda _e, m=mode: self._set_training_route_card_hover(m, False), add="+")
-        except Exception:
-            pass
+        bind_training_route_card(self, widget, mode)
 
     def _set_training_route_card_hover(self, mode: str, enabled: bool):
-        self._free_route_hover_mode = mode if enabled else None
-        self._refresh_free_training_route_cards()
+        set_training_route_card_hover(self, mode, enabled)
 
     def _refresh_free_training_route_cards(self):
-        cards = getattr(self, "_free_training_route_cards", {})
-        if not cards:
-            return
-
-        palette = getattr(self.app, "palette", {})
-        panel_bg = palette.get("panel", "#252526")
-        panel_alt = palette.get("panel_alt", "#2d2d30")
-        hover_bg = palette.get("button_hover", panel_alt)
-        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        fg = palette.get("fg", "#f3f3f3")
-        muted = palette.get("muted", "#c7c7c7")
-        accent = palette.get("accent", "#0e639c")
-        accent_text = palette.get("accent_text", "#ffffff")
-        success = palette.get("success", "#4ec9b0")
-        surface_info = palette.get("surface_info", hover_bg)
-        surface_success = palette.get("surface_success", hover_bg)
-
-        active_mode = self._get_selected_training_target()
-        hover_mode = getattr(self, "_free_route_hover_mode", None)
-
-        for mode, widgets in cards.items():
-            frame = widgets.get("frame")
-            title = widgets.get("title")
-            badge = widgets.get("badge")
-            desc = widgets.get("desc")
-            meta = widgets.get("meta")
-            if frame is None:
-                continue
-
-            is_active = mode == active_mode
-            is_hover = mode == hover_mode
-            if mode == "plate":
-                accent_color = accent
-                active_bg = surface_info
-            else:
-                accent_color = success
-                active_bg = surface_success
-
-            bg = active_bg if is_active else (hover_bg if is_hover else panel_alt)
-            frame_border = accent_color if is_active else border
-            title_fg = accent_color if is_active else fg
-            badge_bg = accent_color if is_active else panel_bg
-            badge_fg = accent_text if is_active else muted
-            desc_fg = fg if is_active else muted
-
-            try:
-                frame.configure(bg=bg, highlightbackground=frame_border, highlightcolor=frame_border)
-            except Exception:
-                pass
-            for label, color in ((title, title_fg), (desc, desc_fg), (meta, muted)):
-                try:
-                    if label is not None:
-                        label.configure(bg=bg, fg=color)
-                except Exception:
-                    pass
-            try:
-                if badge is not None:
-                    badge.configure(
-                        bg=badge_bg,
-                        fg=badge_fg,
-                        highlightbackground=frame_border,
-                        highlightcolor=frame_border
-                    )
-            except Exception:
-                pass
-
-        title = getattr(self, "free_training_route_title_lbl", None)
-        if title is not None:
-            try:
-                title.configure(text=("Co chcesz trenowac?" if not CAMPAIGN.get_active_project_name() else "Wybrany tor treningu"))
-            except Exception:
-                pass
+        refresh_free_training_route_cards(self)
 
     def _refresh_free_training_route_ui(self):
-        host = getattr(self, "free_training_route_host", None)
-        if host is None:
-            return
-
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        try:
-            if campaign_active:
-                host.pack_forget()
-            else:
-                host.pack(anchor=tk.W, fill=tk.X, pady=(0, 12), before=self.train_session_name_row)
-        except Exception:
-            pass
-
-        self._refresh_free_training_route_cards()
-        self._refresh_training_start_state()
+        refresh_free_training_route_ui(self)
 
     def _update_step4_notebook_mode(self):
-        if not hasattr(self, "main_nb"):
-            return
-
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        dataset_label = "[PZ1] Produkcja datasetu"
-        train_label = "[PZ2] Trening i analiza" if campaign_active else "[PZ1] Trening i analiza"
-
-        try:
-            self.main_nb.tab(self.tab_train, text=train_label)
-        except Exception:
-            pass
-
-        if campaign_active:
-            if not getattr(self, "_step4_dataset_tab_visible", False):
-                try:
-                    self.main_nb.insert(0, self.tab_dataset, text=dataset_label)
-                except Exception:
-                    try:
-                        self.main_nb.add(self.tab_dataset, text=dataset_label)
-                    except Exception:
-                        pass
-                self._step4_dataset_tab_visible = True
-            else:
-                try:
-                    self.main_nb.tab(self.tab_dataset, text=dataset_label)
-                except Exception:
-                    pass
-            return
-
-        if getattr(self, "_step4_dataset_tab_visible", False):
-            try:
-                self.main_nb.hide(self.tab_dataset)
-            except Exception:
-                pass
-            self._step4_dataset_tab_visible = False
-
-        try:
-            if str(self.main_nb.select()) != str(self.tab_train):
-                self.main_nb.select(self.tab_train)
-        except Exception:
-            pass
+        update_step4_notebook_mode(self)
 
     def _update_training_dataset_hint(self):
         label = getattr(self, "train_dataset_hint_lbl", None)
@@ -4709,72 +5428,7 @@ class TrainingTab:
 
     #=====================================
     def set_campaign_context(self, runs_dir=None, datasets_dir=None):
-        """
-        Przełącza TrainingTab na katalogi aktywnego projektu
-        i odtwarza stan z4 dla bieżącego projektu.
-        """
-        campaign_target = CAMPAIGN.get_iteration_target()
-        if campaign_target not in ("char", "plate"):
-            campaign_target = "char"
-            require_route_selection = True
-        else:
-            require_route_selection = False
-
-        if datasets_dir is not None:
-            self._campaign_datasets_dir = str(Path(datasets_dir))
-
-        project_datasets_dir = Path(self._campaign_datasets_dir) if self._campaign_datasets_dir else None
-
-        if runs_dir is None:
-            self._reset_step4_transient_ui(
-                datasets_dir=project_datasets_dir,
-                target=campaign_target,
-                require_route_selection=require_route_selection
-            )
-            try:
-                self._restore_step4_campaign_project_state()
-            except Exception:
-                pass
-            return
-
-        new_runs_dir = Path(runs_dir)
-
-        if getattr(self.trainer, "is_training", False):
-            logger.warning("Nie można zmienić kontekstu projektu podczas aktywnego treningu.")
-            return
-
-        if self._campaign_runs_dir == str(new_runs_dir):
-            self._reset_step4_transient_ui(
-                datasets_dir=project_datasets_dir,
-                target=campaign_target,
-                require_route_selection=require_route_selection
-            )
-            try:
-                self._restore_step4_campaign_project_state()
-            except Exception:
-                pass
-            return
-
-        self._campaign_runs_dir = str(new_runs_dir)
-        new_runs_dir.mkdir(parents=True, exist_ok=True)
-
-        self.history = TrainingHistory(history_dir=new_runs_dir)
-        self.trainer = YOLOPoseTrainer(history=self.history)
-        self._bind_trainer_callbacks()
-
-        self._reset_step4_transient_ui(
-            datasets_dir=project_datasets_dir,
-            target=campaign_target,
-            clear_builder_inputs=True,
-            require_route_selection=require_route_selection
-        )
-
-        try:
-            self._restore_step4_campaign_project_state()
-        except Exception:
-            pass
-
-        logger.info(f"TrainingTab przełączony na projektowy katalog runów: {new_runs_dir}")
+        set_campaign_context(self, runs_dir=runs_dir, datasets_dir=datasets_dir)
 
     def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -> dict:
         target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
@@ -4951,414 +5605,17 @@ class TrainingTab:
         iteration_target: str | None = None,
         preferred_subtab: str | None = None,
     ) -> dict:
-        if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 4:
-            return {"ok": False, "reason": "campaign_inactive"}
-
-        target = str(iteration_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
-        if target not in {"plate", "char"}:
-            target = "char"
-        preferred_subtab = str(preferred_subtab or "").strip().lower()
-        if preferred_subtab not in {"dataset", "train"}:
-            preferred_subtab = ""
-
-        datasets_dir = CAMPAIGN.get_dir("datasets")
-        runs_dir = CAMPAIGN.get_dir("runs")
-        if datasets_dir is None:
-            logger.error("Brak katalogu datasets dla aktywnego projektu.")
-            return {"ok": False, "reason": "missing_datasets_dir"}
-
-        try:
-            self.set_campaign_training_target(target)
-        except Exception:
-            pass
-
-        self.set_campaign_context(
-            runs_dir=str(runs_dir) if runs_dir is not None else None,
-            datasets_dir=str(datasets_dir),
+        return open_campaign_step4_entry(
+            self,
+            iteration_target=iteration_target,
+            preferred_subtab=preferred_subtab,
         )
-
-        readiness = self.get_campaign_step4_readiness(iteration_target=target)
-        readiness_reason = str(readiness.get("reason") or "").strip().lower()
-        if not readiness.get("ok", False) and readiness_reason != "stale_plate_dataset":
-            return readiness
-
-        self._step4_train_unlocked = False
-        try:
-            if str(readiness.get("ready_dataset") or "").strip():
-                self._step4_train_unlocked = True
-        except Exception:
-            pass
-
-        datasets_dir = Path(datasets_dir)
-        source_candidates = []
-        try:
-            for path in self._find_dataset_source_candidates(datasets_dir):
-                inferred = self._infer_dataset_target(str(path))
-                if target == "char":
-                    if inferred != "char":
-                        continue
-                elif inferred not in {"plate", None}:
-                    continue
-                source_candidates.append(path)
-        except Exception:
-            source_candidates = []
-
-        latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
-
-        if target == "char" and latest_source is not None:
-            self.split_src_var.set(str(latest_source))
-            self.split_out_var.set(str(latest_source.parent / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
-        elif target == "char":
-            self.split_src_var.set("")
-            self.split_out_var.set(str(datasets_dir / "[BRAK_DATASETU_ZRODLOWEGO]"))
-
-        self._step4_suppress_base_model_state_save = True
-        try:
-            restored_saved_selection = self._apply_saved_step4_training_model_selection(target)
-            if not restored_saved_selection:
-                if target == "plate":
-                    plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-
-                    if plate_model and Path(plate_model).exists():
-                        self.base_model_var.set("Custom")
-                        self.base_custom_var.set(plate_model)
-                    else:
-                        self.base_model_var.set(self._get_preferred_plate_pose_base_model())
-                        self.base_custom_var.set("")
-                else:
-                    char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-                    if char_model and Path(char_model).exists():
-                        self.base_model_var.set("Custom")
-                        self.base_custom_var.set(char_model)
-                    else:
-                        self.base_model_var.set(self._get_default_base_model_for_mode("char"))
-                        self.base_custom_var.set("")
-        finally:
-            self._step4_suppress_base_model_state_save = False
-
-        try:
-            self._refresh_training_start_state()
-        except Exception:
-            pass
-        try:
-            self._schedule_step4_deferred_model_refresh()
-        except Exception:
-            pass
-
-        try:
-            if preferred_subtab == "dataset":
-                self.main_nb.select(self.tab_dataset)
-            elif preferred_subtab == "train":
-                self.main_nb.select(self.tab_train)
-                self._select_step4_analysis_tab(self.hist_tab)
-            elif bool(getattr(self, "_step4_train_unlocked", False)):
-                self.main_nb.select(self.tab_train)
-                self._select_step4_analysis_tab(self.hist_tab)
-            else:
-                self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        dataset_hint = str(self.dataset_var.get() or "").strip()
-        return {
-            "ok": True,
-            "iteration_target": target,
-            "latest_source": str(latest_source or ""),
-            "dataset_hint": dataset_hint,
-            "train_unlocked": bool(getattr(self, "_step4_train_unlocked", False)),
-        }
 
 
 
     #=====================================
     def _restore_step4_campaign_project_state(self):
-        """
-        Odtwarza stan z4 dla aktywnego projektu oryg:
-        - czyści ścieżki z poprzedniego projektu,
-        - uzupełnia źródło splitu w pz1, jeśli istnieje sensowny zestaw źródłowy,
-        - jeśli istnieje gotowy dataset treningowy dla bieżącego projektu,
-        przechodzi od razu do pz2,
-        - w przeciwnym razie zostawia użytkownika w pz1.
-        """
-        datasets_dir = Path(self._campaign_datasets_dir) if self._campaign_datasets_dir else None
-
-        try:
-            self.split_src_var.set("")
-        except Exception:
-            pass
-
-        try:
-            if datasets_dir is not None:
-                self.split_out_var.set(str(datasets_dir / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
-            else:
-                self.split_out_var.set(str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
-        except Exception:
-            pass
-
-        try:
-            self.dataset_var.set("")
-        except Exception:
-            pass
-
-        try:
-            if datasets_dir is not None:
-                self.ds_out_var.set(str(datasets_dir / "Plates_CVAT_[DATA_I_CZAS]"))
-            else:
-                self.ds_out_var.set(str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
-        except Exception:
-            pass
-
-        campaign_target = CAMPAIGN.get_iteration_target()
-        remembered_target = campaign_target if campaign_target in ("char", "plate") else self.get_campaign_training_target()
-        if remembered_target not in ("char", "plate"):
-            remembered_target = "char"
-
-        latest_source = None
-        ready_dataset = None
-        ready_target = remembered_target
-        latest_xml = ""
-        latest_xml_images = ""
-        current_iter_images = ""
-
-        if datasets_dir is not None and datasets_dir.exists():
-            source_candidates = self._find_dataset_source_candidates(datasets_dir)
-            if source_candidates:
-                latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
-
-            if remembered_target == "plate":
-                plate_dataset_info = self._resolve_campaign_plate_ready_dataset(datasets_dir)
-                if not bool(plate_dataset_info.get("stale")):
-                    ready_dataset = plate_dataset_info.get("path")
-                    if ready_dataset is not None:
-                        ready_target = "plate"
-            else:
-                ready_candidates = self._find_ready_dataset_candidates(datasets_dir)
-
-                preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]
-                if preferred:
-                    ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
-                elif ready_candidates:
-                    ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
-
-        if remembered_target != "plate":
-            try:
-                auto_dir = CAMPAIGN.get_dir("auto_ann")
-                if auto_dir is not None:
-                    xml_files = list(Path(auto_dir).rglob("annotations.xml"))
-                    if xml_files:
-                        latest_xml_path = max(xml_files, key=lambda p: p.stat().st_mtime)
-                        latest_xml = str(latest_xml_path)
-                        manifest_path = latest_xml_path.parent / "run_manifest.json"
-                        if manifest_path.exists():
-                            try:
-                                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                            except Exception:
-                                manifest = {}
-                            manifest_input = str(manifest.get("input_dir") or "").strip() if isinstance(manifest, dict) else ""
-                            if manifest_input and Path(manifest_input).exists():
-                                latest_xml_images = manifest_input
-            except Exception:
-                latest_xml = ""
-                latest_xml_images = ""
-
-        try:
-            raw_dir = CAMPAIGN.get_dir("raw")
-            if raw_dir is not None:
-                iter_num = CAMPAIGN.get_current_iteration_num()
-                iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-                if iter_dir.exists():
-                    current_iter_images = str(iter_dir)
-        except Exception:
-            current_iter_images = ""
-
-        if remembered_target == "plate":
-            approved_source = self._get_campaign_plate_builder_source()
-            approved_xml = str(approved_source.get("xml_path") or "").strip()
-            approved_images_dir = str(approved_source.get("images_dir") or "").strip()
-            if approved_xml and approved_images_dir:
-                latest_xml = approved_xml
-                latest_xml_images = approved_images_dir
-
-        if latest_source is not None:
-            try:
-                self.split_src_var.set(str(latest_source))
-                split_base = latest_source.parent if latest_source.parent != datasets_dir else Path(self._campaign_datasets_dir)
-                self.split_out_var.set(str(split_base / f"{latest_source.name}_Split_[DATA_I_CZAS]"))
-            except Exception:
-                pass
-
-        try:
-            self.cvat_xml_var.set(latest_xml)
-        except Exception:
-            pass
-
-        try:
-            self.cvat_images_var.set(latest_xml_images or current_iter_images)
-        except Exception:
-            pass
-
-        active_target = campaign_target if campaign_target in ("char", "plate") else ready_target
-        self._step4_dataset_mode = active_target
-        self.set_campaign_training_target(active_target)
-        self._step4_route_selected = bool(campaign_target in ("char", "plate"))
-        self._step4_train_unlocked = False
-        self._step4_campaign_finish_ready = False
-
-        finish_state = {}
-        try:
-            finish_state = self.get_campaign_step4_finish_state(iteration_target=active_target) or {}
-        except Exception:
-            try:
-                finish_state = CAMPAIGN.get_step4_finish_state() or {}
-            except Exception:
-                finish_state = {}
-        try:
-            current_campaign_step = int(CAMPAIGN.get_current_step() or 0)
-        except Exception:
-            current_campaign_step = 0
-
-        finish_ready = bool(finish_state.get("ready", False))
-        finish_run_id = str(finish_state.get("run_id", "") or "").strip()
-        finish_target = str(finish_state.get("target", "") or "").strip().lower()
-        finish_iteration = int(finish_state.get("iteration", 0) or 0)
-        if finish_target not in ("char", "plate"):
-            finish_target = active_target
-
-        step4_already_closed = current_campaign_step > 4
-        if step4_already_closed:
-            # Ponowne wejscie do Z4 po domknieciu iteracji nie moze reaktywowac
-            # przycisku zamkniecia E4 ani cofac projektu do kroku 4.
-            if finish_ready or finish_run_id:
-                try:
-                    CAMPAIGN.set_step4_finish_state(False)
-                except Exception:
-                    pass
-            finish_ready = False
-            finish_run_id = ""
-            finish_target = active_target
-            finish_iteration = 0
-        elif not finish_ready or not finish_run_id:
-            recovered_finish_state = self._recover_campaign_finish_state_from_history(active_target)
-            if recovered_finish_state:
-                finish_ready = bool(recovered_finish_state.get("ready", False))
-                finish_run_id = str(recovered_finish_state.get("run_id", "") or "").strip()
-                finish_target = str(recovered_finish_state.get("target", active_target) or "").strip().lower()
-                finish_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
-                try:
-                    CAMPAIGN.set_step4_finish_state(
-                        finish_ready,
-                        run_id=finish_run_id,
-                        target=finish_target,
-                        iteration_num=finish_iteration,
-                    )
-                except Exception:
-                    pass
-
-        if finish_ready and finish_target == active_target and finish_iteration == int(CAMPAIGN.get_current_iteration_num() or 0):
-            self._step4_campaign_finish_ready = True
-            self._step4_train_unlocked = True
-            self.current_run_id = finish_run_id or self.current_run_id
-
-        if ready_dataset is not None:
-            try:
-                self.dataset_var.set(str(ready_dataset))
-            except Exception:
-                pass
-
-            self._step4_train_unlocked = True
-
-            try:
-                self._append_step4_builder_log(
-                    f"[KAMPANIA] Odtworzono gotowy dataset projektu: {ready_dataset.name}. "
-                    "Przejście do treningu zostało odblokowane, a przebudowa datasetu lub splitu pozostaje opcjonalna."
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                self._append_step4_builder_log(
-                    "[KAMPANIA] Brak gotowego datasetu treningowego dla tego projektu. "
-                    "Pozostaję w pz1."
-                )
-            except Exception:
-                pass
-
-        try:
-            self._refresh_step4_dataset_mode_ui()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_base_model_choices()
-        except Exception:
-            pass
-
-        try:
-            self._step4_suppress_base_model_state_save = True
-            if not self._apply_saved_step4_training_model_selection(active_target):
-                if active_target == "plate":
-                    plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-                    if plate_model and Path(plate_model).exists():
-                        self.base_model_var.set("Custom")
-                        self.base_custom_var.set(plate_model)
-                    else:
-                        self.base_model_var.set(self._get_preferred_plate_pose_base_model())
-                        self.base_custom_var.set("")
-                else:
-                    char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-                    if char_model and Path(char_model).exists():
-                        self.base_model_var.set("Custom")
-                        self.base_custom_var.set(char_model)
-                    else:
-                        self.base_model_var.set(self._get_default_base_model_for_mode("char"))
-                        self.base_custom_var.set("")
-        except Exception:
-            pass
-        finally:
-            self._step4_suppress_base_model_state_save = False
-
-        try:
-            self._refresh_training_start_state()
-        except Exception:
-            pass
-        try:
-            self._schedule_step4_deferred_model_refresh()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            campaign_active = bool(CAMPAIGN.get_active_project_name())
-            if campaign_active and bool(getattr(self, "_step4_train_unlocked", False)):
-                target_tab = self.tab_train
-            else:
-                target_tab = self.tab_dataset if campaign_active else self.tab_train
-            self.main_nb.select(target_tab)
-        except Exception:
-            pass
-
-        try:
-            if bool(CAMPAIGN.get_active_project_name()) and bool(getattr(self, "_step4_train_unlocked", False)):
-                self._select_step4_analysis_tab(self.hist_tab)
-        except Exception:
-            pass
-
-        try:
-            if self._step4_route_selected:
-                self._clear_step4_guidance()
-            else:
-                self._guide_step4_route_selection()
-        except Exception:
-            pass
+        restore_step4_campaign_project_state(self)
 
     @staticmethod
     def _plate_dataset_source_manifest_path(dataset_dir: Path) -> Path:
@@ -5563,49 +5820,7 @@ class TrainingTab:
             pass
 
     def clear_campaign_context(self):
-        """
-        Czyści projektowy kontekst treningu i wraca do globalnych katalogów Workspace.
-        Dodatkowo czyści kampanijne logi / wyniki widoczne w UI.
-        """
-        free_mode_target = CONFIG.normalize_task_target(
-            getattr(self, "_step4_dataset_mode", getattr(self, "_campaign_training_target", "char"))
-        )
-
-        self._campaign_runs_dir = None
-        self._campaign_datasets_dir = None
-
-        self._rebind_free_mode_training_storage(target=free_mode_target, reload_history=False)
-
-        self._reset_step4_transient_ui(
-            target=free_mode_target,
-            clear_builder_inputs=True,
-            require_route_selection=False
-        )
-
-        try:
-            self._update_step4_notebook_mode()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_free_training_route_ui()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_dataset_mode_ui()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            self._update_training_dataset_hint()
-        except Exception:
-            pass
+        clear_campaign_context(self)
 
     def _reset_step4_transient_ui(
         self,
@@ -5855,22 +6070,10 @@ class TrainingTab:
             pass
 
     def set_campaign_training_target(self, target: str):
-        target = (target or "char").strip().lower()
-        if target not in ("char", "plate"):
-            target = "char"
-
-        self._campaign_training_target = target
-        self._refresh_training_metric_reference()
-
-        try:
-            label = "znaków" if target == "char" else "tablic"
-            self._append_train_log(f"[TARGET] Ustawiono kampanijny target treningu: model {label}.")
-        except Exception:
-            pass
+        set_campaign_training_target(self, target)
 
     def get_campaign_training_target(self) -> str:
-        target = getattr(self, "_campaign_training_target", "char")
-        return target if target in ("char", "plate") else "char"
+        return get_campaign_training_target(self)
     
     def _append_step4_builder_log(self, message: str):
         if not hasattr(self, "step4_builder_log_text"):
@@ -5923,8 +6126,13 @@ class TrainingTab:
             return
 
         if visible:
+            try:
+                self.split_feedback_frame.pack_forget()
+            except Exception:
+                pass
             self.split_feedback_frame.pack(
                 fill=tk.X,
+                pady=(0, 8),
                 after=self.btn_step4_split_frame
             )
         else:
@@ -5945,6 +6153,16 @@ class TrainingTab:
 
     def _sync_train_left_scrollregion(self, event=None):
         canvas = getattr(self, "train_left_canvas", None)
+        if canvas is None:
+            return
+
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_dataset_mode_scrollregion(self, event=None):
+        canvas = getattr(self, "ds_mode_canvas", None)
         if canvas is None:
             return
 
@@ -5982,6 +6200,29 @@ class TrainingTab:
 
         try:
             self._sync_train_left_scrollregion()
+        except Exception:
+            pass
+
+    def _sync_dataset_mode_canvas_width(self, event=None):
+        canvas = getattr(self, "ds_mode_canvas", None)
+        if canvas is None:
+            return
+
+        try:
+            width = max(50, int(canvas.winfo_width()) - 2)
+            canvas.itemconfigure(self.ds_mode_host_window, width=width)
+        except Exception:
+            pass
+
+        try:
+            content = getattr(self, "ds_mode_host", None)
+            if content is not None:
+                content.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            self._sync_dataset_mode_scrollregion()
         except Exception:
             pass
 
@@ -6072,6 +6313,13 @@ class TrainingTab:
 
     def _train_left_canvas_overflows(self) -> bool:
         canvas = getattr(self, "train_left_canvas", None)
+        return self._scroll_canvas_overflows(canvas)
+
+    def _dataset_mode_canvas_overflows(self) -> bool:
+        canvas = getattr(self, "ds_mode_canvas", None)
+        return self._scroll_canvas_overflows(canvas)
+
+    def _scroll_canvas_overflows(self, canvas) -> bool:
         if canvas is None:
             return False
 
@@ -6090,11 +6338,45 @@ class TrainingTab:
         if canvas is None:
             return None
 
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+            pointer_in_left_panel = self._inertial_scroll.widget_contains_point(canvas, x_root, y_root)
+        except Exception:
+            pointer_in_left_panel = False
+
+        if pointer_in_left_panel and self._mousewheel_event_from_combobox(event):
+            return "break"
+
         if self._inertial_scroll.scroll_canvas_if_targeted(
             canvas,
             event,
             pointer_widget=self.frame,
             overflow_checker=self._train_left_canvas_overflows,
+        ):
+            return "break"
+        return None
+
+    def _on_dataset_mode_global_mousewheel(self, event):
+        canvas = getattr(self, "ds_mode_canvas", None)
+        if canvas is None:
+            return None
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+            pointer_in_panel = self._inertial_scroll.widget_contains_point(canvas, x_root, y_root)
+        except Exception:
+            pointer_in_panel = False
+
+        if pointer_in_panel and self._mousewheel_event_from_combobox(event):
+            return "break"
+
+        if self._inertial_scroll.scroll_canvas_if_targeted(
+            canvas,
+            event,
+            pointer_widget=self.frame,
+            overflow_checker=self._dataset_mode_canvas_overflows,
         ):
             return "break"
         return None
@@ -6115,13 +6397,38 @@ class TrainingTab:
             event,
             canvas,
             pointer_widget=self.frame,
-            overflow_checker=self._train_left_canvas_overflows,
+            overflow_checker=lambda c=canvas: self._scroll_canvas_overflows(c),
         ):
             self._restore_scroll_canvas_focus(canvas)
             return "break"
 
         self._restore_scroll_canvas_focus(canvas)
         return "break"
+
+    def _mousewheel_event_from_combobox(self, event) -> bool:
+        widget = getattr(event, "widget", None)
+        visited = set()
+        while widget is not None and id(widget) not in visited:
+            visited.add(id(widget))
+            try:
+                class_name = str(widget.winfo_class())
+            except Exception:
+                class_name = ""
+            try:
+                widget_path = str(widget).lower()
+            except Exception:
+                widget_path = ""
+
+            if class_name in {"TCombobox", "ComboboxPopdown"}:
+                return True
+            if class_name == "Listbox" and "popdown" in widget_path:
+                return True
+
+            try:
+                widget = widget.master
+            except Exception:
+                widget = None
+        return False
 
     def _bind_scroll_canvas_children(self, root, canvas):
         if root is None or canvas is None:
@@ -6142,16 +6449,17 @@ class TrainingTab:
 
         def _walk(widget):
             try:
-                widget.bind("<MouseWheel>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
-                widget.bind("<Button-4>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
-                widget.bind("<Button-5>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
-            except Exception:
-                pass
-
-            try:
                 class_name = str(widget.winfo_class())
             except Exception:
                 class_name = ""
+
+            if class_name != "TCombobox":
+                try:
+                    widget.bind("<MouseWheel>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                    widget.bind("<Button-4>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                    widget.bind("<Button-5>", lambda e, c=canvas: self._redirect_child_mousewheel_to_canvas(e, c), add="+")
+                except Exception:
+                    pass
 
             if class_name in release_focus_classes:
                 try:
@@ -6182,17 +6490,28 @@ class TrainingTab:
         except Exception:
             pass
 
-        for label_name in (
-            "free_training_route_title_lbl",
-            "train_dataset_title_lbl",
-            "train_base_title_lbl",
-            "train_params_title_lbl",
-        ):
+        for label_name in ("free_training_route_title_lbl",):
             label = getattr(self, label_name, None)
             if label is None or not hasattr(label, "apply_theme"):
                 continue
             try:
                 label.apply_theme()
+            except Exception:
+                pass
+
+        for label_name in (
+            "train_dataset_title_lbl",
+            "train_base_title_lbl",
+            "train_params_title_lbl",
+        ):
+            label = getattr(self, label_name, None)
+            if label is None:
+                continue
+            try:
+                label.configure(
+                    bg=palette.get("panel", "#252526"),
+                    fg=palette.get("fg", "#f3f3f3"),
+                )
             except Exception:
                 pass
 
@@ -6225,8 +6544,11 @@ class TrainingTab:
             pass
 
         try:
-            if hasattr(self, "train_left_canvas"):
-                self.train_left_canvas.configure(
+            for canvas_name in ("train_left_canvas", "ds_mode_canvas"):
+                canvas = getattr(self, canvas_name, None)
+                if canvas is None:
+                    continue
+                canvas.configure(
                     bg=palette.get("panel", "#252526"),
                     highlightbackground=console_border,
                     highlightcolor=console_border
@@ -6356,6 +6678,10 @@ class TrainingTab:
                 pass
 
         self._refresh_free_training_route_cards()
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
         self._apply_training_recommendation_table_theme()
         self._style_analysis_dialog()
 
@@ -6432,852 +6758,86 @@ class TrainingTab:
         return CONFIG.normalize_task_target(self._get_selected_training_target()) == "plate"
 
     def _refresh_step4_analysis_tab_visibility(self):
-        if not hasattr(self, "right_nb") or not hasattr(self, "ranking_tab"):
-            return
-
-        ranking_enabled = self._is_ranking_available_for_selected_target()
-
-        if ranking_enabled:
-            if not getattr(self, "_step4_ranking_tab_visible", False):
-                try:
-                    self.right_nb.add(self.ranking_tab, text="Ranking")
-                except Exception:
-                    try:
-                        self.right_nb.insert("end", self.ranking_tab, text="Ranking")
-                    except Exception:
-                        pass
-                self._step4_ranking_tab_visible = True
-            else:
-                try:
-                    self.right_nb.tab(self.ranking_tab, text="Ranking", state="normal")
-                except Exception:
-                    pass
-            if self._is_ranking_tab_active():
-                try:
-                    self._prefill_ranking_reference_if_empty()
-                except Exception:
-                    pass
-                try:
-                    self._refresh_ranking_reference_ui()
-                except Exception:
-                    pass
-            return
-
-        try:
-            if str(self.right_nb.select()) == str(self.ranking_tab):
-                self.right_nb.select(self.hist_tab)
-        except Exception:
-            pass
-
-        if getattr(self, "_step4_ranking_tab_visible", False):
-            try:
-                self.right_nb.hide(self.ranking_tab)
-            except Exception:
-                pass
-            self._step4_ranking_tab_visible = False
+        refresh_step4_analysis_tab_visibility(self)
 
     def _sync_step4_analysis_nav_buttons(self, event=None):
-        try:
-            self._refresh_step4_analysis_tab_visibility()
-        except Exception:
-            pass
+        sync_step4_analysis_nav_buttons(self, event=event)
 
     def _resolve_step4_guidance_buttons(self, attr_name: str):
-        if attr_name == "step4_route_panel_frame":
-            return [getattr(self, "btn_choose_plate", None), getattr(self, "btn_choose_char", None)]
-        if attr_name == "btn_step4_start_train_frame":
-            return [getattr(self, "btn_start_train", None)]
-        if attr_name == "btn_step4_finish_frame":
-            return [
-                getattr(self, "btn_step4_finish", None),
-                getattr(self, "btn_step4_complete_project", None),
-            ]
-
-        candidates = [attr_name]
-        if attr_name.endswith("_frame"):
-            candidates.append(attr_name[:-6])
-
-        resolved = []
-        for candidate in candidates:
-            widget = getattr(self, candidate, None)
-            if isinstance(widget, ttk.Button):
-                resolved.append(widget)
-
-        unique_buttons = []
-        seen = set()
-        for btn in resolved:
-            if btn is None:
-                continue
-            btn_id = str(btn)
-            if btn_id not in seen:
-                unique_buttons.append(btn)
-                seen.add(btn_id)
-        return unique_buttons
+        return resolve_step4_guidance_buttons(self, attr_name)
 
     def _resolve_step4_guidance_frame(self, attr_name: str):
-        if not attr_name:
-            return None
-
-        if attr_name == "step4_route_panel_frame":
-            return getattr(self, "step4_route_panel_frame", None)
-        if attr_name == "btn_step4_start_train_frame":
-            return getattr(self, "btn_step4_start_train_pulse_frame", None)
-
-        candidates = [attr_name]
-
-        for candidate in candidates:
-            widget = getattr(self, candidate, None)
-            if isinstance(widget, tk.Frame):
-                return widget
-
-        return None
+        return resolve_step4_guidance_frame(self, attr_name)
 
     def _set_step4_emphasis(self, frame_attr: str, enabled: bool, color: str = "#f39c12"):
-        frame = self._resolve_step4_guidance_frame(frame_attr)
-        if frame is not None:
-            try:
-                bg = self.app.palette.get("bg", "#1e1e1e") if frame_attr == "step4_route_panel_frame" else self.app.palette.get("panel", "#252526")
-                self.app.set_frame_emphasis(frame, enabled, background=bg)
-            except Exception as e:
-                logger.debug(f"Nie udało się ustawić podświetlenia ramki dla {frame_attr}: {e}")
-
-        buttons = self._resolve_step4_guidance_buttons(frame_attr)
-        for btn in buttons:
-            try:
-                self.app.set_button_emphasis(btn, enabled)
-            except Exception as e:
-                logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
+        set_step4_emphasis(self, frame_attr, enabled, color=color)
 
     def _clear_step4_guidance(self):
-        for attr_name in (
-            "step4_route_panel_frame",
-            "btn_step4_create_frame",
-            "btn_step4_split_frame",
-            "btn_step4_next_frame",
-            "btn_step4_start_train_frame",
-            "btn_step4_finish_frame",
-            "btn_step4_train_back",
-        ):
-            try:
-                self._set_step4_emphasis(attr_name, False)
-            except Exception:
-                pass
+        clear_step4_guidance(self)
 
     def _guide_step4_route_selection(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        self._clear_step4_guidance()
-        self._set_step4_emphasis("step4_route_panel_frame", True)
+        guide_step4_route_selection(self)
 
     def _guide_step4_builder_action(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        self._clear_step4_guidance()
-        frame_attr = "btn_step4_create_frame" if self._step4_dataset_mode == "plate" else "btn_step4_split_frame"
-        self._set_step4_emphasis(frame_attr, True)
+        guide_step4_builder_action(self)
 
     def _guide_step4_next_action(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        self._clear_step4_guidance()
-        self._set_step4_emphasis("btn_step4_next_frame", True)
+        guide_step4_next_action(self)
 
     def _guide_step4_training_action(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        self._clear_step4_guidance()
-        self._set_step4_emphasis("btn_step4_start_train_frame", True)
+        guide_step4_training_action(self)
 
     def _guide_step4_finish_action(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        self._clear_step4_guidance()
-        self._set_step4_emphasis("btn_step4_train_back", True)
+        guide_step4_finish_action(self)
 
     def _open_step4_dataset_stage(self):
-        try:
-            self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        try:
-            self._guide_step4_builder_action()
-        except Exception:
-            pass
+        open_step4_dataset_stage(self)
 
     def _mark_step4_dataset_ready(self, dataset_path: str | Path | None = None):
-        if dataset_path:
-            try:
-                self.dataset_var.set(str(dataset_path))
-            except Exception:
-                pass
+        mark_step4_dataset_ready(self, dataset_path=dataset_path)
 
-        if CAMPAIGN.get_active_project_name():
-            self._step4_train_unlocked = True
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            self._guide_step4_next_action()
-        except Exception:
-            pass
-        try:
-            self._refresh_step4_dataset_mode_ui()
-        except Exception:
-            pass
-        try:
-            self._update_training_dataset_hint()
-        except Exception:
-            pass
-        try:
-            self._refresh_training_start_state()
-        except Exception:
-            pass
+    def _accept_training_input_context(
+        self,
+        *,
+        source: str = "",
+        target: str = "",
+        dataset_path: str | Path | None = None,
+        select_training: bool = False,
+    ) -> bool:
+        return accept_training_input_context(
+            self,
+            source=source,
+            target=target,
+            dataset_path=dataset_path,
+            select_training=select_training,
+        )
 
     def _set_step4_dataset_mode(self, mode: str):
-        mode = (mode or "char").strip().lower()
-        if mode not in ("char", "plate"):
-            mode = "char"
-
-        if mode != str(getattr(self, "_step4_dataset_mode", "char") or "char"):
-            active_label = self._get_active_step4_operation_label()
-            if active_label:
-                messagebox.showinfo(
-                    "Proces w toku",
-                    "Nie można teraz zmienic toru treningu.\n\n"
-                    f"Najpierw poczekaj na zakonczenie: {active_label}.",
-                )
-                return
-
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        locked_target = self._get_locked_campaign_training_target()
-        if campaign_active and locked_target in ("char", "plate"):
-            if mode != locked_target:
-                messagebox.showinfo(
-                    "Tor zablokowany przez E2",
-                    "Tor treningu dla tej iteracji został już ustalony w wizardzie E2.\n\n"
-                    f"Ta iteracja pozostaje w torze {self._format_training_target_label(locked_target)}."
-                )
-            mode = locked_target
-
-        self._step4_dataset_mode = mode
-        self.set_campaign_training_target(mode)
-        if campaign_active:
-            self._step4_route_selected = True
-            self._step4_train_unlocked = False
-        else:
-            self._rebind_free_mode_training_storage(target=mode)
-            try:
-                self.rank_models_dir.set(str(self._get_ranking_models_default_dir()))
-            except Exception:
-                pass
-        try:
-            self._refresh_base_model_choices()
-        except Exception:
-            pass
-        try:
-            self._apply_training_recommended_start_params()
-        except Exception:
-            pass
-        try:
-            self._refresh_training_recommendation_table()
-        except Exception:
-            pass
-        self._refresh_step4_dataset_mode_ui()
-        self._refresh_step4_campaign_navigation_ui()
-        try:
-            self._refresh_free_training_route_ui()
-        except Exception:
-            pass
-        try:
-            self._update_training_dataset_hint()
-        except Exception:
-            pass
-
-        try:
-            label = "tablic (YOLO Pose)" if mode == "plate" else "znaków (YOLO Detect)"
-            self._append_step4_builder_log(f"[TRYB] Wybrano tor budowy datasetu dla modelu {label}.")
-        except Exception:
-            pass
-
-        if campaign_active:
-            try:
-                self._guide_step4_builder_action()
-            except Exception:
-                pass
+        set_step4_dataset_mode(self, mode)
 
     def _get_step4_dataset_workflow_view_model(self) -> Step4DatasetWorkflowViewModel:
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        locked_target = self._get_locked_campaign_training_target()
-        route_locked = campaign_active and locked_target in ("char", "plate")
-        mode = getattr(self, "_step4_dataset_mode", "char")
-        route_selected = bool(getattr(self, "_step4_route_selected", False))
-
-        creator_summary = ""
-        split_intro = "Dzieli zbiór (np. wygenerowany w zakładce Znaków) na foldery train/val potrzebne do treningu."
-        split_summary = ""
-        split_action_label = "Rozpocznij podział (split)"
-        show_split_toggle = False
-        split_toggle_label = "Popraw split"
-        show_split_details = True
-        char_ready_dataset = False
-        char_ready_train = 0
-        char_ready_val = 0
-        char_ready_test = 0
-        char_ready_path = ""
-
-        if campaign_active and mode == "plate":
-            plate_readiness = {}
-            try:
-                plate_readiness = dict(self.get_campaign_step4_readiness(iteration_target="plate") or {})
-            except Exception:
-                plate_readiness = {}
-            approved_images = int(plate_readiness.get("project_approved_images", 0) or 0)
-            approved_plates = int(plate_readiness.get("project_approved_plates", 0) or 0)
-            ready_dataset_path = str(plate_readiness.get("ready_dataset") or "").strip()
-            ready_train = int(plate_readiness.get("train_images", 0) or 0)
-            ready_val = int(plate_readiness.get("val_images", 0) or 0)
-            ready_test = int(plate_readiness.get("test_images", 0) or 0)
-            xml_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_xml_var.get()), 96)
-            images_value = self._shorten_training_text(self._format_workspace_relative_path(self.cvat_images_var.get()), 96)
-            creator_summary = (
-                f"ApprovedSet projektu: {approved_images} obraz(y), {approved_plates} tablic(e).\n"
-                "Źródła do budowy datasetu tablic zostały już przygotowane wcześniej.\n"
-                f"Anotacje tablic: {xml_value}\n"
-                f"Obrazy źródłowe: {images_value}"
-            )
-            if ready_dataset_path and (ready_train > 0 or ready_val > 0 or ready_test > 0):
-                creator_summary += (
-                    f"\nAktualny dataset treningowy: train={ready_train}, val={ready_val}, test={ready_test}"
-                )
-
-        if campaign_active and mode == "char":
-            readiness = {}
-            try:
-                readiness = dict(self.get_campaign_step4_readiness(iteration_target="char") or {})
-            except Exception:
-                readiness = {}
-
-            char_ready_path = str(readiness.get("ready_dataset") or "").strip()
-            char_ready_train = int(readiness.get("train_images", 0) or 0)
-            char_ready_val = int(readiness.get("val_images", 0) or 0)
-            char_ready_test = int(readiness.get("test_images", 0) or 0)
-            char_ready_dataset = bool(char_ready_path and char_ready_train > 0 and char_ready_val > 0)
-
-            if char_ready_dataset:
-                split_ready_value = self._shorten_training_text(
-                    self._format_workspace_relative_path(char_ready_path),
-                    96,
-                )
-                split_intro = "Dataset znaków ma już poprawny split treningowy. Nie musisz wykonywać tego kroku ponownie."
-                split_summary = (
-                    "Dataset znaków jest już gotowy do treningu.\n"
-                    f"Gotowy dataset: {split_ready_value}\n"
-                    f"Split: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}\n"
-                    "Nie musisz wykonywać splitu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
-                    "jeśli chcesz świadomie przebudować podział train / val / test."
-                )
-                show_split_toggle = True
-                show_split_details = bool(getattr(self, "_step4_char_split_details_visible", False))
-                split_toggle_label = "Ukryj opcje splitu" if show_split_details else "Popraw split"
-                split_action_label = "Przebuduj split"
-            else:
-                split_src_value = self._shorten_training_text(
-                    self._format_workspace_relative_path(self.split_src_var.get()),
-                    96,
-                )
-                split_intro = "Przygotuj split train / val / test dla datasetu znaków, aby odblokować trening."
-                split_summary = (
-                    "Źródło do podziału datasetu znaków zostało już wybrane wcześniej.\n"
-                    f"Dataset źródłowy: {split_src_value}"
-                )
-
-        if campaign_active and not route_selected:
-            return Step4DatasetWorkflowViewModel(
-                mode=mode,
-                in_campaign=True,
-                route_selected=False,
-                route_locked=route_locked,
-                show_route_panel=not route_locked,
-                show_waiting_panel=True,
-                title="Wybierz tor po lewej stronie",
-                description=(
-                    "W trybie projektu najpierw wybierz tor tablic albo tor znaków. "
-                    "Dopiero wtedy odblokuje się panel budowy datasetu."
-                ),
-                next_label="Wybierz tor",
-            )
-
-        if mode == "plate":
-            description = (
-                "Wybierz ten tor, jeśli chcesz zbudować dataset tablic z XML CVAT "
-                "i trenować model tablic rejestracyjnych."
-            )
-            if route_locked:
-                campaign_plate_stats = {}
-                try:
-                    campaign_plate_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
-                except Exception:
-                    campaign_plate_stats = {}
-                approved_images = int(campaign_plate_stats.get("images", 0) or 0)
-                approved_plates = int(campaign_plate_stats.get("plates", 0) or 0)
-                description = (
-                    "Ten etap korzysta z zatwierdzonych źródeł projektu i buduje dataset tablic bez ponownego wybierania XML ani obrazów. "
-                    f"Aktualnie zbiór projektu ma {approved_images} obraz(y) i {approved_plates} tablic(e)."
-                )
-        else:
-            description = (
-                "Wybierz ten tor, jeśli chcesz przygotować i podzielić dataset znaków "
-                "i trenować model znaków na tablicach."
-            )
-            if route_locked:
-                if char_ready_dataset:
-                    description = (
-                        "Ten etap ma już gotowy dataset znaków z poprawnym splitem treningowym. "
-                        f"Aktualny stan: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}. "
-                        "Możesz przejść dalej do treningu, a przebudowę splitu traktować tylko jako opcjonalne narzędzie."
-                    )
-                else:
-                    description = (
-                        "Ten etap korzysta z gotowego źródła datasetu znaków projektu i prowadzi do przygotowania splitu oraz treningu."
-                    )
-
-        if route_locked:
-            description = str(description or "").strip() + " Tor tej iteracji został zatwierdzony w E2 i nie może być zmieniony w Z4."
-
-        return Step4DatasetWorkflowViewModel(
-            mode=mode,
-            in_campaign=campaign_active,
-            route_selected=route_selected,
-            route_locked=route_locked,
-            show_route_panel=not route_locked,
-            show_waiting_panel=False,
-            title=("Tor tablic (YOLO Pose)" if mode == "plate" else "Tor znaków (YOLO Detect)"),
-            description=description,
-            show_creator_section=(mode == "plate"),
-            show_split_section=(mode == "char"),
-            next_label="Dalej do treningu",
-            creator_summary=creator_summary,
-            split_intro=split_intro,
-            split_summary=split_summary,
-            split_action_label=split_action_label,
-            show_split_toggle=show_split_toggle,
-            split_toggle_label=split_toggle_label,
-            show_split_details=show_split_details,
-            char_ready_dataset=char_ready_dataset,
-            char_ready_dataset_path=char_ready_path,
-            char_ready_train=char_ready_train,
-            char_ready_val=char_ready_val,
-            char_ready_test=char_ready_test,
-        )
+        return build_step4_dataset_workflow_view_model(self)
 
     def _get_step4_training_inputs_view_model(self) -> Step4TrainingInputsViewModel:
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        current_base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
-        current_custom_value = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
-        show_project_custom_row = bool(campaign_active and current_base_key == "Custom" and current_custom_value)
-        return Step4TrainingInputsViewModel(
-            in_campaign=campaign_active,
-            show_session_name=(not campaign_active),
-            show_dataset_section=(not campaign_active),
-            dataset_caption=(
-                "Aktywny dataset treningowy wynika z bieżącego workflow projektu. "
-                "W kampanii to pole ma wyłącznie charakter informacyjny."
-                if campaign_active
-                else "Tutaj wybierasz gotowy dataset treningowy przygotowany wcześniej przez eksport z Z2 albo Z3. "
-                     "Wskaż cały folder z plikiem data.yaml."
-            ),
-            dataset_entry_state=("readonly" if campaign_active else "normal"),
-            show_dataset_pick_button=(not campaign_active),
-            show_dataset_hint=(not campaign_active),
-            show_scope_hint=(not campaign_active),
-            show_pose_warning=(not campaign_active),
-            base_caption=(
-                "W kampanii projekt może automatycznie podstawić aktywny model z poprzednich iteracji. "
-                "To tylko propozycja startowa: możesz zmienić wybór w comboboxie, a trening uruchomi się "
-                "dokładnie na modelu widocznym teraz na liście. "
-                "Jeśli widzisz 'Custom', poniżej pokazuję aktualny model projektu."
-                if campaign_active
-                else "Dla tablic wybieraj modele YOLO Pose. "
-                     "Dla znaków wybieraj modele YOLO Detect. "
-                     "Możesz też wskazać własny plik modelu .pt do fine-tuningu."
-            ),
-            base_combo_state="readonly",
-            show_custom_model=((not campaign_active) or show_project_custom_row),
-            custom_entry_state=("readonly" if show_project_custom_row else "disabled"),
-            show_custom_pick_button=(not campaign_active),
-        )
+        return build_step4_training_inputs_view_model(self)
 
     def _get_step4_campaign_navigation_view_model(self) -> Step4CampaignNavigationViewModel:
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        train_unlocked = bool(getattr(self, "_step4_train_unlocked", False))
-        route_selected = bool(getattr(self, "_step4_route_selected", False))
-        dataset_tab_visible = bool(getattr(self, "_step4_dataset_tab_visible", False))
-        finish_ready = bool(getattr(self, "_step4_campaign_finish_ready", False))
-        dataset_vm = self._get_step4_dataset_workflow_view_model()
-
-        return Step4CampaignNavigationViewModel(
-            in_campaign=campaign_active,
-            dataset_tab_enabled=(not campaign_active) or dataset_tab_visible,
-            train_tab_enabled=(not campaign_active) or train_unlocked,
-            next_enabled=(not campaign_active) or (route_selected and train_unlocked),
-            next_label=str(dataset_vm.next_label or "Dalej do treningu"),
-            show_dataset_back=True,
-            dataset_back_label=("Wróć do kampanii" if campaign_active else "Wstecz"),
-            show_train_nav=campaign_active,
-            show_train_back=True,
-            train_back_label=("Wróć do kampanii" if campaign_active else "Wstecz do toru"),
-            finish_enabled=campaign_active and finish_ready,
-            show_complete_project=False,
-            force_dataset_tab_selection=campaign_active and dataset_tab_visible and not train_unlocked,
-        )
+        return build_step4_campaign_navigation_view_model(self)
 
     def _refresh_step4_campaign_builder_inputs_ui(self):
-        vm = self._get_step4_dataset_workflow_view_model()
-
-        try:
-            route_manager = str(self.step4_route_panel_frame.winfo_manager())
-        except Exception:
-            route_manager = ""
-
-        if not bool(vm.show_route_panel):
-            if route_manager == "pack":
-                try:
-                    self.step4_route_panel_frame.pack_forget()
-                except Exception:
-                    pass
-        else:
-            if route_manager != "pack":
-                try:
-                    self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8), before=self.step4_mode_right_host)
-                except Exception:
-                    pass
-
-        try:
-            if bool(vm.in_campaign) and vm.mode == "plate":
-                self.creator_xml_row.pack_forget()
-                self.creator_images_row.pack_forget()
-                self._set_training_widget_text(self.creator_source_summary_lbl, str(vm.creator_summary or ""))
-                if str(self.creator_source_summary_lbl.winfo_manager()) != "pack":
-                    self.creator_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
-            else:
-                if str(self.creator_xml_row.winfo_manager()) != "pack":
-                    self.creator_xml_row.pack(fill=tk.X, pady=2, before=self.creator_source_summary_lbl)
-                if str(self.creator_images_row.winfo_manager()) != "pack":
-                    self.creator_images_row.pack(fill=tk.X, pady=2, before=self.creator_source_summary_lbl)
-                if str(self.creator_source_summary_lbl.winfo_manager()) == "pack":
-                    self.creator_source_summary_lbl.pack_forget()
-        except Exception:
-            pass
-
-        try:
-            if bool(vm.in_campaign) and vm.mode == "char":
-                self.split_source_row.pack_forget()
-                self._set_training_widget_text(self.split_intro_lbl, str(vm.split_intro or ""))
-                try:
-                    if bool(vm.show_split_toggle):
-                        self._set_training_widget_text(self.btn_step4_split_toggle, str(vm.split_toggle_label or "Popraw split"))
-                        if str(self.btn_step4_split_toggle.winfo_manager()) != "pack":
-                            self.btn_step4_split_toggle.pack(anchor=tk.W, pady=(0, 8))
-                    elif str(self.btn_step4_split_toggle.winfo_manager()) == "pack":
-                        self.btn_step4_split_toggle.pack_forget()
-                except Exception:
-                    pass
-                self._set_training_widget_text(self.btn_step4_split, str(vm.split_action_label or "Rozpocznij podział (split)"))
-                self._set_training_widget_text(self.split_source_summary_lbl, str(vm.split_summary or ""))
-                if str(self.split_source_summary_lbl.winfo_manager()) != "pack":
-                    self.split_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
-                for widget, kwargs in (
-                    (self.split_output_row, {"fill": tk.X, "pady": 2}),
-                    (self.split_ratios_frame, {"fill": tk.X, "pady": 10}),
-                    (self.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
-                ):
-                    try:
-                        if bool(vm.show_split_details):
-                            if str(widget.winfo_manager()) != "pack":
-                                widget.pack(**kwargs)
-                        elif str(widget.winfo_manager()) == "pack":
-                            widget.pack_forget()
-                    except Exception:
-                        pass
-                try:
-                    if not bool(vm.show_split_details) and str(self.split_feedback_frame.winfo_manager()) == "pack":
-                        self.split_feedback_frame.pack_forget()
-                except Exception:
-                    pass
-            else:
-                self._set_training_widget_text(self.split_intro_lbl, str(vm.split_intro or ""))
-                self._set_training_widget_text(self.btn_step4_split, str(vm.split_action_label or "Rozpocznij podział (split)"))
-                try:
-                    self._step4_char_split_details_visible = False
-                    if str(self.btn_step4_split_toggle.winfo_manager()) == "pack":
-                        self.btn_step4_split_toggle.pack_forget()
-                except Exception:
-                    pass
-                if str(self.split_source_row.winfo_manager()) != "pack":
-                    self.split_source_row.pack(fill=tk.X, pady=2, before=self.split_source_summary_lbl)
-                if str(self.split_source_summary_lbl.winfo_manager()) == "pack":
-                    self.split_source_summary_lbl.pack_forget()
-                for widget, kwargs in (
-                    (self.split_output_row, {"fill": tk.X, "pady": 2}),
-                    (self.split_ratios_frame, {"fill": tk.X, "pady": 10}),
-                    (self.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
-                ):
-                    try:
-                        if str(widget.winfo_manager()) != "pack":
-                            widget.pack(**kwargs)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        refresh_step4_campaign_builder_inputs_ui(self)
 
     def _refresh_step4_training_inputs_mode_ui(self):
-        vm = self._get_step4_training_inputs_view_model()
-
-        def _set_pack_visible(widget, visible: bool, **pack_kwargs):
-            if widget is None:
-                return
-            try:
-                manager = str(widget.winfo_manager())
-            except Exception:
-                manager = ""
-            try:
-                if visible:
-                    if manager != "pack":
-                        widget.pack(**pack_kwargs)
-                elif manager == "pack":
-                    widget.pack_forget()
-            except Exception:
-                pass
-
-        session_row = getattr(self, "train_session_name_row", None)
-        dataset_title = getattr(self, "train_dataset_title_lbl", None)
-        dataset_caption = getattr(self, "train_dataset_caption_lbl", None)
-        dataset_entry = getattr(self, "train_dataset_entry", None)
-        dataset_btn = getattr(self, "train_dataset_pick_btn", None)
-        dataset_row = getattr(self, "train_dataset_row", None)
-        dataset_hint = getattr(self, "train_dataset_hint_lbl", None)
-        scope_hint = getattr(self, "train_scope_hint_lbl", None)
-        pose_warning = getattr(self, "train_pose_warning_lbl", None)
-        base_caption = getattr(self, "train_base_caption_lbl", None)
-        base_combo = getattr(self, "base_combo", None)
-        custom_row = getattr(self, "custom_row", None)
-        custom_entry = getattr(self, "base_custom_entry", None)
-        custom_btn = getattr(self, "base_custom_btn", None)
-
-        _set_pack_visible(session_row, bool(vm.show_session_name), fill=tk.X, pady=(0, self._train_left_section_gap))
-        if dataset_title is not None:
-            try:
-                if not bool(vm.show_dataset_section):
-                    dataset_title.pack_forget()
-                elif not str(dataset_title.winfo_manager()):
-                    dataset_title.pack(anchor=tk.W, fill=tk.X)
-            except Exception:
-                pass
-        _set_pack_visible(dataset_caption, bool(vm.show_dataset_section), anchor=tk.W, fill=tk.X, pady=(2, 6))
-        _set_pack_visible(dataset_row, bool(vm.show_dataset_section), fill=tk.X, pady=2)
-        _set_pack_visible(dataset_hint, bool(vm.show_dataset_hint), anchor=tk.W, fill=tk.X, pady=(4, 8))
-        _set_pack_visible(scope_hint, bool(vm.show_scope_hint), anchor=tk.W, fill=tk.X, pady=(0, self._train_left_section_gap))
-        _set_pack_visible(
-            pose_warning,
-            (bool(vm.show_pose_warning) and bool(str(getattr(pose_warning, "cget", lambda _x: "")("text") or "").strip())),
-            anchor=tk.W,
-            fill=tk.X,
-            pady=(0, self._train_left_section_gap),
-        )
-
-        self._set_training_widget_text(dataset_caption, str(vm.dataset_caption or ""))
-
-        if dataset_entry is not None:
-            try:
-                dataset_entry.configure(state=str(vm.dataset_entry_state or "normal"))
-            except Exception:
-                pass
-
-        if dataset_btn is not None:
-            try:
-                if not bool(vm.show_dataset_pick_button):
-                    dataset_btn.pack_forget()
-                elif not str(dataset_btn.winfo_manager()):
-                    dataset_btn.pack(side=tk.LEFT, padx=(8, 0))
-            except Exception:
-                pass
-
-        self._set_training_widget_text(base_caption, str(vm.base_caption or ""))
-
-        if base_combo is not None:
-            try:
-                base_combo.configure(state=str(vm.base_combo_state or "readonly"))
-            except Exception:
-                pass
-
-        if custom_row is not None:
-            try:
-                if not bool(vm.show_custom_model):
-                    custom_row.pack_forget()
-                elif not str(custom_row.winfo_manager()):
-                    custom_row.pack(fill=tk.X, pady=2, after=base_combo)
-            except Exception:
-                pass
-
-        if custom_entry is not None:
-            try:
-                custom_entry.configure(state=str(vm.custom_entry_state or "disabled"))
-            except Exception:
-                pass
-
-        if custom_btn is not None:
-            try:
-                if not bool(vm.show_custom_pick_button):
-                    custom_btn.pack_forget()
-                elif not str(custom_btn.winfo_manager()):
-                    custom_btn.pack(side=tk.LEFT, padx=(8, 0))
-                if bool(vm.show_custom_pick_button):
-                    custom_btn.configure(state=tk.NORMAL if self.base_model_var.get() == "Custom" else tk.DISABLED)
-            except Exception:
-                pass
-
-        if not bool(vm.in_campaign):
-            try:
-                self._on_base_model_change()
-            except Exception:
-                pass
+        refresh_step4_training_inputs_mode_ui(self)
 
     def _refresh_step4_dataset_mode_ui(self):
-        try:
-            self._refresh_free_training_route_ui()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_analysis_tab_visibility()
-        except Exception:
-            pass
-
-        if not hasattr(self, "ds_mode_host"):
-            return
-
-        vm = self._get_step4_dataset_workflow_view_model()
-        mode = getattr(self, "_step4_dataset_mode", "char")
-        campaign_active = bool(CAMPAIGN.get_active_project_name())
-        route_selected = bool(getattr(self, "_step4_route_selected", False))
-        locked_target = self._get_locked_campaign_training_target()
-        route_locked = campaign_active and locked_target in ("char", "plate")
-        campaign_plate_stats = {}
-        if campaign_active:
-            try:
-                campaign_plate_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
-            except Exception:
-                campaign_plate_stats = {}
-
-        try:
-            self.ds_creator_frame.pack_forget()
-        except Exception:
-            pass
-
-        try:
-            self.ds_split_frame.pack_forget()
-        except Exception:
-            pass
-
-        try:
-            self.ds_mode_waiting_frame.pack_forget()
-        except Exception:
-            pass
-
-        if bool(vm.show_waiting_panel):
-            self.ds_mode_title_var.set(str(vm.title or "Wybierz tor po lewej stronie"))
-            self.ds_mode_desc_var.set(str(vm.description or ""))
-            self.btn_choose_plate.configure(state=tk.NORMAL)
-            self.btn_choose_char.configure(state=tk.NORMAL)
-            self.ds_mode_waiting_frame.pack(fill=tk.X, expand=False)
-            self.btn_step4_next.configure(
-                text=str(vm.next_label or "Wybierz tor"),
-                state=tk.DISABLED
-            )
-            return
-
-        if mode == "plate":
-            self.ds_mode_title_var.set(str(vm.title or "Tor tablic (YOLO Pose)"))
-            self.ds_mode_desc_var.set(str(vm.description or ""))
-            self.btn_choose_plate.configure(state=tk.DISABLED)
-            self.btn_choose_char.configure(state=(tk.DISABLED if route_locked else tk.NORMAL))
-            if bool(vm.show_creator_section):
-                self.ds_creator_frame.pack(fill=tk.X, expand=False)
-            self.btn_step4_next.configure(text=str(vm.next_label or "Dalej do treningu"))
-        else:
-            self.ds_mode_title_var.set(str(vm.title or "Tor znaków (YOLO Detect)"))
-            self.ds_mode_desc_var.set(str(vm.description or ""))
-            self.btn_choose_plate.configure(state=(tk.DISABLED if route_locked else tk.NORMAL))
-            self.btn_choose_char.configure(state=tk.DISABLED)
-            if bool(vm.show_split_section):
-                self.ds_split_frame.pack(fill=tk.X, expand=False)
-            self.btn_step4_next.configure(text=str(vm.next_label or "Dalej do treningu"))
-
-        if route_locked:
-            self.btn_choose_plate.configure(state=tk.DISABLED)
-            self.btn_choose_char.configure(state=tk.DISABLED)
-
-        try:
-            self._refresh_step4_campaign_builder_inputs_ui()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_training_inputs_mode_ui()
-        except Exception:
-            pass
+        refresh_step4_dataset_mode_ui(self)
 
     def _step4_dataset_go_next(self):
-        if CAMPAIGN.get_active_project_name() and not getattr(self, "_step4_train_unlocked", False):
-            return
-
-        try:
-            mode = getattr(self, "_step4_dataset_mode", "char")
-            self.set_campaign_training_target(mode)
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            self.main_nb.select(self.tab_train)
-        except Exception:
-            pass
-
-        try:
-            self._select_step4_analysis_tab(self.hist_tab)
-        except Exception:
-            pass
-
-        if CAMPAIGN.get_active_project_name():
-            try:
-                if getattr(self, "_step4_campaign_finish_ready", False):
-                    self._guide_step4_finish_action()
-                else:
-                    self._guide_step4_training_action()
-            except Exception:
-                pass
+        step4_dataset_go_next(self)
 
     def _step4_dataset_go_back(self):
-        if CAMPAIGN.get_active_project_name():
-            self._return_to_campaign_from_step4()
-            return
-
-        self._append_step4_builder_log(
-            "[NAWIGACJA] Tryb swobodny: brak poprzedniego kroku wizardowego do otwarcia."
-        )
+        step4_dataset_go_back(self)
 
     def _toggle_step4_char_split_details(self):
         self._step4_char_split_details_visible = not bool(getattr(self, "_step4_char_split_details_visible", False))
@@ -7287,292 +6847,21 @@ class TrainingTab:
             pass
 
     def _refresh_step4_campaign_navigation_ui(self):
-        vm = self._get_step4_campaign_navigation_view_model()
-
-        try:
-            self._update_step4_notebook_mode()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_analysis_tab_visibility()
-        except Exception:
-            pass
-
-        try:
-            if bool(vm.in_campaign) and bool(vm.dataset_tab_enabled):
-                self.main_nb.tab(self.tab_dataset, state="normal")
-            self.main_nb.tab(
-                self.tab_train,
-                state=("normal" if bool(vm.train_tab_enabled) else "disabled")
-            )
-        except Exception:
-            pass
-
-        try:
-            self.btn_step4_next.configure(
-                text=str(vm.next_label or "Dalej do treningu"),
-                state=(tk.NORMAL if bool(vm.next_enabled) else tk.DISABLED),
-            )
-        except Exception:
-            pass
-
-        try:
-            self.btn_step4_back.configure(text=str(vm.dataset_back_label or "Wstecz"))
-            if not bool(vm.show_dataset_back):
-                self.btn_step4_back.grid_remove()
-            else:
-                self.btn_step4_back.grid()
-        except Exception:
-            pass
-
-        try:
-            if (
-                bool(vm.force_dataset_tab_selection)
-                and str(self.main_nb.select()) == str(self.tab_train)
-            ):
-                self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        if not hasattr(self, "step4_train_nav"):
-            return
-
-        try:
-            if bool(vm.show_train_nav):
-                self.step4_train_nav.grid()
-            else:
-                self.step4_train_nav.grid_remove()
-        except Exception:
-            pass
-
-        try:
-            self._update_training_dataset_hint()
-        except Exception:
-            pass
-
-        try:
-            self.btn_step4_train_back.configure(text=str(vm.train_back_label or "Wstecz do toru"))
-            if not bool(vm.show_train_back):
-                self.btn_step4_train_back.pack_forget()
-            elif not str(self.btn_step4_train_back.winfo_manager()):
-                self.btn_step4_train_back.pack(side=tk.RIGHT, padx=(8, 0))
-        except Exception:
-            pass
-
-        try:
-            self.btn_step4_finish.configure(
-                state=tk.DISABLED
-            )
-        except Exception:
-            pass
-
-        try:
-            active_target = str(self.get_campaign_training_target() or "").strip().lower()
-            show_dataset_adjust_cta = bool(
-                CAMPAIGN.get_active_project_name()
-                and active_target == "char"
-                and bool(getattr(self, "_step4_train_unlocked", False))
-            )
-            if show_dataset_adjust_cta:
-                self.btn_step4_finish.configure(
-                    text="Popraw split w PZ1",
-                    command=self._open_step4_dataset_stage,
-                    state=(tk.DISABLED if self._step4_has_active_operation() else tk.NORMAL),
-                )
-                if not str(self.btn_step4_finish.winfo_manager()):
-                    self.btn_step4_finish.pack(side=tk.LEFT)
-            else:
-                self.btn_step4_finish.pack_forget()
-        except Exception:
-            pass
-
-        try:
-            if bool(vm.show_complete_project):
-                if not str(self.btn_step4_complete_project.winfo_manager()):
-                    self.btn_step4_complete_project.pack(side=tk.LEFT, padx=(0, 8))
-            else:
-                self.btn_step4_complete_project.pack_forget()
-        except Exception:
-            pass
+        refresh_step4_campaign_navigation_ui(self)
 
 
     def _step4_train_go_back(self):
-        if CAMPAIGN.get_active_project_name():
-            try:
-                self._return_to_campaign_from_step4()
-                return
-            except Exception:
-                pass
+        step4_train_go_back(self)
 
     def _return_to_campaign_from_step4(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                try:
-                    campaign_tab.request_wizard_stage_focus(
-                        step_num=min(max(int(CAMPAIGN.get_current_step() or 4), 1), 4)
-                    )
-                except Exception:
-                    pass
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self.app.update_campaign_tab_access()
-        except Exception:
-            pass
-
-        try:
-            self.app.update_status(
-                "Wracam do wizarda kampanii.",
-                "info"
-            )
-        except Exception:
-            pass
-
-        try:
-            self.app.open_controlled_tab("campaign")
-        except Exception:
-            pass
+        return_to_campaign_from_step4(self)
 
 
     def _finish_campaign_step4(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        if not self._step4_campaign_finish_ready:
-            return
-
-        try:
-            CAMPAIGN.set_current_step(5)
-        except Exception:
-            return
-
-        self._step4_campaign_finish_ready = False
-        try:
-            CAMPAIGN.set_step4_finish_state(False)
-        except Exception:
-            pass
-
-        try:
-            self._append_train_log(
-                "[KAMPANIA] Użytkownik domknął etap iteracji. "
-                "Cykl iteracji został domknięty i można rozpocząć kolejną iterację."
-            )
-        except Exception:
-            pass
-
-        try:
-            self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                try:
-                    campaign_tab.request_wizard_stage_focus(step_num=4)
-                except Exception:
-                    pass
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            self.app.update_status(
-                "Etap iteracji został zamknięty. W kampanii możesz rozpocząć nową iterację od tego samego zestawu zdjęć (E2) albo od nowego zestawu zdjęć (E1). Aktywne modele projektu pozostały zachowane.",
-                "info"
-            )
-        except Exception:
-            pass
-
-        try:
-            self.app.open_controlled_tab("campaign")
-        except Exception:
-            pass
+        finish_campaign_step4(self)
 
     def _complete_campaign_project(self):
-        if not CAMPAIGN.get_active_project_name():
-            return
-
-        if not self._step4_campaign_finish_ready:
-            return
-
-        should_finish = self.app.themed_confirm(
-            "Zakonczenie projektu",
-            "Czy oznaczyc ten projekt jako zakończony?\n\n"
-            "Projekt pozostanie dostępny do przegladu, ale dashboard nie będzie już prowadzil do nowej iteracji, "
-            "dopoki ręcznie go nie wznowisz.",
-            parent=self.frame,
-            confirm_label="Zakończ projekt",
-            tone="info"
-        )
-        if not should_finish:
-            return
-
-        if not CAMPAIGN.complete_project():
-            return
-
-        self._step4_campaign_finish_ready = False
-        try:
-            CAMPAIGN.set_step4_finish_state(False)
-        except Exception:
-            pass
-
-        try:
-            self._append_train_log(
-                "[KAMPANIA] Użytkownik oznaczyl projekt jako zakończony. "
-                "Nowa iteracja nie zostanie już proponowana, dopoki projekt nie zostanie wznowiony."
-            )
-        except Exception:
-            pass
-
-        try:
-            self.main_nb.select(self.tab_dataset)
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self._refresh_step4_campaign_navigation_ui()
-        except Exception:
-            pass
-
-        try:
-            project_name = CAMPAIGN.get_active_project_name()
-            if project_name:
-                self.app.update_status(
-                    f"Projekt '{project_name}' został oznaczony jako zakończony.",
-                    "info"
-                )
-        except Exception:
-            pass
-
-        try:
-            self.app.update_campaign_tab_access()
-        except Exception:
-            pass
-
-        try:
-            self.app.open_controlled_tab("campaign")
-        except Exception:
-            pass
+        complete_campaign_project(self)
 
     def _get_run_dir_for_run_id(self, run_id: str) -> Path | None:
         if not run_id:
@@ -7616,367 +6905,16 @@ class TrainingTab:
 
 
     def _promote_trained_model_to_campaign_if_needed(self):
-        """
-        Jeśli aktywny trening dotyczył modelu kampanijnego,
-        to po pojawieniu się best.pt promuje model do odpowiedniego
-        slotu projektu: best_char_model albo best_plate_model.
-        """
-        target = (self._pending_campaign_model_type or "").strip().lower()
-        if target not in ("char", "plate"):
-            return False
-
-        if not self.current_run_id:
-            return False
-
-        best_model = self._find_best_weights_for_run(self.current_run_id)
-        if best_model is None or not best_model.exists():
-            return False
-
-        CAMPAIGN.set_global_model(target, str(best_model))
-
-        try:
-            if target == "char":
-                self._append_train_log(
-                    f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}"
-                )
-            else:
-                self._append_train_log(
-                    f"[MODEL] Ustawiono nowy aktywny model tablic projektu: {best_model}"
-                )
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self._complete_campaign_step4_if_needed(target)
-        except Exception:
-            pass
-
-        self._pending_campaign_model_type = None
-        return True
+        return promote_trained_model_to_campaign_if_needed(self)
 
     def _complete_campaign_step4_if_needed(self, target: str) -> bool:
-        """
-        Po promocji modelu kampanijnego tylko sygnalizuje gotowość
-        do ręcznego domknięcia etapu iteracji. Nie zamyka etapu automatycznie.
-        """
-        target = str(target or "").strip().lower()
-        if target not in ("char", "plate"):
-            return False
-
-        if not CAMPAIGN.get_active_project_name():
-            return False
-
-        try:
-            label = "znaków" if target == "char" else "tablic"
-            self._append_train_log(
-                f"[KAMPANIA] Model {label} został wypromowany do projektu. "
-                "Możesz teraz domknąć etap iteracji albo oznaczyć cały projekt jako zakończony."
-            )
-        except Exception:
-            pass
-
-        try:
-            campaign_tab = self.app.tabs.get("campaign")
-            if campaign_tab:
-                campaign_tab._refresh_dashboard()
-        except Exception:
-            pass
-
-        try:
-            self.app.update_status(
-                f"✅ Zakończono trening toru '{target}'. Model został zapisany w projekcie.",
-                "info"
-            )
-        except Exception:
-            pass
-
-        return True
+        return complete_campaign_step4_if_needed(self, target)
 
     def _show_training_completion_summary(self, *, promoted: bool, can_finish_step4: bool):
-        run_id = str(self.current_run_id or "").strip()
-        if not run_id:
-            return
-
-        if str(getattr(self, "_last_training_completion_summary_run_id", "") or "").strip() == run_id:
-            return
-
-        run = None
-        try:
-            run = self.history.get_run(run_id)
-        except Exception:
-            run = None
-
-        target = self.get_campaign_training_target()
-        if target not in ("char", "plate"):
-            target = str(getattr(self, "_pending_campaign_model_type", "") or "").strip().lower()
-
-        if target == "char":
-            target_label = "znaków"
-        elif target == "plate":
-            target_label = "tablic"
-        else:
-            target_label = "projektu"
-
-        status_value = str(getattr(run, "status", "") or "").strip().lower() if run is not None else ""
-        success = bool(status_value == TrainingStatus.COMPLETED.value)
-        title = "Podsumowanie treningu"
-        tone = "success" if success else "warning"
-
-        if status_value == TrainingStatus.FAILED.value:
-            title = "Trening zakończony błędem"
-            tone = "error"
-            try:
-                self.app.themed_error(
-                    title,
-                    self._build_training_failure_message(run),
-                    parent=self.frame,
-                )
-                self._last_training_completion_summary_run_id = run_id
-            except Exception:
-                pass
-            return
-
-        lines = []
-        if run is not None:
-            lines.append(f"Run: {run.name}")
-            lines.append(f"Model bazowy: {run.base_model}")
-            lines.append(f"Dataset: {run.dataset_path}")
-            if float(getattr(run, "best_map50_95", 0.0) or 0.0) > 0.0:
-                lines.append(f"Najlepsze mAP50-95: {float(run.best_map50_95):.3f}")
-
-        if can_finish_step4:
-            if promoted:
-                lines.append("")
-                lines.append(f"Nowy aktywny model {target_label} został zapisany w projekcie.")
-            else:
-                lines.append("")
-                lines.append(f"Aktywny model {target_label} projektu nie został podmieniony.")
-            if str(target or "").strip().lower() == "char":
-                lines.append(
-                    "Dalej: wróć do wizarda E4, aby formalnie domknąć etap. "
-                    "Jeśli chcesz, możesz jeszcze wrócić do PZ1 i poprawić split datasetu znaków."
-                )
-            else:
-                lines.append(
-                    "Dalej: wróć do wizarda E4, aby formalnie domknąć etap. "
-                    "W Z4 możesz jeszcze przebudować dataset tablic w PZ1, jeśli chcesz."
-                )
-        else:
-            lines.append("")
-            if success:
-                lines.append("Trening zakończył się poprawnie.")
-            else:
-                lines.append("Trening został zatrzymany albo zakończył się błędem.")
-            lines.append("Dalej: możesz zmienić ustawienia i uruchomić kolejny trening.")
-
-        try:
-            self.app.themed_info(
-                title,
-                "\n".join(lines).strip(),
-                parent=self.frame,
-                tone=tone,
-            )
-            self._last_training_completion_summary_run_id = run_id
-        except Exception:
-            pass
+        show_training_completion_summary(self, promoted=promoted, can_finish_step4=can_finish_step4)
 
     def _poll_training_completion(self):
-        """
-        Lekki polling końca treningu:
-        - czeka aż trainer.is_training spadnie do False
-        - jeśli powstał best.pt, promuje model do projektu
-        - w trybie kampanijnym odblokowuje ręczne zakończenie kroku 4
-        """
-        try:
-            is_training = bool(getattr(self.trainer, "is_training", False))
-
-            if is_training:
-                self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
-                return
-
-            self._training_completion_poll_job = None
-            promoted = self._promote_trained_model_to_campaign_if_needed()
-
-            try:
-                self._load_history()
-            except Exception:
-                pass
-
-            run_status = ""
-            try:
-                if self.current_run_id:
-                    current_run = self.history.get_run(str(self.current_run_id))
-                    run_status = str(getattr(current_run, "status", "") or "").strip().lower()
-            except Exception:
-                run_status = ""
-
-            try:
-                self._remember_campaign_training_run_in_registry(
-                    run_id=str(self.current_run_id or "").strip(),
-                    status=run_status,
-                    target=self.get_campaign_training_target(),
-                )
-            except Exception:
-                pass
-
-            campaign_active = bool(CAMPAIGN.get_active_project_name())
-            can_finish_step4 = campaign_active and bool(self.current_run_id)
-            run_failed = bool(run_status == TrainingStatus.FAILED.value)
-
-            if run_status == TrainingStatus.PAUSED.value:
-                self._step4_campaign_finish_ready = False
-                try:
-                    if CAMPAIGN.get_active_project_name():
-                        CAMPAIGN.set_step4_finish_state(False)
-                except Exception:
-                    pass
-                self._set_training_ui_idle_state(
-                    "Trening wstrzymany. Ten run możesz wznowić później.",
-                    "#d35400"
-                )
-                try:
-                    self._append_train_log(
-                        "[KAMPANIA] Run został wstrzymany. Etap 4 nie został jeszcze domknięty."
-                    )
-                except Exception:
-                    pass
-                try:
-                    self._refresh_step4_campaign_navigation_ui()
-                except Exception:
-                    pass
-                try:
-                    self._show_training_completion_summary(promoted=False, can_finish_step4=False)
-                except Exception:
-                    pass
-                return
-
-            if run_failed:
-                self._step4_campaign_finish_ready = False
-                try:
-                    if CAMPAIGN.get_active_project_name():
-                        CAMPAIGN.set_step4_finish_state(False)
-                except Exception:
-                    pass
-                self._set_training_ui_idle_state(
-                    "Trening zakończył się błędem. Etap E4 nie może zostać jeszcze domknięty.",
-                    "#c0392b"
-                )
-                try:
-                    self._append_train_log(
-                        "[KAMPANIA] Run zakończył się błędem. Najpierw popraw ustawienia albo dataset i uruchom trening ponownie."
-                    )
-                except Exception:
-                    pass
-                try:
-                    self._refresh_step4_campaign_navigation_ui()
-                except Exception:
-                    pass
-                try:
-                    self._show_training_completion_summary(promoted=False, can_finish_step4=False)
-                except Exception:
-                    pass
-                return
-
-            if can_finish_step4 and promoted:
-                self._step4_campaign_finish_ready = True
-                finish_target = self.get_campaign_training_target()
-                if finish_target not in ("char", "plate"):
-                    finish_target = (self._pending_campaign_model_type or "").strip().lower()
-                try:
-                    CAMPAIGN.set_step4_finish_state(
-                        True,
-                        run_id=str(self.current_run_id or ""),
-                        target=finish_target,
-                        iteration_num=int(CAMPAIGN.get_current_iteration_num() or 0),
-                    )
-                except Exception:
-                    pass
-                self._set_training_ui_idle_state(
-                    "Trening zakończony. Wróć do wizarda E4, aby formalnie domknąć etap iteracji.",
-                    "#1e8449"
-                )
-            elif can_finish_step4:
-                target = self.get_campaign_training_target()
-                if target not in ("char", "plate"):
-                    target = (self._pending_campaign_model_type or "").strip().lower()
-                target_label = "model projektu" if target not in ("char", "plate") else (
-                    "model znaków projektu" if target == "char" else "model tablic projektu"
-                )
-
-                self._step4_campaign_finish_ready = True
-                try:
-                    CAMPAIGN.set_step4_finish_state(
-                        True,
-                        run_id=str(self.current_run_id or ""),
-                        target=target,
-                        iteration_num=int(CAMPAIGN.get_current_iteration_num() or 0),
-                    )
-                except Exception:
-                    pass
-                self._set_training_ui_idle_state(
-                    (
-                        "Trening zakończony lub zatrzymany bez podmiany aktywnego "
-                        f"{target_label}. Wróć do wizarda E4, aby formalnie domknąć etap iteracji "
-                        "albo kontynuować pracę nad datasetem w Z4."
-                    ),
-                    "#7f8c8d"
-                )
-                try:
-                    self._append_train_log(
-                        "[KAMPANIA] Ten run treningu nie wypromował nowego aktywnego modelu projektu. "
-                        "Wróć do wizarda E4, aby formalnie domknąć etap iteracji, "
-                        "albo pozostań w Z4 i dopracuj dataset treningowy."
-                    )
-                except Exception:
-                    pass
-            else:
-                self._step4_campaign_finish_ready = False
-                try:
-                    if CAMPAIGN.get_active_project_name():
-                        CAMPAIGN.set_step4_finish_state(False)
-                except Exception:
-                    pass
-                self._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
-
-            try:
-                self._refresh_step4_campaign_navigation_ui()
-            except Exception:
-                pass
-
-            try:
-                self._show_training_completion_summary(promoted=promoted, can_finish_step4=can_finish_step4)
-            except Exception:
-                pass
-
-            if can_finish_step4:
-                try:
-                    self._guide_step4_finish_action()
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.error(f"Błąd pollingu końca treningu: {e}")
-            self._training_completion_poll_job = None
-            self._pending_campaign_model_type = None
-            self._step4_campaign_finish_ready = False
-            try:
-                if CAMPAIGN.get_active_project_name():
-                    CAMPAIGN.set_step4_finish_state(False)
-            except Exception:
-                pass
-            self._set_training_ui_idle_state("Błąd monitorowania końca treningu.", "#c0392b")
-
-            try:
-                self._refresh_step4_campaign_navigation_ui()
-            except Exception:
-                pass
+        poll_training_completion(self)
 
     def _set_training_ui_running_state(self):
         try:
@@ -8619,18 +7557,82 @@ class TrainingTab:
 
         self.main_nb.add(self.tab_dataset, text="[PZ1] Budowa datasetu")
         self.main_nb.add(self.tab_train, text="[PZ2] Trening i wyniki")
+        self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
         self._step4_dataset_tab_visible = True
 
         self._build_dataset_tab()
         self._build_train_tab()
         self._update_step4_notebook_mode()
 
+    def _on_main_nb_tab_changed(self, event=None):
+        if event is not None and getattr(event, "widget", None) is not self.main_nb:
+            return
+        try:
+            notify = getattr(self.app, "notify_free_mode_assistant_context_changed", None)
+            if callable(notify):
+                notify()
+        except Exception:
+            pass
+
+    def get_free_mode_assistant_context(self) -> dict:
+        try:
+            selected_tab = str(self.main_nb.select())
+        except Exception:
+            selected_tab = ""
+
+        if selected_tab == str(getattr(self, "tab_dataset", "")):
+            return {
+                "location": "[Z4] Trening i analiza / [PZ1] Budowa datasetu",
+                "goal": "Ta podzakładka wybiera tor i źródło danych, a następnie tworzy wariant datasetu treningowego dostępny później w PZ2.",
+                "workflow": (
+                    "Wybierz tor: tablice YOLO Pose albo znaki YOLO Detect.",
+                    "Wskaż właściwe źródło: dla tablic XML + zgodne obrazy albo gotowy wariant, dla znaków dataset YOLO z data.yaml.",
+                    "Utwórz wariant datasetu lub nowy split, nie podmieniaj ręcznie źródeł w PZ2.",
+                    "Po sukcesie przeczytaj modal i przejdź do PZ2, gdzie wariant pojawi się na liście wyboru.",
+                ),
+                "glossary": (
+                    "wariant = konkretna wersja datasetu",
+                    "split = train / val / test",
+                    "data.yaml = opis datasetu YOLO",
+                ),
+                "caution": "W trybie swobodnym warto testować różne warianty bez ponownego eksportu z Z2/Z3.",
+            }
+        if selected_tab == str(getattr(self, "tab_train", "")):
+            return {
+                "location": "[Z4] Trening i analiza / [PZ2] Trening i wyniki",
+                "goal": "Ta podzakładka korzysta z wariantu datasetu przygotowanego w PZ1, wybiera model bazowy i uruchamia trening oraz porównanie wyników.",
+                "workflow": (
+                    "Wybierz wariant datasetu przygotowany wcześniej w PZ1.",
+                    "Wybierz model bazowy albo checkpoint zgodny z torem tablic lub znaków.",
+                    "Ustaw parametry startowe: epoki, batch, rozdzielczość, learning rate i urządzenie.",
+                    "Uruchom trening i obserwuj postęp oraz terminal procesu.",
+                    "Po treningu sprawdź historię runów, wykonaj walidację lub porównaj wyniki w rankingu.",
+                ),
+                "glossary": (
+                    "epoka = pełne przejście po danych",
+                    "val = walidacja jakości",
+                    "ranking = porównanie modeli",
+                ),
+                "caution": "Jeśli trening ma używać innego splitu, wróć do PZ1 i wybierz albo utwórz inny wariant.",
+            }
+        return {
+            "location": "[Z4] Trening i analiza",
+            "goal": "Ta zakładka prowadzi od przygotowania wariantu datasetu do treningu modelu i analizy wyników.",
+            "workflow": (
+                "PZ1 buduje lub wybiera wariant datasetu zgodny z aktualnym torem.",
+                "PZ2 używa tego wariantu do treningu, walidacji i porównania modeli.",
+                "Jeśli chcesz testować inny split, wróć do PZ1 i utwórz kolejny wariant.",
+            ),
+            "glossary": ("PZ1 = budowa datasetu", "PZ2 = trening i wyniki", "ranking = porównanie modeli"),
+            "caution": "Źródła datasetu nie podmieniamy ręcznie w PZ2.",
+        }
+
     def _build_dataset_tab(self):
         root = ttk.Frame(self.tab_dataset, padding=8)
         root.pack(fill=tk.BOTH, expand=True)
 
         top = ttk.Frame(root)
-        top.pack(fill=tk.X, expand=False)
+        top.pack(fill=tk.BOTH, expand=True)
 
         self.step4_route_panel_frame = tk.Frame(top, bd=0, highlightthickness=1)
         self.step4_route_panel_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
@@ -8647,42 +7649,131 @@ class TrainingTab:
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(0, 12))
 
+        self._step4_route_choice_cards = {}
+        route_palette = getattr(self.app, "palette", {})
+        route_initial_badge_bg = route_palette.get("panel", "#252526")
+        route_initial_badge_fg = route_palette.get("muted", "#c7c7c7")
+        route_initial_badge_border = route_palette.get("panel_border", route_palette.get("border", "#3c3c3c"))
+
+        self.step4_plate_route_card = tk.Frame(left, bd=0, highlightthickness=1, padx=10, pady=8)
+        self.step4_plate_route_card.pack(fill=tk.X, pady=(0, 10))
+        self.step4_plate_route_title_row = tk.Frame(self.step4_plate_route_card, bd=0, highlightthickness=0)
+        self.step4_plate_route_title_row.pack(fill=tk.X)
+        self.step4_plate_route_title_lbl = tk.Label(
+            self.step4_plate_route_title_row,
+            text="Tor tablic",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.step4_plate_route_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.step4_plate_route_badge_lbl = tk.Label(
+            self.step4_plate_route_title_row,
+            text="DO WYBORU",
+            font=("Segoe UI", 8, "bold"),
+            width=10,
+            anchor=tk.CENTER,
+            padx=7,
+            pady=2,
+            bd=0,
+            highlightthickness=1,
+            bg=route_initial_badge_bg,
+            fg=route_initial_badge_fg,
+            highlightbackground=route_initial_badge_border,
+            highlightcolor=route_initial_badge_border,
+        )
+        self.step4_plate_route_badge_lbl.pack(side=tk.RIGHT, padx=(6, 0))
+        self.step4_plate_route_desc_lbl = tk.Label(
+            self.step4_plate_route_card,
+            text="YOLO Pose. Dataset tablic może pochodzić z eksportu Z2 albo z alternatywnego kreatora XML.",
+            wraplength=220,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.step4_plate_route_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
         self.btn_choose_plate = ttk.Button(
             left,
-            text="Tor tablic (YOLO Pose)",
+            text="Wybierz tor tablic",
             command=lambda: self._set_step4_dataset_mode("plate")
         )
-        self.btn_choose_plate.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(
-            left,
-            text=(
-                "Buduje dataset tablic z XML CVAT i prowadzi dalej do treningu "
-                "modelu tablic rejestracyjnych."
-            ),
-            wraplength=240,
-            justify=tk.LEFT
-        ).pack(anchor=tk.W, pady=(0, 12))
-
+        self.step4_char_route_card = tk.Frame(left, bd=0, highlightthickness=1, padx=10, pady=8)
+        self.step4_char_route_card.pack(fill=tk.X)
+        self.step4_char_route_title_row = tk.Frame(self.step4_char_route_card, bd=0, highlightthickness=0)
+        self.step4_char_route_title_row.pack(fill=tk.X)
+        self.step4_char_route_title_lbl = tk.Label(
+            self.step4_char_route_title_row,
+            text="Tor znaków",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.step4_char_route_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.step4_char_route_badge_lbl = tk.Label(
+            self.step4_char_route_title_row,
+            text="DO WYBORU",
+            font=("Segoe UI", 8, "bold"),
+            width=10,
+            anchor=tk.CENTER,
+            padx=7,
+            pady=2,
+            bd=0,
+            highlightthickness=1,
+            bg=route_initial_badge_bg,
+            fg=route_initial_badge_fg,
+            highlightbackground=route_initial_badge_border,
+            highlightcolor=route_initial_badge_border,
+        )
+        self.step4_char_route_badge_lbl.pack(side=tk.RIGHT, padx=(6, 0))
+        self.step4_char_route_desc_lbl = tk.Label(
+            self.step4_char_route_card,
+            text="YOLO Detect. Split gotowego datasetu znaków i trening modelu rozpoznającego znaki.",
+            wraplength=220,
+            justify=tk.LEFT,
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.step4_char_route_desc_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
         self.btn_choose_char = ttk.Button(
             left,
-            text="Tor znaków (YOLO Detect)",
+            text="Wybierz tor znaków",
             command=lambda: self._set_step4_dataset_mode("char")
         )
-        self.btn_choose_char.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(
-            left,
-            text=(
-                "Przygotowuje split gotowego datasetu znaków i prowadzi dalej "
-                "do treningu modelu rozpoznającego znaki na tablicach."
-            ),
-            wraplength=240,
-            justify=tk.LEFT
-        ).pack(anchor=tk.W)
+        self._step4_route_choice_cards = {
+            "plate": {
+                "frame": self.step4_plate_route_card,
+                "title_row": self.step4_plate_route_title_row,
+                "title": self.step4_plate_route_title_lbl,
+                "badge": self.step4_plate_route_badge_lbl,
+                "desc": self.step4_plate_route_desc_lbl,
+            },
+            "char": {
+                "frame": self.step4_char_route_card,
+                "title_row": self.step4_char_route_title_row,
+                "title": self.step4_char_route_title_lbl,
+                "badge": self.step4_char_route_badge_lbl,
+                "desc": self.step4_char_route_desc_lbl,
+            },
+        }
+        for route_mode, widgets in self._step4_route_choice_cards.items():
+            for widget in widgets.values():
+                try:
+                    widget.configure(cursor="hand2")
+                except Exception:
+                    pass
+                try:
+                    widget.bind("<Button-1>", lambda _event, mode=route_mode: self._set_step4_dataset_mode(mode), add="+")
+                except Exception:
+                    pass
 
         right = ttk.Frame(top)
-        right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.step4_mode_right_host = right
 
         header = ttk.LabelFrame(right, text=" Aktywny tor ", padding=10)
@@ -8704,8 +7795,35 @@ class TrainingTab:
             justify=tk.LEFT
         ).pack(anchor=tk.W, pady=(6, 0))
 
-        self.ds_mode_host = ttk.Frame(right)
-        self.ds_mode_host.pack(fill=tk.X, expand=False, pady=(8, 0))
+        self.ds_mode_scroll_host = ttk.Frame(right)
+        self.ds_mode_scroll_host.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.ds_mode_scroll_host.grid_rowconfigure(0, weight=1)
+        self.ds_mode_scroll_host.grid_columnconfigure(0, weight=1)
+
+        palette = getattr(self.app, "palette", {})
+        self.ds_mode_canvas = tk.Canvas(
+            self.ds_mode_scroll_host,
+            bg=palette.get("panel", "#252526"),
+            bd=0,
+            highlightthickness=0,
+        )
+        self.ds_mode_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.ds_mode_scrollbar = WebSlimScrollbar(
+            self.ds_mode_scroll_host,
+            command=self.ds_mode_canvas.yview,
+        )
+        self.ds_mode_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.ds_mode_canvas.configure(yscrollcommand=self.ds_mode_scrollbar.set)
+
+        self.ds_mode_host = ttk.Frame(self.ds_mode_canvas)
+        self.ds_mode_host_window = self.ds_mode_canvas.create_window(
+            (0, 0),
+            window=self.ds_mode_host,
+            anchor="nw",
+        )
+        self.ds_mode_host.bind("<Configure>", self._sync_dataset_mode_scrollregion, add="+")
+        self.ds_mode_canvas.bind("<Configure>", self._sync_dataset_mode_canvas_width, add="+")
 
         self.ds_mode_waiting_frame = ttk.LabelFrame(
             self.ds_mode_host,
@@ -8739,6 +7857,31 @@ class TrainingTab:
 
         self._build_creator_ui()
         self._build_splitter_ui()
+        self._bind_scroll_canvas_children(self.ds_mode_host, self.ds_mode_canvas)
+        try:
+            self.ds_mode_canvas.bind(
+                "<MouseWheel>",
+                lambda event, canvas=self.ds_mode_canvas: self._redirect_child_mousewheel_to_canvas(event, canvas),
+                add="+",
+            )
+            self.ds_mode_canvas.bind(
+                "<Button-4>",
+                lambda event, canvas=self.ds_mode_canvas: self._redirect_child_mousewheel_to_canvas(event, canvas),
+                add="+",
+            )
+            self.ds_mode_canvas.bind(
+                "<Button-5>",
+                lambda event, canvas=self.ds_mode_canvas: self._redirect_child_mousewheel_to_canvas(event, canvas),
+                add="+",
+            )
+        except Exception:
+            pass
+        try:
+            self.frame.bind_all("<MouseWheel>", self._on_dataset_mode_global_mousewheel, add="+")
+            self.frame.bind_all("<Button-4>", self._on_dataset_mode_global_mousewheel, add="+")
+            self.frame.bind_all("<Button-5>", self._on_dataset_mode_global_mousewheel, add="+")
+        except Exception:
+            pass
 
         self.step4_builder_log_frame = ttk.LabelFrame(root, text=" Terminal procesu ", padding=6)
         self.step4_builder_log_toolbar = ttk.Frame(self.step4_builder_log_frame)
@@ -8779,7 +7922,7 @@ class TrainingTab:
         self.step4_builder_tools.pack_forget()
 
         self.step4_builder_nav = ttk.Frame(root)
-        self.step4_builder_nav.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.step4_builder_nav.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0), before=self.step4_dataset_top)
         self.step4_builder_nav.grid_columnconfigure(0, weight=0)
         self.step4_builder_nav.grid_columnconfigure(1, weight=1)
         self.step4_builder_nav.grid_columnconfigure(2, weight=0)
@@ -8820,6 +7963,8 @@ class TrainingTab:
         self.btn_step4_next.configure(text="Dalej do treningu", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         HELP.bind_help(self.step4_route_panel_frame, "tr_route_panel")
+        HELP.bind_help(self.step4_plate_route_card, "tr_route_plate")
+        HELP.bind_help(self.step4_char_route_card, "tr_route_char")
         HELP.bind_help(self.btn_choose_plate, "tr_route_plate")
         HELP.bind_help(self.btn_choose_char, "tr_route_char")
         HELP.bind_help(self.btn_toggle_step4_log, "tr_builder_log")
@@ -8835,32 +7980,95 @@ class TrainingTab:
         self._step4_train_unlocked = True
         self._set_step4_builder_log_visibility(False)
         self._set_step4_dataset_mode(initial_mode)
+        try:
+            self.frame.after_idle(self._refresh_step4_dataset_mode_ui)
+            self.frame.after(80, self._refresh_step4_dataset_mode_ui)
+        except Exception:
+            pass
 
     def _build_creator_ui(self):
         f = self.ds_creator_frame
         palette = getattr(self.app, "palette", {})
         self.creator_intro_lbl = ttk.Label(
             f,
-            text="Tworzy dataset YOLO Pose na podstawie wyeksportowanego pliku annotations.xml.",
-            font=("Segoe UI", 9)
+            text=(
+                "Alternatywny kreator datasetu YOLO Pose. Użyj go, jeśli nie korzystasz "
+                "z gotowego datasetu przekazanego z Z2: wskaż plik anotacji XML i zgodny z nim folder obrazów. "
+                "Nazwy obrazów z XML muszą istnieć w tym folderze."
+            ),
+            font=("Segoe UI", 9),
+            wraplength=720,
+            justify=tk.LEFT,
         )
         self.creator_intro_lbl.pack(anchor=tk.W, pady=(0, 10))
+
+        self.creator_source_mode_var = tk.StringVar(value="xml")
+        self.creator_source_mode_frame = ttk.LabelFrame(f, text=" Źródło datasetu ", padding=8)
+        self.creator_source_mode_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(
+            self.creator_source_mode_frame,
+            text=(
+                "Wybierz jedną ścieżkę pracy. Pola XML i obrazy są potrzebne tylko wtedy, "
+                "gdy tworzysz nowy wariant datasetu z anotacji."
+            ),
+            justify=tk.LEFT,
+            wraplength=700,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
+        self.creator_source_ready_radio = ttk.Radiobutton(
+            self.creator_source_mode_frame,
+            text="Użyj gotowego wariantu datasetu tablic",
+            value="ready",
+            variable=self.creator_source_mode_var,
+            command=self._on_creator_source_mode_change,
+        )
+        self.creator_source_ready_radio.pack(anchor=tk.W)
+        self.creator_source_xml_radio = ttk.Radiobutton(
+            self.creator_source_mode_frame,
+            text="Utwórz nowy wariant: wymagane są XML + zgodny folder obrazów",
+            value="xml",
+            variable=self.creator_source_mode_var,
+            command=self._on_creator_source_mode_change,
+        )
+        self.creator_source_xml_radio.pack(anchor=tk.W, pady=(2, 0))
+
+        self.creator_ready_dataset_lbl = ttk.Label(
+            f,
+            text="",
+            justify=tk.LEFT,
+            wraplength=720
+        )
+
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
         self.creator_xml_row = row1
-        ttk.Label(row1, text="CVAT XML:").pack(side=tk.LEFT)
+        ttk.Label(row1, text="Plik anotacji XML:").pack(side=tk.LEFT)
         self.cvat_xml_var = tk.StringVar()
         self.cvat_xml_entry = ttk.Entry(row1, textvariable=self.cvat_xml_var)
         self.cvat_xml_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.btn_pick_cvat_xml = ttk.Button(row1, text="Wybierz", command=lambda: self._pick_file(self.cvat_xml_var, "*.xml"))
+        self.btn_pick_cvat_xml = ttk.Button(
+            row1,
+            text="Wybierz",
+            command=lambda: self._pick_file(
+                self.cvat_xml_var,
+                "*.xml",
+                initialdir=self._get_plate_xml_picker_dir(),
+            ),
+        )
         self.btn_pick_cvat_xml.pack(side=tk.LEFT)
 
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
         self.creator_images_row = row2
-        ttk.Label(row2, text="Folder obrazów:").pack(side=tk.LEFT)
+        ttk.Label(row2, text="Folder obrazów zgodny z XML:").pack(side=tk.LEFT)
         self.cvat_images_var = tk.StringVar()
         self.cvat_images_entry = ttk.Entry(row2, textvariable=self.cvat_images_var)
         self.cvat_images_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.btn_pick_cvat_images = ttk.Button(row2, text="Wybierz", command=lambda: self._pick_dir(self.cvat_images_var))
+        self.btn_pick_cvat_images = ttk.Button(
+            row2,
+            text="Wybierz",
+            command=lambda: self._pick_dir(
+                self.cvat_images_var,
+                initialdir=self._get_plate_images_picker_dir(),
+            ),
+        )
         self.btn_pick_cvat_images.pack(side=tk.LEFT)
 
         self.creator_source_summary_lbl = ttk.Label(
@@ -8871,12 +8079,14 @@ class TrainingTab:
         )
 
         row3 = ttk.Frame(f); row3.pack(fill=tk.X, pady=2)
-        ttk.Label(row3, text="Folder wyjściowy:").pack(side=tk.LEFT)
+        self.creator_output_row = row3
+        ttk.Label(row3, text="Folder wariantu:").pack(side=tk.LEFT)
         # Ścieżka docelowa jest wyliczana automatycznie i pozostaje tylko do odczytu.
         self.ds_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
         ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
         creator_ratios = ttk.Frame(f)
+        self.creator_ratios_frame = creator_ratios
         creator_ratios.pack(fill=tk.X, pady=10)
         ttk.Label(creator_ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
         ttk.Scale(
@@ -8918,7 +8128,7 @@ class TrainingTab:
 
         self.btn_step4_create = ttk.Button(
             self.btn_step4_create_pulse_frame,
-            text="Stwórz dataset",
+            text="Utwórz wariant datasetu",
             command=self._create_dataset_thread
         )
         self.btn_step4_create.pack()
@@ -8939,9 +8149,22 @@ class TrainingTab:
         self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
         self.ds_status.pack(anchor=tk.W)
 
+        try:
+            self.cvat_xml_var.trace_add("write", lambda *_args: self._on_cvat_xml_source_changed())
+            self.cvat_images_var.trace_add("write", lambda *_args: self._on_cvat_images_source_changed())
+        except Exception:
+            pass
+        self._refresh_dataset_creator_cta_state()
+
         # Powiązania pomocy dla budowy datasetu z CVAT.
         HELP.bind_help(row1, "tr_cvat_xml")
+        HELP.bind_help(self.creator_source_mode_frame, "tr_cvat_source_mode")
+        HELP.bind_help(self.creator_source_ready_radio, "tr_cvat_source_mode")
+        HELP.bind_help(self.creator_source_xml_radio, "tr_cvat_source_mode")
+        HELP.bind_help(self.btn_pick_cvat_xml, "tr_cvat_xml")
         HELP.bind_help(row2, "tr_cvat_img")
+        HELP.bind_help(self.btn_pick_cvat_images, "tr_cvat_img")
+        HELP.bind_help(self.creator_source_summary_lbl, "tr_cvat_source_mode")
         HELP.bind_help(creator_ratios, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_create, "tr_cvat_btn")
 
@@ -8950,8 +8173,14 @@ class TrainingTab:
         palette = getattr(self.app, "palette", {})
         self.split_intro_lbl = ttk.Label(
             f,
-            text="Dzieli gotowy dataset znaków na foldery train / val / test potrzebne do treningu.",
-            font=("Segoe UI", 9)
+            text=(
+                "PZ1 tworzy wariant datasetu YOLO Detect znaków. Wejściem musi być folder YOLO z images/labels "
+                "albo plik data.yaml. Dataset OCR/klasyfikacyjny z manifest.json nie pasuje do tego kroku. "
+                "Utworzone tutaj datasety są dostępne w PZ2 na liście wariantów."
+            ),
+            font=("Segoe UI", 9),
+            wraplength=720,
+            justify=tk.LEFT,
         )
         self.split_intro_lbl.pack(anchor=tk.W, pady=(0, 10))
 
@@ -8963,14 +8192,35 @@ class TrainingTab:
             style="WorkflowCard.TButton"
         )
 
+        self.split_source_hint_lbl = ttk.Label(
+            f,
+            text=(
+                "Wymagane jest jedno źródło YOLO Detect: folder z images/labels albo plik data.yaml. "
+                "Nie wskazuj katalogu CharClassificationDataset_* z manifest.json."
+            ),
+            justify=tk.LEFT,
+            wraplength=720,
+        )
+        self.split_source_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
+
         row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
         self.split_source_row = row1
-        ttk.Label(row1, text="Źródło datasetu:").pack(side=tk.LEFT)
+        ttk.Label(row1, text="Źródło YOLO Detect:").pack(side=tk.LEFT)
         self.split_src_var = tk.StringVar()
         self.split_src_entry = ttk.Entry(row1, textvariable=self.split_src_var)
         self.split_src_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.btn_pick_split_src = ttk.Button(row1, text="Wybierz", command=lambda: self._pick_dir(self.split_src_var))
+        self.btn_pick_split_src = ttk.Button(
+            row1,
+            text="Folder YOLO",
+            command=self._pick_char_split_source_dir,
+        )
         self.btn_pick_split_src.pack(side=tk.LEFT)
+        self.btn_pick_split_yaml = ttk.Button(
+            row1,
+            text="Plik data.yaml",
+            command=self._pick_char_split_source_yaml,
+        )
+        self.btn_pick_split_yaml.pack(side=tk.LEFT, padx=(6, 0))
 
         self.split_source_summary_lbl = ttk.Label(
             f,
@@ -8982,8 +8232,8 @@ class TrainingTab:
 
         row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
         self.split_output_row = row2
-        ttk.Label(row2, text="Wynik podziału:").pack(side=tk.LEFT)
-        # Ścieżka wyniku splitu jest wyliczana automatycznie i pozostaje tylko do odczytu.
+        ttk.Label(row2, text="Folder wariantu:").pack(side=tk.LEFT)
+        # Ścieżka wariantu splitu jest wyliczana automatycznie i pozostaje tylko do odczytu.
         self.split_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
         ttk.Entry(row2, textvariable=self.split_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
@@ -9014,7 +8264,7 @@ class TrainingTab:
 
         self.btn_step4_split = ttk.Button(
             self.btn_step4_split_pulse_frame,
-            text="Rozpocznij podział (split)",
+            text="Utwórz wariant datasetu",
             command=self._split_dataset_thread,
             style="Accent.TButton"
         )
@@ -9036,10 +8286,21 @@ class TrainingTab:
         self.split_status = ttk.Label(self.split_feedback_frame, text="Gotowy")
         self.split_status.pack(anchor=tk.W)
         self._set_split_feedback_visibility(False)
+        try:
+            self.split_src_var.trace_add("write", lambda *_args: self._refresh_dataset_split_cta_state())
+        except Exception:
+            pass
+        self._refresh_dataset_split_cta_state()
 
         # Powiązania pomocy dla splitu datasetu.
         HELP.bind_help(row1, "tr_split_src")
+        HELP.bind_help(self.split_intro_lbl, "tr_split_src")
+        HELP.bind_help(self.split_source_hint_lbl, "tr_split_src")
+        HELP.bind_help(self.btn_pick_split_src, "tr_split_src")
+        HELP.bind_help(self.btn_pick_split_yaml, "tr_split_src")
+        HELP.bind_help(self.split_source_summary_lbl, "tr_split_src")
         HELP.bind_help(ratios, "tr_split_ratios")
+        HELP.bind_help(self.btn_step4_split_toggle, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_split, "tr_split_btn")
         self._update_ratio_labels()
 
@@ -9103,7 +8364,7 @@ class TrainingTab:
         self.free_training_route_title_lbl = SectionHeaderLabel(
             self.free_training_route_host,
             self.app,
-            text="Co chcesz trenowac?",
+            text="Wejście treningowe",
             fade_ratio=0.74,
         )
         self.free_training_route_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
@@ -9111,13 +8372,13 @@ class TrainingTab:
         route_intro = ttk.Label(
             self.free_training_route_host,
             text=(
-                "Najpierw wybierz tor treningu. Ten wybór ustala, jakiego datasetu oczekuje formularz "
-                "i jakiego typu model bazowy ma sens."
+                "PZ2 korzysta z toru i datasetu przygotowanego w PZ1."
             ),
             style="PanelMuted.TLabel",
             wraplength=360,
             justify=tk.LEFT
         )
+        self.free_training_route_intro_lbl = route_intro
         route_intro.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
         self._register_train_left_wrap_target(
             route_intro,
@@ -9126,8 +8387,73 @@ class TrainingTab:
             min_wrap=220,
         )
 
+        self.training_input_summary_frame = tk.Frame(
+            self.free_training_route_host,
+            bd=0,
+            highlightthickness=0,
+            padx=10,
+            pady=8,
+        )
+        self.training_input_summary_frame.pack(fill=tk.X, pady=(0, 8))
+        self.training_input_badge_lbl = tk.Label(
+            self.training_input_summary_frame,
+            text="PZ1",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+            bd=0,
+            highlightthickness=1,
+        )
+        self.training_input_badge_lbl.pack(anchor=tk.W)
+        self.training_input_route_lbl = tk.Label(
+            self.training_input_summary_frame,
+            text="",
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.training_input_route_lbl.pack(anchor=tk.W, fill=tk.X, pady=(7, 0))
+        self.training_input_dataset_lbl = tk.Label(
+            self.training_input_summary_frame,
+            text="",
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.training_input_dataset_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+        self.training_input_source_lbl = tk.Label(
+            self.training_input_summary_frame,
+            text="",
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.training_input_source_lbl.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+        self.training_input_change_btn = ttk.Button(
+            self.training_input_summary_frame,
+            text="Wróć do PZ1",
+            command=self._open_step4_dataset_stage,
+        )
+        for summary_label in (
+            self.training_input_route_lbl,
+            self.training_input_dataset_lbl,
+            self.training_input_source_lbl,
+        ):
+            self._register_train_left_wrap_target(
+                summary_label,
+                container=self.training_input_summary_frame,
+                padding=24,
+                min_wrap=180,
+            )
+
         self.free_training_route_cards_row = tk.Frame(self.free_training_route_host, bd=0, highlightthickness=0)
-        self.free_training_route_cards_row.pack(fill=tk.X)
+        self.free_training_route_cards_row.pack_forget()
         self.free_training_route_cards_row.grid_columnconfigure(0, weight=1)
         self.free_training_route_cards_row.grid_columnconfigure(1, weight=1)
 
@@ -9136,15 +8462,15 @@ class TrainingTab:
                 "plate",
                 "Tablice",
                 "YOLO Pose",
-                "Trening tablic z keypointami i geometrią rogów.",
-                "Oczekiwany dataset: export z Z2",
+                "Model tablic z geometrią rogów.",
+                "Dataset z Z2",
             ),
             (
                 "char",
                 "Znaki tablic",
                 "YOLO Detect",
-                "Trening boxów znaków na wyciętych tablicach.",
-                "Oczekiwany dataset: gold pack z Z3/PZ3",
+                "Model znaków na wyciętych tablicach.",
+                "Dataset z Z3/PZ3",
             ),
         )
         self._free_training_route_cards = {}
@@ -9154,8 +8480,28 @@ class TrainingTab:
 
             title = tk.Label(card, text=title_text, font=("Segoe UI Semibold", 11), anchor="w", bd=0, highlightthickness=0)
             title.pack(anchor=tk.W)
-            badge = tk.Label(card, text=badge_text, font=("Segoe UI", 8, "bold"), padx=8, pady=2, bd=0, highlightthickness=1)
-            badge.pack(anchor=tk.W, pady=(8, 8))
+            badge_row = tk.Frame(card, bd=0, highlightthickness=0)
+            badge_row.pack(anchor=tk.W, fill=tk.X, pady=(8, 8))
+            badge = tk.Label(
+                badge_row,
+                text=badge_text,
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=2,
+                bd=0,
+                highlightthickness=1,
+            )
+            badge.pack(side=tk.LEFT)
+            choice_badge = tk.Label(
+                badge_row,
+                text="DO WYBORU",
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=2,
+                bd=0,
+                highlightthickness=1,
+            )
+            choice_badge.pack(side=tk.LEFT, padx=(6, 0))
             desc = tk.Label(card, text=desc_text, justify=tk.LEFT, anchor="w", wraplength=140, bd=0, highlightthickness=0)
             desc.pack(anchor=tk.W, fill=tk.X)
             meta = tk.Label(card, text=meta_text, justify=tk.LEFT, anchor="w", wraplength=140, bd=0, highlightthickness=0)
@@ -9163,13 +8509,15 @@ class TrainingTab:
             self._register_train_left_wrap_target(desc, container=card, padding=30, min_wrap=120)
             self._register_train_left_wrap_target(meta, container=card, padding=30, min_wrap=120)
 
-            for widget in (card, title, badge, desc, meta):
+            for widget in (card, title, badge_row, badge, choice_badge, desc, meta):
                 self._bind_training_route_card(widget, mode)
 
             self._free_training_route_cards[mode] = {
                 "frame": card,
                 "title": title,
+                "badge_row": badge_row,
                 "badge": badge,
+                "choice_badge": choice_badge,
                 "desc": desc,
                 "meta": meta,
             }
@@ -9185,14 +8533,35 @@ class TrainingTab:
         ttk.Entry(self.train_session_name_row, textvariable=self.name_var, width=35).pack(fill=tk.X, pady=2)
         self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
 
-        self.train_dataset_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Dataset treningowy")
-        self.train_dataset_title_lbl.pack(anchor=tk.W, fill=tk.X)
-        self.train_dataset_caption_lbl = ttk.Label(
+        self.train_dataset_section_frame = ttk.LabelFrame(
             settings_col,
-            text=(
-                "Tutaj wybierasz gotowy dataset treningowy przygotowany wcześniej przez eksport z Z2 albo Z3. "
-                "Wskaż cały folder z plikiem data.yaml."
-            ),
+            text=" Wariant datasetu treningowego ",
+            padding=8,
+        )
+        self.train_dataset_section_frame.pack(fill=tk.X, pady=(0, self._train_left_section_gap))
+
+        self.train_dataset_title_lbl = tk.Label(
+            self.train_dataset_section_frame,
+            text="Dataset treningowy",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.train_dataset_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+        self.train_dataset_required_lbl = ttk.Label(
+            self.train_dataset_section_frame,
+            text="Wymagane: gotowy dataset YOLO z plikiem data.yaml.",
+            style="Panel.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=360,
+        )
+        self.train_dataset_required_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 4))
+        self._register_train_left_wrap_target(self.train_dataset_required_lbl, padding=16, min_wrap=220)
+        self.train_dataset_caption_lbl = ttk.Label(
+            self.train_dataset_section_frame,
+            text="Wybierz gotowy wariant utworzony w PZ1. Źródła datasetu nie podmieniamy ręcznie w PZ2.",
             style="PanelMuted.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
@@ -9201,16 +8570,57 @@ class TrainingTab:
         self.train_dataset_caption_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 6))
         self._register_train_left_wrap_target(self.train_dataset_caption_lbl, padding=16, min_wrap=220)
         self.dataset_var = tk.StringVar()
-        ds_row = ttk.Frame(settings_col, style="Panel.TFrame")
-        ds_row.pack(fill=tk.X, pady=2)
+        self.train_dataset_path_lbl = ttk.Label(
+            self.train_dataset_section_frame,
+            text="Ścieżka gotowego datasetu:",
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        ds_row = ttk.Frame(self.train_dataset_section_frame, style="Panel.TFrame")
         self.train_dataset_row = ds_row
+        # PZ2 przechowuje dataset_var wewnętrznie, ale użytkownik wybiera już tylko gotowe warianty z comboboxa.
         self.train_dataset_entry = ttk.Entry(ds_row, textvariable=self.dataset_var)
         self.train_dataset_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.train_dataset_pick_btn = ttk.Button(ds_row, text="Wybierz", command=self._pick_training_dataset_dir)
-        self.train_dataset_pick_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.train_dataset_pick_btn = ttk.Button(ds_row, text="Folder datasetu", command=self._pick_training_dataset_dir)
+        self.train_dataset_yaml_btn = ttk.Button(ds_row, text="Plik data.yaml", command=self._pick_training_dataset_yaml)
+
+        self.dataset_variant_row = ttk.Frame(self.train_dataset_section_frame, style="Panel.TFrame")
+        self.dataset_variant_row.pack(fill=tk.X, pady=(4, 2))
+        self.dataset_variant_title_lbl = ttk.Label(
+            self.dataset_variant_row,
+            text="Wariant splitu:",
+            style="PanelMuted.TLabel",
+        )
+        self.dataset_variant_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.dataset_variant_caption_lbl = ttk.Label(
+            self.dataset_variant_row,
+            text="Lista pokazuje warianty z data.yaml zgodne z wybranym torem treningu.",
+            style="PanelMuted.TLabel",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=340,
+        )
+        self.dataset_variant_caption_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+        self._register_train_left_wrap_target(self.dataset_variant_caption_lbl, padding=16, min_wrap=220)
+        self.dataset_variant_var = tk.StringVar()
+        self.dataset_variant_combo = ttk.Combobox(
+            self.dataset_variant_row,
+            textvariable=self.dataset_variant_var,
+            state="readonly",
+            values=[],
+        )
+        self.dataset_variant_combo.pack(fill=tk.X, pady=(2, 0))
+        self.dataset_variant_combo.bind("<<ComboboxSelected>>", self._on_dataset_variant_selected)
+        self.dataset_variant_refresh_btn = ttk.Button(
+            self.dataset_variant_row,
+            text="Odśwież listę wariantów",
+            command=self._refresh_dataset_variant_choices,
+        )
+        self.dataset_variant_refresh_btn.pack(anchor=tk.W, pady=(4, 0))
 
         self.train_dataset_hint_lbl = ttk.Label(
-            settings_col,
+            self.train_dataset_section_frame,
             text="",
             style="PanelMuted.TLabel",
             anchor=tk.W,
@@ -9255,15 +8665,18 @@ class TrainingTab:
 
         self._build_train_left_separator(settings_col, pady=(0, self._train_left_section_gap))
 
-        self.train_base_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Model bazowy (.pt)")
-        self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_base_title_lbl = tk.Label(
+            settings_col,
+            text="Model bazowy (.pt)",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
         self.train_base_caption_lbl = ttk.Label(
             settings_col,
-            text=(
-                "Dla tablic wybieraj modele YOLO Pose. "
-                "Dla znaków wybieraj modele YOLO Detect. "
-                "Możesz też wskazać własny plik modelu .pt do fine-tuningu."
-            ),
+            text="Wybierz model zgodny z torem: tablice = Pose, znaki = Detect.",
             style="PanelMuted.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
@@ -9320,6 +8733,8 @@ class TrainingTab:
         self.dataset_var.trace_add("write", lambda *args: self._update_training_dataset_hint())
         self.dataset_var.trace_add("write", lambda *args: self._refresh_training_start_state())
         self.dataset_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
+        self.dataset_var.trace_add("write", lambda *args: self._refresh_step4_dataset_mode_ui())
+        self.dataset_var.trace_add("write", lambda *args: self._sync_dataset_variant_selection())
         self.base_model_var.trace_add("write", self._on_training_base_model_value_write)
         self.base_model_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
         self.base_custom_var.trace_add("write", self._on_training_base_model_value_write)
@@ -9329,11 +8744,19 @@ class TrainingTab:
         self._refresh_base_model_choices()
         auto_name() # Inicjalizacja pierwszego wpisu        
         self._refresh_step4_training_inputs_mode_ui()
+        self._refresh_dataset_variant_choices()
         
         self._build_train_left_separator(settings_col, pady=(self._train_left_section_gap, self._train_left_section_gap))
 
-        self.train_params_title_lbl = SectionHeaderLabel(settings_col, self.app, text="Parametry treningu YOLO")
-        self.train_params_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self.train_params_title_lbl = tk.Label(
+            settings_col,
+            text="Parametry treningu YOLO",
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.train_params_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
         self.train_params_caption_lbl = None
 
         self.epochs_var = tk.IntVar(value=100)
@@ -9512,7 +8935,7 @@ class TrainingTab:
                 }
             )
         self.train_recommendation_tree = None
-        self.train_recommendation_note_var = tk.StringVar(value="Gdy zabraknie pamięci, zmniejszaj ustawienia po kolei: 2 -> 3 -> 4.")
+        self.train_recommendation_note_var = tk.StringVar(value="Brak VRAM? Zmniejszaj kolejno: batch -> imgsz -> epoki.")
         self.train_recommendation_note_lbl = ttk.Label(
             settings_col,
             textvariable=self.train_recommendation_note_var,
@@ -10023,9 +9446,20 @@ class TrainingTab:
         self._refresh_step4_campaign_navigation_ui()
 
         HELP.bind_help(ds_row, "tr_train_ds")
+        HELP.bind_help(self.training_input_summary_frame, "tr_train_input_summary")
+        HELP.bind_help(self.training_input_change_btn, "tr_train_input_summary")
+        HELP.bind_help(self.train_dataset_section_frame, "tr_train_ds")
+        HELP.bind_help(self.train_dataset_entry, "tr_train_ds")
+        HELP.bind_help(self.train_dataset_pick_btn, "tr_train_ds")
+        HELP.bind_help(self.train_dataset_yaml_btn, "tr_train_ds")
+        HELP.bind_help(self.dataset_variant_row, "tr_dataset_variant")
+        HELP.bind_help(self.dataset_variant_combo, "tr_dataset_variant")
+        HELP.bind_help(self.dataset_variant_refresh_btn, "tr_dataset_variant")
         HELP.bind_help(self.train_dataset_hint_lbl, "tr_train_ds")
         HELP.bind_help(self.base_combo, "tr_train_base")
+        HELP.bind_help(self.base_custom_btn, "tr_train_custom")
         HELP.bind_help(self.train_recommendation_grid, "tr_train_params")
+        HELP.bind_help(self.btn_apply_training_recommendation, "tr_train_recommendation")
         HELP.bind_help(self.train_device_hint_lbl, "tr_train_device")
         HELP.bind_help(self.btn_step4_back, "tr_builder_back")
         
@@ -10043,6 +9477,8 @@ class TrainingTab:
             logger.debug(f"Błąd podpinania pomocy do siatki: {e}")
         
         HELP.bind_help(self.btn_start_train, "tr_train_btn")
+        HELP.bind_help(self.btn_pause_train, "tr_train_control")
+        HELP.bind_help(self.btn_stop_train, "tr_train_control")
         HELP.bind_help(self.tree, "tr_train_tree")
         HELP.bind_help(self.custom_row, "tr_train_custom")
         HELP.bind_help(self.btn_toggle_step4_train_log, "tr_train_log")
@@ -11392,7 +10828,17 @@ class TrainingTab:
             kwargs["initialdir"] = str(initialdir)
             
         p = filedialog.askopenfilename(**kwargs)
-        if p: var.set(p)
+        if p:
+            var.set(p)
+            try:
+                self._refresh_dataset_creator_cta_state()
+            except Exception:
+                pass
+            try:
+                self._refresh_dataset_split_cta_state()
+            except Exception:
+                pass
+        return p
         
     def _pick_dir(self, var, initialdir=None):
         kwargs = {}
@@ -11400,7 +10846,17 @@ class TrainingTab:
             kwargs["initialdir"] = str(initialdir)
             
         p = filedialog.askdirectory(**kwargs)
-        if p: var.set(p)
+        if p:
+            var.set(p)
+            try:
+                self._refresh_dataset_creator_cta_state()
+            except Exception:
+                pass
+            try:
+                self._refresh_dataset_split_cta_state()
+            except Exception:
+                pass
+        return p
 
     def _update_ratio_labels(self):
         train = float(self.train_pct.get())
@@ -11436,15 +10892,770 @@ class TrainingTab:
         except Exception:
             pass
 
-    def _create_dataset_thread(self):
-        xml = Path(self.cvat_xml_var.get().strip())
-        images_dir = Path(self.cvat_images_var.get().strip())
-        stage_source_images_dir = images_dir
+    def _on_cvat_xml_source_changed(self):
+        try:
+            self._refresh_dataset_creator_cta_state()
+        except Exception:
+            pass
+        try:
+            self._cvat_source_binding_generation = int(getattr(self, "_cvat_source_binding_generation", 0) or 0) + 1
+        except Exception:
+            self._cvat_source_binding_generation = 1
+        try:
+            self._schedule_cvat_source_binding_refresh()
+        except Exception:
+            pass
 
-        if not xml.exists():
-            return messagebox.showerror("Błąd", "XML nie istnieje.")
-        if not images_dir.exists():
-            return messagebox.showerror("Błąd", "Folder obrazów nie istnieje.")
+    def _on_cvat_images_source_changed(self):
+        try:
+            self._refresh_dataset_creator_cta_state()
+        except Exception:
+            pass
+        try:
+            self._cvat_source_binding_generation = int(getattr(self, "_cvat_source_binding_generation", 0) or 0) + 1
+        except Exception:
+            self._cvat_source_binding_generation = 1
+        pending = getattr(self, "_cvat_source_binding_after_id", None)
+        if pending and hasattr(self, "frame") and self.frame is not None:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._cvat_source_binding_after_id = None
+
+    def _schedule_cvat_source_binding_refresh(self, delay_ms: int = 180):
+        if not hasattr(self, "frame") or self.frame is None:
+            return
+        try:
+            if self._get_creator_source_mode() != "xml":
+                return
+        except Exception:
+            pass
+
+        pending = getattr(self, "_cvat_source_binding_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+
+        try:
+            token = int(getattr(self, "_cvat_source_binding_generation", 0) or 0)
+        except Exception:
+            token = 0
+
+        self._cvat_source_binding_after_id = self.frame.after(
+            max(0, int(delay_ms)),
+            lambda expected_token=token: self._auto_bind_cvat_images_dir_from_xml(expected_token),
+        )
+
+    def _normalize_cvat_xml_image_relpath(self, raw_name: str) -> str:
+        raw = str(raw_name or "").strip().replace("\\", "/")
+        while raw.startswith("./"):
+            raw = raw[2:]
+
+        parts = [part for part in PurePosixPath(raw).parts if part not in ("", ".")]
+        return "/".join(parts)
+
+    def _cvat_xml_relpath_to_path(self, rel_path: str) -> Path:
+        parts = [part for part in PurePosixPath(rel_path).parts if part not in ("", ".")]
+        return Path(*parts) if parts else Path()
+
+    def _read_cvat_xml_image_names(self, xml_path: Path) -> list[str]:
+        tree = ET.parse(xml_path)
+        names: list[str] = []
+        for image_el in tree.getroot().findall(".//image"):
+            normalized = self._normalize_cvat_xml_image_relpath(image_el.get("name") or "")
+            if normalized:
+                names.append(normalized)
+        return list(dict.fromkeys(names))
+
+    def _evaluate_images_dir_for_cvat_xml(self, images_dir: Path, xml_image_names: list[str]) -> dict:
+        matched = 0
+        missing: list[str] = []
+        for rel_name in xml_image_names:
+            candidate = Path(images_dir) / self._cvat_xml_relpath_to_path(rel_name)
+            if candidate.exists() and candidate.is_file():
+                matched += 1
+            else:
+                missing.append(rel_name)
+        return {
+            "images_dir": Path(images_dir),
+            "total": len(xml_image_names),
+            "matched": matched,
+            "missing_count": len(missing),
+            "missing": missing,
+        }
+
+    def _get_cvat_image_source_roots(self) -> list[Path]:
+        roots: list[Path] = []
+
+        for getter in (
+            lambda: CAMPAIGN.get_iteration_raw_dir(),
+            lambda: CAMPAIGN.get_master_pool_dir(),
+            lambda: CAMPAIGN.get_dir("raw"),
+        ):
+            try:
+                candidate = getter()
+                if candidate:
+                    roots.append(Path(candidate))
+            except Exception:
+                pass
+
+        try:
+            roots.append(Path(CONFIG.DIR_1_RAW))
+        except Exception:
+            pass
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                resolved = str(root.resolve())
+            except Exception:
+                resolved = str(root)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if root.exists() and root.is_dir():
+                    unique.append(root)
+            except Exception:
+                pass
+        return unique
+
+    def _derive_cvat_candidate_root_for_match(self, found_file: Path, xml_rel_name: str) -> Path | None:
+        parts = [part for part in PurePosixPath(xml_rel_name).parts if part not in ("", ".")]
+        if not parts:
+            return None
+
+        ascend_levels = len(parts) - 1
+        parents = found_file.parents
+        if ascend_levels >= len(parents):
+            return None
+
+        candidate_root = parents[ascend_levels]
+        try:
+            expected_path = (candidate_root / self._cvat_xml_relpath_to_path(xml_rel_name)).resolve()
+            if expected_path != found_file.resolve():
+                return None
+        except Exception:
+            return None
+
+        return candidate_root
+
+    def _find_matching_images_dir_for_cvat_xml(self, xml_image_names: list[str]) -> dict | None:
+        if not xml_image_names:
+            return None
+
+        search_roots = self._get_cvat_image_source_roots()
+        if not search_roots:
+            return None
+
+        sample_names = xml_image_names[: min(24, len(xml_image_names))]
+        sample_by_basename: dict[str, list[str]] = {}
+        for rel_name in sample_names:
+            sample_by_basename.setdefault(PurePosixPath(rel_name).name, []).append(rel_name)
+
+        candidate_hits: dict[str, dict] = {}
+        for search_root in search_roots:
+            try:
+                for file_path in search_root.rglob("*"):
+                    if not file_path.is_file():
+                        continue
+                    candidate_rel_names = sample_by_basename.get(file_path.name)
+                    if not candidate_rel_names:
+                        continue
+                    for rel_name in candidate_rel_names:
+                        candidate_root = self._derive_cvat_candidate_root_for_match(file_path, rel_name)
+                        if candidate_root is None:
+                            continue
+                        try:
+                            key = str(candidate_root.resolve())
+                        except Exception:
+                            key = str(candidate_root)
+                        entry = candidate_hits.setdefault(
+                            key,
+                            {"images_dir": candidate_root, "sample_hits": set()},
+                        )
+                        entry["sample_hits"].add(rel_name)
+            except Exception as exc:
+                logger.debug(f"Nie udało się przeskanować {search_root} przy dopasowaniu obrazów do XML: {exc}")
+
+        if not candidate_hits:
+            return None
+
+        ranked_candidates = sorted(
+            candidate_hits.values(),
+            key=lambda item: (len(item["sample_hits"]), -len(str(item["images_dir"]))),
+            reverse=True,
+        )
+
+        best_match = None
+        best_score = None
+        for candidate in ranked_candidates[:8]:
+            stats = self._evaluate_images_dir_for_cvat_xml(candidate["images_dir"], xml_image_names)
+            stats["sample_hits"] = len(candidate["sample_hits"])
+            score = (stats["matched"], -stats["missing_count"], stats["sample_hits"])
+            if best_match is None or score > best_score:
+                best_match = stats
+                best_score = score
+        return best_match
+
+    def _auto_bind_cvat_images_dir_from_xml(self, expected_token: int | None = None):
+        self._cvat_source_binding_after_id = None
+
+        try:
+            current_token = int(getattr(self, "_cvat_source_binding_generation", 0) or 0)
+            if expected_token is not None and int(expected_token) != current_token:
+                return
+        except Exception:
+            pass
+
+        try:
+            if self._get_creator_source_mode() != "xml":
+                return
+        except Exception:
+            pass
+
+        xml_raw = str(getattr(self, "cvat_xml_var", tk.StringVar()).get() or "").strip()
+        if not xml_raw:
+            return
+        try:
+            xml_path = Path(xml_raw)
+        except Exception:
+            return
+        if not xml_path.exists() or not xml_path.is_file():
+            return
+
+        try:
+            xml_image_names = self._read_cvat_xml_image_names(xml_path)
+        except Exception as exc:
+            logger.debug(f"Nie udało się odczytać nazw obrazów z XML dla PZ1: {exc}")
+            return
+        if not xml_image_names:
+            return
+
+        images_raw = str(getattr(self, "cvat_images_var", tk.StringVar()).get() or "").strip()
+        if images_raw:
+            try:
+                current_dir = Path(images_raw)
+                if current_dir.exists() and current_dir.is_dir():
+                    current_stats = self._evaluate_images_dir_for_cvat_xml(current_dir, xml_image_names)
+                    if current_stats["matched"] == current_stats["total"]:
+                        return
+            except Exception:
+                pass
+
+        best_candidate = self._find_matching_images_dir_for_cvat_xml(xml_image_names)
+        if not best_candidate or best_candidate.get("matched") != best_candidate.get("total"):
+            return
+
+        try:
+            current_token = int(getattr(self, "_cvat_source_binding_generation", 0) or 0)
+            if expected_token is not None and int(expected_token) != current_token:
+                return
+        except Exception:
+            pass
+
+        # Użytkownik mógł wskazać folder ręcznie w czasie oczekiwania na automatyczne dopasowanie.
+        # Wtedy nie pokazujemy spóźnionego modala, nawet jeśli folder wymaga dalszej walidacji.
+        latest_images_raw = str(getattr(self, "cvat_images_var", tk.StringVar()).get() or "").strip()
+        if latest_images_raw and latest_images_raw != images_raw:
+            return
+
+        candidate_dir = Path(best_candidate["images_dir"])
+        try:
+            display_dir = self._format_workspace_relative_path(candidate_dir)
+        except Exception:
+            display_dir = str(candidate_dir)
+
+        attach = messagebox.askyesno(
+            "Znaleziono zgodny folder obrazów",
+            (
+                "Na podstawie pliku XML znaleziono folder zawierający komplet zgodnych obrazów.\n\n"
+                f"Dopasowanie: {best_candidate['matched']}/{best_candidate['total']} plików z XML\n"
+                f"Folder: {display_dir}\n\n"
+                "Czy podpiąć ten folder jako źródło obrazów dla kreatora PZ1?"
+            ),
+            parent=getattr(self, "frame", None),
+        )
+        if not attach:
+            try:
+                status = getattr(self, "ds_status", None)
+                if status is not None:
+                    status.configure(foreground="#d35400")
+                    self._set_training_widget_text(
+                        status,
+                        "Znaleziono zgodny folder obrazów, ale podpięcie anulowano. Wskaż folder ręcznie albo wybierz XML ponownie.",
+                    )
+            except Exception:
+                pass
+            return
+
+        try:
+            self.cvat_images_var.set(str(candidate_dir.resolve()))
+        except Exception:
+            self.cvat_images_var.set(str(candidate_dir))
+
+        try:
+            status = getattr(self, "ds_status", None)
+            if status is not None:
+                status.configure(foreground="green")
+                self._set_training_widget_text(
+                    status,
+                    f"Podpięto zgodny folder obrazów: {best_candidate['matched']}/{best_candidate['total']} plików z XML w {display_dir}.",
+                )
+        except Exception:
+            pass
+
+    def _get_creator_source_mode(self) -> str:
+        try:
+            mode = str(self.creator_source_mode_var.get() or "").strip().lower()
+        except Exception:
+            mode = ""
+        return mode if mode in {"ready", "xml"} else "xml"
+
+    def _set_creator_source_mode(self, mode: str):
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"ready", "xml"}:
+            normalized = "xml"
+        try:
+            self.creator_source_mode_var.set(normalized)
+        except Exception:
+            pass
+
+    def _on_creator_source_mode_change(self):
+        try:
+            self._refresh_step4_dataset_mode_ui()
+        except Exception:
+            pass
+        try:
+            self._refresh_dataset_creator_cta_state()
+        except Exception:
+            pass
+
+    def _resolve_dataset_creator_inputs(self) -> dict:
+        result = {
+            "ok": False,
+            "xml": None,
+            "images_dir": None,
+            "message": "W trybie budowy z XML wymagane są dwa zgodne źródła: plik XML i folder obrazów.",
+        }
+
+        xml_raw = str(getattr(self, "cvat_xml_var", tk.StringVar()).get() or "").strip()
+        images_raw = str(getattr(self, "cvat_images_var", tk.StringVar()).get() or "").strip()
+
+        if not xml_raw:
+            return result
+        try:
+            xml_path = Path(xml_raw)
+        except Exception:
+            result["message"] = "Nie udało się odczytać ścieżki pliku XML."
+            return result
+        if not xml_path.exists() or not xml_path.is_file() or xml_path.suffix.lower() != ".xml":
+            result["message"] = "Wskaż istniejący plik anotacji XML."
+            return result
+
+        if not images_raw:
+            result["message"] = "Wskaż folder obrazów dla tego pliku XML."
+            return result
+        try:
+            images_dir = Path(images_raw)
+        except Exception:
+            result["message"] = "Nie udało się odczytać ścieżki folderu obrazów."
+            return result
+        if not images_dir.exists() or not images_dir.is_dir():
+            result["message"] = "Wskaż istniejący folder obrazów."
+            return result
+
+        result.update(
+            {
+                "ok": True,
+                "xml": xml_path,
+                "images_dir": images_dir,
+                "message": "Gotowy do utworzenia wariantu datasetu treningowego.",
+            }
+        )
+        return result
+
+    @staticmethod
+    def _normalize_xml_image_name(image_name: str) -> str:
+        return str(image_name or "").strip().replace("\\", "/")
+
+    def _validate_dataset_creator_xml_images_alignment(self, images_dir: Path) -> dict:
+        result = {
+            "ok": False,
+            "message": "Nie udało się porównać XML z folderem obrazów.",
+            "missing": [],
+            "extra_count": 0,
+        }
+
+        try:
+            images_dir = Path(images_dir)
+        except Exception:
+            return result
+
+        if not images_dir.exists() or not images_dir.is_dir():
+            result["message"] = "Folder obrazów nie istnieje."
+            return result
+
+        xml_names = {
+            self._normalize_xml_image_name(name)
+            for name in set(getattr(self.creator, "xml_image_names", set()) or set())
+            if str(name or "").strip()
+        }
+        annotated_names = {
+            self._normalize_xml_image_name(name)
+            for name in set(self.creator.get_annotated_image_names() or set())
+            if str(name or "").strip()
+        }
+        required_names = xml_names or annotated_names
+        if not required_names:
+            result["message"] = "XML nie zawiera obrazów do walidacji."
+            return result
+
+        missing = []
+        for image_name in sorted(required_names):
+            candidate = images_dir / Path(image_name)
+            if not candidate.exists() or not candidate.is_file():
+                missing.append(image_name)
+
+        if missing:
+            sample = ", ".join(missing[:8])
+            more = "" if len(missing) <= 8 else f" oraz {len(missing) - 8} więcej"
+            result["missing"] = missing
+            result["message"] = (
+                "Plik XML i folder obrazów nie są zgodne.\n\n"
+                f"W XML jest {len(required_names)} obraz(ów), ale w wybranym folderze brakuje {len(missing)}.\n"
+                f"Przykłady brakujących: {sample}{more}.\n\n"
+                "Wskaż folder, względem którego nazwy obrazów z XML istnieją dokładnie tak samo."
+            )
+            return result
+
+        try:
+            direct_image_names = {path.name for path in get_image_files(images_dir)}
+            xml_basenames = {Path(name).name for name in required_names}
+            extra_count = len([name for name in direct_image_names if name not in xml_basenames])
+        except Exception:
+            extra_count = 0
+
+        result.update(
+            {
+                "ok": True,
+                "message": (
+                    f"XML i folder obrazów są zgodne: {len(required_names)} obraz(ów) z XML "
+                    "ma odpowiadający plik źródłowy."
+                ),
+                "extra_count": int(extra_count),
+            }
+        )
+        return result
+
+    def _refresh_dataset_creator_cta_state(self):
+        btn = getattr(self, "btn_step4_create", None)
+        if btn is None:
+            return
+
+        try:
+            in_campaign = bool(CAMPAIGN.get_active_project_name())
+        except Exception:
+            in_campaign = False
+        if not in_campaign and self._get_creator_source_mode() == "ready":
+            try:
+                btn.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+            status = getattr(self, "ds_status", None)
+            if status is not None:
+                try:
+                    status.configure(foreground="green")
+                    self._set_training_widget_text(
+                        status,
+                        "Gotowy dataset jest już wejściem treningowym. Przejdź dalej do PZ2.",
+                    )
+                except Exception:
+                    pass
+            return
+
+        info = self._resolve_dataset_creator_inputs()
+        try:
+            busy = bool(self._step4_has_active_operation())
+        except Exception:
+            busy = False
+
+        enabled = bool(info.get("ok")) and not busy
+        try:
+            btn.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+        except Exception:
+            pass
+
+        status = getattr(self, "ds_status", None)
+        if status is None:
+            return
+        try:
+            if busy:
+                status.configure(foreground="#d35400")
+                self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
+            elif enabled:
+                status.configure(foreground="green")
+                self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
+            else:
+                status.configure(foreground="#d35400")
+                self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
+        except Exception:
+            pass
+
+    def _resolve_dataset_split_inputs(self) -> dict:
+        result = {
+            "ok": False,
+            "src": None,
+            "message": (
+                "Wskaż źródło YOLO Detect dla znaków: folder z images/labels albo plik data.yaml. "
+                "Dataset OCR/klasyfikacyjny z manifest.json nie jest wejściem tego kroku."
+            ),
+        }
+
+        src_raw = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+        if not src_raw:
+            return result
+
+        validation = self._validate_char_yolo_split_source(src_raw, resolve_nested_dataset=True)
+        if not bool(validation.get("ok")):
+            result["message"] = str(validation.get("message") or result["message"])
+            return result
+
+        result.update(
+            {
+                "ok": True,
+                "src": validation.get("src"),
+                "message": str(validation.get("message") or "Gotowy do utworzenia wariantu datasetu treningowego."),
+            }
+        )
+        return result
+
+    def _refresh_dataset_split_cta_state(self):
+        btn = getattr(self, "btn_step4_split", None)
+        if btn is None:
+            return
+
+        info = self._resolve_dataset_split_inputs()
+        try:
+            busy = bool(self._step4_has_active_operation())
+        except Exception:
+            busy = False
+
+        enabled = bool(info.get("ok")) and not busy
+        try:
+            btn.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+        except Exception:
+            pass
+
+        status = getattr(self, "split_status", None)
+        if status is None:
+            return
+        try:
+            if busy:
+                status.configure(foreground="#d35400")
+                self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
+            elif enabled:
+                status.configure(foreground="green")
+                self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
+            else:
+                status.configure(foreground="#d35400")
+                self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
+        except Exception:
+            pass
+
+    def _can_open_pz2_after_dataset_result(self) -> bool:
+        if CAMPAIGN.get_active_project_name():
+            return bool(getattr(self, "_step4_train_unlocked", False))
+        return True
+
+    def _show_step4_dataset_result_modal(
+        self,
+        *,
+        title: str,
+        body: str,
+        allow_pz2: bool = True,
+        primary_text: str = "Przejdź do PZ2",
+        secondary_text: str = "Zostań w PZ1",
+    ) -> bool:
+        parent = getattr(self, "frame", None)
+        root = parent.winfo_toplevel() if parent is not None else None
+        dialog = tk.Toplevel(root or parent)
+        dialog.title(title)
+        dialog.resizable(False, False)
+        try:
+            dialog.transient(root)
+            dialog.grab_set()
+        except Exception:
+            pass
+
+        result = {"go_pz2": False}
+        container = ttk.Frame(dialog, padding=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text=title,
+            font=("Segoe UI Semibold", 11),
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+        ttk.Label(
+            container,
+            text=str(body or "").strip(),
+            justify=tk.LEFT,
+            wraplength=500,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(10, 14))
+
+        buttons = ttk.Frame(container)
+        buttons.pack(anchor=tk.E, fill=tk.X)
+
+        def close(go_pz2: bool = False):
+            result["go_pz2"] = bool(go_pz2)
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        pz2_btn = ttk.Button(
+            buttons,
+            text=primary_text,
+            command=lambda: close(True),
+            state=(tk.NORMAL if allow_pz2 else tk.DISABLED),
+        )
+        pz2_btn.pack(side=tk.RIGHT)
+        ttk.Button(
+            buttons,
+            text=secondary_text,
+            command=lambda: close(False),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        try:
+            dialog.update_idletasks()
+            if root is not None:
+                x = root.winfo_rootx() + max(40, (root.winfo_width() - dialog.winfo_width()) // 2)
+                y = root.winfo_rooty() + max(40, (root.winfo_height() - dialog.winfo_height()) // 2)
+                dialog.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        try:
+            dialog.wait_window()
+        except Exception:
+            pass
+        return bool(result.get("go_pz2"))
+
+    def _format_step4_dataset_result_path(self, dataset_path: str | Path | None) -> str:
+        raw = str(dataset_path or "").strip()
+        if not raw:
+            return ""
+        try:
+            return self._format_workspace_relative_path(raw)
+        except Exception:
+            return raw
+
+    def _open_pz2_from_dataset_result(self):
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+        try:
+            self._step4_dataset_go_next()
+        except Exception:
+            try:
+                self.main_nb.select(self.tab_train)
+            except Exception:
+                pass
+
+    def _handle_step4_dataset_success_result(
+        self,
+        *,
+        dataset_path: str | Path,
+        message: str,
+        target: str,
+        counts: dict | None = None,
+    ):
+        self._mark_step4_dataset_ready(dataset_path)
+        target_label = self._format_training_target_label(target)
+        path_text = self._format_step4_dataset_result_path(dataset_path)
+        counts = counts or {}
+        split_text = ""
+        if counts:
+            split_text = (
+                "\n\nSplit wariantu: "
+                f"train={int(counts.get('train', 0) or 0)}, "
+                f"val={int(counts.get('val', 0) or 0)}, "
+                f"test={int(counts.get('test', 0) or 0)}."
+            )
+
+        body = (
+            f"Utworzono wariant datasetu dla toru: {target_label}.\n\n"
+            f"Dataset: {path_text or '-'}"
+            f"{split_text}\n\n"
+            "Co dalej?\n"
+            "Możesz przejść bezpośrednio do PZ2, gdzie ten wariant jest dostępny na liście wariantów, "
+            "albo zostać w PZ1 i utworzyć kolejny wariant."
+        )
+        extra = str(message or "").strip()
+        if extra:
+            body += f"\n\nKomunikat procesu: {extra}"
+
+        if self._show_step4_dataset_result_modal(
+            title="Dataset utworzony",
+            body=body,
+            allow_pz2=True,
+        ):
+            self._open_pz2_from_dataset_result()
+
+    def _handle_step4_dataset_failure_result(
+        self,
+        *,
+        message: str,
+        target: str,
+        critical: bool = False,
+    ):
+        target_label = self._format_training_target_label(target)
+        allow_pz2 = self._can_open_pz2_after_dataset_result()
+        body = (
+            f"Nie utworzono nowego wariantu datasetu dla toru: {target_label}.\n\n"
+            f"Powód:\n{str(message or 'Nieznany błąd').strip()}\n\n"
+            "Co dalej?\n"
+            "Zostań w PZ1, popraw źródła i uruchom tworzenie wariantu ponownie."
+        )
+        if allow_pz2:
+            body += (
+                "\n\nMożesz też przejść do PZ2 i wybrać jeden z istniejących wariantów z listy."
+            )
+        else:
+            body += (
+                "\n\nPrzejście do PZ2 jest teraz zablokowane, bo ta iteracja nie ma jeszcze gotowego wariantu treningowego."
+            )
+
+        if self._show_step4_dataset_result_modal(
+            title=("Krytyczny błąd datasetu" if critical else "Dataset nie został utworzony"),
+            body=body,
+            allow_pz2=allow_pz2,
+        ):
+            self._open_pz2_from_dataset_result()
+
+    def _create_dataset_thread(self):
+        source_info = self._resolve_dataset_creator_inputs()
+        if not bool(source_info.get("ok")):
+            self._refresh_dataset_creator_cta_state()
+            self._handle_step4_dataset_failure_result(
+                message=str(source_info.get("message") or "Najpierw wskaż plik anotacji XML i folder obrazów."),
+                target="plate",
+                critical=False,
+            )
+            return
+
+        xml = Path(source_info["xml"])
+        images_dir = Path(source_info["images_dir"])
+        stage_source_images_dir = images_dir
 
         try:
             if bool(CAMPAIGN.get_active_project_name()) and self._get_selected_training_target() == "plate":
@@ -11473,7 +11684,27 @@ class TrainingTab:
 
         ok, msg, _ = self.creator.parse_cvat_xml(xml)
         if not ok:
-            return messagebox.showerror("Błąd", msg)
+            self._handle_step4_dataset_failure_result(
+                message=str(msg or "Nie udało się odczytać pliku XML."),
+                target="plate",
+                critical=False,
+            )
+            return
+
+        alignment = self._validate_dataset_creator_xml_images_alignment(images_dir)
+        if not bool(alignment.get("ok")):
+            self.ds_status.configure(foreground="#c0392b")
+            self._set_training_widget_text(self.ds_status, "XML i folder obrazów nie są zgodne.")
+            self._handle_step4_dataset_failure_result(
+                message=str(alignment.get("message") or "Wskaż zgodny plik XML i folder obrazów."),
+                target="plate",
+                critical=False,
+            )
+            return
+        try:
+            self._append_step4_builder_log(f"[WALIDACJA] {alignment.get('message')}")
+        except Exception:
+            pass
 
         train = float(self.train_pct.get()) / 100.0
         val = float(self.val_pct.get()) / 100.0
@@ -11483,13 +11714,13 @@ class TrainingTab:
             "test": max(0.0, 1.0 - train - val)
         }
 
-        if not self._begin_step4_operation("z4.dataset.build", "Z4: budowa datasetu"):
+        if not self._begin_step4_operation("z4.dataset.build", "Z4: przygotowanie datasetu tablic"):
             return
         self.dataset_build_is_running = True
 
         self.ds_progress_var.set(0)
         self.ds_status.configure(foreground="black")
-        self._set_training_widget_text(self.ds_status, "Rozpoczynam budowę datasetu...")
+        self._set_training_widget_text(self.ds_status, "Rozpoczynam przygotowanie datasetu...")
 
         def worker():
             try:
@@ -11535,8 +11766,7 @@ class TrainingTab:
                             stage_result["stage_images_total"] = int(stage_stats.get("stage_images_total", 0) or 0)
                             stage_result["stage_images_dir"] = str(stage_stats.get("stage_images_dir") or "").strip()
                     self._ui(lambda: self.ds_status.configure(foreground="green"))
-                    self._ui(lambda: self._set_training_widget_text(self.ds_status, "Dataset został utworzony!"))
-                    self._ui(lambda: messagebox.showinfo("Sukces", msg2))
+                    self._ui(lambda: self._set_training_widget_text(self.ds_status, "Dataset treningowy został przygotowany!"))
                     if stage_result["enabled"] and stage_result["ok"] and stage_result["stage_images_dir"]:
                         self._ui(
                             lambda info=dict(stage_result): messagebox.showinfo(
@@ -11567,33 +11797,56 @@ class TrainingTab:
                         )
                     )
 
-                    # Po sukcesie od razu podstaw dataset do sekcji treningu.
-                    self._ui(lambda p=str(out_dir): self._mark_step4_dataset_ready(p))
+                    self._ui(
+                        lambda p=str(out_dir), msg=str(msg2), counts=dict(dataset_counts): self._handle_step4_dataset_success_result(
+                            dataset_path=p,
+                            message=msg,
+                            target="plate",
+                            counts=counts,
+                        )
+                    )
                 else:
                     self._ui(lambda: self.ds_status.configure(foreground="red"))
-                    self._ui(lambda: self._set_training_widget_text(self.ds_status, "Błąd budowy datasetu"))
-                    self._ui(lambda: messagebox.showerror("Błąd", msg2))
+                    self._ui(lambda: self._set_training_widget_text(self.ds_status, "Błąd przygotowania datasetu"))
+                    self._ui(
+                        lambda msg=str(msg2): self._handle_step4_dataset_failure_result(
+                            message=msg,
+                            target="plate",
+                            critical=False,
+                        )
+                    )
 
             except Exception as e:
                 self._ui(lambda: self.ds_status.configure(foreground="red"))
-                self._ui(lambda: self._set_training_widget_text(self.ds_status, "Krytyczny błąd budowy datasetu"))
-                self._ui(lambda err=str(e): messagebox.showerror("Krytyczny Błąd", err))
+                self._ui(lambda: self._set_training_widget_text(self.ds_status, "Krytyczny błąd przygotowania datasetu"))
+                self._ui(
+                    lambda err=str(e): self._handle_step4_dataset_failure_result(
+                        message=err,
+                        target="plate",
+                        critical=True,
+                    )
+                )
 
             finally:
                 self.dataset_build_is_running = False
                 self._end_step4_operation("z4.dataset.build")
+                self._ui(self._refresh_dataset_creator_cta_state)
                 self._ui(self._refresh_training_start_state)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _split_dataset_thread(self):
-        src = Path(self.split_src_var.get().strip())
-
-        if not src.exists() or not (src / "images").exists():
-            return messagebox.showerror(
-                "Błąd",
-                "Brak folderu wejściowego (lub brakuje w nim folderu 'images')."
+        source_info = self._resolve_dataset_split_inputs()
+        if not bool(source_info.get("ok")):
+            self._refresh_dataset_split_cta_state()
+            self._handle_step4_dataset_failure_result(
+                message=str(source_info.get("message") or "Najpierw wskaż źródłowy dataset znaków."),
+                target="char",
+                critical=False,
             )
+            return
+
+        src = Path(source_info["src"])
 
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -11614,13 +11867,18 @@ class TrainingTab:
             "test": max(0.0, 1.0 - train - val)
         }
 
-        if not self._begin_step4_operation("z4.dataset.split", "Z4: dzielenie datasetu"):
+        if not self._begin_step4_operation("z4.dataset.split", "Z4: przygotowanie datasetu znaków"):
             return
         self.dataset_split_is_running = True
 
+        self._set_split_feedback_visibility(True)
         self.split_progress_var.set(0)
         self.split_status.config(foreground="black")
-        self._set_training_widget_text(self.split_status, "Rozpoczynam podział...")
+        self._set_training_widget_text(self.split_status, "Rozpoczynam przygotowanie datasetu...")
+        try:
+            self.frame.update_idletasks()
+        except Exception:
+            pass
 
         def worker():
             try:
@@ -11633,25 +11891,43 @@ class TrainingTab:
                 ok, msg, _ = self.splitter.split_dataset(src, out, ratios, prog)
 
                 if ok:
+                    dataset_counts = self._get_dataset_split_image_counts(out)
                     self._ui(lambda: self.split_status.configure(foreground="green"))
-                    self._ui(lambda: self._set_training_widget_text(self.split_status, "Podział zakończony!"))
-                    self._ui(lambda: messagebox.showinfo("Sukces", msg))
-
-                    # Po sukcesie od razu podstaw dataset do sekcji treningu.
-                    self._ui(lambda p=str(out): self._mark_step4_dataset_ready(p))
+                    self._ui(lambda: self._set_training_widget_text(self.split_status, "Dataset treningowy został przygotowany!"))
+                    self._ui(
+                        lambda p=str(out), msg=str(msg), counts=dict(dataset_counts): self._handle_step4_dataset_success_result(
+                            dataset_path=p,
+                            message=msg,
+                            target="char",
+                            counts=counts,
+                        )
+                    )
                 else:
                     self._ui(lambda: self.split_status.configure(foreground="red"))
-                    self._ui(lambda: self._set_training_widget_text(self.split_status, "Błąd podziału"))
-                    self._ui(lambda: messagebox.showerror("Błąd", msg))
+                    self._ui(lambda: self._set_training_widget_text(self.split_status, "Błąd przygotowania datasetu"))
+                    self._ui(
+                        lambda msg=str(msg): self._handle_step4_dataset_failure_result(
+                            message=msg,
+                            target="char",
+                            critical=False,
+                        )
+                    )
 
             except Exception as e:
                 self._ui(lambda: self.split_status.configure(foreground="red"))
-                self._ui(lambda: self._set_training_widget_text(self.split_status, "Krytyczny błąd podziału"))
-                self._ui(lambda err=str(e): messagebox.showerror("Krytyczny Błąd", err))
+                self._ui(lambda: self._set_training_widget_text(self.split_status, "Krytyczny błąd przygotowania datasetu"))
+                self._ui(
+                    lambda err=str(e): self._handle_step4_dataset_failure_result(
+                        message=err,
+                        target="char",
+                        critical=True,
+                    )
+                )
 
             finally:
                 self.dataset_split_is_running = False
                 self._end_step4_operation("z4.dataset.split")
+                self._ui(self._refresh_dataset_split_cta_state)
                 self._ui(self._refresh_training_start_state)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -11702,6 +11978,11 @@ class TrainingTab:
         ds_path = Path(ds)
         yaml_path = ds_path / "data.yaml" if ds_path.is_dir() else ds_path
         if not yaml_path.exists():
+            if self._looks_like_char_classification_dataset(ds_path):
+                return messagebox.showerror(
+                    "Nieobsługiwany typ datasetu",
+                    self._char_classification_dataset_message(),
+                )
             return messagebox.showerror("Błąd", "Nie znaleziono pliku data.yaml.")
         dataset_root = yaml_path.parent
 

@@ -23,6 +23,7 @@ from .tab_character_annotation import CharacterAnnotationTab
 from .tab_training import TrainingTab
 from .tab_campaign import CampaignTab
 from .help_manager import HELP
+from .free_mode_assistant import FreeModeAssistantContext, FreeModeAssistantOverlay
 
 try:
     from .tab_help import HelpTab
@@ -175,6 +176,7 @@ class AutoAnnotationApp:
         self._menu_outside_click_bind_id = None
         self._menu_escape_bind_id = None
         self._theme_refresh_after_id = None
+        self._theme_refresh_after_ids = []
         self._help_scroll_ctrl_down = False
         self._help_scroll_alt_down = False
         self._help_panel_default_height = 1
@@ -183,6 +185,11 @@ class AutoAnnotationApp:
         self._help_overlay_place_after_id = None
         self._help_overlay_forced_visible = False
         self._help_overlay_forced_text = ""
+        self._free_mode_assistant_overlay = None
+        self._free_mode_assistant_place_after_id = None
+        self._free_mode_assistant_refresh_after_id = None
+        self._free_mode_assistant_toggle_btn = None
+        self._free_mode_assistant_enabled = False
         self._help_panel_message_prefix = "HELP:"
         self._status_full_text = ""
         self._global_terminal_lines = ["[APP] Terminal globalny gotowy. Tutaj trafiaja logi procesow z Z2, PZ2 i Z4."]
@@ -408,6 +415,27 @@ class AutoAnnotationApp:
         )
         self._global_terminal_toggle_btn.pack(side=tk.LEFT, padx=(8, 0), pady=4)
 
+        self._free_mode_assistant_toggle_btn = tk.Button(
+            self.info_panel_frame,
+            text="AS",
+            command=self.toggle_free_mode_assistant,
+            width=3,
+            cursor="hand2",
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            padx=6,
+            pady=2,
+            font=("Segoe UI", 9, "bold"),
+            bg="#050505",
+            activebackground="#050505",
+            fg=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
+            activeforeground=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
+        )
+        self._free_mode_assistant_toggle_btn.pack(side=tk.LEFT, padx=(4, 0), pady=4)
+        HELP.bind_help(self._global_terminal_toggle_btn, "app_global_terminal")
+        HELP.bind_help(self._free_mode_assistant_toggle_btn, "app_free_assistant")
+
         self.status_text = tk.Text(
             self.info_panel_frame, height=1, wrap=tk.NONE, 
             bg="#050505",
@@ -422,6 +450,7 @@ class AutoAnnotationApp:
         self.status_text.insert(tk.END, self._format_help_panel_message(self.default_status_message))
         self.status_text.config(state=tk.DISABLED)
         self.status_text.bind("<Configure>", self._on_help_panel_text_configure, add="+")
+        HELP.bind_help(self.status_text, "app_help_panel")
         self.help_overlay_frame = tk.Frame(
             root,
             bg="#112235",
@@ -432,7 +461,7 @@ class AutoAnnotationApp:
         )
         self.help_overlay_title_lbl = tk.Label(
             self.help_overlay_frame,
-            text="Rozwinieta pomoc  |  CTRL + ALT lub PPM",
+            text="Rozwinięta pomoc  |  CTRL + ALT",
             anchor="w",
             justify=tk.LEFT,
             font=("Segoe UI", 9, "bold"),
@@ -480,10 +509,13 @@ class AutoAnnotationApp:
 
         # główna blokada działa przez disabled tabs
         self.notebook.bind("<<NotebookTabChanged>>", self._on_main_notebook_tab_changed)
+        self._free_mode_assistant_overlay = FreeModeAssistantOverlay(root)
+        self.root.bind("<Configure>", lambda _event: self._schedule_free_mode_assistant_placement(), add="+")
 
         # początkowa synchronizacja stanów zakładek
         self.update_campaign_tab_access()
         self._restore_active_main_tab_preference()
+        self._refresh_free_mode_assistant()
 
         # Po starcie pokaż informację o aktywnym projekcie, jeśli aplikacja wznawia tryb kampanii.
         try:
@@ -1313,6 +1345,15 @@ class AutoAnnotationApp:
             pass
 
         try:
+            overlay = getattr(self, "_free_mode_assistant_overlay", None)
+            if overlay is not None:
+                overlay.refresh_theme(palette)
+                self._schedule_free_mode_assistant_placement()
+            self._sync_free_mode_assistant_toggle_state()
+        except Exception:
+            pass
+
+        try:
             self.refresh_window_title()
         except Exception:
             pass
@@ -1350,6 +1391,13 @@ class AutoAnnotationApp:
                 except Exception:
                     pass
 
+            if isinstance(widget, WebSlimScrollbar):
+                try:
+                    track = self._resolve_widget_background(getattr(widget, "master", None))
+                    self.style_web_scrollbar(widget, track_color=track)
+                except Exception:
+                    pass
+
             try:
                 for child in widget.winfo_children():
                     walk(child)
@@ -1358,11 +1406,67 @@ class AutoAnnotationApp:
 
         walk(root)
 
+    def _emit_theme_repaint_pulse(self):
+        """Force custom drawn widgets to repaint after a palette switch."""
+        visited: set[int] = set()
+
+        def _safe_event_generate(widget, sequence: str):
+            try:
+                widget.event_generate(sequence)
+            except Exception:
+                pass
+
+        def _safe_configure_event(widget):
+            try:
+                width = max(1, int(widget.winfo_width() or 1))
+                height = max(1, int(widget.winfo_height() or 1))
+                widget.event_generate("<Configure>", width=width, height=height)
+            except Exception:
+                _safe_event_generate(widget, "<Configure>")
+
+        def walk(widget):
+            if widget is None:
+                return
+
+            widget_id = id(widget)
+            if widget_id in visited:
+                return
+            visited.add(widget_id)
+
+            try:
+                if isinstance(widget, tk.Canvas):
+                    _safe_configure_event(widget)
+                    _safe_event_generate(widget, "<Expose>")
+                else:
+                    class_name = str(widget.winfo_class() or "")
+                    if class_name in {"Panedwindow", "TPanedwindow", "TNotebook"}:
+                        _safe_configure_event(widget)
+            except Exception:
+                pass
+
+            try:
+                for child in widget.winfo_children():
+                    walk(child)
+            except Exception:
+                pass
+
+        walk(self.root)
+
+        try:
+            self.root.event_generate("<<AppThemeChanged>>")
+        except Exception:
+            pass
+
     def _finalize_theme_refresh(self):
         self._theme_refresh_after_id = None
 
         try:
             self._apply_theme_to_widget_tree(self.root)
+        except Exception:
+            pass
+
+        try:
+            self._emit_theme_repaint_pulse()
         except Exception:
             pass
 
@@ -1380,10 +1484,41 @@ class AutoAnnotationApp:
                 pass
             self._theme_refresh_after_id = None
 
+        for pending_id in list(getattr(self, "_theme_refresh_after_ids", []) or []):
+            try:
+                self.root.after_cancel(pending_id)
+            except Exception:
+                pass
+        self._theme_refresh_after_ids = []
+
         self._finalize_theme_refresh()
 
+        def _queue_refresh(delay_ms: int | None = None):
+            token = {"id": None}
+
+            def _run():
+                pending_id = token.get("id")
+                try:
+                    if pending_id in self._theme_refresh_after_ids:
+                        self._theme_refresh_after_ids.remove(pending_id)
+                except Exception:
+                    pass
+                self._finalize_theme_refresh()
+
+            try:
+                if delay_ms is None:
+                    token["id"] = self.root.after_idle(_run)
+                else:
+                    token["id"] = self.root.after(int(delay_ms), _run)
+                self._theme_refresh_after_ids.append(token["id"])
+                self._theme_refresh_after_id = token["id"]
+            except Exception:
+                self._theme_refresh_after_id = None
+
+        _queue_refresh(None)
+        _queue_refresh(60)
         try:
-            self._theme_refresh_after_id = self.root.after_idle(self._finalize_theme_refresh)
+            _queue_refresh(180)
         except Exception:
             self._theme_refresh_after_id = None
 
@@ -1392,14 +1527,11 @@ class AutoAnnotationApp:
             return
 
         palette = getattr(self, "palette", {})
-        bg = background or blend_hex_colors(
-            palette.get("accent_hover", palette.get("accent", "#0e639c")),
-            palette.get("accent_text", "#ffffff"),
-            0.30,
-        )
         trough = troughcolor or palette.get("panel", palette.get("bg", "#1e1e1e"))
+        _track, thumb, thumb_hover = self._get_scrollbar_colors(track_color=trough)
+        bg = thumb if self.is_dark_theme() else (background or thumb)
         border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        active_bg = blend_hex_colors(bg, palette.get("accent_text", "#ffffff"), 0.18)
+        active_bg = thumb_hover
 
         options = {
             "bg": bg,
@@ -1421,6 +1553,25 @@ class AutoAnnotationApp:
                 scrollbar.configure(**{option_name: option_value})
             except Exception:
                 pass
+
+    def is_dark_theme(self) -> bool:
+        return str(getattr(self, "current_theme_key", "") or "").strip().lower().startswith("dark")
+
+    def _get_scrollbar_colors(self, track_color: str = None) -> tuple[str, str, str]:
+        palette = getattr(self, "palette", {})
+        track = track_color or palette.get("panel", palette.get("bg", "#1e1e1e"))
+        if self.is_dark_theme():
+            thumb = palette.get("success", "#4ec9b0")
+            thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+            return track, thumb, thumb_hover
+
+        thumb = blend_hex_colors(
+            palette.get("accent_hover", palette.get("accent", "#0e639c")),
+            palette.get("accent_text", "#ffffff"),
+            0.30,
+        )
+        thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+        return track, thumb, thumb_hover
 
     def style_text_widget(self, widget, role: str = "default"):
         if widget is None:
@@ -1486,12 +1637,13 @@ class AutoAnnotationApp:
 
         palette = getattr(self, "palette", {})
         border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        select_bg, select_fg = self.get_list_selection_colors()
 
         options = {
             "bg": palette.get("field", "#1a1a1a"),
             "fg": palette.get("fg", "#f3f3f3"),
-            "selectbackground": palette.get("accent", "#3498db"),
-            "selectforeground": palette.get("accent_text", "#ffffff"),
+            "selectbackground": select_bg,
+            "selectforeground": select_fg,
             "disabledforeground": palette.get("muted_dim", "#9a9a9a"),
             "highlightthickness": 1,
             "highlightbackground": border,
@@ -1510,14 +1662,7 @@ class AutoAnnotationApp:
         if scrollbar is None or not isinstance(scrollbar, WebSlimScrollbar):
             return
 
-        palette = getattr(self, "palette", {})
-        track = track_color or palette.get("panel", palette.get("bg", "#1e1e1e"))
-        thumb = blend_hex_colors(
-            palette.get("accent_hover", palette.get("accent", "#0e639c")),
-            palette.get("accent_text", "#ffffff"),
-            0.30,
-        )
-        thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+        track, thumb, thumb_hover = self._get_scrollbar_colors(track_color=track_color)
 
         try:
             scrollbar.configure_style(
@@ -1606,6 +1751,26 @@ class AutoAnnotationApp:
         if not raw:
             return "default"
         return "".join(ch if ch.isalnum() else "_" for ch in raw) or "default"
+
+    def get_list_selection_colors(self) -> tuple[str, str]:
+        """High-contrast selection colors for native list widgets."""
+        palette = getattr(self, "palette", {})
+        bg = self._coerce_color_hex(
+            palette.get("field", palette.get("panel", "#252526")),
+            fallback=palette.get("panel", "#252526"),
+        )
+        try:
+            token = bg.lstrip("#")
+            red = int(token[0:2], 16) / 255.0
+            green = int(token[2:4], 16) / 255.0
+            blue = int(token[4:6], 16) / 255.0
+            luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+        except Exception:
+            luminance = 0.0 if str(getattr(self, "current_theme_key", "")).startswith("dark") else 1.0
+
+        if luminance < 0.5:
+            return "#f8fafc", "#111827"
+        return "#111827", "#f8fafc"
 
     def _coerce_color_hex(self, color: str = None, fallback: str = None) -> str:
         palette = getattr(self, "palette", {})
@@ -2628,6 +2793,22 @@ class AutoAnnotationApp:
             if hasattr(self, "theme_var"):
                 self.theme_var.set(theme_key)
             palette = self.palette
+            dark_theme = str(theme_key or "").strip().lower().startswith("dark")
+            dropdown_select_bg = (
+                palette.get("success", palette.get("accent", "#4ec9b0"))
+                if dark_theme
+                else palette.get("accent", "#006bb3")
+            )
+            dropdown_select_fg = (
+                palette.get("guide_text", "#111111")
+                if dark_theme
+                else palette.get("accent_text", "#ffffff")
+            )
+            list_select_bg, list_select_fg = self.get_list_selection_colors()
+            scrollbar_track = palette.get("bg", "#1e1e1e")
+            _scroll_track, scrollbar_thumb, scrollbar_thumb_hover = self._get_scrollbar_colors(
+                track_color=scrollbar_track,
+            )
 
             self.root.configure(bg=palette["bg"])
 
@@ -2660,11 +2841,18 @@ class AutoAnnotationApp:
             self.root.option_add("*Entry.insertBackground", palette["fg"])
             self.root.option_add("*Listbox.background", palette["field"])
             self.root.option_add("*Listbox.foreground", palette["fg"])
-            self.root.option_add("*Listbox.selectBackground", palette["accent"])
-            self.root.option_add("*Listbox.selectForeground", "#ffffff")
+            self.root.option_add("*Listbox.selectBackground", list_select_bg)
+            self.root.option_add("*Listbox.selectForeground", list_select_fg)
+            self.root.option_add("*TCombobox*Listbox.background", palette["field"])
+            self.root.option_add("*TCombobox*Listbox.foreground", palette["fg"])
+            self.root.option_add("*TCombobox*Listbox.selectBackground", dropdown_select_bg)
+            self.root.option_add("*TCombobox*Listbox.selectForeground", dropdown_select_fg)
             self.root.option_add("*Text.background", palette["field"])
             self.root.option_add("*Text.foreground", palette["fg"])
             self.root.option_add("*Text.insertBackground", palette["fg"])
+            self.root.option_add("*Scrollbar.background", scrollbar_thumb)
+            self.root.option_add("*Scrollbar.activeBackground", scrollbar_thumb_hover)
+            self.root.option_add("*Scrollbar.troughColor", scrollbar_track)
             self.root.option_add("*Menu.background", palette["panel"])
             self.root.option_add("*Menu.foreground", palette["fg"])
             self.root.option_add("*Menu.activeBackground", palette["accent"])
@@ -3139,14 +3327,24 @@ class AutoAnnotationApp:
                 bordercolor=palette["border"],
                 lightcolor=palette["border"],
                 darkcolor=palette["border"],
+                selectbackground=dropdown_select_bg,
+                selectforeground=dropdown_select_fg,
                 arrowsize=14,
                 arrowcolor=control_arrow,
             )
             safe_map(
                 'TCombobox',
                 fieldbackground=[('readonly', palette["field"])],
-                selectbackground=[('readonly', palette["accent"])],
-                selectforeground=[('readonly', '#ffffff')],
+                selectbackground=[
+                    ('disabled', palette["panel"]),
+                    ('readonly', dropdown_select_bg),
+                    ('focus', dropdown_select_bg),
+                ],
+                selectforeground=[
+                    ('disabled', palette["muted_dim"]),
+                    ('readonly', dropdown_select_fg),
+                    ('focus', dropdown_select_fg),
+                ],
                 foreground=[('disabled', palette["muted_dim"])],
                 arrowcolor=[
                     ('readonly', control_arrow),
@@ -3181,8 +3379,8 @@ class AutoAnnotationApp:
             )
             safe_map(
                 'Treeview',
-                background=[('selected', palette["accent_selected"])],
-                foreground=[('selected', '#ffffff')]
+                background=[('selected', list_select_bg)],
+                foreground=[('selected', list_select_fg)]
             )
             safe_configure(
                 'Treeview.Heading',
@@ -3206,26 +3404,34 @@ class AutoAnnotationApp:
             self._ensure_horizontal_scale_style_assets(background=palette.get("panel", palette["bg"]))
             safe_configure(
                 'Vertical.TScrollbar',
-                background=palette["panel_alt"],
-                troughcolor=palette["bg"],
+                background=scrollbar_thumb,
+                troughcolor=scrollbar_track,
                 bordercolor=palette["border"],
+                lightcolor=scrollbar_thumb,
+                darkcolor=scrollbar_thumb,
                 arrowcolor=control_arrow
             )
             safe_map(
                 'Vertical.TScrollbar',
-                background=[('active', palette.get("button_hover", palette["panel_alt"]))],
+                background=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
+                lightcolor=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
+                darkcolor=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
                 arrowcolor=[('active', control_arrow), ('disabled', control_arrow_disabled)]
             )
             safe_configure(
                 'Horizontal.TScrollbar',
-                background=palette["panel_alt"],
-                troughcolor=palette["bg"],
+                background=scrollbar_thumb,
+                troughcolor=scrollbar_track,
                 bordercolor=palette["border"],
+                lightcolor=scrollbar_thumb,
+                darkcolor=scrollbar_thumb,
                 arrowcolor=control_arrow
             )
             safe_map(
                 'Horizontal.TScrollbar',
-                background=[('active', palette.get("button_hover", palette["panel_alt"]))],
+                background=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
+                lightcolor=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
+                darkcolor=[('active', scrollbar_thumb_hover), ('pressed', scrollbar_thumb_hover)],
                 arrowcolor=[('active', control_arrow), ('disabled', control_arrow_disabled)]
             )
         except: pass
@@ -3700,31 +3906,6 @@ class AutoAnnotationApp:
 
         return f"{base_prefix} {clean_message}".strip()
 
-    def _should_show_help_context_ppm_hint(self) -> bool:
-        try:
-            hover_widget = getattr(HELP, "_hover_widget", None)
-            if hover_widget is None:
-                return False
-
-            current_cursor = ""
-            try:
-                current_cursor = str(hover_widget.cget("cursor") or "").strip().lower()
-            except Exception:
-                current_cursor = str(getattr(hover_widget, "_help_context_cursor", "") or "").strip().lower()
-
-            if current_cursor not in ("question_arrow", "help"):
-                return False
-
-            try:
-                if HELP._widget_has_explicit_right_click(hover_widget):
-                    return False
-            except Exception:
-                pass
-
-            return True
-        except Exception:
-            return False
-
     def _get_help_strip_available_width(self) -> int:
         widget = getattr(self, "status_text", None)
         if widget is None:
@@ -3758,9 +3939,6 @@ class AutoAnnotationApp:
         full_text = str(text or "").replace("\r", " ").replace("\n", " ").strip()
         if not full_text:
             return ""
-
-        if self._should_show_help_context_ppm_hint():
-            full_text = f"{full_text} | PPM"
 
         compact_prefix = str(getattr(self, "_help_panel_message_prefix", "HELP:")).strip()
         hint_suffix = "..."
@@ -3936,9 +4114,9 @@ class AutoAnnotationApp:
                     overlay_title.configure(
                         bg="#112235",
                         fg="#dcefff",
-                        text="Rozwinieta pomoc  |  PPM lub ESC"
+                        text="Rozwinięta pomoc  |  ESC"
                         if bool(getattr(self, "_help_overlay_forced_visible", False))
-                        else "Rozwinieta pomoc  |  CTRL + ALT lub PPM",
+                        else "Rozwinięta pomoc  |  CTRL + ALT",
                     )
             except Exception:
                 pass
@@ -3959,6 +4137,7 @@ class AutoAnnotationApp:
                 pass
 
             self._sync_global_terminal_toggle_state()
+            self._sync_free_mode_assistant_toggle_state()
             self._apply_global_terminal_visual_state()
             self._render_help_panel_text()
             self._set_help_overlay_visible(expanded)
@@ -3987,6 +4166,61 @@ class AutoAnnotationApp:
             )
         except Exception:
             pass
+
+    def _is_free_mode_assistant_available(self) -> bool:
+        try:
+            if not self._is_free_mode_assistant_context():
+                return False
+            return not self._get_free_mode_assistant_context().is_empty()
+        except Exception:
+            return False
+
+    def _sync_free_mode_assistant_toggle_state(self):
+        btn = getattr(self, "_free_mode_assistant_toggle_btn", None)
+        if btn is None:
+            return
+
+        palette = getattr(self, "palette", {})
+        base_bg = "#050505"
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        success = palette.get("success", palette.get("accent", "#4ec9b0"))
+        guide = palette.get("guide", palette.get("warning", "#f0b44c"))
+        muted = palette.get("muted_dim", palette.get("muted", "#9a9a9a"))
+        available = self._is_free_mode_assistant_available()
+        active = bool(getattr(self, "_free_mode_assistant_enabled", False)) and available
+        bg = blend_hex_colors(success, base_bg, 0.20) if active else base_bg
+        fg = guide if available else muted
+
+        try:
+            btn.configure(
+                text="AS",
+                state=tk.NORMAL if available else tk.DISABLED,
+                bg=bg,
+                fg=fg,
+                activebackground=bg,
+                activeforeground=fg,
+                disabledforeground=muted,
+                highlightbackground=border,
+                highlightcolor=border,
+                relief=tk.SUNKEN if active else tk.FLAT,
+            )
+        except Exception:
+            pass
+
+    def toggle_free_mode_assistant(self):
+        if not self._is_free_mode_assistant_available():
+            self._free_mode_assistant_enabled = False
+            overlay = getattr(self, "_free_mode_assistant_overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.hide()
+                except Exception:
+                    pass
+            self._sync_free_mode_assistant_toggle_state()
+            return
+
+        self._free_mode_assistant_enabled = not bool(getattr(self, "_free_mode_assistant_enabled", False))
+        self._refresh_free_mode_assistant()
 
     def _apply_global_terminal_visual_state(self):
         palette = getattr(self, "palette", {})
@@ -4881,6 +5115,148 @@ class AutoAnnotationApp:
 
         return None
 
+    def _is_free_mode_assistant_context(self) -> bool:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            active_project = CAMPAIGN.get_active_project_name()
+        except Exception:
+            active_project = ""
+        return bool(getattr(self, "campaign_free_mode", False) or not active_project)
+
+    def _get_default_free_mode_assistant_context(self, tab_key: str | None) -> FreeModeAssistantContext:
+        if tab_key == "annotation":
+            return FreeModeAssistantContext(
+                location="[Z2] Anotacja tablic",
+                goal="Ta zakładka prowadzi pracę nad tablicami: wybierasz tor, przygotowujesz obrazy i tworzysz albo poprawiasz anotacje.",
+                workflow=(
+                    "Wybierz tor pracy i źródło obrazów.",
+                    "Utwórz XML ręcznie albo uruchom autoanotację po wyborze modelu.",
+                    "Popraw poligony tablic i zatwierdź poprawne obrazy.",
+                    "Wyeksportuj anotacje lub dataset i zdecyduj, czy przechodzisz do Z4.",
+                ),
+                glossary=(
+                    "run = katalog pracy z artefaktami",
+                    "XML = plik współrzędnych ramek",
+                    "autoanotacja = YOLO tworzy wstępne boxy",
+                ),
+                caution="Model PT jest wymagany tylko dla autoanotacji; ręczny tor pracuje na obrazach i XML.",
+            )
+        if tab_key == "characters":
+            return FreeModeAssistantContext(
+                location="[Z3] Autoanotacja znaków tablic",
+                goal="Ta zakładka prowadzi pracę nad znakami: od cropów tablic, przez OCR i boxy znaków, do źródłowego datasetu znaków.",
+                workflow=(
+                    "PZ1 tworzy cropy tablic ze źródła Z2.",
+                    "PZ2 analizuje znaki przez OCR lub YOLO i pozwala poprawiać boxy.",
+                    "PZ3 zbiera perfecty, obsługuje opcjonalny CVAT i eksportuje źródłowy dataset znaków.",
+                ),
+                glossary=(
+                    "preview run = robocza paczka cropów tablic",
+                    "perfect = tablica gotowa do datasetu",
+                    "gold pack = wybrane poprawne przykłady",
+                ),
+                caution="CVAT w PZ3 dotyczy cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach.",
+            )
+        if tab_key == "training":
+            return FreeModeAssistantContext(
+                location="[Z4] Trening i analiza",
+                goal="Ta zakładka służy do przygotowania wariantu datasetu, wyboru splitu i uruchomienia treningu modelu.",
+                workflow=(
+                    "W PZ1 wybierz tor i utwórz wariant datasetu.",
+                    "W PZ2 wybierz wariant, model bazowy i parametry treningu.",
+                    "Po treningu sprawdź historię, walidację i ranking wyników.",
+                ),
+                glossary=(
+                    "wariant = konkretna wersja datasetu",
+                    "split = train / val / test",
+                    "data.yaml = wejście YOLO Detect/Pose",
+                ),
+                caution="Źródła datasetu tworzysz wcześniej; w Z4/PZ2 wybierasz wariant, a nie podmieniasz ręcznie bazę danych.",
+            )
+        return FreeModeAssistantContext(
+            location="Tryb swobodny",
+            goal="Jesteś poza wizardem kampanii i możesz przechodzić między zakładkami Z2, Z3 oraz Z4 według potrzeb.",
+            workflow=(
+                "Z2 przygotowuje tablice i eksport anotacji lub datasetu.",
+                "Z3 przygotowuje znaki i źródłowy dataset znaków.",
+                "Z4 tworzy warianty datasetu i uruchamia trening modeli.",
+            ),
+            glossary=("Z2 = tablice", "Z3 = znaki", "Z4 = dataset i trening"),
+            caution="Jeśli wrócisz do kampanii, obowiązuje już prowadzenie etapowe wizarda.",
+        )
+
+    def _get_free_mode_assistant_context(self) -> FreeModeAssistantContext:
+        tab_key = self._get_selected_tab_key()
+        if tab_key in {"campaign", "help", None}:
+            return FreeModeAssistantContext()
+
+        tab = self.tabs.get(tab_key) if isinstance(getattr(self, "tabs", None), dict) else None
+        provider = getattr(tab, "get_free_mode_assistant_context", None)
+        if callable(provider):
+            try:
+                provided = FreeModeAssistantContext.from_value(provider())
+                if not provided.is_empty():
+                    return provided
+            except Exception:
+                pass
+        return self._get_default_free_mode_assistant_context(tab_key)
+
+    def _schedule_free_mode_assistant_placement(self):
+        if getattr(self, "_free_mode_assistant_place_after_id", None):
+            return
+        try:
+            self._free_mode_assistant_place_after_id = self.root.after_idle(self._place_free_mode_assistant)
+        except Exception:
+            self._free_mode_assistant_place_after_id = None
+
+    def _place_free_mode_assistant(self):
+        self._free_mode_assistant_place_after_id = None
+        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.place(
+                notebook=getattr(self, "notebook", None),
+                info_panel=getattr(self, "info_panel_frame", None),
+            )
+        except Exception:
+            pass
+
+    def _refresh_free_mode_assistant(self):
+        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        if overlay is None:
+            return
+
+        self._sync_free_mode_assistant_toggle_state()
+        if not self._is_free_mode_assistant_context():
+            overlay.hide()
+            return
+
+        context = self._get_free_mode_assistant_context()
+        if context.is_empty():
+            overlay.hide()
+            return
+
+        overlay.update_context(context, palette=getattr(self, "palette", {}))
+        if not bool(getattr(self, "_free_mode_assistant_enabled", False)):
+            overlay.hide()
+            return
+
+        overlay.show()
+        self._schedule_free_mode_assistant_placement()
+
+    def notify_free_mode_assistant_context_changed(self):
+        if getattr(self, "_free_mode_assistant_refresh_after_id", None):
+            return
+        try:
+            self._free_mode_assistant_refresh_after_id = self.root.after_idle(self._refresh_free_mode_assistant_from_after)
+        except Exception:
+            self._free_mode_assistant_refresh_after_id = None
+
+    def _refresh_free_mode_assistant_from_after(self):
+        self._free_mode_assistant_refresh_after_id = None
+        self._refresh_free_mode_assistant()
+
 
     def update_campaign_tab_access(self):
         """
@@ -4911,6 +5287,7 @@ class AutoAnnotationApp:
 
             self.refresh_main_tab_labels()
             self.refresh_window_title()
+            self.notify_free_mode_assistant_context_changed()
             return
 
         # aktywny projekt
@@ -4943,6 +5320,7 @@ class AutoAnnotationApp:
 
         self.refresh_main_tab_labels(active_tab_key=active_step_tab_key)
         self.refresh_window_title()
+        self.notify_free_mode_assistant_context_changed()
 
     def get_tab_index(self, tab_key: str) -> int:
         if tab_key not in self.tabs:
@@ -5073,6 +5451,7 @@ class AutoAnnotationApp:
         if selected_key in {"annotation", "characters", "training"}:
             self._last_allowed_main_tab_key = selected_key
         self._save_active_main_tab_preference()
+        self.notify_free_mode_assistant_context_changed()
 
 
     
@@ -5112,6 +5491,8 @@ class AutoAnnotationApp:
                 "_theme_refresh_after_id",
                 "_startup_finalize_after_id",
                 "_help_overlay_place_after_id",
+                "_free_mode_assistant_place_after_id",
+                "_free_mode_assistant_refresh_after_id",
             ):
                 pending = getattr(self, attr_name, None)
                 if not pending:

@@ -458,3 +458,278 @@ Kazdy nowy fix workflow ma przejsc przez trzy pytania:
 3. Czy GUI tylko to wyswietla, czy nadal probuje samo zgadywac?
 
 Jesli odpowiedz na pytanie 3 brzmi "GUI zgaduje", to to jest kandydat do kolejnego przepiecia na RC.
+
+### Dodatkowy krok RC domkniety po tej analizie
+- `Z2` dostalo jawny wpis `step2_active_run` w `artifact_registry.json`.
+- Przywracanie kampanii do `Z2` zaczyna teraz preferowac:
+  1. `step2_active_run` z RC,
+  2. potem ogolne `plate_source`,
+  3. a dopiero dalej starsze fallbacki awaryjne.
+- Powrot naprawczy `E3 -> Z2` nie powinien juz semantycznie polegac na:
+  - `last_preview_run_dir`
+  - ani `plate_dataset_run`
+  ze snapshotu `annotation_ui_state.json`,
+  jesli aktywny run `Z2` jest juz zapisany w RC.
+- To jest kolejny krok w kierunku zasady:
+  - `annotation_ui_state.json` = stan interfejsu
+  - `artifact_registry.json` = aktywne artefakty iteracji
+  - `campaigns_registry.json` = stan workflow projektu
+
+### Kolejny krok RC domkniety
+- Kampanijny snapshot `annotation_ui_state.json` nie zapisuje juz:
+  - `plate_dataset_run`
+  - `plate_dataset_images`
+  - `last_preview_run_dir`
+- Te pola byly historycznie wykorzystywane do odtwarzania aktywnego runu `Z2`,
+  ale po wprowadzeniu `step2_active_run` staly sie zdublowanym zrodlem prawdy.
+- Nowa zasada:
+  - aktywny run `Z2` i jego katalog obrazow po stronie kampanii maja pochodzic z RC,
+  - snapshot UI moze przechowywac tylko pomocnicze informacje sesyjne:
+    - indeks,
+    - nazwe ostatniego preview,
+    - lokalne `[OK]`,
+    - kosmetyke interfejsu.
+
+### Kolejny krok RC domkniety po licznikach toru znakow
+- W `campaign_manager.py` pojawil sie wspolny helper `get_step3_char_source_state()`.
+- Ten helper liczy jedno, jawne zrodlo stanu `E3/char` z:
+  - aktywnej paczki `PZ2`,
+  - nowych `[OK]` z `step2_active_run`,
+  - oraz z wykluczeniem tego, co jest juz w projektowym `ApprovedSet`.
+- Kampania (`tab_campaign.py`) przestala skladac ten stan lokalnie w GUI.
+- Prawy panel `Z2` (`tab_annotation.py`) zaczal korzystac z tego samego helpera dla zielonej ramki i liczb toru znakow.
+- To odcina kolejny rozjazd typu:
+  - `E3` liczy jedno,
+  - `Z2` liczy drugie,
+  - a RC trzyma trzecie.
+
+## 2026-05-12
+
+### Checkpoint Architektury GUI - Z2 / Z3 / Z4
+
+### Co zostalo fizycznie rozdzielone
+
+#### Z2
+- `z2_campaign_flow.py`
+- `z2_free_mode_flow.py`
+- `z2_shared_ui.py`
+- `z2_flow_models.py`
+- host: `tab_annotation.py`
+
+#### Z3
+- `z3_campaign_flow.py`
+- `z3_free_mode_flow.py`
+- `z3_shared_ui.py`
+- `z3_preview_ui.py`
+- `z3_flow_models.py`
+- `z3_view_models.py`
+- host: `tab_character_annotation.py`
+
+#### Z4
+- `z4_campaign_flow.py`
+- `z4_free_mode_flow.py`
+- `z4_shared_ui.py`
+- `z4_flow_models.py`
+- `z4_view_models.py`
+- host: `tab_training.py`
+
+### Co to oznacza praktycznie
+- `(C)` i `(F)` nie siedza juz na jednym wspolnym state machine w `Z2`.
+- `Z3` nie trzyma juz kampanijnego wejscia, preview, kompasu, `PZ3 statusu` i wiekszosci przejsc w jednym monolicie hosta.
+- `Z4` nie trzyma juz w hoście glownego shell workflow:
+  - wyboru toru,
+  - `PZ1 -> PZ2`,
+  - powrotu do kampanii,
+  - finish / complete project,
+  - kampanijnego entry / restore.
+
+### Co zostalo w hostach
+
+#### `tab_annotation.py`
+- host widgetow `Z2`
+- lokalne helpery UI i runtime
+- nadal sa wrappery/delegaty, ale najwieksze decyzje `C/F` sa juz wyjete
+
+#### `tab_character_annotation.py`
+- host widgetow `Z3`
+- preview editing / OCR lab / niskopoziomowe akcje na znakach
+- nadal sa wrappery, ale glowny workflow `C/F`, `PZ2/PZ3` i preview chrome sa juz poza hostem
+
+#### `tab_training.py`
+- host widgetow `Z4`
+- niskopoziomowe helpery treningowe, walidacje, historię i analityke
+- nadal zostaja lokalne funkcje stricte od treningu/modeli/GPU
+
+### Najwazniejszy efekt architektoniczny
+- mozemy teraz stabilizowac workflow bez ciaglego ryzyka, ze:
+  - poprawka kampanii rozwali freemode,
+  - poprawka freemode rozwali wizard,
+  - a zmiana preview rozwali shell etapu.
+
+### Co jeszcze nie jest idealne
+- hosty nadal maja troche wrapperow i pomocniczych helperow domenowych
+- `shared ui` w `Z3/Z4` jest juz duze i trzeba pilnowac, zeby nie zamienilo sie w nowy monolit
+- `freemode` nie jest jeszcze przepiete na RC jako zrodlo prawdy
+
+### Ocena checkpointu
+- `Z2`: fundament mocny
+- `Z3`: fundament bardzo mocny
+- `Z4`: fundament juz sensowny i spojny z reszta, ale wymaga jeszcze testow regresji
+
+### Rekomendacja po tym checkpointcie
+Kolejny sensowny etap to juz nie dalsze ciecie w ciemno, tylko:
+- checkpoint testowy `Z2/Z3/Z4`
+- potem poprawki zachowania
+- a dopiero na koncu ewentualne doczyszczanie ostatnich wrapperow.
+
+### Wersja Inzynierska Architektury
+
+```text
+                                ┌───────────────────────┐
+                                │ campaign_manager.py   │
+                                │ RC / registry / stan  │
+                                └───────────┬───────────┘
+                                            │
+                         kampania (C)       │       artefakty / status etapu
+                                            │
+        ┌───────────────────────────────────┼───────────────────────────────────┐
+        │                                   │                                   │
+        ▼                                   ▼                                   ▼
+
+┌────────────────────┐             ┌────────────────────┐             ┌────────────────────┐
+│ Z2 / E2            │             │ Z3 / E3            │             │ Z4 / E4            │
+│ tab_annotation.py  │             │ tab_character_...  │             │ tab_training.py    │
+│ host UI            │             │ host UI            │             │ host UI            │
+└─────────┬──────────┘             └─────────┬──────────┘             └─────────┬──────────┘
+          │                                  │                                  │
+          │ delegates                        │ delegates                        │ delegates
+          │                                  │                                  │
+   ┌──────┼──────────────┐            ┌──────┼───────────────┐           ┌──────┼──────────────┐
+   │      │              │            │      │       │       │           │      │      │       │
+   ▼      ▼              ▼            ▼      ▼       ▼       ▼           ▼      ▼      ▼       ▼
+
+[z2_campaign] [z2_free] [z2_shared]   [z3_campaign] [z3_free] [z3_shared] [z3_preview]
+[z2_models]   [z2_view]               [z3_models]   [z3_view]
+
+                                                                  [z4_campaign] [z4_free]
+                                                                  [z4_shared]   [z4_models]
+                                                                  [z4_view]
+
+Legenda:
+- `campaign_flow` = logika tylko dla (C)
+- `free_mode_flow` = logika tylko dla (F)
+- `shared_ui` = wspolny apply/render bez semantyki etapu
+- `preview_ui` = canvas / fullscreen / overlay / kompas
+- `flow_models` = typed kontrakty miedzy warstwami
+- `view_models` = gotowe modele widoku
+```
+
+### Odczyt tej mapy
+- hosty `tab_*` buduja widgety i deleguja logike dalej
+- kampania korzysta z RC i artefaktow wskazanych przez RC
+- freemode korzysta z lokalnego runtime / session / storage
+- `Z2`, `Z3`, `Z4` zaczynaja miec ten sam, powtarzalny wzorzec modulu
+
+### Wersja Produktowa Architektury
+
+```text
+                   UZYTKOWNIK
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+          ▼                         ▼
+   KAMPANIA / WIZARD (C)       FREEMODE (F)
+          │                         │
+          │                         │
+          ├──────────────┬──────────┤
+          │              │          │
+          ▼              ▼          ▼
+        Z2/E2          Z3/E3      Z4/E4
+     anotacja tablic   znaki       trening
+          │              │          │
+          │              │          │
+          ▼              ▼          ▼
+   osobny flow C/F  osobny flow C/F  osobny flow C/F
+
+Dla (C):
+- zrodlo prawdy = RC
+- etapy sa prowadzone przez wizard
+- artefakty iteracji sa odtwarzane z rejestru
+
+Dla (F):
+- zrodlo prawdy = lokalny runtime / session / storage
+- brak prowadzenia przez wizard
+- uzytkownik pracuje swobodnie po wlasnej sciezce
+
+Cel architektury:
+- poprawka w (C) nie rozwala (F)
+- poprawka w (F) nie rozwala (C)
+- host zakladki nie liczy juz calego workflow samodzielnie
+```
+
+### Odczyt wersji produktowej
+- kampania i freemode sa rozdzielone nie tylko logicznie, ale tez modulowo
+- kazdy etap `Z2 / Z3 / Z4` ma osobny przeplyw dla kampanii i dla trybu swobodnego
+- RC prowadzi kampanie, a freemode pozostaje lokalnym trybem pracy
+
+## 2026-05-13
+
+### Z2 (F) - ostatnie zmiany miniflow autoanotacji
+
+- Uporzadkowano semantyke toru auto w `Z2`:
+  - `Tor (0) -> Wejscie (1) -> Autoanotacja (2) -> Korekta (3) -> Eksport (4)`.
+- Wejscie do toru `Autoanotacja` startuje od czystego kroku wyboru obrazow.
+- Sam wybor katalogu obrazow zostal odchudzony:
+  - to juz tylko lekka walidacja sciezki,
+  - bez ciezkiego budowania workspace na tym etapie.
+- Ladowanie pelnego workspace `Z2` zostalo przypiete do przejscia `Dalej` z kroku `Wejscie`.
+- Dodano guardy, ktore blokuja ponowne samoczynne odpalanie splash/workspace load:
+  - po potwierdzeniu modala ustawien autoanotacji,
+  - po zwyklym refreshu UI,
+  - po przypadkowym restore stanu.
+- Ustawienia modala autoanotacji przestaly byc przywracane jako trwaly stan sesji:
+  - sciezka modelu tablic `.pt`,
+  - wsparcie pojazdami,
+  - model pojazdow / custom path,
+  - `confidence`,
+  - runtime meta modelu tablic.
+- Wyjscie z miniflow do wyboru toru czysci teraz rowniez runtime ustawien modala autoanotacji.
+- Krok `Wejscie` i krok `Autoanotacja` dostaly bardziej kompaktowy uklad:
+  - mniej pionowych odstepow,
+  - mniej meta-opisow miedzy gradientowym naglowkiem a karta,
+  - czytelniejsze zawijanie tekstu.
+- To samo zostalo dopiete dla kroku `Korekta`:
+  - sekcja siedzi wyzej,
+  - wrap tekstow jest bardziej przewidywalny.
+- W kroku `Korekta` ukryto tekstowa sciezke runu:
+  - zostal tylko przycisk otwarcia folderu runu.
+- Ustabilizowano etykiete CTA w torze auto:
+  - po cofnieciu z `Korekty` do `Autoanotacji` przycisk nie powinien juz zmieniac nazwy na warianty zalezne od trybu pojazdow.
+- Pasek postepu autoanotacji zostal przepiety tak, aby windowal pod CTA `Start / ZATRZYMAJ`, a nie wyzej w karcie.
+
+### Autoanotacja ze wsparciem pojazdow
+
+- Tryb `Pojazdy + tablice` zostal przebudowany z filtra post-process na faktyczny wariant `vehicle-first`:
+  - najpierw wykrywane sa pojazdy,
+  - potem tablice sa szukane tylko w obrebie pojazdu.
+- UI i copy w `Z2` zostaly dopasowane do tej semantyki:
+  - wsparcie pojazdami jest opisane jako mechanizm pomocniczy,
+  - boxy pojazdow nie sa komunikowane jako finalny artefakt YOLO.
+
+### Backlog - rzeczy do doszlifowania pozniej
+
+- Domknac `Z2` miniflow auto jako jeszcze bardziej zwarty modul:
+  - mniej semantyki w hoście `tab_annotation.py`,
+  - mniej rozproszenia miedzy `z2_free_mode_flow.py` i `z2_shared_ui.py`.
+- Wyciagnac `workspace loader` i `splash/progress UI` do bardziej spojnego podmodulu:
+  - dzis to nadal jest obszar wrazliwy na regresje.
+- Pilnowac, aby `shared_ui` nie stalo sie nowym monolitem `Z2`.
+- Dalsze porzadki copy:
+  - usuwanie starych fallbackow tekstowych,
+  - ograniczenie dublowania narracji dla toru auto.
+- Dopic ostroznie testy regresji dla:
+  - `Wejscie -> Autoanotacja`,
+  - `Autoanotacja -> Korekta`,
+  - `Korekta -> Eksport`,
+  - powrot do wyboru toru,
+  - restart aplikacji i restore sesji.

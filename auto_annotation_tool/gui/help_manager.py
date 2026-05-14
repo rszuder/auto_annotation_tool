@@ -19,8 +19,8 @@ class HelpSystem:
         self.overlay_presenter = None
         self.overlay_dismisser = None
         self.default_message = (
-            "Gotowy. Najedź, kliknij albo ustaw fokus na elemencie interfejsu, "
-            "aby zobaczyć wskazówkę. PPM pokaże pełniejszy opis."
+            "Gotowy. Najedź na kartę, przycisk, pole albo panel, aby zobaczyć opis kontekstu. "
+            "Kliknięcie przypomina wskazówkę, a Ctrl+Alt rozwija pełniejszy opis w globalnym helpie."
         )
         self._hover_widget = None
         self._hover_help_key = ""
@@ -103,19 +103,6 @@ class HelpSystem:
         except Exception:
             pass
 
-    @staticmethod
-    def _widget_has_explicit_right_click(widget) -> bool:
-        if widget is None:
-            return False
-
-        for sequence in ("<Button-3>", "<ButtonRelease-3>"):
-            try:
-                if str(widget.bind(sequence) or "").strip():
-                    return True
-            except Exception:
-                pass
-        return False
-
     def bind_help(self, widget, index_key: str):
         if widget is None:
             return
@@ -165,23 +152,12 @@ class HelpSystem:
             self._hover_full_text = full_text
             self._push_status(full_text, "help")
 
-        def on_secondary_help(event=None):
-            self._hover_widget = widget
-            self._hover_help_key = str(index_key or "")
-            self._hover_full_text = full_text
-            self._push_status(full_text, "help")
-            self._show_overlay(full_text, "help")
-
         widget.bind("<Enter>", on_enter, add="+")
         widget.bind("<FocusIn>", on_focus_in, add="+")
         widget.bind("<Leave>", on_leave, add="+")
         widget.bind("<FocusOut>", on_focus_out, add="+")
         widget.bind("<ButtonPress-1>", on_primary_help, add="+")
         widget.bind("<Destroy>", on_destroy, add="+")
-
-        # Nie nadpisujemy widgetów, które mają już własną logikę PPM.
-        if not self._widget_has_explicit_right_click(widget):
-            widget.bind("<Button-3>", on_secondary_help, add="+")
 
 
 HELP = HelpSystem()

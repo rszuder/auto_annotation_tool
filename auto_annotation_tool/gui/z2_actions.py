@@ -538,7 +538,7 @@ class PlateExportAction(Z2Action):
     def get_description(self, ctx: Z2ActionContext) -> str:
         if ctx.has_export_ready_run:
             return "Przechodzi do przygotowania splitu i eksportu datasetu na gotowym runie Z2."
-        return "Akcja odblokuje się, gdy run Z2 będzie miał zapisane tablice gotowe do eksportu."
+        return "Akcja odblokuje się, gdy run Z2 będzie miał co najmniej jedną tablicę oznaczoną statusem OK."
 
     def activate(self, host, ctx: Z2ActionContext) -> None:
         if not self.is_enabled(ctx):

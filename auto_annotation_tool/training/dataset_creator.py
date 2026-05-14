@@ -178,7 +178,7 @@ class DatasetCreator:
         """Zwraca opis wymaganego formatu."""
         return DatasetCreator.REQUIRED_FORMAT
     
-    def parse_cvat_xml(self, xml_path: Path) -> Tuple[bool, str, Dict]:
+    def parse_cvat_xml(self, xml_path: Path, allowed_image_names: Optional[set[str]] = None) -> Tuple[bool, str, Dict]:
         """
         Parsuje plik CVAT XML.
         
@@ -189,6 +189,7 @@ class DatasetCreator:
             "images": 0,
             "plates": 0,
             "skipped": 0,
+            "skipped_unapproved": 0,
             "annotated_images": 0,
             "pending_xml_images": 0,
             "errors": []
@@ -200,6 +201,14 @@ class DatasetCreator:
         
         if not xml_path.exists():
             return False, "Plik nie istnieje", stats
+
+        allowed_lookup = None
+        if allowed_image_names is not None:
+            allowed_lookup = {
+                str(name or "").strip().lower()
+                for name in set(allowed_image_names or set())
+                if str(name or "").strip()
+            }
         
         try:
             tree = ET.parse(xml_path)
@@ -211,6 +220,10 @@ class DatasetCreator:
                 img_height = int(image.get('height', 0))
                 
                 if not img_name or not img_width or not img_height:
+                    continue
+
+                if allowed_lookup is not None and img_name.strip().lower() not in allowed_lookup:
+                    stats["skipped_unapproved"] += 1
                     continue
                 
                 stats["images"] += 1

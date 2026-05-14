@@ -58,11 +58,17 @@ class DatasetSplitter:
         
         for split in ["train", "val", "test", ""]:
             img_dir = source_dir / "images" / split if split else source_dir / "images"
+            lbl_dir = source_dir / "labels" / split if split else source_dir / "labels"
+            if split and not img_dir.exists():
+                alt_img_dir = source_dir / split / "images"
+                alt_lbl_dir = source_dir / split / "labels"
+                if alt_img_dir.exists():
+                    img_dir = alt_img_dir
+                    lbl_dir = alt_lbl_dir
             if img_dir.exists():
                 for img_path in img_dir.iterdir():
                     if img_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
                         # Znajdź odpowiadającą etykietę
-                        lbl_dir = source_dir / "labels" / split if split else source_dir / "labels"
                         lbl_path = lbl_dir / (img_path.stem + ".txt")
                         
                         if lbl_path.exists():
@@ -271,11 +277,17 @@ class DatasetSplitter:
         
         for split in ["train", "val", "test", ""]:
             img_dir = source_dir / "images" / split if split else source_dir / "images"
+            lbl_dir = source_dir / "labels" / split if split else source_dir / "labels"
+            if split and not img_dir.exists():
+                alt_img_dir = source_dir / split / "images"
+                alt_lbl_dir = source_dir / split / "labels"
+                if alt_img_dir.exists():
+                    img_dir = alt_img_dir
+                    lbl_dir = alt_lbl_dir
             if img_dir.exists():
                 for img_path in img_dir.iterdir():
                     if img_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
                         # Znajdź odpowiadającą etykietę
-                        lbl_dir = source_dir / "labels" / split if split else source_dir / "labels"
                         lbl_path = lbl_dir / (img_path.stem + ".txt")
                         
                         if lbl_path.exists():
