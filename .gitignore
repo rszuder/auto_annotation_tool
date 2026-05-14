@@ -8,6 +8,7 @@ Thumbs.db
 
 # wyniki i dane robocze
 output/
+export_clean/
 training_runs/
 rankings/
 datasets/
