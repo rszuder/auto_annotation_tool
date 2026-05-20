@@ -63,6 +63,8 @@ class CampaignManager:
             "project_start_scope_plate_run": "",
             "project_start_scope_plate_model": "",
             "project_start_scope_char_model": "",
+            "step1_source_manual_clear_iteration": 0,
+            "step1_restored_image_source_dir": "",
             "step1_status": "pending",
             "iteration_target": "",
             "last_iteration_target": "",
@@ -148,7 +150,7 @@ class CampaignManager:
     def _load_state(self) -> Dict[str, Any]:
         if self.state_file.exists():
             try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
+                with open(self.state_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     if "projects" in data and "active_project" in data:
                         for project_name, project_data in list(data.get("projects", {}).items()):
@@ -182,7 +184,7 @@ class CampaignManager:
 
     def _read_json_file(self, path: Path) -> Dict[str, Any]:
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
             return data if isinstance(data, dict) else {}
         except Exception:
@@ -805,6 +807,111 @@ class CampaignManager:
             "manifest_cloned": bool(manifest_cloned),
         }
 
+    def _resolve_previous_iteration_image_source_for_e1(
+        self,
+        *,
+        project_name: str,
+        current_iteration: int,
+        project_data: Dict[str, Any],
+    ) -> str:
+        stage_state = self.get_manual_plate_stage_images_state(
+            source_iteration=current_iteration,
+            project_name=project_name,
+        )
+        if int(stage_state.get("image_count", 0) or 0) > 0:
+            stage_images_dir = str(stage_state.get("images_dir") or "").strip()
+            if stage_images_dir:
+                return stage_images_dir
+        return ""
+
+    def get_manual_plate_stage_images_state(
+        self,
+        source_iteration: int = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {"ok": False, "image_count": 0, "images_dir": "", "stage_dir": ""}
+
+        try:
+            iter_value = int(source_iteration or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+
+        stage_root = self.get_staging_dir("plate_stage")
+        if stage_root is None:
+            return {"ok": False, "image_count": 0, "images_dir": "", "stage_dir": ""}
+
+        stage_root = Path(stage_root)
+        stage_candidates = [
+            (stage_root / f"Iteracja_{iter_value:03d}", stage_root / f"Iteracja_{iter_value:03d}" / "images"),
+            (stage_root, stage_root / "images"),
+        ]
+
+        for stage_dir, images_dir in stage_candidates:
+            try:
+                if not images_dir.exists() or not images_dir.is_dir():
+                    continue
+                count = 0
+                for image_path in images_dir.iterdir():
+                    if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                        count += 1
+                if count > 0:
+                    return {
+                        "ok": True,
+                        "image_count": int(count),
+                        "images_dir": str(images_dir.resolve()),
+                        "stage_dir": str(stage_dir.resolve()),
+                        "iteration": int(iter_value),
+                    }
+            except Exception:
+                continue
+
+        return {
+            "ok": False,
+            "image_count": 0,
+            "images_dir": "",
+            "stage_dir": str((stage_root / f"Iteracja_{iter_value:03d}").resolve()),
+            "iteration": int(iter_value),
+        }
+
+    def ensure_step1_image_source_restored_from_previous_iteration(self, project_name: str = None) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+        project_data = self.state.get("projects", {}).get(project_name)
+        if not isinstance(project_data, dict):
+            return ""
+        try:
+            current_step = int(project_data.get("current_step", 1) or 1)
+            current_iteration = int(project_data.get("current_iteration", 1) or 1)
+        except Exception:
+            return ""
+        if current_step != 1 or current_iteration <= 1:
+            return ""
+        if str(project_data.get("master_pool_dir", "") or "").strip():
+            return ""
+        try:
+            manual_clear_iteration = int(project_data.get("step1_source_manual_clear_iteration", 0) or 0)
+        except Exception:
+            manual_clear_iteration = 0
+        if manual_clear_iteration == current_iteration:
+            return ""
+
+        previous_source = self._resolve_previous_iteration_image_source_for_e1(
+            project_name=project_name,
+            current_iteration=current_iteration - 1,
+            project_data=project_data,
+        )
+        if not previous_source:
+            return ""
+
+        project_data["master_pool_dir"] = previous_source
+        project_data["step1_restored_image_source_dir"] = previous_source
+        project_data["step1_source_manual_clear_iteration"] = 0
+        self.save_state()
+        return previous_source
+
     def _seed_iteration_from_master_pool(
         self,
         *,
@@ -1157,6 +1264,16 @@ class CampaignManager:
         current_target = self._normalize_iteration_target(project_data.get("iteration_target", ""))
         current_iteration = int(project_data.get("current_iteration", 1) or 1)
         next_iteration = current_iteration + 1
+        pending_stage_state = self.get_manual_plate_stage_images_state(
+            source_iteration=current_iteration,
+            project_name=act,
+        )
+        pending_stage_images = int(pending_stage_state.get("image_count", 0) or 0)
+        previous_image_source = self._resolve_previous_iteration_image_source_for_e1(
+            project_name=act,
+            current_iteration=current_iteration,
+            project_data=project_data,
+        )
 
         result: Dict[str, Any] = {
             "ok": True,
@@ -1166,6 +1283,10 @@ class CampaignManager:
             "next_iteration": next_iteration,
             "copied_images": 0,
             "manifest_cloned": False,
+            "previous_image_source": previous_image_source,
+            "restored_master_pool_dir": "",
+            "pending_stage_images": pending_stage_images,
+            "needs_new_image_source": False,
         }
 
         reuse_result: Dict[str, Any] | None = None
@@ -1189,6 +1310,8 @@ class CampaignManager:
         project_data["current_iteration"] = next_iteration
         project_data["current_step"] = 1
         project_data["step1_status"] = "pending"
+        project_data["step1_source_manual_clear_iteration"] = 0
+        project_data["step1_restored_image_source_dir"] = ""
 
         if current_target in {"plate", "char"}:
             project_data["last_iteration_target"] = current_target
@@ -1199,11 +1322,15 @@ class CampaignManager:
 
         if start_mode == "reuse_input":
             result.update(reuse_result or {})
-            project_data["current_step"] = 2
-            project_data["step1_status"] = "approved"
             result["effective_mode"] = "reuse_input"
         else:
-            project_data["master_pool_dir"] = ""
+            if previous_image_source:
+                project_data["master_pool_dir"] = previous_image_source
+                project_data["step1_restored_image_source_dir"] = previous_image_source
+                result["restored_master_pool_dir"] = previous_image_source
+            else:
+                project_data["master_pool_dir"] = ""
+                result["needs_new_image_source"] = True
 
         # Nowa iteracja zaczyna się od pełnego resetu stanów etapów zależnych od danych wejściowych.
         project_data["step2_status"] = "pending"
@@ -1820,6 +1947,8 @@ class CampaignManager:
 
         target = Path(path).expanduser()
         self.state["projects"][project_name]["master_pool_dir"] = str(target)
+        self.state["projects"][project_name]["step1_source_manual_clear_iteration"] = 0
+        self.state["projects"][project_name]["step1_restored_image_source_dir"] = ""
         self.save_state()
         return True
 
@@ -1827,7 +1956,13 @@ class CampaignManager:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
             return False
-        self.state["projects"][project_name]["master_pool_dir"] = ""
+        project_data = self.state["projects"][project_name]
+        project_data["master_pool_dir"] = ""
+        project_data["step1_restored_image_source_dir"] = ""
+        try:
+            project_data["step1_source_manual_clear_iteration"] = int(project_data.get("current_iteration", 1) or 1)
+        except Exception:
+            project_data["step1_source_manual_clear_iteration"] = 0
         self.save_state()
         return True
 
@@ -2141,14 +2276,28 @@ class CampaignManager:
 
         union_source_names = {
             str(name or "").strip().lower()
-            for name in set(preview_state.get("source_names") or set())
+            for name in set(project_approved_plates_by_source.keys())
             if str(name or "").strip()
         }
         union_plates_by_source = {
             str(name or "").strip().lower(): int(count or 0)
-            for name, count in dict(preview_state.get("plates_by_source") or {}).items()
+            for name, count in dict(project_approved_plates_by_source).items()
             if str(name or "").strip() and int(count or 0) > 0
         }
+
+        for name in set(preview_state.get("source_names") or set()):
+            safe_name = str(name or "").strip().lower()
+            if safe_name:
+                union_source_names.add(safe_name)
+        for name, count in dict(preview_state.get("plates_by_source") or {}).items():
+            safe_name = str(name or "").strip().lower()
+            plate_count = int(count or 0)
+            if safe_name and plate_count > 0:
+                union_source_names.add(safe_name)
+                union_plates_by_source[safe_name] = max(
+                    int(union_plates_by_source.get(safe_name, 0) or 0),
+                    plate_count,
+                )
 
         pending_added_names: set[str] = set()
         pending_added_plates_by_source: dict[str, int] = {}
@@ -2179,7 +2328,15 @@ class CampaignManager:
         current_plates = max(0, int(union_total_plates) - int(union_project_plates))
 
         return {
-            "source_scope": "step3_pending_union" if pending_images > 0 else str(preview_state.get("source_scope") or "step3_preview"),
+            "source_scope": (
+                "step3_pending_union"
+                if pending_images > 0
+                else (
+                    "campaign_approved_set"
+                    if union_project_names
+                    else str(preview_state.get("source_scope") or "step3_preview")
+                )
+            ),
             "images_with_plates": int(len(union_source_names)),
             "total_plates": int(union_total_plates),
             "project_images_with_plates": int(len(union_project_names)),
@@ -2276,6 +2433,75 @@ class CampaignManager:
 
         return stats
 
+    def get_plate_approved_set_iteration_stats(
+        self,
+        iteration_num: int = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {
+                "project": "",
+                "iteration": int(iteration_num or 0),
+                "images": 0,
+                "plates": 0,
+                "image_names": [],
+            }
+
+        try:
+            iter_value = int(
+                iteration_num
+                or self.state["projects"][project_name].get("current_iteration", 1)
+                or 1
+            )
+        except Exception:
+            iter_value = 1
+
+        stats = {
+            "project": project_name,
+            "iteration": int(iter_value),
+            "images": 0,
+            "plates": 0,
+            "image_names": [],
+        }
+        image_names: set[str] = set()
+
+        for entry in self.list_plate_approved_entries(project_name):
+            if not isinstance(entry, dict):
+                continue
+            raw_iteration = (
+                entry.get("first_approved_iteration")
+                or entry.get("approved_iteration")
+                or 0
+            )
+            try:
+                entry_iteration = int(raw_iteration or 0)
+            except Exception:
+                entry_iteration = 0
+            if entry_iteration != int(iter_value):
+                continue
+
+            valid_plate_count = 0
+            for plate_entry in list(entry.get("plates") or []):
+                if not isinstance(plate_entry, dict):
+                    continue
+                polygon = list(plate_entry.get("polygon") or [])
+                if len(polygon) >= 4:
+                    valid_plate_count += 1
+            if valid_plate_count <= 0:
+                valid_plate_count = int(entry.get("plate_count", 0) or 0)
+            if valid_plate_count <= 0:
+                continue
+
+            stats["images"] += 1
+            stats["plates"] += int(valid_plate_count)
+            image_name = str(entry.get("image_name", "") or "").strip()
+            if image_name:
+                image_names.add(image_name)
+
+        stats["image_names"] = sorted(image_names)
+        return stats
+
     def upsert_plate_approved_entries(
         self,
         entries: List[Dict[str, Any]],
@@ -2308,6 +2534,32 @@ class CampaignManager:
             normalized = dict(raw_entry)
             normalized["entry_key"] = entry_key
             normalized["image_name"] = image_name
+
+            existing_entry = stored_entries.get(entry_key)
+            if not isinstance(existing_entry, dict):
+                existing_entry = {}
+
+            first_iteration = (
+                existing_entry.get("first_approved_iteration")
+                or existing_entry.get("approved_iteration")
+                or normalized.get("first_approved_iteration")
+                or normalized.get("approved_iteration")
+            )
+            try:
+                first_iteration = int(first_iteration or 0)
+            except Exception:
+                first_iteration = 0
+            if first_iteration > 0:
+                normalized["first_approved_iteration"] = int(first_iteration)
+
+            first_approved_at = (
+                str(existing_entry.get("first_approved_at", "") or "").strip()
+                or str(existing_entry.get("approved_at", "") or "").strip()
+                or str(normalized.get("first_approved_at", "") or "").strip()
+                or str(normalized.get("approved_at", "") or "").strip()
+            )
+            if first_approved_at:
+                normalized["first_approved_at"] = first_approved_at
 
             if entry_key in stored_entries:
                 updated += 1
@@ -2422,7 +2674,12 @@ class CampaignManager:
             "total_filenames": len(filenames),
         }
 
-    def get_project_packet_filename_registry(self, project_name: str = None) -> Dict[str, Any]:
+    def get_project_packet_filename_registry(
+        self,
+        project_name: str = None,
+        *,
+        exclude_iteration_num: int | None = None,
+    ) -> Dict[str, Any]:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
             return {
@@ -2456,6 +2713,13 @@ class CampaignManager:
             for image_path in raw_root.rglob("*"):
                 if not image_path.is_file():
                     continue
+                if exclude_iteration_num is not None:
+                    try:
+                        excluded_dir = raw_root / f"Iteracja_{int(exclude_iteration_num):03d}"
+                        if excluded_dir in image_path.parents:
+                            continue
+                    except Exception:
+                        pass
                 if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
                     continue
                 filename = str(image_path.name or "").strip().lower()

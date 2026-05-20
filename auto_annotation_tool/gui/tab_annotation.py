@@ -6,6 +6,7 @@ Układ 3-kolumnowy z interaktywną przeglądarką na Canvasie.
 """
 
 import copy
+import csv
 import json
 from collections import deque
 import os
@@ -41,6 +42,10 @@ from .z2_campaign_flow import (
     prepare_campaign_workflow_runtime,
 )
 from .z2_free_mode_flow import (
+    AUTO_REVIEW_FOLLOWUP_TEXT,
+    AUTO_REVIEW_FOLLOWUP_TITLE,
+    MANUAL_REVIEW_FOLLOWUP_TEXT,
+    MANUAL_REVIEW_FOLLOWUP_TITLE,
     build_z2_cta_state_free_mode,
     build_z2_layout_state_free_mode,
     build_z2_left_panel_copy_payload_free_mode,
@@ -60,7 +65,7 @@ from .z2_shared_ui import (
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
-from .z2_view_models import Step2CtaViewModel, Step2RouteChoiceViewModel, Step2ViewModel
+from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SESSION
 from ..icons import IconManager
@@ -180,6 +185,110 @@ class AnnotationTab:
             logger.debug(f"Nie udało się wyczyścić pamięci GPU po Z2: {e}")
 
     def get_free_mode_assistant_context(self) -> dict:
+        try:
+            campaign_char_repair = bool(self._is_campaign_char_repair_return_mode())
+            campaign_plate_repair = bool(self._is_campaign_plate_step4_repair_return_mode())
+        except Exception:
+            campaign_char_repair = False
+            campaign_plate_repair = False
+
+        if campaign_char_repair or campaign_plate_repair:
+            return {
+                "location": "[Z2] Tryb naprawczy kampanii",
+                "goal": (
+                    "Wróciłeś do Z2, żeby poprawić albo powiększyć zbiór tablic przed dalszą pracą kampanii. "
+                    "Najważniejsze jest przygotowanie poprawnych ramek tablic i nadanie zdjęciom statusu [OK]."
+                ),
+                "workflow": (
+                    "Jeśli masz dobry model tablic, uruchom autoanotację i potraktuj jej wynik jako punkt startowy.",
+                    "Jeśli dokładność jest ważniejsza niż czas, popraw ramki ręcznie na canvasie.",
+                    "Po utworzeniu lub korekcie ramek zaznacz poprawne zdjęcia na liście i nadaj im status [OK].",
+                    "Najwygodniej rysować i poprawiać ramki w pełnym ekranie, przełączanym klawiszem Enter.",
+                    "Po zakończeniu wróć do wizarda, żeby kontynuować etap kampanii.",
+                ),
+                "glossary": (
+                    "Z2 = zakładka pracy nad tablicami",
+                    "tryb naprawczy = powrót do wcześniejszego kroku, żeby uzupełnić dane",
+                    "ramka = obrys tablicy na zdjęciu",
+                    "status [OK] = zdjęcie/anotacja zatwierdzone do dalszych etapów",
+                    "autoanotacja = model PT tworzy wstępne ramki",
+                    "PPM = prawy przycisk myszy na liście wyników",
+                    "LPM = lewy przycisk myszy",
+                    "Enter = przełączenie canvasa w pełny ekran",
+                ),
+                "caution": (
+                    "Nie zatwierdzaj zdjęć bez poprawnych ramek tablic. "
+                    "Tylko pozycje z [OK] zasilą wspólną pulę projektu."
+                ),
+            }
+
+        try:
+            free_mode_screen = str(self._coerce_free_mode_screen() or "").strip().lower()
+            free_mode_route = str(self._get_workflow_route() or "").strip().lower()
+            free_mode_context = bool(self._is_free_mode_session_context())
+        except Exception:
+            free_mode_screen = ""
+            free_mode_route = ""
+            free_mode_context = False
+
+        if free_mode_context and free_mode_route == "auto" and free_mode_screen == "auto_summary":
+            return {
+                "location": "[Z2] Korekta po autoanotacji",
+                "goal": (
+                    "Sprawdzasz wynik autoanotacji tablic i decydujesz, co dalej zrobić z bieżącym runem Z2."
+                ),
+                "workflow": (
+                    "Po prawej możesz ręcznie poprawić polygony tablic i zatwierdzić poprawne pozycje statusem [OK].",
+                    "Po samej autoanotacji akcje „Wytnij tablice” i „Eksport i split datasetu” pozostają zablokowane, jeśli nie ma pozycji [OK].",
+                    "Odblokują się dopiero wtedy, gdy co najmniej jeden obraz ma zapisaną ramkę/poligon tablicy oraz status [OK].",
+                    "„Ponowna autoanotacja” wraca do startu procesu, żeby uruchomić kolejny przebieg, także innym modelem.",
+                    "„Wytnij tablice” prowadzi do Z3/PZ1 i przygotowuje cropy tablic do dalszej pracy nad znakami.",
+                    "„Eksport i split datasetu” otwiera osobną ścieżkę produkcji datasetu tablic YOLO Pose do treningu w Z4.",
+                    "Obie ścieżki biorą tylko obrazy oznaczone statusem [OK]; niezatwierdzone pozycje są pomijane.",
+                    "Jeśli wejdziesz w Z3/PZ1, run Z2 nadal zostaje zapisany i możesz wrócić do eksportu później z poziomu Z2.",
+                ),
+                "glossary": (
+                    "run = katalog pracy Z2 z anotacjami i metadanymi",
+                    "polygon = obrys tablicy zapisany w anotacji",
+                    "crop = wycięty fragment obrazu, tutaj sama tablica dla Z3",
+                    "YOLO Pose = typ datasetu/modelu, który uczy się obrysu tablicy",
+                    "status [OK] = pozycja zatwierdzona do dalszego wykorzystania",
+                ),
+                "caution": (
+                    "Wycinanie tablic do Z3 i eksport datasetu YOLO Pose to dwa różne cele. "
+                    "W obu przypadkach najpierw narysuj lub popraw ramkę tablicy i zatwierdź obraz statusem [OK]."
+                ),
+            }
+
+        if free_mode_context and free_mode_route == "manual" and free_mode_screen == "manual_review":
+            return {
+                "location": "[Z2] Korekta po anotacji ręcznej",
+                "goal": (
+                    "Sprawdzasz ręczny run anotacji tablic i wybierasz, czy ma zasilić pracę nad znakami, "
+                    "czy dataset tablic do treningu YOLO Pose."
+                ),
+                "workflow": (
+                    "Po prawej możesz dalej poprawiać polygony tablic i zatwierdzać poprawne pozycje statusem [OK].",
+                    "Po samym utworzeniu XML akcje „Wytnij tablice” i „Przejdź do splitu i eksportu” pozostają zablokowane.",
+                    "Odblokują się dopiero wtedy, gdy co najmniej jeden obraz ma zapisaną ramkę/poligon tablicy oraz status [OK].",
+                    "„Wytnij tablice” prowadzi do Z3/PZ1 i przygotowuje cropy tablic do anotacji znaków.",
+                    "„Przejdź do splitu i eksportu” otwiera osobną ścieżkę produkcji datasetu tablic YOLO Pose do treningu w Z4.",
+                    "Obie ścieżki biorą tylko obrazy oznaczone statusem [OK]; niezatwierdzone pozycje są pomijane.",
+                    "Run Z2 pozostaje zapisany, więc eksport możesz wykonać później z historii runów bez utraty pracy.",
+                ),
+                "glossary": (
+                    "run = katalog pracy Z2 z ręcznym XML-em i metadanymi",
+                    "polygon = obrys tablicy zapisany w anotacji",
+                    "crop = wycięty fragment obrazu, tutaj sama tablica dla Z3",
+                    "YOLO Pose = typ datasetu/modelu, który uczy się obrysu tablicy",
+                    "status [OK] = pozycja zatwierdzona do dalszego wykorzystania",
+                ),
+                "caution": (
+                    "Wycinanie tablic do Z3 i eksport datasetu YOLO Pose to dwa różne cele. "
+                    "W obu przypadkach najpierw narysuj lub popraw ramkę tablicy i zatwierdź obraz statusem [OK]."
+                ),
+            }
+
         return {
             "location": "[Z2] Anotacja tablic",
             "goal": "Ta zakładka służy do przygotowania anotacji tablic: możesz utworzyć ręczny XML, uruchomić autoanotację albo poprawić istniejący run.",
@@ -225,6 +334,10 @@ class AnnotationTab:
         self._preview_processing_overlay_active = False
         self._campaign_context_project_name = ""
         self._free_mode_session_save_after_id = None
+        self._pending_session_save_include_preview_approved = False
+        self._last_free_mode_session_snapshot_signature = ""
+        self._available_devices_cache = None
+        self._available_devices_cache_time = 0.0
         self._pre_campaign_free_mode_snapshot = None
         self._ui_dispatch_queue = queue.Queue()
         self._ui_dispatch_after_id = None
@@ -272,6 +385,10 @@ class AnnotationTab:
         self._preview_dirty_images = set()
         self._preview_autosave_after_id = None
         self._preview_drag_refresh_after_id = None
+        self._preview_select_render_after_id = None
+        self._preview_pending_select_render = None
+        self._preview_post_interaction_refresh_after_id = None
+        self._preview_light_overlay_refresh = False
         self._preview_fullscreen_active = False
         self._preview_controls_legend_render_key = None
         self._preview_controls_legend_inline_expanded = False
@@ -285,8 +402,27 @@ class AnnotationTab:
         self._preview_controls_legend_offset_x = 10.0
         self._preview_controls_legend_offset_y = 10.0
         self._preview_controls_legend_grab_bbox = None
+        self._preview_controls_legend_toggle_bbox = None
         self._preview_controls_legend_drag_state = None
         self._preview_controls_legend_click_state = None
+        self._preview_controls_legend_active_grab_widget = None
+        self._preview_controls_legend_visible = True
+        self._preview_metrics_overlay_expanded = True
+        self._preview_metrics_overlay_visible = False
+        self._preview_metrics_overlay_offset_x = 12.0
+        self._preview_metrics_overlay_offset_y = 12.0
+        self._preview_metrics_overlay_drag_state = None
+        self._preview_metrics_overlay_user_moved = False
+        self._preview_metrics_overlay_render_key = None
+        self._preview_metrics_overlay_current_width = 0.0
+        self._preview_metrics_overlay_current_height = 0.0
+        self._preview_super_correction_badge_visible = False
+        self._preview_overlay_dock_expanded = True
+        self._preview_overlay_dock_render_key = None
+        self._preview_overlay_dock_tool_rows = {}
+        self._preview_image_status_overlay_render_key = None
+        self._preview_campaign_gate_overlay_render_key = None
+        self._campaign_step2_gate_overlay_state = {}
         self._preview_fullscreen_restore_log_visible = False
         self._preview_fullscreen_restore_root_state = False
         self._preview_fullscreen_restore_window_state = "normal"
@@ -321,6 +457,9 @@ class AnnotationTab:
         self._campaign_step2_transition_skip_heavy_finalize = False
         self._campaign_route_cleanup_after_id = None
         self._campaign_route_cleanup_token = 0
+        self._campaign_char_effective_refresh_after_id = None
+        self._preview_approved_persist_after_id = None
+        self._preview_approval_followup_after_id = None
         self._preview_resume_persist_after_id = None
         self._preview_any_auto_in_run_cache = None
         self._preview_list_sort_tiles = {}
@@ -329,6 +468,7 @@ class AnnotationTab:
         self._preview_list_frozen_context_key = ""
         self._preview_list_frozen_bucket_snapshot = {}
         self._preview_approved_filenames = set()
+        self._preview_image_meta_cache = {}
         self._pending_preview_approved_filenames = set()
         self._campaign_pending_approved_filenames = set()
         self._campaign_hidden_project_approved_filenames = set()
@@ -348,6 +488,11 @@ class AnnotationTab:
             "owned_temp_dirs": [],
         }
         self._plate_auto_scope_modal_refresh_callback = None
+        self._plate_auto_scope_modal_refresh_after_id = None
+        self._plate_auto_scope_modal_selection_refresh_callback = None
+        self._plate_auto_scope_modal_selection_refresh_after_id = None
+        self._plate_auto_scope_modal_selection_watch_after_id = None
+        self._plate_auto_scope_modal_last_selection_signature = ()
         self._plate_auto_scope_selection_mode_active = False
         self._plate_auto_scope_modal_open = False
         self._plate_auto_scope_locked_widget_states = {}
@@ -359,6 +504,9 @@ class AnnotationTab:
         self._main_pane_layout_deferred_force_defaults = False
         self._left_panel_scroll_after_id = None
         self._left_panel_top_row_minsize_before_preview_population = None
+        self._left_list_container_resize_drag_state = None
+        self._left_list_container_user_top_height = None
+        self._preview_left_counter_width_bucket = 0
         self._current_run_manual_template = False
         self._current_run_manual_vehicle_assist = False
         self._plate_model_runtime_meta = {
@@ -381,6 +529,7 @@ class AnnotationTab:
         )
         self._preview_list_sort_options = (
             "Status: ED, OK, problem",
+            "Status: A, M, OK, problem",
             "Status: OK, ED, problem",
             "Status: problem, ED, OK",
             "Nazwa pliku A-Z",
@@ -630,8 +779,15 @@ class AnnotationTab:
     def _auto_device_label(self) -> str:
         return "auto (prefer GPU/CUDA, fallback CPU)"
 
-    def _get_available_devices(self):
+    def _get_available_devices(self, *, allow_probe: bool = False):
         devices = [self._auto_device_label(), "cpu"]
+        if not bool(getattr(self, "_startup_ui_ready", False)):
+            return devices
+        cached = getattr(self, "_available_devices_cache", None)
+        if isinstance(cached, list) and cached:
+            return list(cached)
+        if not allow_probe:
+            return devices
         try:
             import torch
             if torch.cuda.is_available():
@@ -639,15 +795,17 @@ class AnnotationTab:
                     name = torch.cuda.get_device_name(i)
                     devices.append(f"cuda:{i} ({name})")
         except: pass
+        self._available_devices_cache = list(devices)
+        self._available_devices_cache_time = time.monotonic()
         return devices
 
     def _normalize_selected_device(self, raw_value: str | None = None, devices=None) -> str:
-        available = list(devices or self._get_available_devices())
+        available = list(devices or [])
         current = str(raw_value if raw_value is not None else self.device_var.get() or "").strip()
         current_lower = current.lower()
 
         if not current or current_lower.startswith("auto"):
-            return available[0] if available else "auto"
+            return available[0] if available else self._auto_device_label()
         if current_lower.startswith("cpu"):
             return "cpu"
         if current_lower.startswith("cuda:"):
@@ -655,11 +813,12 @@ class AnnotationTab:
             for option in available:
                 if option.startswith(prefix):
                     return option
+            return prefix
 
-        return current if current in available else (available[0] if available else "auto")
+        return current if (not available or current in available) else (available[0] if available else self._auto_device_label())
 
-    def _refresh_device_options(self):
-        devices = self._get_available_devices()
+    def _refresh_device_options(self, *, allow_probe: bool = False):
+        devices = self._get_available_devices(allow_probe=allow_probe)
         if hasattr(self, "device_combo"):
             try:
                 self.device_combo.configure(values=devices)
@@ -699,7 +858,7 @@ class AnnotationTab:
         if label is None:
             return
 
-        devices = self._get_available_devices()
+        devices = self._get_available_devices(allow_probe=False)
         normalized = self._normalize_selected_device(devices=devices)
         current = str(self.device_var.get() or "").strip()
         if normalized != current:
@@ -1436,12 +1595,15 @@ class AnnotationTab:
             "character_custom": str(self.character_custom_var.get() or "").strip(),
             "device": self._get_effective_yolo_device_choice(),
             "conf": float(self.conf_var.get()),
+            "plate_dataset_run": run_dir_value,
+            "plate_dataset_images": str(self.plate_dataset_images_var.get() or "").strip(),
             "plate_train_pct": float(self.plate_train_pct.get()),
             "plate_val_pct": float(self.plate_val_pct.get()),
             "manual_xml_template": bool(self.manual_xml_template_var.get()),
             "manual_vehicle_assist": bool(self.manual_vehicle_assist_var.get()),
             "auto_vehicle_choice": self._normalize_auto_vehicle_choice(),
             "manual_review_history": list(self._manual_review_history_entries or []),
+            "last_preview_run_dir": run_dir_value,
             "last_preview_index": (
                 int(self.current_preview_index)
                 if self.current_preview_index is not None
@@ -2360,7 +2522,6 @@ class AnnotationTab:
                 CAMPAIGN.get_active_project_name()
                 and int(CAMPAIGN.get_current_step() or 0) == 3
                 and str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char"
-                and str(CAMPAIGN.get_step3_status() or "").strip().lower() == "needs_rework"
             )
         except Exception:
             return False
@@ -2383,145 +2544,6 @@ class AnnotationTab:
             return approved_images < 2
         except Exception:
             return False
-
-    @staticmethod
-    def _campaign_step2_iteration_target_label(target: str) -> str:
-        if target == "plate":
-            return "tor tablic"
-        if target == "char":
-            return "tor znaków"
-        return "nie wybrano toru"
-
-    def _campaign_step2_route_button_label(
-        self,
-        route: str,
-        *,
-        current_target: str = "",
-        last_target: str = "",
-    ) -> str:
-        route = self._normalize_campaign_iteration_target_value(route)
-        current_target = self._normalize_campaign_iteration_target_value(current_target)
-        last_target = self._normalize_campaign_iteration_target_value(last_target)
-
-        if route == "plate":
-            if not current_target and last_target == "plate":
-                return "A. Tablice (kontynuuj)"
-            return "A. Tablice"
-
-        if route == "char":
-            if not current_target and last_target == "char":
-                return "B. Znaki (kontynuuj)"
-            return "B. Znaki"
-
-        return ""
-
-    def _get_campaign_step2_route_lock_reason(
-        self,
-        *,
-        current_step: int,
-        step2_status: str,
-        step3_status: str,
-        iteration_target: str,
-    ) -> str:
-        current_target = self._normalize_campaign_iteration_target_value(iteration_target)
-        if current_target not in {"plate", "char"}:
-            return ""
-
-        active_route_label = self._campaign_step2_route_button_label(current_target)
-        if not active_route_label:
-            active_route_label = (
-                "A. Tablice"
-                if current_target == "plate"
-                else "B. Znaki"
-            )
-
-        if current_step > 2:
-            return (
-                f"Ta iteracja trwa już w „{active_route_label}”. "
-                "Drugi tor będzie dostępny dopiero w nowej iteracji."
-            )
-
-        if str(step2_status or "").strip().lower() in {"approved"}:
-            return (
-                f"Ta iteracja trwa już w „{active_route_label}”. "
-                "Drugi tor będzie dostępny dopiero w nowej iteracji."
-            )
-
-        return ""
-
-    def _build_campaign_step2_route_choices(
-        self,
-        *,
-        current_step: int,
-        step2_status: str,
-        step3_status: str,
-        iteration_target: str,
-        plate_model_ready: bool,
-        char_route_source_exists: bool,
-    ) -> tuple[str, str, list[Step2RouteChoiceViewModel]]:
-        route_hint = (
-            "Wybierz tor tej iteracji."
-            if not iteration_target
-            else f"Wybrany tor: {self._campaign_step2_iteration_target_label(iteration_target)}."
-        )
-        route_lock_reason = self._get_campaign_step2_route_lock_reason(
-            current_step=current_step,
-            step2_status=step2_status,
-            step3_status=step3_status,
-            iteration_target=iteration_target,
-        )
-        target_locked = bool(route_lock_reason)
-
-        try:
-            from ..campaign_manager import CAMPAIGN
-
-            last_target = self._normalize_campaign_iteration_target_value(CAMPAIGN.get_last_iteration_target())
-            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
-        except Exception:
-            last_target = ""
-            current_iteration = 1
-
-        char_continue_available = bool(
-            current_iteration > 1
-            and last_target == "char"
-            and int(current_step or 0) == 2
-            and str(step2_status or "").strip().lower() == "pending"
-            and str(step3_status or "").strip().lower() == "pending"
-        )
-
-        route_choices = [
-            Step2RouteChoiceViewModel(
-                id="plate",
-                label=self._campaign_step2_route_button_label(
-                    "plate",
-                    current_target=iteration_target,
-                    last_target=last_target,
-                ),
-                visible=True,
-                enabled=bool(not target_locked and iteration_target != "plate"),
-                selected=bool(iteration_target == "plate"),
-                command_id="choose_iteration_target",
-                command_context={"target": "plate"},
-            ),
-            Step2RouteChoiceViewModel(
-                id="char",
-                label=self._campaign_step2_route_button_label(
-                    "char",
-                    current_target=iteration_target,
-                    last_target=last_target,
-                ),
-                visible=True,
-                enabled=bool(
-                    not target_locked
-                    and iteration_target != "char"
-                    and (plate_model_ready or char_route_source_exists or char_continue_available)
-                ),
-                selected=bool(iteration_target == "char"),
-                command_id="choose_iteration_target",
-                command_context={"target": "char"},
-            ),
-        ]
-        return route_hint, route_lock_reason, route_choices
 
     def get_campaign_step2_bootstrap(self, *, iteration_target: str | None = None) -> dict:
         target = self._normalize_campaign_iteration_target_value(iteration_target)
@@ -2648,6 +2670,44 @@ class AnnotationTab:
                     result["needs_more_tables"] = True
                 return result
 
+        if target == "char":
+            try:
+                project_char_state = dict(CAMPAIGN.get_step3_char_source_state() or {})
+            except Exception:
+                project_char_state = {}
+            project_char_images = int(project_char_state.get("images_with_plates", 0) or 0)
+            project_char_plates = int(project_char_state.get("total_plates", 0) or 0)
+            if project_char_plates > 0:
+                result["has_source"] = True
+                result["images_with_plates"] = project_char_images
+                result["total_plates"] = project_char_plates
+                result["project_images_with_plates"] = int(
+                    project_char_state.get("project_images_with_plates", project_char_images) or 0
+                )
+                result["project_total_plates"] = int(
+                    project_char_state.get("project_total_plates", project_char_plates) or 0
+                )
+                result["source_scope"] = str(project_char_state.get("source_scope") or "campaign_approved_set").strip()
+                result["run_name"] = str(
+                    project_char_state.get("run_name")
+                    or project_char_state.get("display_name")
+                    or "Zatwierdzony zbiór projektu tablic"
+                ).strip()
+                result["input_source"] = "campaign_plate_approved_set"
+                result["manual_template"] = False
+                result["ready"] = bool(project_char_images >= 2)
+                result["needs_more_tables"] = bool(not result["ready"])
+                result["bootstrap"] = {
+                    **dict(result.get("bootstrap") or {}),
+                    "input_source": "campaign_plate_approved_set",
+                    "manual_template": False,
+                    "plate_model_path": str(plate_model_path or "").strip(),
+                    "display_name": result["run_name"],
+                    "run_name": result["run_name"],
+                    "source_scope": result["source_scope"],
+                }
+                return result
+
         if restore_run_dir is None:
             return result
 
@@ -2757,12 +2817,9 @@ class AnnotationTab:
             current_step=0,
             step2_status="pending",
             state="locked",
-            title="E2. Wybierz tor iteracji",
+            title="E2. Tablice",
             summary="E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1.",
             details="Najpierw domknij E1.",
-            route_hint="Wybierz tor tej iteracji.",
-            route_lock_reason="",
-            route_choices=[],
             primary_cta=None,
             secondary_cta=None,
         )
@@ -2788,9 +2845,6 @@ class AnnotationTab:
         state = result.state
         primary_cta = None
         secondary_cta = None
-        route_hint = result.route_hint
-        route_lock_reason = ""
-        route_choices: list[Step2RouteChoiceViewModel] = []
         title = result.title
 
         try:
@@ -2798,32 +2852,13 @@ class AnnotationTab:
             plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
         except Exception:
             plate_model_ready = False
-        char_route_source_exists = False
-        if (not plate_model_ready) and iteration_target != "char":
-            try:
-                char_route_source_exists = bool(
-                    dict(self.get_campaign_step2_source_state(iteration_target="char") or {}).get("has_source")
-                )
-            except Exception:
-                char_route_source_exists = False
-
-        route_hint, route_lock_reason, route_choices = self._build_campaign_step2_route_choices(
-            current_step=current_step,
-            step2_status=step2_status,
-            step3_status=step3_status,
-            iteration_target=iteration_target,
-            plate_model_ready=plate_model_ready,
-            char_route_source_exists=char_route_source_exists,
-        )
 
         if not iteration_target:
             state = "in_progress" if current_step >= 2 else "locked"
-            summary = "Wybierz tor tej iteracji."
+            summary = "Brak wybranego toru iteracji."
             details = (
-                "Wybierz tor tej iteracji, bo od tej decyzji zależy dalszy przebieg pracy. "
-                "Tor tablic prowadzi od razu do przygotowania danych i treningu modelu tablic. "
-                "Tor znaków najpierw korzysta z tablic jako źródła wejściowego, a potem odblokowuje etap pracy nad znakami. "
-                "W jednej iteracji pracujesz tylko w jednym torze."
+                "Wybór toru należy do E1. Wróć do E1, wybierz tor tablic albo tor znaków "
+                "i dopiero wtedy uruchom etap tablic w E2."
             )
             return Step2ViewModel(
                 stage_key="step2",
@@ -2834,9 +2869,6 @@ class AnnotationTab:
                 title=title,
                 summary=summary,
                 details=details,
-                route_hint=route_hint,
-                route_lock_reason=route_lock_reason,
-                route_choices=route_choices,
                 primary_cta=primary_cta,
                 secondary_cta=secondary_cta,
             )
@@ -2844,9 +2876,9 @@ class AnnotationTab:
         source_state = self.get_campaign_step2_source_state(iteration_target=iteration_target)
         plate_model_ready = bool(source_state.get("plate_model_ready"))
         title = (
-            "E2. Tor tablic i przygotowanie Z2"
+            "E2. Tablice Z2"
             if iteration_target == "plate"
-            else "E2. Tor znaków i przygotowanie tablic"
+            else "E2. Tablice jako źródło dla znaków"
         )
 
         if iteration_target == "plate":
@@ -2947,24 +2979,32 @@ class AnnotationTab:
             if bool(source_state.get("ready")):
                 source_context = dict(source_state.get("bootstrap") or {})
                 source_run_name = str(source_state.get("run_name") or "").strip()
+                source_images = int(source_state.get("images_with_plates", 0) or 0)
+                source_plates = int(source_state.get("total_plates", 0) or 0)
                 if current_step > 2 or step2_status == "approved":
                     state = "done"
                     summary = "E2 zostało zatwierdzone. Źródła tablic do pracy nad znakami są gotowe."
-                    details = (
-                        f"Zatwierdzone źródło tablic: {source_run_name}. Dalsza praca odbywa się już w E3 / Z3. "
-                        "Jeśli chcesz, możesz nadal powiększać zbiór tablic w Z2, bo większy zatwierdzony zbiór poprawi kolejne iteracje modelu."
+                    source_prefix = (
+                        f"Zatwierdzone źródło tablic: {source_run_name}."
                         if source_run_name
-                        else "Źródła tablic zostały zatwierdzone. Dalsza praca odbywa się już w E3 / Z3. "
+                        else "Źródła tablic zostały zatwierdzone."
+                    )
+                    details = (
+                        f"{source_prefix} Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
+                        "Dalsza praca odbywa się już w E3 / Z3. "
                         "Jeśli chcesz, możesz nadal powiększać zbiór tablic w Z2, bo większy zatwierdzony zbiór poprawi kolejne iteracje modelu."
                     )
                 else:
                     state = "ready"
                     summary = "Źródło tablic dla tej paczki jest już gotowe."
-                    details = (
-                        f"Źródło tablic: {source_run_name}. Jeśli wszystko jest w porządku, zamknij E2 badge’em po prawej i przejdź dalej do E3. "
-                        "Z2 możesz jeszcze otworzyć, jeśli chcesz sprawdzić albo powiększyć zbiór tablic."
+                    source_prefix = (
+                        f"Źródło tablic: {source_run_name}."
                         if source_run_name
-                        else "Źródło tablic dla tej paczki jest już gotowe. Jeśli wszystko jest w porządku, zamknij E2 badge’em po prawej i przejdź dalej do E3. "
+                        else "Źródło tablic dla tej paczki jest już gotowe."
+                    )
+                    details = (
+                        f"{source_prefix} Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
+                        "Jeśli wszystko jest w porządku, zamknij E2 badge’em po prawej i przejdź dalej do E3. "
                         "Z2 możesz jeszcze otworzyć, jeśli chcesz sprawdzić albo powiększyć zbiór tablic."
                     )
                     primary_cta = Step2CtaViewModel(
@@ -2986,16 +3026,16 @@ class AnnotationTab:
             elif bool(source_state.get("needs_more_tables")):
                 source_images = int(source_state.get("images_with_plates", 0) or 0)
                 source_plates = int(source_state.get("total_plates", 0) or 0)
+                missing_images = max(0, 2 - source_images)
                 source_run_name = str(source_state.get("run_name", "") or "").strip()
                 state = "needs_attention"
                 summary = "Źródło tablic dla toru znaków wymaga jeszcze uzupełnienia."
+                source_prefix = f"Źródło tablic: {source_run_name}." if source_run_name else ""
                 details = (
-                    f"Źródło tablic: {source_run_name}. Oznaczone obrazy [OK]: {source_images}/2. Zapisanych tablic: {source_plates}. "
+                    f"{source_prefix} Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
+                    f"Minimum do wejścia do E3: 2 zatwierdzone obrazy; brakuje {missing_images}. "
                     "Wróć do Z2 i przygotuj więcej tablic, a potem przejdź dalej do E3."
-                    if source_run_name
-                    else f"Oznaczone obrazy [OK]: {source_images}/2. Zapisanych tablic: {source_plates}. "
-                    "Wróć do Z2 i przygotuj więcej tablic, a potem przejdź dalej do E3."
-                )
+                ).strip()
                 primary_cta = Step2CtaViewModel(
                     label="Przygotuj więcej tablic w Z2",
                     command_id="open_z2_step2_review",
@@ -3011,11 +3051,14 @@ class AnnotationTab:
                     "W Z2 przygotujesz źródło tablic potrzebne do pracy nad znakami. "
                     "Po domknięciu E2 projekt przejdzie dalej do E3."
                 )
-                if plate_model_ready:
-                    primary_cta = Step2CtaViewModel(
-                        label="Przygotuj tablice na modelu projektu (Z2)",
-                        command_id="open_z2",
-                    )
+                primary_cta = Step2CtaViewModel(
+                    label=(
+                        "Przygotuj tablice na modelu projektu (Z2)"
+                        if plate_model_ready
+                        else "Przygotuj tablice w Z2"
+                    ),
+                    command_id="open_z2",
+                )
 
             if (
                 current_step == 2
@@ -3026,9 +3069,13 @@ class AnnotationTab:
                 state = "needs_attention"
                 summary = "Tor znaków potrzebuje źródła tablic."
                 details = (
-                    "Aby przejść dalej do E3, przygotuj źródło tablic w Z2 albo dodaj model tablic projektu."
+                    "Aby przejść dalej do E3, przygotuj źródło tablic w Z2. "
+                    "Możesz zrobić to ręcznie, a jeśli projekt ma model tablic, Z2 wykorzysta go jako przyspieszenie."
                 )
-                primary_cta = None
+                primary_cta = Step2CtaViewModel(
+                    label="Przygotuj tablice w Z2",
+                    command_id="open_z2",
+                )
 
         return Step2ViewModel(
             stage_key="step2",
@@ -3039,9 +3086,6 @@ class AnnotationTab:
             title=title,
             summary=summary,
             details=details,
-            route_hint=route_hint,
-            route_lock_reason=route_lock_reason,
-            route_choices=route_choices,
             primary_cta=primary_cta,
             secondary_cta=secondary_cta,
         )
@@ -3565,13 +3609,11 @@ class AnnotationTab:
             return set()
 
         preview_context = self._get_campaign_step3_preview_source_context()
-        preview_hidden = {
+        hidden_filenames = {
             str(name or "").strip().lower()
             for name in set(preview_context.get("filenames") or set())
             if str(name or "").strip()
         }
-        if preview_hidden:
-            return preview_hidden
 
         candidate_xml_paths: list[Path] = []
         seen_candidates: set[str] = set()
@@ -3612,13 +3654,13 @@ class AnnotationTab:
                 continue
             filenames = self._load_cvat_plate_annotated_filenames(xml_path)
             if filenames:
-                return {
+                hidden_filenames |= {
                     str(name or "").strip().lower()
                     for name in filenames
                     if str(name or "").strip()
                 }
 
-        return set()
+        return hidden_filenames
 
     def _collect_campaign_auto_annotation_sources(
         self,
@@ -4272,6 +4314,8 @@ class AnnotationTab:
             except Exception:
                 pass
 
+            self._sync_preview_approval_flags_from_current_sets()
+
             restore_idx = self._compute_annotation_run_restore_index(
                 annotations,
                 manifest,
@@ -4365,6 +4409,19 @@ class AnnotationTab:
                 self.current_annotation_xml_path = run_dir / "annotations.xml"
                 self.last_staging_run_dir = run_dir
                 self._load_plate_dataset_context_from_run(run_dir, force_images_update=True)
+                self._refresh_preview_workspace_visibility(manual_review_active=False)
+                try:
+                    self._populate_preview_list(batch_size=150)
+                except Exception:
+                    try:
+                        self._refresh_preview_list(preserve_selection=False, render_current=True)
+                    except Exception:
+                        pass
+                try:
+                    if self.current_annotations and self.current_preview_index is None:
+                        self._select_preview_index(0, reset_view=True)
+                except Exception:
+                    pass
                 self._refresh_preview_workspace_visibility(manual_review_active=False)
                 self._refresh_step2_action_states()
                 self._queue_free_mode_session_save()
@@ -4495,6 +4552,32 @@ class AnnotationTab:
                         self._persist_preview_approved_filenames()
                     except Exception:
                         pass
+
+            if not self._is_free_mode_session_context():
+                try:
+                    sync_input_dir = self._resolve_existing_dir(getattr(self, "current_input_dir", None))
+                    if sync_input_dir is None:
+                        manifest = self._load_annotation_run_manifest(run_dir)
+                        sync_input_dir = self._resolve_existing_dir(
+                            manifest.get("source_input_dir")
+                            or manifest.get("input_dir")
+                            or manifest.get("imported_source_input_dir")
+                        )
+                    self.current_annotation_run_dir = run_dir
+                    self.current_annotation_xml_path = run_dir / "annotations.xml"
+                    self.last_staging_run_dir = run_dir
+                    try:
+                        self.plate_dataset_run_var.set(str(run_dir))
+                    except Exception:
+                        pass
+                    self._sync_campaign_iteration_artifact_registry(
+                        run_dir=run_dir,
+                        xml_path=run_dir / "annotations.xml",
+                        input_dir=sync_input_dir,
+                    )
+                    self._save_campaign_project_snapshot()
+                except Exception as e:
+                    logger.debug(f"Nie udało się utrwalić kampanijnego runu Z2 po zakończeniu anotacji: {e}")
 
             self._refresh_plate_dataset_export_sources()
             self._refresh_preview_list_summary()
@@ -4746,22 +4829,14 @@ class AnnotationTab:
                     self._prime_campaign_source_preview(self.current_input_dir)
                 except Exception as e:
                     logger.debug(f"Nie udało się przygotować podglądu wejściowego Z2 po restarcie: {e}")
-            approved_runtime_lookup = set(self._get_preview_approved_filenames())
-            if approved_runtime_lookup and self.current_annotations:
-                for ann in list(self.current_annotations or []):
-                    try:
-                        setattr(
-                            ann,
-                            "_approved_for_training",
-                            str(getattr(ann, "filename", "") or "").strip().lower() in approved_runtime_lookup,
-                        )
-                    except Exception:
-                        continue
-                try:
-                    self._refresh_preview_list(preserve_selection=True, render_current=False)
+            approved_runtime_lookup = set(self._get_preview_approved_filenames_base())
+            if self.current_annotations:
+                sync_changed = self._sync_preview_approval_flags_from_current_sets(
+                    refresh_list=bool(approved_runtime_lookup),
+                    render_current=False,
+                )
+                if approved_runtime_lookup or sync_changed:
                     deferred_preview_load = True
-                except Exception:
-                    pass
             self._manual_review_active = bool(self._manual_review_active and restored_preview)
             self._manual_review_from_auto = bool(self._manual_review_from_auto and self._manual_review_active)
             self._manual_review_export_ready = bool(self._manual_review_export_ready and self._manual_review_active)
@@ -4823,9 +4898,14 @@ class AnnotationTab:
                 pass
 
     def _on_free_mode_session_var_changed(self, *_args):
-        self._queue_free_mode_session_save()
+        # Zwykłe pisanie w polach Z2 nie powinno przepisywać ciężkich
+        # elementów stanu ani odpalać I/O po każdym znaku.
+        self._queue_free_mode_session_save(
+            include_preview_approved=False,
+            delay_ms=1200,
+        )
 
-    def _queue_free_mode_session_save(self, *, include_preview_approved: bool = True):
+    def _queue_free_mode_session_save(self, *, include_preview_approved: bool = True, delay_ms: int = 350):
         if self._free_mode_session_restore_in_progress or self._campaign_project_restore_in_progress:
             return
 
@@ -4851,9 +4931,178 @@ class AnnotationTab:
         self._pending_session_save_include_preview_approved = bool(previous_mode or include_preview_approved)
 
         try:
-            self._free_mode_session_save_after_id = self.frame.after(250, self.flush_free_mode_session_state)
+            self._free_mode_session_save_after_id = self.frame.after(
+                max(200, int(delay_ms or 350)),
+                self.flush_free_mode_session_state,
+            )
         except Exception:
             self.flush_free_mode_session_state()
+
+    def _cancel_campaign_char_effective_source_refresh(self) -> None:
+        pending = getattr(self, "_campaign_char_effective_refresh_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._campaign_char_effective_refresh_after_id = None
+
+    def _campaign_char_effective_source_refresh_needed(self) -> bool:
+        if self._is_free_mode_session_context():
+            return False
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+            iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+        except Exception:
+            return False
+        return bool(iteration_target == "char" or current_step >= 3)
+
+    def _schedule_campaign_char_effective_source_refresh(self, *, delay_ms: int = 1800) -> None:
+        if not self._campaign_char_effective_source_refresh_needed():
+            return
+
+        self._cancel_campaign_char_effective_source_refresh()
+
+        def _run() -> None:
+            self._campaign_char_effective_refresh_after_id = None
+            self._refresh_campaign_char_effective_source_after_approval()
+
+        try:
+            self._campaign_char_effective_refresh_after_id = self.frame.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            self._campaign_char_effective_refresh_after_id = None
+            _run()
+
+    def _cancel_preview_approved_persist(self) -> None:
+        pending = getattr(self, "_preview_approved_persist_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_approved_persist_after_id = None
+
+    def _schedule_preview_approved_persist(self, *, delay_ms: int = 320) -> None:
+        self._cancel_preview_approved_persist()
+
+        def _run() -> None:
+            self._preview_approved_persist_after_id = None
+            self._persist_preview_approved_filenames()
+
+        try:
+            self._preview_approved_persist_after_id = self.frame.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            self._preview_approved_persist_after_id = None
+            _run()
+
+    def _flush_preview_approved_persist(self) -> None:
+        pending = getattr(self, "_preview_approved_persist_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+            self._preview_approved_persist_after_id = None
+            self._persist_preview_approved_filenames()
+
+    def _cancel_preview_approval_followup_refresh(self) -> None:
+        pending = getattr(self, "_preview_approval_followup_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_approval_followup_after_id = None
+
+    def _schedule_preview_approval_followup_refresh(self, *, delay_ms: int = 650) -> None:
+        self._cancel_preview_approval_followup_refresh()
+
+        def _run() -> None:
+            self._preview_approval_followup_after_id = None
+            try:
+                active_run_dir = self._get_active_annotation_run_dir(require_xml=True)
+                if active_run_dir is not None:
+                    self._load_plate_dataset_context_from_run(active_run_dir, force_images_update=True)
+                self._refresh_plate_dataset_export_sources()
+                self._refresh_step2_action_states()
+                self._refresh_free_mode_workflow_ui()
+            except Exception:
+                try:
+                    self._refresh_step2_action_states()
+                except Exception:
+                    pass
+
+        try:
+            self._preview_approval_followup_after_id = self.frame.after(max(0, int(delay_ms)), _run)
+        except Exception:
+            self._preview_approval_followup_after_id = None
+            _run()
+
+    def _refresh_campaign_char_effective_source_after_approval(self) -> None:
+        if not self._campaign_char_effective_source_refresh_needed():
+            return
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+        except Exception:
+            return
+
+        try:
+            refreshed_char_source = dict(self._build_campaign_char_effective_source() or {})
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć char_effective_source po zmianie OK w Z2: {e}")
+            refreshed_char_source = {}
+
+        try:
+            self._append_z2_trace(
+                "approved-mark-char-effective-refresh",
+                (
+                    f"entries={int(refreshed_char_source.get('entries_count', 0) or 0)} "
+                    f"images={int(refreshed_char_source.get('images_with_plates', 0) or 0)} "
+                    f"plates={int(refreshed_char_source.get('total_plates', 0) or 0)}"
+                ),
+            )
+        except Exception:
+            pass
+
+        try:
+            refreshed_run_dir = self._resolve_existing_run_dir(refreshed_char_source.get("run_dir"))
+        except Exception:
+            refreshed_run_dir = None
+        try:
+            refreshed_xml_path = self._path_value_to_path(refreshed_char_source.get("xml_path"))
+        except Exception:
+            refreshed_xml_path = None
+        try:
+            refreshed_images_dir = self._resolve_existing_dir(refreshed_char_source.get("images_dir"))
+        except Exception:
+            refreshed_images_dir = None
+
+        try:
+            CAMPAIGN.set_step3_needs_rework()
+            CAMPAIGN.set_step3_stage1_done(False)
+            CAMPAIGN.set_step3_stage2_done(False)
+            CAMPAIGN.set_step3_substep(1)
+            CAMPAIGN.set_step3_extract_state(
+                entry_mode="continue",
+                workflow_step="start",
+                annotation_run_dir=(str(refreshed_run_dir) if refreshed_run_dir is not None else ""),
+                xml_path=(str(refreshed_xml_path) if refreshed_xml_path is not None else ""),
+                images_dir=(str(refreshed_images_dir) if refreshed_images_dir is not None else ""),
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się zresetować kroku E3 po zmianie OK w Z2: {e}")
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign") if getattr(self.app, "tabs", None) else None
+            if campaign_tab is not None:
+                campaign_tab._clear_dashboard_perf_cache()
+                campaign_tab._refresh_dashboard()
+            self.app.update_campaign_tab_access()
+        except Exception:
+            pass
 
     def _cancel_preview_resume_persist(self) -> None:
         pending = getattr(self, "_preview_resume_persist_after_id", None)
@@ -4908,10 +5157,17 @@ class AnnotationTab:
                 snapshot = self._collect_free_mode_session_snapshot()
                 snapshot = self._apply_annotation_auto_modal_defaults_to_snapshot(snapshot)
                 snapshot = self._strip_persisted_annotation_miniflow_snapshot(snapshot)
+                try:
+                    signature = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, default=str)
+                except Exception:
+                    signature = ""
+                if signature and signature == str(getattr(self, "_last_free_mode_session_snapshot_signature", "") or ""):
+                    return
                 SESSION.set("annotation", "images_dir", snapshot["input_dir"])
                 for key, value in snapshot.items():
                     SESSION.set("annotation", key, value)
                 SESSION.save_session()
+                self._last_free_mode_session_snapshot_signature = signature
             except Exception as e:
                 logger.debug(f"Nie udalo sie zapisac stanu Z2: {e}")
             return
@@ -5172,16 +5428,19 @@ class AnnotationTab:
                     attributes.setdefault("manual_source", "preview")
                     attributes.setdefault("manually_edited", "true")
 
-                detections.append(
-                    Detection(
-                        label="plate",
-                        confidence=confidence,
-                        bbox=self._bbox_from_polygon(polygon),
-                        keypoints=self._keypoints_from_polygon(polygon),
-                        polygon=polygon,
-                        attributes=attributes,
-                    )
+                detection = Detection(
+                    label="plate",
+                    confidence=confidence,
+                    bbox=self._bbox_from_polygon(polygon),
+                    keypoints=self._keypoints_from_polygon(polygon),
+                    polygon=polygon,
+                    attributes=attributes,
                 )
+                try:
+                    setattr(detection, "_cvat_source", polygon_source or "auto")
+                except Exception:
+                    pass
+                detections.append(detection)
 
             annotations.append(
                 ImageAnnotation(
@@ -5189,15 +5448,36 @@ class AnnotationTab:
                     width=width,
                     height=height,
                     detections=detections,
-                    status=(
-                        AnnotationStatus.SUCCESS
-                        if any(str(det.label or "").lower() in {"plate", "vehicle"} for det in detections)
-                        else AnnotationStatus.NO_PLATE
-                    ),
+                status=(
+                    AnnotationStatus.SUCCESS
+                    if any(
+                        str(det.label or "").strip().lower() in CONFIG.PLATE_LABELS
+                        or str(det.label or "").strip().lower() in CONFIG.VEHICLE_LABELS
+                        for det in detections
+                    )
+                    else AnnotationStatus.NO_PLATE
+                ),
                 )
             )
 
         return annotations
+
+    @staticmethod
+    def _mark_auto_plate_origin_for_annotations(annotations: list[ImageAnnotation] | None) -> None:
+        for ann in list(annotations or []):
+            for det in list(getattr(ann, "detections", []) or []):
+                if not AnnotationTab._is_plate_detection_label(getattr(det, "label", "")):
+                    continue
+                attributes = dict(getattr(det, "attributes", {}) or {})
+                manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
+                manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
+                cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+                if manually_edited or manual_source or cvat_source == "manual":
+                    continue
+                try:
+                    setattr(det, "_cvat_source", "auto")
+                except Exception:
+                    pass
 
     def _restore_preview_from_session_run(self):
         run_dir = self._resolve_best_free_mode_restore_run()
@@ -5287,6 +5567,17 @@ class AnnotationTab:
         self.current_annotation_run_dir = run_dir
         self.current_annotation_xml_path = xml_path
         self.last_staging_run_dir = run_dir
+        run_approved_filenames = set(self._load_annotation_run_approved_filenames(run_dir))
+        if run_approved_filenames:
+            self._preview_approved_filenames = set(self._get_preview_approved_filenames_base()) | set(run_approved_filenames)
+            if not self._is_free_mode_session_context():
+                self._campaign_pending_approved_filenames = set(self._preview_approved_filenames)
+        hidden_char_effective_filenames = set()
+        if not self._is_free_mode_session_context():
+            try:
+                hidden_char_effective_filenames = self._get_campaign_char_effective_source_hidden_filenames()
+            except Exception:
+                hidden_char_effective_filenames = set()
         try:
             run_is_manual_template = bool(self._annotation_run_manifest_is_manual_template(manifest))
         except Exception:
@@ -5333,6 +5624,7 @@ class AnnotationTab:
             self._restore_campaign_step2_generated_from_run(run_dir, only_when_pending=True)
         except Exception:
             pass
+        self._sync_preview_approval_flags_from_current_sets()
         restore_idx = self._compute_annotation_run_restore_index(
             annotations,
             manifest,
@@ -5422,6 +5714,46 @@ class AnnotationTab:
             return False
         return bool(getattr(self, "_annotation_right_panel_visible", True))
 
+    def _get_preview_left_counter_total(self) -> int:
+        totals = []
+        try:
+            totals.append(int(len(getattr(self, "current_annotations", []) or [])))
+        except Exception:
+            pass
+        try:
+            totals.append(int(len(getattr(self, "_preview_list_display_indices", []) or [])))
+        except Exception:
+            pass
+        try:
+            pending_summary = dict(getattr(self, "_campaign_pending_batch_summary", {}) or {})
+            totals.append(int(pending_summary.get("pending_count", 0) or 0))
+        except Exception:
+            pass
+        return max([0] + [max(0, int(value or 0)) for value in totals])
+
+    def _get_preview_left_counter_width_bucket(self) -> int:
+        total = self._get_preview_left_counter_total()
+        if total <= 0:
+            return 0
+        return max(1, len(str(max(1, int(total)))))
+
+    def _get_preview_left_counter_min_width(self) -> int:
+        digits = self._get_preview_left_counter_width_bucket()
+        if digits <= 0:
+            return 0
+        # Stable digit buckets: enough room for legend counters without resizing on every refresh.
+        return min(420, 318 + max(0, int(digits) - 3) * 28)
+
+    def _sync_preview_left_counter_layout_width(self) -> None:
+        bucket = self._get_preview_left_counter_width_bucket()
+        if bucket == int(getattr(self, "_preview_left_counter_width_bucket", 0) or 0):
+            return
+        self._preview_left_counter_width_bucket = int(bucket)
+        try:
+            self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=80)
+        except Exception:
+            pass
+
     def _sync_main_pane_right_panel_visibility(self):
         pane = getattr(self, "main_pane", None)
         right_frame = getattr(self, "main_right_frame", None)
@@ -5438,6 +5770,64 @@ class AnnotationTab:
                 pane.forget(right_frame)
         except Exception:
             pass
+
+    def _restore_right_panel_content_after_fullscreen(self):
+        if bool(getattr(self, "_preview_fullscreen_active", False)):
+            return
+        if not self._should_show_right_panel():
+            return
+
+        pane = getattr(self, "main_pane", None)
+        right_frame = getattr(self, "main_right_frame", None)
+        if pane is None or right_frame is None:
+            return
+
+        try:
+            if not self._pane_has_child(pane, right_frame):
+                pane.add(right_frame, weight=1)
+        except Exception:
+            pass
+
+        # W fullscreen odswiezanie E2 celowo ukrywa prawy panel. Po wyjsciu
+        # trzeba przebudowac nie tylko rame, ale tez jej wewnetrzne sekcje.
+        try:
+            self._refresh_step2_action_states(lightweight=False)
+        except Exception:
+            pass
+        try:
+            self._sync_approve_hint_wraplength()
+        except Exception:
+            pass
+        try:
+            self._normalize_approve_panel_order()
+        except Exception:
+            pass
+        try:
+            self._sync_right_panel_canvas_width()
+            self._sync_right_panel_scrollregion()
+        except Exception:
+            pass
+        try:
+            self._schedule_main_pane_layout_refresh(force_defaults=True, delay_ms=40)
+        except Exception:
+            pass
+
+    def _schedule_right_panel_content_restore_after_fullscreen(self, delay_ms: int = 0):
+        if bool(getattr(self, "_preview_fullscreen_active", False)):
+            return
+        if not self._should_show_right_panel():
+            return
+
+        def _restore():
+            self._restore_right_panel_content_after_fullscreen()
+
+        try:
+            if int(delay_ms or 0) > 0:
+                self.frame.after(int(delay_ms), _restore)
+            else:
+                self.frame.after_idle(_restore)
+        except Exception:
+            _restore()
 
     def _get_main_pane_width_limits(self) -> tuple[int, int]:
         left_content_req = 0
@@ -5468,7 +5858,16 @@ class AnnotationTab:
             right_scrollbar_req = 10
 
         right_content_req = max(int(right_content_req), int(approve_req))
-        left_min = max(280, min(340, left_content_req + left_scrollbar_req + 12))
+        left_counter_req = 0
+        try:
+            left_counter_req = int(self._get_preview_left_counter_min_width() or 0)
+        except Exception:
+            left_counter_req = 0
+        left_base_req = max(
+            int(left_content_req) + int(left_scrollbar_req) + 12,
+            int(left_counter_req),
+        )
+        left_min = max(280, min(420, left_base_req))
         right_min = max(320, min(460, right_content_req + right_scrollbar_req + 20))
         return int(left_min), int(right_min)
 
@@ -5679,6 +6078,21 @@ class AnnotationTab:
             except Exception:
                 pass
             return
+
+        try:
+            campaign_tab = self.app.tabs.get("campaign") if getattr(self.app, "tabs", None) else None
+            confirm_no_progress = getattr(campaign_tab, "_confirm_step2_without_current_iteration_contribution", None)
+            if callable(confirm_no_progress) and not confirm_no_progress(source_state=source_state):
+                try:
+                    self.app.update_status(
+                        "Zatwierdzenie E2 przerwane. Dodaj nowe zatwierdzone tablice albo świadomie zatwierdź E2 bez nowego wkładu.",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
 
         try:
             CAMPAIGN.approve_step2()
@@ -6099,15 +6513,10 @@ class AnnotationTab:
         ).strip()
         if not normalized:
             return ""
-        legacy_map = {
-            "Status: ED -> OK -> problem": "Status: ED, OK, problem",
-            "Status: OK -> ED -> problem": "Status: OK, ED, problem",
-            "Status: problem -> ED -> OK": "Status: problem, ED, OK",
-            "Status: M -> A -> --": "Status: ED, OK, problem",
-            "Status: A -> M -> --": "Status: OK, ED, problem",
-            "Status: -- -> M -> A": "Status: problem, ED, OK",
-        }
-        return legacy_map.get(normalized, normalized)
+        allowed_modes = set(getattr(self, "_preview_list_sort_options", ()) or ())
+        if normalized in allowed_modes:
+            return normalized
+        return str(next(iter(getattr(self, "_preview_list_sort_options", ()) or ("",)), "") or "")
 
     def _get_preview_metric_filter_input_thresholds(self) -> tuple[float, float]:
         conf_raw = 0.0
@@ -6419,6 +6828,77 @@ class AnnotationTab:
             except Exception:
                 pass
 
+    def _clamp_left_list_container_top_height(self, value: int | float | None) -> int:
+        try:
+            requested = int(value or 0)
+        except Exception:
+            requested = 0
+        try:
+            left_frame = getattr(self, "main_left_frame", None)
+            available_height = int(left_frame.winfo_height() or 0) if left_frame is not None else 0
+        except Exception:
+            available_height = 0
+        min_top = 72
+        min_list = 230
+        if available_height > 0:
+            max_top = max(min_top, int(available_height) - min_list)
+            return max(min_top, min(max_top, requested))
+        return max(min_top, requested)
+
+    def _apply_left_list_container_top_height(self, value: int | float | None) -> None:
+        top_height = self._clamp_left_list_container_top_height(value)
+        self._left_list_container_user_top_height = int(top_height)
+        try:
+            left_canvas = getattr(self, "left_settings_canvas", None)
+            if left_canvas is not None:
+                left_canvas.configure(height=int(top_height))
+        except Exception:
+            pass
+        try:
+            left_frame = getattr(self, "main_left_frame", None)
+            if left_frame is not None:
+                left_frame.grid_rowconfigure(0, minsize=int(top_height))
+        except Exception:
+            pass
+
+    def _on_left_list_container_resize_press(self, event=None):
+        top_shell = getattr(self, "left_scroll_shell", None)
+        try:
+            start_top_height = int(top_shell.winfo_height() or top_shell.winfo_reqheight() or 0)
+        except Exception:
+            start_top_height = int(getattr(self, "_left_list_container_user_top_height", 0) or 0)
+        if start_top_height <= 0:
+            try:
+                start_top_height = int(getattr(self, "left_settings_canvas", None).winfo_height() or 0)
+            except Exception:
+                start_top_height = 180
+        self._left_list_container_resize_drag_state = {
+            "start_y": int(getattr(event, "y_root", 0) or 0),
+            "start_top_height": self._clamp_left_list_container_top_height(start_top_height),
+        }
+        return "break"
+
+    def _on_left_list_container_resize_drag(self, event=None):
+        drag_state = getattr(self, "_left_list_container_resize_drag_state", None)
+        if not isinstance(drag_state, dict):
+            return "break"
+        try:
+            current_y = int(getattr(event, "y_root", 0) or drag_state.get("start_y", 0) or 0)
+        except Exception:
+            current_y = int(drag_state.get("start_y", 0) or 0)
+        start_y = int(drag_state.get("start_y", current_y) or current_y)
+        start_top_height = int(drag_state.get("start_top_height", 180) or 180)
+        self._apply_left_list_container_top_height(start_top_height + (current_y - start_y))
+        return "break"
+
+    def _on_left_list_container_resize_release(self, event=None):
+        self._left_list_container_resize_drag_state = None
+        try:
+            self._sync_left_panel_scrollregion()
+        except Exception:
+            pass
+        return "break"
+
     def _invalidate_preview_list_frozen_order(self) -> None:
         self._preview_list_frozen_sort_mode = ""
         self._preview_list_frozen_filename_order = []
@@ -6460,7 +6940,10 @@ class AnnotationTab:
             for _actual_idx, ann in entries
         ]
         self._preview_list_frozen_bucket_snapshot = {
-            str(getattr(ann, "filename", "") or "").strip().lower(): self._preview_annotation_sort_bucket(ann)
+            str(getattr(ann, "filename", "") or "").strip().lower(): self._preview_annotation_sort_bucket_for_mode(
+                ann,
+                sort_mode,
+            )
             for _actual_idx, ann in entries
         }
 
@@ -7189,6 +7672,8 @@ class AnnotationTab:
         ordered_widgets = [
             (getattr(self, "workflow_start_title_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 6)}),
             (getattr(self, "workflow_start_intro_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (4, 0)}),
+            (getattr(self, "workflow_start_manual_vehicle_assist_check", None), {"anchor": tk.W, "pady": (6, 2)}),
+            (getattr(self, "workflow_start_manual_vehicle_assist_hint_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 6)}),
             (getattr(self, "start_btn_row", None), {"fill": tk.X, "pady": (6, 0)}),
             (getattr(self, "progress_info_row", None), {"fill": tk.X, "pady": (10, 4)}),
             (getattr(self, "workflow_start_action_hint_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (6, 0)}),
@@ -7445,6 +7930,8 @@ class AnnotationTab:
             highlightbackground=panel_border,
             highlightcolor=panel_border,
         )
+        self.preview_left_list_resize_grip = None
+        self.preview_left_list_resize_grip_line = None
         self.preview_left_list_host = ttk.Frame(self.preview_left_list_shell, style="Panel.TFrame")
         self.preview_left_list_host.pack(fill=tk.BOTH, expand=True)
         self.preview_left_list_shell.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -8324,6 +8811,24 @@ class AnnotationTab:
             min_px=220,
         )
 
+        self.workflow_start_manual_vehicle_assist_check = ttk.Checkbutton(
+            self.workflow_start_section,
+            text="Opcjonalnie: dodaj pomocnicze boxy pojazdów do XML",
+            style="WorkflowManualAssist.TCheckbutton",
+            variable=self.manual_vehicle_assist_var,
+            command=self._update_manual_xml_template_ui,
+        )
+        self.workflow_start_manual_vehicle_assist_hint_lbl = tk.Label(
+            self.workflow_start_section,
+            textvariable=self.manual_vehicle_assist_hint_var,
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=340,
+            bd=0,
+            highlightthickness=0,
+        )
+        self._set_inline_label_state(self.workflow_start_manual_vehicle_assist_hint_lbl, tone="muted", emphasis=False)
+
         self.start_btn_row = tk.Frame(self.workflow_start_section, bd=0, highlightthickness=0)
         self.start_btn_row.pack(fill=tk.X, pady=(4, 0))
         self.start_btn_row.columnconfigure(0, weight=5)
@@ -8417,8 +8922,21 @@ class AnnotationTab:
             "workflow_start",
             self.workflow_start_section,
             title=self.workflow_start_title_lbl,
-            labels=[self.workflow_start_intro_lbl, self.status_label, self.progress_counts_lbl, self.workflow_start_action_hint_lbl],
+            labels=[
+                self.workflow_start_intro_lbl,
+                self.workflow_start_manual_vehicle_assist_hint_lbl,
+                self.status_label,
+                self.progress_counts_lbl,
+                self.workflow_start_action_hint_lbl,
+            ],
             child_frames=[self.start_btn_row, self.start_btn_frame, self.progress_info_row],
+            style_targets=[
+                {
+                    "widget": self.workflow_start_manual_vehicle_assist_check,
+                    "kind": "checkbutton",
+                    "style": "WorkflowManualAssist.TCheckbutton",
+                },
+            ],
             step_keys={"auto_start", "manual_start"},
         )
 
@@ -8970,7 +9488,7 @@ class AnnotationTab:
         list_lf.pack(fill=tk.BOTH, expand=True)
         preview_list_meta = ttk.Frame(list_lf, style="Panel.TFrame")
         self.preview_list_meta = preview_list_meta
-        preview_list_meta.pack(fill=tk.X, pady=(0, 1))
+        preview_list_meta.pack(fill=tk.BOTH, expand=True, pady=(0, 1))
         self.preview_list_summary_lbl = tk.Label(
             preview_list_meta,
             textvariable=self.preview_list_summary_var,
@@ -9129,9 +9647,9 @@ class AnnotationTab:
             preview_list_sort_grid,
             0,
             1,
-            "Status: OK, ED, problem",
-            "OK, ED, problem",
-            "Najpierw gotowe auto",
+            "Status: A, M, OK, problem",
+            "A, M, OK, problem",
+            "Najpierw autoanotacja",
         )
         _build_preview_sort_tile(
             preview_list_sort_grid,
@@ -9170,9 +9688,9 @@ class AnnotationTab:
         preview_list_legend_grid = ttk.Frame(preview_list_legend, style="Panel.TFrame")
         self.preview_list_legend_grid = preview_list_legend_grid
         preview_list_legend_grid.pack(fill=tk.X)
-        preview_list_legend_grid.columnconfigure(0, weight=1)
-        preview_list_legend_grid.columnconfigure(1, weight=1)
-        preview_list_legend_grid.columnconfigure(2, weight=1)
+        preview_list_legend_grid.columnconfigure(0, weight=1, uniform="preview_legend")
+        preview_list_legend_grid.columnconfigure(1, weight=1, uniform="preview_legend")
+        preview_list_legend_grid.columnconfigure(2, weight=0, minsize=0)
 
         def _build_preview_list_legend_item(parent, row, column, badge_text, text, *, rowspan: int = 1):
             item = tk.Frame(parent, bd=0, highlightthickness=1, padx=5, pady=2)
@@ -9249,16 +9767,16 @@ class AnnotationTab:
             preview_list_legend_grid,
             bd=0,
             highlightthickness=1,
-            padx=8,
-            pady=6,
+            padx=6,
+            pady=2,
         )
         self.preview_list_legend_total_item.grid(
-            row=0,
-            column=2,
-            rowspan=2,
-            sticky="nsew",
-            padx=(4, 0),
-            pady=(0, 2),
+            row=2,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=(0, 0),
+            pady=(1, 1),
         )
         self.preview_list_legend_total_lbl = tk.Label(
             self.preview_list_legend_total_item,
@@ -9267,29 +9785,32 @@ class AnnotationTab:
             justify=tk.LEFT,
             bd=0,
             highlightthickness=0,
-            font=("Segoe UI Semibold", 8),
+            font=("Segoe UI", 8),
         )
-        self.preview_list_legend_total_lbl.pack(anchor=tk.W)
+        self.preview_list_legend_total_lbl.pack(side=tk.LEFT, anchor=tk.W)
         self.preview_list_legend_total_count_lbl = tk.Label(
             self.preview_list_legend_total_item,
             text="0 / 0",
-            anchor="w",
-            justify=tk.LEFT,
+            anchor="e",
+            justify=tk.RIGHT,
             bd=0,
             highlightthickness=0,
-            font=("Segoe UI", 11, "normal"),
+            font=("Segoe UI Semibold", 9),
         )
-        self.preview_list_legend_total_count_lbl.pack(anchor=tk.W, pady=(6, 0))
+        self.preview_list_legend_total_count_lbl.pack(side=tk.RIGHT, anchor=tk.E, padx=(6, 0))
 
+        self._bind_preview_sort_tile(self.preview_list_legend_ok_item, "Status: A, M, OK, problem")
         self._bind_preview_sort_tile(self.preview_list_legend_corrected_item, "Status: ED, OK, problem")
         self._bind_preview_sort_tile(self.preview_list_legend_problem_item, "Status: problem, ED, OK")
         self._bind_preview_sort_tile(self.preview_list_legend_dirty_item, "Status: OK, ED, problem")
         list_frame = ttk.Frame(preview_list_section)
+        self.preview_list_frame = list_frame
         list_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_listbox = tk.Listbox(
             list_frame,
             font=("Consolas", 9),
-            height=16,
+            height=9,
+            activestyle="none",
             selectmode=tk.EXTENDED,
             exportselection=False,
         )
@@ -9299,7 +9820,7 @@ class AnnotationTab:
         self.preview_listbox.config(yscrollcommand=scroll.set)
 
         self.preview_filter_bar = ttk.Frame(preview_list_section, style="Panel.TFrame")
-        self.preview_filter_bar.pack(fill=tk.X, pady=(4, 0))
+        self.preview_filter_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0), before=list_frame)
         self.preview_filter_bar_grid = ttk.Frame(self.preview_filter_bar, style="Panel.TFrame")
         self.preview_filter_bar_grid.pack(fill=tk.X)
         self.preview_filter_bar_grid.columnconfigure(0, weight=1)
@@ -9411,11 +9932,21 @@ class AnnotationTab:
         self.preview_list_context_menu.add_separator()
         self.preview_list_context_menu.add_command(
             label="Oznacz zaznaczone jako OK",
-            command=lambda: self._set_selected_preview_images_approved(True),
+            command=lambda: self._set_selected_preview_images_approved(
+                True,
+                persist_immediately=False,
+                refresh_export_sources=False,
+                schedule_followup_refresh=True,
+            ),
         )
         self.preview_list_context_menu.add_command(
             label="Cofnij OK",
-            command=lambda: self._set_selected_preview_images_approved(False),
+            command=lambda: self._set_selected_preview_images_approved(
+                False,
+                persist_immediately=False,
+                refresh_export_sources=False,
+                schedule_followup_refresh=True,
+            ),
         )
         self.preview_list_context_menu.add_command(
             label="Zmień nazwę pliku...",
@@ -9427,9 +9958,11 @@ class AnnotationTab:
             command=self._clear_selected_preview_auto_plates,
         )
         self.preview_listbox.bind("<Button-1>", self._on_preview_list_mouse_primary, add=False)
+        self.preview_listbox.bind("<ButtonRelease-1>", lambda _event: self._refresh_plate_auto_scope_modal_selection_state(), add="+")
         self.preview_listbox.bind("<Button-3>", self._on_preview_list_mouse_secondary, add=False)
         self.preview_listbox.bind("<B1-Motion>", lambda _event: "break", add=False)
         self.preview_listbox.bind("<<ListboxSelect>>", self._on_preview_select)
+        self.preview_listbox.bind("<KeyRelease>", lambda _event: self._refresh_plate_auto_scope_modal_selection_state(), add="+")
         self.preview_listbox.bind("<Shift-F10>", self._open_preview_list_context_menu_from_keyboard, add="+")
         self.preview_listbox.bind("<Menu>", self._open_preview_list_context_menu_from_keyboard, add="+")
         self.preview_listbox.bind("<Up>", self._on_preview_arrow_up_shortcut, add=False)
@@ -9473,7 +10006,7 @@ class AnnotationTab:
 
         self.preview_fit_btn = ttk.Button(
             self.preview_tools_primary_left,
-            text="Dopasuj",
+            text="Dopasuj obraz do okna (F)",
             command=self._fit_preview_image_to_view,
             state=tk.DISABLED
         )
@@ -9521,7 +10054,7 @@ class AnnotationTab:
             highlightthickness=0
         )
         self.preview_fullscreen_hint_var.set(
-            "Wybierz obraz, aby włączyć pełny ekran i narzędzia edycji podglądu."
+            "Wybierz obraz. Do rysowania i korekty ramek tablic najwygodniej przejść w pełny ekran klawiszem Enter."
         )
         self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="muted", emphasis=False)
         self.preview_fullscreen_hint_lbl.pack(fill=tk.X, pady=(0, 8))
@@ -9537,7 +10070,16 @@ class AnnotationTab:
         canvas_frame = ttk.Frame(preview_lf)
         self.canvas_frame = canvas_frame
         canvas_frame.pack(fill=tk.BOTH, expand=True)
-        canvas_frame.bind("<Configure>", lambda _event: self._place_preview_legend_overlay(), add="+")
+        canvas_frame.bind(
+            "<Configure>",
+            lambda _event: (
+                self._place_preview_legend_overlay(),
+                self._update_preview_canvas_metrics_overlay(),
+                self._place_preview_overlay_dock(),
+                self._place_preview_campaign_gate_overlay(),
+            ),
+            add="+",
+        )
         preview_hint_frame = tk.Frame(
             preview_lf,
             bg=palette.get("panel", "#252526"),
@@ -9581,7 +10123,337 @@ class AnnotationTab:
         self.preview_canvas.bind("<Button-3>", self._on_preview_canvas_right_click, add="+")
         self.preview_canvas.bind("<FocusOut>", self._on_preview_canvas_focus_out, add="+")
         self._bind_preview_shortcuts()
-        self.frame.after_idle(lambda: self._place_preview_legend_overlay(refresh=True))
+
+        self.preview_metrics_frame = tk.Frame(
+            canvas_frame,
+            bd=0,
+            highlightthickness=1,
+            cursor="arrow",
+        )
+        self.preview_metrics_header = tk.Frame(
+            self.preview_metrics_frame,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_metrics_header.pack(fill=tk.X)
+        self.preview_metrics_icon_lbl = tk.Label(
+            self.preview_metrics_header,
+            text="PX",
+            width=3,
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 8),
+            padx=4,
+            pady=4,
+            cursor="hand2",
+        )
+        self.preview_metrics_icon_lbl.pack(side=tk.LEFT)
+        self.preview_metrics_title_lbl = tk.Label(
+            self.preview_metrics_header,
+            text="Parametry obrazu i ramki",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 8),
+            padx=6,
+            pady=4,
+            cursor="hand2",
+        )
+        self.preview_metrics_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.preview_metrics_toggle_lbl = tk.Label(
+            self.preview_metrics_header,
+            text="-",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 9),
+            padx=2,
+            pady=4,
+            cursor="hand2",
+        )
+        self.preview_metrics_toggle_lbl.pack(side=tk.LEFT)
+        self.preview_metrics_grab_lbl = tk.Canvas(
+            self.preview_metrics_header,
+            bd=0,
+            highlightthickness=0,
+            width=22,
+            height=22,
+            cursor="fleur",
+        )
+        self.preview_metrics_grab_lbl.pack(side=tk.LEFT, padx=(3, 5), pady=3)
+        self.preview_metrics_body = tk.Frame(
+            self.preview_metrics_frame,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_metrics_body.pack(fill=tk.BOTH, expand=True)
+        for widget in (
+            self.preview_metrics_icon_lbl,
+            self.preview_metrics_title_lbl,
+            self.preview_metrics_toggle_lbl,
+        ):
+            try:
+                widget.bind("<Button-1>", self._toggle_preview_metrics_overlay, add="+")
+            except Exception:
+                pass
+        for widget in (self.preview_metrics_grab_lbl,):
+            try:
+                widget.bind("<ButtonPress-1>", self._on_preview_metrics_overlay_press, add="+")
+                widget.bind("<B1-Motion>", self._on_preview_metrics_overlay_drag, add="+")
+                widget.bind("<ButtonRelease-1>", self._on_preview_metrics_overlay_release, add="+")
+            except Exception:
+                pass
+        self.preview_metrics_frame.place_forget()
+
+        self.preview_overlay_dock = tk.Frame(
+            canvas_frame,
+            bd=0,
+            highlightthickness=1,
+            cursor="arrow",
+        )
+        self.preview_overlay_dock_header = tk.Frame(
+            self.preview_overlay_dock,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_overlay_dock_header.pack(fill=tk.X)
+        self.preview_overlay_dock_title_lbl = tk.Label(
+            self.preview_overlay_dock_header,
+            text="SZUFLADA",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 7),
+            padx=7,
+            pady=5,
+            cursor="hand2",
+        )
+        self.preview_overlay_dock_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.preview_overlay_dock_toggle_lbl = tk.Label(
+            self.preview_overlay_dock_header,
+            text="<",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 8),
+            width=2,
+            padx=3,
+            pady=5,
+            cursor="hand2",
+        )
+        self.preview_overlay_dock_toggle_lbl.pack(side=tk.RIGHT)
+        self.preview_overlay_dock_body = tk.Frame(
+            self.preview_overlay_dock,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_overlay_dock_body.pack(fill=tk.X)
+        self._preview_overlay_dock_tool_rows = {}
+        for tool_key, icon_text, label_text in (
+            ("legend", "KP", "Kompas"),
+            ("super", "SK", "Super"),
+            ("metrics", "PX", "Parametry"),
+        ):
+            row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="hand2")
+            row.pack(fill=tk.X, padx=6, pady=(0, 5))
+            icon_lbl = tk.Label(
+                row,
+                text=icon_text,
+                width=3,
+                anchor="center",
+                justify=tk.CENTER,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI Semibold", 8),
+                padx=4,
+                pady=5,
+                cursor="hand2",
+            )
+            icon_lbl.pack(side=tk.LEFT)
+            text_lbl = tk.Label(
+                row,
+                text=label_text,
+                anchor="w",
+                justify=tk.LEFT,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI", 8),
+                padx=6,
+                pady=5,
+                cursor="hand2",
+            )
+            text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            status_lbl = tk.Label(
+                row,
+                text="",
+                anchor="e",
+                justify=tk.RIGHT,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI Semibold", 7),
+                padx=5,
+                pady=5,
+                cursor="hand2",
+            )
+            status_lbl.pack(side=tk.RIGHT)
+            self._preview_overlay_dock_tool_rows[tool_key] = {
+                "row": row,
+                "icon": icon_lbl,
+                "label": text_lbl,
+                "status": status_lbl,
+            }
+            for widget in (row, icon_lbl, text_lbl, status_lbl):
+                try:
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _event, key=tool_key: self._toggle_preview_overlay_dock_tool(key),
+                        add="+",
+                    )
+                except Exception:
+                    pass
+        for widget in (
+            self.preview_overlay_dock_header,
+            self.preview_overlay_dock_title_lbl,
+            self.preview_overlay_dock_toggle_lbl,
+        ):
+            try:
+                widget.bind("<Button-1>", self._toggle_preview_overlay_dock, add="+")
+            except Exception:
+                pass
+        self.preview_overlay_dock.place_forget()
+
+        self.preview_image_status_frame = tk.Frame(
+            canvas_frame,
+            bd=0,
+            highlightthickness=1,
+            cursor="arrow",
+        )
+        self.preview_image_status_lbl = tk.Label(
+            self.preview_image_status_frame,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 7),
+            padx=7,
+            pady=4,
+        )
+        self.preview_image_status_lbl.pack(fill=tk.BOTH, expand=True)
+        self.preview_image_status_frame.place_forget()
+
+        self.preview_campaign_gate_frame = tk.Frame(
+            canvas_frame,
+            bd=0,
+            highlightthickness=1,
+            cursor="arrow",
+        )
+        self.preview_campaign_gate_header = tk.Frame(
+            self.preview_campaign_gate_frame,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_campaign_gate_header.pack(fill=tk.X)
+        self.preview_campaign_gate_title_lbl = tk.Label(
+            self.preview_campaign_gate_header,
+            text="BRAMKA E2",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 8),
+            padx=8,
+            pady=3,
+        )
+        self.preview_campaign_gate_title_lbl.pack(fill=tk.X, expand=True)
+        self.preview_campaign_gate_status_lbl = tk.Label(
+            self.preview_campaign_gate_header,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=1,
+            font=("Segoe UI Semibold", 8),
+            padx=6,
+            pady=2,
+        )
+        self.preview_campaign_gate_status_lbl.pack(fill=tk.X, padx=7, pady=(0, 6))
+        self.preview_campaign_gate_body = tk.Frame(
+            self.preview_campaign_gate_frame,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_campaign_gate_body.pack(fill=tk.X)
+        self.preview_campaign_gate_counters_frame = tk.Frame(
+            self.preview_campaign_gate_body,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_campaign_gate_counters_frame.pack(fill=tk.X, padx=5, pady=(5, 3))
+        self.preview_campaign_gate_count_lbl = tk.Label(
+            self.preview_campaign_gate_counters_frame,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 9),
+            padx=4,
+            pady=4,
+        )
+        self.preview_campaign_gate_count_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+        self.preview_campaign_gate_missing_lbl = tk.Label(
+            self.preview_campaign_gate_counters_frame,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 9),
+            padx=4,
+            pady=4,
+        )
+        self.preview_campaign_gate_missing_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0))
+        self.preview_campaign_gate_quality_lbl = tk.Label(
+            self.preview_campaign_gate_body,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=1,
+            font=("Segoe UI Semibold", 8),
+            padx=7,
+            pady=3,
+        )
+        self.preview_campaign_gate_quality_lbl.pack(fill=tk.X, padx=5, pady=(0, 3))
+        self.preview_campaign_gate_info_lbl = tk.Label(
+            self.preview_campaign_gate_body,
+            text="",
+            anchor="center",
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI", 7),
+            padx=7,
+            pady=3,
+        )
+        self.preview_campaign_gate_info_lbl.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.preview_campaign_gate_frame.place_forget()
+
+        self.frame.after_idle(
+            lambda: (
+                self._place_preview_legend_overlay(refresh=True),
+                self._place_preview_overlay_dock(force_render=True),
+                self._place_preview_campaign_gate_overlay(force_render=True),
+            )
+        )
 
         self.preview_edit_status_lbl = ttk.Label(
             preview_lf,
@@ -9597,7 +10469,13 @@ class AnnotationTab:
         except Exception:
             pass
         try:
-            self.frame.after_idle(self._place_preview_legend_overlay)
+            self.frame.after_idle(
+                lambda: (
+                    self._place_preview_legend_overlay(),
+                    self._place_preview_overlay_dock(),
+                    self._place_preview_campaign_gate_overlay(),
+                )
+            )
         except Exception:
             pass
 
@@ -10468,10 +11346,777 @@ class AnnotationTab:
             info = {}
         return format_yolo_model_identity(info)
 
+    @staticmethod
+    def _model_quality_float(value) -> float | None:
+        if value in (None, "", "-"):
+            return None
+        try:
+            numeric = float(str(value).strip().replace(",", "."))
+        except Exception:
+            return None
+        if not math.isfinite(numeric):
+            return None
+        return numeric
+
+    @classmethod
+    def _model_quality_value(cls, mapping: dict | None, keys: list[str] | tuple[str, ...]) -> float | None:
+        if not isinstance(mapping, dict):
+            return None
+
+        for key in keys:
+            if key in mapping:
+                value = cls._model_quality_float(mapping.get(key))
+                if value is not None:
+                    return value
+
+        lower_map = {str(k or "").strip().lower(): v for k, v in mapping.items()}
+        for key in keys:
+            value = cls._model_quality_float(lower_map.get(str(key or "").strip().lower()))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _paths_refer_to_same_model(left: str | Path | None, right: str | Path | None) -> bool:
+        left_text = str(left or "").strip()
+        right_text = str(right or "").strip()
+        if not left_text or not right_text:
+            return False
+        try:
+            left_key = os.path.normcase(str(Path(left_text).resolve()))
+            right_key = os.path.normcase(str(Path(right_text).resolve()))
+            return left_key == right_key
+        except Exception:
+            return os.path.normcase(left_text) == os.path.normcase(right_text)
+
+    @staticmethod
+    def _path_is_inside_dir(path_value: str | Path | None, dir_value: str | Path | None) -> bool:
+        path_text = str(path_value or "").strip()
+        dir_text = str(dir_value or "").strip()
+        if not path_text or not dir_text:
+            return False
+        try:
+            path_key = os.path.normcase(str(Path(path_text).resolve()))
+            dir_key = os.path.normcase(str(Path(dir_text).resolve()))
+            return path_key == dir_key or path_key.startswith(dir_key + os.sep)
+        except Exception:
+            return False
+
+    def _iter_plate_training_history_files(self) -> list[Path]:
+        candidates: list[Path] = []
+        try:
+            candidates.append(Path(CONFIG.get_training_runs_dir("plate")) / "training_history.json")
+        except Exception:
+            pass
+        try:
+            candidates.append(Path(CONFIG.DIR_5_RUNS_PLATES) / "training_history.json")
+        except Exception:
+            pass
+        try:
+            candidates.append(Path(CONFIG.DEFAULT_TRAINING_DIR) / "training_history.json")
+        except Exception:
+            pass
+        try:
+            root = Path(CONFIG.DEFAULT_TRAINING_DIR)
+            if root.exists():
+                candidates.extend(root.rglob("training_history.json"))
+        except Exception:
+            pass
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+            if active_project:
+                project_root = CAMPAIGN.get_project_root(active_project)
+                if project_root is not None:
+                    candidates.append(Path(project_root) / "5_training_runs" / "training_history.json")
+        except Exception:
+            pass
+        try:
+            projects_root = Path(CONFIG.DIR_9_PROJECTS)
+            if projects_root.exists():
+                candidates.extend(projects_root.glob("*/5_training_runs/training_history.json"))
+        except Exception:
+            pass
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                key = os.path.normcase(str(candidate.resolve()))
+            except Exception:
+                key = os.path.normcase(str(candidate))
+            if key in seen or not candidate.exists():
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
+
+    @staticmethod
+    def _training_history_run_looks_like_plate(run: dict | None) -> bool:
+        if not isinstance(run, dict):
+            return False
+
+        text = " ".join(
+            str(run.get(key) or "")
+            for key in ("name", "dataset_path", "base_model", "output_dir")
+        ).lower()
+        if any(token in text for token in ("plate", "plates", "tablic", "pose", "-pose", "_pose")):
+            return True
+        if any(token in text for token in ("char", "chars", "character", "ocr", "znak", "znaki", "vehicle", "pojazd")):
+            return False
+        return True
+
+    @staticmethod
+    def _load_training_runs_from_history_file(history_file: Path) -> list[dict]:
+        try:
+            with history_file.open("r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except Exception:
+            return []
+
+        raw_runs = data.get("runs", {}) if isinstance(data, dict) else {}
+        if isinstance(raw_runs, dict):
+            runs: list[dict] = []
+            for run_id, run_data in raw_runs.items():
+                if not isinstance(run_data, dict):
+                    continue
+                cloned = dict(run_data)
+                cloned.setdefault("id", str(run_id or "").strip())
+                runs.append(cloned)
+            return runs
+        if isinstance(raw_runs, list):
+            return [dict(item) for item in raw_runs if isinstance(item, dict)]
+        return []
+
+    def _find_plate_training_run_for_model(self, model_path: Path) -> dict | None:
+        safe_path = Path(model_path)
+        model_name = str(safe_path.name or "").strip().lower()
+        try:
+            model_key = os.path.normcase(str(safe_path.resolve()))
+        except Exception:
+            model_key = os.path.normcase(str(safe_path))
+
+        for history_file in self._iter_plate_training_history_files():
+            for run in self._load_training_runs_from_history_file(history_file):
+                if not self._training_history_run_looks_like_plate(run):
+                    continue
+                candidate_paths = [
+                    str(run.get("best_weights") or "").strip(),
+                    str(run.get("last_weights") or "").strip(),
+                ]
+                output_dir = str(run.get("output_dir") or "").strip()
+                if output_dir:
+                    candidate_paths.extend(
+                        [
+                            str(Path(output_dir) / "train" / "weights" / "best.pt"),
+                            str(Path(output_dir) / "train" / "weights" / "last.pt"),
+                        ]
+                    )
+
+                for candidate in candidate_paths:
+                    if candidate and self._paths_refer_to_same_model(candidate, safe_path):
+                        run["_history_file"] = str(history_file)
+                        return run
+
+                if output_dir and self._path_is_inside_dir(model_key, output_dir):
+                    run["_history_file"] = str(history_file)
+                    return run
+
+                run_id = str(run.get("id") or "").strip().lower()
+                if run_id and run_id in model_name:
+                    run["_history_file"] = str(history_file)
+                    return run
+
+        return None
+
+    def _extract_plate_model_metrics_from_rows(self, rows: list[dict], *, source: str = "") -> dict:
+        if not rows:
+            return {}
+
+        best_row: dict | None = None
+        best_score = -1.0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            strict_value = self._model_quality_value(
+                row,
+                (
+                    "map50_95",
+                    "box_map50_95",
+                    "metrics/mAP50-95(B)",
+                    "metrics/mAP50-95",
+                    "map50_90",
+                    "box_map50_90",
+                    "metrics/mAP50-90(B)",
+                    "metrics/mAP50-90",
+                    "pose_map50_95",
+                    "metrics/mAP50-95(P)",
+                    "pose_map50_90",
+                    "metrics/mAP50-90(P)",
+                ),
+            )
+            loose_value = self._model_quality_value(
+                row,
+                (
+                    "map50",
+                    "box_map50",
+                    "metrics/mAP50(B)",
+                    "metrics/mAP50",
+                    "pose_map50",
+                    "metrics/mAP50(P)",
+                ),
+            )
+            score = strict_value if strict_value is not None else loose_value
+            if score is None:
+                continue
+            if score >= best_score:
+                best_score = score
+                best_row = row
+
+        if best_row is None:
+            return {}
+
+        metrics = {
+            "map50_95": self._model_quality_value(
+                best_row,
+                (
+                    "map50_95",
+                    "box_map50_95",
+                    "metrics/mAP50-95(B)",
+                    "metrics/mAP50-95",
+                    "pose_map50_95",
+                    "metrics/mAP50-95(P)",
+                ),
+            ),
+            "map50_90": self._model_quality_value(
+                best_row,
+                (
+                    "map50_90",
+                    "box_map50_90",
+                    "metrics/mAP50-90(B)",
+                    "metrics/mAP50-90",
+                    "pose_map50_90",
+                    "metrics/mAP50-90(P)",
+                ),
+            ),
+            "map50": self._model_quality_value(
+                best_row,
+                (
+                    "map50",
+                    "box_map50",
+                    "metrics/mAP50(B)",
+                    "metrics/mAP50",
+                    "pose_map50",
+                    "metrics/mAP50(P)",
+                ),
+            ),
+            "precision": self._model_quality_value(
+                best_row,
+                (
+                    "precision",
+                    "box_precision",
+                    "metrics/precision(B)",
+                    "pose_precision",
+                    "metrics/precision(P)",
+                ),
+            ),
+            "recall": self._model_quality_value(
+                best_row,
+                (
+                    "recall",
+                    "box_recall",
+                    "metrics/recall(B)",
+                    "pose_recall",
+                    "metrics/recall(P)",
+                ),
+            ),
+            "loss": self._model_quality_value(
+                best_row,
+                (
+                    "loss",
+                    "val/loss",
+                    "train/loss",
+                    "val/box_loss",
+                    "train/box_loss",
+                    "val/pose_loss",
+                    "train/pose_loss",
+                ),
+            ),
+            "epoch": self._model_quality_value(best_row, ("epoch", "Epoch")),
+            "source": source,
+        }
+        return {key: value for key, value in metrics.items() if value not in (None, "")}
+
+    def _read_results_csv_metrics(self, csv_path: Path, *, source: str = "results.csv") -> dict:
+        if not csv_path.exists():
+            return {}
+        rows: list[dict] = []
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if not isinstance(row, dict):
+                        continue
+                    rows.append({str(k or "").strip(): str(v or "").strip() for k, v in row.items()})
+        except Exception as e:
+            logger.debug(f"Nie udało się odczytać metryk modelu z results.csv: {e}")
+            return {}
+        metrics = self._extract_plate_model_metrics_from_rows(rows, source=source)
+        if metrics:
+            metrics["results_csv"] = str(csv_path)
+        return metrics
+
+    def _read_results_csv_metrics_for_model(self, model_path: Path) -> dict:
+        safe_path = Path(model_path)
+        candidates: list[Path] = []
+        try:
+            if safe_path.parent.name.lower() == "weights":
+                candidates.append(safe_path.parent.parent / "results.csv")
+            candidates.extend(
+                [
+                    safe_path.parent / "results.csv",
+                    safe_path.parent.parent / "results.csv",
+                ]
+            )
+        except Exception:
+            pass
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                key = os.path.normcase(str(candidate.resolve()))
+            except Exception:
+                key = os.path.normcase(str(candidate))
+            if key in seen:
+                continue
+            seen.add(key)
+            metrics = self._read_results_csv_metrics(candidate, source="results.csv obok wag")
+            if metrics:
+                return metrics
+        return {}
+
+    def _read_exported_model_metadata_metrics(self, model_path: Path) -> dict:
+        safe_path = Path(model_path)
+        candidates: list[Path] = []
+
+        def add_candidate(candidate: Path) -> None:
+            try:
+                key = os.path.normcase(str(candidate.resolve()))
+            except Exception:
+                key = os.path.normcase(str(candidate))
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+
+        seen: set[str] = set()
+        add_candidate(safe_path.with_suffix(".json"))
+        add_candidate(safe_path.with_name(f"{safe_path.stem}_metadata.json"))
+        try:
+            stem_key = str(safe_path.stem or "").strip().lower()
+            for candidate in safe_path.parent.glob("*.json"):
+                candidate_name = str(candidate.stem or "").strip().lower()
+                if stem_key and stem_key in candidate_name:
+                    add_candidate(candidate)
+        except Exception:
+            pass
+
+        for metadata_path in candidates:
+            if not metadata_path.exists():
+                continue
+            try:
+                with metadata_path.open("r", encoding="utf-8-sig") as handle:
+                    data = json.load(handle)
+            except Exception as e:
+                logger.debug(f"Nie udało się odczytać metadanych modelu {metadata_path}: {e}")
+                continue
+            if not isinstance(data, dict):
+                continue
+
+            metrics_root = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+            best_row = metrics_root.get("best_row") if isinstance(metrics_root.get("best_row"), dict) else {}
+            latest = metrics_root.get("latest") if isinstance(metrics_root.get("latest"), dict) else {}
+            training = data.get("training") if isinstance(data.get("training"), dict) else {}
+            run_snapshot = data.get("run_snapshot") if isinstance(data.get("run_snapshot"), dict) else {}
+            source_root = data.get("source") if isinstance(data.get("source"), dict) else {}
+            source = "metadata eksportu modelu"
+
+            def first_metric(*values):
+                for value in values:
+                    if value is not None:
+                        return value
+                return None
+
+            metrics = {
+                "map50": first_metric(
+                    self._model_quality_float(metrics_root.get("best_map50")),
+                    self._model_quality_float(run_snapshot.get("best_map50")),
+                    self._model_quality_value(best_row, ("map50", "box_map50", "metrics/mAP50(B)", "metrics/mAP50", "pose_map50", "metrics/mAP50(P)")),
+                    self._model_quality_value(latest, ("map50", "box_map50", "metrics/mAP50(B)", "metrics/mAP50", "pose_map50", "metrics/mAP50(P)")),
+                ),
+                "map50_95": first_metric(
+                    self._model_quality_float(metrics_root.get("best_map50_95")),
+                    self._model_quality_float(run_snapshot.get("best_map50_95")),
+                    self._model_quality_value(best_row, ("map50_95", "box_map50_95", "metrics/mAP50-95(B)", "metrics/mAP50-95", "pose_map50_95", "metrics/mAP50-95(P)")),
+                    self._model_quality_value(latest, ("map50_95", "box_map50_95", "metrics/mAP50-95(B)", "metrics/mAP50-95", "pose_map50_95", "metrics/mAP50-95(P)")),
+                ),
+                "precision": first_metric(
+                    self._model_quality_value(best_row, ("precision", "box_precision", "metrics/precision(B)", "pose_precision", "metrics/precision(P)")),
+                    self._model_quality_value(latest, ("precision", "box_precision", "metrics/precision(B)", "pose_precision", "metrics/precision(P)")),
+                ),
+                "recall": first_metric(
+                    self._model_quality_value(best_row, ("recall", "box_recall", "metrics/recall(B)", "pose_recall", "metrics/recall(P)")),
+                    self._model_quality_value(latest, ("recall", "box_recall", "metrics/recall(B)", "pose_recall", "metrics/recall(P)")),
+                ),
+                "loss": first_metric(
+                    self._model_quality_value(best_row, ("loss", "val/loss", "train/loss", "val/box_loss", "train/box_loss", "val/pose_loss", "train/pose_loss")),
+                    self._model_quality_value(latest, ("loss", "val/loss", "train/loss", "val/box_loss", "train/box_loss", "val/pose_loss", "train/pose_loss")),
+                ),
+                "epoch": first_metric(
+                    self._model_quality_float(metrics_root.get("best_epoch")),
+                    self._model_quality_value(best_row, ("epoch", "Epoch")),
+                    self._model_quality_float(training.get("current_epoch")),
+                    self._model_quality_float(run_snapshot.get("current_epoch")),
+                ),
+                "source": source,
+                "metadata_json": str(metadata_path),
+                "run_id": str(training.get("run_id") or run_snapshot.get("id") or "").strip(),
+                "run_name": str(training.get("run_name") or run_snapshot.get("name") or "").strip(),
+                "status": str(training.get("status") or run_snapshot.get("status") or "").strip(),
+                "dataset_path": str(training.get("dataset_path") or run_snapshot.get("dataset_path") or "").strip(),
+                "output_dir": str(source_root.get("run_output_dir") or "").strip(),
+            }
+            return {key: value for key, value in metrics.items() if value not in (None, "")}
+
+        return {}
+
+    def _build_plate_model_quality_metrics(self, model_path: Path) -> dict:
+        safe_path = Path(model_path)
+        metrics: dict = self._read_exported_model_metadata_metrics(safe_path)
+        run = self._find_plate_training_run_for_model(safe_path)
+
+        if isinstance(run, dict):
+            history_rows = list(run.get("metrics_history") or [])
+            history_metrics = self._extract_plate_model_metrics_from_rows(history_rows, source="historia treningu")
+
+            if not history_metrics:
+                history_metrics = {
+                    "map50": self._model_quality_float(run.get("best_map50")),
+                    "map50_95": self._model_quality_float(run.get("best_map50_95")),
+                    "source": "historia treningu",
+                }
+                history_metrics = {key: value for key, value in history_metrics.items() if value not in (None, "")}
+
+            output_dir = str(run.get("output_dir") or "").strip()
+            if output_dir:
+                csv_metrics = self._read_results_csv_metrics(
+                    Path(output_dir) / "train" / "results.csv",
+                    source="results.csv runu",
+                )
+                if csv_metrics:
+                    history_metrics.update({key: value for key, value in csv_metrics.items() if value not in (None, "")})
+
+            history_metrics.update(
+                {
+                    "run_id": str(run.get("id") or "").strip(),
+                    "run_name": str(run.get("name") or "").strip(),
+                    "status": str(run.get("status") or "").strip(),
+                    "dataset_path": str(run.get("dataset_path") or "").strip(),
+                    "output_dir": str(run.get("output_dir") or "").strip(),
+                }
+            )
+            for key, value in history_metrics.items():
+                if key not in metrics or metrics.get(key) in (None, ""):
+                    metrics[key] = value
+
+        if not metrics:
+            metrics = self._read_results_csv_metrics_for_model(safe_path)
+
+        return {key: value for key, value in metrics.items() if value not in (None, "")}
+
+    def _get_plate_model_quality_metrics(self, model_path: Path | None) -> dict:
+        if model_path is None or not Path(model_path).exists():
+            return {}
+        safe_path = Path(model_path)
+        try:
+            stat = safe_path.stat()
+            cache_key = (
+                os.path.normcase(str(safe_path.resolve())),
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(getattr(stat, "st_size", 0) or 0),
+            )
+        except Exception:
+            cache_key = (os.path.normcase(str(safe_path)), 0, 0)
+
+        cache = getattr(self, "_plate_model_quality_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._plate_model_quality_cache = cache
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
+        metrics = self._build_plate_model_quality_metrics(safe_path)
+        cache[cache_key] = dict(metrics)
+        return metrics
+
+    @staticmethod
+    def _format_model_quality_number(value) -> str:
+        numeric = AnnotationTab._model_quality_float(value)
+        if numeric is None:
+            return "-"
+        return f"{numeric:.3f}"
+
+    @staticmethod
+    def _format_model_quality_epoch(value) -> str:
+        numeric = AnnotationTab._model_quality_float(value)
+        if numeric is None:
+            return "-"
+        return str(max(0, int(round(numeric))))
+
+    @staticmethod
+    def _describe_auto_model_quality(value) -> str:
+        numeric = AnnotationTab._model_quality_float(value)
+        if numeric is None:
+            return ""
+        if numeric >= 0.80:
+            return "bardzo dobry poziom"
+        if numeric >= 0.60:
+            return "dobry poziom"
+        if numeric >= 0.40:
+            return "poziom używalny, ale do kontroli"
+        return "niski poziom - wybierz ostrożnie"
+
+    @staticmethod
+    def _auto_model_metric_tone(value, profile: str = "strict") -> str:
+        numeric = AnnotationTab._model_quality_float(value)
+        if numeric is None:
+            return "info"
+        normalized = str(profile or "").strip().lower()
+        if normalized == "loose":
+            return "success" if numeric >= 0.70 else "warning"
+        if normalized == "standard":
+            return "success" if numeric >= 0.50 else "warning"
+        return "success" if numeric >= 0.60 else "warning"
+
+    @staticmethod
+    def _shorten_model_quality_text(value, limit: int = 72) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= int(limit):
+            return text
+        return text[: max(1, int(limit) - 3)] + "..."
+
+    def _build_auto_annotation_model_quality_rows(self, model_path: Path | str | None) -> tuple[list[tuple[str, str, str]], str]:
+        path_text = str(model_path or "").strip()
+        if not path_text:
+            return [("Status", "nie wybrano pliku .pt", "warning")], "warning"
+
+        try:
+            safe_path = Path(path_text)
+        except Exception:
+            return [("Status", "nieprawidłowa ścieżka pliku .pt", "warning")], "warning"
+
+        if not safe_path.exists():
+            return [("Status", "plik .pt nie istnieje", "warning")], "warning"
+
+        identity = self._get_model_identity_caption(safe_path)
+        size_text = ""
+        try:
+            size_text = f"{safe_path.stat().st_size / (1024 * 1024):.1f} MB"
+        except Exception:
+            size_text = ""
+
+        rows: list[tuple[str, str, str]] = [("Plik", safe_path.name, "info")]
+        if identity:
+            rows.append(("Typ", identity, "info"))
+        if size_text:
+            rows.append(("Rozmiar", size_text, "info"))
+
+        metrics = self._get_plate_model_quality_metrics(safe_path)
+        if metrics:
+            has_metric_numbers = any(
+                self._model_quality_float(metrics.get(metric_key)) is not None
+                for metric_key in ("map50_95", "map50_90", "map50", "precision", "recall", "loss")
+            )
+            strict_value = metrics.get("map50_95")
+            strict_label = "mAP50-95"
+            if strict_value is None and metrics.get("map50_90") is not None:
+                strict_value = metrics.get("map50_90")
+                strict_label = "mAP50-90"
+            if strict_value is not None:
+                rows.append((strict_label, self._format_model_quality_number(strict_value), self._auto_model_metric_tone(strict_value, "strict")))
+            if metrics.get("map50") is not None:
+                rows.append(("mAP50", self._format_model_quality_number(metrics.get("map50")), self._auto_model_metric_tone(metrics.get("map50"), "loose")))
+            if metrics.get("precision") is not None:
+                rows.append(("Precision", self._format_model_quality_number(metrics.get("precision")), self._auto_model_metric_tone(metrics.get("precision"), "standard")))
+            if metrics.get("recall") is not None:
+                rows.append(("Recall", self._format_model_quality_number(metrics.get("recall")), self._auto_model_metric_tone(metrics.get("recall"), "standard")))
+            if metrics.get("loss") is not None:
+                rows.append(("Loss", self._format_model_quality_number(metrics.get("loss")), "info"))
+            if metrics.get("epoch") is not None:
+                rows.append(("Najlepsza epoka", self._format_model_quality_epoch(metrics.get("epoch")), "info"))
+
+            quality_basis = strict_value if strict_value is not None else metrics.get("map50")
+            quality_note = self._describe_auto_model_quality(quality_basis)
+            quality_numeric = self._model_quality_float(quality_basis)
+            if quality_note:
+                rows.append(
+                    (
+                        "Ocena",
+                        quality_note,
+                        "success" if quality_numeric is not None and quality_numeric >= 0.60 else "warning",
+                    )
+                )
+            elif not has_metric_numbers:
+                rows.append(
+                    (
+                        "Wyniki treningu",
+                        "znaleziono powiązany run, ale bez zapisanych wartości mAP/precision/recall",
+                        "warning",
+                    )
+                )
+
+            table_tone = "success" if quality_numeric is not None and quality_numeric >= 0.60 else "warning"
+            run_name = str(metrics.get("run_name") or "").strip()
+            run_id = str(metrics.get("run_id") or "").strip()
+            run_label = run_name or run_id
+            if run_name and run_id and run_id not in run_name:
+                run_label = f"{run_name} [{run_id}]"
+            source = str(metrics.get("source") or "").strip()
+            if run_label or source:
+                source_line = "Źródło metryk"
+                source_bits = []
+                if source:
+                    source_bits.append(source)
+                if run_label:
+                    source_bits.append(self._shorten_model_quality_text(run_label, 68))
+                rows.append((source_line, " | ".join(source_bits), "info"))
+
+            dataset_path = str(metrics.get("dataset_path") or "").strip()
+            if dataset_path:
+                try:
+                    dataset_display = self._format_workspace_relative_path(dataset_path)
+                except Exception:
+                    dataset_display = dataset_path
+                rows.append(("Dataset", self._shorten_model_quality_text(dataset_display, 86), "info"))
+            return rows, (table_tone if has_metric_numbers else "warning")
+
+        rows.append(
+            (
+                "Wyniki treningu",
+                "brak metryk w historii treningu albo w results.csv",
+                "warning",
+            )
+        )
+        rows.append(
+            (
+                "Wskazówka",
+                "przed wyborem sprawdź raport treningu, żeby nie startować autoanotacji w ciemno",
+                "warning",
+            )
+        )
+        return rows, "warning"
+
+    def _format_auto_annotation_model_quality_summary(self, model_path: Path | str | None) -> tuple[str, str]:
+        rows, tone = self._build_auto_annotation_model_quality_rows(model_path)
+        lines = [f"{label}: {value}" for label, value, _row_tone in rows if str(value or "").strip()]
+        return "\n".join(lines), tone
+
+    def _render_auto_annotation_model_quality_table(
+        self,
+        host,
+        rows: list[tuple[str, str, str]],
+        tone: str,
+        *,
+        bg: str | None = None,
+        fg: str | None = None,
+        muted: str | None = None,
+        border: str | None = None,
+        success: str | None = None,
+        warning: str | None = None,
+        wraplength: int = 390,
+        label_width: int = 15,
+    ) -> None:
+        if host is None:
+            return
+        for child in list(host.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        safe_rows = [
+            (str(label or "").strip(), str(value or "").strip(), str(row_tone or "").strip().lower())
+            for label, value, row_tone in list(rows or [])
+            if str(label or "").strip() and str(value or "").strip()
+        ]
+        if not safe_rows:
+            return
+
+        palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+        table_bg = str(bg or palette.get("field", palette.get("panel_alt", "#2d2d30")))
+        table_fg = str(fg or palette.get("fg", "#f3f3f3"))
+        table_muted = str(muted or palette.get("muted", "#c7c7c7"))
+        table_border = str(border or palette.get("panel_border", palette.get("border", "#3c3c3c")))
+        success_color = str(success or palette.get("success", "#2ecc71"))
+        warning_color = str(warning or palette.get("warning", "#f39c12"))
+        table_tone = str(tone or "").strip().lower()
+        accent = success_color if table_tone == "success" else warning_color
+        row_alt = blend_hex_colors(table_border, table_bg, 0.18)
+
+        shell = tk.Frame(
+            host,
+            bg=table_bg,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=accent,
+            highlightcolor=accent,
+        )
+        shell.pack(fill=tk.X)
+
+        for idx, (label_text, value_text, row_tone) in enumerate(safe_rows):
+            row_bg = table_bg if idx % 2 == 0 else row_alt
+            row = tk.Frame(shell, bg=row_bg, bd=0, highlightthickness=0)
+            row.pack(fill=tk.X, padx=1, pady=(1 if idx == 0 else 0, 1))
+
+            tk.Label(
+                row,
+                text=label_text,
+                bg=row_bg,
+                fg=table_muted,
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                width=max(8, int(label_width)),
+                padx=7,
+                pady=3,
+            ).pack(side=tk.LEFT, fill=tk.Y)
+
+            value_fg = (
+                success_color
+                if row_tone == "success"
+                else warning_color
+                if row_tone == "warning"
+                else table_fg
+            )
+            tk.Label(
+                row,
+                text=value_text,
+                bg=row_bg,
+                fg=value_fg,
+                font=("Segoe UI", 8, "bold" if row_tone in {"success", "warning"} else "normal"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=max(220, int(wraplength)),
+                padx=7,
+                pady=3,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
     def _confirm_campaign_plate_model_identity_choice(self, model_path: Path, info: dict | None, *, adopt_to_project: bool) -> bool:
         safe_path = Path(model_path)
         info = dict(info or {})
-        identity_label = format_yolo_model_identity(info)
         source_architecture = str(info.get("source_architecture_label") or "").strip()
         source_model_name = str(info.get("source_model_name") or "").strip()
         source_display = source_architecture or source_model_name
@@ -10481,27 +12126,163 @@ class AnnotationTab:
         )
 
         scope_text = "po zapisaniu w projekcie" if adopt_to_project else "tylko dla bieżącego runu Z2"
-        lines = [
-            "Potwierdź wybór modelu tablic dla autoanotacji.",
-            "",
-            f"Plik: {safe_path.name}",
+        result = {"confirmed": False}
+        palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+        panel_bg = palette.get("panel", "#252526")
+        field_bg = palette.get("field", palette.get("panel_alt", "#2d2d30"))
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#2ecc71")
+        warning = palette.get("warning", "#f39c12")
+
+        dialog = tk.Toplevel(self.frame)
+        try:
+            dialog.withdraw()
+        except Exception:
+            pass
+
+        dialog_styler = getattr(self.app, "style_dialog_window", None)
+        if callable(dialog_styler):
+            try:
+                dialog_styler(dialog, title="Potwierdź model tablic", geometry="760x560", parent=self.frame)
+            except Exception:
+                try:
+                    dialog.title("Potwierdź model tablic")
+                    dialog.resizable(False, False)
+                except Exception:
+                    pass
+        else:
+            try:
+                dialog.title("Potwierdź model tablic")
+                dialog.resizable(False, False)
+            except Exception:
+                pass
+
+        try:
+            dialog.configure(bg=panel_bg, highlightbackground=panel_bg, highlightcolor=panel_bg)
+        except Exception:
+            pass
+        try:
+            dialog.transient(getattr(self.app, "root", None) or self.frame.winfo_toplevel())
+        except Exception:
+            pass
+
+        body_surface_builder = getattr(self.app, "_build_themed_dialog_surface", None)
+        if callable(body_surface_builder):
+            try:
+                body_surface = body_surface_builder(dialog, tone="info")
+            except Exception:
+                body_surface = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+                body_surface.pack(fill=tk.BOTH, expand=True)
+        else:
+            body_surface = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+            body_surface.pack(fill=tk.BOTH, expand=True)
+
+        body = tk.Frame(body_surface, bg=panel_bg, bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
+
+        title_lbl = tk.Label(
+            body,
+            text="Potwierdź model tablic dla autoanotacji",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        title_lbl.pack(anchor=tk.W, fill=tk.X)
+
+        intro_lines = [
+            "Sprawdź parametry modelu przed uruchomieniem autoanotacji. To ten model będzie tworzył ramki tablic w bieżącym runie.",
+            f"Zakres użycia: {scope_text}.",
         ]
-        if identity_label:
-            lines.append(f"Wykryto: {identity_label}")
         if is_checkpoint_like and source_display:
-            lines.append(f"Checkpoint wytrenowano z: {source_display}")
-        lines.extend(
-            [
-                f"Zakres użycia: {scope_text}",
-                "",
-                "Czy użyć tego modelu?",
-            ]
+            intro_lines.append(f"Checkpoint wytrenowano z: {source_display}.")
+
+        tk.Label(
+            body,
+            text="\n".join(intro_lines),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=650,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
+
+        table_host = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        table_host.pack(anchor=tk.W, fill=tk.X, pady=(0, 12))
+        quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(safe_path)
+        self._render_auto_annotation_model_quality_table(
+            table_host,
+            quality_rows,
+            quality_tone,
+            bg=field_bg,
+            fg=fg,
+            muted=muted,
+            border=border,
+            success=success,
+            warning=warning,
+            wraplength=500,
+            label_width=17,
         )
-        return messagebox.askyesno(
-            "Potwierdź model tablic",
-            "\n".join(lines),
-            parent=self.frame,
-        )
+
+        if str(quality_tone or "").strip().lower() != "success":
+            tk.Label(
+                body,
+                text=(
+                    "Uwaga: metryki są niskie albo nie udało się ich odczytać. "
+                    "Możesz użyć tego modelu, ale wynik autoanotacji może wymagać większej korekty ręcznej."
+                ),
+                bg=panel_bg,
+                fg=warning,
+                font=("Segoe UI", 9),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=650,
+            ).pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+
+        buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        buttons.pack(fill=tk.X, pady=(8, 0))
+
+        def choose(value: bool) -> None:
+            result["confirmed"] = bool(value)
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(buttons, text="Anuluj", command=lambda: choose(False)).pack(side=tk.RIGHT)
+        ttk.Button(
+            buttons,
+            text="Użyj tego modelu",
+            command=lambda: choose(True),
+            style=("Accent.TButton" if str(quality_tone or "").strip().lower() == "success" else "TButton"),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            self._fit_borderless_dialog(dialog, parent=self.frame, min_width=760, min_height=520)
+            dialog.update_idletasks()
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+        except Exception:
+            pass
+        try:
+            dialog.grab_set()
+        except Exception:
+            pass
+        dialog.bind("<Escape>", lambda _e: choose(False))
+        try:
+            dialog.wait_window()
+        finally:
+            try:
+                if dialog.winfo_exists():
+                    dialog.grab_release()
+            except Exception:
+                pass
+        return bool(result.get("confirmed"))
 
     @staticmethod
     def _normalize_plate_model_source(value: str | None) -> str:
@@ -10586,12 +12367,6 @@ class AnnotationTab:
         if not current_path:
             return {"path": "", "identity": "", "source": "", "scope": ""}
 
-        if not str(meta.get("identity") or "").strip():
-            try:
-                meta["identity"] = self._get_model_identity_caption(Path(current_path))
-            except Exception:
-                meta["identity"] = ""
-
         if not self._normalize_plate_model_source(meta.get("source")):
             project_model = self._get_campaign_project_plate_model_path()
             try:
@@ -10638,7 +12413,16 @@ class AnnotationTab:
         tone = "info"
         if campaign_context:
             project_model_path = self._get_campaign_project_plate_model_path()
-            project_identity = self._get_model_identity_caption(project_model_path)
+            project_identity = ""
+            try:
+                if (
+                    project_model_path is not None
+                    and path_text
+                    and Path(path_text).resolve() == project_model_path.resolve()
+                ):
+                    project_identity = identity
+            except Exception:
+                project_identity = identity if source == "project" else ""
             if project_model_path is not None:
                 project_line = f"Model projektu tablic: {project_model_path.name}"
                 if project_identity:
@@ -10729,7 +12513,65 @@ class AnnotationTab:
             pass
         return True
 
-    def _get_campaign_plate_model_picker_initial_dir(self, preferred_path: Path | None = None) -> Path:
+    def _get_auto_model_picker_initial_dir(
+        self,
+        target: str,
+        *,
+        picker_scope: str = "free",
+        preferred_path: Path | None = None,
+    ) -> Path:
+        scope = str(picker_scope or "").strip().lower()
+        if scope == "project" and not self._is_free_mode_session_context():
+            try:
+                from ..campaign_manager import CAMPAIGN
+                project_models_dir = CAMPAIGN.get_dir("models")
+                if project_models_dir is not None and Path(project_models_dir).exists():
+                    return Path(project_models_dir)
+            except Exception:
+                pass
+
+        if scope == "free":
+            try:
+                initial_dir = CONFIG.get_trained_models_dir(target)
+                if initial_dir.exists():
+                    return initial_dir
+            except Exception:
+                pass
+            try:
+                if CONFIG.DIR_6_MODELS.exists():
+                    return Path(CONFIG.DIR_6_MODELS)
+            except Exception:
+                pass
+
+        if preferred_path is not None:
+            try:
+                candidate = preferred_path.parent if preferred_path.is_file() else preferred_path
+                if candidate.exists():
+                    return candidate
+            except Exception:
+                pass
+
+        try:
+            initial_dir = CONFIG.get_trained_models_dir(target)
+            if initial_dir.exists():
+                return initial_dir
+        except Exception:
+            pass
+        return Path(CONFIG.DIR_6_MODELS)
+
+    def _get_campaign_plate_model_picker_initial_dir(
+        self,
+        preferred_path: Path | None = None,
+        *,
+        picker_scope: str = "project",
+    ) -> Path:
+        scoped_dir = self._get_auto_model_picker_initial_dir(
+            "plate",
+            picker_scope=picker_scope,
+            preferred_path=preferred_path,
+        )
+        if scoped_dir.exists():
+            return scoped_dir
         if preferred_path is not None:
             try:
                 candidate = preferred_path.parent if preferred_path.is_file() else preferred_path
@@ -10744,13 +12586,18 @@ class AnnotationTab:
                 return Path(project_models_dir)
         except Exception:
             pass
-        initial_dir = CONFIG.get_trained_models_dir("plate")
-        if initial_dir.exists():
-            return initial_dir
         return Path(CONFIG.DIR_6_MODELS)
 
-    def _pick_campaign_plate_auto_model_file(self, preferred_path: Path | None = None) -> Path | None:
-        initial_dir = self._get_campaign_plate_model_picker_initial_dir(preferred_path=preferred_path)
+    def _pick_campaign_plate_auto_model_file(
+        self,
+        preferred_path: Path | None = None,
+        *,
+        picker_scope: str = "project",
+    ) -> Path | None:
+        initial_dir = self._get_campaign_plate_model_picker_initial_dir(
+            preferred_path=preferred_path,
+            picker_scope=picker_scope,
+        )
         chosen = filedialog.askopenfilename(
             initialdir=str(initial_dir.absolute()),
             filetypes=[("YOLO Model", "*.pt")],
@@ -11000,7 +12847,10 @@ class AnnotationTab:
 
         frozen_buckets = dict(getattr(self, "_preview_list_frozen_bucket_snapshot", {}) or {})
         current_key = str(getattr(current_ann, "filename", "") or "").strip().lower()
-        current_bucket = frozen_buckets.get(current_key) or self._preview_annotation_sort_bucket(current_ann)
+        current_bucket = frozen_buckets.get(current_key) or self._preview_annotation_sort_bucket_for_mode(
+            current_ann,
+            sort_mode,
+        )
         if not current_bucket:
             return []
 
@@ -11010,7 +12860,11 @@ class AnnotationTab:
             except Exception:
                 return ""
             filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
-            return str(frozen_buckets.get(filename_key) or self._preview_annotation_sort_bucket(ann) or "").strip().lower()
+            return str(
+                frozen_buckets.get(filename_key)
+                or self._preview_annotation_sort_bucket_for_mode(ann, sort_mode)
+                or ""
+            ).strip().lower()
 
         group_indices = [int(current_actual)]
         left = int(current_display) - 1
@@ -11036,12 +12890,18 @@ class AnnotationTab:
         actual_indices: list[int],
         *,
         candidate_path_map: dict[str, Path] | None = None,
+        protected_filenames: set[str] | None = None,
     ) -> list[Path]:
         resolved_paths: list[Path] = []
         seen_names: set[str] = set()
         path_map = {
             str(name or "").strip().lower(): Path(path)
             for name, path in dict(candidate_path_map or {}).items()
+            if str(name or "").strip()
+        }
+        protected_names = {
+            str(name or "").strip().lower()
+            for name in set(protected_filenames or set())
             if str(name or "").strip()
         }
         for actual_index in list(actual_indices or []):
@@ -11051,6 +12911,8 @@ class AnnotationTab:
                 continue
             filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
             if not filename_key or filename_key in seen_names:
+                continue
+            if filename_key in protected_names:
                 continue
             resolved_path = path_map.get(filename_key)
             if resolved_path is None:
@@ -11066,12 +12928,106 @@ class AnnotationTab:
             resolved_paths.append(Path(resolved_path))
         return resolved_paths
 
+    @staticmethod
+    def _count_unique_preview_scope_indices(
+        annotations: list,
+        actual_indices: list[int],
+    ) -> int:
+        seen_names: set[str] = set()
+        count = 0
+        for actual_index in list(actual_indices or []):
+            try:
+                ann = annotations[int(actual_index)]
+            except Exception:
+                continue
+            filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
+            if not filename_key or filename_key in seen_names:
+                continue
+            seen_names.add(filename_key)
+            count += 1
+        return count
+
+    @staticmethod
+    def _count_protected_preview_scope_indices(
+        annotations: list,
+        actual_indices: list[int],
+        protected_filenames: set[str],
+    ) -> int:
+        protected_names = {
+            str(name or "").strip().lower()
+            for name in set(protected_filenames or set())
+            if str(name or "").strip()
+        }
+        if not protected_names:
+            return 0
+
+        seen_names: set[str] = set()
+        skipped_count = 0
+        for actual_index in list(actual_indices or []):
+            try:
+                ann = annotations[int(actual_index)]
+            except Exception:
+                continue
+            filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
+            if not filename_key or filename_key in seen_names:
+                continue
+            seen_names.add(filename_key)
+            if filename_key in protected_names:
+                skipped_count += 1
+        return skipped_count
+
+    def _get_preview_auto_scope_protected_filenames(self) -> set[str]:
+        protected: set[str] = set()
+        annotations = list(getattr(self, "current_annotations", []) or [])
+        if not annotations:
+            return protected
+
+        try:
+            approved_names = set(self._get_preview_approved_filenames_base() or set())
+        except Exception:
+            approved_names = set()
+        try:
+            campaign_manual_names = set(self._get_campaign_manual_touched_filenames() or set())
+        except Exception:
+            campaign_manual_names = set()
+
+        for ann in annotations:
+            filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
+            if not filename_key:
+                continue
+            is_approved = False
+            try:
+                is_approved = bool(
+                    self._preview_annotation_is_explicitly_approved(
+                        ann,
+                        approved_names=approved_names,
+                    )
+                )
+            except Exception:
+                is_approved = filename_key in approved_names
+            is_manual = bool(filename_key in campaign_manual_names)
+            try:
+                is_manual = bool(is_manual or self._preview_annotation_has_manual_touch(ann))
+            except Exception:
+                pass
+            if is_approved or is_manual:
+                protected.add(filename_key)
+
+        return protected
+
     def _collect_plate_auto_scope_candidates(
         self,
         *,
         candidate_image_paths: list[Path] | None = None,
     ) -> dict:
-        candidate_paths = self._dedupe_image_paths_by_name(candidate_image_paths or [])
+        protected_filenames = self._get_preview_auto_scope_protected_filenames()
+        annotations = list(getattr(self, "current_annotations", []) or [])
+        raw_candidate_paths = self._dedupe_image_paths_by_name(candidate_image_paths or [])
+        candidate_paths = [
+            path
+            for path in raw_candidate_paths
+            if str(getattr(path, "name", "") or "").strip().lower() not in protected_filenames
+        ]
         candidate_path_map = {
             str(path.name or "").strip().lower(): path
             for path in candidate_paths
@@ -11081,38 +13037,101 @@ class AnnotationTab:
         selected_paths = self._resolve_preview_scope_paths(
             selected_indices,
             candidate_path_map=candidate_path_map,
+            protected_filenames=protected_filenames,
+        )
+        selected_row_count = self._get_preview_listbox_selected_row_count()
+        selected_total_count = self._count_unique_preview_scope_indices(
+            annotations,
+            selected_indices,
+        )
+        selected_protected_skip_count = self._count_protected_preview_scope_indices(
+            annotations,
+            selected_indices,
+            protected_filenames,
         )
         group_indices = self._get_preview_group_actual_indices()
         group_paths = self._resolve_preview_scope_paths(
             group_indices,
             candidate_path_map=candidate_path_map,
+            protected_filenames=protected_filenames,
         )
         group_bucket = ""
         if group_indices:
             try:
                 first_ann = self.current_annotations[int(group_indices[0])]
-                filename_key = str(getattr(first_ann, "filename", "") or "").strip().lower()
-                frozen_buckets = dict(getattr(self, "_preview_list_frozen_bucket_snapshot", {}) or {})
-                group_bucket = str(
-                    frozen_buckets.get(filename_key) or self._preview_annotation_sort_bucket(first_ann) or ""
-                ).strip().lower()
+                group_bucket = self._preview_annotation_auto_scope_bucket(first_ann)
             except Exception:
                 group_bucket = ""
         return {
+            "raw_all_paths": raw_candidate_paths,
             "all_paths": candidate_paths,
+            "protected_skip_count": max(0, len(raw_candidate_paths) - len(candidate_paths)),
             "selected_paths": selected_paths,
             "selected_count": len(selected_paths),
+            "selected_row_count": selected_row_count,
+            "selected_total_count": selected_total_count,
+            "selected_duplicate_skip_count": max(0, int(selected_row_count) - int(selected_total_count)),
+            "selected_protected_skip_count": selected_protected_skip_count,
+            "selected_unresolved_skip_count": max(
+                0,
+                int(selected_total_count) - int(selected_protected_skip_count) - int(len(selected_paths)),
+            ),
             "group_paths": group_paths,
             "group_count": len(group_paths),
+            "group_protected_skip_count": self._count_protected_preview_scope_indices(
+                annotations,
+                group_indices,
+                protected_filenames,
+            ),
             "group_bucket": group_bucket,
         }
+
+    def _collect_plate_auto_scope_bucket_protected_counts(
+        self,
+        *,
+        candidate_image_paths: list[Path] | None = None,
+    ) -> dict[str, int]:
+        protected_filenames = self._get_preview_auto_scope_protected_filenames()
+        candidate_paths = self._dedupe_image_paths_by_name(candidate_image_paths or [])
+        candidate_names = {
+            str(getattr(path, "name", "") or "").strip().lower()
+            for path in candidate_paths
+            if str(getattr(path, "name", "") or "").strip()
+        }
+        if not protected_filenames or not candidate_names:
+            return {"manual": 0, "auto": 0, "problem": 0}
+
+        counts: dict[str, int] = {"manual": 0, "auto": 0, "problem": 0}
+        seen_names: set[str] = set()
+        for actual_index in list(getattr(self, "_preview_list_display_indices", []) or []):
+            try:
+                ann = self.current_annotations[int(actual_index)]
+            except Exception:
+                continue
+            filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
+            if not filename_key or filename_key in seen_names:
+                continue
+            if filename_key not in candidate_names or filename_key not in protected_filenames:
+                continue
+            bucket = self._preview_annotation_auto_scope_bucket(ann)
+            if bucket not in counts:
+                continue
+            seen_names.add(filename_key)
+            counts[bucket] += 1
+        return counts
 
     def _collect_plate_auto_scope_bucket_paths(
         self,
         *,
         candidate_image_paths: list[Path] | None = None,
     ) -> dict[str, list[Path]]:
+        protected_filenames = self._get_preview_auto_scope_protected_filenames()
         candidate_paths = self._dedupe_image_paths_by_name(candidate_image_paths or [])
+        candidate_paths = [
+            path
+            for path in candidate_paths
+            if str(getattr(path, "name", "") or "").strip().lower() not in protected_filenames
+        ]
         if not candidate_paths:
             return {"manual": [], "auto": [], "problem": []}
 
@@ -11123,7 +13142,6 @@ class AnnotationTab:
         }
         ordered_paths: dict[str, list[Path]] = {"manual": [], "auto": [], "problem": []}
         seen_names: set[str] = set()
-        frozen_buckets = dict(getattr(self, "_preview_list_frozen_bucket_snapshot", {}) or {})
 
         for actual_index in list(getattr(self, "_preview_list_display_indices", []) or []):
             try:
@@ -11133,12 +13151,12 @@ class AnnotationTab:
             filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
             if not filename_key or filename_key in seen_names:
                 continue
+            if filename_key in protected_filenames:
+                continue
             resolved_path = candidate_path_map.get(filename_key)
             if resolved_path is None:
                 continue
-            bucket = str(
-                frozen_buckets.get(filename_key) or self._preview_annotation_sort_bucket(ann) or ""
-            ).strip().lower()
+            bucket = self._preview_annotation_auto_scope_bucket(ann)
             if bucket not in ordered_paths:
                 continue
             ordered_paths[bucket].append(resolved_path)
@@ -11309,6 +13327,56 @@ class AnnotationTab:
         except Exception:
             pass
 
+    def _get_preview_listbox_selected_row_count(self) -> int:
+        return len(self._get_preview_listbox_selection_signature())
+
+    def _get_preview_listbox_selection_signature(self) -> tuple[int, ...]:
+        listbox = getattr(self, "preview_listbox", None)
+        if listbox is None:
+            return ()
+        try:
+            return tuple(int(index) for index in list(listbox.curselection() or ()))
+        except Exception:
+            return ()
+
+    def _refresh_plate_auto_scope_modal_selection_state(self) -> None:
+        selection_refresh_callback = getattr(self, "_plate_auto_scope_modal_selection_refresh_callback", None)
+        if not callable(selection_refresh_callback):
+            return
+
+        try:
+            self._plate_auto_scope_modal_last_selection_signature = self._get_preview_listbox_selection_signature()
+        except Exception:
+            pass
+
+        frame = getattr(self, "frame", None)
+        if frame is None:
+            try:
+                selection_refresh_callback()
+            except Exception:
+                pass
+            return
+
+        def _refresh_selection_again() -> None:
+            self._plate_auto_scope_modal_selection_refresh_after_id = None
+            callback = getattr(self, "_plate_auto_scope_modal_selection_refresh_callback", None)
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    pass
+
+        try:
+            previous_after_id = getattr(self, "_plate_auto_scope_modal_selection_refresh_after_id", None)
+            if previous_after_id:
+                frame.after_cancel(previous_after_id)
+        except Exception:
+            pass
+        try:
+            self._plate_auto_scope_modal_selection_refresh_after_id = frame.after(35, _refresh_selection_again)
+        except Exception:
+            pass
+
     def _prompt_plate_auto_scope_choice(
         self,
         *,
@@ -11317,14 +13385,36 @@ class AnnotationTab:
         scope_info = self._collect_plate_auto_scope_candidates(
             candidate_image_paths=candidate_image_paths,
         )
+        raw_all_paths = list(scope_info.get("raw_all_paths") or [])
         all_paths = list(scope_info.get("all_paths") or [])
+        scope_protected_filenames = self._get_preview_auto_scope_protected_filenames()
+        scope_candidate_path_map = {
+            str(path.name or "").strip().lower(): path
+            for path in all_paths
+            if str(getattr(path, "name", "") or "").strip()
+        }
+        protected_skip_count = int(scope_info.get("protected_skip_count", 0) or 0)
         selected_count = int(scope_info.get("selected_count", 0) or 0)
-        bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=all_paths)
+        selected_total_count = int(scope_info.get("selected_total_count", selected_count) or 0)
+        selected_row_count = int(scope_info.get("selected_row_count", selected_total_count) or 0)
+        bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=raw_all_paths or all_paths)
         manual_bucket_paths = list(bucket_paths.get("manual") or [])
         auto_bucket_paths = list(bucket_paths.get("auto") or [])
         problem_bucket_paths = list(bucket_paths.get("problem") or [])
 
         if not all_paths:
+            if protected_skip_count > 0:
+                try:
+                    messagebox.showinfo(
+                        "Brak obrazów do autoanotacji",
+                        (
+                            "W wybranym zakresie nie ma obrazów gotowych do autoanotacji.\n\n"
+                            f"Pominięto {protected_skip_count} pozycji, bo są ręcznie anotowane albo mają status [OK]. "
+                            "To mechanizm ochronny przed nadpisaniem gotowej pracy."
+                        ),
+                    )
+                except Exception:
+                    pass
             return None
 
         palette = getattr(self.app, "palette", {}) or {}
@@ -11434,6 +13524,46 @@ class AnnotationTab:
             except Exception:
                 pass
 
+        def _capture_scope_modal_scroll_state() -> dict:
+            try:
+                yview = tuple(scroll_canvas.yview() or (0.0, 1.0))
+            except Exception:
+                yview = (0.0, 1.0)
+            try:
+                top_px = float(scroll_canvas.canvasy(0))
+            except Exception:
+                top_px = 0.0
+            return {
+                "fraction": float(yview[0] if yview else 0.0),
+                "top_px": top_px,
+            }
+
+        def _restore_scope_modal_scroll_state(scroll_state: dict | None) -> None:
+            if not isinstance(scroll_state, dict):
+                return
+            try:
+                if not dialog.winfo_exists():
+                    return
+            except Exception:
+                return
+            try:
+                scroll_canvas.update_idletasks()
+                region = str(scroll_canvas.cget("scrollregion") or "").split()
+                if len(region) >= 4:
+                    y1 = float(region[1])
+                    y2 = float(region[3])
+                    viewport_h = max(1.0, float(scroll_canvas.winfo_height() or 1.0))
+                    scroll_h = max(1.0, y2 - y1)
+                    max_top = max(0.0, scroll_h - viewport_h)
+                    top_px = min(max(float(scroll_state.get("top_px", 0.0) or 0.0), y1), y1 + max_top)
+                    scroll_canvas.yview_moveto(max(0.0, min(1.0, (top_px - y1) / scroll_h)))
+                else:
+                    scroll_canvas.yview_moveto(
+                        max(0.0, min(1.0, float(scroll_state.get("fraction", 0.0) or 0.0)))
+                    )
+            except Exception:
+                pass
+
         try:
             body_content.bind("<Configure>", _sync_scope_modal_scrollregion, add="+")
             scroll_canvas.bind("<Configure>", _sync_scope_modal_canvas_width, add="+")
@@ -11462,10 +13592,13 @@ class AnnotationTab:
             return "break"
 
         def _bind_scope_modal_scroll_children(widget):
+            already_bound = bool(getattr(widget, "_scope_modal_scroll_bound", False))
             try:
-                widget.bind("<MouseWheel>", _scope_modal_redirect_wheel, add="+")
-                widget.bind("<Button-4>", _scope_modal_redirect_wheel, add="+")
-                widget.bind("<Button-5>", _scope_modal_redirect_wheel, add="+")
+                if not already_bound:
+                    widget.bind("<MouseWheel>", _scope_modal_redirect_wheel, add="+")
+                    widget.bind("<Button-4>", _scope_modal_redirect_wheel, add="+")
+                    widget.bind("<Button-5>", _scope_modal_redirect_wheel, add="+")
+                    widget._scope_modal_scroll_bound = True
             except Exception:
                 pass
             try:
@@ -11739,7 +13872,11 @@ class AnnotationTab:
             wraplength=540,
         ).pack(anchor=tk.W, fill=tk.X, pady=(4, 10))
 
-        project_model_path = self._get_campaign_project_plate_model_path()
+        project_model_path = (
+            None
+            if self._is_free_mode_session_context()
+            else self._get_campaign_project_plate_model_path()
+        )
         current_plate_path = str(self.plate_custom_var.get() or "").strip()
         default_plate_mode = "custom"
         try:
@@ -11757,6 +13894,9 @@ class AnnotationTab:
         )
         modal_plate_path_var = tk.StringVar(value=current_plate_path)
         modal_plate_adopt_var = tk.BooleanVar(value=False)
+        default_picker_scope = "free" if self._is_free_mode_session_context() else "project"
+        modal_plate_picker_scope_var = tk.StringVar(value=default_picker_scope)
+        modal_vehicle_picker_scope_var = tk.StringVar(value=default_picker_scope)
         modal_conf_var = tk.DoubleVar(value=float(self.conf_var.get() or 0.25))
         modal_use_vehicle_var = tk.BooleanVar(value=bool(self._get_auto_vehicle_choice() == "use"))
         modal_vehicle_model_var = tk.StringVar(value=str(self.vehicle_model_var.get() or "").strip())
@@ -11814,6 +13954,43 @@ class AnnotationTab:
         )
         custom_plate_toggle["row"].pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
+        plate_picker_scope_host = tk.Frame(plate_model_mode_host, bg=field_bg, bd=0, highlightthickness=0)
+        tk.Label(
+            plate_picker_scope_host,
+            text="Katalog startowy przycisku „Wybierz”",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(2, 2))
+        plate_picker_scope_row = tk.Frame(plate_picker_scope_host, bg=field_bg, bd=0, highlightthickness=0)
+        plate_picker_scope_row.pack(anchor=tk.W, fill=tk.X)
+        plate_picker_project_toggle = build_modal_toggle(
+            plate_picker_scope_row,
+            kind="radio",
+            variable=modal_plate_picker_scope_var,
+            value="project",
+            text="Tryb projektowy",
+            bg=field_bg,
+            fg_color=fg,
+            font=("Segoe UI", 8),
+            wraplength=150,
+        )
+        plate_picker_project_toggle["row"].pack(side=tk.LEFT, padx=(0, 12))
+        plate_picker_free_toggle = build_modal_toggle(
+            plate_picker_scope_row,
+            kind="radio",
+            variable=modal_plate_picker_scope_var,
+            value="free",
+            text="Tryb swobodny",
+            bg=field_bg,
+            fg_color=fg,
+            font=("Segoe UI", 8),
+            wraplength=150,
+        )
+        plate_picker_free_toggle["row"].pack(side=tk.LEFT, padx=(0, 12))
+
         plate_model_hint_lbl = tk.Label(
             plate_model_mode_host,
             text="",
@@ -11828,6 +14005,30 @@ class AnnotationTab:
         )
         plate_model_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
 
+        plate_model_quality_table = tk.Frame(
+            plate_model_mode_host,
+            bg=field_bg,
+            bd=0,
+            highlightthickness=0,
+        )
+        plate_model_quality_table.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+
+        def render_plate_model_quality_table(rows: list[tuple[str, str, str]], tone: str) -> None:
+            self._render_auto_annotation_model_quality_table(
+                plate_model_quality_table,
+                rows,
+                tone,
+                bg=field_bg,
+                fg=fg,
+                muted=muted,
+                border=border,
+                success=success,
+                warning=palette.get("warning", "#f39c12"),
+                wraplength=390,
+                label_width=15,
+            )
+            _bind_scope_modal_scroll_children(plate_model_quality_table)
+
         plate_path_row = tk.Frame(plate_model_mode_host, bg=field_bg, bd=0, highlightthickness=0)
         plate_path_entry = ttk.Entry(plate_path_row, textvariable=modal_plate_path_var)
         plate_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -11838,7 +14039,10 @@ class AnnotationTab:
                 preferred = Path(str(modal_plate_path_var.get() or "").strip()) if str(modal_plate_path_var.get() or "").strip() else project_model_path
             except Exception:
                 preferred = project_model_path
-            initial_dir = self._get_campaign_plate_model_picker_initial_dir(preferred_path=preferred)
+            initial_dir = self._get_campaign_plate_model_picker_initial_dir(
+                preferred_path=preferred,
+                picker_scope=str(modal_plate_picker_scope_var.get() or default_picker_scope),
+            )
             chosen = filedialog.askopenfilename(
                 initialdir=str(initial_dir.absolute()),
                 filetypes=[("YOLO Model", "*.pt")],
@@ -11856,7 +14060,7 @@ class AnnotationTab:
         ).pack(side=tk.RIGHT, padx=(5, 0))
 
         plate_adopt_check = build_modal_toggle(
-            settings_card,
+            plate_model_mode_host,
             kind="check",
             variable=modal_plate_adopt_var,
             text="Zapisz ten model także jako model projektu tablic",
@@ -11899,8 +14103,26 @@ class AnnotationTab:
         )
         conf_value_lbl.pack(side=tk.RIGHT, padx=(8, 0))
 
-        vehicle_card = tk.Frame(settings_card, bg=field_bg, bd=0, highlightthickness=0)
-        vehicle_card.pack(fill=tk.X, pady=(10, 0))
+        vehicle_card = tk.Frame(
+            body_content,
+            bg=field_bg,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=border,
+            padx=12,
+            pady=12,
+        )
+        vehicle_card.pack(fill=tk.X, pady=(0, 14))
+        tk.Label(
+            vehicle_card,
+            text="Opcjonalna asysta modelem pojazdów",
+            bg=field_bg,
+            fg=fg,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
         vehicle_check = build_modal_toggle(
             vehicle_card,
             kind="check",
@@ -11954,14 +14176,57 @@ class AnnotationTab:
         )
         vehicle_combo.pack(fill=tk.X, pady=(4, 0))
 
+        vehicle_picker_scope_host = tk.Frame(vehicle_model_host, bg=field_bg, bd=0, highlightthickness=0)
+        tk.Label(
+            vehicle_picker_scope_host,
+            text="Katalog startowy przycisku „Wybierz”",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(2, 2))
+        vehicle_picker_scope_row = tk.Frame(vehicle_picker_scope_host, bg=field_bg, bd=0, highlightthickness=0)
+        vehicle_picker_scope_row.pack(anchor=tk.W, fill=tk.X)
+        vehicle_picker_project_toggle = build_modal_toggle(
+            vehicle_picker_scope_row,
+            kind="radio",
+            variable=modal_vehicle_picker_scope_var,
+            value="project",
+            text="Tryb projektowy",
+            bg=field_bg,
+            fg_color=fg,
+            font=("Segoe UI", 8),
+            wraplength=150,
+        )
+        vehicle_picker_project_toggle["row"].pack(side=tk.LEFT, padx=(0, 12))
+        vehicle_picker_free_toggle = build_modal_toggle(
+            vehicle_picker_scope_row,
+            kind="radio",
+            variable=modal_vehicle_picker_scope_var,
+            value="free",
+            text="Tryb swobodny",
+            bg=field_bg,
+            fg_color=fg,
+            font=("Segoe UI", 8),
+            wraplength=150,
+        )
+        vehicle_picker_free_toggle["row"].pack(side=tk.LEFT, padx=(0, 12))
+
         vehicle_custom_row = tk.Frame(vehicle_model_host, bg=field_bg, bd=0, highlightthickness=0)
         vehicle_custom_entry = ttk.Entry(vehicle_custom_row, textvariable=modal_vehicle_custom_var)
         vehicle_custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         def choose_vehicle_model_for_modal():
-            initial_dir = CONFIG.get_trained_models_dir("vehicle")
-            if not initial_dir.exists():
-                initial_dir = CONFIG.DIR_6_MODELS
+            try:
+                preferred = Path(str(modal_vehicle_custom_var.get() or "").strip()) if str(modal_vehicle_custom_var.get() or "").strip() else None
+            except Exception:
+                preferred = None
+            initial_dir = self._get_auto_model_picker_initial_dir(
+                "vehicle",
+                picker_scope=str(modal_vehicle_picker_scope_var.get() or default_picker_scope),
+                preferred_path=preferred,
+            )
             chosen = filedialog.askopenfilename(
                 initialdir=str(Path(initial_dir).absolute()),
                 filetypes=[("YOLO Model", "*.pt")],
@@ -12001,6 +14266,20 @@ class AnnotationTab:
             justify=tk.LEFT,
             wraplength=560,
         ).pack(anchor=tk.W, fill=tk.X, pady=(6, 10))
+
+        protection_notice_var = tk.StringVar(value="")
+        protection_notice_lbl = tk.Label(
+            body_content,
+            textvariable=protection_notice_var,
+            bg=panel_bg,
+            fg=palette.get("warning", "#f39c12"),
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=560,
+            bd=0,
+            highlightthickness=0,
+        )
 
         options_host = tk.Frame(body_content, bg=panel_bg, bd=0, highlightthickness=0)
         options_host.pack(fill=tk.BOTH, expand=True)
@@ -12059,11 +14338,71 @@ class AnnotationTab:
             value="selected",
             title="Ręczne zaznaczanie na liście",
             description=(
-                f"Użyj dokładnie zaznaczenia z listy po lewej ({selected_count} obrazów). Możesz zrobić to teraz, bez zamykania tego okna."
-                if selected_count > 0
-                else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „Dalej” odblokuje się automatycznie."
+                "Licznik poniżej pokazuje faktycznie zaznaczone wiersze listy i liczbę obrazów, które trafią do autoanotacji. Możesz zmienić zaznaczenie bez zamykania tego okna. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny przed nadpisaniem gotowej pracy."
+                if selected_row_count > 0
+                else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „Dalej” odblokuje się automatycznie. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny."
             ),
         )
+        selected_rows_count_var = tk.StringVar(value=str(selected_row_count))
+        selected_process_count_var = tk.StringVar(value=str(selected_count))
+        selected_counter_row = tk.Frame(_selected_card, bg=field_bg, bd=0, highlightthickness=0)
+        tk.Label(
+            selected_counter_row,
+            text="Zaznaczono: ",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        selected_rows_count_lbl = tk.Label(
+            selected_counter_row,
+            textvariable=selected_rows_count_var,
+            bg=field_bg,
+            fg=(success if selected_row_count > 0 else muted),
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            width=4,
+        )
+        selected_rows_count_lbl.pack(side=tk.LEFT)
+        tk.Label(
+            selected_counter_row,
+            text="pozycji   Do autoanotacji: ",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        selected_process_count_lbl = tk.Label(
+            selected_counter_row,
+            textvariable=selected_process_count_var,
+            bg=field_bg,
+            fg=(success if selected_count > 0 else muted),
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            width=4,
+        )
+        selected_process_count_lbl.pack(side=tk.LEFT)
+        tk.Label(
+            selected_counter_row,
+            text="obrazów",
+            bg=field_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        def refresh_selected_counter_visibility() -> None:
+            selected_mode_active = str(selected_mode_var.get() or "").strip().lower() == "selected"
+            self._set_widget_packed(
+                selected_counter_row,
+                bool(selected_mode_active),
+                anchor=tk.W,
+                fill=tk.X,
+                padx=(26, 0),
+                pady=(8, 0),
+            )
+
+        refresh_selected_counter_visibility()
 
         buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
         buttons.pack(fill=tk.X, pady=(4, 0))
@@ -12080,7 +14419,7 @@ class AnnotationTab:
         next_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
         def resolve_bucket_paths() -> list[Path]:
-            live_bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=all_paths)
+            live_bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=raw_all_paths or all_paths)
             merged: list[Path] = []
             seen_names: set[str] = set()
             if bool(include_manual_var.get()):
@@ -12106,7 +14445,7 @@ class AnnotationTab:
         def choose_next() -> None:
             mode = str(selected_mode_var.get() or "").strip().lower()
             if mode == "selected":
-                live_scope = self._collect_plate_auto_scope_candidates(candidate_image_paths=all_paths)
+                live_scope = self._collect_plate_auto_scope_candidates(candidate_image_paths=raw_all_paths or all_paths)
                 live_selected_paths = list(live_scope.get("selected_paths") or [])
                 if not live_selected_paths:
                     return
@@ -12221,25 +14560,176 @@ class AnnotationTab:
 
         next_btn.configure(command=choose_next)
 
-        def refresh_scope_choices() -> None:
+        def _scope_model_inputs_ready(can_continue: bool) -> bool:
+            if not can_continue:
+                return False
+            use_project_model = str(plate_mode_var.get() or "").strip().lower() == "project"
+            if use_project_model:
+                can_continue = bool(project_model_path is not None and project_model_path.exists())
+            else:
+                chosen_plate_path = str(modal_plate_path_var.get() or "").strip()
+                can_continue = bool(chosen_plate_path and Path(chosen_plate_path).exists())
+
+            use_vehicle = bool(modal_use_vehicle_var.get())
+            if can_continue and use_vehicle and str(modal_vehicle_model_var.get() or "").strip() == "Custom":
+                chosen_vehicle_path = str(modal_vehicle_custom_var.get() or "").strip()
+                can_continue = bool(chosen_vehicle_path and Path(chosen_vehicle_path).exists())
+            return bool(can_continue)
+
+        def refresh_selected_scope_counter() -> None:
             try:
                 if not dialog.winfo_exists():
                     return
             except Exception:
                 return
 
-            live_scope = self._collect_plate_auto_scope_candidates(candidate_image_paths=all_paths)
+            mode = str(selected_mode_var.get() or "").strip().lower()
+            if mode != "selected":
+                try:
+                    refresh_selected_counter_visibility()
+                except Exception:
+                    pass
+                return
+
+            annotations = list(getattr(self, "current_annotations", []) or [])
+            try:
+                selected_display_indices = list(self.preview_listbox.curselection() or ())
+            except Exception:
+                selected_display_indices = []
+            display_map = getattr(self, "_preview_list_display_indices", []) or []
+            selected_indices: list[int] = []
+            seen_selected_indices: set[int] = set()
+            for display_index in selected_display_indices:
+                try:
+                    safe_display_index = int(display_index)
+                    actual_index = int(display_map[safe_display_index])
+                except Exception:
+                    continue
+                if actual_index in seen_selected_indices:
+                    continue
+                seen_selected_indices.add(actual_index)
+                selected_indices.append(actual_index)
+            selected_paths = self._resolve_preview_scope_paths(
+                selected_indices,
+                candidate_path_map=scope_candidate_path_map,
+                protected_filenames=scope_protected_filenames,
+            )
+            live_selected_row_count = len(selected_display_indices)
+            live_selected_total_count = self._count_unique_preview_scope_indices(
+                annotations,
+                selected_indices,
+            )
+            live_selected_protected_skip_count = self._count_protected_preview_scope_indices(
+                annotations,
+                selected_indices,
+                scope_protected_filenames,
+            )
+            live_selected_count = len(selected_paths)
+            live_selected_duplicate_skip_count = max(0, int(live_selected_row_count) - int(live_selected_total_count))
+            live_selected_unresolved_skip_count = max(
+                0,
+                int(live_selected_total_count) - int(live_selected_protected_skip_count) - int(live_selected_count),
+            )
+
+            try:
+                refresh_selected_counter_visibility()
+                selected_desc_var.set(
+                    "Licznik poniżej pokazuje faktycznie zaznaczone wiersze listy i liczbę obrazów, które trafią do autoanotacji. Możesz zmienić zaznaczenie bez zamykania tego okna. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny przed nadpisaniem gotowej pracy."
+                )
+                selected_rows_count_var.set(str(live_selected_row_count))
+                selected_process_count_var.set(str(live_selected_count))
+                selected_rows_count_lbl.configure(fg=(success if live_selected_row_count > 0 else muted))
+                selected_process_count_lbl.configure(
+                    fg=(
+                        success
+                        if live_selected_count > 0
+                        else (palette.get("warning", "#f39c12") if live_selected_row_count > 0 else muted)
+                    )
+                )
+            except Exception:
+                pass
+
+            try:
+                notice_parts = []
+                if live_selected_protected_skip_count > 0:
+                    notice_parts.append(
+                        f"W zaznaczeniu pominięte zostanie {live_selected_protected_skip_count} zdjęć ręcznie anotowanych albo ze statusem [OK]."
+                    )
+                if live_selected_duplicate_skip_count > 0:
+                    notice_parts.append(
+                        f"{live_selected_duplicate_skip_count} zaznaczonych pozycji ma powtórzoną nazwę pliku i zostanie potraktowanych jako ten sam obraz."
+                    )
+                if live_selected_unresolved_skip_count > 0:
+                    notice_parts.append(
+                        f"{live_selected_unresolved_skip_count} zaznaczonych pozycji nie ma dostępnego pliku obrazu w tym zakresie."
+                    )
+                notice_text = (
+                    f"Do autoanotacji trafi {live_selected_count} zdjęć. " + " ".join(notice_parts)
+                    if notice_parts
+                    else ""
+                )
+                protection_notice_var.set(notice_text)
+                self._set_widget_packed(
+                    protection_notice_lbl,
+                    bool(notice_text),
+                    anchor=tk.W,
+                    fill=tk.X,
+                    pady=(0, 10),
+                    before=options_host,
+                )
+            except Exception:
+                protection_notice_var.set("")
+                self._set_widget_packed(protection_notice_lbl, False)
+
+            try:
+                next_btn.configure(
+                    state=(
+                        tk.NORMAL
+                        if _scope_model_inputs_ready(live_selected_count > 0)
+                        else tk.DISABLED
+                    )
+                )
+            except Exception:
+                pass
+
+        def refresh_scope_choices() -> None:
+            scroll_state = _capture_scope_modal_scroll_state()
+            try:
+                if not dialog.winfo_exists():
+                    return
+            except Exception:
+                return
+
+            live_scope = self._collect_plate_auto_scope_candidates(candidate_image_paths=raw_all_paths or all_paths)
             live_selected_count = int(live_scope.get("selected_count", 0) or 0)
-            live_bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=all_paths)
+            live_selected_total_count = int(live_scope.get("selected_total_count", live_selected_count) or 0)
+            live_selected_row_count = int(live_scope.get("selected_row_count", live_selected_total_count) or 0)
+            live_selected_duplicate_skip_count = int(live_scope.get("selected_duplicate_skip_count", 0) or 0)
+            live_selected_unresolved_skip_count = int(live_scope.get("selected_unresolved_skip_count", 0) or 0)
+            live_bucket_paths = self._collect_plate_auto_scope_bucket_paths(candidate_image_paths=raw_all_paths or all_paths)
+            live_bucket_protected_counts = self._collect_plate_auto_scope_bucket_protected_counts(
+                candidate_image_paths=raw_all_paths or all_paths
+            )
             live_manual_count = len(list(live_bucket_paths.get("manual") or []))
             live_auto_count = len(list(live_bucket_paths.get("auto") or []))
             live_problem_count = len(list(live_bucket_paths.get("problem") or []))
 
             try:
+                refresh_selected_counter_visibility()
                 selected_desc_var.set(
-                    f"Użyj dokładnie zaznaczenia z listy po lewej ({live_selected_count} obrazów). Możesz zrobić to teraz, bez zamykania tego okna."
-                    if live_selected_count > 0
-                    else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „Dalej” odblokuje się automatycznie."
+                    "Licznik poniżej pokazuje faktycznie zaznaczone wiersze listy i liczbę obrazów, które trafią do autoanotacji. Możesz zmienić zaznaczenie bez zamykania tego okna. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny przed nadpisaniem gotowej pracy."
+                    if str(selected_mode_var.get() or "").strip().lower() == "selected"
+                    else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „Dalej” odblokuje się automatycznie. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny."
+                )
+                selected_rows_count_var.set(str(live_selected_row_count))
+                selected_process_count_var.set(str(live_selected_count))
+                selected_rows_count_lbl.configure(fg=(success if live_selected_row_count > 0 else muted))
+                selected_process_count_lbl.configure(
+                    fg=(
+                        success
+                        if live_selected_count > 0
+                        else (palette.get("warning", "#f39c12") if live_selected_row_count > 0 else muted)
+                    )
                 )
             except Exception:
                 pass
@@ -12252,6 +14742,66 @@ class AnnotationTab:
                 pass
 
             try:
+                mode_for_notice = str(selected_mode_var.get() or "").strip().lower()
+                if mode_for_notice == "selected":
+                    protected_for_notice = int(live_scope.get("selected_protected_skip_count", 0) or 0)
+                    process_for_notice = int(live_selected_count or 0)
+                    scope_word = "zaznaczeniu"
+                elif mode_for_notice == "buckets":
+                    protected_for_notice = 0
+                    if bool(include_manual_var.get()):
+                        protected_for_notice += int(live_bucket_protected_counts.get("manual", 0) or 0)
+                    if bool(include_auto_var.get()):
+                        protected_for_notice += int(live_bucket_protected_counts.get("auto", 0) or 0)
+                    if bool(include_problem_var.get()):
+                        protected_for_notice += int(live_bucket_protected_counts.get("problem", 0) or 0)
+                    process_for_notice = int(len(resolve_bucket_paths()) or 0)
+                    scope_word = "wybranych grupach"
+                else:
+                    protected_for_notice = int(live_scope.get("protected_skip_count", 0) or 0)
+                    process_for_notice = int(len(list(live_scope.get("all_paths") or [])) or 0)
+                    scope_word = "całej paczce"
+                if (
+                    protected_for_notice > 0
+                    or (
+                        mode_for_notice == "selected"
+                        and (live_selected_unresolved_skip_count > 0 or live_selected_duplicate_skip_count > 0)
+                    )
+                ):
+                    notice_parts = []
+                    if protected_for_notice > 0:
+                        notice_parts.append(
+                            f"W {scope_word} pominięte zostanie {protected_for_notice} zdjęć ręcznie anotowanych albo ze statusem [OK]."
+                        )
+                    if mode_for_notice == "selected" and live_selected_duplicate_skip_count > 0:
+                        notice_parts.append(
+                            f"{live_selected_duplicate_skip_count} zaznaczonych pozycji ma powtórzoną nazwę pliku i zostanie potraktowanych jako ten sam obraz."
+                        )
+                    if mode_for_notice == "selected" and live_selected_unresolved_skip_count > 0:
+                        notice_parts.append(
+                            f"{live_selected_unresolved_skip_count} zaznaczonych pozycji nie ma dostępnego pliku obrazu w tym zakresie."
+                        )
+                    notice_text = (
+                        f"Do autoanotacji trafi {process_for_notice} zdjęć. "
+                        + " ".join(notice_parts)
+                    )
+                    protection_notice_var.set(notice_text)
+                else:
+                    notice_text = ""
+                    protection_notice_var.set("")
+                self._set_widget_packed(
+                    protection_notice_lbl,
+                    bool(notice_text),
+                    anchor=tk.W,
+                    fill=tk.X,
+                    pady=(0, 10),
+                    before=options_host,
+                )
+            except Exception:
+                protection_notice_var.set("")
+                self._set_widget_packed(protection_notice_lbl, False)
+
+            try:
                 conf_value_lbl.configure(text=f"{float(modal_conf_var.get() or 0.0):.2f}")
             except Exception:
                 pass
@@ -12262,6 +14812,12 @@ class AnnotationTab:
                 plate_path_entry.configure(state=("disabled" if not plate_custom_active else "normal"))
             except Exception:
                 pass
+            self._set_widget_packed(
+                plate_picker_scope_host,
+                bool((not self._is_free_mode_session_context()) and plate_custom_active),
+                fill=tk.X,
+                pady=(8, 0),
+            )
             self._set_widget_packed(
                 plate_path_row,
                 bool(plate_custom_active),
@@ -12277,25 +14833,35 @@ class AnnotationTab:
             try:
                 if use_project_model:
                     if project_model_path is not None and project_model_path.exists():
+                        quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(project_model_path)
                         plate_model_hint_lbl.configure(
                             text="To wymagany model dla tego runu. Uzyjesz aktywnego modelu projektu tablic.",
                             fg=muted,
                         )
+                        render_plate_model_quality_table(quality_rows, quality_tone)
                     else:
+                        quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(None)
                         plate_model_hint_lbl.configure(
                             text="Model projektu tablic nie jest dostepny. Aby uruchomic autoanotacje, przelacz na wlasny model dla tego runu.",
                             fg=palette.get("warning", "#f39c12"),
                         )
+                        render_plate_model_quality_table(quality_rows, quality_tone)
                 elif str(modal_plate_path_var.get() or "").strip():
+                    quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(
+                        str(modal_plate_path_var.get() or "").strip()
+                    )
                     plate_model_hint_lbl.configure(
                         text="To wymagany model dla tego runu. Ten plik zostanie uzyty tylko w biezacej autoanotacji Z2.",
                         fg=muted,
                     )
+                    render_plate_model_quality_table(quality_rows, quality_tone)
                 else:
+                    quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(None)
                     plate_model_hint_lbl.configure(
                         text="Najpierw wskaz wymagany model tablic (.pt). Bez tego autoanotacja nie wystartuje i przycisk „Dalej” pozostanie zablokowany.",
                         fg=palette.get("warning", "#f39c12"),
                     )
+                    render_plate_model_quality_table(quality_rows, quality_tone)
             except Exception:
                 pass
 
@@ -12307,6 +14873,12 @@ class AnnotationTab:
                 pady=(4, 0),
             )
             vehicle_custom_active = use_vehicle and str(modal_vehicle_model_var.get() or "").strip() == "Custom"
+            self._set_widget_packed(
+                vehicle_picker_scope_host,
+                bool((not self._is_free_mode_session_context()) and vehicle_custom_active),
+                fill=tk.X,
+                pady=(8, 0),
+            )
             self._set_widget_packed(
                 vehicle_custom_row,
                 vehicle_custom_active,
@@ -12333,27 +14905,98 @@ class AnnotationTab:
             else:
                 can_continue = bool(all_paths)
 
-            if can_continue:
-                if use_project_model:
-                    can_continue = project_model_path is not None and project_model_path.exists()
-                else:
-                    chosen_plate_path = str(modal_plate_path_var.get() or "").strip()
-                    can_continue = bool(chosen_plate_path and Path(chosen_plate_path).exists())
-
-            if can_continue and use_vehicle and str(modal_vehicle_model_var.get() or "").strip() == "Custom":
-                chosen_vehicle_path = str(modal_vehicle_custom_var.get() or "").strip()
-                can_continue = bool(chosen_vehicle_path and Path(chosen_vehicle_path).exists())
+            can_continue = _scope_model_inputs_ready(can_continue)
 
             try:
                 next_btn.configure(state=(tk.NORMAL if can_continue else tk.DISABLED))
             except Exception:
                 pass
 
-        self._plate_auto_scope_modal_refresh_callback = refresh_scope_choices
+            try:
+                dialog.after_idle(lambda state=scroll_state: _restore_scope_modal_scroll_state(state))
+                dialog.after(35, lambda state=scroll_state: _restore_scope_modal_scroll_state(state))
+            except Exception:
+                _restore_scope_modal_scroll_state(scroll_state)
 
-        def _cleanup_scope_modal(*_args):
+        self._plate_auto_scope_modal_refresh_callback = refresh_scope_choices
+        self._plate_auto_scope_modal_selection_refresh_callback = refresh_selected_scope_counter
+        self._plate_auto_scope_modal_last_selection_signature = self._get_preview_listbox_selection_signature()
+
+        def _schedule_scope_selection_watch(delay_ms: int = 120) -> None:
+            try:
+                if not dialog.winfo_exists():
+                    return
+            except Exception:
+                return
+            if getattr(self, "_plate_auto_scope_modal_refresh_callback", None) is not refresh_scope_choices:
+                return
+            try:
+                self._plate_auto_scope_modal_selection_watch_after_id = dialog.after(
+                    int(delay_ms),
+                    _poll_scope_selection,
+                )
+            except Exception:
+                self._plate_auto_scope_modal_selection_watch_after_id = None
+
+        def _poll_scope_selection() -> None:
+            self._plate_auto_scope_modal_selection_watch_after_id = None
+            try:
+                if not dialog.winfo_exists():
+                    return
+            except Exception:
+                return
+            if getattr(self, "_plate_auto_scope_modal_refresh_callback", None) is not refresh_scope_choices:
+                return
+
+            try:
+                current_signature = self._get_preview_listbox_selection_signature()
+                previous_signature = tuple(getattr(self, "_plate_auto_scope_modal_last_selection_signature", ()) or ())
+            except Exception:
+                current_signature = previous_signature = ()
+
+            mode = str(selected_mode_var.get() or "").strip().lower()
+            if mode == "selected" and current_signature != previous_signature:
+                self._plate_auto_scope_modal_last_selection_signature = current_signature
+                self._refresh_plate_auto_scope_modal_selection_state()
+            elif mode != "selected":
+                self._plate_auto_scope_modal_last_selection_signature = current_signature
+
+            _schedule_scope_selection_watch(450 if mode == "selected" else 900)
+
+        _schedule_scope_selection_watch(450)
+
+        def _cleanup_scope_modal(event=None, *_args):
+            try:
+                if event is not None and getattr(event, "widget", None) is not dialog:
+                    return
+            except Exception:
+                pass
             if getattr(self, "_plate_auto_scope_modal_refresh_callback", None) is refresh_scope_choices:
                 self._plate_auto_scope_modal_refresh_callback = None
+            if getattr(self, "_plate_auto_scope_modal_selection_refresh_callback", None) is refresh_selected_scope_counter:
+                self._plate_auto_scope_modal_selection_refresh_callback = None
+            try:
+                pending_refresh_after_id = getattr(self, "_plate_auto_scope_modal_refresh_after_id", None)
+                if pending_refresh_after_id:
+                    self.frame.after_cancel(pending_refresh_after_id)
+            except Exception:
+                pass
+            self._plate_auto_scope_modal_refresh_after_id = None
+            try:
+                pending_selection_after_id = getattr(self, "_plate_auto_scope_modal_selection_refresh_after_id", None)
+                if pending_selection_after_id:
+                    self.frame.after_cancel(pending_selection_after_id)
+            except Exception:
+                pass
+            self._plate_auto_scope_modal_selection_refresh_after_id = None
+            try:
+                pending_watch_after_id = getattr(self, "_plate_auto_scope_modal_selection_watch_after_id", None)
+                if pending_watch_after_id:
+                    dialog.after_cancel(pending_watch_after_id)
+            except Exception:
+                pass
+            self._plate_auto_scope_modal_selection_watch_after_id = None
+            self._plate_auto_scope_modal_last_selection_signature = ()
             self._plate_auto_scope_active_dialog = None
             self._set_plate_auto_scope_selection_mode(False)
             self._set_plate_auto_scope_modal_ui_lock(False)
@@ -12372,17 +15015,41 @@ class AnnotationTab:
             dialog.bind("<Destroy>", _cleanup_scope_modal, add="+")
         except Exception:
             pass
+
+        def _schedule_scope_choices_refresh(*_args, delay_ms: int = 90):
+            try:
+                pending_refresh_after_id = getattr(self, "_plate_auto_scope_modal_refresh_after_id", None)
+                if pending_refresh_after_id:
+                    self.frame.after_cancel(pending_refresh_after_id)
+            except Exception:
+                pass
+
+            def _run_refresh():
+                self._plate_auto_scope_modal_refresh_after_id = None
+                refresh_scope_choices()
+
+            try:
+                self._plate_auto_scope_modal_refresh_after_id = self.frame.after(
+                    max(20, int(delay_ms or 90)),
+                    _run_refresh,
+                )
+            except Exception:
+                self._plate_auto_scope_modal_refresh_after_id = None
+                refresh_scope_choices()
+
         try:
-            selected_mode_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            include_manual_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            include_auto_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            include_problem_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            plate_mode_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            modal_plate_path_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            modal_conf_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            modal_use_vehicle_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            modal_vehicle_model_var.trace_add("write", lambda *_args: refresh_scope_choices())
-            modal_vehicle_custom_var.trace_add("write", lambda *_args: refresh_scope_choices())
+            selected_mode_var.trace_add("write", _schedule_scope_choices_refresh)
+            include_manual_var.trace_add("write", _schedule_scope_choices_refresh)
+            include_auto_var.trace_add("write", _schedule_scope_choices_refresh)
+            include_problem_var.trace_add("write", _schedule_scope_choices_refresh)
+            plate_mode_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_plate_picker_scope_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_plate_path_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_conf_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_use_vehicle_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_vehicle_model_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_vehicle_picker_scope_var.trace_add("write", _schedule_scope_choices_refresh)
+            modal_vehicle_custom_var.trace_add("write", _schedule_scope_choices_refresh)
         except Exception:
             pass
         refresh_scope_choices()
@@ -12625,10 +15292,12 @@ class AnnotationTab:
                 project_model_text = f"Aktywny model projektu: {project_model_path.name}"
                 if project_identity:
                     project_model_text += f" | {project_identity}"
+                project_quality_text, _project_quality_tone = self._format_auto_annotation_model_quality_summary(project_model_path)
                 add_option(
                     "Użyj modelu projektu",
                     (
                         f"{project_model_text}\n"
+                        f"{project_quality_text}\n"
                         "To najszybsza ścieżka, jeśli chcesz po prostu uruchomić autoanotację na obecnym modelu kampanii."
                     ),
                     "Użyj modelu projektu",
@@ -13153,6 +15822,48 @@ class AnnotationTab:
             except Exception:
                 continue
         return approved
+
+    def _sync_preview_approval_flags_from_current_sets(
+        self,
+        *,
+        refresh_list: bool = False,
+        render_current: bool = False,
+    ) -> bool:
+        annotations = list(getattr(self, "current_annotations", []) or [])
+        if not annotations:
+            return False
+
+        approved_names = set(self._get_preview_approved_filenames_base() or set())
+        changed = False
+        for ann in annotations:
+            filename = str(getattr(ann, "filename", "") or "").strip().lower()
+            approved = bool(
+                filename
+                and filename in approved_names
+                and self._preview_annotation_can_be_approved_for_export(ann)
+            )
+            try:
+                if bool(getattr(ann, "_approved_for_training", False)) != approved:
+                    setattr(ann, "_approved_for_training", approved)
+                    changed = True
+            except Exception:
+                continue
+
+        if refresh_list:
+            try:
+                self._refresh_preview_list(preserve_selection=True, render_current=render_current)
+            except Exception:
+                pass
+            try:
+                self._refresh_preview_list_summary()
+            except Exception:
+                pass
+            try:
+                self._refresh_step2_action_states()
+            except Exception:
+                pass
+
+        return changed
 
     def _filter_campaign_project_approved_annotations(
         self,
@@ -13804,6 +16515,10 @@ class AnnotationTab:
         source_xml_path = safe_run_dir / "annotations.xml"
         manual_origin = bool(self._annotation_run_manifest_has_manual_value(manifest))
         approved_at = datetime.datetime.now().isoformat(timespec="seconds")
+        try:
+            approved_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            approved_iteration = 1
 
         entries: list[dict] = []
         for ann in annotations:
@@ -13886,6 +16601,9 @@ class AnnotationTab:
                     "plates": plate_entries,
                     "annotation_origin": ("manual" if (manual_origin or has_manual_polygon) else "auto_accepted"),
                     "approved_at": approved_at,
+                    "approved_iteration": int(approved_iteration),
+                    "first_approved_iteration": int(approved_iteration),
+                    "first_approved_at": approved_at,
                 }
             )
 
@@ -13924,6 +16642,10 @@ class AnnotationTab:
 
         grouped: dict[str, dict] = {}
         approved_at = datetime.datetime.now().isoformat(timespec="seconds")
+        try:
+            approved_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            approved_iteration = 1
 
         for pid, payload in loaded.items():
             if not isinstance(payload, dict):
@@ -13987,6 +16709,9 @@ class AnnotationTab:
                     "plates": [],
                     "annotation_origin": "preview_extracted",
                     "approved_at": approved_at,
+                    "approved_iteration": int(approved_iteration),
+                    "first_approved_iteration": int(approved_iteration),
+                    "first_approved_at": approved_at,
                 }
                 grouped[entry_key] = grouped_entry
 
@@ -14383,14 +17108,36 @@ class AnnotationTab:
             if contributor_run_dir is not None
             else None
         )
+        contributor_approved_token = ""
+        if contributor_run_dir is not None:
+            try:
+                if (
+                    getattr(self, "current_annotation_run_dir", None) is not None
+                    and self.current_annotations
+                    and self._paths_equivalent(self.current_annotation_run_dir, contributor_run_dir)
+                ):
+                    contributor_approved_values = sorted(
+                        str(name or "").strip().lower()
+                        for name in self._get_preview_approved_filenames()
+                        if str(name or "").strip()
+                    )
+                else:
+                    contributor_approved_values = sorted(
+                        str(name or "").strip().lower()
+                        for name in self._load_annotation_run_approved_filenames(contributor_run_dir)
+                        if str(name or "").strip()
+                    )
+                contributor_approved_token = json.dumps(contributor_approved_values, ensure_ascii=False)
+            except Exception:
+                contributor_approved_token = ""
 
         source_state = {
-            "builder_version": 2,
+            "builder_version": 4,
             "approved_manifest_token": self._build_path_change_token(approved_manifest_path),
             "contributor_run_dir": str(contributor_run_dir or ""),
             "contributor_manifest_token": self._build_path_change_token(contributor_manifest_path),
             "contributor_annotations_token": self._build_path_change_token(contributor_annotations_path),
-            "preview_meta_token": self._build_path_change_token(preview_meta_path),
+            "contributor_approved_token": contributor_approved_token,
         }
 
         existing_state = {}
@@ -14437,14 +17184,10 @@ class AnnotationTab:
             }
 
         approved_entries = list(CAMPAIGN.list_plate_approved_entries() or [])
+        # Preview PZ2 jest wynikiem wycinania z ApprovedSet, więc nie może wracać
+        # jako kolejne źródło wejściowe. Inaczej każde odtworzenie E3 mnoży cropy
+        # tablic: ApprovedSet -> preview -> nowe źródło -> kolejny preview.
         preview_entries: list[dict] = []
-        if preview_source_dir is not None:
-            try:
-                preview_entries = list(
-                    self._build_campaign_plate_entries_from_step3_preview(preview_source_dir) or []
-                )
-            except Exception:
-                preview_entries = []
 
         contributor_entries: list[dict] = []
         contributor_approved_lookup: set[str] = set()
@@ -14908,16 +17651,7 @@ class AnnotationTab:
     def _annotation_run_matches_input(self, run_dir: Path, input_dir: Path | None) -> bool:
         if input_dir is None:
             return True
-
-        manifest = self._load_annotation_run_manifest(run_dir)
-        manifest_input = str(manifest.get("input_dir") or "").strip()
-        if not manifest_input:
-            return False
-
-        try:
-            return Path(manifest_input).resolve() == Path(input_dir).resolve()
-        except Exception:
-            return str(Path(manifest_input)) == str(Path(input_dir))
+        return self._annotation_run_matches_expected_input_dir(run_dir, input_dir)
 
     def _find_latest_annotation_run_for_input(
         self,
@@ -15207,6 +17941,17 @@ class AnnotationTab:
             return
 
         campaign_context = not self._is_free_mode_session_context()
+        if (
+            not campaign_context
+            and bool(getattr(self, "_manual_review_active", False))
+            and self._coerce_free_mode_screen() == "manual_review"
+        ):
+            self._refresh_manual_review_followup_ui(
+                from_auto=bool(getattr(self, "_manual_review_from_auto", False)),
+                active_run=True,
+            )
+            return
+
         manual_enabled = self._manual_xml_template_enabled()
         separator = getattr(self, "manual_stage_separator", None)
         if campaign_context:
@@ -15357,7 +18102,21 @@ class AnnotationTab:
         status_label = getattr(self, "manual_stage_status_lbl", None)
         buttons_row = getattr(self, "manual_stage_buttons_row", None)
         campaign_context = not self._is_free_mode_session_context()
-        compact_followup = bool(active_run or from_auto or campaign_context)
+        manual_review_screen = bool(
+            (not campaign_context)
+            and getattr(self, "_manual_review_active", False)
+            and self._coerce_free_mode_screen() == "manual_review"
+        )
+        compact_followup = bool(active_run or from_auto or campaign_context or manual_review_screen)
+        repair_followup = False
+        if campaign_context:
+            try:
+                repair_followup = bool(
+                    self._is_campaign_char_repair_return_mode()
+                    or self._is_campaign_plate_step4_repair_return_mode()
+                )
+            except Exception:
+                repair_followup = False
         thematic_prefixes = self._get_z2_thematic_title_prefixes()
 
         if compact_followup:
@@ -15369,11 +18128,28 @@ class AnnotationTab:
             )
             current_input_dir = str(self.input_dir_var.get() or "").strip()
             route = self._get_workflow_route()
+            payload_followup_title = ""
+            payload_followup_text = ""
+            if (not campaign_context) and from_auto:
+                try:
+                    payload_followup_title = str(self.followup_title_lbl.cget("text") or "").strip()
+                except Exception:
+                    payload_followup_title = ""
+                try:
+                    payload_followup_text = str(self.followup_intro_var.get() or "").strip()
+                except Exception:
+                    payload_followup_text = ""
             self._set_widget_packed(title_label, True, anchor=tk.W, fill=tk.X)
             try:
                 base_title = (
-                    "Korekta wyniku autoanotacji"
+                    "Naprawa źródła tablic dla E3"
+                    if repair_followup
+                    else "Korekta wyniku autoanotacji"
                     if (campaign_context and from_auto)
+                    else (payload_followup_title or AUTO_REVIEW_FOLLOWUP_TITLE)
+                    if from_auto
+                    else MANUAL_REVIEW_FOLLOWUP_TITLE
+                    if (not campaign_context and route == "manual")
                     else "Anotacja ręczna tablic"
                     if (campaign_context and route == "manual")
                     else "Aktywny run ręcznej korekty"
@@ -15393,13 +18169,24 @@ class AnnotationTab:
                 help_label,
                 text=(
                     (
-                        "To jest bieżący run Z2 tej iteracji. Po prawej poprawiasz polygony aktualnego runu, "
-                        "a po zakończeniu zmian domykasz E2. Stage kolejnej iteracji nie jest aktywnym krokiem "
-                        "na tym ekranie."
+                        (
+                            "Uzupełnij brakujące ramki tablic w Z2. Po zapisaniu oznacz poprawne obrazy jako OK "
+                            "z menu listy i zatwierdź powrót do E3 po prawej."
+                        )
+                        if repair_followup
+                        else (
+                            "To jest ręczna anotacja tablic dla bieżącej paczki zdjęć tej iteracji. "
+                            "Narysuj albo popraw polygony tablic, zapisz zmiany i oznacz poprawne obrazy "
+                            "statusem [OK] na liście wyników. Gdy osiągniesz wymagane minimum, po prawej "
+                            "odblokujesz zatwierdzenie E2 i powrót do wizarda."
+                        )
                     )
                     if campaign_context
-                    else "Po prawej poprawiasz polygony bieżącego runu Z2. "
-                    "Wstecz wraca do wejścia do korekty, a do eksportu datasetu przejdziesz przyciskiem Eksport w mini-flow."
+                    else (
+                        (payload_followup_text or AUTO_REVIEW_FOLLOWUP_TEXT)
+                        if from_auto
+                        else MANUAL_REVIEW_FOLLOWUP_TEXT
+                    )
                 ),
                 tone="muted",
                 emphasis=False,
@@ -15408,28 +18195,67 @@ class AnnotationTab:
                 self._refresh_bound_label_wraplength(help_label)
             except Exception:
                 pass
-            self._set_widget_packed(help_label, True, anchor=tk.W, fill=tk.X, pady=(0, 6))
+            self._set_widget_packed(
+                help_label,
+                True,
+                anchor=tk.W,
+                fill=tk.X,
+                pady=((2, 4) if repair_followup else (0, 6)),
+            )
             self._set_widget_packed(path_title, False)
             self._set_widget_packed(path_row, False)
             run_chunks = []
             if current_run_name:
                 run_chunks.append(f"Run: {current_run_name}")
-            if current_input_dir:
+            if current_input_dir and not repair_followup:
                 run_chunks.append(
                     f"Obrazy: {self._format_workspace_relative_path(current_input_dir)}"
                 )
             if campaign_context or run_chunks:
+                status_tone = "success" if campaign_context else "muted"
+                if not campaign_context and current_run_dir is not None:
+                    try:
+                        approval_state = self._get_run_plate_strict_approved_state(current_run_dir)
+                    except Exception:
+                        approval_state = {}
+                    approved_ready = bool(approval_state.get("ok"))
+                    approved_images = int(approval_state.get("approved_images", 0) or 0)
+                    approved_plates = int(approval_state.get("approved_plates", 0) or 0)
+                    total_images = int(approval_state.get("total_images", 0) or 0)
+                    total_plates = int(approval_state.get("total_plates", 0) or 0)
+                    if approved_ready:
+                        run_chunks.append(
+                            f"Gotowe do eksportu i wycinania: {approved_images} obrazów [OK] / {approved_plates} tablic."
+                        )
+                        status_tone = "success"
+                    else:
+                        run_chunks.append(
+                            "Eksport i wycinanie są zablokowane. Nadaj [OK] co najmniej jednemu obrazowi, "
+                            "który ma zapisaną poprawną ramkę/poligon tablicy."
+                        )
+                        if total_images > 0 or total_plates > 0:
+                            run_chunks.append(
+                                f"Teraz: {approved_images} obrazów [OK] / {approved_plates} tablic [OK]; "
+                                f"w runie: {total_images} obrazów / {total_plates} tablic."
+                            )
+                        status_tone = "warning"
                 self._set_inline_label_state(
                     status_label,
                     text=("\n".join(run_chunks) if run_chunks else "Trwa korekta bieżącego runu Z2."),
-                    tone=("success" if campaign_context else "muted"),
+                    tone=status_tone,
                     emphasis=False,
                 )
                 try:
                     self._refresh_bound_label_wraplength(status_label)
                 except Exception:
                     pass
-                self._set_widget_packed(status_label, True, anchor=tk.W, fill=tk.X, pady=(0, 8))
+                self._set_widget_packed(
+                    status_label,
+                    True,
+                    anchor=tk.W,
+                    fill=tk.X,
+                    pady=((0, 4) if repair_followup else (0, 8)),
+                )
             else:
                 self._set_widget_packed(status_label, False)
             if campaign_context:
@@ -15506,6 +18332,15 @@ class AnnotationTab:
         free_mode_screen = self._coerce_free_mode_screen() if free_mode_context else ""
         free_mode_route = str(self._get_workflow_route() or "").strip().lower() if free_mode_context else ""
         free_mode_step = str(self._coerce_workflow_step() or "").strip().lower() if free_mode_context else ""
+        campaign_repair_preview_layout = False
+        if not free_mode_context:
+            try:
+                campaign_repair_preview_layout = bool(
+                    self._is_campaign_char_repair_return_mode()
+                    or self._is_campaign_plate_step4_repair_return_mode()
+                )
+            except Exception:
+                campaign_repair_preview_layout = False
         processing_overlay_active = bool(getattr(self, "_preview_processing_overlay_active", False))
         preserve_left_scroll = bool(self.is_processing or processing_overlay_active)
         left_scroll_fraction = 0.0
@@ -15521,8 +18356,10 @@ class AnnotationTab:
         allow_workflow_preview_without_xml = bool(
             free_mode_context
             and free_mode_screen == "workflow"
-            and free_mode_route == "auto"
-            and free_mode_step == "auto_start"
+            and (
+                (free_mode_route == "auto" and free_mode_step == "auto_start")
+                or (free_mode_route == "manual" and free_mode_step == "manual_start")
+            )
         )
         has_loaded_preview = bool(
             has_any_preview
@@ -15602,14 +18439,20 @@ class AnnotationTab:
                         available_height = 0
                     if show_preview:
                         if available_height > 0:
-                            reserved_preview_height = max(280, int(available_height * 0.52))
+                            reserved_preview_height = max(
+                                (340 if campaign_repair_preview_layout else 280),
+                                int(available_height * (0.60 if campaign_repair_preview_layout else 0.52)),
+                            )
                             preview_cap = min(
-                                max(220, int(available_height * 0.38)),
-                                max(220, int(available_height - reserved_preview_height)),
+                                max(180, int(available_height * (0.30 if campaign_repair_preview_layout else 0.38))),
+                                max(180, int(available_height - reserved_preview_height)),
                             )
                         else:
-                            preview_cap = 320
+                            preview_cap = 220 if campaign_repair_preview_layout else 320
                         target_height = min(target_height, int(preview_cap))
+                        user_top_height = getattr(self, "_left_list_container_user_top_height", None)
+                        if user_top_height is not None:
+                            target_height = self._clamp_left_list_container_top_height(user_top_height)
                     else:
                         target_height = min(target_height, 560)
                     left_settings_canvas.configure(height=target_height)
@@ -17194,6 +20037,8 @@ class AnnotationTab:
         total_plates = int(state.get("total_plates", 0) or 0)
         message = (
             "Eksport anotacji jest zablokowany, bo żadna anotacja w tym runie nie ma statusu OK.\n\n"
+            "Warunek nadania [OK]: obraz musi mieć co najmniej jedną poprawną ramkę/poligon tablicy zapisaną w XML. "
+            "Samo zaznaczenie obrazu bez ramki nie wystarczy.\n\n"
             "Po autoanotacji albo anotacji ręcznej zaznacz poprawne obrazy na liście, kliknij PPM "
             "i wybierz „Oznacz zaznaczone jako OK”. Dopiero po tym eksport obejmie wyłącznie zatwierdzone pozycje.\n\n"
             f"Status teraz: OK obrazy={approved_images}, OK tablice={approved_plates}, "
@@ -17202,6 +20047,7 @@ class AnnotationTab:
         self._set_plate_export_status(
             (
                 "Eksport zablokowany: oznacz co najmniej jeden poprawny obraz jako OK.\n\n"
+                "Warunek [OK]: obraz musi mieć zapisaną ramkę/poligon tablicy.\n\n"
                 "Zaznacz obraz lub grupę obrazów na liście, kliknij PPM i wybierz „Oznacz zaznaczone jako OK”.\n\n"
                 f"OK: {approved_images} obrazów / {approved_plates} tablic."
             ),
@@ -17210,6 +20056,31 @@ class AnnotationTab:
         try:
             messagebox.showwarning(
                 "Eksport wymaga statusu OK",
+                message,
+                parent=self.frame.winfo_toplevel(),
+            )
+        except Exception:
+            pass
+
+    def _warn_plate_cut_requires_ok(self, approval_state: dict | None = None) -> None:
+        state = dict(approval_state or self._get_plate_dataset_export_approval_state())
+        approved_images = int(state.get("approved_images", 0) or 0)
+        approved_plates = int(state.get("approved_plates", 0) or 0)
+        total_images = int(state.get("total_images", 0) or 0)
+        total_plates = int(state.get("total_plates", 0) or 0)
+        message = (
+            "Wycinanie tablic do Z3 jest zablokowane, bo żadna pozycja w tym runie nie ma statusu OK.\n\n"
+            "Warunek nadania [OK]: obraz musi mieć co najmniej jedną poprawną ramkę/poligon tablicy zapisaną w XML. "
+            "Samo zaznaczenie obrazu bez ramki nie wystarczy i nie może być źródłem wycinania.\n\n"
+            "Zaznacz poprawne obrazy na liście, kliknij PPM i wybierz „Oznacz zaznaczone jako OK”. "
+            "Możesz też zatwierdzać bieżące zdjęcie spacją w podglądzie. Dopiero po tym Z2 przygotuje "
+            "dla PZ1 źródło zawierające wyłącznie zatwierdzone pozycje.\n\n"
+            f"Status teraz: OK obrazy={approved_images}, OK tablice={approved_plates}, "
+            f"wszystkie obrazy w runie={total_images}, wszystkie tablice={total_plates}."
+        )
+        try:
+            messagebox.showwarning(
+                "Wycinanie wymaga statusu OK",
                 message,
                 parent=self.frame.winfo_toplevel(),
             )
@@ -17331,10 +20202,19 @@ class AnnotationTab:
         self._campaign_step2_approval_repair_mode = False
         self._campaign_step2_approval_hint_text = ""
         self._campaign_step2_approval_hint_tone = "muted"
+        self._campaign_step2_gate_overlay_state = {}
         if bool(getattr(self, "_campaign_step2_transition_in_progress", False)):
             self._campaign_step2_transition_refresh_pending = True
+            try:
+                self._hide_preview_campaign_gate_overlay()
+            except Exception:
+                pass
             return
         if bool(getattr(self, "_campaign_deferred_run_restore_in_progress", False)):
+            try:
+                self._hide_preview_campaign_gate_overlay()
+            except Exception:
+                pass
             try:
                 self.approve_btn.config(state=tk.DISABLED)
             except Exception:
@@ -17455,6 +20335,11 @@ class AnnotationTab:
                 project_approved_images = 0
                 project_approved_plates = 0
         if project_active and approval_iteration_target == "char":
+            refreshed_char_effective_source = {}
+            try:
+                refreshed_char_effective_source = dict(self._build_campaign_char_effective_source() or {})
+            except Exception:
+                refreshed_char_effective_source = {}
             try:
                 if campaign_manager_obj is not None:
                     char_source_state = dict(campaign_manager_obj.get_step3_char_source_state() or {})
@@ -17462,17 +20347,27 @@ class AnnotationTab:
                     char_source_state = dict(self.get_campaign_step2_source_state(iteration_target="char") or {})
             except Exception:
                 char_source_state = {}
+            if refreshed_char_effective_source:
+                char_source_state.update(
+                    {
+                        "source_scope": "campaign_char_effective_source",
+                        "run_dir": str(refreshed_char_effective_source.get("run_dir") or ""),
+                        "xml_path": str(refreshed_char_effective_source.get("xml_path") or ""),
+                        "images_dir": str(refreshed_char_effective_source.get("images_dir") or ""),
+                        "images_with_plates": int(refreshed_char_effective_source.get("images_with_plates", 0) or 0),
+                        "total_plates": int(refreshed_char_effective_source.get("total_plates", 0) or 0),
+                        "ready": bool(
+                            int(refreshed_char_effective_source.get("images_with_plates", 0) or 0) >= int(min_approval_images)
+                            and int(refreshed_char_effective_source.get("total_plates", 0) or 0) > 0
+                        ),
+                        "has_source": bool(int(refreshed_char_effective_source.get("total_plates", 0) or 0) > 0),
+                    }
+                )
             char_effective_images = int(char_source_state.get("images_with_plates", 0) or 0)
             char_effective_plates = int(char_source_state.get("total_plates", 0) or 0)
             char_effective_ready = bool(char_source_state.get("ready"))
             project_approved_images = int(char_source_state.get("project_images_with_plates", project_approved_images) or 0)
             project_approved_plates = int(char_source_state.get("project_total_plates", project_approved_plates) or 0)
-        char_effective_preview_images = int(
-            char_source_state.get("preview_images_with_plates", 0) or 0
-        )
-        char_effective_preview_plates = int(
-            char_source_state.get("preview_total_plates", 0) or 0
-        )
         char_effective_pending_images = int(
             char_source_state.get("pending_images_with_plates", 0) or 0
         )
@@ -17518,17 +20413,11 @@ class AnnotationTab:
             char_display_images = int(project_approved_images or 0) + int(char_display_current_images or 0)
             char_display_plates = int(project_approved_plates or 0) + int(char_display_current_plates or 0)
         char_effective_summary_line = ""
-        char_effective_current_line = ""
         if project_active and approval_iteration_target == "char":
             char_effective_summary_line = (
                 f"Aktywne źródło tablic dla etapu 3 obejmuje teraz {int(char_display_images or 0)} zatwierdzonych obrazów "
                 f"i {int(char_display_plates or 0)} tablic."
             )
-            if int(char_display_current_images or 0) > 0 or int(char_display_current_plates or 0) > 0:
-                char_effective_current_line = (
-                    f"Nowe względem ostatniego wycinania PZ2: {int(char_display_current_images or 0)} obrazów [OK] "
-                    f"i {int(char_display_current_plates or 0)} tablic."
-                )
         current_iteration_plate_ready = bool(
             approval_marked_plates > 0
             and int(approval_marked_images or 0) >= int(min_approval_images)
@@ -17599,19 +20488,23 @@ class AnnotationTab:
         approve_hint_tone = "muted"
         campaign_context = not self._is_free_mode_session_context()
         current_iteration_num = 0
+        total_project_images = 0
         if project_active:
             try:
                 from ..campaign_manager import CAMPAIGN
                 current_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
             except Exception:
                 current_iteration_num = 0
+            try:
+                total_project_images = int(self._get_campaign_project_total_image_count() or 0)
+            except Exception:
+                total_project_images = 0
         if project_active and current_step == 2 and approval_iteration_target == "plate":
             pending_count = (
                 int(len(self.current_annotations or []))
                 if self.current_annotations
                 else int(campaign_pending_summary.get("pending_count", len(self.current_annotations or [])) or 0)
             )
-            total_project_images = int(self._get_campaign_project_total_image_count() or 0)
             future_project_images = int(project_approved_images or 0) + int(approval_marked_images or 0)
             future_project_plates = int(project_approved_plates or 0) + int(approval_marked_plates or 0)
             hint_lines = [
@@ -17667,16 +20560,12 @@ class AnnotationTab:
             )
             if char_effective_ready:
                 hint_lines = [char_effective_summary_line]
-                if char_effective_current_line:
-                    hint_lines.append(char_effective_current_line)
                 hint_lines.append("Jeśli chcesz, możesz nadal dopisywać kolejne tablice. Większy zatwierdzony zbiór poprawi skuteczność następnych iteracji modelu tablic.")
                 approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
                 approve_hint_tone = "success"
             elif char_effective_plates > 0:
                 missing_images = max(0, int(min_approval_images) - int(char_display_images or 0))
                 hint_lines = [char_effective_summary_line]
-                if char_effective_current_line:
-                    hint_lines.append(char_effective_current_line)
                 hint_lines.append(
                     (
                         f"Do wejścia do Z3 brakuje jeszcze {missing_images} obrazu oznaczonego jako [OK]. "
@@ -17700,15 +20589,11 @@ class AnnotationTab:
             if approval_iteration_target == "char":
                 if char_current_ready:
                     hint_lines = [char_effective_summary_line]
-                    if char_effective_current_line:
-                        hint_lines.append(char_effective_current_line)
                     hint_lines.append("Minimalny próg wejścia do E3 jest już spełniony, ale jeśli masz jeszcze chwilę, zwykle warto dopisać kolejne poprawne tablice w Z2. Większy zatwierdzony zbiór poprawi skuteczność następnych iteracji modelu tablic.")
                     approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
                     approve_hint_tone = "success"
                 elif char_effective_ready and char_effective_plates > 0 and int(char_display_images or 0) >= int(min_approval_images):
                     hint_lines = [char_effective_summary_line]
-                    if char_effective_current_line:
-                        hint_lines.append(char_effective_current_line)
                     hint_lines.append("Możesz wrócić do E3 bez dokładania nowych [OK] w tej iteracji.")
                     hint_lines.append("To jest wystarczające minimum, ale zwykle lepszą decyzją jest dopisanie jeszcze kilku poprawnych tablic w Z2, zanim zamkniesz etap.")
                     approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
@@ -17723,7 +20608,8 @@ class AnnotationTab:
                         )
                         + (
                             f"Obecnie masz {approval_images_with_plates} obrazów z tablicami, "
-                            f"ale tylko {approval_marked_images}/2 oznaczonych jako [OK]. "
+                            f"zatwierdzonych jako [OK]: {approval_marked_images}. "
+                            f"Minimum: {int(min_approval_images)}. "
                         )
                         + (
                             f"Brakuje jeszcze {missing_images} obrazu oznaczonego jako [OK]. "
@@ -17766,7 +20652,7 @@ class AnnotationTab:
                     missing_images = max(0, int(min_approval_images) - int(approval_images_with_plates or 0))
                     approve_hint_text = (
                         "Aby odblokowac domkniecie E2 w torze tablic, potrzebujesz co najmniej 2 oznaczonych obrazow. "
-                        f"Obecnie: {approval_images_with_plates}/2. "
+                        f"Zatwierdzonych obrazow: {approval_images_with_plates}. Minimum: {int(min_approval_images)}. "
                         + (
                             f"Brakuje jeszcze {missing_images} obrazu z zapisana tablica 'plate'. "
                             if missing_images > 0
@@ -17842,33 +20728,35 @@ class AnnotationTab:
                 ),
             ]
         elif project_active and approval_iteration_target == "char" and (current_step >= 3 or repair_mode):
-            approve_context_text = "Pracujesz w Z2, ale nadal jesteś w aktywnym etapie E3."
+            approve_context_text = (
+                "Pracujesz w Z2, ale nadal jesteś w aktywnym etapie E3.\n\n"
+                "Po wyjściu do wizarda, zdjęcia ze statusem [OK] trafią do katalogu zatwierdzonych. "
+                "Tylko zdjęcia z tego katalogu będą poddane procesowi wycinania tablic. "
+                "Proces wycinania tablic w E3 zamyka możliwość ich ponownej anotacji w Z2."
+            )
             approve_hint_title_text = "Łączne źródło tablic dla E3"
             approve_hint_text = ""
             approve_hint_table_rows.append(
                 (
-                    "Łącznie w źródle E3",
-                    f"{int(char_display_images or 0)} obrazów / {int(char_display_plates or 0)} tablic",
-                    "success" if char_effective_ready else "warning",
+                    "Pula projektowa",
+                    f"{int(total_project_images or 0)} zdjęć łącznie",
+                    "info" if int(total_project_images or 0) > 0 else "muted",
                 )
             )
-            if int(char_display_current_images or 0) > 0 or int(char_display_current_plates or 0) > 0:
-                approve_hint_table_rows.append(
-                    (
-                        "Nowe od ostatniego wycinania PZ2",
-                        f"{int(char_display_current_images or 0)} obrazów / {int(char_display_current_plates or 0)} tablic",
-                        "info",
-                    )
+            approve_hint_table_rows.append(
+                (
+                    "Liczba oznaczonych tablic",
+                    f"{int(approval_total_plates or 0)} w bieżącym runie Z2",
+                    "success" if int(approval_total_plates or 0) > 0 else "warning",
                 )
-            if int(char_effective_preview_images or 0) > 0 or int(char_effective_preview_plates or 0) > 0:
-                approve_hint_table_rows.insert(
-                    1,
-                    (
-                        "Już wycięte w ostatnim PZ2",
-                        f"{int(char_effective_preview_images or 0)} obrazów / {int(char_effective_preview_plates or 0)} tablic",
-                        "muted",
-                    )
+            )
+            approve_hint_table_rows.append(
+                (
+                    "Z tego do katalogu już zatwierdzonych trafiło",
+                    f"{int(project_approved_images or 0)} obrazów / {int(project_approved_plates or 0)} tablic",
+                    "success" if int(project_approved_images or 0) > 0 and int(project_approved_plates or 0) > 0 else "warning",
                 )
+            )
         elif campaign_context and str(approve_hint_text or "").strip():
             approve_hint_title_text = "Status bieżącego etapu"
 
@@ -17895,6 +20783,11 @@ class AnnotationTab:
         self._campaign_step2_approval_repair_mode = bool(repair_mode)
         self._campaign_step2_approval_hint_text = str(approve_hint_text or "").strip()
         self._campaign_step2_approval_hint_tone = str(approve_hint_tone or "muted").strip()
+        try:
+            self._campaign_step2_gate_overlay_state = self._build_campaign_z2_gate_overlay_state()
+            self._place_preview_campaign_gate_overlay(force_render=True)
+        except Exception:
+            self._campaign_step2_gate_overlay_state = {}
 
         approve_hint_lbl = getattr(self, "approve_gate_hint_lbl", None)
         if not lightweight:
@@ -17982,8 +20875,8 @@ class AnnotationTab:
 
         if getattr(self, "_current_run_manual_template", False):
             return (
-                "Nowy run recznej anotacji Z2 jest gotowy. Poprawiaj polygony bezposrednio w podgladzie, "
-                "uzywaj Del do twardego usuwania zlych obrazow i zapisuj korekty na biezaco do annotations.xml."
+                "Nowy run ręcznej anotacji Z2 jest gotowy. Poprawiaj polygony bezpośrednio w podglądzie "
+                "i zapisuj korekty na bieżąco do annotations.xml."
                 + (
                     " Po zapisaniu zmian domknij E2; dataset i trening wykonasz potem w [Z4]."
                     if campaign_context
@@ -17993,19 +20886,162 @@ class AnnotationTab:
 
         if total_plates <= 0:
             return (
-                "Run anotacji Z2 zostal zapisany, ale bez gotowych tablic. Mozesz przejrzec wyniki, poprawic je recznie "
-                "albo uruchomic autoanotacje ponownie z innymi ustawieniami."
+                "Run anotacji Z2 został zapisany, ale bez gotowych tablic. Możesz przejrzeć wyniki, poprawić je ręcznie "
+                "albo uruchomić autoanotację ponownie z innymi ustawieniami."
+            )
+
+        if not campaign_context:
+            return (
+                "Run anotacji Z2 jest gotowy. Wybierz „Wytnij tablice”, jeśli przygotowujesz materiał do Z3, "
+                "albo „Eksport i split datasetu”, jeśli chcesz trenować model tablic. Run pozostaje zapisany, "
+                "więc eksport możesz wykonać później z poziomu Z2."
             )
 
         return (
-            "Run anotacji Z2 jest gotowy. Możesz przejść „Dalej” do eksportu autoanotacji "
-            "lub dokonać ręcznej ich korekty bezpośrednio w oknie podglądu."
-            + (
-                " Po domknieciu E2 przygotujesz dataset i trening w [Z4]."
-                if campaign_context
-                else " W sekcji 4 uruchomisz split i eksport gotowego zbioru."
-            )
+            "Run anotacji Z2 jest gotowy. Sprawdź lub popraw tablice w podglądzie, a po domknięciu E2 "
+            "przygotujesz dataset i trening w [Z4]."
         )
+
+    def _show_auto_annotation_success_dialog(self, next_steps: str = "") -> None:
+        try:
+            parent = self.frame.winfo_toplevel()
+        except Exception:
+            parent = getattr(self.app, "root", None)
+
+        dialog = tk.Toplevel(parent if parent is not None else self.frame)
+        dialog.withdraw()
+        try:
+            dialog.transient(parent)
+        except Exception:
+            pass
+        dialog.title("Autoanotacja zakończona")
+        dialog.resizable(False, False)
+
+        palette = getattr(self.app, "palette", {})
+        panel_bg = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        error = palette.get("error", "#e74c3c")
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+
+        try:
+            dialog.configure(bg=panel_bg)
+        except Exception:
+            pass
+
+        shell = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0, padx=20, pady=18)
+        shell.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            shell,
+            text="Autoanotacja została zakończona",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI Semibold", 12),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        summary_text = str(next_steps or "").strip() or (
+            "Run anotacji Z2 jest gotowy. Sprawdź wynik i popraw ramki tablic tam, gdzie to potrzebne."
+        )
+        tk.Label(
+            shell,
+            text=summary_text,
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=620,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(10, 0))
+
+        warning_box = tk.Frame(
+            shell,
+            bg=panel_alt,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=error,
+            highlightcolor=error,
+            padx=12,
+            pady=10,
+        )
+        warning_box.pack(anchor=tk.W, fill=tk.X, pady=(14, 0))
+
+        tk.Label(
+            warning_box,
+            text=(
+                "WARUNEK KONIECZNY: eksport datasetu albo wycinanie tablic będzie możliwe dopiero po "
+                "zatwierdzeniu odpowiedniej liczby zdjęć prawym przyciskiem myszy na liście."
+            ),
+            bg=panel_alt,
+            fg=error,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=600,
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        tk.Label(
+            warning_box,
+            text=(
+                "Na liście wyników kliknij PPM na wybranym zdjęciu lub zaznaczonej grupie i nadaj status [OK]. "
+                "Dopiero po tym program odblokuje dalsze CTA dla zatwierdzonych pozycji."
+            ),
+            bg=panel_alt,
+            fg=fg,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=600,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(6, 0))
+
+        buttons = tk.Frame(shell, bg=panel_bg, bd=0, highlightthickness=0)
+        buttons.pack(fill=tk.X, pady=(16, 0))
+
+        def close_dialog() -> None:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(
+            buttons,
+            text="Rozumiem",
+            style="Accent.TButton",
+            command=close_dialog,
+        ).pack(side=tk.RIGHT)
+
+        try:
+            dialog.update_idletasks()
+            width = max(680, int(dialog.winfo_reqwidth() or 680))
+            height = max(260, int(dialog.winfo_reqheight() or 260))
+            if parent is not None:
+                px = int(parent.winfo_rootx() or 0)
+                py = int(parent.winfo_rooty() or 0)
+                pw = int(parent.winfo_width() or 0)
+                ph = int(parent.winfo_height() or 0)
+                x = px + max(0, (pw - width) // 2)
+                y = py + max(0, (ph - height) // 2)
+            else:
+                x = y = 120
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+            dialog.grab_set()
+        except Exception:
+            try:
+                dialog.deiconify()
+            except Exception:
+                pass
+
+        dialog.bind("<Escape>", lambda _event: close_dialog())
+        try:
+            dialog.wait_window()
+        except Exception:
+            pass
 
     def _load_plate_dataset_context_from_run(self, run_dir: Path, force_images_update: bool = False):
         run_dir = self._resolve_safe_annotation_run_dir(run_dir)
@@ -18626,6 +21662,9 @@ class AnnotationTab:
                 self.preview_hint_frame.configure(bg=legend_theme["canvas_bg"])
             self.preview_controls_canvas.configure(bg=legend_theme["canvas_bg"])
             self._refresh_preview_controls_legend()
+            self._preview_overlay_dock_render_key = None
+            self._place_preview_overlay_dock(force_render=True)
+            self._place_preview_campaign_gate_overlay(force_render=True)
         except Exception:
             pass
 
@@ -20122,6 +23161,11 @@ class AnnotationTab:
 
         if target not in {"plate", "char"}:
             return
+        try:
+            if self._is_campaign_char_repair_return_mode() or self._is_campaign_plate_step4_repair_return_mode():
+                return
+        except Exception:
+            pass
         if self._manual_xml_template_enabled():
             return
         if self._get_workflow_route() != "auto":
@@ -20604,15 +23648,25 @@ class AnnotationTab:
             pass
         return True
 
-    def _ensure_free_mode_auto_workspace_preview(self) -> bool:
+    def _ensure_free_mode_input_workspace_preview(
+        self,
+        *,
+        expected_route: str = "auto",
+        expected_step: str | None = None,
+    ) -> bool:
         if not self._is_free_mode_session_context():
             return False
-        if str(self._get_workflow_route() or "").strip().lower() != "auto":
+        current_route = str(self._get_workflow_route() or "").strip().lower()
+        expected_route = str(expected_route or "").strip().lower()
+        if current_route != expected_route:
             return False
         if str(self._coerce_free_mode_screen() or "").strip().lower() != "workflow":
             return False
-        if str(self._coerce_workflow_step() or "").strip().lower() != "auto_start":
+        current_step = str(self._coerce_workflow_step() or "").strip().lower()
+        expected_step = str(expected_step or f"{expected_route}_start").strip().lower()
+        if current_step != expected_step:
             return False
+        manual_preview = bool(current_route == "manual")
 
         images_value = str(self.input_dir_var.get() or "").strip()
         if not images_value:
@@ -20666,7 +23720,11 @@ class AnnotationTab:
                     height=1,
                     detections=[],
                     status=AnnotationStatus.NO_PLATE,
-                    status_message="Obraz źródłowy gotowy do autoanotacji. Użyj Start, aby uruchomić proces dla tej paczki.",
+                    status_message=(
+                        "Obraz źródłowy gotowy do utworzenia XML ręcznej anotacji."
+                        if manual_preview
+                        else "Obraz źródłowy gotowy do autoanotacji. Użyj Start, aby uruchomić proces dla tej paczki."
+                    ),
                 )
             )
             image_map[str(image_path.name)] = Path(image_path)
@@ -20736,7 +23794,11 @@ class AnnotationTab:
         def _finish_workspace_preview_load() -> None:
             try:
                 self._set_status_label_state(
-                    f"Wczytano {len(preview_annotations)} obrazów do pracy w Z2. Możesz zaznaczyć zakres i uruchomić autoanotację przyciskiem Start.",
+                    (
+                        f"Wczytano {len(preview_annotations)} obrazów do pracy w Z2. Możesz teraz utworzyć XML anotacji ręcznej."
+                        if manual_preview
+                        else f"Wczytano {len(preview_annotations)} obrazów do pracy w Z2. Możesz zaznaczyć zakres i uruchomić autoanotację przyciskiem Start."
+                    ),
                     "neutral",
                 )
             except Exception:
@@ -20765,16 +23827,36 @@ class AnnotationTab:
             pass
         return True
 
-    def _schedule_free_mode_auto_workspace_preview_load(self) -> bool:
+    def _ensure_free_mode_auto_workspace_preview(self) -> bool:
+        return self._ensure_free_mode_input_workspace_preview(
+            expected_route="auto",
+            expected_step="auto_start",
+        )
+
+    def _ensure_free_mode_manual_workspace_preview(self) -> bool:
+        return self._ensure_free_mode_input_workspace_preview(
+            expected_route="manual",
+            expected_step="manual_start",
+        )
+
+    def _schedule_free_mode_input_workspace_preview_load(
+        self,
+        *,
+        expected_route: str = "auto",
+        expected_step: str | None = None,
+        require_auto_pending: bool = False,
+    ) -> bool:
         if not self._is_free_mode_session_context():
             return False
-        if str(self._get_workflow_route() or "").strip().lower() != "auto":
+        expected_route = str(expected_route or "").strip().lower()
+        if str(self._get_workflow_route() or "").strip().lower() != expected_route:
             return False
         if str(self._coerce_free_mode_screen() or "").strip().lower() != "workflow":
             return False
-        if str(self._coerce_workflow_step() or "").strip().lower() != "auto_start":
+        expected_step = str(expected_step or f"{expected_route}_start").strip().lower()
+        if str(self._coerce_workflow_step() or "").strip().lower() != expected_step:
             return False
-        if not bool(getattr(self, "_auto_route_settings_pending", False)):
+        if require_auto_pending and not bool(getattr(self, "_auto_route_settings_pending", False)):
             return False
         if self.is_processing:
             return False
@@ -20820,9 +23902,12 @@ class AnnotationTab:
                 return
             self._free_mode_auto_workspace_preview_load_after_id = None
             try:
-                self._ensure_free_mode_auto_workspace_preview()
+                self._ensure_free_mode_input_workspace_preview(
+                    expected_route=expected_route,
+                    expected_step=expected_step,
+                )
             except Exception as e:
-                logger.debug(f"Nie udało się przygotować odroczonego workspace Z2 dla freemode auto: {e}")
+                logger.debug(f"Nie udało się przygotować odroczonego workspace Z2 dla freemode {expected_route}: {e}")
                 try:
                     self._hide_campaign_step2_splash()
                 except Exception:
@@ -20837,6 +23922,19 @@ class AnnotationTab:
             self._free_mode_auto_workspace_preview_load_after_id = None
             _run()
         return True
+
+    def _schedule_free_mode_auto_workspace_preview_load(self) -> bool:
+        return self._schedule_free_mode_input_workspace_preview_load(
+            expected_route="auto",
+            expected_step="auto_start",
+            require_auto_pending=True,
+        )
+
+    def _schedule_free_mode_manual_workspace_preview_load(self) -> bool:
+        return self._schedule_free_mode_input_workspace_preview_load(
+            expected_route="manual",
+            expected_step="manual_start",
+        )
 
     def _prime_campaign_source_preview(self, input_dir: Path | None) -> bool:
         started_at = time.perf_counter()
@@ -21841,11 +24939,7 @@ class AnnotationTab:
         if current == "manual_history":
             return self._get_selected_manual_review_history_run_dir() is not None
         if current == "manual_input":
-            if not input_ready:
-                return False
-            if self._manual_vehicle_assist_enabled():
-                return vehicle_model_ready
-            return True
+            return bool(input_ready)
         if current == "manual_conf":
             return True
         if current in {"auto_start", "manual_start"}:
@@ -21878,6 +24972,9 @@ class AnnotationTab:
                 self._close_export_followup()
                 return
             if screen == "manual_review":
+                if self._get_workflow_route() == "manual":
+                    self._open_step3_from_z2_annotation_source()
+                    return
                 self._exit_manual_review_stage()
                 return
             if screen == "auto_summary":
@@ -22201,11 +25298,25 @@ class AnnotationTab:
         if self._is_free_mode_session_context():
             screen = self._coerce_free_mode_screen()
             if screen == "auto_summary":
-                if self._get_preferred_annotation_run_dir(require_xml=True) is not None:
+                run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+                if run_dir is not None:
+                    approval_state = self._get_run_plate_strict_approved_state(run_dir)
+                    if not approval_state.get("ok"):
+                        self._warn_plate_dataset_export_requires_ok(approval_state)
+                        return
                     self._jump_to_export_section()
                 return
             if screen == "manual_review":
-                self._jump_to_export_section()
+                if self._get_workflow_route() == "manual":
+                    run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+                    if run_dir is not None:
+                        approval_state = self._get_run_plate_strict_approved_state(run_dir)
+                        if not approval_state.get("ok"):
+                            self._warn_plate_dataset_export_requires_ok(approval_state)
+                            return
+                        self._jump_to_export_section()
+                    return
+                self._open_step3_from_z2_annotation_source()
                 return
             if screen == "export":
                 if self._dataset_export_completed:
@@ -22431,6 +25542,262 @@ class AnnotationTab:
     def _jump_to_export_section(self):
         dispatch_jump_to_export_section(self)
 
+    def _resolve_step3_images_dir_from_z2_run(self, run_dir: Path | None) -> Path | None:
+        safe_run_dir = self._resolve_safe_annotation_run_dir(run_dir, require_xml=True)
+        candidates = []
+
+        if safe_run_dir is not None:
+            try:
+                manifest = self._load_annotation_run_manifest(safe_run_dir)
+            except Exception:
+                manifest = {}
+            if isinstance(manifest, dict):
+                candidates.extend(
+                    [
+                        manifest.get("source_input_dir"),
+                        manifest.get("input_dir"),
+                        manifest.get("imported_source_input_dir"),
+                    ]
+                )
+
+        candidates.extend(
+            [
+                getattr(self, "current_input_dir", None),
+                str(self.input_dir_var.get() or "").strip() if hasattr(self, "input_dir_var") else "",
+                str(self.plate_dataset_images_var.get() or "").strip()
+                if hasattr(self, "plate_dataset_images_var")
+                else "",
+            ]
+        )
+
+        for candidate in candidates:
+            resolved = self._resolve_existing_dir(candidate)
+            if resolved is not None:
+                return resolved
+        return None
+
+    def _prepare_approved_step3_source_from_z2_run(self, run_dir: Path, images_dir: Path | None) -> Path | None:
+        safe_run_dir = self._resolve_safe_annotation_run_dir(run_dir, require_xml=True)
+        if safe_run_dir is None:
+            return None
+
+        approval_state = self._get_run_plate_strict_approved_state(safe_run_dir)
+        if not approval_state.get("ok"):
+            self._warn_plate_cut_requires_ok(approval_state)
+            return None
+
+        approved_lookup = {
+            str(name or "").strip().lower()
+            for name in set(approval_state.get("approved_filenames") or set())
+            if str(name or "").strip()
+        }
+        if not approved_lookup:
+            self._warn_plate_cut_requires_ok(approval_state)
+            return None
+
+        current_run_dir = getattr(self, "current_annotation_run_dir", None)
+        if (
+            current_run_dir is not None
+            and self.current_annotations
+            and self._paths_equivalent(safe_run_dir, current_run_dir)
+        ):
+            source_annotations = list(self.current_annotations or [])
+        else:
+            try:
+                source_annotations = self._parse_cvat_preview_annotations(safe_run_dir / "annotations.xml")
+            except Exception as e:
+                messagebox.showerror(
+                    "Błąd źródła Z2",
+                    f"Nie mogę odczytać annotations.xml przed wycinaniem tablic:\n{e}",
+                    parent=self.frame.winfo_toplevel(),
+                )
+                return None
+
+        approved_annotations = []
+        for ann in list(source_annotations or []):
+            image_name = str(getattr(ann, "filename", "") or "").strip().lower()
+            if not image_name or image_name not in approved_lookup:
+                continue
+            try:
+                if len(self._get_plate_detections(ann)) <= 0:
+                    continue
+            except Exception:
+                continue
+            approved_annotations.append(copy.deepcopy(ann))
+
+        if not approved_annotations:
+            self._warn_plate_cut_requires_ok(approval_state)
+            return None
+
+        derived_root = safe_run_dir.parent / "_z3_approved_sources"
+        derived_run_dir = derived_root / f"{safe_run_dir.name}_ok"
+        try:
+            derived_run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror(
+                "Błąd źródła Z3",
+                f"Nie mogę przygotować filtrowanego źródła dla PZ1:\n{e}",
+                parent=self.frame.winfo_toplevel(),
+            )
+            return None
+
+        derived_xml_path = derived_run_dir / "annotations.xml"
+        if not CVATExporter(task_name="Z2 Approved Plates for Z3").export(
+            approved_annotations,
+            derived_xml_path,
+            include_confidence=True,
+            only_successful=False,
+        ):
+            messagebox.showerror(
+                "Błąd źródła Z3",
+                f"Nie udało się zapisać filtrowanego XML z pozycjami [OK]:\n{derived_xml_path}",
+                parent=self.frame.winfo_toplevel(),
+            )
+            return None
+
+        try:
+            source_manifest = self._load_annotation_run_manifest(safe_run_dir)
+        except Exception:
+            source_manifest = {}
+
+        manifest_payload = dict(source_manifest or {})
+        manifest_payload.update(
+            {
+                "annotation_run_type": "z2_approved_for_z3",
+                "source_run_dir": str(safe_run_dir),
+                "source_xml_path": str(safe_run_dir / "annotations.xml"),
+                "source_input_dir": str(images_dir or ""),
+                "input_dir": str(images_dir or ""),
+                "approved_filenames": sorted(
+                    str(getattr(ann, "filename", "") or "").strip().lower()
+                    for ann in approved_annotations
+                    if str(getattr(ann, "filename", "") or "").strip()
+                ),
+                "derived_for": "z3_plate_cutting",
+                "derived_from_approved_only": True,
+                "derived_source_run_name": str(safe_run_dir.name or ""),
+                "derived_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "approved_images": int(approval_state.get("approved_images", 0) or 0),
+                "approved_plates": int(approval_state.get("approved_plates", 0) or 0),
+            }
+        )
+        try:
+            manifest_path = self._annotation_run_manifest_path(derived_run_dir)
+            manifest_path.write_text(
+                json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            PROJECT_CACHE.invalidate_json(manifest_path)
+        except Exception as e:
+            logger.debug(f"Nie udało się zapisać manifestu źródła Z3 z pozycji OK: {e}")
+
+        return derived_run_dir
+
+    def _open_step3_from_z2_annotation_source(self) -> bool:
+        if self.is_processing:
+            return False
+
+        run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+        if run_dir is None:
+            messagebox.showwarning(
+                "Brak źródła dla Z3",
+                "Nie znalazłem gotowego runu Z2 z plikiem annotations.xml. "
+                "Najpierw utwórz albo otwórz run anotacji tablic.",
+                parent=self.frame.winfo_toplevel(),
+            )
+            return False
+
+        if not self._ensure_preview_edits_saved("przejście do Z3/PZ1"):
+            return False
+
+        xml_path = run_dir / "annotations.xml"
+        images_dir = self._resolve_step3_images_dir_from_z2_run(run_dir)
+        step3_run_dir = self._prepare_approved_step3_source_from_z2_run(run_dir, images_dir)
+        if step3_run_dir is None:
+            return False
+        xml_path = step3_run_dir / "annotations.xml"
+
+        try:
+            character_tab = getattr(getattr(self, "app", None), "tabs", {}).get("characters")
+        except Exception:
+            character_tab = None
+
+        if character_tab is None:
+            messagebox.showwarning(
+                "Brak Z3",
+                "Zakładka Z3 nie jest teraz dostępna, więc nie mogę przejść bezpośrednio do PZ1.",
+                parent=self.frame.winfo_toplevel(),
+            )
+            return False
+
+        try:
+            character_tab.set_pending_z2_annotation_source(
+                run_dir=str(step3_run_dir),
+                xml_path=str(xml_path),
+                images_dir=(str(images_dir) if images_dir is not None else ""),
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się przekazać źródła Z2 do Z3: {e}")
+
+        try:
+            self.app.open_controlled_tab("characters")
+        except Exception:
+            return False
+
+        bootstrapped = {"done": False}
+
+        def _bootstrap_step3_pz1() -> None:
+            if bootstrapped["done"]:
+                return
+            bootstrapped["done"] = True
+
+            try:
+                character_tab.reset_subtab_flow()
+            except Exception:
+                pass
+            try:
+                character_tab.back_to_substep_1()
+            except Exception:
+                pass
+            try:
+                character_tab.preview_dir_var.set("")
+                character_tab._reset_preview_cache()
+            except Exception:
+                pass
+
+            source_ready = False
+            try:
+                source_ready = bool(
+                    character_tab._use_z2_source_on_demand(
+                        notify_on_failure=True,
+                        advance_to_start=True,
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Nie udało się automatycznie przygotować PZ1 z runu Z2: {e}")
+
+            try:
+                character_tab._refresh_extract_workflow_ui()
+            except Exception:
+                pass
+
+            try:
+                status_text = (
+                    "Z2 przekazało annotations.xml do Z3/PZ1. Możesz wyciąć tablice do pracy nad znakami."
+                    if source_ready
+                    else "Otworzyłem Z3/PZ1. Sprawdź zgodność annotations.xml i katalogu obrazów."
+                )
+                self.app.update_status(status_text, "success" if source_ready else "warning")
+            except Exception:
+                pass
+
+        try:
+            character_tab.frame.after_idle(_bootstrap_step3_pz1)
+        except Exception:
+            _bootstrap_step3_pz1()
+
+        return True
+
     def _open_existing_run_for_manual_review(
         self,
         run_dir: Path | None = None,
@@ -22574,6 +25941,13 @@ class AnnotationTab:
         self._workflow_ui_refresh_in_progress = True
         self._refresh_workflow_route_cards()
         preferred_run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+        if (
+            preferred_run_dir is None
+            and self._is_free_mode_session_context()
+            and bool(getattr(self, "_manual_review_active", False))
+            and self._coerce_free_mode_screen() == "manual_review"
+        ):
+            preferred_run_dir = self._get_active_annotation_run_dir(require_xml=True)
         self._refresh_run_output_info(preferred_run_dir)
         secondary_actions = self._get_z2_secondary_actions()
         secondary_ctx = self._build_z2_action_context()
@@ -22637,6 +26011,11 @@ class AnnotationTab:
                     self._schedule_free_mode_auto_workspace_preview_load()
                 except Exception as e:
                     logger.debug(f"Nie udało się przygotować preview workspace Z2 dla freemode auto: {e}")
+            elif route == "manual" and free_mode_screen == "workflow" and current_step == "manual_start":
+                try:
+                    self._schedule_free_mode_manual_workspace_preview_load()
+                except Exception as e:
+                    logger.debug(f"Nie udało się przygotować preview workspace Z2 dla freemode manual: {e}")
 
         if campaign_context:
             layout_state = self._build_z2_layout_state_campaign(
@@ -22820,7 +26199,13 @@ class AnnotationTab:
             except Exception:
                 pass
             try:
-                self.start_btn.configure(text="Utw\u00f3rz XML anotacji")
+                self.start_btn.configure(
+                    text=(
+                        "Utwórz XML + boxy pojazdów"
+                        if self._manual_vehicle_assist_enabled()
+                        else "Utwórz XML anotacji"
+                    )
+                )
             except Exception:
                 pass
 
@@ -22892,6 +26277,10 @@ class AnnotationTab:
             except Exception:
                 pass
 
+        promotion_result = self._promote_campaign_char_repair_ok_to_approved_pool_before_return()
+        if bool(promotion_result.get("abort")):
+            return
+
         try:
             campaign_tab = self.app.tabs.get("campaign")
             if campaign_tab is not None:
@@ -22912,6 +26301,123 @@ class AnnotationTab:
             )
         except Exception as e:
             logger.debug(f"Nie udalo sie wrocic do wizarda kampanii: {e}")
+
+    def _promote_campaign_char_repair_ok_to_approved_pool_before_return(self) -> dict:
+        if self._is_free_mode_session_context():
+            return {"ok": False, "reason": "free_mode"}
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+        except Exception:
+            return {"ok": False, "reason": "campaign_unavailable"}
+
+        try:
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+            iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+        except Exception:
+            current_step = 0
+            iteration_target = ""
+
+        if not CAMPAIGN.get_active_project_name() or current_step != 3 or iteration_target != "char":
+            return {"ok": False, "reason": "not_char_repair_return"}
+
+        approval_context = self._get_campaign_step2_approval_context()
+        run_dir = self._resolve_safe_annotation_run_dir(approval_context.get("run_dir"), require_xml=True)
+        if run_dir is None:
+            run_dir = self._resolve_safe_annotation_run_dir(getattr(self, "current_annotation_run_dir", None), require_xml=True)
+        if run_dir is None:
+            run_dir = self._resolve_safe_annotation_run_dir(getattr(self, "last_staging_run_dir", None), require_xml=True)
+        if run_dir is None:
+            return {"ok": False, "reason": "missing_run"}
+
+        if not self._ensure_preview_edits_saved("wyjście do wizarda z trybu naprawczego E3"):
+            return {"ok": False, "reason": "save_failed", "abort": True}
+
+        try:
+            self._persist_preview_approved_filenames()
+        except Exception:
+            pass
+
+        current_ok_images, current_ok_plates = 0, 0
+        try:
+            current_run_dir = self._resolve_safe_annotation_run_dir(
+                getattr(self, "current_annotation_run_dir", None),
+                require_xml=True,
+            )
+            if current_run_dir is not None and self._paths_equivalent(current_run_dir, run_dir):
+                current_ok_images, current_ok_plates = self._get_current_preview_plate_approved_counts()
+        except Exception:
+            current_ok_images, current_ok_plates = 0, 0
+        try:
+            run_ok_images, run_ok_plates = self._get_run_plate_approved_counts(run_dir)
+        except Exception:
+            run_ok_images, run_ok_plates = 0, 0
+
+        approved_images = max(int(current_ok_images or 0), int(run_ok_images or 0))
+        approved_plates = max(int(current_ok_plates or 0), int(run_ok_plates or 0))
+        if approved_images <= 0 or approved_plates <= 0:
+            return {"ok": False, "reason": "no_ok_images"}
+
+        try:
+            result = self._promote_run_to_campaign_plate_approved_set(run_dir)
+        except Exception as e:
+            logger.debug(f"Nie udało się przenieść [OK] z trybu naprawczego E3 do puli zatwierdzonych: {e}")
+            result = {"ok": False, "reason": "promotion_exception"}
+
+        if not bool(result.get("ok")):
+            try:
+                messagebox.showwarning(
+                    "Nie zapisano puli do wycinania",
+                    (
+                        "Nie udało się przenieść zdjęć [OK] do katalogu zatwierdzonych, więc nie będą jeszcze "
+                        "bezpiecznie dostępne dla procesu wycinania tablic w E3.\n\n"
+                        "Pozostań w Z2, zapisz anotacje i spróbuj ponownie wyjść do wizarda."
+                    ),
+                    parent=self.frame.winfo_toplevel(),
+                )
+            except Exception:
+                pass
+            return {**dict(result or {}), "abort": True}
+
+        try:
+            promoted_names = self._load_annotation_run_approved_filenames(run_dir)
+            self._campaign_hidden_project_approved_filenames = (
+                set(getattr(self, "_campaign_hidden_project_approved_filenames", set()) or set())
+                | {
+                    str(name or "").strip().lower()
+                    for name in set(promoted_names or set())
+                    if str(name or "").strip()
+                }
+            )
+            self._campaign_hidden_project_approved_count = len(self._campaign_hidden_project_approved_filenames)
+        except Exception:
+            pass
+
+        try:
+            self._refresh_campaign_char_effective_source_after_approval()
+        except Exception as e:
+            logger.debug(f"Nie udało się odświeżyć źródła E3 po wyjściu z naprawczego Z2: {e}")
+
+        try:
+            self._append_z2_trace(
+                "char-repair-return-promote-ok",
+                (
+                    f"run={run_dir} images={approved_images} plates={approved_plates} "
+                    f"approved_total={int(result.get('total', 0) or 0)}"
+                ),
+            )
+        except Exception:
+            pass
+
+        try:
+            self.app.update_status(
+                f"Przeniesiono {approved_images} zdjęć [OK] do katalogu zatwierdzonych dla E3.",
+                "success",
+            )
+        except Exception:
+            pass
+
+        return result
 
     def _get_campaign_return_to_wizard_ok_warning_context(self) -> dict:
         if self._is_free_mode_session_context():
@@ -23006,7 +26512,7 @@ class AnnotationTab:
                 dialog_styler(
                     dialog,
                     title="Sama korekta nie oznacza jeszcze zatwierdzenia",
-                    geometry="760x360",
+                    geometry="620x320",
                     parent=self.frame,
                 )
             except Exception:
@@ -23044,7 +26550,7 @@ class AnnotationTab:
             body_surface.pack(fill=tk.BOTH, expand=True)
 
         body = tk.Frame(body_surface, bg=panel_bg, bd=0, highlightthickness=0)
-        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
 
         tk.Label(
             body,
@@ -23059,8 +26565,9 @@ class AnnotationTab:
         tk.Label(
             body,
             text=(
-                f"Aktualnie [OK]: {int(approved_images)}/{max(int(required_images or 0), int(images_with_plates or 0))} | "
-                f"Tablice zapisane: {int(total_plates or 0)}"
+                f"Zatwierdzonych obrazów [OK]: {int(approved_images)}. "
+                f"Minimum: {int(required_images or 0)}. "
+                f"Liczba oznaczonych tablic: {int(total_plates or 0)}."
             ),
             bg=panel_bg,
             fg=success,
@@ -23075,7 +26582,7 @@ class AnnotationTab:
             missing_xml = bool(xml_required and not xml_exists)
             message_text = (
                 "Ten etap nie ma jeszcze minimalnej liczby anotacji potrzebnej do domknięcia E2.\n\n"
-                f"Minimum: {int(required_images or 0)} obrazy oznaczone jako [OK] oraz co najmniej 1 zapisana tablica"
+                f"Minimum: {int(required_images or 0)} obrazy oznaczone jako [OK] oraz co najmniej 1 oznaczona tablica"
                 + (" i utworzony plik XML anotacji." if xml_required else ".")
                 + "\n"
                 + f"Brakuje: {missing_images} obrazów [OK], {missing_plate} tablic"
@@ -23101,7 +26608,7 @@ class AnnotationTab:
             font=("Segoe UI", 9),
             anchor="w",
             justify=tk.LEFT,
-            wraplength=620,
+            wraplength=520,
         ).pack(anchor=tk.W, fill=tk.X, pady=(10, 0))
 
         buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
@@ -23129,6 +26636,12 @@ class AnnotationTab:
 
         try:
             dialog.update_idletasks()
+            self._fit_borderless_dialog(
+                dialog,
+                parent=getattr(self.app, "root", None) or self.frame,
+                min_width=600,
+                min_height=280,
+            )
             dialog.deiconify()
             dialog.lift()
             dialog.focus_force()
@@ -23226,14 +26739,34 @@ class AnnotationTab:
         self.workflow_vehicle_model_title_var.set(str(payload.workflow_vehicle_title or ""))
         self.workflow_vehicle_model_hint_var.set(str(payload.workflow_vehicle_hint or ""))
         self.workflow_start_intro_var.set(str(payload.workflow_start_intro or "").strip())
+        followup_text = str(payload.followup_text or "").strip()
+        export_text = str(payload.export_text or "").strip()
+        self.followup_intro_var.set(followup_text)
+        self.export_intro_var.set(export_text)
         self.run_intro_var.set(str(payload.run_intro_text or "").strip())
         self._set_inline_label_state(self.route_badge_lbl, text=str(payload.badge_text or ""), tone=str(payload.badge_tone or "muted"), emphasis=True)
         self._set_inline_label_state(self.run_intro_lbl, tone="muted", emphasis=False)
         self._set_inline_label_state(self.route_summary_lbl, text=str(payload.route_text or ""), tone=str(payload.route_tone or "muted"), emphasis=False)
         self._set_inline_label_state(self.workflow_start_intro_lbl, tone="muted", emphasis=False)
         self._set_inline_label_state(self.workflow_action_hint_lbl, text=str(payload.action_text or ""), tone="muted", emphasis=False)
-        self._set_inline_label_state(self.followup_intro_lbl, text=str(payload.followup_text or ""), tone="muted", emphasis=False)
-        self._set_inline_label_state(self.export_intro_lbl, text=str(payload.export_text or ""), tone="muted", emphasis=False)
+        try:
+            free_mode_screen = str(self._coerce_free_mode_screen() or "").strip().lower()
+            free_mode_route = str(self._get_workflow_route() or "").strip().lower()
+        except Exception:
+            free_mode_screen = ""
+            free_mode_route = ""
+        followup_tone = (
+            "warning"
+            if (
+                self._is_free_mode_session_context()
+                and free_mode_route in {"auto", "manual"}
+                and free_mode_screen in {"auto_summary", "manual_review"}
+                and followup_text
+            )
+            else "muted"
+        )
+        self._set_inline_label_state(self.followup_intro_lbl, text=followup_text, tone=followup_tone, emphasis=False)
+        self._set_inline_label_state(self.export_intro_lbl, text=export_text, tone="muted", emphasis=False)
         self._set_inline_label_state(self.auto_vehicle_choice_hint_lbl, tone="muted", emphasis=False)
         self._set_inline_label_state(self.manual_entry_hint_lbl, tone=str(payload.manual_hint_tone or "muted"), emphasis=False)
         self._set_inline_label_state(self.manual_xml_template_hint_lbl, tone=str(payload.manual_template_tone or "muted"), emphasis=False)
@@ -23692,12 +27225,20 @@ class AnnotationTab:
                     label=str(scope_selection.get("label") or "Cała paczka"),
                     count=len(selected_scope_paths),
                 )
+            if route == "auto":
+                mode_text = (
+                    "C: Pojazdy + tablice"
+                    if self._get_auto_vehicle_choice() == "use"
+                    else "B: Tylko tablice"
+                )
+                self.mode_var.set(mode_text)
             selected_device = self._get_effective_yolo_device_choice()
             dev = self._device_to_ultralytics(selected_device)
             success, msg = True, ""
             conf = self.conf_var.get()
             v_p = None
             p_p = None
+            safe_output_dir = None
 
             if not manual_template:
                 self._validate_models()
@@ -23714,36 +27255,6 @@ class AnnotationTab:
                 if not self._confirm_and_download_missing_models(pending_downloads):
                     return
                 v_p = self._get_model_path("vehicle")
-
-            if self.annotator is not None:
-                try:
-                    self.annotator.unload_models()
-                except Exception:
-                    pass
-                self.annotator = None
-
-            if not manual_template:
-                if self._mode_uses_vehicle(mode_text):
-                    self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
-                else:
-                    self.annotator = PlateAnnotator(p_p, conf, dev)
-            elif manual_vehicle_assist:
-                self.annotator = VehicleAnnotator(v_p, conf, dev)
-
-            try:
-                from ..campaign_manager import CAMPAIGN
-                if CAMPAIGN.get_active_project_name():
-                    preserve_step2_approval = bool(
-                        self._is_campaign_char_repair_return_mode()
-                        or self._is_campaign_plate_step4_repair_return_mode()
-                        or bool(getattr(self, "_campaign_step2_approval_repair_mode", False))
-                    )
-                    if not preserve_step2_approval:
-                        CAMPAIGN.reset_step2()
-                    if "campaign" in self.app.tabs:
-                        self.app.tabs["campaign"]._refresh_dashboard()
-            except Exception as e:
-                logger.debug(f"Nie udalo sie zresetowac stanu Kroku 2: {e}")
 
             self._manual_review_active = False
             self._manual_review_from_auto = False
@@ -23783,6 +27294,64 @@ class AnnotationTab:
                 self._pending_progress_update = None
                 self._progress_update_flush_queued = False
             self._progress_update_seen = False
+
+            self._set_preview_processing_overlay(
+                not (
+                    manual_template
+                    and self._is_free_mode_session_context()
+                    and route == "manual"
+                    and manual_entry_mode == "new"
+                ),
+                title=(
+                    "Trwa przygotowanie autoanotacji"
+                    if not manual_template
+                    else "Trwa przygotowanie XML"
+                ),
+                details="Ładuję modele i przygotowuję run. Za chwilę pojawi się właściwy postęp.",
+                cancel_visible=False,
+            )
+            self._update_preview_processing_overlay_progress(
+                pct=0.0,
+                current=0,
+                total=0,
+                filename="",
+                meta_text="0% | przygotowanie modeli",
+            )
+            try:
+                self.frame.update_idletasks()
+                self.frame.update()
+            except Exception:
+                pass
+
+            if self.annotator is not None:
+                try:
+                    self.annotator.unload_models()
+                except Exception:
+                    pass
+                self.annotator = None
+
+            if not manual_template:
+                if self._mode_uses_vehicle(mode_text):
+                    self.annotator = CombinedAnnotator(v_p, p_p, conf, conf, CONFIG.PLATE_INSIDE_THRESHOLD, dev)
+                else:
+                    self.annotator = PlateAnnotator(p_p, conf, dev)
+            elif manual_vehicle_assist:
+                self.annotator = VehicleAnnotator(v_p, conf, dev)
+
+            try:
+                from ..campaign_manager import CAMPAIGN
+                if CAMPAIGN.get_active_project_name():
+                    preserve_step2_approval = bool(
+                        self._is_campaign_char_repair_return_mode()
+                        or self._is_campaign_plate_step4_repair_return_mode()
+                        or bool(getattr(self, "_campaign_step2_approval_repair_mode", False))
+                    )
+                    if not preserve_step2_approval:
+                        CAMPAIGN.reset_step2()
+                    if "campaign" in self.app.tabs:
+                        self.app.tabs["campaign"]._refresh_dashboard()
+            except Exception as e:
+                logger.debug(f"Nie udalo sie zresetowac stanu Kroku 2: {e}")
 
             if not manual_template:
                 live_manual_bundle = self._get_current_campaign_manual_preview_bundle()
@@ -23898,6 +27467,19 @@ class AnnotationTab:
                     self.app.end_exclusive_operation("z2.annotation.run")
                 else:
                     self.app.set_processing(False)
+                try:
+                    self._set_preview_processing_overlay(False)
+                except Exception:
+                    pass
+                try:
+                    self.start_btn.config(state=tk.NORMAL)
+                    self.stop_btn.config(state=tk.DISABLED)
+                except Exception:
+                    pass
+                try:
+                    self._refresh_free_mode_workflow_ui()
+                except Exception:
+                    pass
             logger.error(f"Nie można wystartować: {e}")
             messagebox.showerror("Błąd Startu", str(e))
 
@@ -24020,8 +27602,8 @@ class AnnotationTab:
             if vehicle_detections:
                 status = AnnotationStatus.SUCCESS
                 status_message = (
-                    f"Wykryto {len(vehicle_detections)} pojazdow. "
-                    "Spacja kadruje kolejne auta, a D dodaje reczna tablice."
+                    f"Wykryto {len(vehicle_detections)} pojazdów. "
+                    "D dodaje ręczną tablicę, a boxy pojazdów pomagają zawęzić obszar pracy."
                 )
             else:
                 status = AnnotationStatus.NO_PLATE
@@ -24139,7 +27721,10 @@ class AnnotationTab:
                 )
             else:
                 annotations, report = self.annotator.process_directory(in_dir, prog_cb)
-            
+
+            if not manual_template:
+                self._mark_auto_plate_origin_for_annotations(annotations)
+
             if ((not manual_template) or manual_vehicle_assist) and (self.annotator.is_stopped() or not self.is_processing):
                 message = "Przetwarzanie przerwane przez użytkownika."
                 success = False
@@ -24326,6 +27911,157 @@ class AnnotationTab:
             return None
         return candidate
 
+    @staticmethod
+    def _format_preview_dpi_value(dpi_value) -> str:
+        if not dpi_value:
+            return ""
+        try:
+            if isinstance(dpi_value, (list, tuple)) and len(dpi_value) >= 2:
+                x_dpi = float(dpi_value[0] or 0.0)
+                y_dpi = float(dpi_value[1] or 0.0)
+            else:
+                x_dpi = y_dpi = float(dpi_value or 0.0)
+        except Exception:
+            return ""
+        if x_dpi <= 0.0 or y_dpi <= 0.0:
+            return ""
+
+        def _fmt(value: float) -> str:
+            rounded = int(round(float(value)))
+            return str(rounded) if abs(float(value) - rounded) < 0.25 else f"{float(value):.1f}"
+
+        if abs(x_dpi - y_dpi) < 0.25:
+            return f"DPI: {_fmt(x_dpi)}"
+        return f"DPI: {_fmt(x_dpi)}x{_fmt(y_dpi)}"
+
+    def _get_preview_image_file_metadata(self, ann, canvas: ZoomableCanvas | None = None) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "path": "",
+            "width": 0,
+            "height": 0,
+            "dpi_text": "",
+            "file_available": False,
+        }
+        image_path = self._resolve_preview_image_path(ann)
+        file_path: Path | None = None
+        if image_path is not None:
+            try:
+                candidate = Path(image_path)
+                if candidate.is_file():
+                    file_path = candidate
+            except Exception:
+                file_path = None
+
+        cache = getattr(self, "_preview_image_meta_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._preview_image_meta_cache = cache
+
+        if file_path is not None:
+            try:
+                stat = file_path.stat()
+                cache_key = ("image-file-meta", str(file_path), int(stat.st_mtime_ns), int(stat.st_size))
+            except Exception:
+                cache_key = ("image-file-meta", str(file_path), 0, 0)
+
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                metadata.update(cached)
+            else:
+                width = 0
+                height = 0
+                dpi_text = ""
+                try:
+                    with Image.open(file_path) as image:
+                        try:
+                            width = max(1, int(getattr(image, "width", 0) or image.size[0] or 0))
+                            height = max(1, int(getattr(image, "height", 0) or image.size[1] or 0))
+                        except Exception:
+                            width = height = 0
+                        info = dict(getattr(image, "info", {}) or {})
+                        dpi_text = self._format_preview_dpi_value(info.get("dpi"))
+                        if not dpi_text:
+                            density = info.get("jfif_density")
+                            unit = int(info.get("jfif_unit", 0) or 0)
+                            if isinstance(density, (list, tuple)) and len(density) >= 2 and unit in {1, 2}:
+                                factor = 1.0 if unit == 1 else 2.54
+                                dpi_text = self._format_preview_dpi_value(
+                                    (float(density[0]) * factor, float(density[1]) * factor)
+                                )
+                except Exception:
+                    width = height = 0
+                    dpi_text = ""
+
+                if not dpi_text:
+                    dpi_text = "DPI: brak w pliku"
+                file_metadata = {
+                    "path": str(file_path),
+                    "width": int(width),
+                    "height": int(height),
+                    "dpi_text": dpi_text,
+                    "file_available": True,
+                }
+                metadata.update(file_metadata)
+                cache[cache_key] = file_metadata
+                if len(cache) > 160:
+                    try:
+                        for key in list(cache.keys())[:40]:
+                            cache.pop(key, None)
+                    except Exception:
+                        pass
+
+        width = int(metadata.get("width", 0) or 0)
+        height = int(metadata.get("height", 0) or 0)
+        dimensions_trusted = bool(width > 0 and height > 0 and bool(metadata.get("file_available")))
+        if (width <= 0 or height <= 0) and canvas is not None:
+            try:
+                original_image = getattr(canvas, "original_image", None)
+                if original_image is not None:
+                    used_canvas_dimensions = False
+                    if width <= 0:
+                        width = max(1, int(getattr(original_image, "width", 0) or 0))
+                        used_canvas_dimensions = True
+                    if height <= 0:
+                        height = max(1, int(getattr(original_image, "height", 0) or 0))
+                        used_canvas_dimensions = True
+                    if used_canvas_dimensions and width > 0 and height > 0:
+                        dimensions_trusted = True
+            except Exception:
+                pass
+        if width <= 0 or height <= 0:
+            try:
+                ann_width = int(getattr(ann, "width", 0) or 0)
+                ann_height = int(getattr(ann, "height", 0) or 0)
+                if width <= 0:
+                    width = ann_width if ann_width > 0 else 0
+                if height <= 0:
+                    height = ann_height if ann_height > 0 else 0
+            except Exception:
+                pass
+
+        metadata["width"] = int(width)
+        metadata["height"] = int(height)
+        if not str(metadata.get("dpi_text", "") or "").strip():
+            metadata["dpi_text"] = "DPI: brak w pliku" if bool(metadata.get("file_available")) else "DPI: brak pliku"
+
+        try:
+            if ann is not None and dimensions_trusted:
+                if width > 0 and int(getattr(ann, "width", 0) or 0) != int(width):
+                    ann.width = int(width)
+                if height > 0 and int(getattr(ann, "height", 0) or 0) != int(height):
+                    ann.height = int(height)
+        except Exception:
+            pass
+        return metadata
+
+    def _get_preview_image_dpi_text(self, ann) -> str:
+        metadata = self._get_preview_image_file_metadata(ann)
+        return str(metadata.get("dpi_text", "") or "DPI: brak pliku")
+
+    @staticmethod
+    def _is_plate_detection_label(label) -> bool:
+        return str(label or "").strip().lower() in CONFIG.PLATE_LABELS
+
     def _preview_list_item_text(self, ann, *, display_index: int | None = None, total_count: int | None = None) -> str:
         dirty_prefix = "*" if ann.filename in self._preview_dirty_images else " "
         status_text = self._preview_annotation_status_tag(ann)
@@ -24336,12 +28072,13 @@ class AnnotationTab:
             order_text = f"{int(display_index) + 1:0{width}d}."
         reuse_prefix = f"{self._campaign_reuse_manual_badge()} " if self._preview_annotation_is_reused_from_previous_manual(ann) else ""
         quality = self._get_preview_annotation_quality_summary(ann)
-        metrics_suffix = ""
+        metrics_prefix = ""
         if int(quality.get("plate_count", 0) or 0) > 0:
-            metrics_suffix = f" | D{float(quality.get('min_confidence', 0.0) or 0.0):.2f}"
+            metric_parts = [f"D{float(quality.get('min_confidence', 0.0) or 0.0):.2f}"]
             if int(quality.get("fit_count", 0) or 0) > 0:
-                metrics_suffix += f" F{float(quality.get('min_fit_score', 0.0) or 0.0):.2f}"
-        return f"{dirty_prefix} {order_text} [{status_text}] {reuse_prefix}{ann.filename}{metrics_suffix}"
+                metric_parts.append(f"F{float(quality.get('min_fit_score', 0.0) or 0.0):.2f}")
+            metrics_prefix = f"{' '.join(metric_parts)} | "
+        return f"{dirty_prefix} {order_text} [{status_text}] {reuse_prefix}{metrics_prefix}{ann.filename}"
 
     def _preview_annotation_is_reused_from_previous_manual(self, ann) -> bool:
         filename = str(getattr(ann, "filename", "") or "").strip()
@@ -24355,12 +28092,13 @@ class AnnotationTab:
             return False
 
         for det in getattr(ann, "detections", []) or []:
-            if str(getattr(det, "label", "") or "").strip().lower() != "plate":
+            if not AnnotationTab._is_plate_detection_label(getattr(det, "label", "")):
                 continue
             attributes = dict(getattr(det, "attributes", {}) or {})
             manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
             manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-            if manually_edited or manual_source:
+            cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+            if manually_edited or manual_source or cvat_source == "manual":
                 return True
         return False
 
@@ -24381,12 +28119,13 @@ class AnnotationTab:
         if ann is None:
             return False
         for det in getattr(ann, "detections", []) or []:
-            if str(getattr(det, "label", "") or "").lower() != "plate":
+            if not self._is_plate_detection_label(getattr(det, "label", "")):
                 continue
             attributes = dict(getattr(det, "attributes", {}) or {})
             manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
             manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-            if manually_edited or manual_source:
+            cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+            if manually_edited or manual_source or cvat_source == "manual":
                 return True
         return False
 
@@ -24411,7 +28150,7 @@ class AnnotationTab:
 
         corrected = 0
         for det in getattr(ann, "detections", []) or []:
-            if str(getattr(det, "label", "") or "").lower() != "plate":
+            if not self._is_plate_detection_label(getattr(det, "label", "")):
                 continue
             attributes = dict(getattr(det, "attributes", {}) or {})
             manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
@@ -24423,7 +28162,7 @@ class AnnotationTab:
             plate_count = sum(
                 1
                 for det in getattr(ann, "detections", []) or []
-                if str(getattr(det, "label", "") or "").lower() == "plate"
+                if self._is_plate_detection_label(getattr(det, "label", ""))
             )
             return int(plate_count or 0)
 
@@ -24437,7 +28176,10 @@ class AnnotationTab:
             attributes = dict(getattr(det, "attributes", {}) or {})
             manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
             manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-            if not manually_edited and not manual_source:
+            cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+            if cvat_source == "manual":
+                continue
+            if cvat_source == "auto" or (not manually_edited and not manual_source):
                 return True
         return False
 
@@ -24448,7 +28190,8 @@ class AnnotationTab:
         attributes = dict(getattr(det, "attributes", {}) or {})
         manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
         manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-        return bool(manually_edited or manual_source)
+        cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+        return bool(manually_edited or manual_source or cvat_source == "manual")
 
     def _get_preview_any_auto_in_run(self) -> bool:
         cached = getattr(self, "_preview_any_auto_in_run_cache", None)
@@ -24497,8 +28240,7 @@ class AnnotationTab:
             kept_detections = []
             removed_here = 0
             for det in list(getattr(ann, "detections", []) or []):
-                label = str(getattr(det, "label", "") or "").strip().lower()
-                if label != "plate":
+                if not self._is_plate_detection_label(getattr(det, "label", "")):
                     kept_detections.append(det)
                     continue
 
@@ -24584,7 +28326,7 @@ class AnnotationTab:
             filename = str(getattr(ann, "filename", "") or "").strip()
             if not filename:
                 continue
-            if self._preview_annotation_has_manual_touch_direct(ann):
+            if self._preview_annotation_has_manual_touch(ann):
                 touched.add(filename)
 
         return touched
@@ -24628,8 +28370,7 @@ class AnnotationTab:
         kept_detections = []
         fallback_plate_detections = []
         for det in list(getattr(normalized_ann, "detections", []) or []):
-            label = str(getattr(det, "label", "") or "").strip().lower()
-            if label != "plate":
+            if not self._is_plate_detection_label(getattr(det, "label", "")):
                 kept_detections.append(det)
                 continue
 
@@ -24641,7 +28382,7 @@ class AnnotationTab:
                 continue
             fallback_plate_detections.append(copy.deepcopy(det))
 
-        if not any(str(getattr(det, "label", "") or "").strip().lower() == "plate" for det in kept_detections):
+        if not any(self._is_plate_detection_label(getattr(det, "label", "")) for det in kept_detections):
             if self._preview_annotation_has_manual_touch(ann) and fallback_plate_detections:
                 for det in fallback_plate_detections:
                     attributes = dict(getattr(det, "attributes", {}) or {})
@@ -24652,8 +28393,11 @@ class AnnotationTab:
 
         normalized_ann.detections = kept_detections
         try:
-            has_plate = any(str(getattr(det, "label", "") or "").strip().lower() == "plate" for det in kept_detections)
-            has_vehicle = any(str(getattr(det, "label", "") or "").strip().lower() == "vehicle" for det in kept_detections)
+            has_plate = any(self._is_plate_detection_label(getattr(det, "label", "")) for det in kept_detections)
+            has_vehicle = any(
+                str(getattr(det, "label", "") or "").strip().lower() in CONFIG.VEHICLE_LABELS
+                for det in kept_detections
+            )
             normalized_ann.status = (
                 AnnotationStatus.SUCCESS
                 if (has_plate or has_vehicle)
@@ -24705,7 +28449,7 @@ class AnnotationTab:
                 return
             if source_key and source_key in project_approved_source_keys:
                 return
-            is_manual = self._preview_annotation_has_manual_touch_direct(ann)
+            is_manual = self._preview_annotation_has_manual_touch(ann)
             is_approved = bool(self._preview_annotation_is_explicitly_approved(ann)) or safe_name in set(approved_names or set())
             if not is_manual and not is_approved:
                 return
@@ -25063,11 +28807,20 @@ class AnnotationTab:
             except Exception:
                 pass
             try:
-                width, height = get_image_size(image_path)
-                normalized_ann.width = max(1, int(width))
-                normalized_ann.height = max(1, int(height))
+                current_width = int(getattr(normalized_ann, "width", 0) or 0)
+                current_height = int(getattr(normalized_ann, "height", 0) or 0)
             except Exception:
-                pass
+                current_width, current_height = 0, 0
+            if current_width <= 1 or current_height <= 1:
+                try:
+                    width, height = get_image_size(image_path)
+                    normalized_ann.width = max(1, int(width))
+                    normalized_ann.height = max(1, int(height))
+                except Exception:
+                    pass
+            else:
+                normalized_ann.width = max(1, current_width)
+                normalized_ann.height = max(1, current_height)
 
             if safe_key in annotation_indices:
                 merged_annotations[int(annotation_indices[safe_key])] = normalized_ann
@@ -25110,8 +28863,38 @@ class AnnotationTab:
             return "auto"
         return "problem"
 
+    def _preview_annotation_sort_bucket_for_mode(self, ann, sort_mode: str | None = None) -> str:
+        normalized_sort = self._normalize_preview_list_sort_mode(sort_mode)
+        if normalized_sort == "Status: A, M, OK, problem":
+            origin_tag = self._preview_annotation_origin_tag(ann)
+            if origin_tag == "A":
+                return "auto"
+            if origin_tag == "M":
+                return "manual"
+            if self._preview_annotation_is_explicitly_approved(ann):
+                return "approved"
+            return "problem"
+        return self._preview_annotation_sort_bucket(ann)
+
+    def _preview_annotation_auto_scope_bucket(self, ann) -> str:
+        try:
+            bucket = str(
+                self._preview_annotation_sort_bucket_for_mode(
+                    ann,
+                    self._normalize_preview_list_sort_mode(),
+                )
+                or ""
+            ).strip().lower()
+        except Exception:
+            bucket = ""
+        if bucket in {"manual", "auto", "problem"}:
+            return bucket
+        return ""
+
     def _preview_list_status_priority(self, sort_mode: str | None = None) -> dict[str, int]:
         sort_mode = self._normalize_preview_list_sort_mode(sort_mode)
+        if sort_mode == "Status: A, M, OK, problem":
+            return {"auto": 0, "manual": 1, "approved": 2, "problem": 3}
         if sort_mode == "Status: OK, ED, problem":
             return {"approved": 0, "manual": 1, "auto": 2, "problem": 3}
         if sort_mode == "Status: problem, ED, OK":
@@ -25136,7 +28919,7 @@ class AnnotationTab:
         priority = self._preview_list_status_priority(sort_mode)
         entries.sort(
             key=lambda item: (
-                priority.get(self._preview_annotation_sort_bucket(item[1]), 99),
+                priority.get(self._preview_annotation_sort_bucket_for_mode(item[1], sort_mode), 99),
                 0 if str(getattr(item[1], "filename", "") or "") in self._preview_dirty_images else 1,
                 str(getattr(item[1], "filename", "") or "").lower(),
             )
@@ -25221,7 +29004,7 @@ class AnnotationTab:
             return None
 
     def _get_preview_actual_index_from_display(self, display_index: int | None) -> int | None:
-        indices = list(getattr(self, "_preview_list_display_indices", []) or [])
+        indices = getattr(self, "_preview_list_display_indices", []) or []
         if display_index is None:
             return None
         try:
@@ -25234,12 +29017,16 @@ class AnnotationTab:
 
     def _get_selected_preview_actual_indices(self) -> list[int]:
         selected_actual_indices: list[int] = []
+        seen_actual_indices: set[int] = set()
         for display_index in list(self.preview_listbox.curselection() or ()):
             actual_index = self._get_preview_actual_index_from_display(display_index)
             if actual_index is None:
                 continue
-            if actual_index not in selected_actual_indices:
-                selected_actual_indices.append(int(actual_index))
+            safe_actual_index = int(actual_index)
+            if safe_actual_index in seen_actual_indices:
+                continue
+            seen_actual_indices.add(safe_actual_index)
+            selected_actual_indices.append(safe_actual_index)
         return selected_actual_indices
 
     def _select_all_visible_preview_images(self) -> None:
@@ -25263,9 +29050,23 @@ class AnnotationTab:
 
         self._update_preview_toolbar_state()
         self._update_preview_edit_status(f"Zaznaczono obrazy spełniające filtr: {total_visible}.")
+        self._refresh_plate_auto_scope_modal_selection_state()
 
-    def _set_selected_preview_images_approved(self, approved: bool) -> None:
-        selected_actual_indices = self._get_selected_preview_actual_indices()
+    def _set_selected_preview_images_approved(
+        self,
+        approved: bool,
+        actual_indices: list[int] | None = None,
+        *,
+        show_warning_modal: bool = True,
+        persist_immediately: bool = True,
+        refresh_export_sources: bool = True,
+        schedule_followup_refresh: bool = False,
+    ) -> None:
+        selected_actual_indices = (
+            [int(idx) for idx in list(actual_indices or [])]
+            if actual_indices is not None
+            else self._get_selected_preview_actual_indices()
+        )
         if not selected_actual_indices:
             self._update_preview_edit_status("Najpierw zaznacz na liście co najmniej jeden obraz.")
             return
@@ -25302,27 +29103,33 @@ class AnnotationTab:
                 setattr(ann, "_approved_for_training", bool(approved))
             except Exception:
                 pass
-            try:
-                resolved_path = self._resolve_preview_image_path(ann)
-            except Exception:
-                resolved_path = None
             if approved:
+                newly_approved = filename not in approved_names
                 if filename not in approved_names:
                     approved_names.add(filename)
                     changed += 1
-                if (
-                    not self._is_free_mode_session_context()
-                    and resolved_path is not None
-                ):
+                if not self._is_free_mode_session_context():
+                    safe_display_name = str(getattr(ann, "filename", "") or "").strip()
+                    needs_overlay_update = bool(
+                        newly_approved
+                        or (safe_display_name and safe_display_name not in campaign_overlay_bundle)
+                    )
+                    if not needs_overlay_update:
+                        continue
                     try:
-                        protected_ann = copy.deepcopy(ann)
-                        setattr(protected_ann, "_approved_for_training", True)
-                        campaign_overlay_bundle[str(getattr(ann, "filename", "") or "").strip()] = (
-                            protected_ann,
-                            Path(resolved_path),
-                        )
+                        resolved_path = self._resolve_preview_image_path(ann)
                     except Exception:
-                        pass
+                        resolved_path = None
+                    if resolved_path is not None:
+                        try:
+                            protected_ann = copy.deepcopy(ann)
+                            setattr(protected_ann, "_approved_for_training", True)
+                            campaign_overlay_bundle[safe_display_name] = (
+                                protected_ann,
+                                Path(resolved_path),
+                            )
+                        except Exception:
+                            pass
             else:
                 if filename in approved_names:
                     approved_names.discard(filename)
@@ -25353,126 +29160,52 @@ class AnnotationTab:
             )
         except Exception:
             pass
-        self._persist_preview_approved_filenames()
-        if not self._is_free_mode_session_context():
-            try:
-                from ..campaign_manager import CAMPAIGN
+        approval_state_changed = bool(changed > 0 or cleaned_without_plate > 0)
+        if approval_state_changed:
+            if persist_immediately:
+                self._persist_preview_approved_filenames()
+            else:
+                self._schedule_preview_approved_persist()
+        if not self._is_free_mode_session_context() and approval_state_changed:
+            self._schedule_campaign_char_effective_source_refresh()
 
-                current_step = int(CAMPAIGN.get_current_step() or 0)
-                iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
-            except Exception:
-                current_step = 0
-                iteration_target = ""
-            if iteration_target == "char" or current_step >= 3:
-                try:
-                    refreshed_char_source = dict(self._build_campaign_char_effective_source() or {})
-                except Exception as e:
-                    logger.debug(f"Nie udało się odświeżyć char_effective_source po zmianie OK w Z2: {e}")
-                    refreshed_char_source = {}
-                try:
-                    self._append_z2_trace(
-                        "approved-mark-char-effective-refresh",
-                        (
-                            f"entries={int(refreshed_char_source.get('entries_count', 0) or 0)} "
-                            f"images={int(refreshed_char_source.get('images_with_plates', 0) or 0)} "
-                            f"plates={int(refreshed_char_source.get('total_plates', 0) or 0)}"
-                        ),
-                    )
-                except Exception:
-                    pass
-                try:
-                    refreshed_run_dir = self._resolve_existing_run_dir(refreshed_char_source.get("run_dir"))
-                except Exception:
-                    refreshed_run_dir = None
-                try:
-                    refreshed_xml_path = self._path_value_to_path(refreshed_char_source.get("xml_path"))
-                except Exception:
-                    refreshed_xml_path = None
-                try:
-                    refreshed_images_dir = self._resolve_existing_dir(refreshed_char_source.get("images_dir"))
-                except Exception:
-                    refreshed_images_dir = None
-                try:
-                    CAMPAIGN.set_step3_needs_rework()
-                    CAMPAIGN.set_step3_stage1_done(False)
-                    CAMPAIGN.set_step3_stage2_done(False)
-                    CAMPAIGN.set_step3_substep(1)
-                    CAMPAIGN.set_step3_extract_state(
-                        entry_mode="continue",
-                        workflow_step="start",
-                        annotation_run_dir=(str(refreshed_run_dir) if refreshed_run_dir is not None else ""),
-                        xml_path=(str(refreshed_xml_path) if refreshed_xml_path is not None else ""),
-                        images_dir=(str(refreshed_images_dir) if refreshed_images_dir is not None else ""),
-                    )
-                except Exception as e:
-                    logger.debug(f"Nie udało się zresetować kroku E3 po zmianie OK w Z2: {e}")
-                try:
-                    campaign_tab = self.app.tabs.get("campaign") if getattr(self.app, "tabs", None) else None
-                    if campaign_tab is not None:
-                        campaign_tab._clear_dashboard_perf_cache()
-                        campaign_tab._refresh_dashboard()
-                    self.app.update_campaign_tab_access()
-                except Exception:
-                    pass
-        try:
-            sort_mode_key = str(self.preview_list_sort_var.get() or "DEFAULT").strip().upper()
-        except Exception:
-            sort_mode_key = "DEFAULT"
-        if sort_mode_key == "DEFAULT":
-            restored_display_indices = []
-            for actual_index in selected_actual_indices:
-                try:
-                    self._refresh_preview_list_row_for_actual_index(actual_index, refresh_summary=False)
-                except Exception:
-                    pass
-                display_index = self._get_preview_display_index(actual_index)
-                if display_index is None:
-                    continue
-                restored_display_indices.append(display_index)
+        restored_display_indices = []
+        for actual_index in selected_actual_indices:
             try:
-                self._clear_listbox_selection_fast(self.preview_listbox)
-                for display_index in restored_display_indices:
-                    self.preview_listbox.selection_set(display_index)
-                if restored_display_indices:
-                    self.preview_listbox.activate(restored_display_indices[-1])
-                    self.preview_listbox.see(restored_display_indices[-1])
+                self._refresh_preview_list_row_for_actual_index(actual_index, refresh_summary=False)
             except Exception:
                 pass
-        else:
-            self._refresh_preview_list(preserve_selection=True, render_current=False)
-
-            restored_display_indices = []
-            for actual_index in selected_actual_indices:
-                display_index = self._get_preview_display_index(actual_index)
-                if display_index is None:
-                    continue
-                restored_display_indices.append(display_index)
-            try:
-                self._clear_listbox_selection_fast(self.preview_listbox)
-                for display_index in restored_display_indices:
-                    self.preview_listbox.selection_set(display_index)
-                if restored_display_indices:
-                    self.preview_listbox.activate(restored_display_indices[-1])
-                    self.preview_listbox.see(restored_display_indices[-1])
-            except Exception:
-                pass
-        self._refresh_preview_list_summary(lightweight=True)
-        self._update_preview_toolbar_state()
-        self._queue_free_mode_session_save()
+            display_index = self._get_preview_display_index(actual_index)
+            if display_index is None:
+                continue
+            restored_display_indices.append(display_index)
         try:
-            active_run_dir = self._get_active_annotation_run_dir(require_xml=True)
-            if active_run_dir is not None:
-                self._load_plate_dataset_context_from_run(active_run_dir, force_images_update=True)
-            self._refresh_plate_dataset_export_sources()
-        except Exception:
-            try:
-                self._refresh_step2_action_states()
-            except Exception:
-                pass
-        try:
-            self._refresh_free_mode_workflow_ui()
+            self._clear_listbox_selection_fast(self.preview_listbox)
+            for display_index in restored_display_indices:
+                self.preview_listbox.selection_set(display_index)
+            if restored_display_indices:
+                self.preview_listbox.activate(restored_display_indices[-1])
+                self.preview_listbox.see(restored_display_indices[-1])
         except Exception:
             pass
+        self._refresh_preview_list_summary(lightweight=True)
+        self._update_preview_toolbar_state(refresh_summary=False)
+        self._queue_free_mode_session_save()
+        if approval_state_changed and refresh_export_sources:
+            try:
+                active_run_dir = self._get_active_annotation_run_dir(require_xml=True)
+                if active_run_dir is not None:
+                    self._load_plate_dataset_context_from_run(active_run_dir, force_images_update=True)
+                self._refresh_plate_dataset_export_sources()
+                self._refresh_step2_action_states()
+                self._refresh_free_mode_workflow_ui()
+            except Exception:
+                try:
+                    self._refresh_step2_action_states()
+                except Exception:
+                    pass
+        elif approval_state_changed and schedule_followup_refresh:
+            self._schedule_preview_approval_followup_refresh()
         if approved and skipped_without_plate > 0:
             if changed > 0:
                 status_text = (
@@ -25489,7 +29222,7 @@ class AnnotationTab:
                     "Nie można oznaczyć jako OK: zaznaczone obrazy nie mają ramki tablicy. "
                     "Najpierw dodaj i zapisz ramkę."
                 )
-            if changed <= 0:
+            if changed <= 0 and show_warning_modal:
                 try:
                     messagebox.showwarning(
                         "Brak ramki tablicy",
@@ -25517,6 +29250,15 @@ class AnnotationTab:
                 )
             )
         self._update_preview_edit_status(status_text)
+        try:
+            self._update_preview_canvas_metrics_overlay(force_render=True)
+        except Exception:
+            pass
+        try:
+            self._place_preview_image_status_overlay(force_render=True)
+            self._place_preview_campaign_gate_overlay(force_render=True)
+        except Exception:
+            pass
 
     def _on_preview_list_sort_changed(self, event=None):
         self._set_preview_list_sort_mode(self.preview_list_sort_var.get())
@@ -25529,6 +29271,11 @@ class AnnotationTab:
         approval_context = self._get_campaign_step2_approval_context() if campaign_context else {}
         approval_current_step = int(approval_context.get("current_step") or 0) if isinstance(approval_context, dict) else 0
         approval_iteration_target = str(approval_context.get("iteration_target") or "").strip().lower() if isinstance(approval_context, dict) else ""
+        approval_repair_context = bool(
+            campaign_context
+            and isinstance(approval_context, dict)
+            and bool(approval_context.get("repair_mode"))
+        )
         char_repair_context = bool(campaign_context and approval_current_step == 3 and approval_iteration_target == "char")
         approved_names = self._get_preview_approved_filenames_base()
         reused_manual = 0
@@ -25674,7 +29421,15 @@ class AnnotationTab:
         try:
             total_widget = getattr(self, "preview_list_legend_total_count_lbl", None)
             if total_widget is not None:
-                total_widget.configure(text=f"{visible_count} / {len(annotations)}")
+                total_text = f"{visible_count} / {len(annotations)}"
+                total_widget.configure(text=total_text, width=max(7, len(total_text)))
+            total_label = getattr(self, "preview_list_legend_total_lbl", None)
+            if total_label is not None:
+                total_label.configure(text="Na liście")
+        except Exception:
+            pass
+        try:
+            self._sync_preview_left_counter_layout_width()
         except Exception:
             pass
 
@@ -25737,13 +29492,7 @@ class AnnotationTab:
             except Exception:
                 pass
 
-        active_sort_mode = str(self.preview_list_sort_var.get() or "").strip()
-        if active_sort_mode == "Status: OK -> ED -> problem":
-            active_sort_mode = "Status: OK, ED, problem"
-        elif active_sort_mode == "Status: problem -> ED -> OK":
-            active_sort_mode = "Status: problem, ED, OK"
-        elif active_sort_mode == "Status: ED -> OK -> problem":
-            active_sort_mode = "Status: ED, OK, problem"
+        active_sort_mode = self._normalize_preview_list_sort_mode()
         active_sort_bg = blend_hex_colors(corrected_color, panel_bg, 0.18)
         active_sort_border = corrected_color
         active_sort_title_fg = "#1b1b1b"
@@ -25779,7 +29528,7 @@ class AnnotationTab:
                 "preview_list_legend_ok_lbl",
                 "preview_list_legend_ok_count_lbl",
                 ok_color,
-                "",
+                "Status: A, M, OK, problem",
             ),
             (
                 "preview_list_legend_corrected_item",
@@ -25806,7 +29555,7 @@ class AnnotationTab:
                 "Status: OK, ED, problem",
             ),
         )
-        active_legend_sort_mode = str(self.preview_list_sort_var.get() or "").strip()
+        active_legend_sort_mode = self._normalize_preview_list_sort_mode()
         for item_name, badge_name, label_name, count_name, accent, linked_sort_mode in legend_items:
             item = getattr(self, item_name, None)
             badge = getattr(self, badge_name, None)
@@ -25839,6 +29588,16 @@ class AnnotationTab:
                 total_lbl.configure(bg=panel_bg, fg=muted_color)
             if total_count_lbl is not None:
                 total_count_lbl.configure(bg=panel_bg, fg=fg_color)
+        except Exception:
+            pass
+
+        try:
+            container_grip = getattr(self, "preview_left_list_resize_grip", None)
+            container_grip_line = getattr(self, "preview_left_list_resize_grip_line", None)
+            if container_grip is not None:
+                container_grip.configure(bg=panel_border)
+            if container_grip_line is not None:
+                container_grip_line.configure(bg=blend_hex_colors(approved_color, panel_border, 0.42))
         except Exception:
             pass
 
@@ -26226,7 +29985,11 @@ class AnnotationTab:
     def _get_plate_detections(self, ann) -> list[Detection]:
         if ann is None:
             return []
-        return [det for det in ann.detections if str(det.label or "").lower() == "plate"]
+        return [
+            det
+            for det in getattr(ann, "detections", []) or []
+            if self._is_plate_detection_label(getattr(det, "label", ""))
+        ]
 
     @staticmethod
     def _detection_polygon(det: Detection) -> list[tuple[float, float]]:
@@ -26246,6 +30009,17 @@ class AnnotationTab:
         xs = [float(x) for x, _y in points]
         ys = [float(y) for _x, y in points]
         return (min(xs), min(ys), max(xs), max(ys))
+
+    @staticmethod
+    def _polygon_area(points: list[tuple[float, float]]) -> float:
+        if not points or len(points) < 3:
+            return 0.0
+        area = 0.0
+        prepared = [(float(x), float(y)) for x, y in points]
+        for idx, (x1, y1) in enumerate(prepared):
+            x2, y2 = prepared[(idx + 1) % len(prepared)]
+            area += (x1 * y2) - (x2 * y1)
+        return abs(area) / 2.0
 
     @staticmethod
     def _keypoints_from_polygon(points: list[tuple[float, float]]) -> list[tuple[float, float, float]]:
@@ -26326,7 +30100,7 @@ class AnnotationTab:
             return None
         return target
 
-    def _mark_preview_image_dirty(self, ann, refresh_list: bool = True):
+    def _mark_preview_image_dirty(self, ann, refresh_list: bool = True, refresh_row: bool = True):
         if ann is None:
             return
         self._invalidate_preview_runtime_caches()
@@ -26334,8 +30108,10 @@ class AnnotationTab:
         self._preview_dirty_images.add(ann.filename)
         if refresh_list and not was_dirty:
             self._refresh_preview_list(preserve_selection=True, render_current=False)
-        elif not was_dirty:
+        elif not was_dirty and refresh_row:
             self._refresh_preview_list_row_for_actual_index(self.current_preview_index, refresh_summary=False)
+            self._update_preview_toolbar_state(refresh_summary=False)
+        elif not was_dirty:
             self._update_preview_toolbar_state(refresh_summary=False)
 
     def _get_preview_history_image_key(self, ann=None) -> str:
@@ -26505,6 +30281,8 @@ class AnnotationTab:
         self._cancel_deferred_campaign_run_restore()
         self._cancel_preview_list_population()
         self._cancel_preview_resume_persist()
+        self._cancel_preview_selection_render()
+        self._cancel_preview_post_interaction_refresh()
         has_pending_preview_save = bool(getattr(self, "_preview_dirty_images", None))
         has_unfinished_draw = bool(self._preview_draw_mode and self._preview_draw_points)
         if has_pending_preview_save and not has_unfinished_draw:
@@ -26867,6 +30645,57 @@ class AnnotationTab:
         if callable(is_cancelled) and is_cancelled():
             return None
 
+        image_map: dict[str, Path] = {}
+        missing_restored_count = 0
+        hidden_char_effective_filenames = set()
+        if not self._is_free_mode_session_context():
+            try:
+                hidden_char_effective_filenames = self._get_campaign_char_effective_source_hidden_filenames()
+            except Exception:
+                hidden_char_effective_filenames = set()
+        try:
+            run_is_manual_template = bool(self._annotation_run_manifest_is_manual_template(manifest))
+        except Exception:
+            run_is_manual_template = False
+        if not run_is_manual_template:
+            missing_source_dir = self._resolve_existing_dir(
+                manifest.get("source_input_dir")
+                or manifest.get("imported_source_input_dir")
+                or manifest.get("input_dir")
+            )
+            if missing_source_dir is None:
+                missing_source_dir = image_dir
+            if callable(is_cancelled) and is_cancelled():
+                return None
+            try:
+                missing_bundle = self._build_missing_preview_annotations_bundle(
+                    missing_source_dir,
+                    existing_annotations=annotations,
+                    extra_hidden_filenames=hidden_char_effective_filenames,
+                )
+            except Exception:
+                missing_bundle = {}
+            if callable(is_cancelled) and is_cancelled():
+                return None
+            if missing_bundle:
+                annotations, image_map, missing_restored_count = self._merge_annotation_bundle_into_payload(
+                    annotations,
+                    image_map,
+                    missing_bundle,
+                )
+            try:
+                self._append_z2_trace(
+                    "prepare-restore-missing",
+                    (
+                        f"source={missing_source_dir} "
+                        f"existing={len(annotations) - int(missing_restored_count or 0)} "
+                        f"missing={int(missing_restored_count or 0)} "
+                        f"run={safe_run_dir}"
+                    ),
+                )
+            except Exception:
+                pass
+
         resolved_restore_index = self._compute_annotation_run_restore_index(
             annotations,
             manifest,
@@ -26882,6 +30711,8 @@ class AnnotationTab:
             "manifest": manifest,
             "annotations": annotations,
             "image_dir": image_dir,
+            "image_map": image_map,
+            "missing_restored_count": int(missing_restored_count or 0),
             "restore_index": resolved_restore_index,
             "restore_filename": (
                 str(getattr(annotations[resolved_restore_index], "filename", "") or "")
@@ -26906,6 +30737,7 @@ class AnnotationTab:
         image_dir = self._resolve_existing_dir(payload.get("image_dir"))
         xml_path = self._path_value_to_path(payload.get("xml_path"))
         annotations = list(payload.get("annotations") or [])
+        image_map = dict(payload.get("image_map") or {})
         if run_dir is None or image_dir is None or xml_path is None or not annotations:
             return False
         run_approved_filenames = {
@@ -26916,13 +30748,30 @@ class AnnotationTab:
         hidden_char_effective_filenames = set()
         hidden_char_effective_count = 0
         if not self._is_free_mode_session_context():
-            hidden_char_effective_filenames = self._get_campaign_char_effective_source_hidden_filenames()
-            if hidden_char_effective_filenames:
-                hidden_char_effective_count = sum(
-                    1
-                    for ann in annotations
-                    if str(getattr(ann, "filename", "") or "").strip().lower() in hidden_char_effective_filenames
-                )
+            active_extract_run = None
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                extract_state = dict(CAMPAIGN.get_step3_extract_state() or {})
+                raw_extract_run = str(extract_state.get("annotation_run_dir") or "").strip()
+                if raw_extract_run:
+                    active_extract_run = self._resolve_safe_annotation_run_dir(raw_extract_run, require_xml=True)
+            except Exception:
+                active_extract_run = None
+            same_as_extract_run = False
+            if active_extract_run is not None:
+                try:
+                    same_as_extract_run = self._paths_equivalent(active_extract_run, run_dir)
+                except Exception:
+                    same_as_extract_run = False
+            if not same_as_extract_run:
+                hidden_char_effective_filenames = self._get_campaign_char_effective_source_hidden_filenames()
+                if hidden_char_effective_filenames:
+                    hidden_char_effective_count = sum(
+                        1
+                        for ann in annotations
+                        if str(getattr(ann, "filename", "") or "").strip().lower() in hidden_char_effective_filenames
+                    )
         annotations, filtered_run_approved_filenames, hidden_project_approved_count = (
             self._filter_campaign_project_approved_annotations(
                 annotations,
@@ -26936,7 +30785,7 @@ class AnnotationTab:
             self._clear_preview_editor_state(clear_dirty=True)
         self.current_annotations = annotations
         self.current_input_dir = image_dir
-        self._preview_image_path_map = {}
+        self._preview_image_path_map = image_map
         self._clear_campaign_manual_reuse_context()
         self.input_dir_var.set(str(image_dir))
         self.plate_dataset_images_var.set(str(image_dir))
@@ -27015,6 +30864,7 @@ class AnnotationTab:
             self._restore_campaign_step2_generated_from_run(run_dir, only_when_pending=True)
         except Exception:
             pass
+        self._sync_preview_approval_flags_from_current_sets()
 
         restore_index = payload.get("restore_index")
         self.current_preview_index = restore_index
@@ -27687,10 +31537,141 @@ class AnnotationTab:
                 pass
         return False
 
+    def _clear_preview_metric_filters_for_new_run(self) -> bool:
+        try:
+            conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
+        except Exception:
+            conf_threshold, fit_threshold = 0.0, 0.0
+        if conf_threshold <= 0.0 and fit_threshold <= 0.0:
+            return False
+
+        try:
+            self.preview_filter_conf_var.set(0.0)
+            self.preview_filter_fit_var.set(0.0)
+        except Exception:
+            pass
+        self._preview_filter_conf_applied = 0.0
+        self._preview_filter_fit_applied = 0.0
+        try:
+            self._invalidate_preview_list_frozen_order()
+        except Exception:
+            pass
+        try:
+            self._refresh_preview_filter_bar_state()
+        except Exception:
+            pass
+        return True
+
+    def _ensure_preview_list_population_consistency(
+        self,
+        *,
+        reason: str = "",
+        render_current: bool = False,
+    ) -> None:
+        try:
+            annotations_count = int(len(self.current_annotations or []))
+        except Exception:
+            annotations_count = 0
+        if annotations_count <= 0 or not hasattr(self, "preview_listbox"):
+            return
+
+        if bool(getattr(self, "_preview_list_population_active", False)):
+            self._schedule_preview_list_population_consistency_check(
+                reason=reason or "population-active",
+                delay_ms=180,
+                render_current=render_current,
+            )
+            return
+
+        try:
+            entries = self._get_preview_list_entries()
+        except Exception:
+            entries = []
+
+        filters_reset = False
+        if not entries and annotations_count > 0:
+            filters_reset = self._clear_preview_metric_filters_for_new_run()
+            if filters_reset:
+                try:
+                    entries = self._get_preview_list_entries()
+                except Exception:
+                    entries = []
+
+        expected_count = int(len(entries))
+        try:
+            listbox_count = int(self.preview_listbox.size() or 0)
+        except Exception:
+            listbox_count = 0
+
+        if expected_count <= 0:
+            return
+        if listbox_count == expected_count and not filters_reset:
+            return
+
+        try:
+            self._append_z2_trace(
+                "preview-list-consistency",
+                (
+                    f"reason={str(reason or '').strip()} annotations={annotations_count} "
+                    f"entries={expected_count} listbox={listbox_count} filters_reset={int(filters_reset)}"
+                ),
+            )
+        except Exception:
+            pass
+
+        if self._should_use_async_preview_list_population(expected_count):
+            self._populate_preview_list_async(
+                preserve_selection=True,
+                render_current=False,
+                batch_size=500,
+                on_complete=(
+                    (lambda: self._load_current_preview_selection(reset_view=False, selection_changed=False))
+                    if render_current
+                    else None
+                ),
+            )
+        else:
+            self._refresh_preview_list(
+                preserve_selection=True,
+                render_current=render_current,
+            )
+
+    def _schedule_preview_list_population_consistency_check(
+        self,
+        *,
+        reason: str = "",
+        delay_ms: int = 120,
+        render_current: bool = False,
+    ) -> None:
+        pending = getattr(self, "_preview_list_consistency_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_list_consistency_after_id = None
+
+        def _run() -> None:
+            self._preview_list_consistency_after_id = None
+            self._ensure_preview_list_population_consistency(
+                reason=reason,
+                render_current=render_current,
+            )
+
+        try:
+            self._preview_list_consistency_after_id = self.frame.after(
+                max(0, int(delay_ms)),
+                _run,
+            )
+        except Exception:
+            self._preview_list_consistency_after_id = None
+            _run()
+
     def _select_preview_index(self, idx: int, *, reset_view: bool = True):
         if not self.current_annotations:
             return
         select_started = time.perf_counter()
+        self._cancel_preview_selection_render()
         self._defer_preview_autosave_for_navigation(delay_ms=700)
         safe_idx = max(0, min(int(idx), len(self.current_annotations) - 1))
         previous_idx = self.current_preview_index
@@ -27723,6 +31704,7 @@ class AnnotationTab:
             self.preview_canvas.focus_set()
         except Exception:
             pass
+        self._refresh_plate_auto_scope_modal_selection_state()
 
     def _select_preview_index_for_super_correction(self, idx: int):
         if not self.current_annotations:
@@ -28008,6 +31990,7 @@ class AnnotationTab:
             "image_text": f"Zdjęcie: {current_image_no}/{display_total}",
             "vehicle_text": f"Pojazd: {current_vehicle_no}/{len(vehicles)}",
             "plate_text": f"Tablica: {current_no}/{len(plates)}",
+            "plate_total": int(len(plates)),
             "pool_text": (
                 f"Pula: {total_images}"
                 if total_images > 0 and display_total > 0 and display_total != total_images
@@ -28383,6 +32366,8 @@ class AnnotationTab:
         success = palette.get("success", "#2fbf71")
         surface_success = palette.get("surface_success", blend_hex_colors(success, panel_alt, 0.72))
         warning = palette.get("warning", "#f59e0b")
+        error = palette.get("error", "#dc2626")
+        surface_error = palette.get("surface_error", blend_hex_colors(error, panel_alt, 0.72))
         try:
             panel_rgb = tuple(int(str(panel).lstrip("#")[idx:idx + 2], 16) for idx in (0, 2, 4))
             panel_luma = ((0.2126 * panel_rgb[0]) + (0.7152 * panel_rgb[1]) + (0.0722 * panel_rgb[2])) / 255.0
@@ -28439,6 +32424,8 @@ class AnnotationTab:
             "badge_image_outline": warning,
             "badge_plate_fill": surface_success,
             "badge_plate_outline": success,
+            "badge_plate_multi_fill": surface_error,
+            "badge_plate_multi_outline": error,
             "compass_guide": compass_guide,
             "compass_dot": compass_dot,
             "compass_north": "#d64545",
@@ -28629,6 +32616,16 @@ class AnnotationTab:
             return False
         return x1 <= float(local_x) <= x2 and y1 <= float(local_y) <= y2
 
+    def _is_preview_controls_legend_toggle_hit(self, local_x: float, local_y: float) -> bool:
+        bbox = getattr(self, "_preview_controls_legend_toggle_bbox", None)
+        if not (isinstance(bbox, tuple) and len(bbox) == 4):
+            return False
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+        except Exception:
+            return False
+        return x1 <= float(local_x) <= x2 and y1 <= float(local_y) <= y2
+
     def _clamp_preview_controls_legend_offsets(self, offset_x: float, offset_y: float, *, width: float | None = None, height: float | None = None) -> tuple[float, float]:
         canvas_frame = getattr(self, "canvas_frame", None)
         try:
@@ -28657,6 +32654,13 @@ class AnnotationTab:
             root_y = float(getattr(event, "y_root", 0.0) or 0.0)
         except Exception:
             return "break"
+        try:
+            grab_widget = getattr(event, "widget", None)
+            if grab_widget is not None:
+                grab_widget.grab_set()
+                self._preview_controls_legend_active_grab_widget = grab_widget
+        except Exception:
+            self._preview_controls_legend_active_grab_widget = None
         if self._is_preview_controls_legend_grab_hit(local_x, local_y):
             self._preview_controls_legend_drag_state = {
                 "press_root_x": root_x,
@@ -28671,6 +32675,9 @@ class AnnotationTab:
         self._preview_controls_legend_click_state = {
             "press_root_x": root_x,
             "press_root_y": root_y,
+            "press_local_x": local_x,
+            "press_local_y": local_y,
+            "toggle_hit": bool(self._is_preview_controls_legend_toggle_hit(local_x, local_y)),
         }
         return "break"
 
@@ -28734,6 +32741,13 @@ class AnnotationTab:
         click_state = getattr(self, "_preview_controls_legend_click_state", None)
         self._preview_controls_legend_drag_state = None
         self._preview_controls_legend_click_state = None
+        grab_widget = getattr(self, "_preview_controls_legend_active_grab_widget", None)
+        self._preview_controls_legend_active_grab_widget = None
+        if grab_widget is not None:
+            try:
+                grab_widget.grab_release()
+            except Exception:
+                pass
         self._update_preview_controls_legend_cursor()
         if isinstance(drag_state, dict):
             return "break"
@@ -28742,11 +32756,732 @@ class AnnotationTab:
         try:
             root_x = float(getattr(event, "x_root", 0.0) or 0.0)
             root_y = float(getattr(event, "y_root", 0.0) or 0.0)
+            local_x = float(getattr(event, "x", 0.0) or 0.0)
+            local_y = float(getattr(event, "y", 0.0) or 0.0)
         except Exception:
             return "break"
-        if abs(root_x - float(click_state.get("press_root_x", root_x))) > 4.0 or abs(root_y - float(click_state.get("press_root_y", root_y))) > 4.0:
+        moved_x = abs(root_x - float(click_state.get("press_root_x", root_x)))
+        moved_y = abs(root_y - float(click_state.get("press_root_y", root_y)))
+        started_on_toggle = bool(click_state.get("toggle_hit"))
+        ended_on_toggle = bool(self._is_preview_controls_legend_toggle_hit(local_x, local_y))
+        tolerance = 16.0 if (started_on_toggle or ended_on_toggle) else 10.0
+        if moved_x > tolerance or moved_y > tolerance:
             return "break"
         return self._toggle_preview_controls_legend(event)
+
+    def _hide_preview_controls_legend_overlay(self) -> None:
+        try:
+            self._cancel_preview_controls_legend_animation()
+        except Exception:
+            pass
+        self._preview_controls_legend_drag_state = None
+        self._preview_controls_legend_click_state = None
+        self._preview_controls_legend_grab_bbox = None
+        self._preview_controls_legend_toggle_bbox = None
+        grab_widget = getattr(self, "_preview_controls_legend_active_grab_widget", None)
+        self._preview_controls_legend_active_grab_widget = None
+        if grab_widget is not None:
+            try:
+                grab_widget.grab_release()
+            except Exception:
+                pass
+        self._preview_controls_legend_render_key = None
+        self._preview_controls_legend_render_width_override = 0.0
+        self._preview_controls_legend_render_height_override = 0.0
+        overlay = getattr(self, "preview_hint_frame", None)
+        if overlay is not None:
+            try:
+                overlay.place_forget()
+            except Exception:
+                pass
+        canvas = getattr(self, "preview_controls_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.delete("all")
+            except Exception:
+                pass
+
+    def _hide_preview_image_status_overlay(self) -> None:
+        self._preview_image_status_overlay_render_key = None
+        frame = getattr(self, "preview_image_status_frame", None)
+        if frame is not None:
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+
+    def _render_preview_image_status_overlay(self, *, force_render: bool = False) -> tuple[int, int]:
+        frame = getattr(self, "preview_image_status_frame", None)
+        label = getattr(self, "preview_image_status_lbl", None)
+        if frame is None or label is None:
+            return 0, 0
+
+        ann = self._get_preview_annotation()
+        if ann is None:
+            return 0, 0
+
+        try:
+            legend_theme = self._get_preview_legend_theme()
+        except Exception:
+            legend_theme = {}
+        palette = getattr(self.app, "palette", {}) if getattr(self, "app", None) is not None else {}
+        panel_fill = str(legend_theme.get("panel_fill", palette.get("panel", "#101419")))
+        text_fill = str(legend_theme.get("entry_text", palette.get("fg", "#f8fafc")))
+        success = str(palette.get("success", "#2fbf71"))
+        error = str(palette.get("error", "#c7422f"))
+
+        approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+        status_fill = success if approved else error
+        status_text = "#111111" if self._legend_color_is_light(status_fill) else "#ffffff"
+        outline = blend_hex_colors(status_fill, panel_fill, 0.08)
+        filename = str(getattr(ann, "filename", "") or "").strip()
+        label_text = "ZDJĘCIE\nZATWIERDZONE [OK]" if approved else "ZDJĘCIE\nNIEZATWIERDZONE"
+
+        render_key = (
+            int(bool(getattr(self, "_preview_fullscreen_active", False))),
+            int(approved),
+            filename.lower(),
+            panel_fill,
+            text_fill,
+            status_fill,
+            status_text,
+            outline,
+        )
+        if bool(force_render) or render_key != getattr(self, "_preview_image_status_overlay_render_key", None):
+            try:
+                frame.configure(bg=status_fill, highlightbackground=outline, highlightcolor=outline)
+                label.configure(
+                    bg=status_fill,
+                    fg=status_text,
+                    text=label_text,
+                    wraplength=126,
+                )
+            except Exception:
+                pass
+            self._preview_image_status_overlay_render_key = render_key
+
+        try:
+            frame.update_idletasks()
+            width = int(frame.winfo_reqwidth() or 126)
+            height = int(frame.winfo_reqheight() or 38)
+        except Exception:
+            width = 126
+            height = 38
+        return int(max(96, min(170, width))), int(max(30, min(72, height)))
+
+    def _place_preview_image_status_overlay(self, *, force_render: bool = False) -> None:
+        frame = getattr(self, "preview_image_status_frame", None)
+        canvas_frame = getattr(self, "canvas_frame", None)
+        canvas = getattr(self, "preview_canvas", None)
+        if frame is None or canvas_frame is None or canvas is None:
+            return
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            self._hide_preview_image_status_overlay()
+            return
+        if getattr(canvas, "original_image", None) is None or self._get_preview_annotation() is None:
+            self._hide_preview_image_status_overlay()
+            return
+
+        try:
+            frame_width = int(canvas_frame.winfo_width() or 0)
+            frame_height = int(canvas_frame.winfo_height() or 0)
+        except Exception:
+            frame_width = frame_height = 0
+        if frame_width <= 180 or frame_height <= 120:
+            self._hide_preview_image_status_overlay()
+            return
+
+        dock = getattr(self, "preview_overlay_dock", None)
+        dock_width = 126
+        dock_height = 0
+        dock_x = None
+        dock_y = None
+        if dock is not None and str(dock.winfo_manager()):
+            try:
+                dock_width = int(dock.winfo_width() or dock.winfo_reqwidth() or dock_width)
+                dock_height = int(dock.winfo_height() or dock.winfo_reqheight() or 0)
+                dock_x = int(dock.winfo_x())
+                dock_y = int(dock.winfo_y())
+            except Exception:
+                dock_width = 126
+                dock_height = 0
+                dock_x = None
+                dock_y = None
+
+        width, height = self._render_preview_image_status_overlay(force_render=force_render)
+        width = max(96, min(frame_width - 16, int(dock_width or width)))
+        if dock_x is None:
+            x = max(8, frame_width - width - 10)
+        else:
+            x = max(8, min(int(dock_x), max(8, frame_width - width - 8)))
+        if dock_y is None:
+            y = 46 + max(0, int(dock_height or 0)) + 6
+        else:
+            y = int(dock_y) + max(0, int(dock_height or 0)) + 6
+        y = min(max(8, y), max(8, frame_height - height - 10))
+        try:
+            frame.place(
+                in_=canvas_frame,
+                x=int(x),
+                y=int(y),
+                width=int(width),
+                height=int(height),
+                anchor="nw",
+            )
+            frame.lift()
+        except Exception:
+            pass
+
+    def _build_campaign_z2_gate_overlay_state(self) -> dict:
+        if self._is_free_mode_session_context():
+            return {}
+        try:
+            approval_context = self._get_campaign_step2_approval_context()
+        except Exception:
+            approval_context = {}
+        if not bool(approval_context.get("project_active")):
+            return {}
+
+        current_step = int(approval_context.get("current_step") or 0)
+        repair_mode = bool(approval_context.get("repair_mode"))
+        iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
+        if iteration_target != "plate" or not (current_step == 2 or repair_mode):
+            return {}
+
+        min_images = 2
+        approval_run_dir = approval_context.get("run_dir")
+        approval_xml_exists = bool(approval_run_dir and (Path(approval_run_dir) / "annotations.xml").exists())
+        project_approved_images = 0
+        project_approved_plates = 0
+        current_iteration_num = 0
+        try:
+            from ..campaign_manager import CAMPAIGN
+            current_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
+            approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+            project_approved_images = int(approved_stats.get("images", 0) or 0)
+            project_approved_plates = int(approved_stats.get("plates", 0) or 0)
+        except Exception:
+            current_iteration_num = 0
+            project_approved_images = 0
+            project_approved_plates = 0
+
+        run_ok_images = 0
+        run_ok_plates = 0
+        if current_step == 2 and not repair_mode and self.current_annotations:
+            try:
+                run_ok_images, run_ok_plates = self._get_current_preview_plate_approved_counts()
+            except Exception:
+                run_ok_images, run_ok_plates = 0, 0
+        else:
+            try:
+                run_ok_images, run_ok_plates = self._get_run_plate_approved_counts(approval_run_dir)
+            except Exception:
+                run_ok_images, run_ok_plates = 0, 0
+
+        effective_images = int(project_approved_images or 0) + int(run_ok_images or 0)
+        effective_plates = int(project_approved_plates or 0) + int(run_ok_plates or 0)
+        xml_required = bool(int(current_iteration_num or 0) <= 1)
+        xml_missing = bool(xml_required and not approval_xml_exists)
+        missing_images = max(0, int(min_images) - int(effective_images or 0))
+        missing_plates = 0 if int(effective_plates or 0) > 0 else 1
+        ready = bool(
+            int(effective_images or 0) >= int(min_images)
+            and int(effective_plates or 0) > 0
+            and not xml_missing
+            and not bool(getattr(self, "is_processing", False))
+        )
+
+        missing_to_open = max(int(missing_images or 0), int(missing_plates or 0))
+        if ready:
+            message = "Etap gotowy do zatwierdzenia w wizardzie."
+            detail = ""
+            tone = "success"
+        elif xml_missing and missing_to_open <= 0:
+            message = "Do otwarcia bramki brakuje pliku anotacji XML."
+            detail = "Utwórz XML anotacji tablic w kroku ręcznej korekty."
+            tone = "warning"
+        else:
+            noun = (
+                "zatwierdzonego zdjęcia z anotacją"
+                if missing_to_open == 1
+                else "zatwierdzonych zdjęć z anotacjami"
+            )
+            message = f"Do otwarcia bramki brakuje {missing_to_open} {noun}."
+            detail = "Zatwierdź zdjęcia z ramkami tablic jako OK."
+            tone = "warning"
+
+        return {
+            "visible": True,
+            "ready": bool(ready),
+            "tone": tone,
+            "status": "OTWARTA" if ready else "ZAMKNIĘTA",
+            "message": message,
+            "detail": detail,
+            "approved_images": int(effective_images or 0),
+            "approved_plates": int(effective_plates or 0),
+            "required_images": int(min_images or 0),
+            "missing_images": int(missing_images or 0),
+            "missing_to_open": int(missing_to_open or 0),
+            "xml": "XML: OK" if approval_xml_exists else ("XML: wymagany" if xml_required else "XML: brak"),
+            "iteration": int(current_iteration_num or 0),
+        }
+
+    def _hide_preview_campaign_gate_overlay(self) -> None:
+        self._preview_campaign_gate_overlay_render_key = None
+        frame = getattr(self, "preview_campaign_gate_frame", None)
+        if frame is not None:
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+
+    def _render_preview_campaign_gate_overlay(self, state: dict, *, force_render: bool = False) -> tuple[int, int]:
+        frame = getattr(self, "preview_campaign_gate_frame", None)
+        header = getattr(self, "preview_campaign_gate_header", None)
+        title = getattr(self, "preview_campaign_gate_title_lbl", None)
+        status = getattr(self, "preview_campaign_gate_status_lbl", None)
+        body = getattr(self, "preview_campaign_gate_body", None)
+        counters = getattr(self, "preview_campaign_gate_counters_frame", None)
+        count = getattr(self, "preview_campaign_gate_count_lbl", None)
+        missing = getattr(self, "preview_campaign_gate_missing_lbl", None)
+        quality = getattr(self, "preview_campaign_gate_quality_lbl", None)
+        info = getattr(self, "preview_campaign_gate_info_lbl", None)
+        if frame is None:
+            return 0, 0
+
+        try:
+            legend_theme = self._get_preview_legend_theme()
+        except Exception:
+            legend_theme = {}
+        palette = getattr(self.app, "palette", {}) if getattr(self, "app", None) is not None else {}
+        fill = str(legend_theme.get("panel_fill", palette.get("panel", "#101419")))
+        outline = str(legend_theme.get("panel_outline", palette.get("panel_border", "#4b5563")))
+        text_fill = str(legend_theme.get("entry_text", palette.get("fg", "#f8fafc")))
+        muted = str(legend_theme.get("section_muted", palette.get("muted", "#c7c7c7")))
+        success = str(palette.get("success", "#2fbf71"))
+        warning = str(palette.get("warning", "#f39c12"))
+        error = str(palette.get("error", "#c7422f"))
+        tone = str(state.get("tone") or "muted").strip().lower()
+        ready = bool(state.get("ready"))
+        accent = success if ready else error
+        header_fill = blend_hex_colors(accent, fill, 0.18)
+        body_fill = (
+            blend_hex_colors(fill, "#000000", 0.18)
+            if self._legend_color_is_light(fill)
+            else blend_hex_colors(fill, "#ffffff", 0.08)
+        )
+        body_text_fill = self._get_preview_legend_text_color(body_fill)
+        status_fill = success if ready else error
+        status_text_fill = "#111111" if self._legend_color_is_light(status_fill) else "#ffffff"
+        status_outline = blend_hex_colors(accent, fill, 0.08)
+        have_fill = blend_hex_colors(success, body_fill, 0.32)
+        have_text_fill = "#111111" if self._legend_color_is_light(have_fill) else "#ffffff"
+        missing_fill = blend_hex_colors(error, body_fill, 0.32)
+        missing_text_fill = "#111111" if self._legend_color_is_light(missing_fill) else "#ffffff"
+        approved_images = int(state.get("approved_images", 0) or 0)
+        approved_plates = int(state.get("approved_plates", 0) or 0)
+        required_images = int(state.get("required_images", 0) or 0)
+        missing_images = int(state.get("missing_images", 0) or 0)
+        missing_to_open = int(state.get("missing_to_open", missing_images) or 0)
+        xml_text = str(state.get("xml") or "").strip()
+        quality_score = min(max(0, approved_images), max(0, approved_plates))
+        if quality_score >= 50:
+            quality_label = "DOBRY"
+            quality_color = success
+        elif quality_score >= 10:
+            quality_label = "PRZECIĘTNY"
+            quality_color = warning
+        else:
+            quality_label = "SŁABY"
+            quality_color = error
+        quality_fill = quality_color
+        quality_text_fill = "#111111" if self._legend_color_is_light(quality_fill) else "#ffffff"
+        quality_outline = blend_hex_colors(quality_color, fill, 0.08)
+        quality_text = f"JAKOŚĆ ZBIORU\n{quality_label}"
+        if ready:
+            instruction_text = "Etap można zamknąć."
+        elif "wymagany" in xml_text.lower() and missing_to_open > 0:
+            instruction_text = "Utwórz XML i oznaczaj dalej."
+        elif "wymagany" in xml_text.lower():
+            instruction_text = "Utwórz XML."
+        elif approved_plates <= 0:
+            instruction_text = "Dodaj ramkę tablicy."
+        else:
+            instruction_text = "Oznaczaj dalej."
+        have_text = f"JEST\n{approved_images}"
+        missing_text = f"BRAKUJE\n{missing_to_open}"
+        render_key = (
+            str(state.get("status") or ""),
+            have_text,
+            missing_text,
+            quality_text,
+            instruction_text,
+            tone,
+            fill,
+            outline,
+            text_fill,
+            muted,
+            accent,
+            body_fill,
+            body_text_fill,
+            status_fill,
+            have_fill,
+            missing_fill,
+            quality_fill,
+        )
+        if bool(force_render) or render_key != getattr(self, "_preview_campaign_gate_overlay_render_key", None):
+            try:
+                frame.configure(bg=fill, highlightbackground=accent, highlightcolor=accent)
+                if header is not None:
+                    header.configure(bg=header_fill)
+                if body is not None:
+                    body.configure(bg=body_fill)
+                if counters is not None:
+                    counters.configure(bg=body_fill)
+                if title is not None:
+                    title.configure(bg=header_fill, fg=text_fill, text="BRAMKA E2")
+                if status is not None:
+                    status.configure(
+                        bg=status_fill,
+                        fg=status_text_fill,
+                        highlightbackground=status_outline,
+                        highlightcolor=status_outline,
+                        text=str(state.get("status") or ""),
+                    )
+                if count is not None:
+                    if not str(count.winfo_manager()):
+                        count.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
+                    count.configure(
+                        bg=have_fill,
+                        fg=have_text_fill,
+                        text=have_text,
+                        wraplength=54,
+                    )
+                if missing is not None:
+                    if not str(missing.winfo_manager()):
+                        missing.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0))
+                    missing.configure(
+                        bg=missing_fill,
+                        fg=missing_text_fill,
+                        text=missing_text,
+                        wraplength=58,
+                    )
+                if quality is not None:
+                    if not str(quality.winfo_manager()):
+                        quality.pack(fill=tk.X, padx=5, pady=(0, 3))
+                    quality.configure(
+                        bg=quality_fill,
+                        fg=quality_text_fill,
+                        highlightbackground=quality_outline,
+                        highlightcolor=quality_outline,
+                        text=quality_text,
+                        wraplength=128,
+                    )
+                if info is not None:
+                    if not str(info.winfo_manager()):
+                        info.pack(fill=tk.X, padx=5, pady=(0, 5))
+                    info.configure(
+                        bg=body_fill,
+                        fg=body_text_fill,
+                        text=instruction_text,
+                        wraplength=128,
+                    )
+            except Exception:
+                pass
+            self._preview_campaign_gate_overlay_render_key = render_key
+
+        try:
+            frame.update_idletasks()
+            width = int(frame.winfo_reqwidth() or 126)
+            height = int(frame.winfo_reqheight() or 72)
+        except Exception:
+            width = 126
+            height = 72
+        return int(max(112, min(170, width))), int(max(102, min(260, height)))
+
+    def _place_preview_campaign_gate_overlay(self, *, force_render: bool = False) -> None:
+        frame = getattr(self, "preview_campaign_gate_frame", None)
+        canvas_frame = getattr(self, "canvas_frame", None)
+        canvas = getattr(self, "preview_canvas", None)
+        if frame is None or canvas_frame is None or canvas is None:
+            return
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            self._hide_preview_campaign_gate_overlay()
+            return
+        if getattr(canvas, "original_image", None) is None:
+            self._hide_preview_campaign_gate_overlay()
+            return
+
+        state = self._build_campaign_z2_gate_overlay_state()
+        self._campaign_step2_gate_overlay_state = dict(state)
+        if not bool(state.get("visible")):
+            self._hide_preview_campaign_gate_overlay()
+            return
+
+        try:
+            frame_width = int(canvas_frame.winfo_width() or 0)
+            frame_height = int(canvas_frame.winfo_height() or 0)
+        except Exception:
+            frame_width = frame_height = 0
+        if frame_width <= 260 or frame_height <= 120:
+            self._hide_preview_campaign_gate_overlay()
+            return
+
+        self._place_preview_image_status_overlay(force_render=force_render)
+
+        dock = getattr(self, "preview_overlay_dock", None)
+        status_frame = getattr(self, "preview_image_status_frame", None)
+        anchor_widget = status_frame if status_frame is not None and str(status_frame.winfo_manager()) else dock
+        dock_width = 126
+        dock_height = 0
+        dock_x = None
+        dock_y = None
+        if anchor_widget is not None and str(anchor_widget.winfo_manager()):
+            try:
+                dock_width = int(anchor_widget.winfo_width() or anchor_widget.winfo_reqwidth() or dock_width)
+                dock_height = int(anchor_widget.winfo_height() or anchor_widget.winfo_reqheight() or 0)
+                dock_x = int(anchor_widget.winfo_x())
+                dock_y = int(anchor_widget.winfo_y())
+            except Exception:
+                dock_width = 126
+                dock_height = 0
+                dock_x = None
+                dock_y = None
+        width, height = self._render_preview_campaign_gate_overlay(state, force_render=force_render)
+        width = max(96, min(frame_width - 16, int(dock_width or width)))
+        if dock_x is None:
+            x = max(8, frame_width - width - 10)
+        else:
+            x = max(8, min(int(dock_x), max(8, frame_width - width - 8)))
+        if dock_y is None:
+            y = 46 + max(0, int(dock_height or 0)) + 8
+        else:
+            y = int(dock_y) + max(0, int(dock_height or 0)) + 8
+        y = min(max(8, y), max(8, frame_height - height - 10))
+        try:
+            frame.place(
+                in_=canvas_frame,
+                x=int(x),
+                y=int(y),
+                width=int(width),
+                height=int(height),
+                anchor="nw",
+            )
+            frame.lift()
+        except Exception:
+            pass
+
+    def _toggle_preview_overlay_dock(self, event=None):
+        self._preview_overlay_dock_expanded = not bool(
+            getattr(self, "_preview_overlay_dock_expanded", True)
+        )
+        self._preview_overlay_dock_render_key = None
+        self._place_preview_overlay_dock(force_render=True)
+        try:
+            self.preview_canvas.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _toggle_preview_overlay_dock_tool(self, tool_key: str):
+        key = str(tool_key or "").strip().lower()
+        if key == "legend":
+            self._preview_controls_legend_visible = not bool(
+                getattr(self, "_preview_controls_legend_visible", True)
+            )
+            if bool(getattr(self, "_preview_controls_legend_visible", True)):
+                self._place_preview_legend_overlay(refresh=True)
+            else:
+                self._hide_preview_controls_legend_overlay()
+        elif key == "metrics":
+            next_visible = not bool(getattr(self, "_preview_metrics_overlay_visible", True))
+            self._preview_metrics_overlay_visible = next_visible
+            if next_visible:
+                self._preview_metrics_overlay_user_moved = False
+                self._preview_metrics_overlay_offset_x = 12.0
+                self._preview_metrics_overlay_offset_y = 12.0
+            self._preview_metrics_overlay_render_key = None
+            self._update_preview_canvas_metrics_overlay(force_render=True)
+        elif key == "super":
+            self._preview_super_correction_badge_visible = not bool(
+                getattr(self, "_preview_super_correction_badge_visible", True)
+            )
+            self._refresh_preview_canvas()
+        self._preview_overlay_dock_render_key = None
+        self._place_preview_overlay_dock(force_render=True)
+        try:
+            self.preview_canvas.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _get_preview_overlay_dock_theme(self) -> dict:
+        try:
+            legend_theme = self._get_preview_legend_theme()
+        except Exception:
+            legend_theme = {}
+        palette = getattr(self.app, "palette", {}) if getattr(self, "app", None) is not None else {}
+        fill = str(legend_theme.get("panel_fill", palette.get("panel", "#101419")))
+        outline = str(legend_theme.get("panel_outline", palette.get("panel_border", "#4b5563")))
+        text_fill = str(legend_theme.get("entry_text", palette.get("fg", "#f8fafc")))
+        muted = str(legend_theme.get("section_muted", palette.get("muted", "#c7c7c7")))
+        accent = str(legend_theme.get("badge_plate_outline", palette.get("accent", "#f1c40f")))
+        active = str(palette.get("success", "#2fbf71"))
+        hidden = str(palette.get("muted", "#8b949e"))
+        row_fill = blend_hex_colors(outline, fill, 0.12)
+        active_fill = blend_hex_colors(active, fill, 0.22)
+        hidden_fill = blend_hex_colors(outline, fill, 0.06)
+        status_on_fill = blend_hex_colors(active, fill, 0.40)
+        status_off_fill = blend_hex_colors(outline, fill, 0.32)
+        return {
+            "fill": fill,
+            "outline": outline,
+            "text": text_fill,
+            "muted": muted,
+            "accent": accent,
+            "active": active,
+            "hidden": hidden,
+            "row_fill": row_fill,
+            "active_fill": active_fill,
+            "hidden_fill": hidden_fill,
+            "status_on_fill": status_on_fill,
+            "status_on_text": text_fill,
+            "status_off_fill": status_off_fill,
+            "status_off_text": muted,
+        }
+
+    def _get_preview_overlay_dock_tools_state(self) -> dict[str, tuple[bool, str]]:
+        legend_visible = bool(getattr(self, "_preview_controls_legend_visible", True))
+        metrics_visible = bool(getattr(self, "_preview_metrics_overlay_visible", True))
+        super_visible = bool(getattr(self, "_preview_super_correction_badge_visible", True))
+        super_active = bool(getattr(self, "_preview_super_correction_active", False))
+        return {
+            "legend": (legend_visible, "ON" if legend_visible else "OFF"),
+            "metrics": (metrics_visible, "ON" if metrics_visible else "OFF"),
+            "super": (
+                super_visible,
+                ("AKT" if super_visible and super_active else ("ON" if super_visible else "OFF")),
+            ),
+        }
+
+    def _render_preview_overlay_dock(self, *, force_render: bool = False) -> tuple[int, int]:
+        dock = getattr(self, "preview_overlay_dock", None)
+        header = getattr(self, "preview_overlay_dock_header", None)
+        title = getattr(self, "preview_overlay_dock_title_lbl", None)
+        toggle = getattr(self, "preview_overlay_dock_toggle_lbl", None)
+        body = getattr(self, "preview_overlay_dock_body", None)
+        if dock is None:
+            return 0, 0
+
+        expanded = bool(getattr(self, "_preview_overlay_dock_expanded", True))
+        theme = self._get_preview_overlay_dock_theme()
+        tool_states = self._get_preview_overlay_dock_tools_state()
+        render_key = (
+            int(expanded),
+            tuple((key, int(value[0]), value[1]) for key, value in sorted(tool_states.items())),
+            tuple(sorted((str(k), str(v)) for k, v in theme.items())),
+        )
+        if bool(force_render) or render_key != getattr(self, "_preview_overlay_dock_render_key", None):
+            fill = theme["fill"]
+            outline = theme["outline"]
+            text_fill = theme["text"]
+            muted = theme["muted"]
+            accent = theme["accent"]
+            try:
+                dock.configure(bg=fill, highlightbackground=outline, highlightcolor=outline)
+                if header is not None:
+                    header.configure(bg=fill)
+                if title is not None:
+                    title.configure(
+                        text=("SZUFLADA" if expanded else "OL"),
+                        bg=fill,
+                        fg=text_fill,
+                        anchor=("w" if expanded else "center"),
+                    )
+                if toggle is not None:
+                    toggle.configure(text=("<" if expanded else ">"), bg=fill, fg=accent)
+                if body is not None:
+                    body.configure(bg=fill)
+                    if expanded and not str(body.winfo_manager()):
+                        body.pack(fill=tk.X)
+                    elif (not expanded) and str(body.winfo_manager()):
+                        body.pack_forget()
+            except Exception:
+                pass
+
+            for key, widgets in dict(getattr(self, "_preview_overlay_dock_tool_rows", {}) or {}).items():
+                visible, status = tool_states.get(str(key), (False, "OFF"))
+                row_bg = theme["active_fill"] if visible else theme["hidden_fill"]
+                row_fg = theme["text"] if visible else theme["muted"]
+                icon_bg = theme["active"] if visible else theme["row_fill"]
+                status_bg = theme["status_on_fill"] if visible else theme["status_off_fill"]
+                status_fg = theme["status_on_text"] if visible else theme["status_off_text"]
+                try:
+                    widgets["row"].configure(
+                        bg=row_bg,
+                        highlightbackground=(theme["active"] if visible else theme["outline"]),
+                        highlightcolor=(theme["active"] if visible else theme["outline"]),
+                    )
+                    widgets["icon"].configure(bg=icon_bg, fg=theme["fill"] if visible else theme["muted"])
+                    widgets["label"].configure(bg=row_bg, fg=row_fg)
+                    widgets["status"].configure(bg=status_bg, fg=status_fg, text=str(status))
+                except Exception:
+                    pass
+            self._preview_overlay_dock_render_key = render_key
+
+        try:
+            dock.update_idletasks()
+            width = int(dock.winfo_reqwidth() or (118 if expanded else 42))
+            height = int(dock.winfo_reqheight() or (128 if expanded else 32))
+        except Exception:
+            width = 118 if expanded else 42
+            height = 128 if expanded else 32
+        return int(max(38, min(142, width))), int(max(30, min(170, height)))
+
+    def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
+        dock = getattr(self, "preview_overlay_dock", None)
+        canvas_frame = getattr(self, "canvas_frame", None)
+        canvas = getattr(self, "preview_canvas", None)
+        if dock is None or canvas_frame is None or canvas is None:
+            return
+        if getattr(canvas, "original_image", None) is None:
+            try:
+                dock.place_forget()
+            except Exception:
+                pass
+            self._hide_preview_image_status_overlay()
+            return
+
+        try:
+            frame_width = int(canvas_frame.winfo_width() or 0)
+            frame_height = int(canvas_frame.winfo_height() or 0)
+        except Exception:
+            frame_width = frame_height = 0
+        if frame_width <= 180 or frame_height <= 120:
+            try:
+                dock.place_forget()
+            except Exception:
+                pass
+            self._hide_preview_image_status_overlay()
+            return
+
+        dock_width, dock_height = self._render_preview_overlay_dock(force_render=force_render)
+        x = max(8, frame_width - dock_width - 10)
+        y = 46 if bool(getattr(self, "_preview_fullscreen_active", False)) else 52
+        y = min(max(8, y), max(8, frame_height - dock_height - 10))
+        try:
+            dock.place(
+                in_=canvas_frame,
+                x=int(x),
+                y=int(y),
+                width=int(dock_width),
+                height=int(dock_height),
+                anchor="nw",
+            )
+            dock.lift()
+        except Exception:
+            pass
+        self._place_preview_image_status_overlay(force_render=force_render)
 
     def _should_freeze_preview_legend_updates(self) -> bool:
         return bool(
@@ -28787,6 +33522,17 @@ class AnnotationTab:
             anchor="nw",
             tags=tags,
         )
+        if not bool(expanded):
+            accent = str(theme.get("shell_outline", theme.get("badge_plate_outline", "#2fbf71")))
+            canvas.create_rectangle(
+                x - 2.0,
+                y - 2.0,
+                x + size + 2.0,
+                y + size + 2.0,
+                outline=accent,
+                width=2,
+                tags=tags,
+            )
         state_text = "Zwiń skróty" if expanded else "Rozwiń skróty"
         title_x = x + size + 10.0
         canvas.create_text(
@@ -28806,6 +33552,12 @@ class AnnotationTab:
             fill=theme.get("section_muted", "#d8e2ee"),
             font=self._get_preview_legend_font(7, "normal"),
             tags=tags,
+        )
+        self._preview_controls_legend_toggle_bbox = (
+            float(x - 4.0),
+            float(y - 4.0),
+            float(x + 156.0),
+            float(y + size + 6.0),
         )
         return 152.0, size
 
@@ -28842,14 +33594,19 @@ class AnnotationTab:
         return handle_w, handle_h
 
     def _build_preview_legend_sections(self):
+        nav_label = (
+            "poprz./nast. tablica"
+            if bool(getattr(self, "_preview_super_correction_active", False))
+            else "poprz./nast. zdjęcie"
+        )
         return [
             {
                 "title": "Nawigacja",
                 "accent": "#2f80ed",
                 "columns": 2,
                 "items": [
-                    {"tokens": ["Q", "E"], "connector": "/", "label": "nawigacja"},
-                    {"tokens": ["F"], "label": "dopasuj"},
+                    {"tokens": ["Q", "E"], "connector": "/", "label": nav_label},
+                    {"tokens": ["F"], "label": "obraz do okna"},
                     {"tokens": ["R + LPM"], "label": "płynny zoom x2"},
                     {"tokens": ["R + PPM"], "label": "cofnij zoom"},
                     {"tokens": ["Enter"], "label": "pełny ekran / wyjście"},
@@ -28862,7 +33619,7 @@ class AnnotationTab:
                 "columns": 2,
                 "items": [
                     {"tokens": ["A"], "label": "tablica +/-"},
-                    {"tokens": ["Spacja"], "label": "pojazd +/-"},
+                    {"tokens": ["Spacja"], "label": "zatwierdź zdjęcie"},
                     {"tokens": ["R"], "label": "ramka aktywnej tablicy"},
                 ],
             },
@@ -28883,6 +33640,9 @@ class AnnotationTab:
 
     def _refresh_preview_controls_legend(self):
         if not bool(getattr(self, "_startup_ui_ready", False)):
+            return
+        if not bool(getattr(self, "_preview_controls_legend_visible", True)):
+            self._hide_preview_controls_legend_overlay()
             return
 
         canvas = getattr(self, "preview_controls_canvas", None)
@@ -28925,13 +33685,27 @@ class AnnotationTab:
             str(legend_theme.get("section_fill", "")),
             str(legend_theme.get("section_title", "")),
             str(legend_theme.get("section_muted", "")),
-            len(sections),
+            tuple(
+                (
+                    str(section.get("title", "")),
+                    tuple(
+                        (
+                            tuple(str(token) for token in item.get("tokens", [])),
+                            str(item.get("connector", "") or ""),
+                            str(item.get("label", "") or ""),
+                        )
+                        for item in section.get("items", []) or []
+                    ),
+                )
+                for section in sections
+            ),
         )
         if legend_key == getattr(self, "_preview_controls_legend_render_key", None):
             return
 
         shell_width = width
         self._preview_controls_legend_grab_bbox = None
+        self._preview_controls_legend_toggle_bbox = None
         target_shell_height = float(self._get_preview_controls_legend_target_height(width))
         current_shell_height = float(getattr(self, "_preview_controls_legend_current_height", 0.0) or 0.0)
         shell_height = max(
@@ -28956,17 +33730,17 @@ class AnnotationTab:
 
         toggle_x = 12.0
         toggle_y = 10.0
-        self._draw_preview_legend_grab_handle(
-            canvas,
-            max(8.0, shell_width - 30.0),
-            10.0,
-            theme=legend_theme,
-        )
         toggle_block_w, toggle_block_h = self._draw_preview_legend_compass_toggle(
             canvas,
             toggle_x,
             toggle_y,
             expanded=expanded,
+            theme=legend_theme,
+        )
+        self._draw_preview_legend_grab_handle(
+            canvas,
+            max(8.0, shell_width - 30.0),
+            10.0,
             theme=legend_theme,
         )
         inner_pad_x = 12.0
@@ -28996,7 +33770,7 @@ class AnnotationTab:
 
         row_h = 20.0
         context_value_x = inner_pad_x + 64.0
-        for idx, (row_label, row_value, _row_fill, _row_outline) in enumerate(context_rows):
+        for idx, (row_label, row_value, row_fill, row_outline) in enumerate(context_rows):
             block_y = current_y + (idx * row_h)
             canvas.create_text(
                 inner_pad_x,
@@ -29007,17 +33781,47 @@ class AnnotationTab:
                 font=meta_font,
                 tags=("preview_legend", "preview_legend_context"),
             )
-            canvas.create_text(
-                context_value_x,
-                block_y,
-                text=str(row_value),
-                anchor="nw",
-                fill=value_fill,
-                font=value_font,
-                width=max(80.0, shell_width - context_value_x - inner_pad_x - 8.0),
-                justify=tk.LEFT,
-                tags=("preview_legend", "preview_legend_context"),
-            )
+            if self._preview_controls_row_is_multi_plate_badge(str(row_label), str(row_value)):
+                badge_text = str(row_value)
+                badge_w = max(40.0, float(value_font.measure(badge_text)) + 18.0)
+                badge_h = 17.0
+                badge_x = context_value_x
+                badge_y = block_y - 1.0
+                rect_id = canvas.create_rectangle(
+                    badge_x,
+                    badge_y,
+                    badge_x + badge_w,
+                    badge_y + badge_h,
+                    fill=str(row_fill),
+                    outline=str(row_outline),
+                    width=1,
+                    tags=("preview_legend", "preview_legend_context"),
+                )
+                text_id = canvas.create_text(
+                    badge_x + (badge_w / 2.0),
+                    badge_y + (badge_h / 2.0) - 0.5,
+                    text=badge_text,
+                    anchor="center",
+                    fill=self._get_preview_legend_text_color(str(row_fill)),
+                    font=value_font,
+                    tags=("preview_legend", "preview_legend_context"),
+                )
+                try:
+                    canvas.tag_lower(rect_id, text_id)
+                except Exception:
+                    pass
+            else:
+                canvas.create_text(
+                    context_value_x,
+                    block_y,
+                    text=str(row_value),
+                    anchor="nw",
+                    fill=value_fill,
+                    font=value_font,
+                    width=max(80.0, shell_width - context_value_x - inner_pad_x - 8.0),
+                    justify=tk.LEFT,
+                    tags=("preview_legend", "preview_legend_context"),
+                )
 
         current_y += (len(context_rows) * row_h) + 1.0
 
@@ -29062,9 +33866,9 @@ class AnnotationTab:
         max_bottom = outer_pad_y
         current_y = outer_pad_y
         content_w = shell_width - (outer_pad_x * 2.0) - 2.0
-        base_shortcut_cols = 2 if shell_width >= 300.0 else 1
+        base_shortcut_cols = 2 if shell_width >= 340.0 else 1
         shortcut_col_gap = 18.0
-        item_row_h = 34.0
+        item_row_h = 38.0
 
         for section in sections:
             shortcut_cols = max(1, min(base_shortcut_cols, int(section.get("columns", base_shortcut_cols) or base_shortcut_cols)))
@@ -29072,7 +33876,7 @@ class AnnotationTab:
             section_rows = max(1, math.ceil(len(section.get("items", [])) / float(shortcut_cols)))
             section_box_x = outer_pad_x
             section_box_y = current_y
-            section_box_h = 24.0 + (section_rows * item_row_h) + 16.0
+            section_box_h = 24.0 + (section_rows * item_row_h) + 18.0
             section_shell = self._get_preview_legend_group_shell_photo(
                 legend_theme,
                 width=int(content_w),
@@ -29146,10 +33950,10 @@ class AnnotationTab:
                 label_width = max(40.0, (item_x + shortcut_col_w) - label_x - 2.0)
                 canvas.create_text(
                     label_x,
-                    row_y + 9.0,
+                    row_y + 5.0,
                     text=label,
                     fill=str(legend_theme.get("section_title", "#eef4fb")),
-                    anchor="w",
+                    anchor="nw",
                     width=label_width,
                     font=desc_font,
                     tags=("preview_legend",),
@@ -29735,6 +34539,15 @@ class AnnotationTab:
             left_frame.grid_rowconfigure(0, weight=(1 if free_mode_expand_top else 0))
             left_frame.grid_rowconfigure(1, weight=(1 if show_preview else 0))
             left_frame.grid_rowconfigure(1, minsize=0)
+            if show_preview and getattr(self, "_left_list_container_user_top_height", None) is not None:
+                left_frame.grid_rowconfigure(
+                    0,
+                    minsize=self._clamp_left_list_container_top_height(
+                        getattr(self, "_left_list_container_user_top_height", None)
+                    ),
+                )
+            elif not show_preview:
+                left_frame.grid_rowconfigure(0, minsize=0)
         except Exception:
             pass
 
@@ -29792,7 +34605,7 @@ class AnnotationTab:
             ("<KeyPress-A>", self._on_preview_cycle_plate_shortcut),
             ("<KeyPress-y>", self._on_preview_toggle_super_correction_shortcut),
             ("<KeyPress-Y>", self._on_preview_toggle_super_correction_shortcut),
-            ("<KeyPress-space>", self._on_preview_cycle_vehicle_shortcut),
+            ("<KeyPress-space>", self._on_preview_toggle_image_approval_shortcut),
             ("<KeyPress-q>", self._on_preview_prev_shortcut),
             ("<KeyPress-Q>", self._on_preview_prev_shortcut),
             ("<KeyPress-e>", self._on_preview_next_shortcut),
@@ -30055,8 +34868,10 @@ class AnnotationTab:
         plates = self._get_plate_detections(ann) if ann is not None else []
         next_state = not bool(getattr(self, "_preview_super_correction_active", False))
         self._preview_super_correction_active = next_state
+        self._preview_overlay_dock_render_key = None
         if not next_state:
             self._refresh_preview_canvas()
+            self._place_preview_overlay_dock(force_render=True)
             self._update_preview_edit_status(
                 "Super korekta wyłączona. Q/E znowu przełączają zdjęcia.",
                 refresh_legend=True,
@@ -30082,6 +34897,7 @@ class AnnotationTab:
                 "Super korekta włączona. Q/E będą szukać kolejnych zdjęć z tablicami, Y wyłącza tryb.",
                 refresh_legend=True,
             )
+        self._place_preview_overlay_dock(force_render=True)
         return "break"
 
     def _on_preview_toggle_super_correction_shortcut(self, event=None):
@@ -30091,19 +34907,63 @@ class AnnotationTab:
             return "break"
         return self._toggle_preview_super_correction(event)
 
+    def _on_preview_toggle_image_approval_shortcut(self, event=None):
+        if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
+            return None
+        if self._preview_shortcut_is_duplicate(event, "preview-toggle-image-approval"):
+            return "break"
+        if self._preview_draw_mode:
+            self._update_preview_edit_status(
+                "Dokończ albo anuluj rysowanie nowego polygonu przed zmianą statusu OK spacją."
+            )
+            return "break"
+
+        ann = self._get_preview_annotation()
+        if ann is None or self.current_preview_index is None:
+            self._update_preview_edit_status("Najpierw wybierz zdjęcie do zatwierdzenia.")
+            return "break"
+
+        try:
+            actual_index = int(self.current_preview_index)
+        except Exception:
+            self._update_preview_edit_status("Nie udało się ustalić bieżącego zdjęcia.")
+            return "break"
+
+        currently_approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+        next_approved = not currently_approved
+        if next_approved and not self._preview_annotation_can_be_approved_for_export(ann):
+            self._update_preview_edit_status(
+                "Nie można zatwierdzić zdjęcia spacją: najpierw dodaj ramkę tablicy."
+            )
+            try:
+                self._update_preview_canvas_metrics_overlay(force_render=True)
+            except Exception:
+                pass
+            return "break"
+
+        self._set_selected_preview_images_approved(
+            next_approved,
+            actual_indices=[actual_index],
+            show_warning_modal=False,
+            persist_immediately=False,
+            refresh_export_sources=False,
+            schedule_followup_refresh=True,
+        )
+        return "break"
+
     def _on_preview_cycle_vehicle_shortcut(self, event=None):
         if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
             return None
         if self._preview_draw_mode:
             self._update_preview_edit_status(
-                "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem Spacji."
+                "Dokończ albo anuluj rysowanie nowego polygonu przed przełączaniem pojazdu."
             )
             return "break"
 
         ann = self._get_preview_annotation()
         vehicles = self._get_vehicle_detections(ann)
         if not vehicles:
-            self._update_preview_edit_status("Na tym obrazie nie ma boxów pojazdów do przełączania klawiszem Spacja.")
+            self._update_preview_edit_status("Na tym obrazie nie ma boxów pojazdów do przełączania.")
             return "break"
 
         current_idx = self._get_selected_vehicle_index_for_ann(ann)
@@ -30122,7 +34982,7 @@ class AnnotationTab:
             push_debug=False,
             status_message=(
                 f"Aktywny pojazd {int(target_idx) + 1}/{len(vehicles)}. "
-                "Spacja przełącza kolejne auta, D dodaje tablicę, R kadruje aktywną tablicę."
+                "D dodaje tablicę, R kadruje aktywną tablicę."
             ),
         ):
             self._push_preview_debug_event("cycle-vehicle", f"v{int(target_idx) + 1}/{len(vehicles)}")
@@ -30215,8 +35075,8 @@ class AnnotationTab:
 
         expanded = self._is_preview_controls_legend_expanded()
         if expanded:
-            max_overlay_width = 332 if bool(getattr(self, "_preview_fullscreen_active", False)) else 316
-            return int(max(276, min(max_overlay_width, frame_width - 24)))
+            max_overlay_width = 372 if bool(getattr(self, "_preview_fullscreen_active", False)) else 352
+            return int(max(312, min(max_overlay_width, frame_width - 24)))
 
         context = self._get_preview_legend_context()
         rows = self._build_preview_controls_context_rows()
@@ -30224,8 +35084,11 @@ class AnnotationTab:
         value_font = self._get_preview_legend_font(8, "bold")
         file_width = float(file_font.measure(f"Plik: {context.get('filename', '')}")) + 18.0
         value_width = 0.0
-        for _row_label, row_value, _fill, _outline in rows:
-            value_width = max(value_width, float(value_font.measure(str(row_value or ""))))
+        for row_label, row_value, _fill, _outline in rows:
+            measured = float(value_font.measure(str(row_value or "")))
+            if self._preview_controls_row_is_multi_plate_badge(str(row_label), str(row_value)):
+                measured += 20.0
+            value_width = max(value_width, measured)
         context_width = 12.0 + 64.0 + value_width + 14.0
         collapsed_width = max(194.0, file_width, context_width)
         return int(min(max(collapsed_width, 194.0), max(194, frame_width - 24)))
@@ -30233,6 +35096,9 @@ class AnnotationTab:
     def _build_preview_controls_context_rows(self) -> list[tuple[str, str, str, str]]:
         context = self._get_preview_legend_context()
         theme = self._get_preview_legend_theme()
+        plate_total = int(context.get("plate_total", 0) or 0)
+        plate_fill = theme["badge_plate_multi_fill"] if plate_total > 1 else theme["badge_plate_fill"]
+        plate_outline = theme["badge_plate_multi_outline"] if plate_total > 1 else theme["badge_plate_outline"]
         rows = [
             (
                 "Zdjęcie",
@@ -30243,8 +35109,8 @@ class AnnotationTab:
             (
                 "Tablica",
                 str(context.get("plate_text") or "").replace("Tablica: ", ""),
-                theme["badge_plate_fill"],
-                theme["badge_plate_outline"],
+                plate_fill,
+                plate_outline,
             ),
             (
                 "Pojazd",
@@ -30264,6 +35130,19 @@ class AnnotationTab:
             )
         return rows
 
+    @staticmethod
+    def _preview_controls_row_is_multi_plate_badge(row_label: str, row_value: str) -> bool:
+        if str(row_label or "").strip().lower() != "tablica":
+            return False
+        value = str(row_value or "").strip()
+        if "/" not in value:
+            return False
+        try:
+            _current, total = value.split("/", 1)
+            return int(total.strip()) > 1
+        except Exception:
+            return False
+
     def _get_preview_controls_legend_target_height(self, width: float | None = None) -> int:
         safe_width = max(194.0, float(width or self._get_preview_controls_legend_target_width()))
         expanded = self._is_preview_controls_legend_expanded()
@@ -30282,13 +35161,16 @@ class AnnotationTab:
         shortcuts_h = 0.0
         for section in sections:
             items = section.get("items", []) or []
-            section_cols = 2 if safe_width >= 300.0 else 1
+            section_cols = 2 if safe_width >= 340.0 else 1
             section_cols = max(1, min(section_cols, int(section.get("columns", section_cols) or section_cols)))
             section_rows = max(1, math.ceil(len(items) / float(section_cols)))
-            shortcuts_h += 52.0 + (section_rows * 34.0)
+            shortcuts_h += 56.0 + (section_rows * 38.0)
         return int(max(compact_height + shortcuts_h + 16.0, 240.0))
 
     def _animate_preview_controls_legend_height(self):
+        if not bool(getattr(self, "_preview_controls_legend_visible", True)):
+            self._hide_preview_controls_legend_overlay()
+            return
         self._cancel_preview_controls_legend_animation()
 
         target_width = float(self._get_preview_controls_legend_target_width())
@@ -30363,6 +35245,12 @@ class AnnotationTab:
                 self._preview_controls_legend_render_width_override = 0.0
                 self._preview_controls_legend_render_height_override = 0.0
                 self._preview_controls_legend_animating = False
+                try:
+                    self._preview_controls_legend_render_key = None
+                    self._refresh_preview_controls_legend()
+                    self._update_preview_canvas_metrics_overlay()
+                except Exception:
+                    pass
                 return
             try:
                 self._preview_controls_legend_anim_after_id = self.frame.after(
@@ -30396,6 +35284,9 @@ class AnnotationTab:
         preview_overlay = getattr(self, "preview_hint_frame", None)
         canvas_frame = getattr(self, "canvas_frame", None)
         if preview_overlay is None or canvas_frame is None:
+            return
+        if not bool(getattr(self, "_preview_controls_legend_visible", True)):
+            self._hide_preview_controls_legend_overlay()
             return
 
         overlay_width = float(width_override or getattr(self, "_preview_controls_legend_current_width", 0.0) or 0.0)
@@ -30596,13 +35487,15 @@ class AnnotationTab:
             self._preview_polygon_focus_restore_state = None
             self._preview_focus_target = None
             self._preview_force_fit_after_resize = True
+            # _should_show_right_panel() celowo zwraca False w fullscreen,
+            # więc najpierw zdejmujemy flagę, dopiero potem odtwarzamy panele.
+            self._preview_fullscreen_active = False
             if not self._pane_has_child(self.main_pane, self.main_left_frame):
                 self.main_pane.insert(0, self.main_left_frame, weight=2)
             if self._should_show_right_panel() and not self._pane_has_child(self.main_pane, self.main_right_frame):
                 self.main_pane.add(self.main_right_frame, weight=1)
 
             self._set_annotation_process_log_visibility(bool(getattr(self, "_preview_fullscreen_restore_log_visible", False)))
-            self._preview_fullscreen_active = False
             self._preview_controls_legend_current_width = 0.0
             self._preview_controls_legend_current_height = 0.0
 
@@ -30613,10 +35506,19 @@ class AnnotationTab:
         self._preview_controls_legend_render_key = None
         try:
             self._place_preview_legend_overlay(refresh=True)
+            self._place_preview_overlay_dock(force_render=True)
+            self._place_preview_campaign_gate_overlay(force_render=True)
         except Exception:
             pass
         try:
-            self.frame.after(90, lambda: self._place_preview_legend_overlay(refresh=True))
+            self.frame.after(
+                90,
+                lambda: (
+                    self._place_preview_legend_overlay(refresh=True),
+                    self._place_preview_overlay_dock(force_render=True),
+                    self._place_preview_campaign_gate_overlay(force_render=True),
+                ),
+            )
         except Exception:
             pass
         try:
@@ -30627,6 +35529,8 @@ class AnnotationTab:
                     setattr(self, "_preview_controls_legend_current_height", 0.0),
                     setattr(self, "_preview_controls_legend_render_key", None),
                     self._place_preview_legend_overlay(refresh=True),
+                    self._place_preview_overlay_dock(force_render=True),
+                    self._place_preview_campaign_gate_overlay(force_render=True),
                 ),
             )
         except Exception:
@@ -30637,7 +35541,10 @@ class AnnotationTab:
         )
         self._schedule_preview_layout_restore_after_resize()
         if not self._preview_fullscreen_active:
-            self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=80)
+            self._sync_main_pane_right_panel_visibility()
+            self._schedule_right_panel_content_restore_after_fullscreen()
+            self._schedule_right_panel_content_restore_after_fullscreen(delay_ms=120)
+            self._schedule_main_pane_layout_refresh(force_defaults=True, delay_ms=80)
         try:
             self.preview_canvas.focus_set()
         except Exception:
@@ -30766,7 +35673,7 @@ class AnnotationTab:
             )
             return
         if not next_state and self._preview_drag_state is None and self._preview_dirty_images:
-            self._schedule_preview_autosave(delay_ms=120)
+            self._schedule_preview_autosave(delay_ms=3500)
 
         self._push_preview_debug_event("modifier", f"W={'on' if next_state else 'off'}")
         if needs_canvas_refresh:
@@ -30784,6 +35691,7 @@ class AnnotationTab:
     ):
         # Szybka seria korekt nie powinna byc przerywana opoznionym zapisem poprzedniego ruchu.
         self._cancel_preview_autosave()
+        self._cancel_preview_post_interaction_refresh()
         self._preview_last_modifier_press_at = time.monotonic()
         start_cursor_x = 0.0
         start_cursor_y = 0.0
@@ -31121,12 +36029,12 @@ class AnnotationTab:
                 self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="info", emphasis=False)
             elif has_image:
                 self.preview_fullscreen_hint_var.set(
-                    "Enter przełącza pełny ekran. Po wejściu zobaczysz pasek skrótów nad canvase."
+                    "Najwygodniej poprawia się ramki tablic w pełnym ekranie. Naciśnij Enter, aby powiększyć canvas i pracować bez rozpraszaczy."
                 )
                 self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="info", emphasis=False)
             else:
                 self.preview_fullscreen_hint_var.set(
-                    "Wybierz obraz, aby włączyć pełny ekran i narzędzia edycji podglądu."
+                    "Wybierz obraz. Do rysowania i korekty ramek tablic najwygodniej przejść w pełny ekran klawiszem Enter."
                 )
                 self._set_inline_label_state(self.preview_fullscreen_hint_lbl, tone="muted", emphasis=False)
         except Exception:
@@ -31211,7 +36119,7 @@ class AnnotationTab:
         vehicle_hint = ""
         if vehicles:
             vehicle_no = 1 if selected_vehicle_idx is None else (int(selected_vehicle_idx) + 1)
-            vehicle_hint = f" Aktywny pojazd {vehicle_no}/{len(vehicles)}. Spacja kadruje kolejne pojazdy."
+            vehicle_hint = f" Aktywny pojazd {vehicle_no}/{len(vehicles)}."
 
         if self._preview_draw_mode:
             clicked_points = len(self._preview_draw_points)
@@ -31242,9 +36150,9 @@ class AnnotationTab:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else selected_idx + 1
             nav_hint = (
-                "Q/E przechodzą po tablicach globalnie."
+                "Q/E przełącza poprzednią/następną tablicę w paczce."
                 if bool(getattr(self, "_preview_super_correction_active", False))
-                else "Q/E przełączają zdjęcia."
+                else "Q/E przełącza poprzednie/następne zdjęcie na liście."
             )
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
@@ -31260,12 +36168,12 @@ class AnnotationTab:
             fullscreen_hint = (
                 "Enter wychodzi z pełnego ekranu."
                 if self._preview_fullscreen_active
-                else "Enter przełącza pełny ekran."
+                else "Enter otwiera pełny ekran - najwygodniejszy tryb korekty ramek."
             )
             self.preview_edit_status_var.set(
                 f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
                 f"Kliknij polygon, aby go wybrać. {drag_hint} "
-                f"{nav_hint} A przełącza tablice lokalnie, Spacja kadruje pojazdy, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
+                f"{nav_hint} A przełącza tablice lokalnie, Spacja zatwierdza lub cofa zatwierdzenie zdjęcia, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz do okna podglądu, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
                 f"{self._preview_campaign_reuse_manual_note(ann, editable=True)}"
             )
 
@@ -31339,6 +36247,8 @@ class AnnotationTab:
             self.preview_canvas.create_text(20, 20, text="Plik nie istnieje na dysku!", fill="red", anchor="nw")
             self._update_preview_toolbar_state(refresh_summary=refresh_summary)
             self._refresh_preview_legend_backdrop()
+            self._place_preview_overlay_dock()
+            self._place_preview_campaign_gate_overlay()
             return
 
         try:
@@ -31347,17 +36257,35 @@ class AnnotationTab:
                 raise ValueError("Nie można załadować obrazu do podglądu.")
 
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            self.preview_canvas.set_image(Image.fromarray(img_rgb))
+            preview_image = Image.fromarray(img_rgb)
             if reset_view:
-                self.preview_canvas.fit_to_view()
+                if hasattr(self.preview_canvas, "set_image_fit_to_view"):
+                    self.preview_canvas.set_image_fit_to_view(preview_image)
+                else:
+                    self.preview_canvas.set_image(preview_image)
+                    self.preview_canvas.fit_to_view()
                 self._preview_force_fit_after_resize = True
                 self._schedule_preview_layout_restore_after_resize()
+            else:
+                self.preview_canvas.set_image(preview_image)
             self._refresh_preview_legend_backdrop()
+            self._update_preview_canvas_metrics_overlay()
+            try:
+                self.preview_canvas.after_idle(
+                    lambda: self._update_preview_canvas_metrics_overlay(force_render=True)
+                )
+            except Exception:
+                pass
+            self._place_preview_overlay_dock()
+            self._place_preview_campaign_gate_overlay()
         except Exception as e:
             logger.error(f"Błąd rysowania podglądu YOLO: {e}")
             self.preview_canvas.clear_image()
             self.preview_canvas.create_text(20, 20, text=f"Błąd podglądu: {e}", fill="red", anchor="nw")
             self._refresh_preview_legend_backdrop()
+            self._update_preview_canvas_metrics_overlay()
+            self._place_preview_overlay_dock()
+            self._place_preview_campaign_gate_overlay()
 
     def _refresh_preview_canvas(self, rerender_image: bool = False):
         drag_active = bool(getattr(self, "_preview_drag_state", None)) or bool(
@@ -31376,8 +36304,57 @@ class AnnotationTab:
 
         if not drag_active:
             self._refresh_preview_legend_backdrop()
+            self._update_preview_canvas_metrics_overlay()
+            self._place_preview_overlay_dock()
+            self._place_preview_campaign_gate_overlay()
+
+    def _cancel_preview_post_interaction_refresh(self) -> None:
+        pending = getattr(self, "_preview_post_interaction_refresh_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_post_interaction_refresh_after_id = None
+
+    def _refresh_preview_canvas_light(self) -> None:
+        try:
+            if getattr(self.preview_canvas, "original_image", None) is None:
+                return
+            self._preview_light_overlay_refresh = True
+            self.preview_canvas.refresh_overlay_only(skip_info=True)
+        except Exception:
+            pass
+        finally:
+            self._preview_light_overlay_refresh = False
+
+    def _schedule_preview_post_interaction_refresh(self, delay_ms: int = 360) -> None:
+        self._cancel_preview_post_interaction_refresh()
+
+        def _flush() -> None:
+            self._preview_post_interaction_refresh_after_id = None
+            if getattr(self, "_preview_drag_state", None) is not None:
+                return
+            if getattr(self, "_preview_super_correction_drag_state", None) is not None:
+                return
+            self._refresh_preview_canvas()
+
+        try:
+            self._preview_post_interaction_refresh_after_id = self.frame.after(
+                max(0, int(delay_ms)),
+                _flush,
+            )
+        except Exception:
+            self._preview_post_interaction_refresh_after_id = None
+
+    def _refresh_preview_canvas_interactive(self, delay_ms: int = 360) -> None:
+        self._refresh_preview_canvas_light()
+        self._schedule_preview_post_interaction_refresh(delay_ms=delay_ms)
 
     def _refresh_preview_legend_backdrop(self):
+        if not bool(getattr(self, "_preview_controls_legend_visible", True)):
+            self._hide_preview_controls_legend_overlay()
+            return
         try:
             self._preview_controls_legend_render_key = None
             self._refresh_preview_controls_legend()
@@ -31407,6 +36384,79 @@ class AnnotationTab:
             self._preview_drag_refresh_after_id = None
             self._refresh_preview_canvas()
 
+    def _cancel_preview_selection_render(self) -> None:
+        pending = getattr(self, "_preview_select_render_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_select_render_after_id = None
+        self._preview_pending_select_render = None
+
+    def _schedule_preview_selection_render(
+        self,
+        idx: int,
+        previous_idx: int | None,
+        *,
+        reset_view: bool = True,
+        delay_ms: int = 55,
+    ) -> None:
+        self._preview_pending_select_render = {
+            "idx": int(idx),
+            "previous_idx": None if previous_idx is None else int(previous_idx),
+            "reset_view": bool(reset_view),
+        }
+
+        pending = getattr(self, "_preview_select_render_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+            self._preview_select_render_after_id = None
+
+        def _flush_selection_render() -> None:
+            payload = getattr(self, "_preview_pending_select_render", None)
+            self._preview_select_render_after_id = None
+            self._preview_pending_select_render = None
+            if not isinstance(payload, dict):
+                return
+            target_idx = int(payload.get("idx", -1))
+            if target_idx < 0 or target_idx >= len(self.current_annotations or []):
+                return
+            if self.current_preview_index is None or int(self.current_preview_index) != target_idx:
+                return
+
+            started = time.perf_counter()
+            previous = payload.get("previous_idx")
+            self._load_current_preview_selection(
+                reset_view=bool(payload.get("reset_view", True)),
+                selection_changed=(previous is None or target_idx != int(previous)),
+                refresh_summary=False,
+            )
+            self._schedule_preview_resume_persist(include_preview_approved=False)
+            elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+            if elapsed_ms >= 20.0:
+                logger.debug(
+                    "[AnnotationTab][PERF] preview_select_render: "
+                    f"{elapsed_ms:.1f} ms | idx={target_idx} total={len(self.current_annotations or [])}"
+                )
+            try:
+                self.preview_canvas.focus_set()
+            except Exception:
+                pass
+            self._refresh_plate_auto_scope_modal_selection_state()
+
+        try:
+            self._preview_select_render_after_id = self.frame.after(
+                max(0, int(delay_ms)),
+                _flush_selection_render,
+            )
+        except Exception:
+            self._preview_select_render_after_id = None
+            _flush_selection_render()
+
     def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         ann = self._get_preview_annotation()
         if ann is None or canvas.original_image is None:
@@ -31419,6 +36469,7 @@ class AnnotationTab:
         self._preview_super_correction_handle_bbox = None
         self._preview_fullscreen_toggle_bbox = None
         drag_active = isinstance(getattr(self, "_preview_drag_state", None), dict)
+        light_overlay = drag_active or bool(getattr(self, "_preview_light_overlay_refresh", False))
         vehicle_color = "#2ecc71"
         plate_color = "#e74c3c"
         active_color = "#f1c40f"
@@ -31439,6 +36490,8 @@ class AnnotationTab:
         )
 
         try:
+            if light_overlay:
+                raise StopIteration
             legend_theme = self._get_preview_legend_theme()
             canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
             canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
@@ -31486,6 +36539,8 @@ class AnnotationTab:
                 float(toggle_x2),
                 float(toggle_y2),
             )
+            if not bool(getattr(self, "_preview_super_correction_badge_visible", True)):
+                raise StopIteration
 
             overlay_state_text = (
                 "Superkorekta: WŁĄCZONA"
@@ -31590,10 +36645,8 @@ class AnnotationTab:
             self._preview_super_correction_handle_bbox = None
             pass
 
-        if not drag_active:
+        if not light_overlay:
             for vehicle_idx, det in enumerate(vehicle_detections):
-                if drag_active and selected_vehicle_idx is not None and vehicle_idx != selected_vehicle_idx:
-                    continue
                 x1, y1, x2, y2 = det.bbox
                 cx1, cy1 = canvas.image_to_canvas_coords(x1, y1)
                 cx2, cy2 = canvas.image_to_canvas_coords(x2, y2)
@@ -31653,7 +36706,7 @@ class AnnotationTab:
                 tags=("preview_overlay",)
             )
 
-            if not drag_active:
+            if not light_overlay:
                 min_x = min(points[0::2]) if points else 0
                 min_y = min(points[1::2]) if points else 0
                 fit_score = self._get_plate_detection_fit_score(det, ann)
@@ -31701,7 +36754,7 @@ class AnnotationTab:
                         width=1,
                         tags=("preview_overlay",)
                     )
-                    if not drag_active:
+                    if not light_overlay:
                         canvas.create_text(
                             cx,
                             cy - 12,
@@ -31754,7 +36807,677 @@ class AnnotationTab:
                     tags=("preview_overlay",)
                 )
 
-        self._draw_preview_bottom_hint(canvas)
+        if not light_overlay:
+            self._draw_preview_bottom_hint(canvas)
+
+    def _build_preview_canvas_metrics_rows(
+        self,
+        canvas: ZoomableCanvas,
+        ann,
+        selected_plate_idx: int | None,
+        plate_detections: list[Detection],
+    ) -> list[tuple[str, str, str]]:
+        image_metadata = self._get_preview_image_file_metadata(ann, canvas=canvas)
+        try:
+            image_width = int(image_metadata.get("width", 0) or 0)
+            image_height = int(image_metadata.get("height", 0) or 0)
+        except Exception:
+            image_width = 0
+            image_height = 0
+        try:
+            if image_width <= 0:
+                image_width = int(getattr(canvas.original_image, "width", 0) or 0)
+            if image_height <= 0:
+                image_height = int(getattr(canvas.original_image, "height", 0) or 0)
+        except Exception:
+            pass
+        if image_width <= 0 or image_height <= 0:
+            return []
+
+        dpi_text = str(image_metadata.get("dpi_text", "") or self._get_preview_image_dpi_text(ann))
+        approved_now = bool(self._preview_annotation_is_explicitly_approved(ann))
+        rows: list[tuple[str, str, str]] = [
+            (
+                "Status",
+                "Zatwierdzone [OK] | Spacja cofa"
+                if approved_now
+                else "Niezatwierdzone | Spacja zatwierdza",
+                "success" if approved_now else "error",
+            ),
+            ("Obraz", f"{image_width}x{image_height} px", "default"),
+            ("DPI", str(dpi_text).replace("DPI:", "").strip() or "brak w pliku", "muted"),
+        ]
+
+        plates = list(plate_detections or [])
+        if not plates:
+            if self._preview_draw_mode and self._preview_draw_points:
+                rows.append(("Tablica", f"nowa, punkty {len(self._preview_draw_points)}/4", "warning"))
+            else:
+                rows.append(("Tablica", "brak ramki, D dodaje polygon", "warning"))
+            return rows
+
+        safe_idx = selected_plate_idx
+        if safe_idx is None:
+            safe_idx = 0 if len(plates) == 1 else None
+        if safe_idx is None:
+            rows.append(("Tablice", f"{len(plates)}; wybierz ramkę, aby zobaczyć udział pola", "warning"))
+            return rows
+
+        try:
+            safe_idx = max(0, min(int(safe_idx), len(plates) - 1))
+        except Exception:
+            safe_idx = 0
+        det = plates[safe_idx]
+        polygon = self._detection_polygon(det)
+        try:
+            bbox = tuple(float(v) for v in (getattr(det, "bbox", None) or ())[:4])
+            if len(bbox) < 4:
+                bbox = self._bbox_from_polygon(polygon)
+        except Exception:
+            bbox = self._bbox_from_polygon(polygon)
+
+        x1, y1, x2, y2 = bbox[:4]
+        bbox_width = max(0.0, float(x2) - float(x1))
+        bbox_height = max(0.0, float(y2) - float(y1))
+        bbox_area = bbox_width * bbox_height
+        image_area = max(1.0, float(image_width) * float(image_height))
+        bbox_pct = (bbox_area / image_area) * 100.0
+        polygon_area = self._polygon_area(polygon)
+        polygon_pct = (polygon_area / image_area) * 100.0 if polygon_area > 0.0 else 0.0
+        polygon_to_bbox_ratio = (polygon_area / bbox_area) if bbox_area > 0.0 and polygon_area > 0.0 else 0.0
+
+        rows.append(("Tablica", f"{safe_idx + 1}/{len(plates)} | {bbox_width:.0f}x{bbox_height:.0f} px", "default"))
+        rows.append(("Obrys detekcji", f"{bbox_area:.0f} px | {bbox_pct:.3f}% obrazu", "success"))
+        if polygon_area > 0.0:
+            rows.append(("Pow. tablicy", f"{polygon_area:.0f} px | {polygon_pct:.3f}% obrazu", "success"))
+            ratio_tone = "success" if polygon_to_bbox_ratio >= 0.45 else "warning"
+            rows.append(("Poligon / detekcja", f"{polygon_to_bbox_ratio * 100.0:.1f}% ramki detekcji", ratio_tone))
+
+        if bbox_pct < 0.05:
+            rows.append(("Skala", "poniżej 0.05% obrazu, zwykle za mała", "warning"))
+        elif bbox_pct < 0.15:
+            rows.append(("Skala", "poniżej 0.15% obrazu, sprawdź czytelność", "warning"))
+        else:
+            rows.append(("Skala", "powyżej progu 0.15% obrazu", "muted"))
+        return rows
+
+    def _build_preview_canvas_metrics_lines(
+        self,
+        canvas: ZoomableCanvas,
+        ann,
+        selected_plate_idx: int | None,
+        plate_detections: list[Detection],
+    ) -> list[str]:
+        rows = self._build_preview_canvas_metrics_rows(
+            canvas,
+            ann,
+            selected_plate_idx,
+            plate_detections,
+        )
+        return [f"{label}: {value}" for label, value, _tone in rows]
+
+    def _draw_preview_canvas_metrics_card(
+        self,
+        canvas: ZoomableCanvas,
+        ann,
+        selected_plate_idx: int | None,
+        plate_detections: list[Detection],
+    ) -> None:
+        try:
+            canvas_width = int(canvas.winfo_width() or 0)
+            canvas_height = int(canvas.winfo_height() or 0)
+        except Exception:
+            return
+        if canvas_width <= 180 or canvas_height <= 120:
+            return
+
+        lines = self._build_preview_canvas_metrics_lines(
+            canvas,
+            ann,
+            selected_plate_idx,
+            plate_detections,
+        )
+        if not lines:
+            return
+
+        try:
+            legend_theme = self._get_preview_legend_theme()
+        except Exception:
+            legend_theme = {}
+        fill = str(legend_theme.get("panel_fill", "#101419"))
+        outline = str(legend_theme.get("panel_outline", "#4b5563"))
+        text_fill = str(legend_theme.get("entry_text", "#f8fafc"))
+        accent = str(legend_theme.get("badge_plate_outline", "#f1c40f"))
+
+        font_obj = self._get_preview_legend_font(8, "normal")
+        try:
+            line_height = int(font_obj.metrics("linespace") or 13)
+        except Exception:
+            line_height = 13
+        text = "\n".join(lines)
+        text_width = max(220, min(canvas_width - 48, 560))
+        card_width = min(canvas_width - 24, text_width + 20)
+        card_height = max(34, (line_height * len(lines)) + 18)
+        view_x = 12.0
+        view_y = 12.0
+
+        try:
+            legend_frame = getattr(self, "preview_hint_frame", None)
+            legend_mapped = bool(legend_frame is not None and str(legend_frame.winfo_manager()))
+        except Exception:
+            legend_mapped = False
+        if legend_mapped:
+            try:
+                legend_x = float(getattr(self, "_preview_controls_legend_offset_x", 10.0) or 10.0)
+                legend_y = float(getattr(self, "_preview_controls_legend_offset_y", 10.0) or 10.0)
+                legend_w = float(getattr(self, "_preview_controls_legend_current_width", 0.0) or 0.0)
+                legend_h = float(getattr(self, "_preview_controls_legend_current_height", 0.0) or 0.0)
+                if legend_w <= 0.0:
+                    legend_w = float(self._get_preview_controls_legend_target_width())
+                if legend_h <= 0.0:
+                    legend_h = float(self._get_preview_controls_legend_target_height(legend_w))
+                overlaps_x = view_x < (legend_x + legend_w + 8.0) and (view_x + card_width) > (legend_x - 8.0)
+                overlaps_y = view_y < (legend_y + legend_h + 8.0) and (view_y + card_height) > (legend_y - 8.0)
+                if overlaps_x and overlaps_y:
+                    candidate_y = legend_y + legend_h + 10.0
+                    bottom_reserved = 72.0 if bool(getattr(self, "_preview_fullscreen_active", False)) else 14.0
+                    if candidate_y + card_height <= canvas_height - bottom_reserved:
+                        view_y = candidate_y
+                    elif canvas_width >= (legend_w + card_width + 36.0):
+                        view_x = max(12.0, canvas_width - card_width - 12.0)
+                        view_y = 12.0
+                    else:
+                        view_y = max(12.0, canvas_height - card_height - bottom_reserved)
+            except Exception:
+                pass
+
+        try:
+            canvas_x = float(canvas.canvasx(view_x))
+            canvas_y = float(canvas.canvasy(view_y))
+            view_left = float(canvas.canvasx(0))
+            view_top = float(canvas.canvasy(0))
+            view_right = float(canvas.canvasx(canvas_width))
+            view_bottom = float(canvas.canvasy(canvas_height))
+        except Exception:
+            canvas_x = view_x
+            canvas_y = view_y
+            view_left = 0.0
+            view_top = 0.0
+            view_right = float(canvas_width)
+            view_bottom = float(canvas_height)
+
+        text_id = canvas.create_text(
+            canvas_x + 10,
+            canvas_y + 8,
+            text=text,
+            fill=text_fill,
+            anchor="nw",
+            justify=tk.LEFT,
+            width=text_width,
+            font=font_obj,
+            tags=("preview_overlay", "preview_metrics_card"),
+        )
+        try:
+            bbox = canvas.bbox(text_id)
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+        x1, y1, x2, y2 = bbox
+        box_id = canvas.create_rectangle(
+            max(view_left + 4, x1 - 10),
+            max(view_top + 4, y1 - 8),
+            min(view_right - 4, x2 + 10),
+            min(view_bottom - 4, y2 + 8),
+            fill=fill,
+            outline=outline,
+            width=1,
+            tags=("preview_overlay", "preview_metrics_card"),
+        )
+        accent_id = canvas.create_rectangle(
+            max(view_left + 4, x1 - 10),
+            max(view_top + 4, y1 - 8),
+            max(view_left + 7, x1 - 7),
+            min(view_bottom - 4, y2 + 8),
+            fill=accent,
+            outline="",
+            tags=("preview_overlay", "preview_metrics_card"),
+        )
+        canvas.tag_lower(box_id, text_id)
+        canvas.tag_lower(accent_id, text_id)
+
+    def _toggle_preview_metrics_overlay(self, event=None):
+        self._preview_metrics_overlay_expanded = not bool(
+            getattr(self, "_preview_metrics_overlay_expanded", True)
+        )
+        self._preview_metrics_overlay_render_key = None
+        try:
+            self.preview_canvas.focus_set()
+        except Exception:
+            pass
+        self._update_preview_canvas_metrics_overlay(force_render=True)
+        return "break"
+
+    def _on_preview_metrics_overlay_press(self, event=None):
+        try:
+            root_x = float(getattr(event, "x_root", 0.0) or 0.0)
+            root_y = float(getattr(event, "y_root", 0.0) or 0.0)
+        except Exception:
+            root_x = root_y = 0.0
+        self._preview_metrics_overlay_drag_state = {
+            "root_x": root_x,
+            "root_y": root_y,
+            "start_x": float(getattr(self, "_preview_metrics_overlay_offset_x", 12.0) or 12.0),
+            "start_y": float(getattr(self, "_preview_metrics_overlay_offset_y", 12.0) or 12.0),
+        }
+        return "break"
+
+    def _on_preview_metrics_overlay_drag(self, event=None):
+        drag_state = getattr(self, "_preview_metrics_overlay_drag_state", None)
+        if not isinstance(drag_state, dict):
+            return "break"
+        try:
+            root_x = float(getattr(event, "x_root", 0.0) or 0.0)
+            root_y = float(getattr(event, "y_root", 0.0) or 0.0)
+        except Exception:
+            root_x = float(drag_state.get("root_x", 0.0) or 0.0)
+            root_y = float(drag_state.get("root_y", 0.0) or 0.0)
+        next_x = float(drag_state.get("start_x", 12.0) or 12.0) + (root_x - float(drag_state.get("root_x", root_x) or root_x))
+        next_y = float(drag_state.get("start_y", 12.0) or 12.0) + (root_y - float(drag_state.get("root_y", root_y) or root_y))
+        frame = getattr(self, "preview_metrics_frame", None)
+        width = float(getattr(self, "_preview_metrics_overlay_current_width", 0.0) or 0.0)
+        height = float(getattr(self, "_preview_metrics_overlay_current_height", 0.0) or 0.0)
+        if frame is not None and (width <= 0.0 or height <= 0.0):
+            try:
+                width = float(frame.winfo_width() or frame.winfo_reqwidth() or 84.0)
+                height = float(frame.winfo_height() or frame.winfo_reqheight() or 34.0)
+            except Exception:
+                width = 84.0
+                height = 34.0
+        next_x, next_y = self._clamp_preview_metrics_overlay_offsets(next_x, next_y, width=width, height=height)
+        self._preview_metrics_overlay_offset_x = float(next_x)
+        self._preview_metrics_overlay_offset_y = float(next_y)
+        self._preview_metrics_overlay_user_moved = True
+        if frame is not None:
+            try:
+                frame.place_configure(x=int(round(next_x)), y=int(round(next_y)))
+                frame.lift()
+            except Exception:
+                pass
+        return "break"
+
+    def _on_preview_metrics_overlay_release(self, event=None):
+        self._preview_metrics_overlay_drag_state = None
+        return "break"
+
+    def _clamp_preview_metrics_overlay_offsets(self, x: float, y: float, *, width: float | None = None, height: float | None = None) -> tuple[float, float]:
+        canvas_frame = getattr(self, "canvas_frame", None)
+        frame = getattr(self, "preview_metrics_frame", None)
+        try:
+            frame_width = float(canvas_frame.winfo_width() or 0.0) if canvas_frame is not None else 0.0
+            frame_height = float(canvas_frame.winfo_height() or 0.0) if canvas_frame is not None else 0.0
+        except Exception:
+            frame_width = frame_height = 0.0
+        try:
+            overlay_width = float(width or (frame.winfo_reqwidth() if frame is not None else 0.0) or 84.0)
+            overlay_height = float(height or (frame.winfo_reqheight() if frame is not None else 0.0) or 34.0)
+        except Exception:
+            overlay_width = 84.0
+            overlay_height = 34.0
+        max_x = max(6.0, frame_width - overlay_width - 6.0)
+        max_y = max(6.0, frame_height - overlay_height - 6.0)
+        return (
+            max(6.0, min(float(x), max_x)),
+            max(6.0, min(float(y), max_y)),
+        )
+
+    def _render_preview_metrics_grab_handle(self, grab_widget, colors: dict) -> None:
+        if grab_widget is None:
+            return
+        fill = str(colors.get("grab_fill", "#3a3f46"))
+        outline = str(colors.get("outline", "#4b5563"))
+        dot_fill = str(colors.get("muted", "#d7e1ec"))
+        bg = str(colors.get("fill", "#101419"))
+        try:
+            grab_widget.configure(bg=bg)
+        except Exception:
+            pass
+        if not hasattr(grab_widget, "create_rectangle"):
+            try:
+                grab_widget.configure(text="::::", fg=dot_fill, bg=bg)
+            except Exception:
+                pass
+            return
+
+        try:
+            grab_widget.delete("all")
+            handle_w = 18.0
+            handle_h = 20.0
+            x = 2.0
+            y = 1.0
+            grab_widget.create_rectangle(
+                x,
+                y,
+                x + handle_w,
+                y + handle_h,
+                fill=fill,
+                outline=outline,
+                width=1,
+            )
+            dot_r = 1.2
+            dot_x = x + (handle_w / 2.0)
+            for row_y in (y + 6.0, y + 10.0, y + 14.0):
+                for col_dx in (-3.0, 3.0):
+                    grab_widget.create_oval(
+                        dot_x + col_dx - dot_r,
+                        row_y - dot_r,
+                        dot_x + col_dx + dot_r,
+                        row_y + dot_r,
+                        fill=dot_fill,
+                        outline="",
+                    )
+        except Exception:
+            pass
+
+    def _render_preview_metrics_table(self, rows: list[tuple[str, str, str]], colors: dict) -> None:
+        body = getattr(self, "preview_metrics_body", None)
+        if body is None:
+            return
+        for child in list(body.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        fill = str(colors.get("fill", "#101419"))
+        row_fill = str(colors.get("row_fill", fill))
+        row_alt = str(colors.get("row_alt", row_fill))
+        outline = str(colors.get("outline", "#4b5563"))
+        text_fill = str(colors.get("text", "#f8fafc"))
+        muted = str(colors.get("muted", "#c7c7c7"))
+        success = str(colors.get("success", "#4ec9b0"))
+        warning = str(colors.get("warning", "#f39c12"))
+        error = str(colors.get("error", "#e74c3c"))
+
+        for idx, (label_text, value_text, tone) in enumerate(rows):
+            row_bg = row_fill if idx % 2 == 0 else row_alt
+            row = tk.Frame(body, bg=row_bg, bd=0, highlightthickness=1, highlightbackground=outline)
+            row.pack(fill=tk.X, padx=6, pady=(0 if idx == 0 else 2, 2))
+            key = tk.Label(
+                row,
+                text=str(label_text or ""),
+                bg=row_bg,
+                fg=muted,
+                anchor="w",
+                justify=tk.LEFT,
+                font=("Segoe UI", 8),
+                width=13,
+                padx=6,
+                pady=3,
+            )
+            key.pack(side=tk.LEFT, fill=tk.Y)
+            tone_key = str(tone or "").strip().lower()
+            if tone_key == "warning":
+                value_fg = warning
+            elif tone_key == "success":
+                value_fg = success
+            elif tone_key == "error":
+                value_fg = error
+            else:
+                value_fg = text_fill
+            value = tk.Label(
+                row,
+                text=str(value_text or ""),
+                bg=row_bg,
+                fg=value_fg,
+                anchor="w",
+                justify=tk.LEFT,
+                font=("Segoe UI Semibold", 8),
+                padx=6,
+                pady=3,
+                wraplength=260,
+            )
+            value.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _update_preview_canvas_metrics_overlay(self, *, force_render: bool = False) -> None:
+        frame = getattr(self, "preview_metrics_frame", None)
+        header = getattr(self, "preview_metrics_header", None)
+        icon = getattr(self, "preview_metrics_icon_lbl", None)
+        title = getattr(self, "preview_metrics_title_lbl", None)
+        toggle = getattr(self, "preview_metrics_toggle_lbl", None)
+        grab = getattr(self, "preview_metrics_grab_lbl", None)
+        body = getattr(self, "preview_metrics_body", None)
+        canvas_frame = getattr(self, "canvas_frame", None)
+        canvas = getattr(self, "preview_canvas", None)
+        if frame is None or canvas_frame is None or canvas is None:
+            return
+        if not bool(getattr(self, "_preview_metrics_overlay_visible", True)):
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+            return
+
+        ann = self._get_preview_annotation()
+        if ann is None or getattr(canvas, "original_image", None) is None:
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+            return
+
+        try:
+            frame_width = int(canvas_frame.winfo_width() or 0)
+            frame_height = int(canvas_frame.winfo_height() or 0)
+        except Exception:
+            frame_width = 0
+            frame_height = 0
+        if frame_width <= 180 or frame_height <= 120:
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+            return
+
+        plate_detections = self._get_plate_detections(ann)
+        selected_plate_idx = self._get_selected_plate_index_for_ann(ann)
+        try:
+            rows = self._build_preview_canvas_metrics_rows(
+                canvas,
+                ann,
+                selected_plate_idx,
+                plate_detections,
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udało się zbudować metryk canvasa Z2: {exc}")
+            rows = []
+        if not rows:
+            try:
+                frame.place_forget()
+            except Exception:
+                pass
+            return
+
+        try:
+            legend_theme = self._get_preview_legend_theme()
+        except Exception:
+            legend_theme = {}
+        palette = getattr(self.app, "palette", {}) if getattr(self, "app", None) is not None else {}
+        fill = str(legend_theme.get("panel_fill", palette.get("panel", "#101419")))
+        outline = str(legend_theme.get("panel_outline", palette.get("panel_border", "#4b5563")))
+        text_fill = str(legend_theme.get("entry_text", palette.get("fg", "#f8fafc")))
+        muted = str(legend_theme.get("section_muted", palette.get("muted", "#c7c7c7")))
+        accent = str(legend_theme.get("badge_plate_outline", palette.get("accent", "#f1c40f")))
+        warning = str(palette.get("warning", "#f39c12"))
+        success = str(palette.get("success", "#4ec9b0"))
+        error = str(palette.get("error", "#e74c3c"))
+        row_fill = blend_hex_colors(outline, fill, 0.16)
+        row_alt = blend_hex_colors(outline, fill, 0.09)
+        icon_bg = blend_hex_colors(accent, fill, 0.34)
+        grab_fill = str(legend_theme.get("entry_fill", palette.get("field", "#3a3f46")))
+
+        expanded = bool(getattr(self, "_preview_metrics_overlay_expanded", True))
+        render_key = (
+            int(expanded),
+            tuple((str(label), str(value), str(tone)) for label, value, tone in rows),
+            fill,
+            outline,
+            text_fill,
+            muted,
+            accent,
+            warning,
+            success,
+            error,
+            grab_fill,
+        )
+        needs_render = bool(force_render) or render_key != getattr(self, "_preview_metrics_overlay_render_key", None)
+        if needs_render:
+            try:
+                frame.configure(bg=fill, highlightbackground=outline, highlightcolor=outline)
+                if header is not None:
+                    header.configure(bg=fill)
+                if icon is not None:
+                    icon.configure(bg=icon_bg, fg=text_fill)
+                if title is not None:
+                    title.configure(bg=fill, fg=text_fill)
+                if toggle is not None:
+                    toggle.configure(text=("-" if expanded else "+"), bg=fill, fg=accent)
+                if body is not None:
+                    body.configure(bg=fill)
+                self._render_preview_metrics_grab_handle(
+                    grab,
+                    {
+                        "fill": fill,
+                        "grab_fill": grab_fill,
+                        "outline": outline,
+                        "muted": muted,
+                    },
+                )
+            except Exception:
+                pass
+
+            try:
+                if title is not None:
+                    if expanded and not str(title.winfo_manager()):
+                        title.pack(side=tk.LEFT, fill=tk.X, expand=True, before=toggle)
+                    elif (not expanded) and str(title.winfo_manager()):
+                        title.pack_forget()
+                if body is not None:
+                    if expanded:
+                        if not str(body.winfo_manager()):
+                            body.pack(fill=tk.BOTH, expand=True)
+                        self._render_preview_metrics_table(
+                            rows,
+                            {
+                                "fill": fill,
+                                "row_fill": row_fill,
+                                "row_alt": row_alt,
+                                "outline": outline,
+                                "text": text_fill,
+                                "muted": muted,
+                                "success": success,
+                                "warning": warning,
+                                "error": error,
+                            },
+                        )
+                    elif str(body.winfo_manager()):
+                        body.pack_forget()
+            except Exception:
+                pass
+            self._preview_metrics_overlay_render_key = render_key
+
+        max_width = max(78, min(frame_width - 24, 420 if expanded else 96))
+        if needs_render or float(getattr(self, "_preview_metrics_overlay_current_width", 0.0) or 0.0) <= 0.0:
+            try:
+                frame.update_idletasks()
+                req_width = min(max_width, max(72 if not expanded else 300, int(frame.winfo_reqwidth() or 120)))
+                req_height = min(frame_height - 24, max(30, int(frame.winfo_reqheight() or 34)))
+            except Exception:
+                req_width = 360 if expanded else 86
+                req_height = 126 if expanded else 34
+        else:
+            try:
+                req_width = min(max_width, max(72 if not expanded else 300, int(getattr(self, "_preview_metrics_overlay_current_width", 0.0) or frame.winfo_width() or frame.winfo_reqwidth() or 120)))
+                req_height = min(frame_height - 24, max(30, int(getattr(self, "_preview_metrics_overlay_current_height", 0.0) or frame.winfo_height() or frame.winfo_reqheight() or 34)))
+            except Exception:
+                req_width = 360 if expanded else 86
+                req_height = 126 if expanded else 34
+
+        x = float(getattr(self, "_preview_metrics_overlay_offset_x", 12.0) or 12.0)
+        y = float(getattr(self, "_preview_metrics_overlay_offset_y", 12.0) or 12.0)
+        if not bool(getattr(self, "_preview_metrics_overlay_user_moved", False)):
+            try:
+                legend_frame = getattr(self, "preview_hint_frame", None)
+                legend_mapped = bool(legend_frame is not None and str(legend_frame.winfo_manager()))
+            except Exception:
+                legend_mapped = False
+            if legend_mapped:
+                try:
+                    legend_x = float(getattr(self, "_preview_controls_legend_offset_x", 10.0) or 10.0)
+                    legend_y = float(getattr(self, "_preview_controls_legend_offset_y", 10.0) or 10.0)
+                    legend_w = float(legend_frame.winfo_width() or getattr(self, "_preview_controls_legend_current_width", 0.0) or 0.0)
+                    legend_h = float(legend_frame.winfo_height() or getattr(self, "_preview_controls_legend_current_height", 0.0) or 0.0)
+                    if legend_w <= 0.0:
+                        legend_w = float(self._get_preview_controls_legend_target_width())
+                    if legend_h <= 0.0:
+                        legend_h = float(self._get_preview_controls_legend_target_height(legend_w))
+                    overlaps_x = x < (legend_x + legend_w + 8.0) and (x + req_width) > (legend_x - 8.0)
+                    overlaps_y = y < (legend_y + legend_h + 8.0) and (y + req_height) > (legend_y - 8.0)
+                    if overlaps_x and overlaps_y:
+                        candidate_y = legend_y + legend_h + 10.0
+                        bottom_reserved = 72.0 if bool(getattr(self, "_preview_fullscreen_active", False)) else 14.0
+                        if candidate_y + req_height <= frame_height - bottom_reserved:
+                            y = candidate_y
+                        elif frame_width >= (legend_w + req_width + 36.0):
+                            x = max(12.0, frame_width - req_width - 12.0)
+                        else:
+                            y = max(12.0, frame_height - req_height - bottom_reserved)
+                except Exception:
+                    pass
+
+            try:
+                dock = getattr(self, "preview_overlay_dock", None)
+                dock_mapped = bool(dock is not None and str(dock.winfo_manager()))
+            except Exception:
+                dock_mapped = False
+            if dock_mapped:
+                try:
+                    dock_x = float(dock.winfo_x() or 0.0)
+                    dock_y = float(dock.winfo_y() or 0.0)
+                    dock_w = float(dock.winfo_width() or dock.winfo_reqwidth() or 0.0)
+                    dock_h = float(dock.winfo_height() or dock.winfo_reqheight() or 0.0)
+                    overlaps_x = x < (dock_x + dock_w + 8.0) and (x + req_width) > (dock_x - 8.0)
+                    overlaps_y = y < (dock_y + dock_h + 8.0) and (y + req_height) > (dock_y - 8.0)
+                    if overlaps_x and overlaps_y:
+                        left_candidate = dock_x - req_width - 10.0
+                        below_candidate = dock_y + dock_h + 10.0
+                        if left_candidate >= 8.0:
+                            x = left_candidate
+                        elif below_candidate + req_height <= frame_height - 10.0:
+                            y = below_candidate
+                        else:
+                            x = 12.0
+                            y = max(12.0, min(y, frame_height - req_height - 10.0))
+                except Exception:
+                    pass
+
+        x, y = self._clamp_preview_metrics_overlay_offsets(x, y, width=req_width, height=req_height)
+        self._preview_metrics_overlay_offset_x = float(x)
+        self._preview_metrics_overlay_offset_y = float(y)
+        try:
+            frame.place(
+                in_=canvas_frame,
+                x=int(round(x)),
+                y=int(round(y)),
+                width=int(round(req_width)),
+                height=int(round(req_height)),
+                anchor="nw",
+            )
+            frame.lift()
+            self._preview_metrics_overlay_current_width = float(req_width)
+            self._preview_metrics_overlay_current_height = float(req_height)
+        except Exception:
+            pass
 
     def _draw_preview_enter_fullscreen_hint(self, canvas: ZoomableCanvas):
         try:
@@ -31765,10 +37488,10 @@ class AnnotationTab:
             return
 
         if self._manual_xml_template_enabled():
-            hint_text = "Do recznej edycji wlacz pelny ekran klawiszem Enter."
+            hint_text = "Pełny ekran daje najwygodniejszą przestrzeń do ręcznej korekty ramek. Enter włącza ten tryb."
             accent = "#f39c12"
         else:
-            hint_text = "Enter przełącza pełny ekran podglądu."
+            hint_text = "Do pracy z ramkami najlepiej wejść w pełny ekran. Naciśnij Enter, aby powiększyć canvas."
             accent = "#3498db"
 
         text_width = max(240, min(canvas_width - 72, 640))
@@ -31848,9 +37571,9 @@ class AnnotationTab:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
             nav_hint = (
-                "Q/E tablica globalnie"
+                "Q/E przełącza poprzednią/następną tablicę w paczce"
                 if bool(getattr(self, "_preview_super_correction_active", False))
-                else "Q/E zdjęcia"
+                else "Q/E przełącza poprzednie/następne zdjęcie na liście"
             )
             super_hint = (
                 "Y wyłącz"
@@ -31860,7 +37583,7 @@ class AnnotationTab:
             drag_hint = "Przytrzymaj W i przeciagnij rog."
             base = (
                 f"Tablica {plate_no}/{len(plates)}. {drag_hint} "
-                f"A zmienia tablice lokalnie, {nav_hint}, Spacja pojazdy, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasuj cały obraz, {super_hint}, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
+                f"A zmienia tablice lokalnie, {nav_hint}, Spacja zatwierdza/cofa zdjęcie, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasowuje cały obraz do okna podglądu, {super_hint}, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
             )
 
         return f"{base}{vehicle_suffix}"
@@ -32212,6 +37935,7 @@ class AnnotationTab:
                 self._mark_preview_image_dirty(
                     ann,
                     refresh_list=False,
+                    refresh_row=False,
                 )
 
         try:
@@ -32221,14 +37945,14 @@ class AnnotationTab:
         self._cancel_preview_drag_refresh()
         self._preview_drag_state = None
         self._preview_pending_vertex_hit = None
-        self._refresh_preview_canvas()
+        self._refresh_preview_canvas_interactive(delay_ms=420)
         self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
         if mark_dirty:
             # Przytrzymane W oznacza sesje szybkiej korekty wielu rogĂłw.
             # Nie zapisujemy wtedy po kazdym puszczeniu myszy, bo to wcinalo
             # sie w chwyt kolejnego punktu. Zapis wraca po puszczeniu W.
             if not self._preview_modifier_active():
-                self._schedule_preview_autosave(delay_ms=900)
+                self._schedule_preview_autosave(delay_ms=3500)
         try:
             self.preview_canvas.focus_set()
         except Exception:
@@ -32396,6 +38120,7 @@ class AnnotationTab:
         return candidates[0] if candidates else None
 
     def _ensure_preview_edits_saved(self, action_label: str) -> bool:
+        self._flush_preview_approved_persist()
         if not self._preview_dirty_images:
             return True
 
@@ -32851,7 +38576,7 @@ class AnnotationTab:
             if len(self._preview_draw_points) >= 4:
                 self._commit_new_preview_polygon()
             else:
-                self._refresh_preview_canvas()
+                self._refresh_preview_canvas_interactive(delay_ms=360)
                 self._update_preview_edit_status()
             return True
 
@@ -32868,7 +38593,7 @@ class AnnotationTab:
                         f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
                     )
                 )
-                self._refresh_preview_canvas()
+                self._refresh_preview_canvas_interactive(delay_ms=360)
                 self._update_preview_edit_status(
                     f"Polygon {int(polygon_hit) + 1}/{len(self._get_plate_detections(ann))} jest zaznaczony do usunięcia. Kliknij PPM, aby go usunąć."
                 )
@@ -32882,7 +38607,7 @@ class AnnotationTab:
                     f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
                 )
             )
-            self._refresh_preview_canvas()
+            self._refresh_preview_canvas_interactive(delay_ms=360)
             self._update_preview_edit_status(
                 "Tryb usuwania aktywny: kliknij wewnątrz polygonu, aby zaznaczyć tablicę do usunięcia."
             )
@@ -32926,7 +38651,7 @@ class AnnotationTab:
                     )
                 )
                 if previously_selected_plate != int(plate_idx):
-                    self._refresh_preview_canvas()
+                    self._refresh_preview_canvas_light()
                 self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
                 return True
 
@@ -32943,7 +38668,7 @@ class AnnotationTab:
                     f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
                 )
             )
-            self._refresh_preview_canvas()
+            self._refresh_preview_canvas_interactive(delay_ms=360)
             self._update_preview_edit_status(
                 "Aby przesuwać rogi tablicy, przytrzymaj W i przeciągaj uchwyt myszą.",
                 refresh_toolbar=False,
@@ -32962,7 +38687,7 @@ class AnnotationTab:
                     f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
                 )
             )
-            self._refresh_preview_canvas()
+            self._refresh_preview_canvas_interactive(delay_ms=360)
             self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
             return True
 
@@ -32977,10 +38702,10 @@ class AnnotationTab:
                     f"{self._describe_preview_hit_debug(canvas_x, canvas_y, event)}"
                 )
             )
-            self._refresh_preview_canvas()
+            self._refresh_preview_canvas_interactive(delay_ms=360)
             self._update_preview_edit_status(
                 f"Wybrano pojazd {int(vehicle_hit) + 1}/{len(self._get_vehicle_detections(ann))}. "
-                "Spacja kadruje ten pojazd i przeskakuje do kolejnych aut.",
+                "Wybrany pojazd może pomóc przy ręcznym dodawaniu tablicy w jego obszarze.",
                 refresh_toolbar=False,
                 refresh_debug=False,
             )
@@ -33039,7 +38764,7 @@ class AnnotationTab:
                     previously_selected_plate = self._get_selected_plate_index_for_ann(ann)
                     self._set_selected_plate_index_for_ann(ann, plate_idx)
                     if previously_selected_plate != int(plate_idx):
-                        self._refresh_preview_canvas()
+                        self._refresh_preview_canvas_light()
                     self._begin_preview_vertex_drag(plate_idx, vertex_idx, anchor_canvas_x, anchor_canvas_y)
                     self._push_preview_debug_event(
                         "drag-begin",
@@ -33098,8 +38823,8 @@ class AnnotationTab:
             start_vertex_y + (float(cursor_y) - start_cursor_y),
         )
         det.polygon = polygon
-        det.bbox = self._bbox_from_polygon(polygon)
-        det.keypoints = self._keypoints_from_polygon(polygon)
+        # Bbox i keypointy przeliczamy dopiero po puszczeniu myszy. W trakcie
+        # dragu liczy się płynny podgląd narożnika, nie pełna normalizacja detekcji.
         det.attributes["manually_edited"] = "true"
         det.attributes["manual_source"] = "preview"
         ann.status = AnnotationStatus.SUCCESS
@@ -33109,7 +38834,7 @@ class AnnotationTab:
 
         # Zapis wykonujemy dopiero po zakonczeniu przeciagania, zeby nie mielic XML-a
         # przy kazdym ruchu kursora i nie powodowac lagow podczas edycji.
-        self._schedule_preview_drag_refresh(delay_ms=16)
+        self._schedule_preview_drag_refresh(delay_ms=24)
         now = time.monotonic()
         if (now - float(getattr(self, "_preview_debug_last_drag_update_at", 0.0) or 0.0)) >= 0.2:
             self._preview_debug_last_drag_update_at = now
@@ -33171,16 +38896,11 @@ class AnnotationTab:
 
         shift_pressed = bool(modifier_state & 0x0001)
         control_pressed = bool(modifier_state & 0x0004)
-        try:
-            current_display_index = self._get_preview_display_index(self.current_preview_index)
-        except Exception:
-            current_display_index = None
-        if current_display_index is not None and not (0 <= int(current_display_index) < size):
-            current_display_index = None
         preserve_preview = False
 
         try:
             if shift_pressed:
+                self._suppress_preview_reload_on_list_select = True
                 try:
                     anchor_index = int(self.preview_listbox.index(tk.ANCHOR))
                 except Exception:
@@ -33196,23 +38916,14 @@ class AnnotationTab:
                 if not control_pressed:
                     self._clear_listbox_selection_fast(self.preview_listbox)
                 self.preview_listbox.selection_set(start_index, end_index)
-                if current_display_index is not None:
-                    self.preview_listbox.activate(current_display_index)
-                else:
-                    self.preview_listbox.activate(anchor_index)
-                self.preview_listbox.see(target_index)
                 preserve_preview = True
             elif control_pressed:
+                self._suppress_preview_reload_on_list_select = True
                 if self.preview_listbox.selection_includes(target_index):
                     self.preview_listbox.selection_clear(target_index)
                 else:
                     self.preview_listbox.selection_set(target_index)
                 self.preview_listbox.selection_anchor(target_index)
-                if current_display_index is not None:
-                    self.preview_listbox.activate(current_display_index)
-                else:
-                    self.preview_listbox.activate(target_index)
-                self.preview_listbox.see(target_index)
                 preserve_preview = True
             else:
                 self._suppress_preview_reload_on_list_select = False
@@ -33226,10 +38937,10 @@ class AnnotationTab:
 
         if preserve_preview:
             self._suppress_preview_reload_on_list_select = True
-            self._update_preview_toolbar_state()
+            self._refresh_plate_auto_scope_modal_selection_state()
             return "break"
 
-        self._on_preview_select(None)
+        self._on_preview_select(None, defer_render=True)
         return "break"
 
     def _refresh_preview_list_context_menu_state(
@@ -33349,7 +39060,7 @@ class AnnotationTab:
                     self.preview_listbox.selection_anchor(target_index)
                     self.preview_listbox.activate(target_index)
                     self.preview_listbox.see(target_index)
-                    self._on_preview_select(None)
+                    self._on_preview_select(None, defer_render=False)
                 else:
                     self.preview_listbox.activate(target_index)
             except Exception:
@@ -33359,16 +39070,17 @@ class AnnotationTab:
         y_root = int(getattr(event, "y_root", 0) or 0)
         return self._show_preview_list_context_menu(x_root, y_root)
 
-    def _on_preview_select(self, event):
+    def _on_preview_select(self, event, *, defer_render: bool = True):
         select_started = time.perf_counter()
         if getattr(self, "_suppress_preview_reload_on_list_select", False):
             self._suppress_preview_reload_on_list_select = False
-            self._update_preview_toolbar_state(refresh_summary=False)
+            self._refresh_plate_auto_scope_modal_selection_state()
             return
         self._defer_preview_autosave_for_navigation(delay_ms=700)
         sel = self.preview_listbox.curselection()
         if not sel or not self.current_annotations:
             self._update_preview_toolbar_state(refresh_summary=False)
+            self._refresh_plate_auto_scope_modal_selection_state()
             return
 
         try:
@@ -33381,10 +39093,11 @@ class AnnotationTab:
         idx = self._get_preview_actual_index_from_display(active_display_index)
         if idx is None:
             self._update_preview_toolbar_state(refresh_summary=False)
+            self._refresh_plate_auto_scope_modal_selection_state()
             return
         previous_idx = self.current_preview_index
         if previous_idx is not None and int(idx) == int(previous_idx):
-            self._update_preview_toolbar_state(refresh_summary=False)
+            self._refresh_plate_auto_scope_modal_selection_state()
             try:
                 self.preview_canvas.focus_set()
             except Exception:
@@ -33393,6 +39106,15 @@ class AnnotationTab:
         self.current_preview_index = idx
         self._preview_session_restore_index = idx
         self._preview_session_restore_filename = str(getattr(self.current_annotations[idx], "filename", "") or "")
+        if defer_render:
+            self._schedule_preview_selection_render(
+                idx,
+                previous_idx,
+                reset_view=True,
+            )
+            self._refresh_plate_auto_scope_modal_selection_state()
+            return
+        self._cancel_preview_selection_render()
         self._load_current_preview_selection(
             reset_view=True,
             selection_changed=(idx != previous_idx),
@@ -33409,6 +39131,7 @@ class AnnotationTab:
             self.preview_canvas.focus_set()
         except Exception:
             pass
+        self._refresh_plate_auto_scope_modal_selection_state()
 
     def _update_progress(self, pct, current, total, filename, successful=0):
         self._progress_update_seen = True
@@ -33515,6 +39238,8 @@ class AnnotationTab:
             self._refresh_step2_action_states()
             self._refresh_left_panel_route_copy()
             self._refresh_free_mode_workflow_ui()
+            if not self._is_free_mode_session_context():
+                self._refresh_step2_action_states()
             if self._is_free_mode_session_context():
                 try:
                     self.app.update_status(f"{msg} {next_steps}", "success")
@@ -33532,7 +39257,10 @@ class AnnotationTab:
                             (
                                 "Utworzono nowy run ręcznej anotacji Z2 oraz plik annotations.xml.\n\n"
                                 "Możesz teraz kliknąć Dalej w karcie, aby przejść do właściwego okna Z2 "
-                                "z listą obrazów i podglądem do ręcznej pracy."
+                                "z listą obrazów i podglądem do ręcznej pracy.\n\n"
+                                "Warunek dalszych akcji: narysuj lub popraw ramkę/poligon tablicy na co najmniej "
+                                "jednym obrazie, zapisz anotację i nadaj temu obrazowi status [OK]. Dopiero wtedy "
+                                "aktywują się CTA „Wytnij tablice” oraz „Przejdź do splitu i eksportu”."
                             ),
                             parent=parent_window,
                         )
@@ -33541,11 +39269,26 @@ class AnnotationTab:
                         self.frame.after_idle(_show_manual_xml_success_dialog)
                     except Exception:
                         _show_manual_xml_success_dialog()
+                elif not manual_template_success:
+                    try:
+                        self.frame.after_idle(
+                            lambda next_steps=next_steps: self._show_auto_annotation_success_dialog(next_steps)
+                        )
+                    except Exception:
+                        self._show_auto_annotation_success_dialog(next_steps)
             else:
                 try:
                     self.app.update_status(f"{msg} {next_steps}", "success")
                 except Exception:
                     pass
+            try:
+                self._schedule_preview_list_population_consistency_check(
+                    reason="annotation-finish-success",
+                    delay_ms=180,
+                    render_current=False,
+                )
+            except Exception:
+                pass
         else:
             msg_text = str(msg or "").strip()
             lowered_msg = msg_text.lower()
@@ -33573,6 +39316,8 @@ class AnnotationTab:
             self._refresh_step2_action_states()
             self._refresh_left_panel_route_copy()
             self._refresh_free_mode_workflow_ui()
+            if not self._is_free_mode_session_context():
+                self._refresh_step2_action_states()
             try:
                 parent_window = self.frame.winfo_toplevel()
             except Exception:
@@ -33701,6 +39446,38 @@ class AnnotationTab:
                     ),
                 )
 
+            if approval_iteration_target != "plate":
+                try:
+                    run_approved_images, run_approved_plates = self._get_run_plate_approved_counts(staging_run)
+                except Exception:
+                    run_approved_images, run_approved_plates = 0, 0
+            if approval_iteration_target == "plate" and (run_approved_images <= 0 or run_approved_plates <= 0):
+                if project_approved_images <= 0 or project_approved_plates <= 0:
+                    self._refresh_step2_action_states()
+                    return messagebox.showwarning(
+                        "Brak zatwierdzonych obrazów",
+                        "Aby domknąć E2 w torze tablic, zaznacz na liście co najmniej jeden poprawny obraz i oznacz go jako OK.",
+                    )
+            try:
+                campaign_tab = self.app.tabs.get("campaign") if getattr(self.app, "tabs", None) else None
+                confirm_no_progress = getattr(campaign_tab, "_confirm_step2_without_current_iteration_contribution", None)
+                if callable(confirm_no_progress) and not confirm_no_progress(
+                    approval_context=approval_context,
+                    run_approved_images=int(run_approved_images or 0),
+                    run_approved_plates=int(run_approved_plates or 0),
+                ):
+                    self._refresh_step2_action_states()
+                    try:
+                        self.app.update_status(
+                            "Zatwierdzenie E2 przerwane. Dodaj nowe zatwierdzone tablice albo świadomie zatwierdź E2 bez nowego wkładu.",
+                            "warning",
+                        )
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
             final_auto_dir = CAMPAIGN.get_dir("auto_ann")
             if final_auto_dir is None:
                 return messagebox.showerror("Błąd", "Nie udało się ustalić katalogu docelowego autoanotacji dla projektu.")
@@ -33735,13 +39512,6 @@ class AnnotationTab:
             self.last_staging_run_dir = target_dir
             approved_set_result = {}
             run_approved_images, run_approved_plates = self._get_run_plate_approved_counts(target_dir)
-            if approval_iteration_target == "plate" and (run_approved_images <= 0 or run_approved_plates <= 0):
-                if project_approved_images <= 0 or project_approved_plates <= 0:
-                    self._refresh_step2_action_states()
-                    return messagebox.showwarning(
-                        "Brak zatwierdzonych obrazów",
-                        "Aby domknąć E2 w torze tablic, zaznacz na liście co najmniej jeden poprawny obraz i oznacz go jako OK.",
-                    )
             try:
                 manifest = self._load_annotation_run_manifest(target_dir)
                 if self._annotation_run_manifest_has_manual_value(manifest):

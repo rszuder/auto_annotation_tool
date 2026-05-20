@@ -21,17 +21,6 @@ class Step2CtaViewModel:
 
 
 @dataclass(frozen=True)
-class Step2RouteChoiceViewModel:
-    id: str = ""
-    label: str = ""
-    visible: bool = True
-    enabled: bool = True
-    selected: bool = False
-    command_id: str = ""
-    command_context: dict = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class Step2ViewModel:
     stage_key: str = "step2"
     iteration_target: str = ""
@@ -41,8 +30,5 @@ class Step2ViewModel:
     title: str = "E2"
     summary: str = ""
     details: str = ""
-    route_hint: str = ""
-    route_lock_reason: str = ""
-    route_choices: list[Step2RouteChoiceViewModel] = field(default_factory=list)
     primary_cta: Step2CtaViewModel | None = None
     secondary_cta: Step2CtaViewModel | None = None

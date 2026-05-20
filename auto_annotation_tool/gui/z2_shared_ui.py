@@ -28,7 +28,16 @@ def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> 
     current_step = host._coerce_workflow_step()
     if host._get_workflow_step() != current_step:
         host._set_workflow_step_state(current_step, campaign_context=host._is_campaign_step2_context())
-    manual_review_active = bool(host._manual_review_active and has_existing_run)
+    manual_review_screen_active = False
+    try:
+        manual_review_screen_active = bool(
+            host._is_free_mode_session_context()
+            and host._coerce_free_mode_screen() == "manual_review"
+            and host._manual_review_active
+        )
+    except Exception:
+        manual_review_screen_active = False
+    manual_review_active = bool(host._manual_review_active and (has_existing_run or manual_review_screen_active))
     manual_review_from_auto = bool(manual_review_active and host._manual_review_from_auto)
     auto_completed = host._is_z2_auto_flow_completed(
         route=route,
@@ -364,7 +373,7 @@ def apply_z2_workflow_left_layout(
         and bool(str(host.run_intro_var.get() or "").strip()),
         anchor=tk.W,
         fill=tk.X,
-        pady=(0, 6),
+        pady=((0, 0) if (campaign_context and campaign_char_repair_mode) else (0, 6)),
     )
     host._set_widget_packed(
         host.route_badge_lbl,
@@ -372,7 +381,8 @@ def apply_z2_workflow_left_layout(
         and not (campaign_context and show_manual_review_followup)
         and not hide_manual_setup_header_meta
         and not compact_free_mode_auto_header
-        and not compact_free_mode_manual_header,
+        and not compact_free_mode_manual_header
+        and not (campaign_context and campaign_char_repair_mode),
         anchor=tk.W,
         fill=tk.X,
         pady=(0, 2),
@@ -386,7 +396,7 @@ def apply_z2_workflow_left_layout(
         and not compact_free_mode_manual_header,
         anchor=tk.W,
         fill=tk.X,
-        pady=(0, 2),
+        pady=((1, 0) if (campaign_context and campaign_char_repair_mode) else (0, 2)),
     )
     host._set_widget_packed(
         host.workflow_action_hint_lbl,
@@ -398,7 +408,7 @@ def apply_z2_workflow_left_layout(
         and bool(str(host.workflow_action_hint_var.get() or "").strip()),
         anchor=tk.W,
         fill=tk.X,
-        pady=(0, 3),
+        pady=((2, 0) if (campaign_context and campaign_char_repair_mode) else (0, 3)),
     )
     hide_compact_route_meta = bool(
         compact_single_route_layout
@@ -413,9 +423,9 @@ def apply_z2_workflow_left_layout(
     if campaign_context and campaign_stage >= 3:
         try:
             return_label = (
-                "Wroc do wizarda (E3)"
+                "Wróć do wizarda (E3)"
                 if campaign_char_repair_mode
-                else (f"Wroc do wizarda (E{campaign_stage})" if campaign_stage <= 4 else "Wroc do wizarda")
+                else (f"Wróć do wizarda (E{campaign_stage})" if campaign_stage <= 4 else "Wróć do wizarda")
             )
             host.return_to_campaign_btn.configure(text=return_label)
             host.return_to_campaign_right_btn.configure(text=return_label)
@@ -449,6 +459,22 @@ def apply_z2_workflow_left_layout(
             if widget is not None and host._widget_is_packed(widget):
                 return widget
         return None
+
+    manual_start_vehicle_options = bool(
+        (not campaign_context)
+        and show_workflow_steps
+        and route == "manual"
+        and manual_setup
+        and current_step == "manual_start"
+        and not bool(getattr(host, "_manual_template_ready_for_review", False))
+    )
+    campaign_manual_input_vehicle_options = bool(
+        campaign_context
+        and show_workflow_steps
+        and route == "manual"
+        and manual_setup
+        and current_step == "manual_input"
+    )
 
     host._set_widget_packed(
         host.auto_plate_model_section,
@@ -496,15 +522,29 @@ def apply_z2_workflow_left_layout(
     host._set_widget_packed(host.manual_xml_template_hint_lbl, False)
     host._set_widget_packed(
         host.workflow_manual_vehicle_assist_check,
-        show_workflow_steps and current_step == "manual_input" and manual_setup,
+        campaign_manual_input_vehicle_options,
         anchor=tk.W,
         pady=(6, 2),
     )
     host._set_widget_packed(
         host.workflow_manual_vehicle_assist_hint_lbl,
-        show_workflow_steps and current_step == "manual_input" and manual_setup,
+        campaign_manual_input_vehicle_options,
         fill=tk.X,
         pady=(0, 6),
+    )
+    host._set_widget_packed(
+        getattr(host, "workflow_start_manual_vehicle_assist_check", None),
+        manual_start_vehicle_options,
+        anchor=tk.W,
+        pady=(6, 2),
+        before=getattr(host, "start_btn_row", None),
+    )
+    host._set_widget_packed(
+        getattr(host, "workflow_start_manual_vehicle_assist_hint_lbl", None),
+        manual_start_vehicle_options,
+        fill=tk.X,
+        pady=(0, 6),
+        before=getattr(host, "start_btn_row", None),
     )
     host._set_widget_packed(
         host.workflow_conf_section,
@@ -512,8 +552,7 @@ def apply_z2_workflow_left_layout(
         and (
             current_step == "manual_conf"
             or (
-                current_step == "manual_input"
-                and manual_setup
+                (campaign_manual_input_vehicle_options or manual_start_vehicle_options)
                 and vehicle_assist_enabled
             )
         ),
@@ -530,8 +569,7 @@ def apply_z2_workflow_left_layout(
         and (
             current_step == "manual_vehicle_model"
             or (
-                current_step == "manual_input"
-                and manual_setup
+                (campaign_manual_input_vehicle_options or manual_start_vehicle_options)
                 and vehicle_assist_enabled
             )
         ),
@@ -588,6 +626,43 @@ def apply_z2_workflow_left_layout(
         anchor=tk.W,
         pady=(0, 8),
     )
+    post_hint_label = getattr(host, "post_annotation_hint_lbl", None)
+    post_hint_visible = False
+    if post_hint_label is not None and not (show_auto_followup and not campaign_context):
+        try:
+            post_hint_visible = bool(str(post_hint_label.cget("text") or "").strip())
+        except Exception:
+            post_hint_visible = False
+    host._set_widget_packed(
+        post_hint_label,
+        post_hint_visible,
+        fill=tk.X,
+        pady=(6, 0),
+    )
+    try:
+        if show_auto_followup and not campaign_context:
+            cut_ready = False
+            try:
+                run_dir = host._get_preferred_annotation_run_dir(require_xml=True)
+                cut_ready = bool(
+                    run_dir is not None
+                    and host._get_run_plate_strict_approved_state(run_dir).get("ok")
+                )
+            except Exception:
+                cut_ready = False
+            host.open_run_dir_btn.configure(
+                text="Wytnij tablice",
+                command=host._open_step3_from_z2_annotation_source,
+                state=(tk.NORMAL if cut_ready and not host.is_processing else tk.DISABLED),
+            )
+        else:
+            host.open_run_dir_btn.configure(
+                text="Otwórz folder runu",
+                command=host._open_current_run_dir,
+                state=(tk.NORMAL if not host.is_processing else tk.DISABLED),
+            )
+    except Exception:
+        pass
     try:
         if show_auto_followup and not campaign_context:
             if str(host.followup_title_lbl.winfo_manager()) == "pack":
@@ -611,8 +686,6 @@ def apply_z2_workflow_left_layout(
         ):
             ordered_widgets = [
                 (getattr(host, "workflow_input_section", None), {"fill": tk.X, "pady": (0, 2)}),
-                (getattr(host, "workflow_vehicle_model_section", None), {"fill": tk.X, "pady": ((0, 0) if vehicle_assist_enabled else (0, 10))}),
-                (getattr(host, "workflow_conf_section", None), {"fill": tk.X, "pady": ((0, 6) if vehicle_assist_enabled else (0, 10))}),
             ]
             visible_widgets = []
             for widget, pack_kwargs in ordered_widgets:
@@ -639,8 +712,6 @@ def apply_z2_workflow_left_layout(
                 host.workflow_input_hint_lbl.pack_configure(anchor=tk.W, fill=tk.X, pady=(0, 4))
             input_group_widgets = [
                 (getattr(host, "workflow_input_row", None), {"fill": tk.X, "pady": (2, 6)}),
-                (getattr(host, "workflow_manual_vehicle_assist_check", None), {"anchor": tk.W, "pady": (2, 2)}),
-                (getattr(host, "workflow_manual_vehicle_assist_hint_lbl", None), {"fill": tk.X, "pady": (0, 4)}),
             ]
             visible_input_group_widgets = []
             for widget, pack_kwargs in input_group_widgets:
@@ -671,7 +742,7 @@ def apply_z2_workflow_left_layout(
             (not campaign_context)
             and route == "manual"
             and manual_setup
-            and current_step == "manual_input"
+            and current_step == "manual_start"
             and vehicle_assist_enabled
         )
         conf_title_lbl = getattr(host, "workflow_conf_title_lbl", None)
@@ -788,9 +859,13 @@ def apply_z2_workflow_cta_ui(
         fill=tk.X,
         pady=((0, 2) if ((not campaign_context) and route == "auto" and current_step == "auto_start") else (0, 10)),
     )
+    try:
+        workflow_start_title_text = str(host.workflow_start_title_lbl.cget("text") or "").strip()
+    except Exception:
+        workflow_start_title_text = ""
     host._set_widget_packed(
         host.workflow_start_title_lbl,
-        show_start_controls,
+        show_start_controls and bool(workflow_start_title_text),
         anchor=tk.W,
         fill=tk.X,
     )
@@ -847,18 +922,19 @@ def apply_z2_workflow_cta_ui(
 
     back_enabled = bool(cta_state.back_enabled)
     next_enabled = bool(cta_state.next_enabled)
+    back_text = str(getattr(cta_state, "back_text", "Wstecz") or "Wstecz")
     next_text = str(cta_state.next_text or "Dalej")
     show_next_button = bool(str(cta_state.next_text or "").strip())
     try:
         host.workflow_back_btn.configure(
             state=(tk.NORMAL if back_enabled else tk.DISABLED),
-            text="Wstecz",
-            width=18,
+            text=back_text,
+            width=max(18, min(28, len(back_text) + 2)),
         )
         host.workflow_next_btn.configure(
             state=(tk.NORMAL if next_enabled else tk.DISABLED),
             text=next_text,
-            width=18,
+            width=max(18, min(30, len(next_text) + 2)),
         )
         if show_next_button:
             host.workflow_next_btn.grid()

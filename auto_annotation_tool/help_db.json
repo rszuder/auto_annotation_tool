@@ -1,6 +1,6 @@
 {
   "app_free_assistant": {
-    "full_help": "Przełącza asystenta trybu swobodnego. Asystent nie steruje aplikacją i nie blokuje pracy: pokazuje aktualny kontekst zakładki/PZ, cel bieżącego miejsca oraz słownik pojęć używanych w interfejsie. Po włączeniu możesz przeciągnąć go za nagłówek GRAB."
+    "full_help": "Przełącza asystenta kontekstu AS. Asystent nie steruje aplikacją i nie blokuje pracy: w trybie swobodnym opisuje zakładkę/PZ, a w wizardzie aktualną kartę etapu. Pokazuje cel bieżącego miejsca oraz słownik pojęć używanych w interfejsie. Po włączeniu możesz przeciągnąć go za nagłówek GRAB."
   },
   "app_global_terminal": {
     "full_help": "Pokazuje lub ukrywa globalny terminal aplikacji. Trafiają tu najważniejsze logi procesów z Z2, Z3, Z4, blokad operacji, treningu i eksportów. To miejsce diagnostyczne, nie element workflow."
@@ -240,7 +240,7 @@
     "full_help": "Otwiera pełny obszar roboczy Z2 do korekty anotacji. Używasz go po utworzeniu XML albo po autoanotacji, aby sprawdzić obrazy, poprawić poligony i oznaczyć pozycje jako OK."
   },
   "tab1_open_run": {
-    "full_help": "Otwiera katalog aktywnego runu Z2 w systemie plików. To tylko podgląd artefaktów: annotations.xml, manifestów, logów i eksportów. Nie zastępuje zatwierdzenia w aplikacji."
+    "full_help": "W korekcie po autoanotacji przycisk „Wytnij tablice” przechodzi do Z3/PZ1 i przygotowuje cropy tablic z aktualnego runu Z2. To osobna ścieżka względem eksportu datasetu YOLO Pose."
   },
   "tab1_preview_edit": {
     "full_help": "Narzędzia ręcznej edycji podglądu Z2. Pozwalają dodać polygon tablicy, poprawić geometrię i zapisać zmiany do XML aktywnego runu."

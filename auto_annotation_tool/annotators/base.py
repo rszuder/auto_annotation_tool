@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 import threading
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE
+from ..config import CONFIG, logger, YOLO_AVAILABLE, resolve_runtime_device
 from ..data_models import Detection, ImageAnnotation, AnnotationReport
 from ..utils import get_image_files, cleanup_gpu_memory
 
@@ -21,7 +21,7 @@ class BaseAnnotator(ABC):
                  confidence: float = 0.25,
                  device: str = "auto"):
         self.confidence = confidence
-        self.device = device if device != "auto" else ("cuda" if CUDA_AVAILABLE else "cpu")
+        self.device = resolve_runtime_device(device)
         self.report = AnnotationReport()
         
         self._stop_event = threading.Event()

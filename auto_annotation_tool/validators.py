@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Set, Tuple
 
-from .config import CONFIG, logger, YOLO_AVAILABLE, YOLO
+from .config import CONFIG, logger, YOLO_AVAILABLE, get_yolo_class
 from .utils import safe_load_yaml, cleanup_gpu_memory
 
 
@@ -260,10 +260,13 @@ def validate_model_file(model_path: Path, _visited: set[str] | None = None) -> T
 
     if not YOLO_AVAILABLE:
         return False, "YOLO niedostępny", info
+    YoloClass = get_yolo_class()
+    if YoloClass is None:
+        return False, "YOLO niedostępny", info
 
     model = None
     try:
-        model = YOLO(str(model_path))
+        model = YoloClass(str(model_path))
 
         if hasattr(model, "task"):
             info["task"] = str(model.task)

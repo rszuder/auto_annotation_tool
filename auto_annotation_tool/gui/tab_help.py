@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zakładka Z5: pomoc, instrukcje i architektura projektu.
+Zakładka Z5: przewodnik użytkownika, kampania i architektura danych.
 """
 
 import tkinter as tk
 from tkinter import ttk
 
 from ..config import CONFIG
+from .inertial_scroll import InertialScrollController
 from .web_slim_scrollbar import WebSlimScrollbar
 
 
@@ -20,6 +21,7 @@ class HelpTab:
         self.frame = ttk.Frame(parent)
         self._startup_ui_ready = False
         self._doc_widgets = []
+        self._inertial_scroll = InertialScrollController(self.frame, decay=0.80, interval_ms=14)
         self._create_widgets()
         self.frame.after_idle(self._mark_startup_ui_ready)
 
@@ -36,17 +38,17 @@ class HelpTab:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         self.t1 = self._create_text_page(
-            "[PZ1] Workflow i praktyka",
+            "[PZ1] Jak pracować",
             palette=palette,
             filler=self._fill_workflow,
         )
         self.t2 = self._create_text_page(
-            "[PZ2] Kampania i iteracje",
+            "[PZ2] Kampania",
             palette=palette,
             filler=self._fill_campaign,
         )
         self.t3 = self._create_text_page(
-            "[PZ3] Architektura i dane",
+            "[PZ3] Dane i architektura",
             palette=palette,
             filler=self._fill_architecture,
         )
@@ -79,6 +81,8 @@ class HelpTab:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         text.configure(yscrollcommand=scrollbar.set)
         text.web_vbar = scrollbar
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            text.bind(sequence, self._on_doc_text_mousewheel, add="+")
 
         self._setup_tags(text)
         self.app.style_text_widget(text, role="doc")
@@ -171,130 +175,160 @@ class HelpTab:
         widget.insert(tk.END, str(label).strip() + " ", tag)
         widget.insert(tk.END, str(text).strip() + "\n", ())
 
+    @staticmethod
+    def _text_widget_can_scroll(widget, units: int) -> bool:
+        if widget is None or units == 0:
+            return False
+        try:
+            first, last = widget.yview()
+            if units < 0 and float(first) <= 0.0:
+                return False
+            if units > 0 and float(last) >= 1.0:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _on_doc_text_mousewheel(self, event=None):
+        widget = getattr(event, "widget", None)
+        units = self._inertial_scroll.mousewheel_units(event)
+        if units == 0 or not self._text_widget_can_scroll(widget, units):
+            return None
+        self._inertial_scroll.queue_canvas_by_units(
+            widget,
+            units,
+            magnitude=self._inertial_scroll.mousewheel_magnitude(event),
+        )
+        return "break"
+
     def _fill_workflow(self, widget):
         self._clear_and_enable(widget)
 
-        widget.insert(tk.END, "Z5. Aktualny przewodnik pracy\n", "H1")
+        widget.insert(tk.END, "Z5. Przewodnik pracy w aktualnej aplikacji\n", "H1")
         self._paragraph(
             widget,
-            "Ta karta opisuje dzisiejszy, rzeczywisty workflow aplikacji. "
-            "Skupia się na tym, jak pracować teraz w Z1-Z4, jak czytać podział na tory "
-            "tablic i znaków oraz jak nie pomylić artefaktów pochodzących z różnych etapów.",
+            "Ta karta jest mapą pracy użytkownika, a nie opisem starej historii refaktorów. "
+            "Pokazuje, gdzie powstają dane, kiedy są tylko robocze, kiedy stają się trwałym artefaktem "
+            "i które zakładki są właściwym miejscem do kolejnego kroku.",
+        )
+
+        self._section(widget, "Najważniejsza zasada")
+        self._paragraph(
+            widget,
+            "Z1 prowadzi kampanię, ale nie wykonuje pracy merytorycznej. Realna praca odbywa się w Z2, Z3 i Z4. "
+            "Z5 ma pomóc zrozumieć, dlaczego aplikacja czasem prosi o powrót do konkretnej podzakładki zamiast "
+            "pozwalać przeskoczyć dalej na skróty.",
+        )
+        self._bullet_list(
+            widget,
+            [
+                "Z2 odpowiada za tablice na obrazach: anotację, korektę, status [OK] i eksport.",
+                "Z3 odpowiada za znaki z tablic: wycinanie tablic, OCR/YOLO/hybrydę, CVAT, perfecty i dataset znaków.",
+                "Z4 odpowiada za wariant datasetu, split, trening, walidację, historię i ranking modeli.",
+                "Z5 odpowiada za orientację: wyjaśnia flow, dane, pojęcia i relacje między zakładkami.",
+            ],
         )
 
         self._section(widget, "Dwa tryby pracy")
         self._bullet_list(
             widget,
             [
-                "Tryb swobodny: sam wskazujesz foldery, runy, datasety i modele. To najlepszy tryb do eksperymentów, napraw i pracy poza kampanią.",
-                "Tryb kampanii: projekt ma własną iterację, własne katalogi i stan zapisany przez Wizard. Zakładki robocze wykonują pracę, a Z1 prowadzi przez E1-E4.",
-                "Z5 dokumentuje oba tryby, ale zawsze w pierwszej kolejności opisuje to, co jest źródłem prawdy w aktualnej implementacji.",
+                "Tryb swobodny (F): sam wybierasz źródła, runy, datasety i modele. To tryb eksperymentów, napraw, testów i pracy poza kampanią.",
+                "Tryb kampanii (C): projekt ma iterację, tor, bramki E1-E4 i własne katalogi. Wizard pilnuje kolejności oraz spójności artefaktów.",
+                "Nie mieszaj założeń tych trybów. W trybie F elastyczność jest zaletą, a w trybie C ważniejsza jest przewidywalność i powtarzalność.",
             ],
         )
 
-        self._section(widget, "Mapa aplikacji")
+        self._section(widget, "Mapa zakładek")
         self._bullet_list(
             widget,
             [
-                "[Z1] Wizard: nawigacja po projekcie, decyzje kampanijne, status iteracji i przejścia do zakładek roboczych.",
-                "[Z2] Anotacja tablic: autoanotacja, ręczna korekta polygonów, przegląd listy, oznaczanie [OK] i domykanie etapu E2.",
-                "[Z3] Autoanotacja znaków tablic: PZ1 wyodrębnia tablice, PZ2 analizuje znaki i boxy, PZ3 robi eksporty, importy i dataset znaków.",
-                "[Z4] Trening i analiza: PZ1 przygotowuje dataset lub split, PZ2 prowadzi trening, walidacje, historię i ranking modeli.",
-                "[Z5] Instrukcja i architektura: zbiera zasady pracy, model kampanii i opis danych.",
+                "[Z1] Wizard kampanii: wybór projektu, iteracja, E1-E4, tor tablic albo tor znaków, powroty do zakładek roboczych.",
+                "[Z2] Tablice: ręczny run XML, autoanotacja z modalem modeli, korekta, status [OK], eksport anotacji i eksport YOLO tablic.",
+                "[Z3/PZ1] Wycinanie tablic: wybór zgodnego XML i folderu obrazów albo kontynuacja na runie, a potem produkcja cropów tablic.",
+                "[Z3/PZ2] Przegląd znaków: OCR, YOLO, hybryda, ręczna poprawa boxów znaków, kompas skrótów i lista przypadków.",
+                "[Z3/PZ3] Dataset znaków i CVAT: review pack, import poprawek, gold pack, perfecty i budowa datasetu znaków.",
+                "[Z4/PZ1] Źródło treningu: wybór toru, wskazanie źródła i tworzenie wariantów datasetu lub splitu.",
+                "[Z4/PZ2] Trening i wyniki: wybór gotowego wariantu, model bazowy, parametry treningu, walidacja, historia i ranking.",
+            ],
+        )
+
+        self._section(widget, "Typowy flow tablic")
+        self._bullet_list(
+            widget,
+            [
+                "1. W Z2 wybierasz folder obrazów i tworzysz run ręczny albo uruchamiasz autoanotację.",
+                "2. Jeżeli używasz autoanotacji, model tablic jest wybierany w modalu startu procesu. Model pojazdów jest tylko wsparciem lokalizacji tablic.",
+                "3. W Z2 poprawiasz polygony tablic i oznaczasz obrazy jako [OK]. Obraz bez ramki nie powinien być zatwierdzany.",
+                "4. Eksport anotacji wymaga statusu [OK]. Pozycje bez [OK] nie są pełnoprawnym materiałem do domknięcia etapu.",
+                "5. Gotowy eksport może prowadzić do Z4, gdzie tworzysz wariant YOLO Pose tablic i uruchamiasz trening.",
+            ],
+        )
+
+        self._section(widget, "Typowy flow znaków")
+        self._bullet_list(
+            widget,
+            [
+                "1. Najpierw potrzebujesz poprawnych tablic z Z2: XML musi pasować do tego samego folderu obrazów.",
+                "2. W Z3/PZ1 wycinasz tablice. Przed startem użytkownik powinien wiedzieć, ile tablic zostanie wyciętych.",
+                "3. W Z3/PZ2 analizujesz cropy tablic: OCR czyta tekst, YOLO wykrywa znaki, a hybryda łączy oba podejścia.",
+                "4. Błędne przypadki poprawiasz ręcznie albo wysyłasz jako review pack do CVAT i importujesz wynik w tym samym obiegu.",
+                "5. W Z3/PZ3 budujesz dataset znaków. Ten dataset trafia dalej do Z4/PZ1 jako źródło wariantu treningowego.",
             ],
         )
 
         self._section(widget, "Ground truth i nazwy plików")
         self._paragraph(
             widget,
-            "Nazwa obrazu jest nadal najważniejszym źródłem prawdy dla tekstu tablicy. "
-            "OCR, YOLO i hybryda są oceniane względem znaków odczytanych z nazwy pliku.",
-        )
-        self._paragraph(
-            widget,
-            "W trybie swobodnym najlepiej przygotowywać takie paczki obrazów jako osobne katalogi pod "
-            "Workspace/1_raw_images/NazwaPaczki/. Dzięki temu łatwiej utrzymać spójność między Z2, Z3 i późniejszym "
-            "ground truth opartym o nazwy plików.",
+            "Dla znaków bardzo ważna jest nazwa pliku obrazu wejściowego. Z niej aplikacja potrafi wyciągać oczekiwany tekst tablicy, "
+            "czyli ground truth używany później do oceny OCR, YOLO, hybrydy i perfectów.",
         )
         self._code_block(
             widget,
-            "Przykłady:\n"
+            "Przykłady nazw:\n"
             "PO12345_001.jpg\n"
             "DW5AB12_007.jpg\n"
-            "TAB1_TAB2_TAB3_id.jpg",
+            "PO12345_DW5AB12_008.jpg",
         )
         self._bullet_list(
             widget,
             [
-                "Część przed końcowym identyfikatorem obrazu jest interpretowana jako oczekiwany napis tablicy lub lista tablic.",
-                "Jeśli nazwy są niespójne, downstream będzie działał technicznie, ale porównania w Z3/PZ2 i ranking perfectów przestaną mieć wartość diagnostyczną.",
-                "Nie mieszaj w jednej paczce różnych konwencji nazewniczych, jeśli chcesz uczciwie oceniać modele.",
+                "Jeżeli nazwy są niespójne, aplikacja może technicznie działać, ale ocena jakości znaków będzie myląca.",
+                "Jedna paczka wejściowa powinna mieć jedną konwencję nazewnictwa.",
+                "Najczytelniej trzymać paczki wejściowe w Workspace/1_raw_images/<nazwa_paczki>/.",
             ],
         )
 
-        self._section(widget, "Typowy workflow w trybie swobodnym")
+        self._section(widget, "Kiedy artefakt jest roboczy, a kiedy trwały")
         self._bullet_list(
             widget,
             [
-                "1. Zanim wejdziesz do Z2, przygotowujesz paczkę obrazów najlepiej w Workspace/1_raw_images/NazwaPaczki/, tak aby nazwy plików były docelowym ground truth dla tablic.",
-                "2. Z2: uruchamiasz anotację tablic na folderze obrazów. Start tworzy nowy run w Workspace/2_auto_annotations/...",
-                "3. Z2: przeglądasz listę, poprawiasz polygony, zapisujesz zmiany do annotations.xml i w razie potrzeby budujesz dataset tablic.",
-                "4. Z3 / PZ1: bierzesz zgodną parę źródeł, czyli annotations.xml oraz oryginalne obrazy, i wycinasz tablice do nowego runu preview.",
-                "5. Z3 / PZ2: uruchamiasz OCR, YOLO lub hybrydę, porównujesz wynik z ground truth i poprawiasz błędne przypadki.",
-                "6. Z3 / PZ3: eksportujesz przypadki do CVAT, importujesz poprawki i budujesz dataset znaków albo nowy split z aktywnego preview.",
-                "7. Z4: wybierasz tor treningu, wskazujesz gotowy dataset YOLO, dobierasz model bazowy i uruchamiasz trening, walidacje oraz ranking.",
+                "Robocze są stany miniflow, ścieżki tymczasowe, overlaye postępu i niewyeksportowane wyniki procesu.",
+                "Trwałe są zapisane XML, zatwierdzone eksporty, gotowe datasety, warianty splitu, runy treningowe i checkpointy modeli.",
+                "Wyjście do wyboru toru albo jawne zakończenie pracy powinno czyścić kontekst roboczy, ale nie usuwać już wyeksportowanych artefaktów.",
+                "Jeżeli po powrocie widzisz starą ścieżkę albo stary dataset w miejscu nowego flow, to prawdopodobnie trzeba szukać wycieku stanu.",
             ],
         )
 
-        self._section(widget, "Co realnie robi Z2")
+        self._section(widget, "Słownik najczęstszych pojęć")
         self._bullet_list(
             widget,
             [
-                "Z2 nie jest już tylko przyciskiem Start. To pełne miejsce pracy nad listą obrazów, podglądem i ręczną korektą polygonu tablicy.",
-                "W kampanii Z2 potrafi pracować na stagingu iteracji, preview-runie kampanijnym i już zapisanym runie do poprawy.",
-                "Domknięcie E2 przenosi wynik do katalogu docelowego projektu i aktualizuje ApprovedSet tablic, z którego potem korzysta E4 toru tablic.",
-                "W torze znaków E2 bywa etapem przygotowawczym: jego celem nie jest wtedy sam trening tablic, tylko dostarczenie poprawnego źródła do Z3.",
-            ],
-        )
-
-        self._section(widget, "Co realnie robi Z3")
-        self._bullet_list(
-            widget,
-            [
-                "PZ1 wymaga świadomie dobranej pary: annotations.xml i tych samych obrazów, na których ten XML powstał.",
-                "PZ2 pracuje na preview-runie tablic. Tu porównujesz OCR, YOLO i hybrydę, sprawdzasz boxy znaków i naprawiasz przypadki problematyczne.",
-                "PZ3 nie jest już dodatkiem eksportowym. To miejsce, w którym spinasz CVAT, import ręcznych poprawek, tor perfect oraz budowę datasetu znaków.",
-                "W kampanii Z3 potrafi otwierać się automatycznie na gotowej paczce z PZ1 albo wracać do PZ1, gdy zmieniło się źródło tablic z Z2.",
-            ],
-        )
-
-        self._section(widget, "Co realnie robi Z4")
-        self._bullet_list(
-            widget,
-            [
-                "Z4 dzisiaj ma dwa panele robocze: [PZ1] Budowa datasetu oraz [PZ2] Trening i wyniki.",
-                "W trybie swobodnym najczęściej konsumuje już gotowy dataset YOLO; helpery w PZ1 są wtedy narzędziami pomocniczymi, a nie obowiązkowym etapem.",
-                "W kampanii tor jest zablokowany przez E2. Dla tablic Z4 pracuje na ApprovedSecie projektu, a dla znaków na poprawnym datasecie z Z3/PZ3.",
-                "Historia runów, walidacja i ranking są częścią Z4/PZ2, a nie osobnych modułów poza treningiem.",
-            ],
-        )
-
-        self._section(widget, "Praktyczne zasady, które oszczędzają czas")
-        self._bullet_list(
-            widget,
-            [
-                "Nie mieszaj źródeł z różnych runów. Jeśli XML i obrazy nie są tą samą parą, wynik PZ1 będzie technicznie mylący.",
-                "Przed domknięciem E2 zawsze zapisz ręczne poprawki. ApprovedSet ma odzwierciedlać to, co rzeczywiście chcesz przekazać dalej.",
-                "Jeśli w kampanii zmieniło się źródło tablic z Z2, wracaj do PZ1 i przebuduj wycinanie zamiast próbować ratować stary preview-run.",
-                "Terminale procesów są diagnostyczne. Do normalnej pracy można je chować, ale przy problemach z datasetem lub treningiem są pierwszym miejscem do sprawdzenia.",
-                "Dolny pasek pomocy i overlay kontekstowy nadal są szybsze od szukania w kodzie: pokazują rolę aktywnego widgetu w bieżącym workflow.",
+                "Artefakt: plik lub katalog wyprodukowany przez aplikację, np. XML, cropy, dataset, split albo model .pt.",
+                "Crop: wycięty fragment obrazu, zwykle sama tablica przygotowana do OCR lub detekcji znaków.",
+                "Box: prostokąt obiektu, np. pojazdu albo znaku. Box pojazdu wspiera detekcję tablic, ale nie powinien trafiać do finalnego YOLO tablic.",
+                "Polygon: wielopunktowy obrys tablicy używany w Z2 i w YOLO Pose tablic.",
+                "Dataset: uporządkowany zestaw images/labels z plikiem data.yaml albo innym manifestem wymaganym przez dany proces.",
+                "Split: podział datasetu na train, val i test. Test może być pusty, jeśli świadomie przesuniesz wszystko do train/val.",
+                "Checkpoint: zapisany model, zwykle plik .pt, używany do autoanotacji, walidacji albo dalszego treningu.",
+                "CVAT: zewnętrzne narzędzie do ręcznej korekty anotacji. W Z3 eksport review pack i import poprawek muszą być ze sobą zgodne.",
             ],
         )
 
         self._callout(
             widget,
             "Ważne:",
-            "Z5 opisuje stan obecnej aplikacji, w którym Wizard jest nawigatorem, a cała praca merytoryczna odbywa się w Z2, Z3 i Z4.",
+            "Jeżeli nie wiesz, gdzie jesteś, patrz na nazwę zakładki, podzakładkę i cel aktualnej karty. Z5 opisuje aktualny model pracy: cienki Wizard, mocne zakładki robocze i jawne artefakty między etapami.",
             "WARN",
         )
 
@@ -303,105 +337,112 @@ class HelpTab:
     def _fill_campaign(self, widget):
         self._clear_and_enable(widget)
 
-        widget.insert(tk.END, "Kampania, iteracje i logika Z1\n", "H1")
+        widget.insert(tk.END, "Kampania i iteracje Z1\n", "H1")
         self._paragraph(
             widget,
-            "Aktualna kampania nie kopiuje już roboczego UI z Z2-Z4. "
-            "Wizard w Z1 trzyma stan projektu, pokazuje statusy E1-E4 i kieruje do "
-            "właściwych narzędzi. Edycja, anotacja, eksport i trening dzieją się w "
-            "zakładkach roboczych.",
+            "Kampania jest trybem uporządkowanym. Jej celem nie jest maksymalna swoboda, tylko powtarzalny proces: "
+            "ta sama paczka danych, jasny tor iteracji, kontrolowane bramki i czytelna decyzja, kiedy artefakt może iść dalej.",
         )
 
-        self._section(widget, "Jak czytać rolę Z1")
+        self._section(widget, "Rola Wizarda")
         self._bullet_list(
             widget,
             [
-                "Z1 jest panelem sterowania iteracją, a nie osobnym edytorem anotacji ani treningu.",
-                "CampaignManager przechowuje stan trwały: projekt, iteracje, aktualny krok, tor iteracji, finish state E4 i ścieżki do kluczowych artefaktów.",
-                "Zakładki Z2, Z3 i Z4 raportują gotowość i wynik. Wizard tylko renderuje te statusy i prowadzi do właściwego miejsca.",
+                "Wizard jest nawigatorem i strażnikiem stanu kampanii.",
+                "Wizard nie powinien dublować pełnego UI Z2, Z3 ani Z4.",
+                "Wizard otwiera właściwą zakładkę roboczą, odbiera status i zapisuje decyzje iteracji.",
+                "Jeżeli zakładka robocza i Wizard pokazują coś innego, źródłem prawdy jest stan kampanii oraz trwałe artefakty projektu.",
             ],
         )
 
-        self._section(widget, "E1. Paczka wejściowa iteracji")
+        self._section(widget, "E1. Paczka wejściowa")
         self._bullet_list(
             widget,
             [
-                "E1 pracuje na pełnej głównej puli zdjęć. Wybierasz katalog, wczytujesz aktualny wybrany folder zdjęć i jawnie zatwierdzasz E1.",
-                "Sama obecność zdjęć w folderze iteracji nie wystarcza. E2 odblokowuje się dopiero po zatwierdzeniu E1.",
-                "Histogram znaków i analiza puli są pomocnicze. To narzędzia decyzyjne, nie bramka techniczna.",
+                "E1 wybiera i zatwierdza paczkę obrazów iteracji.",
+                "Samo istnienie plików w katalogu nie oznacza jeszcze, że E1 jest zamknięte.",
+                "Po zatwierdzeniu E1 kolejne kroki powinny korzystać z tej samej paczki, chyba że użytkownik jawnie zacznie nową iterację.",
+                "Histogram i podgląd puli pomagają ocenić materiał, ale nie zastępują decyzji użytkownika.",
             ],
         )
 
-        self._section(widget, "E2. Tor iteracji")
+        self._section(widget, "E2. Tablice i wybór toru")
         self._paragraph(
             widget,
-            "W praktyce E2 jest decyzją projektową, która blokuje dalszy przebieg iteracji. "
-            "W rozmowach i starszych opisach możesz jeszcze spotkać nazwy Tor A i Tor B.",
+            "E2 ustala, czy iteracja idzie torem tablic, czy torem znaków. Ten wybór ma konsekwencje dla Z3 i Z4, dlatego po zatwierdzeniu nie powinien być swobodnie przełączany w połowie pracy.",
         )
         self._bullet_list(
             widget,
             [
-                "Tor A = plate = tor tablic. Iteracja koncentruje się na tablicach i po Z2 przechodzi do E4.",
-                "Tor B = char = tor znaków. Najpierw przygotowujesz poprawne tablice dla tej paczki, potem pracujesz w Z3 i dopiero na końcu idziesz do E4.",
-                "Po zatwierdzeniu E2 tor jest zamrożony dla iteracji. Z4 dziedziczy ten wybór i nie pozwala już swobodnie przełączać toru.",
+                "Tor tablic: celem jest poprawny zbiór anotacji tablic i późniejszy trening modelu YOLO Pose tablic.",
+                "Tor znaków: tablice z Z2 są materiałem wejściowym do Z3, gdzie powstaje dataset znaków.",
+                "Z2 może startować ręcznie albo przez autoanotację. W autoanotacji wybór modelu tablic następuje w modalu startowym.",
+                "Domknięcie E2 powinno opierać się na zatwierdzonych anotacjach, a nie na samym fakcie uruchomienia procesu.",
             ],
         )
 
-        self._section(widget, "E3. Znaki i gold pack")
+        self._section(widget, "E3. Znaki")
         self._bullet_list(
             widget,
             [
-                "E3 istnieje tylko dla toru znaków. W torze tablic jest pomijane jako etap roboczy.",
-                "PZ1 wyodrębnia tablice z aktualnego źródła z Z2. PZ2 analizuje znaki i boxy. PZ3 buduje dataset znaków i spina eksporty/importy.",
-                "Jeśli po drodze źródło tablic z Z2 zmieniło się lub zostało rozszerzone, kampania wymusza powrót do PZ1 i ponowne wycinanie.",
+                "E3 występuje tylko w torze znaków.",
+                "Z3/PZ1 bierze tablice z Z2 i tworzy cropy tablic.",
+                "Z3/PZ2 pozwala przejrzeć znaki, OCR, YOLO, hybrydę i ręczne poprawki.",
+                "Z3/PZ3 odpowiada za review pack do CVAT, import poprawek i budowę datasetu znaków.",
+                "Jeżeli zmieniło się źródło tablic w Z2, stary preview-run znaków może być nieaktualny i trzeba wrócić do PZ1.",
             ],
         )
 
-        self._section(widget, "E4. Dataset i trening")
+        self._section(widget, "E4. Dataset, trening i model")
         self._bullet_list(
             widget,
             [
-                "W torze tablic E4 korzysta z zatwierdzonego zbioru projektu. Minimalna bramka to co najmniej 2 oznaczone obrazy w ApprovedSecie.",
-                "W torze znaków E4 wymaga poprawnego datasetu z Z3/PZ3. Samo zamknięcie E3 nie wystarcza, jeśli split lub eksport są niepełne.",
-                "Z4 w kampanii ma dwa obszary: PZ1 przygotowuje dataset albo split, PZ2 prowadzi trening, walidacje, historię i ranking.",
-                "Promocja najlepszego modelu do projektu nie zamyka iteracji automatycznie. Stan gotowości do domknięcia E4 jest trzymany osobno.",
+                "W torze tablic E4 pracuje na zatwierdzonym materiale tablic z projektu.",
+                "W torze znaków E4 pracuje na datasecie znaków z Z3/PZ3.",
+                "Z4/PZ1 przygotowuje lub wybiera wariant datasetu. Z4/PZ2 uruchamia trening i analizuje wyniki.",
+                "Promocja modelu do projektu jest osobną decyzją. Dobry wynik treningu nie powinien automatycznie zamykać iteracji.",
+                "Po przejściu z Z2 do Z4 po eksporcie kontekst Z2 powinien być wyczyszczony, a Z4 powinno dostać gotowy, konkretny dataset.",
             ],
         )
 
-        self._section(widget, "Powroty, naprawy i ponowne wejścia")
+        self._section(widget, "Powroty i poprawki")
         self._bullet_list(
             widget,
             [
-                "Po domknięciu kroku można dalej wracać do Z2, Z3 albo Z4 w trybie przeglądu albo naprawy, ale Wizard nie powinien cofnięciu robić automatycznie za Ciebie.",
-                "W Z4 zwykły powrót do kampanii jest osobną akcją nawigacyjną. Nie należy go mylić z przyciskiem domknięcia E4.",
-                "Jeśli E4 jest już zamknięte, Z4 nadal może służyć do przeglądu wyników, walidacji, historii i ewentualnych decyzji o kolejnej iteracji.",
+                "Powrót do wcześniejszej zakładki jest dozwolony, ale powinien być jawny i zrozumiały dla użytkownika.",
+                "Jeżeli poprawiasz Z2 po tym, jak Z3 już wycięło tablice, rozważ przebudowanie PZ1 w Z3.",
+                "Jeżeli poprawiasz dataset po treningu, traktuj go jako nowy wariant, a nie cichą podmianę starego wyniku.",
+                "Jeżeli zamykasz miniflow albo wracasz do wyboru toru, stan roboczy powinien zostać wyczyszczony.",
             ],
         )
 
-        self._section(widget, "Po zamknięciu iteracji")
+        self._section(widget, "Co powinno być widoczne dla użytkownika")
         self._bullet_list(
             widget,
             [
-                "Projekt przechodzi na current_step = 5, a Wizard oferuje rozpoczęcie nowej iteracji.",
-                "Nowa iteracja może wystartować od nowej paczki z E1 albo od tego samego zestawu zdjęć i przejść od razu do E2.",
-                "Aktywne modele projektu pozostają zachowane. To one stają się bazą do dalszej autoanotacji i kolejnych treningów.",
+                "Cel minimum: ile anotacji, cropów albo elementów brakuje do odblokowania kolejnej bramki.",
+                "Status źródeł: czy XML, obrazy, dataset, split i model są zgodne z aktualnym torem.",
+                "Skutek akcji: czy przycisk tylko wybiera ścieżkę, czy rzeczywiście ładuje, kopiuje, eksportuje albo trenuje.",
+                "Ryzyko wyjścia: modal powinien ostrzec przed utratą stanu roboczego albo brakiem wymaganego minimum.",
             ],
         )
 
-        self._section(widget, "Co jest źródłem prawdy w kampanii")
+        self._section(widget, "Źródła prawdy kampanii")
         self._bullet_list(
             widget,
             [
-                "Rejestr kampanii: Workspace/campaigns_registry.json przechowuje listę projektów i podstawowy stan aktywnego projektu.",
-                "Stan projektu: katalog 9_projects/<projekt>/_campaign_state zawiera lokalne artefakty sterujące workflow kampanii.",
-                "ApprovedSet tablic i wynikowe runy w katalogu projektu są źródłem dla kolejnych bramek E2-E4, a nie chwilowy stan jednego widgetu.",
+                "campaigns_registry.json: lista projektów i podstawowy stan aktywnego projektu.",
+                "9_projects/<projekt>/_campaign_state: lokalny stan kampanii, iteracji, toru i bramek.",
+                "ApprovedSet tablic: zatwierdzony materiał tablic dla projektu.",
+                "Dataset znaków z Z3/PZ3: materiał wejściowy dla toru znaków w Z4.",
+                "Checkpoint modelu projektu: aktywny model używany jako punkt startu kolejnych iteracji.",
             ],
         )
 
         self._callout(
             widget,
-            "Ważne:",
-            "Jeśli Wizard i zakładka robocza wydają się niespójne, najpierw sprawdź aktualny current_step, iteration_target i aktywne źródło danych projektu. To są trzy najczęstsze przyczyny pozornych regresji.",
+            "Uwaga:",
+            "Tryb kampanii ma prawo być mniej elastyczny niż tryb swobodny. To nie wada, tylko zabezpieczenie przed mieszaniem źródeł, runów i splitów z różnych etapów.",
             "WARN",
         )
 
@@ -410,26 +451,15 @@ class HelpTab:
     def _fill_architecture(self, widget):
         self._clear_and_enable(widget)
 
-        widget.insert(tk.END, "Architektura danych, Workspace i artefakty\n", "H1")
+        widget.insert(tk.END, "Architektura danych, Workspace i stabilizacja\n", "H1")
         self._paragraph(
             widget,
-            f"{CONFIG.APP_NAME} pracuje jednocześnie na przestrzeni globalnej Workspace "
-            "oraz na lokalnych przestrzeniach projektowych w 9_projects. Zrozumienie tej "
-            "różnicy oszczędza bardzo dużo czasu przy diagnozie problemów z runami, "
-            "datasetami i treningiem.",
+            f"{CONFIG.APP_NAME} pracuje na globalnym Workspace oraz na katalogach projektów kampanii. "
+            "Po ostatnim rozdzieleniu flow najważniejsze jest pilnowanie granic: Z2, Z3 i Z4 mogą wymieniać artefakty, "
+            "ale nie powinny ukrycie przejmować swoich stanów roboczych.",
         )
 
-        self._section(widget, "Dwie warstwy danych")
-        self._bullet_list(
-            widget,
-            [
-                "Workspace globalny: miejsce wspólne dla trybu swobodnego, modeli bazowych, presetów OCR, globalnych datasetów i historycznych runów poza kampanią.",
-                "Workspace projektu: osobne drzewo katalogów dla każdego projektu kampanii w 9_projects/<nazwa_folderu_projektu>/...",
-                "W kampanii preferuj zawsze ścieżki projektowe. Globalny Workspace traktuj jako zaplecze wspólne i tryb swobodny.",
-            ],
-        )
-
-        self._section(widget, "Szkic globalnego Workspace")
+        self._section(widget, "Globalny Workspace")
         self._code_block(
             widget,
             "Workspace/\n"
@@ -437,6 +467,9 @@ class HelpTab:
             "|-- 2_auto_annotations/\n"
             "|-- 3_cropped_characters/\n"
             "|-- 4_training_datasets/\n"
+            "|   |-- plates/\n"
+            "|   |-- chars_yolo/\n"
+            "|   `-- chars_ocr/\n"
             "|-- 5_training_runs/\n"
             "|-- 6_models/\n"
             "|-- 7_rankings/\n"
@@ -445,15 +478,14 @@ class HelpTab:
         )
         self._paragraph(
             widget,
-            "W trybie swobodnym katalog Workspace/1_raw_images/ jest preferowanym miejscem na paczki wejściowe. "
-            "Najczytelniejszy układ to Workspace/1_raw_images/NazwaPaczki/, gdzie nazwy plików od razu niosą ground truth "
-            "dla OCR, testów i rankingu znaków.",
+            "Nazwy katalogów 1-9 są częścią stałego drzewa Workspace. Tryb swobodny najczęściej korzysta z globalnego drzewa, "
+            "a tryb kampanii powinien preferować katalog konkretnego projektu.",
         )
 
-        self._section(widget, "Szkic katalogu projektu")
+        self._section(widget, "Workspace projektu")
         self._code_block(
             widget,
-            "Workspace/9_projects/<project>/\n"
+            "Workspace/9_projects/<projekt>/\n"
             "|-- 1_raw_images/\n"
             "|-- 2_auto_annotations/\n"
             "|-- 3_cropped_characters/\n"
@@ -462,86 +494,95 @@ class HelpTab:
             "|-- _campaign_state/\n"
             "`-- _staging/\n",
         )
-
-        self._section(widget, "Najważniejsze artefakty i do czego służą")
         self._bullet_list(
             widget,
             [
-                "annotations.xml: wynik anotacji tablic. To główny plik przejściowy między Z2 a Z3/PZ1 oraz źródło datasetu tablic.",
-                "metadata.json: rdzeń preview-runu Z3. Trzyma odczyty, statusy, boxy znaków, perfecty i dane potrzebne do eksportu/importu.",
-                "data.yaml: punkt wejścia do treningu YOLO. Opisuje klasy oraz splity train / val / test.",
-                "training_history.json: historia runów treningowych w danym katalogu 5_training_runs.",
-                "campaigns_registry.json + _campaign_state: stan projektu kampanijnego, iteracji, targetu i lokalnych artefaktów Wizarda.",
+                "Katalog projektu izoluje iteracje kampanii od globalnych eksperymentów.",
+                "_staging przechowuje materiał roboczy przed zatwierdzeniem.",
+                "_campaign_state przechowuje decyzje i wskaźniki, których nie powinien nadpisywać pojedynczy widget.",
             ],
         )
 
-        self._section(widget, "Jak dane przepływają między etapami")
+        self._section(widget, "Najważniejsze artefakty")
         self._bullet_list(
             widget,
             [
-                "Z2 -> Z3: annotations.xml plus oryginalne obrazy dają materiał do wycinania tablic w PZ1.",
-                "Z3/PZ1 -> Z3/PZ2: run wycinania daje preview-run tablic do OCR, YOLO i hybrydy.",
-                "Z3/PZ2 -> Z3/PZ3: aktywny preview-run zasila eksporty CVAT, import poprawek, tor perfect i dataset znaków.",
-                "Z2 lub Z3/PZ3 -> Z4: gotowy dataset YOLO trafia do treningu, walidacji i rankingu.",
-                "Z4 -> projekt: najlepszy checkpoint może zostać wypromowany do aktywnego modelu projektu i stać się bazą dla kolejnych iteracji.",
+                "annotations.xml: wynik Z2, czyli anotacje tablic powiązane z konkretnym folderem obrazów.",
+                "Run Z2: katalog pracy tablic, lista obrazów, XML i metadane procesu anotacji.",
+                "Run wycinania Z3/PZ1: cropy tablic przygotowane z pary XML + obrazy.",
+                "metadata.json Z3: statusy cropów, wyniki OCR/YOLO/hybrydy, perfecty, poprawki i dane do eksportów.",
+                "Review pack CVAT: paczka eksportowana z Z3/PZ3 do ręcznej korekty poza aplikacją.",
+                "Dataset YOLO: folder images/labels z data.yaml, gotowy do Z4.",
+                "training_history.json: historia runów treningowych dla danego obszaru treningu.",
+                "Checkpoint .pt: wynik treningu albo model bazowy używany do dalszej pracy.",
             ],
         )
 
-        self._section(widget, "Shared vs project-local")
+        self._section(widget, "Relacje Z2-Z3-Z4")
         self._bullet_list(
             widget,
             [
-                "Modele bazowe z 6_models/base są zasobem wspólnym.",
-                "Runy i datasety tworzone w kampanii powinny pozostawać wewnątrz katalogu projektu, żeby nie mieszać iteracji i ApprovedSetów.",
-                "Presety OCR oraz część rankingów mają nadal charakter współdzielony, ale wynik oceny zawsze zależy od konkretnego preview-runu albo datasetu.",
+                "Z2 produkuje XML tablic i ewentualnie dataset tablic.",
+                "Z3 konsumuje XML tablic oraz obrazy, produkuje cropy tablic i dataset znaków.",
+                "Z4 konsumuje gotowy dataset tablic albo znaków i produkuje run treningowy oraz checkpoint modelu.",
+                "Przejście między zakładkami powinno przekazywać artefakt, nie cały stan ekranu poprzedniej zakładki.",
+                "Jeżeli użytkownik zmienia źródło, wariant albo tor, niezgodne ścieżki powinny zostać wyczyszczone.",
             ],
         )
 
-        self._section(widget, "Wymagania środowiska i start aplikacji")
-        self._paragraph(
-            widget,
-            "Aplikacja zakłada uruchomienie na Pythonie z działającym Tkinterem. "
-            "Przy starcie sprawdzane są najważniejsze biblioteki runtime, a wynik jest wypisywany "
-            "w konsoli w formie statusów OK albo BRAK.",
-        )
+        self._section(widget, "Aktualny kierunek architektury")
         self._bullet_list(
             widget,
             [
-                "Biblioteki krytyczne dla startu GUI: Tkinter, NumPy, OpenCV i Pillow.",
-                "Biblioteki funkcjonalne dla pełnego workflow: PyYAML, PyTorch, Ultralytics i EasyOCR.",
-                "Lista pakietów pip do środowiska runtime jest utrzymywana w requirements-runtime.txt.",
-                "Jeśli na nowej maszynie czegoś brakuje, bootstrap przed startem GUI pokaże raport, zaproponuje instalację i może uruchomić pip automatycznie w bieżącym interpreterze.",
-                "Po udanej instalacji aplikacja może sama wykonać restart i ponownie sprawdzić środowisko.",
+                "Flow kampanii i flow swobodny są rozdzielane fizycznie w osobnych modułach.",
+                "View modele mają opisywać treść widoku, żeby logika nie musiała bezpośrednio mieszać tekstów z layoutem.",
+                "Shared UI powinno zawierać tylko wspólne klocki, nie ukryte decyzje biznesowe.",
+                "Dispatcher i route state powinny odpowiadać za przejścia, a nie za budowanie całego UI.",
+                "Canvas overlay jest wspólnym obiektem postępu/blokady dla procesów związanych z canvasem.",
             ],
         )
-        self._code_block(
-            widget,
-            "Pliki związane ze startem środowiska:\n"
-            "main.py\n"
-            "dependency_bootstrap.py\n"
-            "requirements-runtime.txt",
-        )
-        self._paragraph(
-            widget,
-            "Tkinter nie jest instalowany z requirements-runtime.txt, bo zwykle pochodzi z samej instalacji Pythona "
-            "i na Windows wymaga Pythona z komponentem Tcl/Tk.",
-        )
 
-        self._section(widget, "Gdzie najpierw patrzeć przy diagnozie problemu")
+        self._section(widget, "Granice, których warto pilnować")
         self._bullet_list(
             widget,
             [
-                "Sprawdź aktywną zakładkę i aktualne źródło danych: folder obrazów, run, preview-run albo dataset.",
-                "W kampanii sprawdź current_step, iteration_target i to, czy problem dotyczy ApprovedSetu, preview-runu czy gotowego datasetu.",
-                "W Z2, Z3 i Z4 ukryte terminale procesu są pierwszym miejscem do szukania technicznych przyczyn błędu.",
-                "Jeśli lista, preview albo przycisk zachowują się inaczej niż oczekujesz, sprawdź najpierw czy nie pracujesz na starszym runie albo na źródle z poprzedniej iteracji.",
+                "Z2 nie powinno zostawiać załadowanego kontekstu po przejściu do treningu.",
+                "Z3/PZ2 nie powinno automatycznie zmieniać źródła PZ1 bez jawnego wyboru użytkownika.",
+                "Z4/PZ2 nie powinno ręcznie podmieniać źródła datasetu, jeżeli PZ1 jest miejscem tworzenia wariantów.",
+                "Tryb kampanii nie powinien korzystać z elastyczności trybu swobodnego tam, gdzie bramki E1-E4 wymagają spójności.",
+                "Teksty UI powinny mówić, co użytkownik ma zrobić teraz, a nie opisywać wewnętrzną historię procesu.",
+            ],
+        )
+
+        self._section(widget, "Diagnostyka problemów")
+        self._bullet_list(
+            widget,
+            [
+                "Najpierw sprawdź: aktywną zakładkę, podzakładkę, tryb F/C, tor tablic/znaków i aktualne źródło.",
+                "Potem sprawdź artefakt: XML, folder obrazów, run wycinania, dataset, data.yaml albo checkpoint .pt.",
+                "Jeżeli przycisk jest nieaktywny, zwykle brakuje zgodności źródła, statusu [OK], poprawnego splitu albo modelu.",
+                "Jeżeli UI pokazuje starą ścieżkę, szukaj nieczyszczonego stanu miniflow albo zapamiętanego wariantu z poprzedniego wejścia.",
+                "Jeżeli proces trwa długo, powinien mieć overlay albo modal postępu. Ciche lagi są błędem UX.",
+            ],
+        )
+
+        self._section(widget, "Minimalny słownik plików")
+        self._bullet_list(
+            widget,
+            [
+                "XML: anotacje tablic z Z2 albo korekty CVAT zależnie od kontekstu.",
+                "YAML: konfiguracja datasetu YOLO, najczęściej data.yaml.",
+                "JSON: metadane procesu, manifesty, historia albo stan kampanii.",
+                "PT: checkpoint modelu PyTorch/YOLO.",
+                "images/labels: standardowy układ datasetu YOLO.",
+                "train/val/test: podział datasetu do treningu, walidacji i końcowej oceny.",
             ],
         )
 
         self._callout(
             widget,
             "Nota architektoniczna:",
-            "Obecna faza rozwoju aplikacji stawia na cienki Wizard i silne zakładki robocze. Dlatego opis danych i przepływów jest ważniejszy niż opis pojedynczych kontrolek UI.",
+            "Obecny fundament jest lepszy niż wcześniej, ale stabilizacja wymaga konsekwencji: małe poprawki, jawne artefakty, czyszczone stany robocze i brak cichych skrótów między zakładkami.",
             "NOTE",
         )
 

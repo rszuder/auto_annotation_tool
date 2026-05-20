@@ -212,6 +212,14 @@ def handle_extract_entry_selection(host: "CharacterAnnotationTab", mode: str) ->
         if current_mode != "continue":
             reset_extract_source_inputs(host)
         set_extract_entry_mode(host, "continue")
+        try:
+            host._use_z2_source_on_demand(notify_on_failure=False, advance_to_start=False)
+        except Exception:
+            pass
+        try:
+            host._set_extract_workflow_step("start")
+        except Exception:
+            pass
         return
 
     reset_extract_source_inputs(host)

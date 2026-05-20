@@ -48,6 +48,19 @@ def open_campaign_step3_entry(
     if raw_dir is None or auto_dir is None:
         return {"ok": False, "reason": "missing_campaign_dirs"}
 
+    try:
+        if str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char":
+            annotation_tab = getattr(getattr(host, "app", None), "tabs", {}).get("annotation")
+            if annotation_tab is not None:
+                flush_approved = getattr(annotation_tab, "_flush_preview_approved_persist", None)
+                if callable(flush_approved):
+                    flush_approved()
+                rebuild_source = getattr(annotation_tab, "_build_campaign_char_effective_source", None)
+                if callable(rebuild_source):
+                    rebuild_source()
+    except Exception as exc:
+        logger.debug(f"Nie udało się odświeżyć kanonicznego źródła E3 przed wejściem do Z3: {exc}")
+
     iter_num = CAMPAIGN.get_current_iteration_num()
     default_folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
     folder = default_folder
@@ -147,6 +160,13 @@ def open_campaign_step3_entry(
         images_dir=(str(folder) if folder.exists() else ""),
         run_dir=latest_run_dir,
     )
+    try:
+        # Wejście kampanijne E3 nie może dziedziczyć wyniku walidacji PZ1/PZ2
+        # z trybu swobodnego albo poprzedniego źródła. Stary licznik potrafił
+        # odrzucić poprawny preview i uruchomić zbędne auto-wycinanie.
+        host._extract_last_source_binding_result = {}
+    except Exception:
+        pass
 
     try:
         saved_extract_state = CAMPAIGN.get_step3_extract_state() or {}
@@ -373,7 +393,7 @@ def auto_progress_campaign_step3_entry(
             try:
                 if not (getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name()):
                     return
-                host.go_to_substep_2()
+                host.go_to_substep_2(force=True)
             except Exception as exc:
                 logger.debug(f"Nie udało się automatycznie otworzyć PZ2 dla kampanii: {exc}")
 
@@ -740,7 +760,7 @@ def unlock_dataset_subtab(host: "CharacterAnnotationTab"):
         host._persist_step3_progress()
 
 
-def go_to_substep_2_campaign(host: "CharacterAnnotationTab"):
+def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = False):
     try:
         host._hide_campaign_detect_splash()
     except Exception:
@@ -749,9 +769,16 @@ def go_to_substep_2_campaign(host: "CharacterAnnotationTab"):
         host._cancel_preview_char_label_interaction()
     except Exception:
         pass
-    btn = getattr(host, "btn_to_detect", None)
-    if btn is not None and str(btn.cget("state")) != "normal":
-        return
+    if not force:
+        btn = getattr(host, "btn_to_detect", None)
+        if btn is not None and str(btn.cget("state")) != "normal":
+            return
+    else:
+        try:
+            host._set_button_state("btn_to_detect", True)
+            host._set_button_emphasis("btn_to_detect_frame", False)
+        except Exception:
+            pass
 
     host._set_subtab_state(host.tab_extract, "disabled")
     host._set_subtab_state(host.tab_detect, "normal")
@@ -893,9 +920,21 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
     stage1_done = CAMPAIGN.is_step3_stage1_done()
     stage2_done = CAMPAIGN.is_step3_stage2_done()
 
-    if saved_substep > 1 and not (host.preview_dir_var.get() or "").strip():
+    try:
+        current_preview_dir = str(host.preview_dir_var.get() or "").strip()
+    except Exception:
+        current_preview_dir = ""
+    try:
+        preview_ready = bool(
+            current_preview_dir
+            and host._is_usable_step3_preview_dir(current_preview_dir, require_plates=True)
+        )
+    except Exception:
+        preview_ready = bool(current_preview_dir)
+
+    if saved_substep > 1 and not preview_ready:
         try:
-            host._restore_preview_context_from_project()
+            host._restore_preview_context_from_project(require_plates=True)
         except Exception:
             pass
 
@@ -1044,19 +1083,19 @@ def build_step3_finish_action_view_model(
     except Exception:
         current_status = "pending"
 
-    finish_hint = "Powrot nie zamyka etapu. Mozesz wrocic do Z3 w dowolnym momencie."
+    finish_hint = "Powrót nie zamyka etapu. Możesz wrócić do Z3 w dowolnym momencie."
     finish_tone = "muted"
     emphasize = False
 
     if ready_for_approval:
-        finish_hint = "Dataset znakow jest gotowy. W wizardzie zatwierdzisz E3 i odblokujesz E4."
+        finish_hint = "Dataset znaków jest gotowy. W wizardzie zatwierdzisz E3 i odblokujesz E4."
         finish_tone = "success"
         emphasize = True
     elif current_status == "needs_rework":
         finish_hint = host._get_step3_finish_block_message(readiness)
         finish_tone = "warning"
     elif current_status == "approved":
-        finish_hint = "Etap 3 jest juz zatwierdzony. Wizard otworzy sie od razu na E4."
+        finish_hint = "Etap 3 jest już zatwierdzony. Wizard otworzy się od razu na E4."
         finish_tone = "success"
     elif not has_outputs:
         finish_hint = host._get_step3_finish_block_message(readiness) or finish_hint
@@ -1064,7 +1103,7 @@ def build_step3_finish_action_view_model(
 
     return Step3FinishActionViewModel(
         visible=True,
-        label="Wroc do wizarda",
+        label="Wróć do wizarda",
         command_id="return_to_wizard_step3",
         enabled=True,
         emphasize=emphasize,

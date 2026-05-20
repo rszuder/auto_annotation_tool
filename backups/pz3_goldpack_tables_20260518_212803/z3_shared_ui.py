@@ -236,24 +236,14 @@ def build_step3_extract_workflow_view_model(
             "Gdy źródło tablic będzie spójne, Z3 samo przygotuje paczkę tablic dla PZ2."
         )
     elif route == "continue":
-        if has_preview:
-            source_intro = (
-                "PZ2 jest już gotowe dla przejętego runu Z2. "
-                "PZ1 pokazuje tutaj tabelę kontrolną źródła i wynik wycinania, ale nie wymaga ponownej pracy."
-            )
-            source_hint = (
-                "Sprawdź tabelę i przejdź do PZ2. Jeśli chcesz świadomie przygotować inną paczkę, wróć do wyboru "
-                "i użyj kafla 'Wskaż anotacje do wyodrębnienia'."
-            )
-        else:
-            source_intro = (
-                "Kontynuacja przejmuje aktywne albo ostatnie źródło z Z2. "
-                "Nie wskazujesz tutaj ręcznie folderu runu, XML ani obrazów; PZ1 tylko pokazuje, co zostało przejęte."
-            )
-            source_hint = (
-                "Jeśli chcesz pracować na innym XML lub innym katalogu obrazów, wróć do wyboru i użyj kafla "
-                "'Wskaż anotacje do wyodrębnienia'."
-            )
+        source_intro = (
+            "Kontynuacja przejmuje aktywne albo ostatnie źródło z Z2. "
+            "Nie wskazujesz tutaj ręcznie folderu runu, XML ani obrazów; PZ1 tylko pokazuje, co zostało przejęte."
+        )
+        source_hint = (
+            "Jeśli chcesz pracować na innym XML lub innym katalogu obrazów, wróć do wyboru i użyj kafla "
+            "'Wskaż anotacje do wyodrębnienia'."
+        )
     else:
         source_intro = "W tym trybie wskazujesz annotations.xml oraz oryginalny katalog obrazów. System dopilnuje zgodności XML z katalogiem."
         source_hint = "Po wskazaniu XML mogę dodatkowo spróbować dopasować katalog obrazów z Workspace/1_raw_images/."
@@ -279,7 +269,7 @@ def build_step3_extract_workflow_view_model(
             run_name = Path(str(host.annotation_run_dir_var.get() or "")).name
             if has_preview:
                 start_hint = (
-                    f"Przejęty run Z2: {run_name}. Tablice są już wycięte, a tabela poniżej potwierdza źródło i gotowy wynik dla PZ2."
+                    f"Przejęty run Z2: {run_name}. Tabela poniżej pokazuje źródło i gotowy wynik dla PZ2."
                 )
             else:
                 start_hint = (
@@ -315,13 +305,7 @@ def build_step3_extract_workflow_view_model(
     elif route == "continue":
         if has_run:
             run_name = Path(str(host.annotation_run_dir_var.get() or "")).name
-            if has_preview:
-                run_hint = (
-                    f"Wybrany run anotacji: {run_name}. PZ2 jest już gotowe; XML, obrazy i wynik wycinania "
-                    "są pokazane w tabeli kontrolnej."
-                )
-            else:
-                run_hint = f"Wybrany run anotacji: {run_name}. XML i katalog obrazów są wyprowadzone z tego runu."
+            run_hint = f"Wybrany run anotacji: {run_name}. XML i katalog obrazów są wyprowadzone z tego runu."
             run_hint_tone = "success"
         elif candidate:
             run_hint = (
@@ -359,28 +343,19 @@ def build_step3_extract_workflow_view_model(
         )
     else:
         source_title = "Źródła wejścia"
-        start_title = (
-            "PZ2 gotowe dla przejętego runu Z2" if route == "continue" and has_preview
-            else "Przejęty run anotacji Z2" if route == "continue"
-            else "Uruchom wyodrębnianie"
+        start_title = "Przejęty run anotacji Z2" if route == "continue" else "Uruchom wyodrębnianie"
+        entry_card_description = (
+            "Kontynuacja po runie anotacji Z2 bez ręcznego wybierania źródeł." if route == "continue"
+            else "Wskażesz annotations.xml i obrazy."
         )
-        if route == "continue" and has_preview:
-            entry_card_description = "PZ2 jest już gotowe: otwórz podsumowanie i przejdź do PZ2."
-        elif route == "continue":
-            entry_card_description = "Kontynuacja po runie anotacji Z2 bez ręcznego wybierania źródeł."
-        else:
-            entry_card_description = "Wskażesz annotations.xml i obrazy."
-        if route == "continue" and has_preview:
-            source_card_description = "Paczka PZ2 istnieje. Tabela pokazuje przejęty run i gotowy wynik."
-        elif route == "continue" and source_ready:
-            source_card_description = "Run anotacji jest potwierdzony i gotowy do wycinania."
-        elif route == "continue":
-            source_card_description = "Podłącz run Z2; XML i obrazy zostaną wyprowadzone automatycznie."
-        else:
-            source_card_description = "Powiąż annotations.xml z katalogiem obrazów."
+        source_card_description = (
+            "Run anotacji jest potwierdzony i gotowy do wycinania." if route == "continue" and source_ready
+            else "Podłącz run Z2; XML i obrazy zostaną wyprowadzone automatycznie." if route == "continue"
+            else "Powiąż annotations.xml z katalogiem obrazów."
+        )
         if route == "continue":
             start_card_description = (
-                "PZ2 gotowe. Nie wycinaj ponownie; przejdź do PZ2." if has_preview
+                "Paczka tablic do PZ2 jest już gotowa." if has_preview
                 else "Sprawdź przejęty run i wytnij tablice do PZ2."
             )
         else:
@@ -414,10 +389,7 @@ def build_step3_extract_workflow_view_model(
         prev_enabled=(current in {"source", "start"} and not (route == "continue" and current == "start")),
         next_enabled=next_enabled,
         next_visible=current != "start",
-        show_tab_nav=(
-            not linear_mode
-            and (not (route == "continue" and current == "start") or has_preview)
-        ),
+        show_tab_nav=(not linear_mode and not (route == "continue" and current == "start")),
         show_back_nav=False,
         show_detect_nav=not linear_mode,
         clear_detect_emphasis=not linear_mode,
@@ -437,7 +409,7 @@ def build_step3_extract_workflow_view_model(
             Step3ExtractStepCardViewModel(
                 key="start",
                 state=str(step_state.get("start", "pending")),
-                title=("PZ2 gotowe" if route == "continue" and has_preview else "Uruchom wyodrębnianie"),
+                title="Uruchom wyodrębnianie",
                 description=start_card_description,
             ),
         ],
@@ -733,11 +705,6 @@ def refresh_extract_entry_cards(host: "CharacterAnnotationTab"):
     fg = palette.get("fg", "#f3f3f3")
     muted = palette.get("muted", "#c7c7c7")
     selected_bg = blend_hex_colors(panel_alt, hover_bg, 0.42)
-    try:
-        preview_ready = bool(host._is_extract_preview_ready())
-    except Exception:
-        preview_ready = False
-    source_ready = bool(getattr(host, "_extract_last_source_binding_result", {}).get("ok"))
 
     for mode, widgets in cards.items():
         is_selected = mode == selected_mode
@@ -762,51 +729,11 @@ def refresh_extract_entry_cards(host: "CharacterAnnotationTab"):
         except Exception:
             pass
         try:
-            title_text = ""
-            if mode == "continue":
-                title_text = "Kontynuuj na runie anotacji"
-            elif mode == "manual":
-                title_text = "Wskaż anotacje do wyodrębnienia"
-            widgets["title"].configure(fg=title_fg, text=title_text or str(widgets["title"].cget("text") or ""))
+            widgets["title"].configure(fg=title_fg)
         except Exception:
             pass
         try:
-            desc_text = ""
-            if mode == "continue" and preview_ready:
-                desc_text = (
-                    "Tablice są już wycięte. Otwórz kafel, aby przejrzeć tabelę przejętego runu "
-                    "i gotowego wyniku."
-                )
-            elif mode == "continue" and source_ready:
-                desc_text = (
-                    "Przejmij potwierdzony run Z2. PZ1 pokaże tabelę źródła i pozwoli wyciąć tablice do PZ2."
-                )
-            elif mode == "continue":
-                desc_text = (
-                    "Przejmij aktywny albo ostatni run anotacji Z2. "
-                    "W tym torze nie wskazujesz ręcznie folderu runu, XML ani obrazów."
-                )
-            elif mode == "manual":
-                desc_text = (
-                    "Podaj annotations.xml oraz folder oryginalnych obrazów, z których mam "
-                    "wyciąć tablice. To dobry tor dla importu z zewnątrz."
-                )
-            widgets["desc"].configure(fg=desc_fg, text=desc_text or str(widgets["desc"].cget("text") or ""))
-        except Exception:
-            pass
-        try:
-            badge = widgets.get("badge")
-            title_widget = widgets.get("title")
-            if mode == "continue" and preview_ready:
-                badge.configure(text="TABLICE WYCIĘTE", fg=palette.get("success", badge_fg))
-                if not str(badge.winfo_manager()):
-                    badge.pack(anchor=tk.W, fill=tk.X, before=title_widget)
-            elif mode == "continue" and source_ready:
-                badge.configure(text="ŹRÓDŁO OK", fg=palette.get("success", badge_fg))
-                if not str(badge.winfo_manager()):
-                    badge.pack(anchor=tk.W, fill=tk.X, before=title_widget)
-            elif badge is not None and str(badge.winfo_manager()):
-                badge.pack_forget()
+            widgets["desc"].configure(fg=desc_fg)
         except Exception:
             pass
 
@@ -1215,7 +1142,7 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
     in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
 
     host._set_grid_visibility(getattr(host, "preview_source_lf", None), (not in_campaign))
-    host._set_grid_visibility(getattr(host, "preview_counts_frame", None), (not in_campaign))
+    host._set_grid_visibility(getattr(host, "preview_counts_frame", None), False)
     host._set_grid_visibility(getattr(host, "preview_fusion_info_lbl", None), False)
     host._set_grid_visibility(getattr(host, "preview_box_mode_info_lbl", None), False)
     for attr_name in (
@@ -1223,27 +1150,7 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
         "preview_repair_progress",
         "preview_repair_progress_status_lbl",
     ):
-        host._set_grid_visibility(getattr(host, attr_name, None), True)
-
-    try:
-        note = getattr(host, "preview_load_note_lbl", None)
-        if note is not None:
-            note_text = (
-                "Szczegóły stanu i liczbę tablic sprawdzisz na liście po lewej stronie."
-                if in_campaign
-                else (
-                    "Poniżej widzisz liczbę tablic perfect oraz ocenę, "
-                    "czy zbiór ma sens jako źródło treningowe."
-                )
-            )
-            host._set_inline_status_label_state(
-                note,
-                text=note_text,
-                tone="muted",
-                emphasis=False,
-            )
-    except Exception:
-        pass
+        host._set_grid_visibility(getattr(host, attr_name, None), in_campaign)
 
     host._set_grid_visibility(getattr(host, "test_progress_row", None), (not in_campaign))
 
@@ -1274,8 +1181,9 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
             pass
 
     try:
-        host._update_preview_repair_progress_ui()
-        if not in_campaign:
+        if in_campaign:
+            host._update_preview_repair_progress_ui()
+        else:
             host._set_test_progress_counter()
     except Exception:
         pass

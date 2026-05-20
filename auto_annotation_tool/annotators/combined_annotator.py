@@ -7,7 +7,7 @@ Combined annotator: vehicle-first plate detection (mode C).
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from ..config import CONFIG, CV2_AVAILABLE, YOLO, YOLO_AVAILABLE, cv2, logger
+from ..config import CONFIG, CV2_AVAILABLE, YOLO_AVAILABLE, cv2, get_yolo_class, logger
 from ..data_models import AnnotationStatus, Detection, ImageAnnotation
 from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import cleanup_gpu_memory, get_image_size
@@ -49,23 +49,26 @@ class CombinedAnnotator(BaseAnnotator):
         self.plate_confidence = plate_confidence
         self.plate_inside_threshold = plate_inside_threshold
 
-        self.vehicle_model: Optional[YOLO] = None
-        self.plate_model: Optional[YOLO] = None
+        self.vehicle_model: Optional[object] = None
+        self.plate_model: Optional[object] = None
         self.is_plate_pose_model = False
         self.vehicle_class_names = {}
 
     def load_models(self) -> Tuple[bool, str]:
         if not YOLO_AVAILABLE:
             return False, "YOLO niedostepny"
+        YoloClass = get_yolo_class()
+        if YoloClass is None:
+            return False, "YOLO niedostepny"
 
         try:
             logger.info(f"Ladowanie modelu pojazdow: {self.vehicle_model_path}")
-            self.vehicle_model = YOLO(str(self.vehicle_model_path))
+            self.vehicle_model = YoloClass(str(self.vehicle_model_path))
             if hasattr(self.vehicle_model, "names"):
                 self.vehicle_class_names = self.vehicle_model.names
 
             logger.info(f"Ladowanie modelu tablic: {self.plate_model_path}")
-            self.plate_model = YOLO(str(self.plate_model_path))
+            self.plate_model = YoloClass(str(self.plate_model_path))
             if hasattr(self.plate_model, "model") and hasattr(self.plate_model.model, "kpt_shape"):
                 self.is_plate_pose_model = True
                 logger.info("Model tablic: POSE")

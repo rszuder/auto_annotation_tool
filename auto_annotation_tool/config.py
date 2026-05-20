@@ -5,6 +5,8 @@ Konfiguracja i stałe aplikacji.
 """
 
 import logging
+import importlib
+import importlib.util
 from dataclasses import dataclass, field
 from typing import FrozenSet
 from pathlib import Path
@@ -28,7 +30,7 @@ try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, scrolledtext
     TK_AVAILABLE = True
-except ImportError:
+except Exception as e:
     TK_AVAILABLE = False
     tk = None
     ttk = None
@@ -42,17 +44,79 @@ except ImportError:
     Image = None
     logger.warning("PIL/Pillow niedostępny")
 
-try:
-    from ultralytics import YOLO
-    import torch
-    YOLO_AVAILABLE = True
-    CUDA_AVAILABLE = torch.cuda.is_available()
-except ImportError:
-    YOLO_AVAILABLE = False
-    CUDA_AVAILABLE = False
-    YOLO = None
-    torch = None
-    logger.warning("Ultralytics/PyTorch niedostępny")
+_TORCH_MODULE = None
+_TORCH_IMPORT_ERROR: Exception | None = None
+_YOLO_CLASS = None
+_YOLO_IMPORT_ERROR: Exception | None = None
+YOLO = None
+torch = None
+
+
+def _has_module(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+TORCH_AVAILABLE = _has_module("torch")
+YOLO_AVAILABLE = bool(TORCH_AVAILABLE and _has_module("ultralytics"))
+CUDA_AVAILABLE = False
+
+
+def get_torch_module():
+    """Lazy-load PyTorch dopiero wtedy, gdy faktycznie potrzebujemy GPU/modeli."""
+    global _TORCH_MODULE, _TORCH_IMPORT_ERROR, torch
+    if _TORCH_MODULE is not None:
+        return _TORCH_MODULE
+    if not TORCH_AVAILABLE:
+        return None
+    try:
+        _TORCH_MODULE = importlib.import_module("torch")
+        torch = _TORCH_MODULE
+        return _TORCH_MODULE
+    except Exception as exc:
+        _TORCH_IMPORT_ERROR = exc
+        logger.warning(f"PyTorch niedostępny albo nie może załadować bibliotek systemowych: {exc}")
+        return None
+
+
+def get_yolo_class():
+    """Lazy-load Ultralytics YOLO bez obciążania startu GUI."""
+    global _YOLO_CLASS, _YOLO_IMPORT_ERROR, YOLO
+    if _YOLO_CLASS is not None:
+        return _YOLO_CLASS
+    if not YOLO_AVAILABLE:
+        return None
+    try:
+        module = importlib.import_module("ultralytics")
+        _YOLO_CLASS = getattr(module, "YOLO", None)
+        YOLO = _YOLO_CLASS
+        return _YOLO_CLASS
+    except Exception as exc:
+        _YOLO_IMPORT_ERROR = exc
+        logger.warning(f"Ultralytics YOLO niedostępny albo nie może załadować bibliotek systemowych: {exc}")
+        return None
+
+
+def is_cuda_available() -> bool:
+    torch_mod = get_torch_module()
+    if torch_mod is None:
+        return False
+    try:
+        return bool(torch_mod.cuda.is_available())
+    except Exception:
+        return False
+
+
+def resolve_runtime_device(device: str | int | None = "auto") -> str | int:
+    raw = str(device or "auto").strip().lower()
+    if raw == "auto":
+        return "cuda" if is_cuda_available() else "cpu"
+    if raw.isdigit():
+        return int(raw)
+    return device or "cpu"
+    logger.debug(f"Ultralytics/PyTorch pominięty podczas startu GUI: {e}")
 
 try:
     import cv2
@@ -82,7 +146,7 @@ class Config:
     """Centralna konfiguracja aplikacji."""
     
     # Wersja
-    VERSION: str = "3.1.0"
+    VERSION: str = "4.0"
     APP_NAME: str = "Auto-Annotation Tool dla CVAT"
     
     # Rozszerzenia plików

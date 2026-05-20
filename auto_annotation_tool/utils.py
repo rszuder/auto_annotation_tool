@@ -13,14 +13,15 @@ from .config import (
     YAML_AVAILABLE, yaml,
     PIL_AVAILABLE,
     CV2_AVAILABLE, cv2,
-    CUDA_AVAILABLE, torch
+    is_cuda_available, get_torch_module
 )
 
 
 def cleanup_gpu_memory():
     """Zwalnia pamięć GPU."""
     gc.collect()
-    if CUDA_AVAILABLE and torch is not None:
+    torch = get_torch_module()
+    if is_cuda_available() and torch is not None:
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
