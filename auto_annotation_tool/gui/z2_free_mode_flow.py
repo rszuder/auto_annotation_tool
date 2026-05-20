@@ -20,6 +20,28 @@ if TYPE_CHECKING:
     from .tab_annotation import AnnotationTab
 
 
+AUTO_REVIEW_FOLLOWUP_TITLE = "Korekta i decyzja po autoanotacji"
+AUTO_REVIEW_FOLLOWUP_TEXT = (
+    "Masz już gotowe anotacje tablic zapisane do pliku xml. Jeśli chcesz przejść do pracy nad "
+    "znakami, wybierz „Wytnij tablice”. Jeśli chcesz trenować model tablic na tym etapie, wybierz "
+    "„Eksport i split datasetu”. Run Z2 pozostaje zapisany, więc później możesz wrócić do niego "
+    "z historii runów i wykonać eksport bez utraty pracy. Po autoanotacji sprawdź wynik, popraw ramki "
+    "lub poligony tablic i zatwierdź poprawne obrazy statusem [OK]. Dopiero wtedy aktywują się akcje "
+    "„Wytnij tablice” oraz „Eksport i split datasetu”. Obie ścieżki korzystają wyłącznie z pozycji "
+    "oznaczonych statusem [OK]; niezatwierdzone obrazy zostaną pominięte."
+)
+MANUAL_REVIEW_FOLLOWUP_TITLE = "Korekta i decyzja po anotacji ręcznej"
+MANUAL_REVIEW_FOLLOWUP_TEXT = (
+    "Masz gotowy ręczny run anotacji tablic zapisany do pliku xml. Jeśli chcesz przejść do pracy "
+    "nad znakami, wybierz „Wytnij tablice”. Jeśli chcesz trenować model tablic na tym etapie, "
+    "wybierz „Przejdź do splitu i eksportu”. Run Z2 pozostaje zapisany, więc później możesz "
+    "wrócić do niego z historii runów i wykonać eksport bez utraty pracy. Najpierw oznacz tablice "
+    "na obrazach i zatwierdź poprawne pozycje statusem [OK]. Dopiero wtedy aktywują się akcje "
+    "wycinania tablic oraz splitu i eksportu. Obie ścieżki korzystają wyłącznie z pozycji "
+    "oznaczonych statusem [OK]; niezatwierdzone obrazy zostaną pominięte."
+)
+
+
 def select_free_mode_route(host: "AnnotationTab", route: str) -> None:
     normalized_route = host._normalize_workflow_route_value(route)
     if not normalized_route:
@@ -168,6 +190,16 @@ def jump_to_export_section(host: "AnnotationTab") -> None:
 
     if should_save_preview_edits and not host._ensure_preview_edits_saved("przejscie do splitu i eksportu"):
         return
+
+    if not campaign_context:
+        run_dir = host._get_preferred_annotation_run_dir(require_xml=True)
+        try:
+            approval_state = host._get_run_plate_strict_approved_state(run_dir)
+        except Exception:
+            approval_state = {}
+        if not approval_state.get("ok"):
+            host._warn_plate_dataset_export_requires_ok(approval_state)
+            return
 
     host._dataset_export_completed = False
     host._manual_review_export_ready = True
@@ -366,7 +398,8 @@ def refresh_manual_review_history_ui(host: "AnnotationTab") -> None:
         pass
     if values and host._manual_review_active and host._get_manual_entry_mode() == "continue":
         hint_text = (
-            "Aktywny run jest już otwarty w podglądzie. Wstecz wraca do historii, a Dalej przechodzi do eksportu datasetu. "
+            "Aktywny run jest już otwarty w podglądzie. Na karcie korekty zdecydujesz, czy wyciąć tablice do Z3, "
+            "czy przejść do splitu i eksportu datasetu. "
             "Możesz też zaznaczyć inny run i otworzyć go ponownie.\n\n"
             f"{run_definition}\n\n"
             f"Domyślny katalog runów Z2: {default_storage}"
@@ -513,6 +546,14 @@ def build_z2_cta_state_free_mode(
     manual_setup: bool,
     manual_run_already_created: bool,
 ) -> Z2CtaState:
+    def _has_approved_plate_positions() -> bool:
+        if not has_existing_run:
+            return False
+        try:
+            return bool(host._get_plate_dataset_export_approval_state().get("ok"))
+        except Exception:
+            return False
+
     show_start_controls = bool(
         show_workflow_steps and current_step in {"auto_start", "manual_start"}
     )
@@ -543,8 +584,13 @@ def build_z2_cta_state_free_mode(
             start_text = "Wybierz obrazy"
             start_command = host._select_input_dir
         else:
-            start_text = "Utwórz XML anotacji"
+            start_text = (
+                "Utwórz XML + boxy pojazdów"
+                if host._manual_vehicle_assist_enabled()
+                else "Utwórz XML anotacji"
+            )
 
+    back_text = "Wstecz"
     next_text = "Dalej"
     if free_mode_screen == "workflow":
         back_enabled = bool(
@@ -580,13 +626,22 @@ def build_z2_cta_state_free_mode(
         elif route == "manual" and current_step == "manual_history" and not host._dataset_export_completed:
             next_text = "Dalej" if host._manual_review_active else "Otworz run"
     elif free_mode_screen == "auto_summary":
+        approved_ready = _has_approved_plate_positions()
         back_enabled = bool(not host.is_processing)
-        next_enabled = bool(not host.is_processing and has_existing_run)
-        next_text = "Eksport"
+        next_enabled = bool(not host.is_processing and approved_ready)
+        back_text = "Ponowna autoanotacja"
+        next_text = "Eksport i split datasetu"
     elif free_mode_screen == "manual_review":
-        back_enabled = bool(not host.is_processing)
-        next_enabled = bool(not host.is_processing)
-        next_text = "Eksport"
+        approved_ready = _has_approved_plate_positions()
+        if route == "manual":
+            back_enabled = bool(not host.is_processing and approved_ready)
+            next_enabled = bool(not host.is_processing and approved_ready)
+            back_text = "Wytnij tablice"
+            next_text = "Przejdź do splitu i eksportu"
+        else:
+            back_enabled = bool(not host.is_processing and has_existing_run)
+            next_enabled = bool(not host.is_processing and approved_ready)
+            next_text = "Dalej do Z3/PZ1"
     elif free_mode_screen == "export":
         back_enabled = bool(not host.is_processing)
         export_allowed = bool(host._is_plate_dataset_export_allowed_for_current_selection())
@@ -603,6 +658,7 @@ def build_z2_cta_state_free_mode(
         start_command=start_command,
         start_text=start_text,
         back_enabled=back_enabled,
+        back_text=back_text,
         next_enabled=next_enabled,
         next_text=next_text,
         suppress_duplicate_start_cta=False,
@@ -671,7 +727,11 @@ def build_z2_left_panel_copy_payload_free_mode(
         if (not auto_setup_pending) and not bool(str(host.plate_custom_var.get() or "").strip()):
             payload["route_text"] = "Model tablic wybierzesz przy starcie autoanotacji."
             payload["action_text"] = "Kliknij Start, a w modalu wskażesz zakres pracy i model dla bieżącego runu Z2."
-            payload["workflow_start_intro"] = "Nie musisz już ustawiać modelu tablic w lewym panelu. Wybierzesz go w modalu startu autoanotacji."
+            payload["workflow_start_intro"] = (
+                "Start otworzy modal ustawień bieżącego runu Z2. Wybierzesz tam zakres obrazów, wymagany model tablic, "
+                "confidence oraz opcjonalne wsparcie modelem pojazdów. Po zatwierdzeniu modala program uruchomi autoanotację, "
+                "a wynik sprawdzisz i poprawisz na liście oraz podglądzie Z2."
+            )
         elif auto_vehicle_choice == "skip":
             payload["route_text"] = "Domyślnie pomijasz boxowanie pojazdów i uruchomisz tylko autoanotację tablic."
             payload["action_text"] = "Jeśli chcesz dodać pojazdy, odznacz pole pomijania. W następnym kroku wybierzesz wtedy model pojazdów."
@@ -725,12 +785,13 @@ def build_z2_left_panel_copy_payload_free_mode(
                     "To jest krok przygotowania źródła pracy. Ustawienia modelu tablic, confidence i opcjonalnych boxów pojazdów potwierdzisz dopiero po wskazaniu obrazów."
                 )
         if auto_completed:
-            payload["followup_title"] = "Korekta wyniku autoanotacji"
-            payload["followup_text"] = (
-                f"{host._build_auto_followup_summary()}\n\n"
-                "Możesz przejść „Dalej” do eksportu autoanotacji lub dokonać ręcznej ich korekty bezpośrednio w oknie podglądu."
+            payload["followup_title"] = AUTO_REVIEW_FOLLOWUP_TITLE
+            payload["followup_text"] = AUTO_REVIEW_FOLLOWUP_TEXT
+            payload["export_text"] = (
+                "Eksport i split budują dataset tablic YOLO Pose z aktualnie skorygowanego runu Z2. "
+                "To osobna ścieżka względem wycinania tablic do Z3/PZ1. Do eksportu trafią wyłącznie "
+                "pozycje oznaczone statusem [OK]."
             )
-            payload["export_text"] = "Po wyborze ścieżki dataset zostanie przygotowany z gotowego runu anotacji Z2."
 
         payload["workflow_input_title"] = "Wska\u017c katalog obraz\u00f3w"
         payload["workflow_start_title"] = "Autoanotacja"
@@ -770,11 +831,13 @@ def build_z2_left_panel_copy_payload_free_mode(
         payload["badge_text"] = "Aktywny tor: praca ręczna w Z2"
         payload["badge_tone"] = "warning"
         payload["route_tone"] = "muted"
-        payload["followup_title"] = "3. Ręczna korekta i stage"
-        payload["followup_text"] = (
-            "W tym torze pracujesz bez mieszania z autoanotacją. Po otwarciu runu anotacji możesz kasować obrazy, przenosić je do stage i poprawiać polygony."
+        payload["followup_title"] = MANUAL_REVIEW_FOLLOWUP_TITLE
+        payload["followup_text"] = MANUAL_REVIEW_FOLLOWUP_TEXT
+        payload["export_text"] = (
+            "Split i eksport budują dataset tablic YOLO Pose z aktualnie skorygowanego ręcznego runu Z2. "
+            "To osobna ścieżka względem wycinania tablic do Z3/PZ1. Do eksportu trafią wyłącznie "
+            "pozycje oznaczone statusem [OK]."
         )
-        payload["export_text"] = "Split i eksport odblokowują się dopiero na gotowym runie anotacji po zapisaniu zmian."
         payload["workflow_input_title"] = "Wskaż katalog obrazów"
         payload["workflow_input_hint"] = "Najpierw wybierz folder obrazów. Ten folder będzie bazą nowego ręcznego runu anotacji Z2."
 
@@ -830,12 +893,14 @@ def build_z2_left_panel_copy_payload_free_mode(
         else:
             payload["workflow_input_title"] = "Wskaż katalog obrazów"
             payload["workflow_input_hint"] = (
-                "Tutaj wybierasz obrazy dla nowego runu ręcznej anotacji Z2. Opcjonalne wsparcie boxami pojazdów ustawiasz w tej samej sekcji."
+                "Tutaj wybierasz wyłącznie katalog zdjęć wejściowych. Po kliknięciu Dalej program wczyta listę i podgląd Z2."
             )
             payload["workflow_start_title"] = "Utwórz XML anotacji"
             payload["workflow_start_intro"] = (
                 "Utworzysz nowy run ręcznej anotacji Z2 i powiązany z nim plik XML ze współrzędnymi ramek tablic. "
-                "Po utworzeniu XML przejdziesz do właściwego okna Z2 z listą obrazów i podglądem do ręcznej korekty."
+                "Lista obrazów i podgląd są już wczytane po prawej stronie, a XML odblokuje właściwą ręczną edycję ramek. "
+                "Eksport i wycinanie tablic będą dostępne dopiero po oznaczeniu co najmniej jednego obrazu ramką tablicy "
+                "i zatwierdzeniu go statusem [OK]."
             )
             payload["route_text"] = "Ręcznie oznaczysz tablice na obrazach z tej iteracji."
             payload["action_text"] = "Kliknij przycisk poniżej, aby otworzyć paczkę do ręcznej anotacji i przygotować XML tej iteracji."
@@ -843,7 +908,10 @@ def build_z2_left_panel_copy_payload_free_mode(
             payload["manual_hint_tone"] = "muted"
             payload["manual_template_hint"] = "Nowy run ręcznej anotacji Z2 nie nadpisuje starszych XML-i i jest zapisywany w workspace Z2."
             payload["manual_template_tone"] = "muted"
-            payload["manual_vehicle_hint"] = "Opcjonalne boxy pojazdów są tylko pomocą przy ręcznej pracy."
+            payload["manual_vehicle_hint"] = (
+                "Opcja przydatna głównie przy trudnych paczkach: pojazdy pomagają zorientować się, gdzie szukać tablicy. "
+                "Te boxy są pomocnicze i nie trafiają do finalnego eksportu YOLO tablic."
+            )
             payload["manual_vehicle_tone"] = "muted"
             if vehicle_assist_enabled:
                 payload["workflow_conf_title"] = ""

@@ -15,13 +15,20 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Callable, Dict, Tuple
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, CUDA_AVAILABLE, AVAILABLE_POSE_MODELS, torch
+from ..config import (
+    CONFIG,
+    logger,
+    YOLO_AVAILABLE,
+    AVAILABLE_POSE_MODELS,
+    get_torch_module,
+    get_yolo_class,
+    is_cuda_available,
+)
 from ..utils import cleanup_gpu_memory, safe_load_yaml
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
 
-if YOLO_AVAILABLE:
-    from ultralytics import YOLO
+YOLO = None
 
 
 _ULTRALYTICS_SAVE_MODEL_PATCHED = False
@@ -119,7 +126,6 @@ class YOLOPoseTrainer:
     """
 
     def __init__(self, history: TrainingHistory = None):
-        _patch_ultralytics_save_model_closed_file_bug()
         self.history = history or TrainingHistory()
         self.current_run: Optional[TrainingRun] = None
         self.model: Optional["YOLO"] = None
@@ -168,6 +174,7 @@ class YOLOPoseTrainer:
             return
 
         try:
+            torch = get_torch_module()
             if torch is not None:
                 try:
                     torch.backends.mkldnn.enabled = False
@@ -294,7 +301,7 @@ class YOLOPoseTrainer:
             "epochs": int(epochs),
             "batch": int(batch_size),
             "imgsz": int(img_size),
-            "device": 0 if device == "auto" and CUDA_AVAILABLE else device,
+            "device": 0 if device == "auto" and is_cuda_available() else device,
             "lr0": float(lr0),
             "project": run.output_dir,
             "name": "train",
@@ -307,7 +314,7 @@ class YOLOPoseTrainer:
             # W Z4 użytkownik oczekuje pełnych artefaktów analitycznych Ultralytics
             # (results.png, confusion_matrix.png, krzywe PR/F1 itd.), więc
             # generowanie wykresów pozostaje domyślnie włączone.
-            "plots": (False if str(device).strip().lower() == "cpu" else True),
+            "plots": True,
             "workers": 0,
             "amp": bool(amp),
         }
@@ -316,6 +323,41 @@ class YOLOPoseTrainer:
         if close_mosaic is not None:
             train_args["close_mosaic"] = int(close_mosaic)
         return train_args
+
+    def _export_training_report_artifacts(self, run: TrainingRun) -> None:
+        if run is None:
+            return
+
+        run_dir = Path(str(getattr(run, "output_dir", "") or "").strip())
+        if not run_dir.exists():
+            return
+
+        train_dir = run_dir / "train"
+        try:
+            plots_dir = TrainingReportGenerator.export_plots(train_dir, run_dir)
+            refreshed_run = self.history.get_run(run.id) or run
+            report_path = TrainingReportGenerator.generate_html(
+                refreshed_run.to_dict(),
+                run_dir / "training_report.html",
+                plots_dir,
+                extra_info={
+                    "plots_dir": str(plots_dir),
+                    "train_dir": str(train_dir),
+                },
+            )
+            self.history.update_run(
+                run.id,
+                plots_dir=str(plots_dir),
+                report_html=str(report_path),
+            )
+            try:
+                run.plots_dir = str(plots_dir)
+                run.report_html = str(report_path)
+            except Exception:
+                pass
+            logger.info(f"Raport treningu zapisany: {report_path}")
+        except Exception as report_err:
+            logger.warning(f"Nie udało się przygotować raportu i wykresów treningu: {report_err}")
 
     def _get_dataset_runtime_profile(self, dataset_path) -> Dict:
         profile = {
@@ -706,6 +748,11 @@ class YOLOPoseTrainer:
         if not YOLO_AVAILABLE:
             logger.error("YOLO niedostępny")
             return None
+        YoloClass = get_yolo_class()
+        if YoloClass is None:
+            logger.error("Nie udało się załadować YOLO")
+            return None
+        _patch_ultralytics_save_model_closed_file_bug()
 
         if self.is_training:
             logger.warning("Trening już trwa")
@@ -804,6 +851,13 @@ class YOLOPoseTrainer:
         run = self.current_run
         try:
             self._reset_runtime_state()
+            if not YOLO_AVAILABLE:
+                raise RuntimeError("YOLO niedostępny w procesie treningu.")
+            YoloClass = get_yolo_class()
+            if YoloClass is None:
+                raise RuntimeError("Nie udało się załadować klasy YOLO w procesie treningu.")
+            _patch_ultralytics_save_model_closed_file_bug()
+
             is_resuming = bool(resume_from and Path(resume_from).exists())
             dataset_profile = self._get_dataset_runtime_profile(dataset_path)
             disable_mosaic_from_start = bool(
@@ -945,10 +999,10 @@ class YOLOPoseTrainer:
             for attempt_index, attempt in enumerate(training_attempts):
                 if is_resuming:
                     logger.info(f"Wznawiam z: {resume_from}")
-                    self.model = YOLO(resume_from)
+                    self.model = YoloClass(resume_from)
                 else:
                     logger.info(f"Ładuję: {model_file}")
-                    self.model = YOLO(model_file)
+                    self.model = YoloClass(model_file)
 
                 self.history.update_run(
                     run.id,
@@ -1067,6 +1121,7 @@ class YOLOPoseTrainer:
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=max(epochs, self._resolve_runtime_epoch()),
             )
+            self._export_training_report_artifacts(self.history.get_run(run.id) or run)
             # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
             try:
                 if best_weights.exists():

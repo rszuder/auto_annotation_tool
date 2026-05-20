@@ -171,6 +171,10 @@ class PlateGenerator:
                     'ocr_text': str(plate_detection.text) if plate_detection.text else None,
                     'ocr_confidence': float(plate_detection.text_confidence) if plate_detection.text_confidence else 0.0,
                     'detection_confidence': float(plate_detection.confidence),
+                    'plate_layout': 'two_row_candidate' if is_square else 'single_row',
+                    'layout_row_count': 0 if is_square else 1,
+                    'layout_confidence': 0.35 if is_square else 0.55,
+                    'layout_source': 'plate_aspect',
                     'plate_attributes': plate_detection.attributes,
                 }
                 

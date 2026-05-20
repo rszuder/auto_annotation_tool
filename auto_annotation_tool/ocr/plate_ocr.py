@@ -6,19 +6,19 @@ Silnik OCR dla tablic rejestracyjnych - TRYB AGRESYWNY.
 
 from pathlib import Path
 from typing import Optional, List, Tuple
+import importlib
+import importlib.util
 import numpy as np
 
-from ..config import logger, CV2_AVAILABLE, cv2
+from ..config import logger, CV2_AVAILABLE, cv2, is_cuda_available
 from ..utils import cleanup_gpu_memory
 from .validators import LicensePlateValidator
 
+easyocr = None
 try:
-    import easyocr
-    EASYOCR_AVAILABLE = True
-except ImportError:
+    EASYOCR_AVAILABLE = importlib.util.find_spec("easyocr") is not None
+except Exception:
     EASYOCR_AVAILABLE = False
-    easyocr = None
-    logger.warning("EasyOCR niedostępny - install: pip install easyocr")
 
 
 class PlateOCR:
@@ -47,9 +47,23 @@ class PlateOCR:
             logger.error("EasyOCR nie jest zainstalowany!")
     
     def _load_reader(self):
+        global easyocr
+        if easyocr is None:
+            try:
+                easyocr = importlib.import_module("easyocr")
+            except Exception as e:
+                logger.error(f"[ERR] Błąd importu EasyOCR: {e}")
+                self.is_loaded = False
+                return
         try:
             logger.info(f"Ładowanie EasyOCR reader (Aggressive Mode)")
-            use_gpu = str(self.device).startswith('cuda')
+            raw_device = str(self.device or "").strip().lower()
+            use_gpu = (
+                isinstance(self.device, int)
+                or raw_device.startswith('cuda')
+                or raw_device.isdigit()
+                or (raw_device == "auto" and is_cuda_available())
+            )
             
             self.reader = easyocr.Reader(
                 self.languages,

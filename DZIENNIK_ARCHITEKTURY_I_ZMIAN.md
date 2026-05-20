@@ -733,3 +733,219 @@ Cel architektury:
   - `Korekta -> Eksport`,
   - powrot do wyboru toru,
   - restart aplikacji i restore sesji.
+
+## 2026-05-19
+
+### Log zmian od ostatniego wpisu
+
+Od wpisu `2026-05-13` aplikacja zostala przesunieta z etapu "ciecia architektury" w etap stabilizacji zachowan uzytkownika. Najwiecej zmian dotyczylo przeplywow `Z2`, `Z3/PZ2`, `Z4`, wizarda kampanii oraz wspolnych mechanizmow canvasa.
+
+### Wizard / kampania (C)
+
+- Przeniesiono wybor toru pracy na poziom `E1`, tak aby uzytkownik wybieral kierunek iteracji przed wejsciem w kolejne etapy.
+- Ujednolicono tabele wyboru zasobow w `E1`, rowniez dla iteracji wiekszych niz pierwsza.
+- Dodano warunek, ze zatwierdzenie `E1` wymaga jednoczesnie wyboru katalogu obrazow oraz wyboru toru.
+- Uszczelniono przejscie `E1 -> E2/E3`:
+  - tor tablic prowadzi do `E2`,
+  - tor znakow moze kierowac bezposrednio do `E3`, jezeli zrodlo znakowe jest gotowe.
+- Zablokowano bypass `E1`, w ktorym `E2` moglo byc gotowe mimo braku zatwierdzenia zrodel w `E1`.
+- Poprawiono odtwarzanie sciezki katalogu obrazow po przejsciu `E4 -> E1`.
+- Dodano logike rozrozniajaca sytuacje:
+  - w stage nadal sa obrazy oczekujace,
+  - stage jest pusty i trzeba wskazac nowy katalog.
+- Poprawiono liczniki w modalu analizy obrazow `E1`, aby rozroznialy realnie nowe obrazy od obrazow znanych juz w projekcie.
+- Uproszczono modal po zakonczeniu `E4`, bo po przebudowie architektury dalsza decyzja odbywa sie w `E1`.
+- Poprawiono badge i CTA zatwierdzania etapow, w tym wyjatek `E4`, gdzie etap moze zostac zamkniety rowniez bez treningu.
+
+### Z2 / anotacja tablic
+
+- Rozdzielono zachowania `Z2` dla trybu kampanii `(C)` i trybu swobodnego `(F)` w kolejnych miejscach przeplywu.
+- Ustabilizowano miniflow autoanotacji w `(F)`:
+  - wybor katalogu obrazow jest lekki,
+  - pelne `Z2` laduje sie dopiero po przejsciu dalej,
+  - modal ustawien autoanotacji startuje z ustawieniami domyslnymi,
+  - wyjscie z miniflow czysci kontekst roboczy.
+- Przebudowano krok korekty po autoanotacji:
+  - rozrozniono decyzje `Wytnij tablice` oraz `Eksport i split datasetu`,
+  - usunieto mylace CTA i stare copy,
+  - dopisano warunek, ze eksport i wycinanie wymagaja zatwierdzonych obrazow ze statusem `[OK]`.
+- W trybie recznej anotacji `(F)` doprowadzono przeplyw do tego samego schematu decyzyjnego co po autoanotacji.
+- Wprowadzono ostrzezenia i modale informujace, ze obraz bez ramki nie powinien otrzymac statusu `[OK]`.
+- Poprawiono zachowanie po wyjsciu z trybu naprawczego `E3 -> Z2`:
+  - obrazy `[OK]` trafiaja do katalogu zatwierdzonych,
+  - po ponownym wejsciu nie powinny wracac na liste robocza,
+  - prawy panel pokazuje czytelniejsze liczniki.
+- Dodano do prawego panelu trybu naprawczego licznik oznaczonych tablic i doprecyzowano copy o katalogu zatwierdzonych zdjec.
+- Dodano i rozwijano overlaye canvasa:
+  - szuflada narzedzi,
+  - kompas,
+  - parametry obrazu i ramek `PX`,
+  - status bramki w fullscreen dla kampanii,
+  - status zatwierdzenia obrazu.
+- Poprawiono zachowanie kompasu, superkorekty i overlayow, aby ograniczyc kolizje z podgladem i lista.
+- Dodano tabele metadanych modeli w modalach autoanotacji, w tym `map50-90`, epoke, typ modelu i parametry eksportu.
+- Poprawiono obsluge eksportowanych modeli z kampanii do trybu swobodnego, aby ich metadane byly widoczne przy pozniejszym uzyciu.
+
+### Z3 / wycinanie tablic i anotacja znakow
+
+- Uproszczono `Z3/PZ1 (F)` dla kontynuacji z runu `Z2`:
+  - zamiast dwoch kart miniflow pojawia sie tabela przejetego runu,
+  - uzytkownik widzi nazwe runu, katalog obrazow, liczbe zdjec i liczbe anotacji do wyciecia,
+  - glowne CTA wykonuje wycinanie tablic.
+- Dodano zasade jednokrotnego wycinania tablic:
+  - po udanym wycieciu przycisk zostaje zablokowany,
+  - uzytkownik dostaje modal podsumowujacy,
+  - aplikacja moze przejsc dalej do pracy na wycietych tablicach.
+- Poprawiono przekazywanie aktualnego runu z `Z2` do `Z3`, aby nie wracaly stare cropy z poprzedniego runu.
+- W `Z3/PZ2` rozbudowano pipeline detekcji znakow:
+  - rozdzielono role `O`, `YB`, `YS`,
+  - wybor modelu YOLO jest wspolny dla calego pipeline,
+  - dodano ochrone manualnych ramek i tablic perfect,
+  - dodano modal decyzji przed detekcja.
+- Dodano rozroznianie metod na liscie tablic, np. `M`, `O`, `YB`, `YS` oraz kombinacje typu `OK|M|O|YB`.
+- Poprawiono logike pipeline `OCR -> YOLO`, `YOLO -> OCR`, `OCR + YOLO` i budowniczego pipeline.
+- Dodano splash postepu dla detekcji znakow.
+- Uporzadkowano prawy panel `PZ2`:
+  - szczegoly stanu,
+  - liczniki perfectow,
+  - czytelniejsze tabele,
+  - mniej agresywne copy.
+- Dodano asystenta operacji canvasowych w szufladzie `PZ2`.
+- Poprawiono tryb wpisywania znakow `ALT+W`, aby nie wlaczal sie przypadkowo po samym nacisnieciu `W` na hoverze boxa.
+- Ograniczono przypadki wypychania podgladu przez overlay asystenta operacji.
+- Rozpoczeto porzadkowanie wydajnosci listy, zaznaczania grupowego i migotania boxow przy edycji.
+
+### Z3/PZ3 / review pack, CVAT i gold pack
+
+- Przebudowano narracje `PZ3`, aby jasno wyjasniala obieg:
+  - eksport review pack do CVAT,
+  - poprawki poza aplikacja,
+  - import poprawek z powrotem.
+- Usunieto niepotrzebny split z `PZ3`, bo warianty splitu sa domena `Z4`.
+- Przeniesiono podsumowania importu/eksportu do modali.
+- Uporzadkowano karty strategii i zrodel gold packa.
+- Dodano dynamiczne tabele dla strategii i zakresu gold packa oraz backup zmian:
+  - `backups/pz3_goldpack_tables_20260518_212803`.
+- Poprawiano geometrie i szerokosci kolumn tabel, bo poprzedni uklad ucinal tresc.
+
+### Z4 / dataset, split, trening i modele
+
+- Uporzadkowano relacje `PZ1/PZ2`:
+  - `PZ1` odpowiada za przygotowanie wariantu splitu,
+  - `PZ2` sluzy do wyboru gotowego wariantu i treningu.
+- Przywrocono mozliwosc pracy na roznych splitach bez ponownego eksportu z `Z2`.
+- Rozdzielono semantyke datasetow znakow i tablic:
+  - znaki: dataset YOLO detect z `images/labels` i `data.yaml`,
+  - tablice: dataset pose oraz zgodnosc XML z obrazami.
+- Dodano walidacje i komunikaty dla niegotowych zrodel datasetu.
+- Dodano tworzenie brakujacego `data.yaml` dla datasetu znakow, gdy uzytkownik potwierdzi taka operacje.
+- Przeniesiono stare katalogi klasyfikacyjne znakow do osobnego miejsca w drzewie workspace, aby nie mieszaly sie z datasetami YOLO.
+- Dodano postep tworzenia datasetu w torze znakow.
+- Poprawiono kolory paskow postepu i licznikow w `Z4`, aby byly zgodne z motywem.
+- Dodano eksport wytrenowanego modelu z historii runow przez menu kontekstowe `PPM`:
+  - eksport `best.pt`,
+  - eksport metadanych modelu,
+  - zapis do wlasciwego katalogu trybu swobodnego `char/pose`.
+- Rozwijano raporty treningowe i wyniki, w tym przywracanie wykresow oraz czytelniejsza produkcje parametrow.
+- Sprawdzano i poprawiano respektowanie globalnego wyboru `GPU/CPU` dla treningu oraz detekcji.
+
+### Globalne UI, AS, help i stabilnosc
+
+- Dodano globalnego asystenta `AS` do kolejnych zakladek i podzakladek, rowniez poza trybem swobodnym.
+- Zmieniono zalozenie: `AS` ma byc dostepny w kazdym etapie, niezaleznie od `(C)` albo `(F)`.
+- Rozbudowano slownik pojec asystenta, aby terminy typu `crop`, `dataset`, `YOLO`, `CVAT`, `model`, `epoka`, `trening`, `boxy` i `poligony` mialy wyjasnienia.
+- Zaktualizowano globalny help i tresci `Z5`.
+- Ustawiono wersje programu w pasku glownym na `4.0` oraz autora `R. Szuderski`.
+- Dodano hover-chmurki dla ikon `Terminal` i `AS`.
+- Poprawiono motywy:
+  - scrollbary w trybie ciemnym,
+  - zaznaczenia list,
+  - dropdowny,
+  - badge,
+  - CTA i tabele.
+- Poprawiano reakcje UI po zmianie motywu, aby wymuszac pelniejszy rerender.
+- Wzmocniono zamykanie aplikacji krzyzykiem systemowym i sprzatanie zasobow.
+- Rozbudowano `dependency_bootstrap.py`, aby komunikaty o brakach pakietow i problemach z pamiecia stronicowania byly czytelniejsze.
+
+### Backlog - pomysl: iteracyjne dopasowanie boxow po OCR
+
+Po testach `Z3/PZ2` widac, ze korekta polozenia boxow po OCR z uzyciem YOLO bywa zbyt malo precyzyjna. Obecny mechanizm nie bierze pierwszego losowego trafienia, ale nadal dziala jednoprzebiegowo: wybiera najlepszego kandydata z aktualnej listy detekcji YOLO i nie prowadzi aktywnego szukania lepszego wariantu.
+
+Pomysl do dalszego rozwoju:
+
+- dodac opcjonalny tryb `YB refine` / `precyzyjne dopasowanie boxow`;
+- nie traktowac go jako domyslnej sciezki, tylko jako kosztowna opcje zaawansowana w pipeline;
+- najpierw poprawic scoring kandydata:
+  - confidence YOLO,
+  - zgodnosc srodka z boxem OCR,
+  - podobienstwo wysokosci do reszty znakow,
+  - linia bazowa,
+  - overlap/IoU z OCR,
+  - kolejnosc znaku,
+  - odleglosc od sasiadow;
+- potem dodac iteracyjne przyblizenia:
+  - kilka najlepszych kandydatow `top-k`,
+  - lokalne przesuniecia,
+  - lokalne skalowanie boxa,
+  - limit iteracji,
+  - limit czasu,
+  - prog akceptacji ustawiany przez uzytkownika;
+- zapisac metadane decyzji:
+  - stary box,
+  - nowy box,
+  - score,
+  - liczba iteracji,
+  - metoda, np. `YB+R`;
+- nie nadpisywac ramek manualnych;
+- dla tablic `perfect` stosowac tylko wtedy, gdy uzytkownik jawnie wylaczy ochrone albo gdy dziala tryb bezpiecznej korekty geometrii bez zmiany tekstu.
+
+Ocena: warto, ale dopiero po stabilizacji obecnego pipeline `O/YB/YS`. Najpierw nalezy dopracowac lekki scoring, a dopiero potem dodac ciezszy wariant iteracyjny.
+
+### Backlog - problem: tablice dwurzedowe
+
+Do dalszej analizy trzeba dodac obsluge tablic dwurzedowych. Obecny przeplyw `Z3/PZ2` i pipeline `O/YB/YS` sa projektowane glownie pod liniowy uklad znakow czytany od lewej do prawej. Dla tablic dwurzedowych moze to powodowac bledy w kolejnosci znakow, walidacji statusu `perfect`, dopasowaniu OCR do YOLO oraz eksporcie datasetu znakow.
+
+Kierunek do rozpoznania:
+
+- wykrywac, czy tablica ma jeden czy dwa rzedy znakow;
+- sortowac znaki najpierw po rzedzie, potem po osi `X`;
+- pokazac w `PZ2` jasny status ukladu tablicy: `1 rzad` / `2 rzedy` / `niepewne`;
+- dopuscic reczna korekte przypisania znaku do rzedu;
+- zapisac w `metadata.json` informacje o rzedzie znaku, aby eksport datasetu i walidacja perfect nie tracily tej struktury;
+- sprawdzic, czy prostowanie tablic nie znieksztalca nadmiernie ukladu dwurzedowego;
+- rozstrzygnac, czy tablice dwurzedowe maja byc obslugiwane pelnoprawnie, czy oznaczane jako przypadek wymagajacy recznej kontroli.
+
+Ocena: temat wazny, ale do wdrozenia po stabilizacji bazowego pipeline znakow, bo zmienia zalozenie o liniowej kolejnosci znakow.
+
+#### Dygresja architektoniczna - runtime odczytu tablic poza edytorem
+
+Mechanizm `1R/2R` w edytorze `Z3/PZ2` pelni dzis przede wszystkim role bramki jakosciowej: pomaga zdecydowac, czy tablica moze otrzymac status `perfect`, a wiec czy moze wejsc do `gold packa` i posluzyc jako material treningowy.
+
+Warto jednak odnotowac konsekwencje dla przyszlego uzycia wytrenowanego modelu poza aplikacja, np. w programie telefonicznym do identyfikacji tablic. Jesli model znakow zwraca osobne boxy znakow, aplikacja produkcyjna musi miec runtime'owy odpowiednik tej logiki:
+
+- wykryc lub przyjac uklad tablicy `1R/2R`;
+- dla `1R` ulozyc znaki od lewej do prawej;
+- dla `2R` najpierw podzielic znaki na rzad gorny i dolny, a dopiero potem sortowac po osi `X`;
+- zlozyc finalny tekst tablicy w poprawnej kolejnosci czytania.
+
+Roznica polega na celu mechanizmu. W edytorze sluzy on walidacji datasetu i statusu `perfect/gold pack`. W runtime mobilnym lub produkcyjnym sluzylby juz nie walidacji, ale inferencji: zamianie wykrytych boxow znakow na poprawny numer rejestracyjny.
+
+Alternatywa architektoniczna to trenowanie modelu/pipeline, ktory zwraca cala sekwencje znakow tablicy bez skladania z pojedynczych boxow. Przy obecnym podejsciu detekcyjnym `YOLO Detect` logika kolejnosci odczytu pozostaje jednak potrzebnym elementem aplikacji koncowej.
+
+### Rzeczy do dalszej stabilizacji
+
+- Oddzielic jeszcze mocniej runtime `(C)` i `(F)`, szczegolnie tam, gdzie `Z2` i `Z3` przekazuja sobie artefakty.
+- Dopilnowac, aby `RC` bylo jedynym zrodlem prawdy dla kampanii.
+- Ograniczyc zaleznosc widokow od starych fallbackow tekstowych i dynamicznych copy.
+- Dopracowac wydajnosc:
+  - przelaczanie obrazow,
+  - zaznaczanie grup na listach,
+  - odswiezanie badge i boxow,
+  - prace po dlugim treningu i minimalizacji okna.
+- Dopisac testy regresji dla:
+  - `E1 -> E2/E3`,
+  - `E3 -> Z2 -> E3`,
+  - `Z2(F) -> Z3/PZ1 -> PZ2`,
+  - pipeline `O/YB/YS`,
+  - eksport modeli z `Z4` do katalogow trybu swobodnego,
+  - odtwarzanie projektu po restarcie aplikacji.

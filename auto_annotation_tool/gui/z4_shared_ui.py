@@ -399,7 +399,7 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     _set_pack_visible(dataset_caption, show_dataset_section, anchor=tk.W, fill=tk.X, pady=(2, 6))
     _set_pack_visible(dataset_path_label, show_manual_dataset_path, anchor=tk.W, fill=tk.X, pady=(2, 2))
     _set_pack_visible(dataset_row, show_manual_dataset_path, fill=tk.X, pady=2)
-    _set_pack_visible(dataset_variant_row, bool(vm.show_dataset_section and not vm.in_campaign), fill=tk.X, pady=(4, 2))
+    _set_pack_visible(dataset_variant_row, bool(vm.show_dataset_section), fill=tk.X, pady=(4, 2))
     _set_pack_visible(dataset_hint, bool(vm.show_dataset_hint), anchor=tk.W, fill=tk.X, pady=(4, 8))
     _set_pack_visible(scope_hint, bool(vm.show_scope_hint), anchor=tk.W, fill=tk.X, pady=(0, host._train_left_section_gap))
     _set_pack_visible(
@@ -421,8 +421,11 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
         host._set_training_widget_text(dataset_title, title_text)
 
     if bool(vm.in_campaign):
-        dataset_caption_text = "Dataset podstawia workflow kampanii."
-        dataset_required_text = "Wymagane: dataset przygotowany przez workflow projektu."
+        dataset_caption_text = (
+            "PZ2 korzysta z wariantów przygotowanych w PZ1. "
+            "Możesz przełączyć split, ale nowych źródeł nie wybieramy w tej karcie."
+        )
+        dataset_required_text = "Wymagane: gotowy wariant datasetu zgodny z torem kampanii."
     elif selected_target == "plate":
         dataset_required_text = "Wymagane: gotowy wariant datasetu YOLO Pose z data.yaml."
         dataset_caption_text = (
@@ -476,8 +479,7 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
             pass
 
     try:
-        if not bool(vm.in_campaign):
-            host._refresh_dataset_variant_choices()
+        host._refresh_dataset_variant_choices()
     except Exception:
         pass
 
@@ -788,13 +790,14 @@ def refresh_step4_campaign_navigation_ui(host: "TrainingTab"):
         active_target = str(host.get_campaign_training_target() or "").strip().lower()
         show_dataset_adjust_cta = bool(
             CAMPAIGN.get_active_project_name()
-            and active_target == "char"
+            and active_target in {"char", "plate"}
             and bool(getattr(host, "_step4_train_unlocked", False))
         )
         if show_dataset_adjust_cta:
             host.btn_step4_finish.configure(
-                text="Popraw split w PZ1",
+                text="Ustaw inny split",
                 command=host._open_step4_dataset_stage,
+                width=22,
                 state=(tk.DISABLED if host._step4_has_active_operation() else tk.NORMAL),
             )
             if not str(host.btn_step4_finish.winfo_manager()):
@@ -997,7 +1000,7 @@ def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | Non
         pass
 
 
-def set_step4_dataset_mode(host: "TrainingTab", mode: str):
+def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_message: bool = True):
     mode = (mode or "char").strip().lower()
     if mode not in ("char", "plate"):
         mode = "char"
@@ -1022,11 +1025,12 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str):
     locked_target = host._get_locked_campaign_training_target()
     if campaign_active and locked_target in ("char", "plate"):
         if mode != locked_target:
-            messagebox.showinfo(
-                "Tor zablokowany przez E2",
-                "Tor treningu dla tej iteracji został już ustalony w wizardzie E2.\n\n"
-                f"Ta iteracja pozostaje w torze {host._format_training_target_label(locked_target)}."
-            )
+            if show_locked_message:
+                messagebox.showinfo(
+                    "Tor iteracji jest stały",
+                    "Tor treningu został już ustalony dla bieżącej iteracji.\n\n"
+                    f"Ta iteracja pozostaje w torze {host._format_training_target_label(locked_target)}."
+                )
         mode = locked_target
         route_changed = mode != previous_mode
 
@@ -1216,6 +1220,24 @@ def step4_train_go_back(host: "TrainingTab"):
             return
         except Exception:
             pass
+
+    try:
+        open_step4_dataset_stage(host)
+    except Exception:
+        try:
+            host.main_nb.select(host.tab_dataset)
+        except Exception:
+            pass
+
+    try:
+        host._refresh_step4_dataset_mode_ui()
+    except Exception:
+        pass
+
+    try:
+        host._refresh_free_training_route_ui()
+    except Exception:
+        pass
 
 
 def refresh_step4_analysis_tab_visibility(host: "TrainingTab"):

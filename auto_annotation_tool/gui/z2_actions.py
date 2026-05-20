@@ -298,8 +298,6 @@ class PlateAutoAction(Z2Action):
 
     def is_available(self, ctx: Z2ActionContext) -> bool:
         if ctx.mode == "campaign":
-            if ctx.campaign_repair_mode:
-                return False
             return True
         return True
 
@@ -307,13 +305,16 @@ class PlateAutoAction(Z2Action):
         if ctx.is_processing:
             return False
         if ctx.mode == "campaign":
-            if ctx.campaign_repair_mode:
-                return False
             return True
         return True
 
     def get_description(self, ctx: Z2ActionContext) -> str:
         if ctx.mode == "campaign":
+            if ctx.campaign_repair_mode:
+                return (
+                    "Dostepna takze w trybie naprawczym. Mozesz uzyc modelu tablic i opcjonalnej asysty pojazdow, "
+                    "aby szybciej powiekszyc albo poprawic zrodlo tablic przed powrotem do E3."
+                )
             if ctx.campaign_repair_mode:
                 return (
                     "W tym trybie naprawczym autoanotacja projektowym modelem jest ukryta celowo. "

@@ -341,6 +341,41 @@ def open_campaign_step2_entry(
                     or run_manifest.get("source_input_dir")
                     or run_manifest.get("imported_source_input_dir")
                 )
+
+            repair_context_matches_current_iteration = False
+            if snapshot_input_dir is not None:
+                try:
+                    repair_context_matches_current_iteration = host._paths_equivalent(
+                        snapshot_input_dir,
+                        base_input_dir,
+                    )
+                except Exception:
+                    repair_context_matches_current_iteration = False
+            if not repair_context_matches_current_iteration and snapshot_restore_run is not None:
+                try:
+                    repair_context_matches_current_iteration = host._annotation_run_matches_expected_input_dir(
+                        snapshot_restore_run,
+                        base_input_dir,
+                    )
+                except Exception:
+                    repair_context_matches_current_iteration = False
+
+            if repair_context_matches_current_iteration:
+                if snapshot_input_dir is None:
+                    snapshot_input_dir = base_input_dir
+            else:
+                if snapshot_restore_run is not None or snapshot_input_dir is not None:
+                    try:
+                        logger.info(
+                            "Pomijam stary kontekst Z2 przy powrocie E3 -> Z2: "
+                            f"snapshot_input={snapshot_input_dir} restore_run={snapshot_restore_run} "
+                            f"current_iteration_input={base_input_dir}"
+                        )
+                    except Exception:
+                        pass
+                snapshot_restore_run = None
+                snapshot_input_dir = base_input_dir
+
             bootstrap = {
                 "input_dir": (snapshot_input_dir or base_input_dir),
                 "input_source": (
@@ -684,6 +719,7 @@ def build_z2_layout_state_campaign(
         show_right_panel=bool(
             (
                 int(campaign_stage or 0) == 2
+                or int(campaign_stage or 0) == 3
                 or host._is_campaign_char_repair_return_mode()
                 or host._is_campaign_plate_step4_repair_return_mode()
             )
@@ -712,7 +748,6 @@ def prepare_campaign_workflow_runtime(
         campaign_char_repair_mode = bool(
             campaign_stage == 3
             and campaign_iteration_target == "char"
-            and str(CAMPAIGN.get_step3_status() or "").strip().lower() == "needs_rework"
         )
         campaign_plate_step4_repair_mode = bool(
             campaign_stage == 4
@@ -869,6 +904,49 @@ def build_z2_cta_state_campaign(
     )
 
 
+def _apply_campaign_char_repair_copy_payload(
+    payload: Z2CopyPayload,
+    *,
+    manual_review_active: bool = False,
+) -> Z2CopyPayload:
+    payload["run_title"] = "Przygotowanie większej liczby tablic"
+    payload["badge_text"] = "Aktywny tor: świadomy powrót z E3 do Z2"
+    payload["badge_tone"] = "success"
+    payload["run_intro_text"] = (
+        "Wróciłeś do Z2, żeby świadomie powiększyć projektowy zbiór tablic. "
+        "Więcej poprawnych ramek daje lepszy materiał do treningu znaków. "
+        "Zatwierdzone anotacje tablic [OK] wchodzą do wspólnej puli przyszłych iteracji "
+        "w torze tablic bądź znaków, zgodnie z wyborem użytkownika. "
+        "Pamiętaj o zatwierdzeniu uznanych za poprawnie anotowane obrazy na liście wyników: "
+        "prawy przycisk myszy PPM na pozycji lub zaznaczonej grupie."
+    )
+    payload["route_text"] = (
+        "Uzupełnij ramki na podglądzie. Poprawne zdjęcia zatwierdzaj z menu listy "
+        "otwieranym prawym przyciskiem myszy: wybierz „Oznacz zaznaczone jako OK”."
+    )
+    payload["action_text"] = ""
+    payload["workflow_start_title"] = ""
+    payload["workflow_start_intro"] = ""
+    payload["auto_plate_model_hint_text"] = (
+        "W tym powrocie możesz użyć aktywnego modelu projektu albo podmienić model tylko dla tego runu Z2. "
+        "Jeśli wolisz, możesz też pominąć autoanotację i poprawiać tablice ręcznie."
+    )
+    payload["auto_plate_model_hint_tone"] = "muted"
+
+    if manual_review_active:
+        payload["manual_hint"] = (
+            "Ten powrót otwiera pełne Z2 dla tej samej paczki: możesz użyć autoanotacji aktywnym modelem projektu, "
+            "podmienić model tylko dla tego runu albo poprawiać tablice ręcznie."
+        )
+        payload["manual_hint_tone"] = "muted"
+        payload["workflow_input_title"] = "Aktywny run źródłowy"
+        payload["workflow_input_hint"] = (
+            "Bieżący run tablic jest już wczytany i gotowy do ręcznej poprawy przed powrotem do E3."
+        )
+
+    return payload
+
+
 def build_z2_left_panel_copy_payload_campaign(
     host: "AnnotationTab",
     ctx: Z2LeftPanelCopyContext,
@@ -949,7 +1027,7 @@ def build_z2_left_panel_copy_payload_campaign(
         payload["workflow_input_hint"] = (
             "To jest paczka obrazów bieżącej iteracji. Opcjonalnie możesz też dołączyć ręcznie anotowane zdjęcia z wcześniejszych iteracji, które mają pozostać widoczne na liście Z2. Model tablic, confidence i opcjonalne boxy pojazdów ustawisz przy starcie autoanotacji w modalu."
         )
-        payload["workflow_start_title"] = "Uruchom autoanotację i sprawdź wynik"
+        payload["workflow_start_title"] = "Start autoanotacji bieżącego runu"
         payload["workflow_start_intro"] = (
             "Uruchom run na bieżącej paczce. Przy starcie wybierzesz w modalu zakres, model tablic, confidence "
             "i ewentualne boxy pojazdów, a po zakończeniu od razu sprawdzisz wynik w tym samym Z2. "
@@ -973,7 +1051,11 @@ def build_z2_left_panel_copy_payload_campaign(
         if not plate_model_selected:
             payload["route_text"] = "Model tablic wybierzesz przy starcie autoanotacji."
             payload["action_text"] = "Kliknij Start, a w modalu wskażesz zakres pracy i model dla bieżącego runu Z2."
-            payload["workflow_start_intro"] = "Nie musisz już ustawiać modelu tablic w lewym panelu. Wybierzesz go w modalu startu autoanotacji."
+            payload["workflow_start_intro"] = (
+                "Start otworzy modal ustawień bieżącego runu Z2. Wybierzesz tam zakres obrazów, wymagany model tablic, "
+                "confidence oraz opcjonalne wsparcie modelem pojazdów. Po zatwierdzeniu modala program uruchomi autoanotację, "
+                "a wynik sprawdzisz i poprawisz na liście oraz podglądzie Z2."
+            )
             payload["auto_plate_model_hint_text"] = (
                 "Na tym etapie możesz wskazać aktywny model projektu albo podmienić go na inny model dla bieżącego runu Z2. "
                 "Sama podmiana w Z2 nie zmieni modelu projektu."
@@ -1020,29 +1102,7 @@ def build_z2_left_panel_copy_payload_campaign(
         payload["export_text"] = "Split i eksport datasetu są kolejnym krokiem dopiero na gotowym, sprawdzonym runie Z2."
 
         if campaign_char_repair_mode:
-            repair_images = sum(1 for ann in (host.current_annotations or []) if len(host._get_plate_detections(ann)) > 0)
-            repair_plates = sum(len(host._get_plate_detections(ann)) for ann in (host.current_annotations or []))
-            missing_images = max(0, 2 - int(repair_images or 0))
-            payload["run_title"] = "Przygotowanie większej liczby tablic"
-            payload["badge_text"] = "Aktywny tor: naprawa źródła dla Z3"
-            payload["route_text"] = (
-                f"Wróciłeś z toru znaków, bo obecne źródło ma {repair_plates} tablic na {repair_images} oznaczonych obrazach."
-            )
-            payload["action_text"] = (
-                (
-                    f"Brakuje jeszcze {missing_images} obrazu z poprawnie zapisaną tablicą 'plate', aby bezpiecznie wrócić do Z3."
-                    if missing_images > 0
-                    else "Masz już minimalną liczbę obrazów z tablicami. Zapisz poprawki i po prawej zatwierdź powrót do Z3."
-                )
-            )
-            payload["workflow_start_intro"] = (
-                "To tryb naprawczy dla toru znaków. Możesz uruchomić autoanotację tablic, użyć innego modelu tylko dla tego runu Z2 albo poprawiać tablice ręcznie, a potem wrócić do pracy nad znakami w Z3."
-            )
-            payload["auto_plate_model_hint_text"] = (
-                "W tym powrocie możesz użyć aktywnego modelu projektu albo podmienić model tylko dla tego runu Z2. "
-                "Jeśli wolisz, możesz też pominąć autoanotację i poprawiać tablice ręcznie."
-            )
-            payload["auto_plate_model_hint_tone"] = "muted"
+            _apply_campaign_char_repair_copy_payload(payload)
 
     elif route == "manual":
         payload["run_title"] = (
@@ -1061,30 +1121,7 @@ def build_z2_left_panel_copy_payload_campaign(
 
         if manual_review_active:
             if campaign_char_repair_mode:
-                repair_images = sum(1 for ann in (host.current_annotations or []) if len(host._get_plate_detections(ann)) > 0)
-                repair_plates = sum(len(host._get_plate_detections(ann)) for ann in (host.current_annotations or []))
-                missing_images = max(0, 2 - int(repair_images or 0))
-                payload["run_title"] = "Przygotowanie większej liczby tablic"
-                payload["badge_text"] = "Aktywny tor: naprawa źródła dla E3"
-                payload["route_text"] = (
-                    f"Wróciłeś z E3, bo obecne źródło ma {repair_plates} tablic na {repair_images} oznaczonych obrazach."
-                )
-                payload["action_text"] = (
-                    (
-                        f"Brakuje jeszcze {missing_images} obrazu z poprawnie zapisaną tablicą 'plate', aby wrócić do E3."
-                        if missing_images > 0
-                        else "Masz już minimalną liczbę obrazów z tablicami. Zapisz poprawki i po prawej zatwierdź powrót do E3."
-                    )
-                )
-                payload["workflow_start_intro"] = "To tryb naprawczy dla E3. Uzupełnij brakujące tablice i wróć do pracy nad znakami."
-                payload["manual_hint"] = (
-                    "Ten powrót otwiera pełne Z2 dla tej samej paczki: możesz użyć autoanotacji aktywnym modelem projektu, "
-                    "podmienić model tylko dla tego runu albo poprawiać tablice ręcznie."
-                )
-                payload["manual_hint_tone"] = "muted"
-                payload["workflow_start_title"] = "Ręczna korekta źródła tablic"
-                payload["workflow_input_title"] = "Aktywny run źródłowy"
-                payload["workflow_input_hint"] = "Bieżący run tablic jest już wczytany i gotowy do ręcznej poprawy przed powrotem do E3."
+                _apply_campaign_char_repair_copy_payload(payload, manual_review_active=True)
             else:
                 payload["route_text"] = "Korygujesz bieżący run Z2 tej iteracji."
                 payload["action_text"] = "Po prawej poprawiasz polygony aktywnego runu i po zakończeniu zmian domykasz E2."

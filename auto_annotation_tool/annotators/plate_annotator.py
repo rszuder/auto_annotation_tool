@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 import numpy as np
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO, CV2_AVAILABLE, cv2
+from ..config import CONFIG, logger, YOLO_AVAILABLE, get_yolo_class, CV2_AVAILABLE, cv2
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
 from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import get_image_size, cleanup_gpu_memory
@@ -44,7 +44,7 @@ class PlateAnnotator(BaseAnnotator):
                  enable_rectification: bool = True):
         super().__init__(confidence, device)
         self.model_path = Path(model_path)
-        self.model: Optional[YOLO] = None
+        self.model: Optional[object] = None
         self.is_pose_model = False
         
         # OCR
@@ -60,11 +60,14 @@ class PlateAnnotator(BaseAnnotator):
         """Ładuje modele: YOLO + OCR."""
         if not YOLO_AVAILABLE:
             return False, "YOLO niedostępny"
+        YoloClass = get_yolo_class()
+        if YoloClass is None:
+            return False, "YOLO niedostępny"
         
         try:
             # Załaduj YOLO
             logger.info(f"Ładowanie modelu tablic: {self.model_path}")
-            self.model = YOLO(str(self.model_path))
+            self.model = YoloClass(str(self.model_path))
             
             # Sprawdź, czy model zwraca keypointy.
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'kpt_shape'):

@@ -161,8 +161,14 @@ def refresh_training_input_summary(host: "TrainingTab"):
     intro = getattr(host, "free_training_route_intro_lbl", None)
     if intro is not None:
         try:
+            campaign_active = bool(CAMPAIGN.get_active_project_name())
             intro.configure(
-                text="PZ2 nie wybiera już toru samodzielnie. Korzysta z kontekstu przygotowanego w PZ1 albo przekazanego z eksportu Z2."
+                text=(
+                    "PZ2 w kampanii korzysta z toru i datasetu ustawionych przez workflow projektu. "
+                    "To podgląd wejścia treningowego przed uruchomieniem treningu."
+                    if campaign_active
+                    else "PZ2 nie wybiera już toru samodzielnie. Korzysta z kontekstu przygotowanego w PZ1 albo przekazanego z eksportu Z2."
+                )
             )
         except Exception:
             pass
@@ -285,12 +291,18 @@ def refresh_free_training_route_ui(host: "TrainingTab"):
     if route_host is None:
         return
 
-    campaign_active = bool(CAMPAIGN.get_active_project_name())
     try:
-        if campaign_active:
-            route_host.pack_forget()
+        pack_options = {"anchor": tk.W, "fill": tk.X, "pady": (0, 12)}
+        parent = route_host.master
+        siblings = []
+        try:
+            siblings = [widget for widget in parent.pack_slaves() if widget is not route_host]
+        except Exception:
+            siblings = []
+        if siblings:
+            route_host.pack(**pack_options, before=siblings[0])
         else:
-            route_host.pack(anchor=tk.W, fill=tk.X, pady=(0, 12), before=host.train_session_name_row)
+            route_host.pack(**pack_options)
     except Exception:
         pass
 

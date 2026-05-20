@@ -201,6 +201,24 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
         self._update_display()
 
+    def set_image_fit_to_view(self, pil_image):
+        """Set a new image and render it already fitted to the canvas."""
+        self._cancel_zoom_animation()
+        self._cancel_deferred_display()
+        self._middle_click_zoom_restore_state = None
+        self.original_image = pil_image
+        self.zoom_level = 1.0
+        self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
+
+        if not self._apply_fit_to_view_geometry():
+            try:
+                self.after(25, self.fit_to_view)
+            except Exception:
+                pass
+            return
+
+        self._update_display()
+
     def clear_image(self):
         """Wyczysc aktualny obraz i zresetuj stan widoku."""
         self._cancel_zoom_animation()
@@ -784,11 +802,9 @@ class ZoomableCanvas(tk.Canvas):
         origin_x = float(self.pan_data.get('x', 0.0))
         origin_y = float(self.pan_data.get('y', 0.0))
 
-        self.delete("all")
-        self.photo_image = None
-        self.image_id = None
-        self._render_region = None
-        self._pan_buffered_move_active = False
+        next_photo_image = None
+        next_image_coords = None
+        next_render_region = None
 
         if visible_region is not None:
             crop_box = visible_region["crop_box"]
@@ -798,14 +814,12 @@ class ZoomableCanvas(tk.Canvas):
                 (int(visible_region["draw_width"]), int(visible_region["draw_height"])),
                 resampling
             )
-            self.photo_image = ImageTk.PhotoImage(scaled)
-            self.image_id = self.create_image(
+            next_photo_image = ImageTk.PhotoImage(scaled)
+            next_image_coords = (
                 float(visible_region["draw_x"]),
                 float(visible_region["draw_y"]),
-                image=self.photo_image,
-                anchor="nw"
             )
-            self._render_region = {
+            next_render_region = {
                 "crop_box": tuple(crop_box),
                 "draw_x": float(visible_region["draw_x"]),
                 "draw_y": float(visible_region["draw_y"]),
@@ -813,6 +827,24 @@ class ZoomableCanvas(tk.Canvas):
                 "draw_height": int(visible_region["draw_height"]),
                 "zoom_level": float(self.zoom_level),
             }
+
+        # Prepare the resized frame before clearing the canvas. The old image
+        # stays visible during resize, so Q/E navigation does not flash blank.
+        self.delete("all")
+        self.photo_image = None
+        self.image_id = None
+        self._render_region = None
+        self._pan_buffered_move_active = False
+
+        if next_photo_image is not None and next_image_coords is not None:
+            self.photo_image = next_photo_image
+            self.image_id = self.create_image(
+                float(next_image_coords[0]),
+                float(next_image_coords[1]),
+                image=self.photo_image,
+                anchor="nw"
+            )
+            self._render_region = next_render_region
 
         self.configure(
             scrollregion=(
@@ -999,18 +1031,16 @@ class ZoomableCanvas(tk.Canvas):
         """Reset widoku (zoom + pan)."""
         self._on_reset_view(None)
 
-    def fit_to_view(self):
-        """Dopasuj cały obraz do aktualnego rozmiaru canvasa i wycentruj go."""
+    def _apply_fit_to_view_geometry(self):
         if self.original_image is None:
-            return
+            return False
 
         self.update_idletasks()
         canvas_width = max(1, int(self.winfo_width()))
         canvas_height = max(1, int(self.winfo_height()))
 
         if canvas_width <= 1 or canvas_height <= 1:
-            self.after(25, self.fit_to_view)
-            return
+            return False
 
         scale_x = canvas_width / max(1, self.original_image.width)
         scale_y = canvas_height / max(1, self.original_image.height)
@@ -1027,6 +1057,16 @@ class ZoomableCanvas(tk.Canvas):
             'press_y': None
         }
         self._apply_clamped_pan()
+        return True
+
+    def fit_to_view(self):
+        """Dopasuj cały obraz do aktualnego rozmiaru canvasa i wycentruj go."""
+        if self.original_image is None:
+            return
+
+        if not self._apply_fit_to_view_geometry():
+            self.after(25, self.fit_to_view)
+            return
         self._update_display()
         
     def update_image_preserve_zoom(self, pil_image):

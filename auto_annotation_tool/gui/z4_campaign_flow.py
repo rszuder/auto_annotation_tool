@@ -12,6 +12,7 @@ from .z4_view_models import (
     Step4DatasetWorkflowViewModel,
     Step4TrainingInputsViewModel,
 )
+from .z4_flow_models import TrainingInputContext
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
@@ -163,7 +164,7 @@ def build_step4_dataset_workflow_view_model(
                 )
 
     if route_locked:
-        description = str(description or "").strip() + " Tor tej iteracji został zatwierdzony w E2 i nie może być zmieniony w Z4."
+        description = str(description or "").strip() + " Tor tej iteracji jest stały w Z4; zmienisz go dopiero w kolejnej iteracji."
 
     return Step4DatasetWorkflowViewModel(
         mode=mode,
@@ -202,16 +203,17 @@ def build_step4_training_inputs_view_model(
     return Step4TrainingInputsViewModel(
         in_campaign=campaign_active,
         show_session_name=(not campaign_active),
-        show_dataset_section=(not campaign_active),
+        show_dataset_section=True,
         dataset_caption=(
             "Aktywny dataset treningowy wynika z bieżącego workflow projektu. "
-            "W kampanii to pole ma wyłącznie charakter informacyjny."
+            "W PZ2 możesz wybrać gotowy wariant utworzony wcześniej w PZ1, "
+            "ale nie wskazujesz tutaj nowych źródeł."
             if campaign_active
             else "PZ2 wybiera gotowy wariant treningowy przygotowany wcześniej w PZ1 albo przekazany z eksportu Z2."
         ),
         dataset_entry_state="readonly",
         show_dataset_pick_button=False,
-        show_dataset_hint=(not campaign_active),
+        show_dataset_hint=True,
         show_scope_hint=(not campaign_active),
         show_pose_warning=(not campaign_active),
         base_caption=(
@@ -247,11 +249,11 @@ def build_step4_campaign_navigation_view_model(
         train_tab_enabled=(not campaign_active) or train_unlocked,
         next_enabled=(not campaign_active) or (route_selected and train_unlocked),
         next_label=str(dataset_vm.next_label or "Dalej do treningu"),
-        show_dataset_back=True,
-        dataset_back_label=("Wróć do kampanii" if campaign_active else "Wstecz"),
-        show_train_nav=campaign_active,
+        show_dataset_back=campaign_active,
+        dataset_back_label=("Wróć do kampanii" if campaign_active else ""),
+        show_train_nav=True,
         show_train_back=True,
-        train_back_label=("Wróć do kampanii" if campaign_active else "Wstecz do toru"),
+        train_back_label=("Wróć do kampanii" if campaign_active else "Wstecz do PZ1"),
         finish_enabled=campaign_active and finish_ready,
         show_complete_project=False,
         force_dataset_tab_selection=campaign_active and dataset_tab_visible and not train_unlocked,
@@ -425,18 +427,6 @@ def open_campaign_step4_entry(
         datasets_dir=str(datasets_dir),
     )
 
-    readiness = host.get_campaign_step4_readiness(iteration_target=target)
-    readiness_reason = str(readiness.get("reason") or "").strip().lower()
-    if not readiness.get("ok", False) and readiness_reason != "stale_plate_dataset":
-        return readiness
-
-    host._step4_train_unlocked = False
-    try:
-        if str(readiness.get("ready_dataset") or "").strip():
-            host._step4_train_unlocked = True
-    except Exception:
-        pass
-
     datasets_dir = Path(datasets_dir)
     source_candidates = []
     try:
@@ -452,6 +442,45 @@ def open_campaign_step4_entry(
         source_candidates = []
 
     latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
+
+    readiness = host.get_campaign_step4_readiness(iteration_target=target)
+    readiness_reason = str(readiness.get("reason") or "").strip().lower()
+    ready_dataset_text = str(readiness.get("ready_dataset") or "").strip()
+    has_training_ready_dataset = bool(readiness.get("ok", False) and ready_dataset_text)
+    allow_dataset_source_entry = bool(
+        target == "char"
+        and preferred_subtab == "dataset"
+        and latest_source is not None
+        and readiness_reason in {"invalid_char_dataset", "missing_char_dataset"}
+    )
+
+    if (
+        not readiness.get("ok", False)
+        and readiness_reason != "stale_plate_dataset"
+        and not allow_dataset_source_entry
+    ):
+        return readiness
+
+    host._step4_train_unlocked = bool(has_training_ready_dataset)
+    if has_training_ready_dataset:
+        try:
+            host.dataset_var.set(ready_dataset_text)
+        except Exception:
+            pass
+        try:
+            host._last_training_input_context = TrainingInputContext(
+                source="campaign_ready_dataset",
+                target=target,
+                dataset_path=ready_dataset_text,
+                ready=True,
+            )
+        except Exception:
+            pass
+    elif target == "char" and preferred_subtab == "dataset":
+        try:
+            host.dataset_var.set("")
+        except Exception:
+            pass
 
     if target == "char" and latest_source is not None:
         host.split_src_var.set(str(latest_source))
@@ -838,15 +867,69 @@ def return_to_campaign_from_step4(host: "TrainingTab"):
 
 def finish_campaign_step4(host: "TrainingTab"):
     if not CAMPAIGN.get_active_project_name():
-        return
+        return False
 
     if not host._step4_campaign_finish_ready:
-        return
+        finish_state = {}
+        try:
+            target = str(CAMPAIGN.get_iteration_target() or host.get_campaign_training_target() or "").strip().lower()
+            finish_state = dict(host.get_campaign_step4_finish_state(iteration_target=target) or {})
+        except Exception:
+            try:
+                finish_state = dict(CAMPAIGN.get_step4_finish_state() or {})
+            except Exception:
+                finish_state = {}
+        try:
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+        except Exception:
+            current_iteration = 0
+        finish_ready = bool(finish_state.get("ready", False))
+        finish_iteration = int(finish_state.get("iteration", 0) or 0)
+        if not (finish_ready and finish_iteration == current_iteration):
+            return False
+        host._step4_campaign_finish_ready = True
+        run_id = str(finish_state.get("run_id", "") or "").strip()
+        if run_id:
+            try:
+                host.current_run_id = run_id
+            except Exception:
+                pass
+
+    campaign_tab = None
+    try:
+        campaign_tab = host.app.tabs.get("campaign") if getattr(host.app, "tabs", None) else None
+    except Exception:
+        campaign_tab = None
+
+    next_mode = None
+    if campaign_tab is not None and hasattr(campaign_tab, "_ask_iteration_advance_mode"):
+        try:
+            next_mode = campaign_tab._ask_iteration_advance_mode(completed_with_training=True)
+        except Exception:
+            next_mode = None
+        if str(next_mode or "").strip().lower() not in {"reuse_input", "new_input"}:
+            try:
+                host.app.update_status(
+                    "Pozostajesz w E4. Iteracja nie została domknięta, więc zatwierdzenie pozostaje dostępne.",
+                    "info",
+                )
+            except Exception:
+                pass
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=4)
+                campaign_tab._refresh_dashboard()
+            except Exception:
+                pass
+            try:
+                host._refresh_step4_campaign_navigation_ui()
+            except Exception:
+                pass
+            return True
 
     try:
         CAMPAIGN.set_current_step(5)
     except Exception:
-        return
+        return False
 
     host._step4_campaign_finish_ready = False
     try:
@@ -868,7 +951,6 @@ def finish_campaign_step4(host: "TrainingTab"):
         pass
 
     try:
-        campaign_tab = host.app.tabs.get("campaign")
         if campaign_tab:
             try:
                 campaign_tab.request_wizard_stage_focus(step_num=4)
@@ -895,6 +977,14 @@ def finish_campaign_step4(host: "TrainingTab"):
         host.app.open_controlled_tab("campaign")
     except Exception:
         pass
+
+    if campaign_tab is not None and str(next_mode or "").strip().lower() in {"reuse_input", "new_input"}:
+        try:
+            campaign_tab._start_iteration_advance(str(next_mode or "").strip().lower())
+        except Exception:
+            pass
+
+    return True
 
 
 def complete_campaign_project(host: "TrainingTab"):

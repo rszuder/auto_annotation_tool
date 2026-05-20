@@ -108,6 +108,7 @@ class Z2CtaState(_CompatModel):
     start_command: Callable[..., Any] | None = None
     start_text: str = "Wybierz tor"
     back_enabled: bool = False
+    back_text: str = "Wstecz"
     next_enabled: bool = False
     next_text: str = "Dalej"
     suppress_duplicate_start_cta: bool = False

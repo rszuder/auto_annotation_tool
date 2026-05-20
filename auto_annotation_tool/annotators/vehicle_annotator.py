@@ -7,7 +7,7 @@ Annotator pojazdów (Tryb A).
 from pathlib import Path
 from typing import Tuple, Optional
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, YOLO
+from ..config import CONFIG, logger, YOLO_AVAILABLE, get_yolo_class
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
 from ..utils import get_image_size, cleanup_gpu_memory
 from .base import BaseAnnotator
@@ -30,17 +30,20 @@ class VehicleAnnotator(BaseAnnotator):
                  device: str = "auto"):
         super().__init__(confidence, device)
         self.model_path = Path(model_path)
-        self.model: Optional[YOLO] = None
+        self.model: Optional[object] = None
         self.class_names = {}
     
     def load_models(self) -> Tuple[bool, str]:
         """Ładuje model detekcji pojazdów."""
         if not YOLO_AVAILABLE:
             return False, "YOLO niedostępny"
+        YoloClass = get_yolo_class()
+        if YoloClass is None:
+            return False, "YOLO niedostępny"
         
         try:
             logger.info(f"Ładowanie modelu pojazdów: {self.model_path}")
-            self.model = YOLO(str(self.model_path))
+            self.model = YoloClass(str(self.model_path))
             
             if hasattr(self.model, 'names'):
                 self.class_names = self.model.names

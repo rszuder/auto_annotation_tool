@@ -48,7 +48,20 @@ def main():
             pass
         
         # Start pętli zdarzeń
-        root.mainloop()
+        try:
+            root.mainloop()
+        finally:
+            try:
+                shutdown_cleanup = getattr(app, "_release_runtime_references", None)
+                if callable(shutdown_cleanup):
+                    shutdown_cleanup()
+            except Exception:
+                pass
+            try:
+                from auto_annotation_tool.utils import cleanup_gpu_memory
+                cleanup_gpu_memory()
+            except Exception:
+                pass
         
     except Exception as e:
         print("\n" + "="*60)

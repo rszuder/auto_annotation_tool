@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import datetime
@@ -27,7 +28,17 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from ..campaign_manager import CAMPAIGN
-from ..config import CONFIG, YOLO_AVAILABLE, AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS, PIL_AVAILABLE, CUDA_AVAILABLE, torch, logger
+from ..config import (
+    CONFIG,
+    YOLO_AVAILABLE,
+    AVAILABLE_POSE_MODELS,
+    AVAILABLE_DETECT_MODELS,
+    PIL_AVAILABLE,
+    get_torch_module,
+    get_yolo_class,
+    is_cuda_available,
+    logger,
+)
 from ..icons import IconManager
 from ..validators import validate_yolo_dataset, validate_model_file, format_yolo_model_identity
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
@@ -104,10 +115,7 @@ NAV_BUTTON_WIDTH = 18
 if PIL_AVAILABLE:
     from PIL import Image, ImageTk, ImageDraw, ImageFont
 
-try:
-    from ultralytics import YOLO
-except ImportError:
-    pass
+YOLO = None
 
 
 class TrainProgressBar(tk.Canvas):
@@ -1206,7 +1214,7 @@ class TrainingTab:
         rows = self._build_training_metric_rows(metrics)
         self._set_metric_table_rows(getattr(self, "train_live_metrics_tree", None), rows)
 
-    def _build_training_recommendation_rows(self) -> tuple[str, str, list[tuple[str, str]], str]:
+    def _build_training_recommendation_rows(self) -> tuple[str, str, list[tuple[str, ...]], str]:
         recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
         memory_gb = float(recommendation.get("memory_gb", 0.0) or 0.0)
         if recommendation.get("effective_raw") == "cpu":
@@ -1220,7 +1228,27 @@ class TrainingTab:
         if not model_label:
             model_label = self._build_training_recommendation_model_text()
 
+        model_identity = str(
+            recommendation.get("model_identity_label")
+            or recommendation.get("model_detected_label")
+            or recommendation.get("model_label")
+            or ""
+        ).strip()
+        if not model_identity:
+            model_identity = self._build_training_recommendation_model_text().replace("Model:", "", 1).strip() or "-"
+
+        model_variant_parts = [
+            str(recommendation.get("model_version_label") or "").strip(),
+            str(recommendation.get("model_size_label") or "").strip(),
+        ]
+        model_params_text = str(recommendation.get("model_params_text") or "").strip()
+        if model_params_text:
+            model_variant_parts.append(f"{model_params_text} param.")
+        model_variant_text = " | ".join(part for part in model_variant_parts if part) or "Nie rozpoznano z nazwy/pliku .pt"
+
         rows = [
+            ("Model bazowy", model_identity, "punkt odniesienia"),
+            ("Wersja / rozmiar", model_variant_text, "większy model = niższy batch"),
             ("1. Epoki (ustawiasz ręcznie)", "Twoja decyzja"),
             ("2. Rozmiar partii", str(int(recommendation.get("batch", 0) or 0))),
             ("3. Rozdzielczość wejściowa", str(int(recommendation.get("imgsz", 0) or 0))),
@@ -1241,11 +1269,17 @@ class TrainingTab:
 
         cells = list(getattr(self, "_train_recommendation_cells", []) or [])
         for row_index, row_values in enumerate(rows):
-            label_text, recommended_text = row_values
+            if len(row_values) >= 3:
+                label_text, current_text, recommended_text = row_values[:3]
+            else:
+                label_text, recommended_text = row_values[:2]
+                current_text = None
             if row_index >= len(cells):
                 continue
             row = cells[row_index]
             self._set_training_widget_text(row.get("key"), str(label_text))
+            if current_text is not None:
+                self._set_training_widget_text(row.get("current"), str(current_text))
             self._set_training_widget_text(row.get("recommended"), str(recommended_text))
 
         note_var = getattr(self, "train_recommendation_note_var", None)
@@ -1307,6 +1341,7 @@ class TrainingTab:
 
         for row_index, row in enumerate(list(getattr(self, "_train_recommendation_cells", []) or [])):
             key_widget = row.get("key")
+            current_widget = row.get("current")
             editor_host = row.get("editor_host")
             recommended_widget = row.get("recommended")
             key_bg = header_bg if row_index % 2 == 1 else cell_bg
@@ -1319,6 +1354,11 @@ class TrainingTab:
             if editor_host is not None:
                 try:
                     editor_host.configure(bg=editor_bg, highlightbackground=editor_bg, highlightcolor=editor_bg)
+                except Exception:
+                    pass
+            if current_widget is not None:
+                try:
+                    current_widget.configure(bg=editor_bg, fg=cell_fg)
                 except Exception:
                     pass
             if recommended_widget is not None:
@@ -2284,18 +2324,25 @@ class TrainingTab:
         return candidates
 
     def _get_free_dataset_variant_choices(self) -> list[dict]:
-        if CAMPAIGN.get_active_project_name():
-            return []
-
         selected_target = self._get_selected_training_target()
         candidates = self._find_ready_dataset_candidates(self._get_datasets_base_dir())
         variants: list[dict] = []
+        campaign_active = bool(CAMPAIGN.get_active_project_name())
+        approved_plate_images = 0
+        if campaign_active and selected_target == "plate":
+            try:
+                approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+                approved_plate_images = int(approved_stats.get("images", 0) or 0)
+            except Exception:
+                approved_plate_images = 0
 
         for path, target, stamp in candidates:
             if target != selected_target:
                 continue
             counts = self._get_dataset_split_image_counts(path)
             total = int(counts.get("total", 0) or 0)
+            if campaign_active and selected_target == "plate" and approved_plate_images > 0 and total != approved_plate_images:
+                continue
             try:
                 label_path = self._format_workspace_relative_path(path)
             except Exception:
@@ -2334,12 +2381,7 @@ class TrainingTab:
             pass
 
         try:
-            if CAMPAIGN.get_active_project_name():
-                combo.configure(state=tk.DISABLED)
-            elif labels:
-                combo.configure(state="readonly")
-            else:
-                combo.configure(state=tk.DISABLED)
+            combo.configure(state=("readonly" if labels else tk.DISABLED))
         except Exception:
             pass
 
@@ -2405,18 +2447,28 @@ class TrainingTab:
             path = str(item.get("path") or "").strip()
             if path:
                 try:
-                    self.dataset_var.set(path)
-                except Exception:
-                    pass
-                try:
-                    self._last_training_input_context = TrainingInputContext(
+                    accepted = self._accept_training_input_context(
                         source="pz2_variant",
                         target=self._get_selected_training_target(),
                         dataset_path=path,
-                        ready=True,
+                        select_training=False,
                     )
                 except Exception:
-                    pass
+                    accepted = False
+                if not accepted:
+                    try:
+                        self.dataset_var.set(path)
+                    except Exception:
+                        pass
+                    try:
+                        self._last_training_input_context = TrainingInputContext(
+                            source="pz2_variant",
+                            target=self._get_selected_training_target(),
+                            dataset_path=path,
+                            ready=True,
+                        )
+                    except Exception:
+                        pass
             return
 
     def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> dict[str, int]:
@@ -2557,6 +2609,32 @@ class TrainingTab:
 
         return "s"
 
+    @staticmethod
+    def _infer_training_model_version_size_from_text(raw_text: str | Path | None) -> tuple[str, str]:
+        text = str(raw_text or "").strip().lower()
+        if not text:
+            return "", ""
+        try:
+            text = f"{text} {Path(text).stem.lower()}"
+        except Exception:
+            pass
+
+        match = re.search(r"yolo(?:v)?(8|11|26)([nsmxl])", text)
+        if not match:
+            return "", ""
+        return str(match.group(1) or "").strip(), str(match.group(2) or "").strip().lower()
+
+    @staticmethod
+    def _format_training_model_version_label(raw_version: str | None) -> str:
+        version = str(raw_version or "").strip().lower()
+        if version.startswith("v"):
+            version = version[1:]
+        if not version:
+            return ""
+        if version == "8":
+            return "YOLOv8"
+        return f"YOLO{version}"
+
     def _resolve_selected_training_base_model_profile(self) -> dict:
         target = self._get_selected_training_target()
         catalog = AVAILABLE_POSE_MODELS if target == "plate" else AVAILABLE_DETECT_MODELS
@@ -2588,6 +2666,9 @@ class TrainingTab:
                 except Exception:
                     file_size_mb = 0.0
 
+        catalog_meta = catalog.get(resolved_key, {}) if resolved_key in catalog else {}
+        catalog_params_text = str((catalog_meta or {}).get("params") or "").strip()
+        catalog_version = str((catalog_meta or {}).get("version") or "").strip()
         detected_label = format_yolo_model_identity(inspection_info)
         detected_source_label = str(inspection_info.get("source_architecture_label") or "").strip()
         detected_scale = str(inspection_info.get("model_scale") or inspection_info.get("yolo_size") or "").strip().lower()
@@ -2598,16 +2679,39 @@ class TrainingTab:
                 source_label = detected_label
 
         if resolved_key in catalog:
-            params_m = self._parse_training_model_params_millions(catalog.get(resolved_key, {}).get("params"))
+            params_m = self._parse_training_model_params_millions(catalog_params_text)
 
-        if detected_scale in {"n", "s", "m", "l", "x"}:
-            bucket = detected_scale
+        model_version = str(inspection_info.get("yolo_version") or "").strip()
+        model_size = detected_scale if detected_scale in {"n", "s", "m", "l", "x"} else ""
+        identity_candidates = [
+            detected_label,
+            detected_source_label,
+            source_label,
+            resolved_key,
+            base_key,
+            custom_model_path.name if custom_model_path is not None else "",
+            str(inspection_path.name if inspection_path is not None else ""),
+        ]
+        if not model_version and catalog_version:
+            model_version = catalog_version
+        for candidate in identity_candidates:
+            inferred_version, inferred_size = self._infer_training_model_version_size_from_text(candidate)
+            if not model_version and inferred_version:
+                model_version = inferred_version
+            if not model_size and inferred_size:
+                model_size = inferred_size
+            if model_version and model_size:
+                break
+
+        if model_size in {"n", "s", "m", "l", "x"}:
+            bucket = model_size
         else:
             bucket = self._infer_training_model_bucket(
                 source_label,
                 params_m=params_m,
                 file_size_mb=file_size_mb,
             )
+            model_size = bucket
 
         return {
             "target": target,
@@ -2621,6 +2725,11 @@ class TrainingTab:
             "detected_label": detected_label,
             "detected_source_label": detected_source_label,
             "detected_scale": detected_scale,
+            "model_version": model_version,
+            "model_version_label": self._format_training_model_version_label(model_version),
+            "model_size": model_size,
+            "model_size_label": self._format_training_model_size_label(model_size),
+            "params_text": catalog_params_text,
             "inspection_path": str(inspection_path) if inspection_path is not None else "",
         }
 
@@ -2630,6 +2739,14 @@ class TrainingTab:
             "val_images": 0,
             "test_images": 0,
             "total_images": 0,
+            "train_label_files": 0,
+            "val_label_files": 0,
+            "test_label_files": 0,
+            "total_label_files": 0,
+            "train_objects": 0,
+            "val_objects": 0,
+            "test_objects": 0,
+            "total_objects": 0,
             "sampled_images": 0,
             "median_width": 0,
             "median_height": 0,
@@ -2645,6 +2762,9 @@ class TrainingTab:
         train_dir = dataset_root / "images" / "train"
         val_dir = dataset_root / "images" / "val"
         test_dir = dataset_root / "images" / "test"
+        train_labels_dir = dataset_root / "labels" / "train"
+        val_labels_dir = dataset_root / "labels" / "val"
+        test_labels_dir = dataset_root / "labels" / "test"
 
         try:
             cache_root = str(dataset_root.resolve())
@@ -2667,8 +2787,17 @@ class TrainingTab:
             test_mtime = int(test_dir.stat().st_mtime) if test_dir.exists() else 0
         except Exception:
             test_mtime = 0
+        label_mtimes = []
+        for label_dir in (train_labels_dir, val_labels_dir, test_labels_dir):
+            try:
+                label_mtimes.append(int(label_dir.stat().st_mtime) if label_dir.exists() else 0)
+            except Exception:
+                label_mtimes.append(0)
 
-        cache_key = f"{cache_root}|{yaml_mtime}|{train_mtime}|{val_mtime}|{test_mtime}"
+        cache_key = (
+            f"{cache_root}|{yaml_mtime}|{train_mtime}|{val_mtime}|{test_mtime}|"
+            + "|".join(str(value) for value in label_mtimes)
+        )
         cached_key = str(getattr(self, "_training_dataset_profile_cache_key", "") or "")
         cached_profile = getattr(self, "_training_dataset_profile_cache", None)
         if cache_key == cached_key and isinstance(cached_profile, dict):
@@ -2679,6 +2808,30 @@ class TrainingTab:
         result["val_images"] = int(counts.get("val", 0) or 0)
         result["test_images"] = int(counts.get("test", 0) or 0)
         result["total_images"] = int(counts.get("total", 0) or 0)
+
+        for split_name, label_dir in (
+            ("train", train_labels_dir),
+            ("val", val_labels_dir),
+            ("test", test_labels_dir),
+        ):
+            label_files = 0
+            object_count = 0
+            if label_dir.exists() and label_dir.is_dir():
+                try:
+                    paths = [path for path in label_dir.iterdir() if path.is_file() and path.suffix.lower() == ".txt"]
+                except Exception:
+                    paths = []
+                label_files = len(paths)
+                for label_path in paths:
+                    try:
+                        with open(label_path, "r", encoding="utf-8", errors="ignore") as handle:
+                            object_count += sum(1 for line in handle if str(line or "").strip())
+                    except Exception:
+                        continue
+            result[f"{split_name}_label_files"] = int(label_files)
+            result[f"{split_name}_objects"] = int(object_count)
+            result["total_label_files"] += int(label_files)
+            result["total_objects"] += int(object_count)
 
         sample_paths: list[Path] = []
         for split_dir in (train_dir, val_dir, test_dir):
@@ -2950,7 +3103,10 @@ class TrainingTab:
         workspace_dir = self._format_workspace_relative_path(CONFIG.get_datasets_dir(selected_target))
 
         if campaign_active:
-            return "Dataset podstawia workflow kampanii."
+            return (
+                "W kampanii PZ2 pokazuje gotowe warianty zgodne z aktualnym torem. "
+                "Jeśli chcesz przygotować nowy split, wróć do PZ1 przyciskiem na dole."
+            )
 
         if selected_target == "plate":
             source_hint = (
@@ -2968,6 +3124,116 @@ class TrainingTab:
             f"{source_hint}\n"
             f"Warianty są wyszukiwane w: {workspace_dir}"
         )
+
+    def _get_training_dataset_quality_thresholds(self, target: str | None = None) -> dict:
+        normalized = CONFIG.normalize_task_target(target or self._get_selected_training_target())
+        if normalized == "plate":
+            return {
+                "object_label": "anotacje tablic",
+                "min_images": 10,
+                "min_train": 8,
+                "min_val": 2,
+                "min_objects": 10,
+                "recommended_images": 80,
+                "recommended_train": 64,
+                "recommended_val": 8,
+                "recommended_objects": 80,
+            }
+        return {
+            "object_label": "boxy znaków",
+            "min_images": 30,
+            "min_train": 20,
+            "min_val": 5,
+            "min_objects": 150,
+            "recommended_images": 300,
+            "recommended_train": 240,
+            "recommended_val": 30,
+            "recommended_objects": 1500,
+        }
+
+    @staticmethod
+    def _format_dataset_quality_need(current: int, expected: int) -> str:
+        current = max(0, int(current or 0))
+        expected = max(0, int(expected or 0))
+        if expected <= 0:
+            return str(current)
+        return f"{current}/{expected}"
+
+    def _build_training_dataset_quality_summary(self) -> dict:
+        target = self._get_selected_training_target()
+        thresholds = self._get_training_dataset_quality_thresholds(target)
+        dataset_yaml = self._resolve_training_dataset_yaml_path()
+        if dataset_yaml is None:
+            return {
+                "visible": not bool(CAMPAIGN.get_active_project_name()),
+                "tone": "muted",
+                "status": "Wybierz wariant",
+                "rows": [
+                    ("Status", "Brak aktywnego wariantu datasetu."),
+                    ("Minimum testowe", "Po wyborze wariantu pokażę licznik obrazów i anotacji."),
+                    ("Zalecane", "Progi są orientacyjne i nie blokują treningu w trybie swobodnym."),
+                ],
+            }
+
+        profile = self._get_training_dataset_profile(dataset_yaml)
+        train_images = int(profile.get("train_images", 0) or 0)
+        val_images = int(profile.get("val_images", 0) or 0)
+        test_images = int(profile.get("test_images", 0) or 0)
+        total_images = int(profile.get("total_images", 0) or 0)
+        total_objects = int(profile.get("total_objects", 0) or 0)
+        object_label = str(thresholds.get("object_label") or "anotacje")
+
+        min_ready = (
+            total_images >= int(thresholds["min_images"])
+            and train_images >= int(thresholds["min_train"])
+            and val_images >= int(thresholds["min_val"])
+            and total_objects >= int(thresholds["min_objects"])
+        )
+        recommended_ready = (
+            total_images >= int(thresholds["recommended_images"])
+            and train_images >= int(thresholds["recommended_train"])
+            and val_images >= int(thresholds["recommended_val"])
+            and total_objects >= int(thresholds["recommended_objects"])
+        )
+
+        if recommended_ready:
+            tone = "success"
+            status = "Dataset wygląda sensownie do treningu."
+        elif min_ready:
+            tone = "warning"
+            status = "Dataset nadaje się do testowego startu, ale warto go powiększyć."
+        else:
+            tone = "danger"
+            status = "Dataset jest za mały na sensowny trening."
+
+        rows = [
+            ("Status", status),
+            ("Aktualnie", f"obrazy {total_images} | train {train_images}, val {val_images}, test {test_images} | {object_label}: {total_objects}"),
+            (
+                "Minimum testowe",
+                " | ".join(
+                    [
+                        f"obrazy {self._format_dataset_quality_need(total_images, thresholds['min_images'])}",
+                        f"train {self._format_dataset_quality_need(train_images, thresholds['min_train'])}",
+                        f"val {self._format_dataset_quality_need(val_images, thresholds['min_val'])}",
+                        f"{object_label} {self._format_dataset_quality_need(total_objects, thresholds['min_objects'])}",
+                    ]
+                ),
+            ),
+            (
+                "Zalecane",
+                " | ".join(
+                    [
+                        f"obrazy {self._format_dataset_quality_need(total_images, thresholds['recommended_images'])}",
+                        f"train {self._format_dataset_quality_need(train_images, thresholds['recommended_train'])}",
+                        f"val {self._format_dataset_quality_need(val_images, thresholds['recommended_val'])}",
+                        f"{object_label} {self._format_dataset_quality_need(total_objects, thresholds['recommended_objects'])}",
+                    ]
+                ),
+            ),
+            ("Uwaga", "To podpowiedź jakości, nie blokada. Mały dataset pozwala sprawdzić pipeline, ale zwykle nie daje stabilnego modelu."),
+        ]
+        return {"visible": not bool(CAMPAIGN.get_active_project_name()), "tone": tone, "status": status, "rows": rows}
 
     def _get_preferred_models_dir(self, target: str | None = None) -> Path:
         normalized_target = CONFIG.normalize_task_target(target or self._get_selected_training_target())
@@ -3307,7 +3573,7 @@ class TrainingTab:
 
         recovered = (
             self._recover_campaign_finish_state_from_history(target, history=history_source)
-            if bundle_matches_current_iteration
+            if iteration_training_matches
             else {}
         )
         if recovered:
@@ -3500,6 +3766,9 @@ class TrainingTab:
             return "vehicle"
         if any(keyword in joined_names for keyword in vehicle_keywords):
             return "vehicle"
+        plate_class_names = {"plate", "plates", "license_plate", "license-plate", "tablica", "tablice"}
+        if class_names and all(str(name).strip().lower() in plate_class_names for name in class_names):
+            return "plate"
         if self._looks_like_character_alphabet(class_names):
             return "char"
         if any(keyword in path_str for keyword in char_keywords):
@@ -4700,6 +4969,160 @@ class TrainingTab:
     def _update_step4_notebook_mode(self):
         update_step4_notebook_mode(self)
 
+    def _ensure_training_dataset_quality_rows(self, required_rows: int) -> None:
+        grid = getattr(self, "train_dataset_quality_grid", None)
+        if grid is None:
+            return
+        rows = getattr(self, "_train_dataset_quality_row_widgets", None)
+        if not isinstance(rows, list):
+            self._train_dataset_quality_row_widgets = []
+            rows = self._train_dataset_quality_row_widgets
+
+        palette = getattr(self.app, "palette", {})
+        while len(rows) < max(0, int(required_rows)):
+            row_index = len(rows) + 1
+            key_label = tk.Label(
+                grid,
+                text="",
+                font=("Segoe UI", 8, "bold"),
+                anchor=tk.W,
+                justify=tk.LEFT,
+                bd=0,
+                padx=6,
+                pady=3,
+                bg=palette.get("panel", "#252526"),
+                fg=palette.get("fg", "#f3f3f3"),
+            )
+            key_label.grid(row=row_index, column=0, sticky="nsew", padx=(0, 1), pady=(0, 1))
+            value_label = tk.Label(
+                grid,
+                text="",
+                font=("Segoe UI", 8),
+                anchor=tk.W,
+                justify=tk.LEFT,
+                bd=0,
+                padx=6,
+                pady=3,
+                wraplength=260,
+                bg=palette.get("panel_alt", palette.get("panel", "#252526")),
+                fg=palette.get("muted", "#c7c7c7"),
+            )
+            value_label.grid(row=row_index, column=1, sticky="nsew", padx=(0, 1), pady=(0, 1))
+            self._register_train_left_wrap_target(value_label, container=grid, padding=150, min_wrap=180)
+            rows.append({"key": key_label, "value": value_label, "row_index": row_index})
+
+    def _refresh_training_dataset_quality_summary(self) -> None:
+        shell = getattr(self, "train_dataset_quality_shell", None)
+        title = getattr(self, "train_dataset_quality_title_lbl", None)
+        if shell is None:
+            return
+
+        summary = self._build_training_dataset_quality_summary()
+        visible = bool(summary.get("visible", True))
+        try:
+            is_visible = bool(str(shell.winfo_manager()))
+        except Exception:
+            is_visible = False
+        if visible and not is_visible:
+            try:
+                shell.pack(anchor=tk.W, fill=tk.X, pady=(2, 8), after=getattr(self, "train_dataset_hint_lbl", None))
+            except Exception:
+                try:
+                    shell.pack(anchor=tk.W, fill=tk.X, pady=(2, 8))
+                except Exception:
+                    pass
+        elif not visible and is_visible:
+            try:
+                shell.pack_forget()
+            except Exception:
+                pass
+
+        rows = list(summary.get("rows", []) or [])
+        self._ensure_training_dataset_quality_rows(len(rows))
+        row_widgets = list(getattr(self, "_train_dataset_quality_row_widgets", []) or [])
+        if title is not None:
+            self._set_training_widget_text(title, "Czy dataset ma sens?")
+
+        for row_index, widgets in enumerate(row_widgets):
+            row_visible = row_index < len(rows)
+            key_label = widgets.get("key")
+            value_label = widgets.get("value")
+            if row_visible:
+                key_text, value_text = rows[row_index]
+            else:
+                key_text, value_text = "", ""
+            for widget in (key_label, value_label):
+                if widget is None:
+                    continue
+                try:
+                    if row_visible:
+                        widget.grid()
+                    else:
+                        widget.grid_remove()
+                except Exception:
+                    pass
+            self._set_training_widget_text(key_label, key_text)
+            self._set_training_widget_text(value_label, value_text)
+
+        try:
+            self._apply_training_dataset_quality_theme(str(summary.get("tone") or "muted"))
+        except Exception:
+            pass
+
+    def _apply_training_dataset_quality_theme(self, tone: str = "muted") -> None:
+        palette = getattr(self.app, "palette", {})
+        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        shell_bg = palette.get("panel", "#252526")
+        title_bg = palette.get("panel_alt", "#2d2d30")
+        title_fg = palette.get("fg", "#f3f3f3")
+        key_bg = palette.get("panel", "#252526")
+        key_fg = palette.get("fg", "#f3f3f3")
+        value_bg = palette.get("panel_alt", palette.get("panel", "#252526"))
+        value_fg = palette.get("muted", "#c7c7c7")
+        success_fg = palette.get("success", "#4ec9b0")
+        warning_fg = palette.get("warning", "#d7ba7d")
+        danger_fg = palette.get("danger", palette.get("error", "#f48771"))
+        tone_fg = {
+            "success": success_fg,
+            "warning": warning_fg,
+            "danger": danger_fg,
+        }.get(str(tone or "").strip().lower(), value_fg)
+
+        for attr_name, bg, fg in (
+            ("train_dataset_quality_shell", border, title_fg),
+            ("train_dataset_quality_grid", border, title_fg),
+            ("train_dataset_quality_title_row", title_bg, title_fg),
+            ("train_dataset_quality_title_lbl", title_bg, title_fg),
+        ):
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                continue
+            try:
+                if isinstance(widget, tk.Label):
+                    widget.configure(bg=bg, fg=fg)
+                else:
+                    widget.configure(bg=bg, highlightbackground=border, highlightcolor=border)
+            except Exception:
+                pass
+
+        for row_index, widgets in enumerate(list(getattr(self, "_train_dataset_quality_row_widgets", []) or [])):
+            row_bg = value_bg if row_index % 2 else shell_bg
+            key_label = widgets.get("key")
+            value_label = widgets.get("value")
+            if key_label is not None:
+                try:
+                    key_label.configure(bg=key_bg, fg=key_fg)
+                except Exception:
+                    pass
+            if value_label is not None:
+                try:
+                    value_label.configure(
+                        bg=row_bg,
+                        fg=(tone_fg if row_index == 0 else value_fg),
+                    )
+                except Exception:
+                    pass
+
     def _update_training_dataset_hint(self):
         label = getattr(self, "train_dataset_hint_lbl", None)
         if label is not None:
@@ -4740,6 +5163,11 @@ class TrainingTab:
                         warning_label.pack_forget()
                     except Exception:
                         pass
+
+        try:
+            self._refresh_training_dataset_quality_summary()
+        except Exception:
+            pass
 
         self._update_training_dataset_hint_wraplength()
         try:
@@ -4945,11 +5373,30 @@ class TrainingTab:
         trough = palette.get("surface_info", palette.get("panel_alt", palette.get("panel", "#252526")))
         shell_bg = palette.get("panel", palette.get("bg", "#1f1f1f"))
         border = shell_bg
-        dataset_fill = palette.get("accent", "#0e639c")
-        split_fill = palette.get("guide", palette.get("warning", "#f0b44c"))
+        dataset_fill = palette.get("success", "#2ecc71")
+        split_fill = palette.get("success", "#2ecc71")
         rank_fill = palette.get("accent_hover", dataset_fill)
         epoch_fill = palette.get("guide", palette.get("warning", "#f0b44c"))
         overall_fill = palette.get("success", "#2ecc71")
+        success_fg = self._get_training_success_fg()
+
+        try:
+            style.configure(
+                "TrainSplitSuccess.TLabel",
+                background=palette.get("panel", "#252526"),
+                foreground=success_fg,
+                padding=2,
+            )
+            style.map(
+                "TrainSplitSuccess.TLabel",
+                foreground=[("disabled", success_fg), ("active", success_fg)],
+                background=[
+                    ("disabled", palette.get("panel", "#252526")),
+                    ("active", palette.get("panel", "#252526")),
+                ],
+            )
+        except Exception:
+            pass
 
         try:
             style.configure(
@@ -5096,6 +5543,63 @@ class TrainingTab:
                 self.app.style_ttk_frame_widget(split_feedback_frame, background=shell_bg)
             except Exception:
                 pass
+        for widget_name in (
+            "train_lbl",
+            "val_lbl",
+            "test_lbl",
+            "creator_train_lbl",
+            "creator_val_lbl",
+            "creator_test_lbl",
+            "ds_status",
+            "split_status",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(style="TrainSplitSuccess.TLabel")
+            except Exception:
+                pass
+            try:
+                widget.configure(foreground=success_fg)
+            except Exception:
+                pass
+
+    def _get_training_success_fg(self) -> str:
+        try:
+            palette = getattr(self.app, "palette", {})
+            success = str(palette.get("success", "#2ecc71"))
+            is_dark = bool(getattr(self.app, "is_dark_theme", lambda: False)())
+            return blend_hex_colors(success, "#ffffff", 0.18) if is_dark else success
+        except Exception:
+            return "#2ecc71"
+
+    def _style_training_success_label(self, widget) -> None:
+        if widget is None:
+            return
+        success_fg = self._get_training_success_fg()
+        try:
+            widget.configure(style="TrainSplitSuccess.TLabel")
+        except Exception:
+            pass
+        try:
+            widget.configure(foreground=success_fg)
+        except Exception:
+            pass
+
+    def _style_training_error_label(self, widget) -> None:
+        if widget is None:
+            return
+        palette = getattr(self.app, "palette", {})
+        error_fg = palette.get("error", palette.get("danger", "#e05d5d"))
+        try:
+            widget.configure(style="PanelError.TLabel")
+        except Exception:
+            pass
+        try:
+            widget.configure(foreground=error_fg)
+        except Exception:
+            pass
 
     def _set_train_progress_values(self, *, overall: float | None = None, epoch: float | None = None):
         if overall is not None:
@@ -5275,7 +5779,8 @@ class TrainingTab:
         except Exception:
             device_index = 0
 
-        if CUDA_AVAILABLE and torch is not None:
+        torch = get_torch_module()
+        if is_cuda_available() and torch is not None:
             try:
                 if torch.cuda.is_available():
                     free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
@@ -5480,8 +5985,6 @@ class TrainingTab:
                 preferred = [rec for rec in ready_candidates if rec[1] == target]
                 if preferred:
                     ready_dataset, _ready_target, _stamp = max(preferred, key=lambda rec: rec[2])
-                elif ready_candidates:
-                    ready_dataset, _ready_target, _stamp = max(ready_candidates, key=lambda rec: rec[2])
             except Exception:
                 ready_dataset = None
 
@@ -5937,7 +6440,8 @@ class TrainingTab:
             pass
 
         try:
-            self.ds_status.configure(text="Gotowy", foreground="green")
+            self._style_training_success_label(self.ds_status)
+            self.ds_status.configure(text="Gotowy")
         except Exception:
             pass
 
@@ -5947,7 +6451,8 @@ class TrainingTab:
             pass
 
         try:
-            self.split_status.configure(text="Gotowy", foreground="black")
+            self._style_training_success_label(self.split_status)
+            self.split_status.configure(text="Gotowy")
         except Exception:
             pass
 
@@ -6135,6 +6640,10 @@ class TrainingTab:
                 pady=(0, 8),
                 after=self.btn_step4_split_frame
             )
+            try:
+                self._configure_train_progress_styles()
+            except Exception:
+                pass
         else:
             self.split_feedback_frame.pack_forget()
 
@@ -6338,14 +6847,9 @@ class TrainingTab:
         if canvas is None:
             return None
 
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-            pointer_in_left_panel = self._inertial_scroll.widget_contains_point(canvas, x_root, y_root)
-        except Exception:
-            pointer_in_left_panel = False
-
-        if pointer_in_left_panel and self._mousewheel_event_from_combobox(event):
+        if self._training_combobox_scroll_guard_active():
+            return "break"
+        if self._mousewheel_event_from_combobox(event):
             return "break"
 
         if self._inertial_scroll.scroll_canvas_if_targeted(
@@ -6362,14 +6866,9 @@ class TrainingTab:
         if canvas is None:
             return None
 
-        try:
-            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
-            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
-            pointer_in_panel = self._inertial_scroll.widget_contains_point(canvas, x_root, y_root)
-        except Exception:
-            pointer_in_panel = False
-
-        if pointer_in_panel and self._mousewheel_event_from_combobox(event):
+        if self._training_combobox_scroll_guard_active():
+            return "break"
+        if self._mousewheel_event_from_combobox(event):
             return "break"
 
         if self._inertial_scroll.scroll_canvas_if_targeted(
@@ -6405,8 +6904,140 @@ class TrainingTab:
         self._restore_scroll_canvas_focus(canvas)
         return "break"
 
-    def _mousewheel_event_from_combobox(self, event) -> bool:
+    def _redirect_combobox_mousewheel_to_canvas(self, event, canvas):
+        # Zamknięty Combobox w Tk potrafi zmienić wartość samym kółkiem myszy.
+        # W Z4 to zbyt ryzykowne: scroll nad polem ma przewijać panel, a wybór
+        # modelu ma następować dopiero po świadomym rozwinięciu listy.
         widget = getattr(event, "widget", None)
+        if self._combobox_popdown_visible(widget):
+            self._mark_training_combobox_scroll_guard(widget)
+            return "break"
+
+        self._mark_training_combobox_scroll_guard(widget, hold_ms=250)
+        if self._inertial_scroll.redirect_child_mousewheel_to_canvas(
+            event,
+            canvas,
+            pointer_widget=self.frame,
+            overflow_checker=lambda c=canvas: self._scroll_canvas_overflows(c),
+        ):
+            self._restore_scroll_canvas_focus(canvas)
+            return "break"
+
+        self._restore_scroll_canvas_focus(canvas)
+        return "break"
+
+    def _register_training_scroll_guard_combobox(self, widget) -> None:
+        if widget is None or bool(getattr(widget, "_training_scroll_guard_bound", False)):
+            return
+
+        try:
+            widget._training_scroll_guard_bound = True
+        except Exception:
+            pass
+
+        registered = list(getattr(self, "_training_scroll_guard_comboboxes", []) or [])
+        if widget not in registered:
+            registered.append(widget)
+            self._training_scroll_guard_comboboxes = registered
+
+        def _mark(_event=None, w=widget):
+            self._mark_training_combobox_scroll_guard(w)
+            return None
+
+        def _release(_event=None):
+            self._schedule_training_combobox_guard_poll(delay_ms=120)
+            return None
+
+        for sequence in ("<ButtonPress-1>", "<KeyPress-Down>", "<Alt-Down>", "<FocusIn>"):
+            try:
+                widget.bind(sequence, _mark, add="+")
+            except Exception:
+                pass
+        for sequence in ("<<ComboboxSelected>>", "<Escape>", "<Return>", "<FocusOut>"):
+            try:
+                widget.bind(sequence, _release, add="+")
+            except Exception:
+                pass
+
+    def _mark_training_combobox_scroll_guard(self, widget=None, *, hold_ms: int = 1200) -> None:
+        try:
+            self._training_combobox_scroll_guard_widget = widget
+            self._training_combobox_scroll_guard_until = time.perf_counter() + (max(150, int(hold_ms)) / 1000.0)
+        except Exception:
+            return
+        self._schedule_training_combobox_guard_poll(delay_ms=120)
+
+    def _schedule_training_combobox_guard_poll(self, *, delay_ms: int = 180) -> None:
+        frame = getattr(self, "frame", None)
+        if frame is None:
+            return
+
+        pending = getattr(self, "_training_combobox_scroll_guard_after_id", None)
+        if pending is not None:
+            try:
+                frame.after_cancel(pending)
+            except Exception:
+                pass
+
+        try:
+            self._training_combobox_scroll_guard_after_id = frame.after(
+                max(50, int(delay_ms)),
+                self._poll_training_combobox_scroll_guard,
+            )
+        except Exception:
+            self._training_combobox_scroll_guard_after_id = None
+
+    def _poll_training_combobox_scroll_guard(self) -> None:
+        self._training_combobox_scroll_guard_after_id = None
+        if self._any_training_combobox_popdown_visible():
+            self._mark_training_combobox_scroll_guard(
+                getattr(self, "_training_combobox_scroll_guard_widget", None),
+                hold_ms=900,
+            )
+            return
+
+        try:
+            if time.perf_counter() >= float(getattr(self, "_training_combobox_scroll_guard_until", 0.0) or 0.0):
+                self._training_combobox_scroll_guard_until = 0.0
+                self._training_combobox_scroll_guard_widget = None
+                return
+        except Exception:
+            self._training_combobox_scroll_guard_until = 0.0
+            self._training_combobox_scroll_guard_widget = None
+            return
+
+        self._schedule_training_combobox_guard_poll(delay_ms=180)
+
+    def _combobox_popdown_visible(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            if not bool(widget.winfo_exists()):
+                return False
+        except Exception:
+            return False
+
+        try:
+            popdown = widget.tk.call("ttk::combobox::PopdownWindow", str(widget))
+            return bool(int(widget.tk.call("winfo", "viewable", popdown)))
+        except Exception:
+            return False
+
+    def _any_training_combobox_popdown_visible(self) -> bool:
+        for widget in list(getattr(self, "_training_scroll_guard_comboboxes", []) or []):
+            if self._combobox_popdown_visible(widget):
+                return True
+        return False
+
+    def _training_combobox_scroll_guard_active(self) -> bool:
+        if self._any_training_combobox_popdown_visible():
+            return True
+        try:
+            return time.perf_counter() < float(getattr(self, "_training_combobox_scroll_guard_until", 0.0) or 0.0)
+        except Exception:
+            return False
+
+    def _widget_is_combobox_or_popdown(self, widget) -> bool:
         visited = set()
         while widget is not None and id(widget) not in visited:
             visited.add(id(widget))
@@ -6421,13 +7052,33 @@ class TrainingTab:
 
             if class_name in {"TCombobox", "ComboboxPopdown"}:
                 return True
-            if class_name == "Listbox" and "popdown" in widget_path:
+            if class_name in {"Listbox", "Toplevel", "Frame"} and (
+                "popdown" in widget_path or "combobox" in widget_path
+            ):
                 return True
 
             try:
                 widget = widget.master
             except Exception:
                 widget = None
+        return False
+
+    def _mousewheel_event_from_combobox(self, event) -> bool:
+        if self._widget_is_combobox_or_popdown(getattr(event, "widget", None)):
+            self._mark_training_combobox_scroll_guard(getattr(event, "widget", None))
+            return True
+
+        try:
+            x_root = int(getattr(event, "x_root", 0) or self.frame.winfo_pointerx())
+            y_root = int(getattr(event, "y_root", 0) or self.frame.winfo_pointery())
+            root = self.frame.winfo_toplevel()
+            pointer_widget = root.winfo_containing(x_root, y_root)
+        except Exception:
+            pointer_widget = None
+
+        if self._widget_is_combobox_or_popdown(pointer_widget):
+            self._mark_training_combobox_scroll_guard(pointer_widget)
+            return True
         return False
 
     def _bind_scroll_canvas_children(self, root, canvas):
@@ -6471,6 +7122,16 @@ class TrainingTab:
                 except Exception:
                     pass
                 if class_name == "TCombobox":
+                    try:
+                        self._register_training_scroll_guard_combobox(widget)
+                    except Exception:
+                        pass
+                    try:
+                        widget.bind("<MouseWheel>", lambda e, c=canvas: self._redirect_combobox_mousewheel_to_canvas(e, c), add="+")
+                        widget.bind("<Button-4>", lambda e, c=canvas: self._redirect_combobox_mousewheel_to_canvas(e, c), add="+")
+                        widget.bind("<Button-5>", lambda e, c=canvas: self._redirect_combobox_mousewheel_to_canvas(e, c), add="+")
+                    except Exception:
+                        pass
                     try:
                         widget.bind("<<ComboboxSelected>>", lambda _e, c=canvas: self._restore_scroll_canvas_focus(c), add="+")
                     except Exception:
@@ -6517,6 +7178,10 @@ class TrainingTab:
 
         try:
             self.app.style_panel_surface(self.frame, background=palette.get("panel", "#252526"))
+        except Exception:
+            pass
+        try:
+            self._configure_train_progress_styles()
         except Exception:
             pass
 
@@ -6683,6 +7348,10 @@ class TrainingTab:
         except Exception:
             pass
         self._apply_training_recommendation_table_theme()
+        try:
+            self._refresh_training_dataset_quality_summary()
+        except Exception:
+            pass
         self._style_analysis_dialog()
 
     def _set_step4_train_log_visibility(self, visible: bool):
@@ -6812,8 +7481,8 @@ class TrainingTab:
             select_training=select_training,
         )
 
-    def _set_step4_dataset_mode(self, mode: str):
-        set_step4_dataset_mode(self, mode)
+    def _set_step4_dataset_mode(self, mode: str, *, show_locked_message: bool = True):
+        set_step4_dataset_mode(self, mode, show_locked_message=show_locked_message)
 
     def _get_step4_dataset_workflow_view_model(self) -> Step4DatasetWorkflowViewModel:
         return build_step4_dataset_workflow_view_model(self)
@@ -6858,7 +7527,7 @@ class TrainingTab:
 
 
     def _finish_campaign_step4(self):
-        finish_campaign_step4(self)
+        return finish_campaign_step4(self)
 
     def _complete_campaign_project(self):
         complete_campaign_project(self)
@@ -6902,6 +7571,367 @@ class TrainingTab:
             pass
 
         return None
+
+    @staticmethod
+    def _json_safe_training_value(value):
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(k): TrainingTab._json_safe_training_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [TrainingTab._json_safe_training_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @staticmethod
+    def _training_metric_float(value) -> float | None:
+        if value in (None, "", "-"):
+            return None
+        try:
+            numeric = float(str(value).strip().replace(",", "."))
+        except Exception:
+            return None
+        return numeric if numeric == numeric else None
+
+    @classmethod
+    def _training_metric_value(cls, mapping: dict | None, keys: tuple[str, ...]) -> float | None:
+        if not isinstance(mapping, dict):
+            return None
+
+        for key in keys:
+            if key in mapping:
+                value = cls._training_metric_float(mapping.get(key))
+                if value is not None:
+                    return value
+
+        lowered = {str(k or "").strip().lower(): v for k, v in mapping.items()}
+        for key in keys:
+            value = cls._training_metric_float(lowered.get(str(key or "").strip().lower()))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _safe_model_export_slug(value: str, fallback: str = "model") -> str:
+        text = str(value or "").strip()
+        if not text:
+            text = fallback
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._-")
+        return (slug or fallback)[:48]
+
+    def _infer_history_run_target(self, run) -> str:
+        target = ""
+        try:
+            infer_target = getattr(self.history, "_infer_run_target", None)
+            if callable(infer_target):
+                target = str(infer_target(run) or "").strip().lower()
+        except Exception:
+            target = ""
+
+        if target not in {"plate", "char", "vehicle"}:
+            try:
+                target = str(self._infer_dataset_target(getattr(run, "dataset_path", "")) or "").strip().lower()
+            except Exception:
+                target = ""
+
+        if target not in {"plate", "char", "vehicle"}:
+            try:
+                merged = " ".join(
+                    str(value or "")
+                    for value in (
+                        getattr(run, "dataset_path", ""),
+                        getattr(run, "base_model", ""),
+                        getattr(run, "name", ""),
+                        getattr(run, "output_dir", ""),
+                    )
+                )
+                infer_from_text = getattr(TrainingHistory, "_infer_target_from_text", None)
+                if callable(infer_from_text):
+                    target = str(infer_from_text(merged) or "").strip().lower()
+            except Exception:
+                target = ""
+
+        return target if target in {"plate", "char", "vehicle"} else ""
+
+    def _resolve_history_run_best_weights(self, run) -> Path | None:
+        if run is None:
+            return None
+
+        for raw_path in (
+            getattr(run, "best_weights", ""),
+            Path(str(getattr(run, "output_dir", "") or "")) / "train" / "weights" / "best.pt",
+        ):
+            text = str(raw_path or "").strip()
+            if not text:
+                continue
+            try:
+                candidate = Path(text)
+            except Exception:
+                continue
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+        try:
+            return self._find_best_weights_for_run(str(getattr(run, "id", "") or "").strip())
+        except Exception:
+            return None
+
+    def _build_history_run_metric_summary(self, run) -> dict:
+        rows = list(getattr(run, "metrics_history", []) or [])
+        latest = dict(rows[-1]) if rows and isinstance(rows[-1], dict) else {}
+        best_row: dict = {}
+        best_score = -1.0
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            score = self._training_metric_value(
+                row,
+                (
+                    "map50_95",
+                    "box_map50_95",
+                    "metrics/mAP50-95(B)",
+                    "metrics/mAP50-95",
+                    "pose_map50_95",
+                    "metrics/mAP50-95(P)",
+                ),
+            )
+            if score is None:
+                score = self._training_metric_value(
+                    row,
+                    (
+                        "map50",
+                        "box_map50",
+                        "metrics/mAP50(B)",
+                        "metrics/mAP50",
+                        "pose_map50",
+                        "metrics/mAP50(P)",
+                    ),
+                )
+            if score is not None and score > best_score:
+                best_score = score
+                best_row = dict(row)
+
+        best_map50 = self._training_metric_float(getattr(run, "best_map50", None))
+        best_map50_95 = self._training_metric_float(getattr(run, "best_map50_95", None))
+        if best_map50 is None:
+            best_map50 = self._training_metric_value(best_row, ("map50", "box_map50", "metrics/mAP50(B)", "metrics/mAP50", "pose_map50", "metrics/mAP50(P)"))
+        if best_map50_95 is None:
+            best_map50_95 = self._training_metric_value(
+                best_row,
+                ("map50_95", "box_map50_95", "metrics/mAP50-95(B)", "metrics/mAP50-95", "pose_map50_95", "metrics/mAP50-95(P)"),
+            )
+
+        epoch = self._training_metric_value(best_row, ("epoch", "Epoch"))
+        if epoch is None:
+            epoch = self._training_metric_float(getattr(run, "current_epoch", None))
+
+        return {
+            "best_map50": best_map50,
+            "best_map50_95": best_map50_95,
+            "best_epoch": epoch,
+            "latest": latest,
+            "best_row": best_row,
+            "history_rows": rows,
+        }
+
+    def _build_free_mode_model_export_path(self, run, target: str, target_dir: Path, source_path: Path) -> Path:
+        prefix = {
+            "plate": "pose",
+            "char": "char",
+            "vehicle": "vehicle",
+        }.get(target, "model")
+        run_name = self._safe_model_export_slug(getattr(run, "name", "") or getattr(run, "id", ""), fallback=prefix)
+        run_id = self._safe_model_export_slug(getattr(run, "id", ""), fallback=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        metric_summary = self._build_history_run_metric_summary(run)
+        metric_value = metric_summary.get("best_map50_95")
+        if metric_value is None:
+            metric_value = metric_summary.get("best_map50")
+        metric_tag = ""
+        if metric_value is not None:
+            try:
+                clamped = max(0.0, min(1.0, float(metric_value)))
+                metric_tag = f"_map{int(round(clamped * 100)):03d}"
+            except Exception:
+                metric_tag = ""
+        suffix = source_path.suffix if source_path.suffix else ".pt"
+        return target_dir / f"{prefix}_{run_name}_{run_id}{metric_tag}{suffix}"
+
+    def _build_exported_model_metadata(self, run, target: str, source_path: Path, destination_path: Path) -> dict:
+        metric_summary = self._build_history_run_metric_summary(run)
+        run_dict = {}
+        try:
+            if hasattr(run, "to_dict"):
+                run_dict = run.to_dict()
+        except Exception:
+            run_dict = {}
+        if not run_dict:
+            run_dict = {
+                key: getattr(run, key, None)
+                for key in (
+                    "id",
+                    "name",
+                    "created_at",
+                    "status",
+                    "dataset_path",
+                    "base_model",
+                    "epochs",
+                    "batch_size",
+                    "img_size",
+                    "device",
+                    "lr0",
+                    "current_epoch",
+                    "best_map50",
+                    "best_map50_95",
+                    "output_dir",
+                    "best_weights",
+                    "last_weights",
+                    "started_at",
+                    "finished_at",
+                    "paused_at",
+                    "metrics_history",
+                    "error_message",
+                    "report_html",
+                    "plots_dir",
+                )
+            }
+
+        validation_ok = False
+        validation_message = ""
+        model_info = {}
+        identity = ""
+        try:
+            validation_ok, validation_message, model_info = validate_model_file(destination_path)
+            identity = format_yolo_model_identity(model_info, include_ultralytics_version=True)
+        except Exception as e:
+            validation_message = str(e)
+            model_info = {}
+
+        return self._json_safe_training_value(
+            {
+                "schema": "auto_annotation_tool.exported_model.v1",
+                "exported_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "exported_for": "free_mode",
+                "target": target,
+                "target_label": self._format_training_target_label(target),
+                "model": {
+                    "file_name": destination_path.name,
+                    "path": str(destination_path),
+                    "directory": str(destination_path.parent),
+                    "identity": identity,
+                    "validation_ok": validation_ok,
+                    "validation_message": validation_message,
+                    "info": model_info,
+                },
+                "source": {
+                    "best_weights": str(source_path),
+                    "run_output_dir": str(getattr(run, "output_dir", "") or ""),
+                    "training_history_dir": str(getattr(getattr(self, "history", None), "history_dir", "") or ""),
+                },
+                "training": {
+                    "run_id": str(getattr(run, "id", "") or ""),
+                    "run_name": str(getattr(run, "name", "") or ""),
+                    "status": str(getattr(run, "status", "") or ""),
+                    "created_at": str(getattr(run, "created_at", "") or ""),
+                    "started_at": str(getattr(run, "started_at", "") or ""),
+                    "finished_at": str(getattr(run, "finished_at", "") or ""),
+                    "dataset_path": str(getattr(run, "dataset_path", "") or ""),
+                    "base_model": str(getattr(run, "base_model", "") or ""),
+                    "epochs": getattr(run, "epochs", None),
+                    "current_epoch": getattr(run, "current_epoch", None),
+                    "batch_size": getattr(run, "batch_size", None),
+                    "img_size": getattr(run, "img_size", None),
+                    "device": str(getattr(run, "device", "") or ""),
+                    "lr0": getattr(run, "lr0", None),
+                    "report_html": str(getattr(run, "report_html", "") or ""),
+                    "plots_dir": str(getattr(run, "plots_dir", "") or ""),
+                },
+                "metrics": {
+                    "best_map50": metric_summary.get("best_map50"),
+                    "best_map50_95": metric_summary.get("best_map50_95"),
+                    "best_epoch": metric_summary.get("best_epoch"),
+                    "latest": metric_summary.get("latest") or {},
+                    "best_row": metric_summary.get("best_row") or {},
+                },
+                "run_snapshot": run_dict,
+            }
+        )
+
+    def _export_selected_run_model_to_free_mode(self):
+        run = self._selected_run()
+        if run is None:
+            return messagebox.showwarning(
+                "Brak runu",
+                "Najpierw wybierz run treningu z historii."
+            )
+
+        target = self._infer_history_run_target(run)
+        if target not in {"plate", "char", "vehicle"}:
+            return messagebox.showerror(
+                "Nie rozpoznano toru",
+                "Nie mogę jednoznacznie ustalić, czy wybrany run dotyczy tablic, znaków czy pojazdów.\n\n"
+                "Eksport do modeli trybu swobodnego jest dostępny tylko dla rozpoznanych runów YOLO."
+            )
+
+        best_weights = self._resolve_history_run_best_weights(run)
+        if best_weights is None:
+            return messagebox.showerror(
+                "Brak best.pt",
+                "Wybrany run nie ma dostępnego pliku best.pt.\n\n"
+                "Eksport jest możliwy dopiero po treningu, który zapisał najlepsze wagi modelu."
+            )
+
+        try:
+            target_dir = Path(CONFIG.get_trained_models_dir(target))
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.exception("Nie udało się przygotować katalogu eksportu modelu")
+            return messagebox.showerror(
+                "Błąd katalogu eksportu",
+                f"Nie udało się przygotować katalogu modeli trybu swobodnego:\n{e}"
+            )
+
+        destination = self._build_free_mode_model_export_path(run, target, target_dir, best_weights)
+        metadata_path = destination.with_suffix(".json")
+
+        if destination.exists() or metadata_path.exists():
+            overwrite = messagebox.askyesno(
+                "Model już istnieje",
+                "W katalogu modeli trybu swobodnego istnieje już eksport dla tego runu.\n\n"
+                f"Model: {destination.name}\n"
+                f"Parametry: {metadata_path.name}\n\n"
+                "Nadpisać te pliki?"
+            )
+            if not overwrite:
+                return
+
+        try:
+            shutil.copy2(best_weights, destination)
+            metadata = self._build_exported_model_metadata(run, target, best_weights, destination)
+            with metadata_path.open("w", encoding="utf-8") as handle:
+                json.dump(metadata, handle, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.exception("Nie udało się wyeksportować modelu do trybu swobodnego")
+            return messagebox.showerror(
+                "Błąd eksportu modelu",
+                f"Nie udało się wyeksportować modelu:\n{e}"
+            )
+
+        try:
+            self._append_train_log(
+                f"[EXPORT] best.pt wyeksportowany do modeli trybu swobodnego: {destination}"
+            )
+        except Exception:
+            pass
+
+        return messagebox.showinfo(
+            "Model wyeksportowany",
+            "Model jest teraz dostępny w trybie swobodnym.\n\n"
+            f"Tor: {self._format_training_target_label(target)}\n"
+            f"Model: {destination}\n"
+            f"Parametry: {metadata_path}"
+        )
 
 
     def _promote_trained_model_to_campaign_if_needed(self):
@@ -6971,8 +8001,12 @@ class TrainingTab:
     
     def _scan_training_cuda_devices(self) -> list[dict]:
         devices: list[dict] = []
+        if not bool(getattr(self, "_startup_ui_ready", False)):
+            return devices
         try:
-            import torch
+            torch = get_torch_module()
+            if torch is None:
+                return devices
 
             if not torch.cuda.is_available():
                 return devices
@@ -7083,8 +8117,9 @@ class TrainingTab:
                 return label
 
         if raw.startswith("cuda:"):
+            raw_token = raw.split()[0]
             try:
-                wanted_index = int(raw.split(":", 1)[1])
+                wanted_index = int(raw_token.split(":", 1)[1])
             except Exception:
                 wanted_index = 0
             for profile in self._training_device_profiles:
@@ -7111,7 +8146,13 @@ class TrainingTab:
             return str(self._training_device_label_map.get(value, "auto"))
 
         raw = value.lower()
-        if raw in {"auto", "cpu"} or raw.startswith("cuda:"):
+        if raw.startswith("auto"):
+            return "auto"
+        if raw.startswith("cpu"):
+            return "cpu"
+        if raw.startswith("cuda:"):
+            return raw.split()[0]
+        if raw in {"auto", "cpu"}:
             return raw
         return "auto"
 
@@ -7140,6 +8181,11 @@ class TrainingTab:
         model_profile = self._resolve_selected_training_base_model_profile()
         model_bucket = str(model_profile.get("bucket", "s") or "s").strip().lower()
         model_detected_label = str(model_profile.get("detected_label", "") or "").strip()
+        model_label = str(model_profile.get("label", "") or "").strip()
+        model_identity_label = model_detected_label or model_label
+        model_version_label = str(model_profile.get("model_version_label", "") or "").strip()
+        model_size_label = str(model_profile.get("model_size_label", "") or "").strip()
+        model_params_text = str(model_profile.get("params_text", "") or "").strip()
         train_images = int(dataset_profile.get("train_images", 0) or 0)
         val_images = int(dataset_profile.get("val_images", 0) or 0)
         total_images = int(dataset_profile.get("total_images", 0) or 0)
@@ -7157,6 +8203,12 @@ class TrainingTab:
                 "imgsz": cpu_imgsz,
                 "lr0": 0.004 if target == "char" else 0.003,
                 "model_detected_label": model_detected_label,
+                "model_label": model_label,
+                "model_identity_label": model_identity_label,
+                "model_version_label": model_version_label,
+                "model_size_label": model_size_label,
+                "model_params_text": model_params_text,
+                "model_bucket": model_bucket,
                 "note": (
                     "Zalecenie awaryjne dla CPU. Uwzglednia tor i konserwatywny start bez ryzyka OOM. "
                     "Trening bedzie wyraznie wolniejszy niz na GPU CUDA."
@@ -7328,14 +8380,18 @@ class TrainingTab:
 
         lr0 = round(max(0.0025, min(0.0100, lr0)), 4)
 
-        model_label = str(model_profile.get("label", "") or "").strip()
         factor_bits = [f"aktywny tor to {self._format_training_target_label(target)}"]
         if model_detected_label:
-            factor_bits.append(f"wybrany model to {model_detected_label} ({model_bucket.upper()})")
+            factor_bits.append(f"wybrany model to {model_detected_label}")
         elif model_label:
-            factor_bits.append(f"wybrany model to {model_label} ({model_bucket.upper()})")
+            factor_bits.append(f"wybrany model to {model_label}")
         else:
             factor_bits.append(f"klasa modelu to {model_bucket.upper()}")
+        variant_bits = [bit for bit in (model_version_label, model_size_label) if bit]
+        if variant_bits:
+            factor_bits.append(f"wariant modelu to {' / '.join(variant_bits)}")
+        if model_params_text:
+            factor_bits.append(f"katalogowo model ma ok. {model_params_text} parametrów")
         factor_bits.append(f"dostępne VRAM to {memory_gb:.1f} GB")
         if sampled_images > 0 and median_long_edge > 0:
             factor_bits.append(f"mediana dłuższego boku obrazu wynosi {median_long_edge}px")
@@ -7352,6 +8408,11 @@ class TrainingTab:
             "lr0": lr0,
             "model_bucket": model_bucket,
             "model_detected_label": model_detected_label,
+            "model_label": model_label,
+            "model_identity_label": model_identity_label,
+            "model_version_label": model_version_label,
+            "model_size_label": model_size_label,
+            "model_params_text": model_params_text,
             "train_images": train_images,
             "val_images": val_images,
             "total_images": total_images,
@@ -7946,15 +9007,8 @@ class TrainingTab:
         self.btn_step4_next_frame = tk.Frame(self.step4_builder_nav, bd=0, highlightthickness=0)
         self.btn_step4_next_frame.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
-        self.btn_step4_next_pulse_frame = tk.Frame(
-            self.btn_step4_next_frame,
-            bd=0,
-            highlightthickness=1
-        )
-        self.btn_step4_next_pulse_frame.pack(anchor=tk.E)
-
         self.btn_step4_next = ttk.Button(
-            self.btn_step4_next_pulse_frame,
+            self.btn_step4_next_frame,
             text="Dalej: Trening i analiza modelu znaków",
             command=self._step4_dataset_go_next,
             style="Accent.TButton"
@@ -7979,7 +9033,7 @@ class TrainingTab:
         self._step4_route_selected = True
         self._step4_train_unlocked = True
         self._set_step4_builder_log_visibility(False)
-        self._set_step4_dataset_mode(initial_mode)
+        self._set_step4_dataset_mode(initial_mode, show_locked_message=False)
         try:
             self.frame.after_idle(self._refresh_step4_dataset_mode_ui)
             self.frame.after(80, self._refresh_step4_dataset_mode_ui)
@@ -8119,19 +9173,12 @@ class TrainingTab:
         self.btn_step4_create_frame = tk.Frame(f, bd=0, highlightthickness=0)
         self.btn_step4_create_frame.pack(anchor=tk.W, pady=(10, 5))
 
-        self.btn_step4_create_pulse_frame = tk.Frame(
-            self.btn_step4_create_frame,
-            bd=0,
-            highlightthickness=1
-        )
-        self.btn_step4_create_pulse_frame.pack(anchor=tk.W)
-
         self.btn_step4_create = ttk.Button(
-            self.btn_step4_create_pulse_frame,
+            self.btn_step4_create_frame,
             text="Utwórz wariant datasetu",
             command=self._create_dataset_thread
         )
-        self.btn_step4_create.pack()
+        self.btn_step4_create.pack(anchor=tk.W)
         
         self.ds_progress_var = tk.DoubleVar(value=0.0)
         self.ds_progress = TrainProgressBar(
@@ -8140,14 +9187,15 @@ class TrainingTab:
             maximum=100,
             thickness=6,
             trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
-            fill_color=palette.get("accent", "#0e639c"),
+            fill_color=palette.get("success", "#2ecc71"),
             bg=palette.get("panel", "#252526"),
             height=10,
         )
         self.ds_progress.pack(fill=tk.X, pady=2)
         
-        self.ds_status = ttk.Label(f, text="Gotowy", foreground="green")
+        self.ds_status = ttk.Label(f, text="Gotowy", style="TrainSplitSuccess.TLabel")
         self.ds_status.pack(anchor=tk.W)
+        self._style_training_success_label(self.ds_status)
 
         try:
             self.cvat_xml_var.trace_add("write", lambda *_args: self._on_cvat_xml_source_changed())
@@ -8255,15 +9303,8 @@ class TrainingTab:
         self.btn_step4_split_frame = tk.Frame(f, bd=0, highlightthickness=0)
         self.btn_step4_split_frame.pack(anchor=tk.W, pady=10)
 
-        self.btn_step4_split_pulse_frame = tk.Frame(
-            self.btn_step4_split_frame,
-            bd=0,
-            highlightthickness=1
-        )
-        self.btn_step4_split_pulse_frame.pack(anchor=tk.W)
-
         self.btn_step4_split = ttk.Button(
-            self.btn_step4_split_pulse_frame,
+            self.btn_step4_split_frame,
             text="Utwórz wariant datasetu",
             command=self._split_dataset_thread,
             style="Accent.TButton"
@@ -8278,7 +9319,7 @@ class TrainingTab:
             maximum=100,
             thickness=6,
             trough_color=palette.get("panel_alt", palette.get("panel", "#252526")),
-            fill_color=palette.get("guide", palette.get("warning", "#f0b44c")),
+            fill_color=palette.get("success", "#2ecc71"),
             bg=palette.get("panel", "#252526"),
             height=10,
         )
@@ -8303,6 +9344,7 @@ class TrainingTab:
         HELP.bind_help(self.btn_step4_split_toggle, "tr_split_ratios")
         HELP.bind_help(self.btn_step4_split, "tr_split_btn")
         self._update_ratio_labels()
+        self._configure_train_progress_styles()
 
     def _build_train_tab(self):
         palette = getattr(self.app, "palette", {})
@@ -8639,6 +9681,39 @@ class TrainingTab:
         )
         self.train_dataset_hint_lbl.bind("<Configure>", self._update_training_dataset_hint_wraplength, add="+")
 
+        self.train_dataset_quality_shell = tk.Frame(
+            self.train_dataset_section_frame,
+            bd=0,
+            highlightthickness=1,
+        )
+        self.train_dataset_quality_shell.pack(anchor=tk.W, fill=tk.X, pady=(2, 8))
+        self.train_dataset_quality_grid = tk.Frame(
+            self.train_dataset_quality_shell,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.train_dataset_quality_grid.pack(fill=tk.X, padx=1, pady=1)
+        self.train_dataset_quality_grid.grid_columnconfigure(0, weight=0, minsize=112)
+        self.train_dataset_quality_grid.grid_columnconfigure(1, weight=1)
+        self.train_dataset_quality_title_row = tk.Frame(
+            self.train_dataset_quality_grid,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.train_dataset_quality_title_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 1), pady=(0, 1))
+        self.train_dataset_quality_title_lbl = tk.Label(
+            self.train_dataset_quality_title_row,
+            text="Czy dataset ma sens?",
+            font=("Segoe UI", 8, "bold"),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            bd=0,
+            padx=6,
+            pady=4,
+        )
+        self.train_dataset_quality_title_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._train_dataset_quality_row_widgets = []
+
         self.train_scope_hint_lbl = ttk.Label(
             settings_col,
             text="",
@@ -8768,9 +9843,9 @@ class TrainingTab:
         self.train_recommendation_table_shell.pack(fill=tk.X, pady=(0, 8))
         self.train_recommendation_grid = tk.Frame(self.train_recommendation_table_shell, bd=0, highlightthickness=0)
         self.train_recommendation_grid.pack(fill=tk.X, padx=1, pady=1)
-        self.train_recommendation_grid.grid_columnconfigure(0, weight=1)
-        self.train_recommendation_grid.grid_columnconfigure(1, weight=0)
-        self.train_recommendation_grid.grid_columnconfigure(2, weight=0)
+        self.train_recommendation_grid.grid_columnconfigure(0, weight=0, minsize=118)
+        self.train_recommendation_grid.grid_columnconfigure(1, weight=1)
+        self.train_recommendation_grid.grid_columnconfigure(2, weight=0, minsize=86)
         header_specs = (
             ("Parametr", tk.W),
             ("Teraz", tk.CENTER),
@@ -8859,13 +9934,66 @@ class TrainingTab:
             label.grid(row=3, column=column, sticky="ew", padx=(0, 1), pady=(0, 1))
             self._train_recommendation_header_labels.append(label)
 
+        self._train_recommendation_cells = []
+        info_specs = (
+            ("Model bazowy", "-", "-", "model_context"),
+            ("Wersja / rozmiar", "-", "-", "model_variant"),
+        )
+        for row_index, (param_text, current_text, recommended_text, param_key) in enumerate(info_specs):
+            grid_row = row_index + 4
+            key_label = tk.Label(
+                self.train_recommendation_grid,
+                text=param_text,
+                font=("Segoe UI", 8),
+                anchor=tk.W,
+                justify=tk.LEFT,
+                bd=0,
+                padx=6,
+                pady=2,
+            )
+            key_label.grid(row=grid_row, column=0, sticky="ew", padx=(0, 1), pady=(0, 1))
+
+            current_label = tk.Label(
+                self.train_recommendation_grid,
+                text=current_text,
+                font=("Segoe UI", 8),
+                anchor=tk.W,
+                justify=tk.LEFT,
+                bd=0,
+                padx=6,
+                pady=2,
+            )
+            current_label.grid(row=grid_row, column=1, sticky="ew", padx=(0, 1), pady=(0, 1))
+
+            recommended_label = tk.Label(
+                self.train_recommendation_grid,
+                text=recommended_text,
+                font=("Segoe UI", 8),
+                anchor=tk.CENTER,
+                justify=tk.CENTER,
+                bd=0,
+                padx=6,
+                pady=2,
+            )
+            recommended_label.grid(row=grid_row, column=2, sticky="ew", padx=(0, 1), pady=(0, 1))
+
+            self._train_recommendation_cells.append(
+                {
+                    "key": key_label,
+                    "current": current_label,
+                    "recommended": recommended_label,
+                    "param_key": param_key,
+                    "static": True,
+                }
+            )
+
         editor_specs = (
             ("1. Epoki (ręcznie)", self.epochs_var, {"from_": 1, "to": 5000, "width": 8}, "epochs"),
             ("2. Rozmiar partii", self.batch_var, {"from_": 1, "to": 256, "width": 8}, "batch"),
             ("3. Rozdzielczość wejściowa", self.imgsz_var, {"from_": 32, "to": 2048, "increment": 32, "width": 8}, "imgsz"),
             ("4. Współczynnik uczenia", self.lr0_var, {"from_": 0.0001, "to": 0.1, "increment": 0.001, "format": "%.4f", "width": 8}, "lr0"),
         )
-        self._train_recommendation_cells = []
+        editor_start_row = 4 + len(info_specs)
         for row_index, (param_text, variable, spinbox_kwargs, param_key) in enumerate(editor_specs):
             key_label = tk.Label(
                 self.train_recommendation_grid,
@@ -8878,7 +10006,7 @@ class TrainingTab:
                 pady=2,
             )
             key_label.grid(
-                row=row_index + 4,
+                row=editor_start_row + row_index,
                 column=0,
                 sticky="ew",
                 padx=(0, 1),
@@ -8893,19 +10021,22 @@ class TrainingTab:
                 pady=2,
             )
             editor_host.grid(
-                row=row_index + 4,
+                row=editor_start_row + row_index,
                 column=1,
                 sticky="ew",
                 padx=(0, 1),
                 pady=(0, 1),
             )
             editor_host.grid_columnconfigure(0, weight=1)
+            editor_host.grid_columnconfigure(1, weight=0)
+            editor_host.grid_columnconfigure(2, weight=1)
             editor = ttk.Spinbox(
                 editor_host,
                 textvariable=variable,
+                justify=tk.CENTER,
                 **spinbox_kwargs,
             )
-            editor.grid(row=0, column=0, sticky="w")
+            editor.grid(row=0, column=1, sticky="", padx=(2, 2))
 
             recommended_label = tk.Label(
                 self.train_recommendation_grid,
@@ -8918,7 +10049,7 @@ class TrainingTab:
                 pady=2,
             )
             recommended_label.grid(
-                row=row_index + 4,
+                row=editor_start_row + row_index,
                 column=2,
                 sticky="ew",
                 padx=(0, 1),
@@ -9349,6 +10480,10 @@ class TrainingTab:
         self.history_context_menu = tk.Menu(self.tree, tearoff=0)
         self.history_context_menu.add_command(label="Wznów trening", command=self._resume_selected_run)
         self.history_context_menu.add_command(label="Otwórz folder", command=self._open_run_folder)
+        self.history_context_menu.add_command(
+            label="Eksportuj best.pt do modeli trybu swobodnego",
+            command=self._export_selected_run_model_to_free_mode,
+        )
         self.history_context_menu.add_command(label="Usun", command=self._delete_selected)
 
         hist_details = ttk.Frame(hist_top, style="Panel.TFrame")
@@ -9416,15 +10551,8 @@ class TrainingTab:
         self.btn_step4_finish_frame = tk.Frame(self.step4_train_nav, bd=0, highlightthickness=0)
         self.btn_step4_finish_frame.pack(side=tk.RIGHT)
 
-        self.btn_step4_finish_pulse_frame = tk.Frame(
-            self.btn_step4_finish_frame,
-            bd=0,
-            highlightthickness=1
-        )
-        self.btn_step4_finish_pulse_frame.pack(anchor=tk.E)
-
         self.btn_step4_complete_project = ttk.Button(
-            self.btn_step4_finish_pulse_frame,
+            self.btn_step4_finish_frame,
             text="Zakończ projekt",
             command=self._complete_campaign_project,
             style="WorkflowCard.TButton",
@@ -9434,14 +10562,14 @@ class TrainingTab:
         self.btn_step4_complete_project.configure(padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
         self.btn_step4_finish = ttk.Button(
-            self.btn_step4_finish_pulse_frame,
-            text="Popraw split w PZ1",
+            self.btn_step4_finish_frame,
+            text="Ustaw inny split",
             command=self._open_step4_dataset_stage,
             style="Accent.TButton",
             state=tk.DISABLED
         )
         self.btn_step4_finish.pack(side=tk.LEFT)
-        self.btn_step4_finish.configure(text="Popraw split w PZ1", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+        self.btn_step4_finish.configure(text="Ustaw inny split", padding=(8, 2), width=22)
 
         self._refresh_step4_campaign_navigation_ui()
 
@@ -9464,15 +10592,13 @@ class TrainingTab:
         HELP.bind_help(self.btn_step4_back, "tr_builder_back")
         
         try:
-            recommendation_rows = list(getattr(self, "_train_recommendation_cells", []) or [])
-            if len(recommendation_rows) > 0:
-                HELP.bind_help(recommendation_rows[0].get("editor"), "tr_train_ep")
-            if len(recommendation_rows) > 1:
-                HELP.bind_help(recommendation_rows[1].get("editor"), "tr_train_bs")
-            if len(recommendation_rows) > 2:
-                HELP.bind_help(recommendation_rows[2].get("editor"), "tr_train_imgsz")
-            if len(recommendation_rows) > 3:
-                HELP.bind_help(recommendation_rows[3].get("editor"), "tr_train_lr0")
+            recommendation_rows = [
+                row for row in list(getattr(self, "_train_recommendation_cells", []) or [])
+                if row.get("editor") is not None
+            ]
+            help_keys = ("tr_train_ep", "tr_train_bs", "tr_train_imgsz", "tr_train_lr0")
+            for row, help_key in zip(recommendation_rows, help_keys):
+                HELP.bind_help(row.get("editor"), help_key)
         except Exception as e: 
             logger.debug(f"Błąd podpinania pomocy do siatki: {e}")
         
@@ -10881,6 +12007,7 @@ class TrainingTab:
                     widget.configure(text=value)
                 except Exception:
                     pass
+                self._style_training_success_label(widget)
 
     def _on_base_model_change(self):
         try:
@@ -11184,7 +12311,7 @@ class TrainingTab:
             try:
                 status = getattr(self, "ds_status", None)
                 if status is not None:
-                    status.configure(foreground="#d35400")
+                    self._style_training_success_label(status)
                     self._set_training_widget_text(
                         status,
                         "Znaleziono zgodny folder obrazów, ale podpięcie anulowano. Wskaż folder ręcznie albo wybierz XML ponownie.",
@@ -11201,7 +12328,7 @@ class TrainingTab:
         try:
             status = getattr(self, "ds_status", None)
             if status is not None:
-                status.configure(foreground="green")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(
                     status,
                     f"Podpięto zgodny folder obrazów: {best_candidate['matched']}/{best_candidate['total']} plików z XML w {display_dir}.",
@@ -11369,7 +12496,7 @@ class TrainingTab:
             status = getattr(self, "ds_status", None)
             if status is not None:
                 try:
-                    status.configure(foreground="green")
+                    self._style_training_success_label(status)
                     self._set_training_widget_text(
                         status,
                         "Gotowy dataset jest już wejściem treningowym. Przejdź dalej do PZ2.",
@@ -11395,13 +12522,13 @@ class TrainingTab:
             return
         try:
             if busy:
-                status.configure(foreground="#d35400")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
             elif enabled:
-                status.configure(foreground="green")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
             else:
-                status.configure(foreground="#d35400")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
         except Exception:
             pass
@@ -11456,13 +12583,13 @@ class TrainingTab:
             return
         try:
             if busy:
-                status.configure(foreground="#d35400")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
             elif enabled:
-                status.configure(foreground="green")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
             else:
-                status.configure(foreground="#d35400")
+                self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
         except Exception:
             pass
@@ -11693,7 +12820,7 @@ class TrainingTab:
 
         alignment = self._validate_dataset_creator_xml_images_alignment(images_dir)
         if not bool(alignment.get("ok")):
-            self.ds_status.configure(foreground="#c0392b")
+            self._style_training_error_label(self.ds_status)
             self._set_training_widget_text(self.ds_status, "XML i folder obrazów nie są zgodne.")
             self._handle_step4_dataset_failure_result(
                 message=str(alignment.get("message") or "Wskaż zgodny plik XML i folder obrazów."),
@@ -11718,8 +12845,9 @@ class TrainingTab:
             return
         self.dataset_build_is_running = True
 
+        self._configure_train_progress_styles()
         self.ds_progress_var.set(0)
-        self.ds_status.configure(foreground="black")
+        self._style_training_success_label(self.ds_status)
         self._set_training_widget_text(self.ds_status, "Rozpoczynam przygotowanie datasetu...")
 
         def worker():
@@ -11735,7 +12863,7 @@ class TrainingTab:
                 def prog(c, t, n):
                     pct = (c / t) * 100 if t > 0 else 0
                     self._ui(lambda: self.ds_progress_var.set(pct))
-                    self._ui(lambda: self.ds_status.configure(foreground="black"))
+                    self._ui(lambda: self._style_training_success_label(self.ds_status))
                     self._ui(lambda c=int(c), t=int(t): self._set_training_widget_text(self.ds_status, f"{c}/{t} obrazów..."))
 
                 ok2, msg2, _ = self.creator.create_dataset(images_dir, out_dir, ratios, prog)
@@ -11765,7 +12893,7 @@ class TrainingTab:
                             stage_result["pending_count"] = int(stage_stats.get("pending_count", 0) or 0)
                             stage_result["stage_images_total"] = int(stage_stats.get("stage_images_total", 0) or 0)
                             stage_result["stage_images_dir"] = str(stage_stats.get("stage_images_dir") or "").strip()
-                    self._ui(lambda: self.ds_status.configure(foreground="green"))
+                    self._ui(lambda: self._style_training_success_label(self.ds_status))
                     self._ui(lambda: self._set_training_widget_text(self.ds_status, "Dataset treningowy został przygotowany!"))
                     if stage_result["enabled"] and stage_result["ok"] and stage_result["stage_images_dir"]:
                         self._ui(
@@ -11782,9 +12910,7 @@ class TrainingTab:
                     elif stage_result["enabled"] and (not stage_result["ok"]) and stage_result["message"]:
                         self._ui(lambda warn=str(stage_result["message"]): messagebox.showwarning("Stage oczekujacych", warn))
 
-                    self._ui(
-                        lambda: self.ds_status.configure(foreground="green")
-                    )
+                    self._ui(lambda: self._style_training_success_label(self.ds_status))
                     self._ui(
                         lambda counts=dict(dataset_counts): self._set_training_widget_text(
                             self.ds_status,
@@ -11806,7 +12932,7 @@ class TrainingTab:
                         )
                     )
                 else:
-                    self._ui(lambda: self.ds_status.configure(foreground="red"))
+                    self._ui(lambda: self._style_training_error_label(self.ds_status))
                     self._ui(lambda: self._set_training_widget_text(self.ds_status, "Błąd przygotowania datasetu"))
                     self._ui(
                         lambda msg=str(msg2): self._handle_step4_dataset_failure_result(
@@ -11817,7 +12943,7 @@ class TrainingTab:
                     )
 
             except Exception as e:
-                self._ui(lambda: self.ds_status.configure(foreground="red"))
+                self._ui(lambda: self._style_training_error_label(self.ds_status))
                 self._ui(lambda: self._set_training_widget_text(self.ds_status, "Krytyczny błąd przygotowania datasetu"))
                 self._ui(
                     lambda err=str(e): self._handle_step4_dataset_failure_result(
@@ -11873,7 +12999,7 @@ class TrainingTab:
 
         self._set_split_feedback_visibility(True)
         self.split_progress_var.set(0)
-        self.split_status.config(foreground="black")
+        self._style_training_success_label(self.split_status)
         self._set_training_widget_text(self.split_status, "Rozpoczynam przygotowanie datasetu...")
         try:
             self.frame.update_idletasks()
@@ -11885,14 +13011,14 @@ class TrainingTab:
                 def prog(c, t, n):
                     pct = (c / t) * 100 if t > 0 else 0
                     self._ui(lambda: self.split_progress_var.set(pct))
-                    self._ui(lambda: self.split_status.configure(foreground="black"))
+                    self._ui(lambda: self._style_training_success_label(self.split_status))
                     self._ui(lambda c=int(c), t=int(t): self._set_training_widget_text(self.split_status, f"Kopiowanie {c}/{t}..."))
 
                 ok, msg, _ = self.splitter.split_dataset(src, out, ratios, prog)
 
                 if ok:
                     dataset_counts = self._get_dataset_split_image_counts(out)
-                    self._ui(lambda: self.split_status.configure(foreground="green"))
+                    self._ui(lambda: self._style_training_success_label(self.split_status))
                     self._ui(lambda: self._set_training_widget_text(self.split_status, "Dataset treningowy został przygotowany!"))
                     self._ui(
                         lambda p=str(out), msg=str(msg), counts=dict(dataset_counts): self._handle_step4_dataset_success_result(
@@ -11903,7 +13029,7 @@ class TrainingTab:
                         )
                     )
                 else:
-                    self._ui(lambda: self.split_status.configure(foreground="red"))
+                    self._ui(lambda: self._style_training_error_label(self.split_status))
                     self._ui(lambda: self._set_training_widget_text(self.split_status, "Błąd przygotowania datasetu"))
                     self._ui(
                         lambda msg=str(msg): self._handle_step4_dataset_failure_result(
@@ -11914,7 +13040,7 @@ class TrainingTab:
                     )
 
             except Exception as e:
-                self._ui(lambda: self.split_status.configure(foreground="red"))
+                self._ui(lambda: self._style_training_error_label(self.split_status))
                 self._ui(lambda: self._set_training_widget_text(self.split_status, "Krytyczny błąd przygotowania datasetu"))
                 self._ui(
                     lambda err=str(e): self._handle_step4_dataset_failure_result(
@@ -12596,8 +13722,24 @@ class TrainingTab:
 
         selected_run = self._selected_run()
         resumable = bool(selected_run is not None and self._is_history_run_resume_allowed(selected_run))
+        exportable = False
+        if selected_run is not None:
+            try:
+                exportable = bool(
+                    self._infer_history_run_target(selected_run) in {"plate", "char", "vehicle"}
+                    and self._resolve_history_run_best_weights(selected_run) is not None
+                )
+            except Exception:
+                exportable = False
         try:
             menu.entryconfigure("Wznów trening", state=(tk.NORMAL if resumable else tk.DISABLED))
+        except Exception:
+            pass
+        try:
+            menu.entryconfigure(
+                "Eksportuj best.pt do modeli trybu swobodnego",
+                state=(tk.NORMAL if exportable else tk.DISABLED),
+            )
         except Exception:
             pass
 
@@ -12667,7 +13809,11 @@ class TrainingTab:
         self._autofill_validation_inputs_from_run(run)
 
     def _run_validation(self):
-        if not YOLO_AVAILABLE: return messagebox.showerror("Błąd", "Brak modułu YOLO!")
+        if not YOLO_AVAILABLE:
+            return messagebox.showerror("Błąd", "Brak modułu YOLO!")
+        YoloClass = get_yolo_class()
+        if YoloClass is None:
+            return messagebox.showerror("Błąd", "Nie udało się załadować modułu YOLO.")
         if self.val_is_running: return
         
         model_path = self.val_model_var.get().strip()
@@ -12698,7 +13844,7 @@ class TrainingTab:
 
         def worker():
             try:
-                model = YOLO(model_path)
+                model = YoloClass(model_path)
                 metrics = model.val(data=data_path, split=self.val_split_var.get())
                 metric_rows = self._extract_validation_metric_rows(metrics)
                 

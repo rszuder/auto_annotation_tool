@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import importlib.util
 import os
 from pathlib import Path
 import queue
@@ -40,8 +41,26 @@ class DependencyIssue:
     error_text: str
 
     @property
+    def is_system_resource_load_error(self) -> bool:
+        return _is_system_resource_load_error(self.error_text)
+
+    @property
     def can_auto_install(self) -> bool:
+        if self.is_system_resource_load_error:
+            return False
         return bool(str(self.spec.package_name or "").strip())
+
+
+def _is_system_resource_load_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    markers = (
+        "winerror 1455",
+        "plik stronicowania jest za mały",
+        "plik stronicowania jest za maly",
+        "paging file is too small",
+        "page file is too small",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _format_dependency_probe_line(spec: DependencySpec, *, ok: bool, error_text: str = "") -> str:
@@ -51,8 +70,9 @@ def _format_dependency_probe_line(spec: DependencySpec, *, ok: bool, error_text:
         package_label = f" | pip={package_label}"
     if ok:
         return f"[BOOTSTRAP] {spec.display_name}: OK | {scope}{package_label}"
+    status = "NIEDOSTĘPNE" if _is_system_resource_load_error(error_text) else "BRAK"
     return (
-        f"[BOOTSTRAP] {spec.display_name}: BRAK | {scope}{package_label} | "
+        f"[BOOTSTRAP] {spec.display_name}: {status} | {scope}{package_label} | "
         f"{str(error_text or '').strip()}"
     )
 
@@ -60,7 +80,7 @@ def _format_dependency_probe_line(spec: DependencySpec, *, ok: bool, error_text:
 def _probe_line_to_terminal_entry(line: str) -> dict:
     text = str(line or "").strip()
     upper = text.upper()
-    if " BRAK " in upper or upper.endswith(": BRAK"):
+    if " BRAK " in upper or upper.endswith(": BRAK") or " NIEDOSTĘPNE " in upper or upper.endswith(": NIEDOSTĘPNE"):
         tag = "terminal_warning"
     elif " OK " in upper or upper.endswith(": OK"):
         tag = "terminal_success"
@@ -139,6 +159,8 @@ DEPENDENCY_SPECS: tuple[DependencySpec, ...] = (
     ),
 )
 
+HEAVY_OPTIONAL_MODULES = {"torch", "ultralytics", "easyocr"}
+
 
 def probe_runtime_dependencies(line_callback=None) -> list[DependencyIssue]:
     global LAST_PROBE_LINES, LAST_PROBE_ISSUES
@@ -152,7 +174,13 @@ def probe_runtime_dependencies(line_callback=None) -> list[DependencyIssue]:
 
     for spec in DEPENDENCY_SPECS:
         try:
-            importlib.import_module(spec.module_name)
+            if (not bool(spec.required_for_startup)) and spec.module_name in HEAVY_OPTIONAL_MODULES:
+                # Nie ładujemy tu natywnych DLL PyTorch/CUDA/EasyOCR. Sam import potrafi
+                # zużyć dużo pagefile na Windowsie jeszcze przed startem GUI.
+                if importlib.util.find_spec(spec.module_name) is None:
+                    raise ImportError(f"No module named '{spec.module_name}'")
+            else:
+                importlib.import_module(spec.module_name)
             emit(_format_dependency_probe_line(spec, ok=True))
         except Exception as exc:  # pragma: no cover - zależne od środowiska
             error_text = f"{type(exc).__name__}: {exc}"
@@ -175,6 +203,8 @@ def _get_blocking_issues(issues: Iterable[DependencyIssue]) -> list[DependencyIs
 def _get_auto_install_packages(issues: Iterable[DependencyIssue]) -> list[str]:
     packages: list[str] = []
     for issue in issues:
+        if not issue.can_auto_install:
+            continue
         package_name = str(issue.spec.package_name or "").strip()
         if package_name and package_name not in packages:
             packages.append(package_name)
@@ -197,11 +227,46 @@ def build_install_command(
     if use_requirements_file:
         cmd.extend(["-r", str(REQUIREMENTS_FILE)])
     else:
-        cmd.extend(_get_auto_install_packages(list(issues or [])))
+        packages = _get_auto_install_packages(list(issues or []))
+        if not packages:
+            return ""
+        cmd.extend(packages)
     return _format_windows_command(cmd)
 
 
+def _build_system_resource_report(issues: list[DependencyIssue]) -> str:
+    lines: list[str] = []
+    lines.append("Wykryto problem z załadowaniem bibliotek środowiska dla Auto-Annotation Tool.")
+    lines.append("")
+    lines.append(f"Interpreter: {sys.executable}")
+    lines.append(f"Folder aplikacji: {ROOT_DIR}")
+    lines.append("")
+    lines.append("To nie wygląda na brak instalacji pakietów.")
+    lines.append("Biblioteki są zainstalowane albo wykryte, ale Windows nie może załadować natywnych DLL PyTorcha.")
+    lines.append("")
+    lines.append("Niedostępne moduły:")
+    for issue in issues:
+        package_label = str(issue.spec.package_name or "").strip()
+        if package_label:
+            package_label = f" | pip: {package_label}"
+        lines.append(f"- {issue.spec.display_name} (import: {issue.spec.module_name}{package_label})")
+        lines.append(f"  Błąd: {issue.error_text}")
+    lines.append("")
+    lines.append("Najbardziej prawdopodobna przyczyna:")
+    lines.append("- Plik stronicowania Windows jest za mały dla bibliotek PyTorch/CUDA (WinError 1455).")
+    lines.append("")
+    lines.append("Co zrobić:")
+    lines.append("- Nie uruchamiaj teraz `pip install torch ultralytics easyocr`, bo to najpewniej nie naprawi problemu.")
+    lines.append("- Zamknij ciężkie aplikacje i zwiększ plik stronicowania Windows albo ustaw go jako zarządzany przez system.")
+    lines.append("- Po zmianie zrestartuj komputer i uruchom aplikację ponownie w tym samym interpreterze.")
+    lines.append("- Dopiero jeśli WinError 1455 zniknie, a import nadal będzie padał, sprawdzamy instalację PyTorch.")
+    return "\n".join(lines)
+
+
 def _build_dependency_report(issues: list[DependencyIssue]) -> str:
+    if issues and all(issue.is_system_resource_load_error for issue in issues):
+        return _build_system_resource_report(issues)
+
     blockers = _get_blocking_issues(issues)
     optional = [issue for issue in issues if issue not in blockers]
     lines: list[str] = []
@@ -249,7 +314,7 @@ def _build_dependency_report(issues: list[DependencyIssue]) -> str:
             lines.append(build_install_command(use_requirements_file=True))
             lines.append("")
 
-    manual_issues = [issue for issue in issues if not issue.can_auto_install]
+    manual_issues = [issue for issue in issues if not issue.can_auto_install and not issue.is_system_resource_load_error]
     if manual_issues:
         lines.append("Pakiety wymagające ręcznego przygotowania środowiska:")
         for issue in manual_issues:
@@ -335,9 +400,12 @@ def _show_tk_dependency_assistant(issues: list[DependencyIssue], app_argv: list[
     from tkinter import messagebox, scrolledtext, ttk
 
     result = {"continue": False}
+    system_resource_only = bool(issues) and all(issue.is_system_resource_load_error for issue in issues)
     root = tk.Tk()
     root.title("Brakujące biblioteki środowiska")
     root.geometry("920x700")
+    if system_resource_only:
+        root.title("Problem ładowania bibliotek środowiska")
     root.minsize(760, 560)
 
     try:
@@ -356,6 +424,8 @@ def _show_tk_dependency_assistant(issues: list[DependencyIssue], app_argv: list[
         justify=tk.LEFT,
     )
     title.pack(fill=tk.X)
+    if system_resource_only:
+        title.configure(text="Windows nie może załadować bibliotek PyTorch")
 
     intro = ttk.Label(
         shell,
@@ -368,6 +438,13 @@ def _show_tk_dependency_assistant(issues: list[DependencyIssue], app_argv: list[
         wraplength=860,
     )
     intro.pack(fill=tk.X, pady=(8, 10))
+    if system_resource_only:
+        intro.configure(
+            text=(
+                "To wygląda na za mały plik stronicowania Windows, a nie na brak pakietów. "
+                "Najpierw popraw pamięć wirtualną systemu, potem uruchom aplikację ponownie."
+            )
+        )
 
     report_box = scrolledtext.ScrolledText(
         shell,
@@ -518,6 +595,8 @@ def _show_tk_dependency_assistant(issues: list[DependencyIssue], app_argv: list[
         command=install_missing_packages,
     )
     btn_install.pack(side=tk.LEFT)
+    if system_resource_only:
+        btn_install.configure(text="Pip nie naprawi WinError 1455")
 
     btn_copy = ttk.Button(
         btn_row,
@@ -532,6 +611,8 @@ def _show_tk_dependency_assistant(issues: list[DependencyIssue], app_argv: list[
         command=continue_with_optional_gaps,
     )
     btn_continue.pack(side=tk.RIGHT, padx=(8, 0))
+    if system_resource_only:
+        btn_continue.configure(text="Uruchom bez modułów ML")
 
     btn_close = ttk.Button(
         btn_row,

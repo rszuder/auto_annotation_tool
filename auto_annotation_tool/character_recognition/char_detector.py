@@ -12,6 +12,7 @@ import numpy as np
 
 from ..config import logger, CV2_AVAILABLE, cv2
 from ..utils import cleanup_gpu_memory
+from .reading_order import group_records_into_reading_rows, sort_records_reading_order
 
 
 class DetectionMethod(Enum):
@@ -94,6 +95,8 @@ class CharacterDetector:
         self.last_yolo_nms_detections: List[CharacterDetection] = []
         self.last_yolo_detections: List[CharacterDetection] = []
         self.last_yolo_ocr_detections: List[CharacterDetection] = []
+        self.last_yolo_requested_device = yolo_device
+        self.last_yolo_runtime_device = ""
         self._cuda_runtime_broken = False
         self._cuda_runtime_break_reason = ""
         self._cuda_runtime_fallback_logged = False
@@ -130,8 +133,7 @@ class CharacterDetector:
             else:
                 detections.extend(self.last_yolo_detections)
             
-        detections.sort(key=lambda d: d.bbox[0])
-        return detections
+        return sort_records_reading_order(detections)
 
     @staticmethod
     def _is_cuda_runtime_error(error: Exception | str | None) -> bool:
@@ -443,11 +445,16 @@ class CharacterDetector:
             }
             if self.yolo_device is not None:
                 predict_kwargs["device"] = self.yolo_device
+            self.last_yolo_requested_device = predict_kwargs.get("device", None)
 
             results = self.yolo_model(plate_image, **predict_kwargs)
             if not results or len(results) == 0: return []
             result = results[0]
             if not hasattr(result, 'boxes') or result.boxes is None: return []
+            try:
+                self.last_yolo_runtime_device = str(getattr(result.boxes.xyxy, "device", "") or "")
+            except Exception:
+                self.last_yolo_runtime_device = ""
             
             boxes = result.boxes.xyxy.cpu().numpy()
             confs = result.boxes.conf.cpu().numpy()
@@ -581,7 +588,7 @@ class CharacterDetector:
             return []
 
         recognized = []
-        for det in sorted(list(yolo_detections), key=lambda item: float(item.bbox[0])):
+        for det in sort_records_reading_order(list(yolo_detections)):
             try:
                 crop_x1, crop_y1, crop_x2, crop_y2 = self._expand_crop_bbox(det.bbox, plate_image.shape)
                 crop = plate_image[crop_y1:crop_y2, crop_x1:crop_x2]
@@ -701,8 +708,7 @@ class CharacterDetector:
             if not skip_candidate:
                 filtered.append(candidate)
 
-        filtered.sort(key=lambda det: float(det.bbox[0]))
-        return filtered
+        return sort_records_reading_order(filtered)
 
     def _detection_width(self, det: CharacterDetection) -> float:
         return max(1.0, float(det.bbox[2]) - float(det.bbox[0]))
@@ -771,7 +777,7 @@ class CharacterDetector:
                 best_subset = cluster
                 best_score = cluster_score
 
-        return sorted(best_subset, key=lambda det: float(det.bbox[0]))
+        return sort_records_reading_order(best_subset)
 
     def _build_sequence_reference_stats(self, detections: List[CharacterDetection]) -> dict:
         if not detections:
@@ -882,7 +888,7 @@ class CharacterDetector:
             and height_similarity >= self.yolo_sequence_min_height_ratio
         )
 
-    def _filter_yolo_sequence_consistency(self, detections: List[CharacterDetection]) -> List[CharacterDetection]:
+    def _filter_yolo_sequence_consistency_single_row(self, detections: List[CharacterDetection]) -> List[CharacterDetection]:
         if len(detections) <= 1:
             return detections
 
@@ -919,3 +925,16 @@ class CharacterDetector:
                 filtered.append(candidate)
 
         return filtered
+
+    def _filter_yolo_sequence_consistency(self, detections: List[CharacterDetection]) -> List[CharacterDetection]:
+        if len(detections) <= 1:
+            return detections
+
+        rows = group_records_into_reading_rows(detections)
+        if len(rows) <= 1:
+            return sort_records_reading_order(self._filter_yolo_sequence_consistency_single_row(detections))
+
+        filtered: List[CharacterDetection] = []
+        for row in rows:
+            filtered.extend(self._filter_yolo_sequence_consistency_single_row(list(row)))
+        return sort_records_reading_order(filtered)

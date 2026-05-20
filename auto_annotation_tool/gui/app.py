@@ -12,9 +12,11 @@ from datetime import datetime
 import threading
 import time
 import faulthandler
+import gc
 
 from ..config import CONFIG, logger, TK_AVAILABLE, SESSION
 from ..icons import IconManager
+from ..utils import cleanup_gpu_memory
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 # Importy zakładek
@@ -31,7 +33,199 @@ except ImportError:
     HelpTab = None
 
 
-APP_AUTHOR = "rszuder"
+APP_AUTHOR = "R. Szuderski"
+
+
+class _LazyNotebookTab:
+    """Lekki placeholder zakładki budowanej dopiero przy pierwszym wejściu."""
+
+    def __init__(self, app, key: str):
+        self.app = app
+        self.key = str(key or "").strip()
+        self.frame = ttk.Frame(app.notebook)
+        self.is_processing = False
+        self.trainer = None
+        self.annotator = None
+        self.detector = None
+        self.char_detector = None
+        self.ocr_engine = None
+        self.plate_ocr = None
+        self.preview_dir_var = None
+        self._preview_fullscreen_active = False
+        self._build_placeholder()
+
+    def _build_placeholder(self):
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("panel", "#252526")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        accent = palette.get("success", "#4ec9b0")
+
+        try:
+            self.frame.configure(style="Panel.TFrame")
+        except Exception:
+            pass
+
+        shell = tk.Frame(
+            self.frame,
+            bg=bg,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=palette.get("border", "#3c3c3c"),
+        )
+        shell.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=520, height=150)
+        self._placeholder_shell = shell
+
+        title = tk.Label(
+            shell,
+            text=f"{self.app.get_main_tab_label(self.key)}",
+            bg=bg,
+            fg=fg,
+            font=("Segoe UI", 15, "bold"),
+            anchor="w",
+        )
+        title.pack(fill=tk.X, padx=18, pady=(18, 6))
+        self._placeholder_title = title
+
+        body = tk.Label(
+            shell,
+            text=(
+                "Zakładka zostanie zbudowana dopiero przy pierwszym wejściu. "
+                "Dzięki temu start programu nie musi ładować całego warsztatu naraz."
+            ),
+            bg=bg,
+            fg=muted,
+            font=("Segoe UI", 10),
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=470,
+        )
+        body.pack(fill=tk.X, padx=18, pady=(0, 10))
+        self._placeholder_body = body
+
+        status = tk.Label(
+            shell,
+            text="Kliknij zakładkę lub przejdź tutaj z wizarda.",
+            bg=bg,
+            fg=accent,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        status.pack(fill=tk.X, padx=18, pady=(0, 16))
+        self._placeholder_status = status
+
+    def apply_theme(self):
+        palette = getattr(self.app, "palette", {})
+        bg = palette.get("panel", "#252526")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        accent = palette.get("success", "#4ec9b0")
+        border = palette.get("border", "#3c3c3c")
+        for widget, options in (
+            (getattr(self, "_placeholder_shell", None), {"bg": bg, "highlightbackground": border}),
+            (getattr(self, "_placeholder_title", None), {"bg": bg, "fg": fg}),
+            (getattr(self, "_placeholder_body", None), {"bg": bg, "fg": muted}),
+            (getattr(self, "_placeholder_status", None), {"bg": bg, "fg": accent}),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.configure(**options)
+            except Exception:
+                pass
+
+    def set_loading_state(self):
+        try:
+            self._placeholder_status.configure(text="Buduję zakładkę... To może chwilę potrwać przy pierwszym wejściu.")
+        except Exception:
+            pass
+        try:
+            self._placeholder_body.configure(
+                text=(
+                    "Pierwsze wejście tworzy pełny interfejs tej zakładki i wczytuje jej lokalny stan. "
+                    "Kolejne przełączenia będą już szybkie."
+                )
+            )
+        except Exception:
+            pass
+
+    def is_startup_ui_ready(self) -> bool:
+        return True
+
+    def release_gpu_resources_for_training(self) -> None:
+        return None
+
+    def apply_global_yolo_device_choice(self, *args, **kwargs) -> None:
+        return None
+
+    def flush_free_mode_session_state(self) -> None:
+        return None
+
+    def clear_campaign_context(self) -> None:
+        return None
+
+    def _on_app_close(self, *args, **kwargs) -> None:
+        return None
+
+    def capture_free_mode_snapshot_for_project_return(self) -> None:
+        return None
+
+    def get_campaign_step2_view_model(self):
+        return None
+
+    def get_campaign_step2_wizard_status(self) -> dict:
+        return {}
+
+    def get_campaign_step2_source_state(self, *args, **kwargs) -> dict:
+        return {}
+
+    def _get_campaign_step2_approval_context(self) -> dict:
+        return {}
+
+    def _resolve_safe_annotation_run_dir(self, *args, **kwargs):
+        return None
+
+    def _get_run_plate_approved_counts(self, *args, **kwargs) -> tuple[int, int]:
+        return 0, 0
+
+    def _get_run_plate_annotation_counts(self, *args, **kwargs) -> tuple[int, int]:
+        return 0, 0
+
+    def _build_campaign_char_effective_source(self, *args, **kwargs) -> dict:
+        return {}
+
+    def _get_campaign_step3_training_readiness(self, *args, **kwargs) -> dict:
+        return {}
+
+    def _has_any_step3_export_outputs(self, *args, **kwargs) -> bool:
+        return False
+
+    def _get_gold_export_split_percentages(self, *args, **kwargs) -> tuple[float, float, float]:
+        return 80.0, 10.0, 10.0
+
+    def get_campaign_step4_readiness(self, *args, **kwargs) -> dict:
+        return {"ok": True, "reason": "", "message": ""}
+
+    def get_campaign_step4_finish_state(self, *args, **kwargs) -> dict:
+        try:
+            from ..campaign_manager import CAMPAIGN
+            return dict(CAMPAIGN.get_step4_finish_state() or {})
+        except Exception:
+            return {}
+
+    def _step4_has_active_operation(self) -> bool:
+        return False
+
+    def _get_active_step4_operation_label(self) -> str:
+        return ""
+
+    def __getattr__(self, name):
+        real_tab = self.app._ensure_tab_loaded(self.key)
+        if real_tab is self:
+            raise AttributeError(name)
+        return getattr(real_tab, name)
+
+
 THEME_DEFINITIONS = {
     "dark_visual_cs": {
         "label": "Dark Visual CS",
@@ -155,6 +349,8 @@ class AutoAnnotationApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.bind("<Unmap>", self._on_root_unmap, add="+")
         self.root.bind("<Map>", self._on_root_map, add="+")
+        self.root.bind("<Visibility>", self._on_root_visibility, add="+")
+        self.root.bind("<FocusIn>", self._on_root_focus_in, add="+")
         self._enable_fatal_crash_logging()
         
         self.icon_manager = IconManager
@@ -190,6 +386,9 @@ class AutoAnnotationApp:
         self._free_mode_assistant_refresh_after_id = None
         self._free_mode_assistant_toggle_btn = None
         self._free_mode_assistant_enabled = False
+        self._simple_tooltip_window = None
+        self._simple_tooltip_after_id = None
+        self._simple_tooltip_target = None
         self._help_panel_message_prefix = "HELP:"
         self._status_full_text = ""
         self._global_terminal_lines = ["[APP] Terminal globalny gotowy. Tutaj trafiaja logi procesow z Z2, PZ2 i Z4."]
@@ -216,6 +415,8 @@ class AutoAnnotationApp:
         self._global_terminal_hold_position = False
         self._window_restore_after_id = None
         self._window_restore_topmost_after_id = None
+        self._window_restore_attempts = 0
+        self._window_restore_pending = False
         self.tabs = {}
         self._closing_in_progress = False
         self.startup_overlay_frame = None
@@ -292,7 +493,7 @@ class AutoAnnotationApp:
             pass
 
     def _release_preview_fullscreens_for_recovery(self):
-        for tab in list(getattr(self, "tabs", {}).values()):
+        for tab in list(self._iter_loaded_tabs()):
             try:
                 if bool(getattr(tab, "_preview_fullscreen_active", False)):
                     exit_fullscreen = getattr(tab, "_set_preview_fullscreen", None)
@@ -310,6 +511,7 @@ class AutoAnnotationApp:
             root_state = ""
         if root_state != "iconic":
             return None
+        self._window_restore_pending = True
         self._release_window_grabs_for_recovery()
         try:
             if bool(getattr(self, "_help_overlay_forced_visible", False)):
@@ -322,17 +524,39 @@ class AutoAnnotationApp:
     def _on_root_map(self, event=None):
         if getattr(event, "widget", None) is not self.root:
             return None
+        self._window_restore_pending = True
+        self._schedule_root_recovery(delay_ms=60, reset_attempts=True)
+        return None
+
+    def _on_root_visibility(self, event=None):
+        if getattr(event, "widget", None) is not self.root:
+            return None
+        if not bool(getattr(self, "_window_restore_pending", False)) and int(getattr(self, "_window_restore_attempts", 0) or 0) <= 0:
+            return None
+        self._schedule_root_recovery(delay_ms=40)
+        return None
+
+    def _on_root_focus_in(self, event=None):
+        if getattr(event, "widget", None) is not self.root:
+            return None
+        if not bool(getattr(self, "_window_restore_pending", False)) and int(getattr(self, "_window_restore_attempts", 0) or 0) <= 0:
+            return None
+        self._schedule_root_recovery(delay_ms=30)
+        return None
+
+    def _schedule_root_recovery(self, delay_ms: int = 60, *, reset_attempts: bool = False):
+        if reset_attempts:
+            self._window_restore_attempts = 0
         try:
             if self._window_restore_after_id is not None:
                 self.root.after_cancel(self._window_restore_after_id)
         except Exception:
             pass
         try:
-            self._window_restore_after_id = self.root.after(60, self._recover_root_after_map)
+            self._window_restore_after_id = self.root.after(max(0, int(delay_ms)), self._recover_root_after_map)
         except Exception:
             self._window_restore_after_id = None
             self._recover_root_after_map()
-        return None
 
     def _recover_root_after_map(self):
         self._window_restore_after_id = None
@@ -341,7 +565,13 @@ class AutoAnnotationApp:
         except Exception:
             root_state = ""
         if root_state == "iconic":
+            self._window_restore_attempts = int(getattr(self, "_window_restore_attempts", 0) or 0) + 1
+            if self._window_restore_attempts <= 24:
+                delay_ms = min(900, 90 + (self._window_restore_attempts * 45))
+                self._schedule_root_recovery(delay_ms=delay_ms)
             return
+        self._window_restore_attempts = 0
+        self._window_restore_pending = False
 
         self._release_window_grabs_for_recovery()
         try:
@@ -382,6 +612,116 @@ class AutoAnnotationApp:
                 self.root.focus_set()
             except Exception:
                 pass
+
+    def _bind_simple_tooltip(self, widget, text: str) -> None:
+        if widget is None:
+            return
+        tooltip_text = str(text or "").strip()
+        if not tooltip_text:
+            return
+
+        try:
+            widget._simple_tooltip_text = tooltip_text
+        except Exception:
+            pass
+
+        widget.bind(
+            "<Enter>",
+            lambda _event, target=widget, value=tooltip_text: self._schedule_simple_tooltip(target, value),
+            add="+",
+        )
+        widget.bind("<Leave>", lambda _event: self._hide_simple_tooltip(), add="+")
+        widget.bind("<ButtonPress-1>", lambda _event: self._hide_simple_tooltip(), add="+")
+        widget.bind("<Destroy>", lambda _event: self._hide_simple_tooltip(), add="+")
+
+    def _schedule_simple_tooltip(self, widget, text: str) -> None:
+        self._hide_simple_tooltip(cancel_pending=True)
+        self._simple_tooltip_target = widget
+        try:
+            self._simple_tooltip_after_id = self.root.after(
+                280,
+                lambda target=widget, value=str(text or "").strip(): self._show_simple_tooltip(target, value),
+            )
+        except Exception:
+            self._simple_tooltip_after_id = None
+
+    def _show_simple_tooltip(self, widget, text: str) -> None:
+        self._simple_tooltip_after_id = None
+        text = str(text or "").strip()
+        if not text or widget is None:
+            return
+        try:
+            if not bool(widget.winfo_exists()):
+                return
+        except Exception:
+            return
+
+        self._hide_simple_tooltip(cancel_pending=False)
+
+        palette = getattr(self, "palette", {})
+        bg = palette.get("panel_alt", palette.get("panel", "#2d2d30"))
+        border = palette.get("guide", palette.get("warning", "#f0b44c"))
+        fg = palette.get("fg", "#f3f3f3")
+
+        try:
+            tooltip = tk.Toplevel(self.root)
+            tooltip.withdraw()
+            tooltip.overrideredirect(True)
+            try:
+                tooltip.attributes("-topmost", True)
+            except Exception:
+                pass
+            tooltip.configure(bg=border)
+
+            body = tk.Label(
+                tooltip,
+                text=text,
+                bg=bg,
+                fg=fg,
+                font=("Segoe UI", 9, "bold"),
+                bd=0,
+                padx=9,
+                pady=4,
+                anchor="center",
+                justify=tk.CENTER,
+            )
+            body.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+            tooltip.update_idletasks()
+
+            width = max(tooltip.winfo_reqwidth(), 1)
+            height = max(tooltip.winfo_reqheight(), 1)
+            widget_width = max(widget.winfo_width(), 1)
+            screen_width = max(widget.winfo_screenwidth(), width)
+            screen_height = max(widget.winfo_screenheight(), height)
+            x = widget.winfo_rootx() + ((widget_width - width) // 2)
+            y = widget.winfo_rooty() - height - 8
+            x = max(4, min(x, screen_width - width - 4))
+            if y < 4:
+                y = min(widget.winfo_rooty() + max(widget.winfo_height(), 1) + 8, screen_height - height - 4)
+
+            tooltip.geometry(f"+{int(x)}+{int(y)}")
+            tooltip.deiconify()
+            self._simple_tooltip_window = tooltip
+        except Exception:
+            self._simple_tooltip_window = None
+
+    def _hide_simple_tooltip(self, cancel_pending: bool = True) -> None:
+        if cancel_pending:
+            pending = getattr(self, "_simple_tooltip_after_id", None)
+            if pending is not None:
+                try:
+                    self.root.after_cancel(pending)
+                except Exception:
+                    pass
+                self._simple_tooltip_after_id = None
+        tooltip = getattr(self, "_simple_tooltip_window", None)
+        if tooltip is not None:
+            try:
+                tooltip.destroy()
+            except Exception:
+                pass
+        self._simple_tooltip_window = None
+        self._simple_tooltip_target = None
 
     def _finish_app_init(self, root):
         self._set_startup_progress(16, "Budowanie menu...")
@@ -433,6 +773,8 @@ class AutoAnnotationApp:
             activeforeground=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
         )
         self._free_mode_assistant_toggle_btn.pack(side=tk.LEFT, padx=(4, 0), pady=4)
+        self._bind_simple_tooltip(self._global_terminal_toggle_btn, "Terminal")
+        self._bind_simple_tooltip(self._free_mode_assistant_toggle_btn, "Asystent")
         HELP.bind_help(self._global_terminal_toggle_btn, "app_global_terminal")
         HELP.bind_help(self._free_mode_assistant_toggle_btn, "app_free_assistant")
 
@@ -879,14 +1221,10 @@ class AutoAnnotationApp:
         if self.startup_overlay_frame is None:
             return
 
-        # Najpierw opróżnij bieżące after_idle z konstruktorów zakładek,
-        # a potem poczekaj na krótkie after(...) używane podczas startu.
-        for _ in range(3):
-            self._wait_for_startup_marker(delay_ms=0, timeout_ms=1500)
-
-        for _ in range(2):
-            self._wait_for_startup_marker(delay_ms=160, timeout_ms=2500)
-            self._wait_for_startup_marker(delay_ms=0, timeout_ms=1500)
+        # Przy leniwym ładowaniu nie wymuszamy pełnego renderu wszystkich zakładek.
+        # Wystarczy opróżnić najbliższe after_idle i krótki marker dla widocznego Z1.
+        self._wait_for_startup_marker(delay_ms=0, timeout_ms=800)
+        self._wait_for_startup_marker(delay_ms=80, timeout_ms=1200)
 
     def _get_expected_startup_tab_keys(self) -> list[str]:
         expected = ["campaign", "annotation", "characters", "training"]
@@ -944,6 +1282,8 @@ class AutoAnnotationApp:
                                 return False, [key]
                         except Exception:
                             return False, [key]
+                if isinstance(tab_obj, _LazyNotebookTab):
+                    continue
                 try:
                     if frame.winfo_reqwidth() <= 1 or frame.winfo_reqheight() <= 1:
                         return False, [key]
@@ -1055,27 +1395,19 @@ class AutoAnnotationApp:
 
         ready, missing = self._startup_tabs_ready()
         if ready:
-            if not bool(getattr(self, "_startup_tabs_prewarmed", False)):
-                self._set_startup_progress(97, "Domykam renderowanie zakładek...")
-                self._prewarm_startup_tabs()
-                self._startup_ready_streak = 0
-                self._startup_tabs_present_since = time.monotonic()
-                self._schedule_startup_finalize(350)
-                return
-
             now = time.monotonic()
             if self._startup_tabs_present_since is None:
                 self._startup_tabs_present_since = now
             self._startup_ready_streak += 1
             settled_for = now - float(self._startup_tabs_present_since or now)
             shown_for = now - float(getattr(self, "startup_overlay_shown_at", now) or now)
-            if self._startup_ready_streak >= 5 and settled_for >= 1.8 and shown_for >= 2.5:
+            if self._startup_ready_streak >= 2 and settled_for >= 0.35 and shown_for >= 0.8:
                 self._set_startup_progress(100, "Ładowanie danych zakończone")
                 self._reveal_main_window_after_startup()
                 self._hide_startup_overlay()
                 logger.info("GUI zainicjalizowane pomyślnie")
                 return
-            self._set_startup_progress(97, "Domykam renderowanie zakładek...")
+            self._set_startup_progress(97, "Domykam start widocznej zakładki...")
             self._schedule_startup_finalize(250)
             return
 
@@ -1139,14 +1471,16 @@ class AutoAnnotationApp:
         raw_value: str | None = None,
         devices: list[str] | None = None,
     ) -> str:
-        available = list(devices or self.get_available_yolo_devices())
+        # Nie enumerujemy GPU przy samym starcie aplikacji. Lista CUDA wymaga importu
+        # PyTorch, więc budujemy ją dopiero przy otwieraniu menu konfiguracji.
+        available = list(devices or [])
         current = str(
             raw_value if raw_value is not None else self.global_yolo_device_var.get() or ""
         ).strip()
         current_lower = current.lower()
 
         if not current or current_lower.startswith("auto"):
-            return available[0] if available else "auto"
+            return available[0] if available else self._auto_device_label()
         if current_lower.startswith("cpu"):
             return "cpu"
         if current_lower.startswith("cuda:"):
@@ -1154,8 +1488,9 @@ class AutoAnnotationApp:
             for option in available:
                 if option.startswith(prefix):
                     return option
+            return prefix
 
-        return current if current in available else (available[0] if available else "auto")
+        return current if (not available or current in available) else (available[0] if available else self._auto_device_label())
 
     def _load_global_yolo_device_preference(self) -> str:
         try:
@@ -3391,7 +3726,15 @@ class AutoAnnotationApp:
             )
             safe_map(
                 'Treeview.Heading',
-                background=[('active', '#37373d')]
+                background=[
+                    ('active', palette.get("button_hover", palette["panel_alt"])),
+                    ('pressed', palette.get("button_hover", palette["panel_alt"])),
+                ],
+                foreground=[
+                    ('active', palette["fg"]),
+                    ('pressed', palette["fg"]),
+                    ('disabled', palette.get("tab_disabled_fg", palette["muted"])),
+                ],
             )
             safe_configure(
                 'Horizontal.TProgressbar',
@@ -3499,6 +3842,128 @@ class AutoAnnotationApp:
             self._refresh_menu_badge()
             self.root.title(base_title)
     
+    def _get_lazy_tab_factory(self, tab_key: str):
+        factories = {
+            "annotation": AnnotationTab,
+            "characters": CharacterAnnotationTab,
+            "training": TrainingTab,
+        }
+        if HelpTab:
+            factories["help"] = HelpTab
+        return factories.get(str(tab_key or "").strip())
+
+    def _is_lazy_tab_key(self, tab_key: str) -> bool:
+        return isinstance(getattr(self, "tabs", {}).get(tab_key), _LazyNotebookTab)
+
+    def _iter_loaded_tabs(self):
+        for tab in getattr(self, "tabs", {}).values():
+            if isinstance(tab, _LazyNotebookTab):
+                continue
+            yield tab
+
+    def _add_lazy_tab(self, tab_key: str):
+        placeholder = _LazyNotebookTab(self, tab_key)
+        self.tabs[tab_key] = placeholder
+        self.notebook.add(placeholder.frame, text=self.get_main_tab_label(tab_key))
+        return placeholder
+
+    def _apply_theme_to_single_tab(self, tab):
+        try:
+            apply_theme = getattr(tab, "apply_theme", None)
+            if callable(apply_theme):
+                apply_theme()
+        except Exception:
+            pass
+
+    def _ensure_tab_loaded(self, tab_key: str, *, select: bool = False):
+        tab_key = str(tab_key or "").strip()
+        current = getattr(self, "tabs", {}).get(tab_key)
+        if current is None:
+            raise KeyError(f"Unknown tab key: {tab_key}")
+        if not isinstance(current, _LazyNotebookTab):
+            if select:
+                try:
+                    self.notebook.select(str(current.frame))
+                except Exception:
+                    pass
+            return current
+
+        if bool(getattr(self, "_lazy_tab_load_in_progress", False)):
+            return current
+
+        factory = self._get_lazy_tab_factory(tab_key)
+        if factory is None:
+            return current
+
+        placeholder_frame = current.frame
+        try:
+            tab_index = self.notebook.index(str(placeholder_frame))
+        except Exception:
+            tab_index = "end"
+        try:
+            tab_state = str(self.notebook.tab(str(placeholder_frame), "state") or "normal")
+        except Exception:
+            tab_state = "normal"
+
+        self._lazy_tab_load_in_progress = True
+        started = time.perf_counter()
+        try:
+            try:
+                self.update_status(f"Ładuję {self.get_main_tab_label(tab_key)}...", "info")
+            except Exception:
+                pass
+            try:
+                current.set_loading_state()
+                self.root.update_idletasks()
+            except Exception:
+                pass
+
+            real_tab = factory(self.notebook, self)
+            self.tabs[tab_key] = real_tab
+
+            try:
+                self.notebook.forget(str(placeholder_frame))
+            except Exception:
+                pass
+            try:
+                placeholder_frame.destroy()
+            except Exception:
+                pass
+
+            try:
+                self.notebook.insert(tab_index, real_tab.frame, text=self.get_main_tab_label(tab_key))
+            except Exception:
+                self.notebook.add(real_tab.frame, text=self.get_main_tab_label(tab_key))
+            try:
+                self.notebook.tab(str(real_tab.frame), state=tab_state)
+            except Exception:
+                pass
+
+            self._apply_theme_to_single_tab(real_tab)
+            if select:
+                try:
+                    self.notebook.select(str(real_tab.frame))
+                except Exception:
+                    pass
+
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(f"Leniwie załadowano zakładkę {tab_key} w {elapsed_ms:.0f} ms")
+            try:
+                self.update_status(f"Załadowano {self.get_main_tab_label(tab_key)}.", "success")
+            except Exception:
+                pass
+            return real_tab
+        except Exception as e:
+            self.tabs[tab_key] = current
+            logger.error(f"Nie udało się leniwie załadować zakładki {tab_key}: {e}")
+            try:
+                self.update_status(f"Nie udało się załadować {self.get_main_tab_label(tab_key)}.", "error")
+            except Exception:
+                pass
+            return current
+        finally:
+            self._lazy_tab_load_in_progress = False
+
     def _create_tabs(self, progress_callback=None):
         def _progress(value, message):
             if callable(progress_callback):
@@ -3515,33 +3980,18 @@ class AutoAnnotationApp:
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki Kampanii: {e}")
 
-            _progress(66, "Ładowanie zakładki Z2...")
-            self.tabs['annotation'] = AnnotationTab(self.notebook, self)
-            self.notebook.add(self.tabs['annotation'].frame, text=self.get_main_tab_label("annotation"))
-            
-            try:
-                _progress(76, "Ładowanie zakładki Z3...")
-                self.tabs['characters'] = CharacterAnnotationTab(self.notebook, self)
-                self.notebook.add(
-                    self.tabs['characters'].frame,
-                    text=self.get_main_tab_label("characters")
-                )
-            except Exception as e:
+            _progress(66, "Rejestrowanie zakładki Z2...")
+            self._add_lazy_tab("annotation")
 
-                logger.error(f"Nie udało się załadować zakładki ZNAKI: {e}")
+            _progress(76, "Rejestrowanie zakładki Z3...")
+            self._add_lazy_tab("characters")
 
-            
-            try:
-                _progress(84, "Ładowanie zakładki Z4...")
-                self.tabs['training'] = TrainingTab(self.notebook, self)
-                self.notebook.add(self.tabs['training'].frame, text=self.get_main_tab_label("training"))
-            except Exception as e:
-                logger.error(f"Nie udało się załadować zakładki TRENING: {e}")
+            _progress(84, "Rejestrowanie zakładki Z4...")
+            self._add_lazy_tab("training")
 
             if HelpTab:
-                _progress(89, "Ładowanie zakładki Z5...")
-                self.tabs['help'] = HelpTab(self.notebook, self)
-                self.notebook.add(self.tabs['help'].frame, text=self.get_main_tab_label("help"))
+                _progress(89, "Rejestrowanie zakładki Z5...")
+                self._add_lazy_tab("help")
 
             self.notebook.select(0)
         except Exception as e:
@@ -5116,14 +5566,45 @@ class AutoAnnotationApp:
         return None
 
     def _is_free_mode_assistant_context(self) -> bool:
-        try:
-            from ..campaign_manager import CAMPAIGN
-            active_project = CAMPAIGN.get_active_project_name()
-        except Exception:
-            active_project = ""
-        return bool(getattr(self, "campaign_free_mode", False) or not active_project)
+        tab_key = self._get_selected_tab_key()
+        return bool(tab_key)
 
     def _get_default_free_mode_assistant_context(self, tab_key: str | None) -> FreeModeAssistantContext:
+        if tab_key == "campaign":
+            return FreeModeAssistantContext(
+                location="[Z1] Wizard",
+                goal="Ta zakładka pokazuje kampanię jako serię etapów: od zasobów wejściowych, przez anotacje, do datasetu i treningu.",
+                workflow=(
+                    "Sprawdź, który etap ma status aktywny, gotowy albo wymaga uwagi.",
+                    "Używaj badge'a „Zatwierdź etap”, gdy etap jest gotowy do formalnego zamknięcia.",
+                    "Otwieraj Z2, Z3 albo Z4 z kart etapów, żeby wykonać właściwą pracę.",
+                    "Po domknięciu E4 rozpocznij kolejną iterację albo wróć do analizy wyników.",
+                ),
+                glossary=(
+                    "Z1 = wizard kampanii",
+                    "kampania = projekt prowadzony etapami",
+                    "iteracja = jeden cykl pracy projektu",
+                    "badge = mały przycisk statusowy przy etapie",
+                ),
+                caution="Z1 pilnuje kolejności etapów. Jeśli coś jest zablokowane, zwykle brakuje zatwierdzenia wcześniejszego etapu albo gotowego artefaktu.",
+            )
+        if tab_key == "help":
+            return FreeModeAssistantContext(
+                location="[Z5] Instrukcja i architektura",
+                goal="Ta zakładka jest miejscem dokumentacji: pomaga zrozumieć przepływ programu, pojęcia, dziennik zmian i aktualną architekturę.",
+                workflow=(
+                    "Użyj Z5, gdy chcesz sprawdzić znaczenie zakładek, etapów albo pojęć używanych w aplikacji.",
+                    "Czytaj opisy architektury przed większymi zmianami workflow.",
+                    "Wracaj do Z1-Z4 z kontekstem, który lepiej wyjaśnia, po co dany krok istnieje.",
+                ),
+                glossary=(
+                    "Z5 = instrukcja i architektura",
+                    "architektura = opis odpowiedzialności modułów i przepływów",
+                    "workflow = kolejność pracy użytkownika",
+                    "dziennik = zapis decyzji i zmian w projekcie",
+                ),
+                caution="Z5 nie wykonuje pracy na danych. To mapa i dokumentacja, a właściwe operacje robisz w Z1-Z4.",
+            )
         if tab_key == "annotation":
             return FreeModeAssistantContext(
                 location="[Z2] Anotacja tablic",
@@ -5187,7 +5668,7 @@ class AutoAnnotationApp:
 
     def _get_free_mode_assistant_context(self) -> FreeModeAssistantContext:
         tab_key = self._get_selected_tab_key()
-        if tab_key in {"campaign", "help", None}:
+        if tab_key is None:
             return FreeModeAssistantContext()
 
         tab = self.tabs.get(tab_key) if isinstance(getattr(self, "tabs", None), dict) else None
@@ -5339,15 +5820,17 @@ class AutoAnnotationApp:
         if tab_key not in self.tabs:
             raise KeyError(f"Unknown tab key: {tab_key}")
 
+        tab = self._ensure_tab_loaded(tab_key, select=False)
         if tab_key == "campaign":
             self._allow_campaign_tab_once = True
-        self.notebook.select(str(self.tabs[tab_key].frame))
+        self.notebook.select(str(tab.frame))
 
     def open_controlled_tab(self, tab_key: str):
         if tab_key not in self.tabs:
             raise KeyError(f"Unknown tab key: {tab_key}")
 
-        tab_widget = str(self.tabs[tab_key].frame)
+        tab = self._ensure_tab_loaded(tab_key, select=False)
+        tab_widget = str(tab.frame)
 
         # Na chwilę odblokuj zakładkę, aby można ją było wybrać programowo.
         self.notebook.tab(tab_widget, state="normal")
@@ -5396,7 +5879,8 @@ class AutoAnnotationApp:
         def _restore_previous_tab():
             self._campaign_nav_guard_in_progress = True
             try:
-                self.notebook.select(str(self.tabs[fallback_key].frame))
+                tab = self._ensure_tab_loaded(fallback_key, select=False)
+                self.notebook.select(str(tab.frame))
                 self.update_status(
                     "Do wizarda kampanii wracaj przez dedykowany przycisk w module, a nie przez klikniecie zakladki Z1.",
                     "warning",
@@ -5414,6 +5898,9 @@ class AutoAnnotationApp:
     def _on_main_notebook_tab_changed(self, event=None):
         self._guard_campaign_navigation(event)
         selected_key = self._get_selected_tab_key()
+        if selected_key and self._is_lazy_tab_key(selected_key):
+            self._ensure_tab_loaded(selected_key, select=True)
+            return
         if selected_key == "annotation":
             try:
                 annotation_tab = getattr(self, "tabs", {}).get("annotation")
@@ -5455,6 +5942,135 @@ class AutoAnnotationApp:
 
 
     
+    def _cancel_after_handle_safely(self, scheduler, handle) -> None:
+        if scheduler is None or not handle:
+            return
+        try:
+            scheduler.after_cancel(handle)
+        except Exception:
+            pass
+
+    def _cancel_dynamic_after_callbacks(self) -> None:
+        owners = [self]
+        try:
+            owners.extend(list(self._iter_loaded_tabs()))
+        except Exception:
+            pass
+
+        suffixes = (
+            "_after_id",
+            "_after_ids",
+            "_after_job",
+            "_poll_job",
+            "_refresh_job",
+            "_layout_after_id",
+            "_watchdog_job",
+        )
+        for owner in owners:
+            scheduler = getattr(owner, "frame", None) or getattr(owner, "root", None) or self.root
+            for attr_name, value in list(vars(owner).items()):
+                if not attr_name.endswith(suffixes):
+                    continue
+                handles = value if isinstance(value, (list, tuple, set)) else [value]
+                for handle in list(handles):
+                    self._cancel_after_handle_safely(scheduler, handle)
+                try:
+                    setattr(owner, attr_name, [] if isinstance(value, list) else None)
+                except Exception:
+                    pass
+
+    def _release_runtime_references(self) -> None:
+        try:
+            self._cancel_dynamic_after_callbacks()
+        except Exception:
+            pass
+
+        for tab in list(self._iter_loaded_tabs()):
+            queue_obj = getattr(tab, "_ui_dispatch_queue", None)
+            if queue_obj is not None:
+                try:
+                    while True:
+                        queue_obj.get_nowait()
+                except Exception:
+                    pass
+
+            try:
+                release_gpu = getattr(tab, "release_gpu_resources_for_training", None)
+                if callable(release_gpu):
+                    release_gpu()
+            except Exception:
+                pass
+
+            for attr_name in ("annotator", "detector", "char_detector", "ocr_engine", "plate_ocr"):
+                obj = getattr(tab, attr_name, None)
+                if obj is None:
+                    continue
+                for method_name in ("shutdown", "stop", "unload_models", "unload", "close"):
+                    method = getattr(obj, method_name, None)
+                    if callable(method):
+                        try:
+                            method()
+                        except Exception:
+                            pass
+                        break
+                try:
+                    setattr(tab, attr_name, None)
+                except Exception:
+                    pass
+
+            for attr_name, value in list(vars(tab).items()):
+                try:
+                    if attr_name in {"preview_metadata", "_preview_legend_image_cache", "_preview_image_meta_cache"}:
+                        if hasattr(value, "clear"):
+                            value.clear()
+                    elif attr_name.endswith("_cache") and hasattr(value, "clear"):
+                        value.clear()
+                    elif attr_name in {"_current_photo", "current_photo", "preview_photo", "_wizard_header_metro_photo"}:
+                        setattr(tab, attr_name, None)
+                except Exception:
+                    pass
+
+            for attr_name in (
+                "current_annotations",
+                "_pending_source_image_map",
+                "_preview_image_path_map",
+                "_preview_list_display_indices",
+                "_preview_list_display_index_map",
+                "_preview_list_frozen_filename_order",
+                "_preview_list_frozen_bucket_snapshot",
+                "preview_plate_ids",
+                "_preview_base_plate_ids",
+                "_listbox_pid_by_index",
+            ):
+                value = getattr(tab, attr_name, None)
+                if value is None:
+                    continue
+                try:
+                    if hasattr(value, "clear"):
+                        value.clear()
+                    else:
+                        setattr(tab, attr_name, None)
+                except Exception:
+                    try:
+                        setattr(tab, attr_name, None)
+                    except Exception:
+                        pass
+
+        try:
+            if hasattr(HELP, "_cache") and hasattr(HELP._cache, "clear"):
+                HELP._cache.clear()
+        except Exception:
+            pass
+
+        try:
+            cleanup_gpu_memory()
+        except Exception:
+            pass
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
     def _on_closing(self):
         if getattr(self, "_closing_in_progress", False):
             return
@@ -5463,7 +6079,7 @@ class AutoAnnotationApp:
 
         try:
             busy = bool(getattr(self, "is_processing", False))
-            for tab in getattr(self, "tabs", {}).values():
+            for tab in self._iter_loaded_tabs():
                 try:
                     if getattr(tab, "is_processing", False):
                         busy = True
@@ -5506,7 +6122,14 @@ class AutoAnnotationApp:
                 except Exception:
                     pass
 
+            try:
+                self._cancel_dynamic_after_callbacks()
+            except Exception:
+                pass
+
             for tab_name, tab in getattr(self, "tabs", {}).items():
+                if isinstance(tab, _LazyNotebookTab):
+                    continue
                 try:
                     flush_session = getattr(tab, "flush_free_mode_session_state", None)
                     if callable(flush_session):
@@ -5556,6 +6179,11 @@ class AutoAnnotationApp:
                 except Exception:
                     pass
 
+            try:
+                self._release_runtime_references()
+            except Exception as e:
+                logger.debug(f"Nie udało się wykonać pełnego cleanupu runtime podczas zamykania: {e}")
+
             for widget in list(self.root.winfo_children()):
                 try:
                     if isinstance(widget, tk.Toplevel):
@@ -5591,6 +6219,11 @@ class AutoAnnotationApp:
 
             try:
                 self.root.destroy()
+            except Exception:
+                pass
+            try:
+                cleanup_gpu_memory()
+                gc.collect()
             except Exception:
                 pass
         finally:
