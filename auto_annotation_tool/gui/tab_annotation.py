@@ -71,10 +71,7 @@ from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SE
 from ..icons import IconManager
 from ..annotators import PlateAnnotator, CombinedAnnotator, VehicleAnnotator
 from ..exporters import CVATExporter, ReportGenerator
-from ..quality_metrics import (
-    compute_character_box_fit_metrics,
-    compute_plate_polygon_fit_metrics,
-)
+from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..project_cache import PROJECT_CACHE
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
@@ -294,7 +291,7 @@ class AnnotationTab:
             "goal": "Ta zakładka służy do przygotowania anotacji tablic: możesz utworzyć ręczny XML, uruchomić autoanotację albo poprawić istniejący run.",
             "workflow": (
                 "Wybierz tor pracy: autoanotacja, anotacja ręczna albo powrót do istniejącego runu.",
-                "Wskaż paczkę obrazów i przejdź dalej dopiero wtedy, gdy chcesz załadować pełny obszar roboczy Z2.",
+                "Wskaż katalog zdjęć i przejdź dalej dopiero wtedy, gdy chcesz załadować pełny obszar roboczy Z2.",
                 "W autoanotacji kliknij start, ustaw model tablic, opcjonalny model pojazdów i confidence w modalu.",
                 "W ręcznej pracy utwórz XML, przejrzyj obrazy, dodaj lub popraw poligony i oznacz poprawne pozycje jako OK.",
                 "Na końcu przejdź do eksportu: zapisz anotacje lub dataset YOLO, a potem zdecyduj czy wracasz do Z2, czy idziesz do Z4.",
@@ -420,6 +417,7 @@ class AnnotationTab:
         self._preview_overlay_dock_expanded = True
         self._preview_overlay_dock_render_key = None
         self._preview_overlay_dock_tool_rows = {}
+        self._preview_overlay_dock_status_rows = {}
         self._preview_image_status_overlay_render_key = None
         self._preview_campaign_gate_overlay_render_key = None
         self._campaign_step2_gate_overlay_state = {}
@@ -442,6 +440,8 @@ class AnnotationTab:
         self._preview_list_populate_after_id = None
         self._preview_list_populate_token = 0
         self._preview_list_population_active = False
+        self._preview_tab_entry_reset_after_id = None
+        self._preview_tab_entry_reset_token = 0
         self._preview_list_display_indices = []
         self._preview_list_display_index_map = {}
         self._preview_super_correction_badge_offset_x = None
@@ -504,8 +504,6 @@ class AnnotationTab:
         self._main_pane_layout_deferred_force_defaults = False
         self._left_panel_scroll_after_id = None
         self._left_panel_top_row_minsize_before_preview_population = None
-        self._left_list_container_resize_drag_state = None
-        self._left_list_container_user_top_height = None
         self._preview_left_counter_width_bucket = 0
         self._current_run_manual_template = False
         self._current_run_manual_vehicle_assist = False
@@ -1115,11 +1113,22 @@ class AnnotationTab:
     def _is_free_mode_session_context(self) -> bool:
         try:
             from ..campaign_manager import CAMPAIGN
-            active_project = CAMPAIGN.get_active_project_name()
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
         except Exception:
-            active_project = None
+            active_project = ""
 
-        return bool(getattr(self.app, "campaign_free_mode", False)) or not active_project
+        # Aktywny projekt ma pierwszeństwo przed flagą trybu swobodnego.
+        # W przeciwnym razie stary stan app.campaign_free_mode potrafi wpuścić
+        # buildery (F) do ekranów kampanii (C).
+        if active_project:
+            try:
+                if bool(getattr(self.app, "campaign_free_mode", False)):
+                    self.app.campaign_free_mode = False
+            except Exception:
+                pass
+            return False
+
+        return True
 
     def _is_campaign_step2_context(self) -> bool:
         return not self._is_free_mode_session_context()
@@ -1133,6 +1142,103 @@ class AnnotationTab:
             return bool(current_tab and current_tab == str(self.frame))
         except Exception:
             return False
+
+    def reset_preview_selection_to_first_visible_on_tab_entry(
+        self,
+        *,
+        reason: str = "tab-entry",
+        attempts_left: int = 8,
+    ) -> None:
+        pending = getattr(self, "_preview_tab_entry_reset_after_id", None)
+        if pending:
+            try:
+                self.frame.after_cancel(pending)
+            except Exception:
+                pass
+        self._preview_tab_entry_reset_after_id = None
+        self._preview_tab_entry_reset_token = int(
+            getattr(self, "_preview_tab_entry_reset_token", 0) or 0
+        ) + 1
+        token = int(self._preview_tab_entry_reset_token)
+
+        def _run(remaining: int) -> None:
+            self._preview_tab_entry_reset_after_id = None
+            if token != int(getattr(self, "_preview_tab_entry_reset_token", 0) or 0):
+                return
+            if not self._is_annotation_tab_selected():
+                return
+            if getattr(self, "is_processing", False):
+                if remaining > 0:
+                    self._preview_tab_entry_reset_after_id = self.frame.after(
+                        180,
+                        lambda: _run(remaining - 1),
+                    )
+                return
+
+            annotations = list(getattr(self, "current_annotations", []) or [])
+            if not annotations:
+                if remaining > 0:
+                    self._preview_tab_entry_reset_after_id = self.frame.after(
+                        180,
+                        lambda: _run(remaining - 1),
+                    )
+                return
+
+            if bool(getattr(self, "_preview_list_population_active", False)):
+                if remaining > 0:
+                    self._preview_tab_entry_reset_after_id = self.frame.after(
+                        180,
+                        lambda: _run(remaining - 1),
+                    )
+                return
+
+            try:
+                display_indices = list(getattr(self, "_preview_list_display_indices", []) or [])
+                list_size = int(getattr(self, "preview_listbox", None).size() or 0)
+            except Exception:
+                display_indices = []
+                list_size = 0
+
+            if not display_indices or list_size <= 0:
+                try:
+                    if self._should_use_async_preview_list_population(len(annotations)):
+                        self._populate_preview_list_async(
+                            preserve_selection=False,
+                            render_current=True,
+                            batch_size=500,
+                        )
+                    else:
+                        self._refresh_preview_list(
+                            preserve_selection=False,
+                            render_current=True,
+                        )
+                except Exception as e:
+                    logger.debug(f"Nie udało się ustawić pierwszej pozycji Z2 po wejściu ({reason}): {e}")
+                return
+
+            try:
+                first_actual_index = int(display_indices[0])
+            except Exception:
+                first_actual_index = 0
+            if first_actual_index < 0 or first_actual_index >= len(annotations):
+                first_actual_index = 0
+
+            try:
+                self._select_preview_index(first_actual_index, reset_view=True)
+                self._append_z2_trace(
+                    "tab-entry-first-selection",
+                    f"reason={str(reason or '').strip()} actual={first_actual_index}",
+                )
+            except Exception as e:
+                logger.debug(f"Nie udało się przeskoczyć na pierwszą pozycję Z2 po wejściu ({reason}): {e}")
+
+        try:
+            self._preview_tab_entry_reset_after_id = self.frame.after(
+                120,
+                lambda: _run(max(0, int(attempts_left or 0))),
+            )
+        except Exception:
+            _run(max(0, int(attempts_left or 0)))
 
     def _get_campaign_annotation_state_path(self, project_name: str | None = None) -> Path | None:
         try:
@@ -1869,6 +1975,56 @@ class AnnotationTab:
                         if deleted_any:
                             invalidate_roots.append(root)
 
+                def _stage_dir_is_manifest_source(candidate_stage_dir: Path) -> bool:
+                    try:
+                        from ..campaign_manager import CAMPAIGN
+
+                        current_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+                        if not current_project:
+                            return False
+                        current_iter = int(CAMPAIGN.get_current_iteration_num() or 1)
+                    except Exception:
+                        return False
+
+                    try:
+                        stage_resolved = Path(candidate_stage_dir).resolve()
+                    except Exception:
+                        stage_resolved = Path(candidate_stage_dir)
+
+                    def _is_stage_path(path_like) -> bool:
+                        raw_text = str(path_like or "").strip()
+                        if not raw_text:
+                            return False
+                        try:
+                            candidate = Path(raw_text).resolve()
+                        except Exception:
+                            candidate = Path(raw_text)
+                        try:
+                            return candidate == stage_resolved or candidate.is_relative_to(stage_resolved)
+                        except Exception:
+                            try:
+                                return str(candidate).startswith(str(stage_resolved))
+                            except Exception:
+                                return False
+
+                    for iter_value in range(1, max(1, current_iter) + 1):
+                        try:
+                            manifest = CAMPAIGN.load_ingest_manifest(iter_value, current_project) or {}
+                        except Exception:
+                            manifest = {}
+                        if not isinstance(manifest, dict):
+                            continue
+                        for key in ("source_dir", "master_pool_dir", "target_dir"):
+                            if _is_stage_path(manifest.get(key, "")):
+                                return True
+                        for item in list(manifest.get("selected_images") or []):
+                            if not isinstance(item, dict):
+                                continue
+                            for key in ("target_path", "source_path", "iteration_target_path"):
+                                if _is_stage_path(item.get(key, "")):
+                                    return True
+                    return False
+
                 if (
                     not _is_cancelled()
                     and stage_root is not None
@@ -1879,8 +2035,13 @@ class AnnotationTab:
                             stage_dir.exists()
                             and self._path_is_within(stage_dir, stage_root)
                         ):
-                            shutil.rmtree(stage_dir)
-                            result["removed_stage"] = True
+                            if _stage_dir_is_manifest_source(stage_dir):
+                                logger.debug(
+                                    f"Pomijam cleanup stage, bo manifest iteracji nadal wskazuje na: {stage_dir}"
+                                )
+                            else:
+                                shutil.rmtree(stage_dir)
+                                result["removed_stage"] = True
                     except Exception as e:
                         logger.debug(f"Nie udalo sie wyczyscic stage po zmianie toru E2: {e}")
 
@@ -1948,7 +2109,10 @@ class AnnotationTab:
             self._free_mode_session_save_after_id = None
 
             candidate_inputs: list[Path] = []
-            iteration_raw_dir = CAMPAIGN.get_iteration_raw_dir()
+            try:
+                iteration_raw_dir = CAMPAIGN.get_iteration_image_source_dir()
+            except Exception:
+                iteration_raw_dir = CAMPAIGN.get_iteration_raw_dir()
             if iteration_raw_dir is not None:
                 candidate_inputs.append(Path(iteration_raw_dir))
 
@@ -2022,9 +2186,14 @@ class AnnotationTab:
             self._preview_session_restore_filename = ""
             if raw_root is not None:
                 iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
-                input_dir = Path(raw_root) / f"Iteracja_{iter_num:03d}"
-                if not input_dir.exists():
-                    input_dir = Path(raw_root)
+                try:
+                    input_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num)
+                except Exception:
+                    input_dir = None
+                if input_dir is None:
+                    input_dir = Path(raw_root) / f"Iteracja_{iter_num:03d}"
+                    if not input_dir.exists():
+                        input_dir = Path(raw_root)
             else:
                 input_dir = None
 
@@ -2208,7 +2377,12 @@ class AnnotationTab:
             if not CAMPAIGN.get_active_project_name():
                 return {}
             iter_value = int(iteration_num or CAMPAIGN.get_current_iteration_num() or 1)
-            preferred_images_dir = images_dir or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iter_value)
+            preferred_images_dir = (
+                images_dir
+                or CAMPAIGN.get_iteration_image_source_dir(iter_value)
+                or CAMPAIGN.get_master_pool_dir()
+                or CAMPAIGN.get_iteration_raw_dir(iter_value)
+            )
             return dict(
                 CAMPAIGN.get_iteration_artifact_bundle(
                     images_dir=preferred_images_dir,
@@ -2229,6 +2403,24 @@ class AnnotationTab:
             iteration_num=iteration_num,
         )
         return dict(bundle.get("step2_active_run") or {})
+
+    def _normalize_campaign_step2_bootstrap_manual_template(self, bootstrap: dict | None) -> dict:
+        result = dict(bootstrap or {})
+        restore_run_dir = self._resolve_safe_annotation_run_dir(
+            result.get("restore_run_dir"),
+            require_xml=True,
+        )
+        if restore_run_dir is None:
+            return result
+
+        result["restore_run_dir"] = restore_run_dir
+        try:
+            manifest = self._load_annotation_run_manifest(restore_run_dir)
+        except Exception:
+            manifest = {}
+        if self._annotation_run_manifest_is_manual_template(manifest):
+            result["manual_template"] = True
+        return result
 
     def _get_campaign_auto_annotation_bootstrap(self, iteration_target: str | None = None) -> dict:
         bootstrap = {
@@ -2253,12 +2445,15 @@ class AnnotationTab:
             iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
             raw_root = Path(raw_dir)
             iter_dir = raw_root / f"Iteracja_{iter_num:03d}"
-            default_input = iter_dir if iter_dir.exists() else raw_root
+            try:
+                default_input = CAMPAIGN.get_iteration_image_source_dir(iter_num) or iter_dir
+            except Exception:
+                default_input = iter_dir if iter_dir.exists() else raw_root
             auto_dir = CAMPAIGN.get_dir("auto_ann")
             project_start_mode = str(getattr(CAMPAIGN, "get_project_start_mode", lambda *_a, **_k: "fresh")() or "fresh").strip().lower()
 
             registry_bundle = self._get_campaign_iteration_artifact_bundle(
-                images_dir=CAMPAIGN.get_master_pool_dir() or default_input,
+                images_dir=default_input or CAMPAIGN.get_iteration_image_source_dir(iter_num) or CAMPAIGN.get_master_pool_dir(),
                 iteration_num=iter_num,
             )
             registry_plate_source = dict(registry_bundle.get("plate_source") or {})
@@ -2395,7 +2590,7 @@ class AnnotationTab:
                     reused_from_iteration = 0
 
                 if selection_mode == "iteration_reuse" and reused_from_iteration > 0:
-                    reuse_source_input = CAMPAIGN.get_iteration_raw_dir(reused_from_iteration)
+                    reuse_source_input = CAMPAIGN.get_iteration_image_source_dir(reused_from_iteration)
 
                 if (
                     bootstrap.get("restore_run_dir") is None
@@ -2501,7 +2696,7 @@ class AnnotationTab:
         except Exception as e:
             logger.debug(f"Nie udalo sie zbudowac bootstrapu Z2 dla kampanii: {e}")
 
-        return bootstrap
+        return self._normalize_campaign_step2_bootstrap_manual_template(bootstrap)
 
     @staticmethod
     def _normalize_campaign_iteration_target_value(target: str | None) -> str:
@@ -2540,14 +2735,17 @@ class AnnotationTab:
                 return False
 
             approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
-            approved_images = int(approved_stats.get("images", 0) or 0)
-            return approved_images < 2
+            approved_plates = int(approved_stats.get("plates", 0) or 0)
+            min_plate_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            return approved_plates < min_plate_approval_plates
         except Exception:
             return False
 
     def get_campaign_step2_bootstrap(self, *, iteration_target: str | None = None) -> dict:
         target = self._normalize_campaign_iteration_target_value(iteration_target)
-        bootstrap = dict(self._get_campaign_auto_annotation_bootstrap(target) or {})
+        bootstrap = self._normalize_campaign_step2_bootstrap_manual_template(
+            self._get_campaign_auto_annotation_bootstrap(target)
+        )
         restore_run_dir = self._resolve_safe_annotation_run_dir(
             bootstrap.get("restore_run_dir"),
             require_xml=True,
@@ -2664,7 +2862,8 @@ class AnnotationTab:
                 result["manual_template"] = False
                 result["images_with_plates"] = int(effective_source.get("images_with_plates", 0) or 0)
                 result["total_plates"] = int(effective_source.get("total_plates", 0) or 0)
-                if int(result["images_with_plates"] or 0) >= 2 and int(result["total_plates"] or 0) > 0:
+                min_char_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+                if int(result["total_plates"] or 0) >= int(min_char_plates):
                     result["ready"] = True
                 elif int(result["total_plates"] or 0) > 0:
                     result["needs_more_tables"] = True
@@ -2695,7 +2894,8 @@ class AnnotationTab:
                 ).strip()
                 result["input_source"] = "campaign_plate_approved_set"
                 result["manual_template"] = False
-                result["ready"] = bool(project_char_images >= 2)
+                min_char_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+                result["ready"] = bool(project_char_plates >= int(min_char_plates))
                 result["needs_more_tables"] = bool(not result["ready"])
                 result["bootstrap"] = {
                     **dict(result.get("bootstrap") or {}),
@@ -2748,7 +2948,8 @@ class AnnotationTab:
             return result
 
         result["images_with_plates"] = int(approved_images_with_plates or 0)
-        if int(approved_images_with_plates or 0) >= 2 and int(approved_total_plates or 0) > 0:
+        min_char_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+        if int(approved_total_plates or 0) >= int(min_char_plates):
             result["ready"] = True
         else:
             result["needs_more_tables"] = True
@@ -2818,7 +3019,7 @@ class AnnotationTab:
             step2_status="pending",
             state="locked",
             title="E2. Tablice",
-            summary="E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1.",
+            summary="E2 odblokuje się po zatwierdzeniu katalogu zdjęć wejściowych w E1.",
             details="Najpierw domknij E1.",
             primary_cta=None,
             secondary_cta=None,
@@ -2898,25 +3099,25 @@ class AnnotationTab:
             except Exception:
                 project_approved_images = 0
                 project_approved_plates = 0
+            min_plate_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
             project_has_ready_plate_set = bool(
-                project_approved_plates > 0
-                and project_approved_images >= 2
+                project_approved_plates >= int(min_plate_approval_plates)
             )
 
             if (
                 (current_step >= 4 or step2_status == "approved")
                 and not project_has_ready_plate_set
                 and approved_state.get("run_dir") is not None
-                and (approved_total <= 0 or approved_images < 2)
+                and int(approved_total or 0) < int(min_plate_approval_plates)
             ):
                 state = "needs_attention"
                 if approved_total <= 0:
                     summary = "Zatwierdzony run Z2 nie zawiera jeszcze poprawnych tablic do dalszej pracy."
                     details = (
-                        "Wróć do Z2 i zapisz co najmniej jedną tablicę typu 'plate', a następnie domknij etap ponownie."
+                        f"Wróć do Z2 i zapisz co najmniej {min_plate_approval_plates} zatwierdzonych tablic, a następnie domknij etap ponownie."
                     )
                 else:
-                    summary = f"E2 wymaga jeszcze co najmniej 2 oznaczonych obrazów. Aktualnie: {approved_images}."
+                    summary = f"E2 wymaga jeszcze co najmniej {min_plate_approval_plates} zatwierdzonych tablic. Aktualnie: {approved_total}."
                     details = (
                         "Wróć do Z2 i dodaj brakujące oznaczenia tablic, zanim projekt przejdzie do E4."
                     )
@@ -2934,7 +3135,7 @@ class AnnotationTab:
                 )
             elif current_step > 2 or step2_status == "approved":
                 state = "done"
-                if project_has_ready_plate_set and (approved_total <= 0 or approved_images < 2):
+                if project_has_ready_plate_set and int(approved_total or 0) < int(min_plate_approval_plates):
                     summary = "Tor tablic został domknięty na podstawie zatwierdzonego zbioru projektu."
                     details = (
                         f"Projekt ma już {project_approved_images} zatwierdzonych obrazów i {project_approved_plates} tablic "
@@ -2946,7 +3147,7 @@ class AnnotationTab:
                     details = "W torze tablic etap Z3 jest pomijany."
             elif bool(source_state.get("has_source")):
                 state = "in_progress" if current_step == 2 else "ready"
-                summary = "Dla tej paczki wykryto już gotowe anotacje tablic."
+                summary = "Dla tego zestawu zdjęć wykryto już gotowe anotacje tablic."
                 details = (
                     f"Z2 może wystartować od runu {source_run_name} zamiast od pustego XML."
                     if source_run_name
@@ -2996,11 +3197,11 @@ class AnnotationTab:
                     )
                 else:
                     state = "ready"
-                    summary = "Źródło tablic dla tej paczki jest już gotowe."
+                    summary = "Źródło tablic dla tego zestawu zdjęć jest już gotowe."
                     source_prefix = (
                         f"Źródło tablic: {source_run_name}."
                         if source_run_name
-                        else "Źródło tablic dla tej paczki jest już gotowe."
+                        else "Źródło tablic dla tego zestawu zdjęć jest już gotowe."
                     )
                     details = (
                         f"{source_prefix} Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
@@ -3014,7 +3215,7 @@ class AnnotationTab:
                     secondary_cta = None
             elif step2_status == "generated":
                 state = "needs_attention"
-                summary = "Tablice dla tej paczki są już przygotowane, ale E2 czeka na zatwierdzenie."
+                summary = "Tablice dla tego zestawu zdjęć są już przygotowane, ale E2 czeka na zatwierdzenie."
                 details = (
                     "Wejdź do Z2, jeśli chcesz jeszcze sprawdzić albo poprawić tablice. "
                     "Gdy źródło będzie gotowe, wrócisz tutaj i przejdziesz dalej badge'em po prawej."
@@ -3026,14 +3227,15 @@ class AnnotationTab:
             elif bool(source_state.get("needs_more_tables")):
                 source_images = int(source_state.get("images_with_plates", 0) or 0)
                 source_plates = int(source_state.get("total_plates", 0) or 0)
-                missing_images = max(0, 2 - source_images)
+                min_char_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+                missing_plates = max(0, min_char_plates - source_plates)
                 source_run_name = str(source_state.get("run_name", "") or "").strip()
                 state = "needs_attention"
                 summary = "Źródło tablic dla toru znaków wymaga jeszcze uzupełnienia."
                 source_prefix = f"Źródło tablic: {source_run_name}." if source_run_name else ""
                 details = (
                     f"{source_prefix} Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
-                    f"Minimum do wejścia do E3: 2 zatwierdzone obrazy; brakuje {missing_images}. "
+                    f"Minimum do wejścia do E3: {min_char_plates} tablic; brakuje {missing_plates}. "
                     "Wróć do Z2 i przygotuj więcej tablic, a potem przejdź dalej do E3."
                 ).strip()
                 primary_cta = Step2CtaViewModel(
@@ -3485,7 +3687,9 @@ class AnnotationTab:
             try:
                 bundle = dict(
                     CAMPAIGN.get_iteration_artifact_bundle(
-                        images_dir=CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(),
+                        images_dir=CAMPAIGN.get_iteration_image_source_dir()
+                        or CAMPAIGN.get_master_pool_dir()
+                        or CAMPAIGN.get_iteration_raw_dir(),
                         iteration_num=int(CAMPAIGN.get_current_iteration_num() or 1),
                     ) or {}
                 )
@@ -3662,6 +3866,28 @@ class AnnotationTab:
 
         return hidden_filenames
 
+    def _get_campaign_iteration_manifest_image_paths(self, base_dir: Path | None = None) -> list[Path]:
+        if self._is_free_mode_session_context():
+            return []
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            return list(CAMPAIGN.get_iteration_manifest_image_paths(base_dir=base_dir) or [])
+        except Exception:
+            return []
+
+    def _get_campaign_iteration_manifest_image_count(self) -> int:
+        if self._is_free_mode_session_context():
+            return 0
+
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            return int(CAMPAIGN.get_iteration_manifest_image_count() or 0)
+        except Exception:
+            return 0
+
     def _collect_campaign_auto_annotation_sources(
         self,
         base_input_dir: Path | None,
@@ -3687,6 +3913,8 @@ class AnnotationTab:
             "char_effective_skip_count": 0,
             "manual_skip_count": 0,
             "manual_skip_filenames": set(),
+            "manifest_scoped": False,
+            "manifest_scope_count": 0,
         }
 
         try:
@@ -3729,7 +3957,16 @@ class AnnotationTab:
             else set()
         )
         manually_skipped_names: set[str] = set()
-        base_images = get_image_files(base_dir) if base_dir is not None and self._dir_has_images(base_dir) else []
+        manifest_expected_count = self._get_campaign_iteration_manifest_image_count()
+        manifest_images = self._get_campaign_iteration_manifest_image_paths(base_dir)
+        if manifest_expected_count > 0:
+            base_images = manifest_images
+        else:
+            base_images = get_image_files(base_dir) if base_dir is not None and self._dir_has_images(base_dir) else []
+        plan["manifest_scoped"] = bool(manifest_expected_count > 0 or manifest_images)
+        plan["manifest_scope_count"] = int(len(manifest_images))
+        plan["manifest_expected_count"] = int(manifest_expected_count)
+        plan["manifest_missing_count"] = max(0, int(manifest_expected_count) - int(len(manifest_images)))
         if approved_filenames or approved_source_keys:
             filtered_base_images = []
             for image_path in base_images:
@@ -4041,7 +4278,7 @@ class AnnotationTab:
             if bool(self.campaign_reuse_manual_var.get()):
                 self.campaign_reuse_manual_hint_var.set(
                     f"Dołączysz {reused_count} ręcznie anotowanych obrazów z {source_label}. Razem do autoanotacji "
-                    f"trafi {total_count} obrazów: {base_count} z bieżącej paczki oraz {reused_count} z wcześniejszej iteracji. "
+                    f"trafi {total_count} obrazów: {base_count} z bieżącego zestawu oraz {reused_count} z wcześniejszej iteracji. "
                     f"Na liście po prawej pozycje z wcześniejszej iteracji są oznaczone jako {self._campaign_reuse_manual_badge()}. "
                     "Uwaga: poprzednie ręczne anotacje tych zdjęć "
                     "nie zostaną zachowane w nowym runie."
@@ -5707,11 +5944,36 @@ class AnnotationTab:
             pass
         self._schedule_main_pane_layout_refresh(force_defaults=False, delay_ms=40)
 
-    def _should_show_right_panel(self) -> bool:
-        if self._is_free_mode_session_context():
+    def _should_show_free_mode_manual_right_panel(self) -> bool:
+        if not self._is_free_mode_session_context():
             return False
         if bool(getattr(self, "_preview_fullscreen_active", False)):
             return False
+        try:
+            route = str(self._get_workflow_route() or "").strip().lower()
+            if route not in {"auto", "manual"}:
+                return False
+            screen = str(self._coerce_free_mode_screen() or "").strip().lower()
+            step = str(self._coerce_workflow_step() or "").strip().lower()
+        except Exception:
+            return False
+        has_active_run = bool(
+            getattr(self, "current_annotations", None)
+            or self._get_preferred_annotation_run_dir(require_xml=True) is not None
+        )
+        if screen in {"manual_review", "auto_summary", "export"}:
+            return has_active_run
+        return bool(
+            screen == "workflow"
+            and step in {"auto_start", "manual_start"}
+            and has_active_run
+        )
+
+    def _should_show_right_panel(self) -> bool:
+        if bool(getattr(self, "_preview_fullscreen_active", False)):
+            return False
+        if self._is_free_mode_session_context():
+            return self._should_show_free_mode_manual_right_panel()
         return bool(getattr(self, "_annotation_right_panel_visible", True))
 
     def _get_preview_left_counter_total(self) -> int:
@@ -5770,6 +6032,241 @@ class AnnotationTab:
                 pane.forget(right_frame)
         except Exception:
             pass
+
+    def _build_z2_free_export_status_state(self) -> dict:
+        run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+        if run_dir is None:
+            run_dir = self._resolve_safe_annotation_run_dir(str(self.plate_dataset_run_var.get() or "").strip(), require_xml=True)
+        images_dir = self._resolve_existing_dir(str(self.plate_dataset_images_var.get() or "").strip())
+        if images_dir is None:
+            images_dir = self._resolve_existing_dir(str(self.input_dir_var.get() or "").strip())
+
+        images_with_plates, total_plates = self._get_run_plate_annotation_counts(run_dir)
+        approval_state = self._get_run_plate_strict_approved_state(run_dir)
+        approved_images = int(approval_state.get("approved_images", 0) or 0)
+        approved_plates = int(approval_state.get("approved_plates", 0) or 0)
+        total_images = int(approval_state.get("total_images", 0) or 0)
+        skipped_images = max(0, int(total_images or 0) - int(approved_images or 0))
+        dataset_min_approved_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+        dataset_missing_approved_plates = max(
+            0,
+            int(dataset_min_approved_plates) - int(approved_plates or 0),
+        )
+        dataset_gate_ready = bool(approved_plates >= dataset_min_approved_plates)
+
+        quality_info = CONFIG.describe_yolo_pose_dataset_quality(approved_plates)
+        annotation_state = self._get_plate_annotation_package_export_state()
+        dataset_ready = bool(
+            run_dir is not None
+            and (Path(run_dir) / "annotations.xml").exists()
+            and images_dir is not None
+            and dataset_gate_ready
+            and not bool(getattr(self, "is_processing", False))
+        )
+        annotation_ready = bool(
+            annotation_state.get("ok")
+            and not bool(getattr(self, "is_processing", False))
+        )
+
+        return {
+            "run_dir": run_dir,
+            "images_dir": images_dir,
+            "images_with_plates": int(images_with_plates or 0),
+            "total_plates": int(total_plates or 0),
+            "approved_images": int(approved_images or 0),
+            "approved_plates": int(approved_plates or 0),
+            "total_images": int(total_images or 0),
+            "skipped_images": int(skipped_images or 0),
+            "dataset_min_approved_plates": int(dataset_min_approved_plates),
+            "dataset_missing_approved_plates": int(dataset_missing_approved_plates),
+            "dataset_gate_ready": bool(dataset_gate_ready),
+            "dataset_ready": bool(dataset_ready),
+            "annotation_ready": bool(annotation_ready),
+            "quality_info": dict(quality_info or {}),
+            "annotation_state": dict(annotation_state or {}),
+        }
+
+    def _is_z2_free_export_choice_available(self) -> bool:
+        if bool(getattr(self, "is_processing", False)):
+            return False
+        state = self._build_z2_free_export_status_state()
+        return bool(state.get("dataset_ready") or state.get("annotation_ready"))
+
+    def _refresh_free_mode_manual_right_panel(self) -> bool:
+        if not self._should_show_free_mode_manual_right_panel():
+            return False
+
+        state = self._build_z2_free_export_status_state()
+        run_dir = state.get("run_dir")
+        approved_images = int(state.get("approved_images", 0) or 0)
+        approved_plates = int(state.get("approved_plates", 0) or 0)
+        total_plates = int(state.get("total_plates", 0) or 0)
+        images_with_plates = int(state.get("images_with_plates", 0) or 0)
+        skipped_images = int(state.get("skipped_images", 0) or 0)
+        dataset_min_approved_plates = int(state.get("dataset_min_approved_plates", 0) or 0)
+        dataset_missing_approved_plates = int(state.get("dataset_missing_approved_plates", 0) or 0)
+        dataset_gate_ready = bool(state.get("dataset_gate_ready"))
+        dataset_ready = bool(state.get("dataset_ready"))
+        annotation_ready = bool(state.get("annotation_ready"))
+        quality_info = dict(state.get("quality_info") or {})
+        quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+        quality_tone = str(quality_info.get("tone", "warning") or "warning").strip().lower()
+        quality_ranges = (
+            f"średni {int(quality_info.get('average_min', 0) or 0)}+ / "
+            f"dobry {int(quality_info.get('good_min', 0) or 0)}+"
+        )
+        ready = bool(dataset_ready or annotation_ready)
+
+        if run_dir is None:
+            context_text = (
+                "Najpierw utwórz XML anotacji. Dopiero wtedy Z2 będzie miało run, "
+                "który można później wycinać albo eksportować jako dataset tablic."
+            )
+        else:
+            route = ""
+            try:
+                route = str(self._get_workflow_route() or "").strip().lower()
+            except Exception:
+                route = ""
+            run_label = "autoanotacji" if route == "auto" else "anotacji"
+
+        if run_dir is None:
+            pass
+        elif annotation_ready and not dataset_ready:
+            context_text = (
+                f"Run {run_label} ma zapisane anotacje tablic, więc możesz wyeksportować pakiet XML do współpracy.\n"
+                f"Dataset YOLO Pose ze splitem wymaga minimum {dataset_min_approved_plates} zatwierdzonych tablic [OK]; "
+                f"brakuje jeszcze {dataset_missing_approved_plates}."
+            )
+        elif ready:
+            context_text = (
+                f"Run {run_label} jest gotowy.\n"
+                f"Zatwierdzone [OK]: {approved_images} obrazów / {approved_plates} tablic.\n"
+                "Możesz eksportować dataset YOLO Pose ze splitem albo pakiet anotacji XML bez splitu."
+            )
+        else:
+            context_text = (
+                f"Run {run_label} istnieje, ale dalsze akcje wymagają pozycji [OK].\n"
+                f"Zatwierdzone: {approved_images} obrazów / {approved_plates} tablic; "
+                f"w runie zapisano {int(total_plates or 0)} tablic.\n"
+                "Narysuj lub popraw ramki, zapisz zmiany, a potem zatwierdź obrazy na liście wyników prawym przyciskiem myszy."
+            )
+
+        try:
+            self.approve_btn_row.configure(text=" Status runu anotacji ")
+        except Exception:
+            pass
+        try:
+            self.approve_context_var.set(context_text)
+            self._set_inline_label_state(self.approve_context_lbl, tone=("success" if ready else "warning"), emphasis=True)
+            self._set_approve_context_box_state("success" if ready else "warning")
+            self._set_widget_packed(self.approve_context_box, True, fill=tk.X, pady=(0, 10))
+        except Exception:
+            pass
+        dataset_rows = []
+        annotation_rows = []
+        if run_dir is not None:
+            dataset_rows = [
+                ("Zatwierdzone dla datasetu YOLO", f"{approved_images} obrazów / {approved_plates} tablic [OK]", "success" if dataset_gate_ready else "warning"),
+                (
+                    "Bramka datasetu YOLO",
+                    (
+                        "OTWARTA"
+                        if dataset_ready
+                        else f"ZAMKNIĘTA - brakuje {dataset_missing_approved_plates} tablic [OK]"
+                    ),
+                    "success" if dataset_ready else "warning",
+                ),
+                ("Pominięte przy eksporcie YOLO", f"{skipped_images} obrazów bez [OK]", "muted" if skipped_images == 0 else "warning"),
+                ("Jakość zbioru YOLO Pose", quality_label, quality_tone),
+                ("Progi jakości YOLO", quality_ranges, "info"),
+            ]
+            annotation_rows = [
+                ("Status eksportu XML", "DOSTĘPNY" if annotation_ready else "BRAK TABLIC W XML", "success" if annotation_ready else "warning"),
+                ("Zapisane anotacje", f"{images_with_plates} obrazów / {total_plates} tablic", "info"),
+                ("Próg [OK]", "nie wymagany", "muted"),
+                ("Split train/val/test", "nie dotyczy", "muted"),
+            ]
+        try:
+            self.approve_hint_title_var.set("Dataset YOLO Pose")
+            self.approve_gate_hint_var.set("")
+            self._render_compact_info_table(
+                getattr(self, "approve_hint_table_frame", None),
+                dataset_rows,
+                default_value_tone="muted",
+                show_header=False,
+            )
+            self._set_widget_packed(
+                getattr(self, "approve_hint_title_lbl", None),
+                bool(dataset_rows),
+                fill=tk.X,
+                before=getattr(self, "approve_hint_table_frame", None),
+            )
+            self._set_widget_packed(
+                getattr(self, "approve_hint_table_frame", None),
+                bool(dataset_rows),
+                fill=tk.X,
+                pady=(6, 8),
+                before=getattr(self, "approve_gate_hint_lbl", None),
+            )
+            self._set_widget_packed(getattr(self, "approve_gate_hint_lbl", None), False)
+            self._set_approve_hint_box_state("success" if dataset_ready else "warning")
+            self._set_widget_packed(self.approve_hint_box, bool(dataset_rows), fill=tk.X, pady=(0, 10))
+        except Exception:
+            pass
+        try:
+            self.approve_breakdown_title_var.set("Anotacje XML bez datasetu")
+            self.approve_breakdown_var.set("")
+            for widget_name in ("approve_breakdown_lbl", "approve_breakdown_canvas"):
+                widget = getattr(self, widget_name, None)
+                if widget is not None and str(widget.winfo_manager()):
+                    try:
+                        widget.pack_forget()
+                    except Exception:
+                        pass
+            self._render_compact_info_table(
+                getattr(self, "approve_breakdown_table_frame", None),
+                annotation_rows,
+                default_value_tone="muted",
+                show_header=False,
+            )
+            self._set_widget_packed(
+                getattr(self, "approve_breakdown_title_lbl", None),
+                bool(annotation_rows),
+                fill=tk.X,
+                before=getattr(self, "approve_breakdown_table_frame", None),
+            )
+            self._set_widget_packed(
+                getattr(self, "approve_breakdown_table_frame", None),
+                bool(annotation_rows),
+                fill=tk.X,
+                pady=(6, 8),
+            )
+            palette = getattr(self.app, "palette", {}) or {}
+            panel_bg = palette.get("panel", "#252526")
+            border = palette.get("success", "#2ecc71") if annotation_ready else palette.get("warning", "#f39c12")
+            breakdown_box = getattr(self, "approve_breakdown_box", None)
+            if breakdown_box is not None:
+                breakdown_box.configure(bg=panel_bg, highlightbackground=border, highlightcolor=border)
+            self._set_inline_label_state(
+                getattr(self, "approve_breakdown_title_lbl", None),
+                tone=("success" if annotation_ready else "warning"),
+                emphasis=True,
+            )
+            self._set_widget_packed(self.approve_breakdown_box, bool(annotation_rows), fill=tk.X, pady=(0, 10))
+        except Exception:
+            try:
+                self._set_widget_packed(getattr(self, "approve_breakdown_box", None), False)
+            except Exception:
+                pass
+        for button_name in ("approve_btn", "return_to_campaign_right_btn"):
+            try:
+                button = getattr(self, button_name, None)
+                if button is not None and str(button.winfo_manager()) == "pack":
+                    button.pack_forget()
+            except Exception:
+                pass
+        return True
 
     def _restore_right_panel_content_after_fullscreen(self):
         if bool(getattr(self, "_preview_fullscreen_active", False)):
@@ -6498,12 +6995,12 @@ class AnnotationTab:
         self._invalidate_preview_list_frozen_order()
         if self._should_use_async_preview_list_population():
             self._populate_preview_list_async(
-                preserve_selection=True,
-                render_current=False,
+                preserve_selection=False,
+                render_current=True,
                 batch_size=200,
             )
         else:
-            self._refresh_preview_list(preserve_selection=True, render_current=False)
+            self._refresh_preview_list(preserve_selection=False, render_current=True)
         self._refresh_preview_list_legend_theme()
         self._update_preview_toolbar_state()
 
@@ -6596,9 +7093,6 @@ class AnnotationTab:
         self._refresh_preview_list_summary()
         self._update_preview_toolbar_state()
         self._refresh_preview_filter_bar_state()
-
-    def _on_preview_metric_filter_changed(self, *_args):
-        return
 
     def _apply_preview_metric_filters(self):
         conf_threshold, fit_threshold = self._get_preview_metric_filter_input_thresholds()
@@ -6828,77 +7322,6 @@ class AnnotationTab:
             except Exception:
                 pass
 
-    def _clamp_left_list_container_top_height(self, value: int | float | None) -> int:
-        try:
-            requested = int(value or 0)
-        except Exception:
-            requested = 0
-        try:
-            left_frame = getattr(self, "main_left_frame", None)
-            available_height = int(left_frame.winfo_height() or 0) if left_frame is not None else 0
-        except Exception:
-            available_height = 0
-        min_top = 72
-        min_list = 230
-        if available_height > 0:
-            max_top = max(min_top, int(available_height) - min_list)
-            return max(min_top, min(max_top, requested))
-        return max(min_top, requested)
-
-    def _apply_left_list_container_top_height(self, value: int | float | None) -> None:
-        top_height = self._clamp_left_list_container_top_height(value)
-        self._left_list_container_user_top_height = int(top_height)
-        try:
-            left_canvas = getattr(self, "left_settings_canvas", None)
-            if left_canvas is not None:
-                left_canvas.configure(height=int(top_height))
-        except Exception:
-            pass
-        try:
-            left_frame = getattr(self, "main_left_frame", None)
-            if left_frame is not None:
-                left_frame.grid_rowconfigure(0, minsize=int(top_height))
-        except Exception:
-            pass
-
-    def _on_left_list_container_resize_press(self, event=None):
-        top_shell = getattr(self, "left_scroll_shell", None)
-        try:
-            start_top_height = int(top_shell.winfo_height() or top_shell.winfo_reqheight() or 0)
-        except Exception:
-            start_top_height = int(getattr(self, "_left_list_container_user_top_height", 0) or 0)
-        if start_top_height <= 0:
-            try:
-                start_top_height = int(getattr(self, "left_settings_canvas", None).winfo_height() or 0)
-            except Exception:
-                start_top_height = 180
-        self._left_list_container_resize_drag_state = {
-            "start_y": int(getattr(event, "y_root", 0) or 0),
-            "start_top_height": self._clamp_left_list_container_top_height(start_top_height),
-        }
-        return "break"
-
-    def _on_left_list_container_resize_drag(self, event=None):
-        drag_state = getattr(self, "_left_list_container_resize_drag_state", None)
-        if not isinstance(drag_state, dict):
-            return "break"
-        try:
-            current_y = int(getattr(event, "y_root", 0) or drag_state.get("start_y", 0) or 0)
-        except Exception:
-            current_y = int(drag_state.get("start_y", 0) or 0)
-        start_y = int(drag_state.get("start_y", current_y) or current_y)
-        start_top_height = int(drag_state.get("start_top_height", 180) or 180)
-        self._apply_left_list_container_top_height(start_top_height + (current_y - start_y))
-        return "break"
-
-    def _on_left_list_container_resize_release(self, event=None):
-        self._left_list_container_resize_drag_state = None
-        try:
-            self._sync_left_panel_scrollregion()
-        except Exception:
-            pass
-        return "break"
-
     def _invalidate_preview_list_frozen_order(self) -> None:
         self._preview_list_frozen_sort_mode = ""
         self._preview_list_frozen_filename_order = []
@@ -7056,23 +7479,6 @@ class AnnotationTab:
             padx=10,
             pady=8,
         )
-
-    @staticmethod
-    def _bind_card_help_recursive(widget, index_key: str):
-        if widget is None:
-            return
-        try:
-            HELP.bind_help(widget, index_key)
-        except Exception:
-            pass
-        try:
-            for child in widget.winfo_children():
-                try:
-                    HELP.bind_help(child, index_key)
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _register_workflow_step_card(
         self,
@@ -7477,6 +7883,7 @@ class AnnotationTab:
             "plate_dataset_run_btn": "WorkflowCard.TButton",
             "plate_dataset_images_btn": "WorkflowCard.TButton",
             "export_back_btn": "WorkflowCard.TButton",
+            "export_plate_annotations_btn": "WorkflowCard.TButton",
             "export_plate_dataset_btn": "WorkflowCardPrimary.TButton",
         }.items():
             button = getattr(self, attr_name, None)
@@ -8761,17 +9168,17 @@ class AnnotationTab:
         )
 
         self.workflow_nav_row = ttk.Frame(self.workflow_nav_bottom_panel, style="Panel.TFrame")
-        self.workflow_nav_row.columnconfigure(0, weight=1)
+        self.workflow_nav_row.columnconfigure(0, weight=0)
         self.workflow_nav_row.columnconfigure(1, weight=1)
-        self.workflow_nav_row.pack(fill=tk.X)
+        self.workflow_nav_row.pack(fill=tk.X, pady=(2, 2))
         self.workflow_back_btn = ttk.Button(
             self.workflow_nav_row,
             text="Wstecz",
             style="WorkflowCard.TButton",
             command=self._go_to_previous_workflow_step,
         )
-        self.workflow_back_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.workflow_back_btn.configure(padding=(6, 1))
+        self.workflow_back_btn.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.workflow_back_btn.configure(padding=(8, 3))
         self.workflow_next_btn = ttk.Button(
             self.workflow_nav_row,
             text="Dalej",
@@ -8779,7 +9186,7 @@ class AnnotationTab:
             command=self._go_to_next_workflow_step,
         )
         self.workflow_next_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        self.workflow_next_btn.configure(padding=(6, 1))
+        self.workflow_next_btn.configure(padding=(8, 3))
 
         self.workflow_start_section = self._build_workflow_step_card(actions_lf)
         self.workflow_start_title_lbl = tk.Label(
@@ -9045,7 +9452,7 @@ class AnnotationTab:
             text=(
                 "Stage to pomocnicza pula zdjec do kolejnej iteracji recznej. "
                 "Po eksporcie moga trafia tu nieoznaczone obrazy, a recznie mozesz tez "
-                "dolozyc nowa paczke bez mieszania z gotowym runem."
+                "dolozyc nowy zestaw zdjec bez mieszania z gotowym runem."
             ),
             anchor="w",
             justify=tk.LEFT,
@@ -9284,6 +9691,7 @@ class AnnotationTab:
         )
 
         split_lf = ttk.Frame(export_lf, style="Panel.TFrame")
+        self.plate_export_split_frame = split_lf
         split_lf.pack(fill=tk.X, pady=(0, 8))
         self.split_title_lbl = tk.Label(
             split_lf,
@@ -9339,11 +9747,19 @@ class AnnotationTab:
 
         self.export_plate_dataset_btn = ttk.Button(
             export_lf,
-            text="EKSPORTUJ DATASET",
+            text="EKSPORT",
             style="WorkflowCardPrimary.TButton",
-            command=self._start_plate_dataset_export
+            command=self._start_z2_export_choice_flow
         )
         self.export_plate_dataset_btn.pack(fill=tk.X)
+
+        self.export_plate_annotations_btn = ttk.Button(
+            export_lf,
+            text="EKSPORTUJ ANOTACJE TABLIC",
+            style="WorkflowCard.TButton",
+            command=self._start_plate_annotation_package_export,
+        )
+        self.export_plate_annotations_btn.pack(fill=tk.X, pady=(6, 0))
 
         self.plate_export_progress = None
 
@@ -9466,6 +9882,11 @@ class AnnotationTab:
                     "widget": self.plate_test_lbl,
                     "kind": "label",
                     "style": "WorkflowExportTestValue.TLabel",
+                },
+                {
+                    "widget": self.export_plate_annotations_btn,
+                    "kind": "button",
+                    "style": "WorkflowExportAnnotationsButton.TButton",
                 },
             ],
         )
@@ -10256,13 +10677,52 @@ class AnnotationTab:
         )
         self.preview_overlay_dock_body.pack(fill=tk.X)
         self._preview_overlay_dock_tool_rows = {}
+        self._preview_overlay_dock_status_rows = {}
+        self.preview_overlay_dock_actions_title_lbl = tk.Label(
+            self.preview_overlay_dock_body,
+            text="AKCJE",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 6),
+            padx=7,
+            pady=4,
+            cursor="arrow",
+        )
+        self.preview_overlay_dock_actions_title_lbl.pack(fill=tk.X)
+        self.preview_overlay_dock_actions_frame = tk.Frame(
+            self.preview_overlay_dock_body,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_overlay_dock_actions_frame.pack(fill=tk.X)
+        self.preview_overlay_dock_status_title_lbl = tk.Label(
+            self.preview_overlay_dock_body,
+            text="STATUSY",
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI Semibold", 6),
+            padx=7,
+            pady=3,
+            cursor="arrow",
+        )
+        self.preview_overlay_dock_status_title_lbl.pack(fill=tk.X)
+        self.preview_overlay_dock_status_frame = tk.Frame(
+            self.preview_overlay_dock_body,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.preview_overlay_dock_status_frame.pack(fill=tk.X)
         for tool_key, icon_text, label_text in (
             ("legend", "KP", "Kompas"),
             ("super", "SK", "Super"),
             ("metrics", "PX", "Parametry"),
         ):
-            row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="hand2")
-            row.pack(fill=tk.X, padx=6, pady=(0, 5))
+            row = tk.Frame(self.preview_overlay_dock_actions_frame, bd=0, highlightthickness=1, cursor="hand2")
+            row.pack(fill=tk.X, padx=6, pady=(0, 6))
             icon_lbl = tk.Label(
                 row,
                 text=icon_text,
@@ -10273,7 +10733,7 @@ class AnnotationTab:
                 highlightthickness=0,
                 font=("Segoe UI Semibold", 8),
                 padx=4,
-                pady=5,
+                pady=7,
                 cursor="hand2",
             )
             icon_lbl.pack(side=tk.LEFT)
@@ -10286,30 +10746,30 @@ class AnnotationTab:
                 highlightthickness=0,
                 font=("Segoe UI", 8),
                 padx=6,
-                pady=5,
+                pady=7,
                 cursor="hand2",
             )
             text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            status_lbl = tk.Label(
+            action_status_lbl = tk.Label(
                 row,
                 text="",
                 anchor="e",
                 justify=tk.RIGHT,
                 bd=0,
                 highlightthickness=0,
-                font=("Segoe UI Semibold", 7),
-                padx=5,
-                pady=5,
+                font=("Segoe UI", 7),
+                padx=4,
+                pady=7,
                 cursor="hand2",
             )
-            status_lbl.pack(side=tk.RIGHT)
+            action_status_lbl.pack(side=tk.RIGHT)
             self._preview_overlay_dock_tool_rows[tool_key] = {
                 "row": row,
                 "icon": icon_lbl,
                 "label": text_lbl,
-                "status": status_lbl,
+                "status": action_status_lbl,
             }
-            for widget in (row, icon_lbl, text_lbl, status_lbl):
+            for widget in (row, icon_lbl, text_lbl, action_status_lbl):
                 try:
                     widget.bind(
                         "<Button-1>",
@@ -10318,6 +10778,54 @@ class AnnotationTab:
                     )
                 except Exception:
                     pass
+            status_row = tk.Frame(self.preview_overlay_dock_status_frame, bd=0, highlightthickness=0, cursor="arrow")
+            status_row.pack(fill=tk.X, padx=7, pady=(0, 2))
+            status_dot_lbl = tk.Label(
+                status_row,
+                text="●",
+                width=2,
+                anchor="center",
+                justify=tk.CENTER,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI", 7),
+                padx=1,
+                pady=2,
+                cursor="arrow",
+            )
+            status_dot_lbl.pack(side=tk.LEFT)
+            status_name_lbl = tk.Label(
+                status_row,
+                text=label_text,
+                anchor="w",
+                justify=tk.LEFT,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI", 7),
+                padx=3,
+                pady=2,
+                cursor="arrow",
+            )
+            status_name_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            status_value_lbl = tk.Label(
+                status_row,
+                text="OFF",
+                anchor="e",
+                justify=tk.RIGHT,
+                bd=0,
+                highlightthickness=0,
+                font=("Segoe UI Semibold", 7),
+                padx=3,
+                pady=2,
+                cursor="arrow",
+            )
+            status_value_lbl.pack(side=tk.RIGHT)
+            self._preview_overlay_dock_status_rows[tool_key] = {
+                "row": status_row,
+                "dot": status_dot_lbl,
+                "label": status_name_lbl,
+                "status": status_value_lbl,
+            }
         for widget in (
             self.preview_overlay_dock_header,
             self.preview_overlay_dock_title_lbl,
@@ -10531,7 +11039,7 @@ class AnnotationTab:
         self._campaign_step2_splash_title_lbl.grid(row=0, column=0, sticky="ew")
         self._campaign_step2_splash_body_lbl = tk.Label(
             self._campaign_step2_splash_card,
-            text="Ładuję kontekst wejścia i listę obrazów tej paczki.",
+            text="Ładuję kontekst wejścia i listę obrazów tego zestawu.",
             anchor="w",
             justify=tk.LEFT,
             wraplength=560,
@@ -10892,6 +11400,7 @@ class AnnotationTab:
         HELP.bind_help(self.split_title_lbl, "tab1_dataset_split")
         HELP.bind_help(split_lf, "tab1_dataset_split")
         HELP.bind_help(self.export_plate_dataset_btn, "tab1_dataset_export")
+        HELP.bind_help(self.export_plate_annotations_btn, "tab1_dataset_export")
         HELP.bind_help(self.jump_to_export_btn, "tab1_dataset_export")
         HELP.bind_help(self.followup_section, "tab1_dataset_export")
         HELP.bind_help(self.followup_title_lbl, "tab1_dataset_export")
@@ -12819,14 +13328,6 @@ class AnnotationTab:
             result.append(safe_path)
         return result
 
-    def _preview_bucket_caption(self, bucket: str) -> str:
-        normalized = str(bucket or "").strip().lower()
-        if normalized == "manual":
-            return "ED"
-        if normalized == "auto":
-            return "OK"
-        return "problem"
-
     def _get_preview_group_actual_indices(self) -> list[int]:
         if not self.current_annotations:
             return []
@@ -13192,6 +13693,7 @@ class AnnotationTab:
                 "stop_btn",
                 "approve_btn",
                 "export_plate_dataset_btn",
+                "export_plate_annotations_btn",
                 "export_back_btn",
                 "workflow_input_browse_btn",
                 "workflow_plate_browse_btn",
@@ -13251,36 +13753,6 @@ class AnnotationTab:
         if active:
             self._focus_plate_auto_scope_modal()
         return active
-
-    def _enable_borderless_dialog_drag(self, dialog, *handle_widgets) -> None:
-        if dialog is None:
-            return
-
-        drag_state = {"offset_x": 0, "offset_y": 0}
-
-        def _start_drag(event):
-            try:
-                drag_state["offset_x"] = int(event.x_root) - int(dialog.winfo_x())
-                drag_state["offset_y"] = int(event.y_root) - int(dialog.winfo_y())
-            except Exception:
-                drag_state["offset_x"] = 0
-                drag_state["offset_y"] = 0
-
-        def _drag(event):
-            try:
-                new_x = int(event.x_root) - int(drag_state.get("offset_x", 0) or 0)
-                new_y = int(event.y_root) - int(drag_state.get("offset_y", 0) or 0)
-                dialog.geometry(f"+{new_x}+{new_y}")
-            except Exception:
-                pass
-
-        for widget in handle_widgets:
-            if widget is None:
-                continue
-            try:
-                widget.configure(cursor="fleur")
-            except Exception:
-                pass
 
     def _fit_borderless_dialog(self, dialog, *, parent=None, min_width: int = 700, min_height: int = 420) -> None:
         fitter = getattr(self.app, "_fit_dialog_to_content", None)
@@ -14287,7 +14759,7 @@ class AnnotationTab:
         build_option_card(
             options_host,
             value="all",
-            title="Cała paczka",
+            title="Cały zestaw zdjęć",
             description=f"Uruchom autoanotację na wszystkich dostępnych obrazach tego wejścia ({len(all_paths)}).",
         )
         bucket_card, bucket_desc_var = build_option_card(
@@ -14476,7 +14948,7 @@ class AnnotationTab:
                 result["choice"] = "all"
                 result["payload"] = {
                     "mode": "all",
-                    "label": "Cała paczka",
+                    "label": "Cały zestaw zdjęć",
                     "image_paths": all_paths,
                 }
 
@@ -14760,7 +15232,7 @@ class AnnotationTab:
                 else:
                     protected_for_notice = int(live_scope.get("protected_skip_count", 0) or 0)
                     process_for_notice = int(len(list(live_scope.get("all_paths") or [])) or 0)
-                    scope_word = "całej paczce"
+                    scope_word = "całym zestawie"
                 if (
                     protected_for_notice > 0
                     or (
@@ -15082,7 +15554,7 @@ class AnnotationTab:
         payload = result.get("payload")
         if isinstance(payload, dict) and payload.get("image_paths"):
             return payload
-        return {"mode": "all", "label": "Cała paczka", "image_paths": all_paths}
+        return {"mode": "all", "label": "Cały zestaw zdjęć", "image_paths": all_paths}
 
     def _build_annotation_input_subset_dir(
         self,
@@ -15121,23 +15593,35 @@ class AnnotationTab:
             pass
 
         source_map: dict[str, Path] = {}
+        prepared_count = 0
+        linked_count = 0
         copied_count = 0
         for image_path in scoped_paths:
             try:
                 target_path = subset_dir / image_path.name
-                shutil.copy2(image_path, target_path)
+                try:
+                    os.link(image_path, target_path)
+                    linked_count += 1
+                except Exception:
+                    shutil.copy2(image_path, target_path)
+                    copied_count += 1
                 source_map[str(image_path.name)] = image_path
-                copied_count += 1
+                prepared_count += 1
             except Exception as e:
-                logger.debug(f"Nie udało się skopiować obrazu do zakresu autoanotacji ({image_path}): {e}")
+                logger.debug(f"Nie udało się przygotować obrazu do zakresu autoanotacji ({image_path}): {e}")
 
-        if copied_count <= 0:
+        if prepared_count <= 0:
             try:
                 if subset_dir.exists():
                     shutil.rmtree(subset_dir)
             except Exception:
                 pass
             return None, {}
+        if copied_count > 0:
+            logger.debug(
+                "[AnnotationTab] Zakres autoanotacji przygotowany z fallbackiem copy: "
+                f"linked={int(linked_count)} copied={int(copied_count)}"
+            )
         return subset_dir, source_map
 
     def _prompt_campaign_plate_auto_model_choice(self) -> bool:
@@ -15210,7 +15694,7 @@ class AnnotationTab:
 
             title_lbl = tk.Label(
                 body,
-                text="Jakiego modelu tablic użyć do autoanotacji tej paczki?",
+                text="Jakiego modelu tablic użyć do autoanotacji tego zestawu zdjęć?",
                 bg=panel_bg,
                 fg=fg,
                 font=("Segoe UI", 10, "bold"),
@@ -15354,16 +15838,6 @@ class AnnotationTab:
             if apply_result == "retry":
                 continue
             return bool(apply_result)
-
-    def _select_character_custom(self):
-        initial_dir = CONFIG.get_trained_models_dir("char")
-        if not initial_dir.exists():
-            initial_dir = CONFIG.DIR_6_MODELS
-        p = filedialog.askopenfilename(initialdir=str(Path(initial_dir).absolute()), filetypes=[("YOLO Model", "*.pt")])
-        if p:
-            self.character_custom_var.set(p)
-            self.character_model_var.set("Custom")
-            self._on_character_model_change()
 
     def _select_input_dir(self):
         if self._is_plate_auto_scope_modal_blocking_actions():
@@ -16268,11 +16742,16 @@ class AnnotationTab:
             return
 
         images_dir = None
+        try:
+            iteration_source_dir = CAMPAIGN.get_iteration_image_source_dir(iteration_num)
+        except Exception:
+            iteration_source_dir = None
         for candidate in (
-            input_dir,
-            getattr(self, "current_input_dir", None),
+            iteration_source_dir,
             CAMPAIGN.get_master_pool_dir(),
             CAMPAIGN.get_iteration_raw_dir(iteration_num),
+            input_dir,
+            getattr(self, "current_input_dir", None),
         ):
             try:
                 resolved = self._resolve_existing_dir(candidate)
@@ -17874,7 +18353,13 @@ class AnnotationTab:
             return base_input_dir
 
         try:
-            raw_base_images = get_image_files(Path(base_input_dir))
+            manifest_expected_count = self._get_campaign_iteration_manifest_image_count()
+            manifest_base_images = self._get_campaign_iteration_manifest_image_paths(Path(base_input_dir))
+            raw_base_images = (
+                manifest_base_images
+                if manifest_expected_count > 0
+                else get_image_files(Path(base_input_dir))
+            )
         except Exception:
             raw_base_images = []
 
@@ -17908,7 +18393,10 @@ class AnnotationTab:
             if image_path.name in copied_names:
                 continue
             try:
-                shutil.copy2(image_path, target_path)
+                try:
+                    os.link(image_path, target_path)
+                except Exception:
+                    shutil.copy2(image_path, target_path)
                 copied_names.add(image_path.name)
             except Exception as e:
                 logger.debug(f"Nie udało się dołączyć obrazu do merge wejścia Z2 ({image_path}): {e}")
@@ -18002,7 +18490,7 @@ class AnnotationTab:
                 if campaign_context
                 else "Stage to pomocnicza pula zdjec do kolejnej iteracji recznej. "
                 "Po eksporcie moga trafiac tu nieoznaczone obrazy, a recznie mozesz tez "
-                "dolozyc nowa paczke bez mieszania z gotowym runem."
+                "dolozyc nowy zestaw zdjec bez mieszania z gotowym runem."
             ),
             tone="muted",
             emphasis=False,
@@ -18015,10 +18503,10 @@ class AnnotationTab:
             status_text = (
                 (
                     "Pula następnej iteracji jest teraz aktywnym wejściem Z2, ale nie ma w niej jeszcze żadnych zdjęć. "
-                    "Wróć do głównej paczki albo odłóż nowe obrazy na później."
+                    "Wróć do głównego wejścia albo odłóż nowe obrazy na później."
                     if campaign_context
                     else "Stage jest aktualnym wejsciem Z2, ale nie ma w nim jeszcze zadnych zdjec. "
-                    "Dodaj nowe obrazy do stage albo wroc do glownej paczki."
+                    "Dodaj nowe obrazy do stage albo wroc do glownego wejscia."
                 ) + updated_suffix
             )
             tone = "warning"
@@ -18030,7 +18518,7 @@ class AnnotationTab:
                     f"Możesz przełączyć Z2 na {stage_rel}."
                     if campaign_context
                     else f"Stage zawiera {stage_count} zdjec oczekujacych na kolejna runde recznej anotacji. "
-                    f"Możesz przełączyć Z2 na {stage_rel} albo dołożyć nową paczkę zdjęć."
+                    f"Możesz przełączyć Z2 na {stage_rel} albo dołożyć nowy zestaw zdjęć."
                 ) + updated_suffix
             )
             tone = "success"
@@ -18150,7 +18638,7 @@ class AnnotationTab:
                     if from_auto
                     else MANUAL_REVIEW_FOLLOWUP_TITLE
                     if (not campaign_context and route == "manual")
-                    else "Anotacja ręczna tablic"
+                    else "Anotacja i korekta tablic"
                     if (campaign_context and route == "manual")
                     else "Aktywny run ręcznej korekty"
                     if active_run
@@ -18175,10 +18663,12 @@ class AnnotationTab:
                         )
                         if repair_followup
                         else (
-                            "To jest ręczna anotacja tablic dla bieżącej paczki zdjęć tej iteracji. "
-                            "Narysuj albo popraw polygony tablic, zapisz zmiany i oznacz poprawne obrazy "
-                            "statusem [OK] na liście wyników. Gdy osiągniesz wymagane minimum, po prawej "
-                            "odblokujesz zatwierdzenie E2 i powrót do wizarda."
+                            "Masz otwarty run Z2 z plikiem XML anotacji tablic dla katalogu zdjęć tej iteracji. "
+                            "Rysuj albo poprawiaj ramki tablic na podglądzie, zapisz zmiany i nadaj poprawnym "
+                            "obrazom status [OK] na liście wyników. Status [OK] jest warunkiem odblokowania "
+                            "zatwierdzenia etapu E2 i powrotu do wizarda. Jeśli chcesz przyspieszyć pracę na "
+                            "pozostałych obrazach, użyj przycisku Uruchom autoanotację - działa on jako wsparcie "
+                            "bieżącego runu i nie zastępuje kontroli wyniku."
                         )
                     )
                     if campaign_context
@@ -18259,9 +18749,24 @@ class AnnotationTab:
             else:
                 self._set_widget_packed(status_label, False)
             if campaign_context:
-                self._set_widget_packed(buttons_row, False)
+                self._set_widget_packed(
+                    buttons_row,
+                    bool(active_run),
+                    fill=tk.X,
+                    pady=(0, 2),
+                )
                 try:
-                    if str(self.manual_stage_use_btn.winfo_manager()) == "grid":
+                    self.manual_stage_use_btn.configure(
+                        text="Uruchom autoanotację",
+                        command=lambda: self._select_workflow_route("auto"),
+                        state=(tk.NORMAL if not self.is_processing else tk.DISABLED),
+                    )
+                    if bool(active_run):
+                        if str(self.manual_stage_use_btn.winfo_manager()) != "grid":
+                            self.manual_stage_use_btn.grid(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 0))
+                        else:
+                            self.manual_stage_use_btn.grid_configure(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 0))
+                    elif str(self.manual_stage_use_btn.winfo_manager()) == "grid":
                         self.manual_stage_use_btn.grid_remove()
                 except Exception:
                     pass
@@ -18299,7 +18804,7 @@ class AnnotationTab:
             text=(
                 "Stage to pomocnicza pula zdjec do kolejnej iteracji recznej. "
                 "Po eksporcie moga trafiac tu nieoznaczone obrazy, a recznie mozesz tez "
-                "dolozyc nowa paczke bez mieszania z gotowym runem."
+                "dolozyc nowy zestaw zdjec bez mieszania z gotowym runem."
             ),
             tone="muted",
             emphasis=False,
@@ -18310,12 +18815,21 @@ class AnnotationTab:
         self._set_widget_packed(status_label, True, anchor=tk.W, fill=tk.X, pady=(0, 8))
         self._set_widget_packed(buttons_row, True, fill=tk.X, pady=(0, 2))
         try:
-            self.manual_stage_add_btn.configure(text="Dodaj zdjęcia do stage")
+            self.manual_stage_use_btn.configure(
+                text="Użyj stage jako wejścia Z2",
+                command=self._use_manual_plate_stage_as_input,
+            )
+            self.manual_stage_add_btn.configure(
+                text="Dodaj zdjęcia do stage",
+                command=self._add_images_to_manual_plate_stage,
+            )
         except Exception:
             pass
         try:
             if str(self.manual_stage_use_btn.winfo_manager()) != "grid":
                 self.manual_stage_use_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            else:
+                self.manual_stage_use_btn.grid_configure(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 6))
         except Exception:
             pass
         try:
@@ -18404,6 +18918,12 @@ class AnnotationTab:
             padx=5,
             pady=0,
         )
+        if free_mode_context and free_mode_route == "manual":
+            try:
+                self._sync_main_pane_right_panel_visibility()
+                self._refresh_free_mode_manual_right_panel()
+            except Exception:
+                pass
         left_settings_canvas = getattr(self, "left_settings_canvas", None)
         left_settings_col = getattr(self, "left_settings_col", None)
         workflow_entry_shell = getattr(self, "workflow_entry_shell", None)
@@ -18450,9 +18970,6 @@ class AnnotationTab:
                         else:
                             preview_cap = 220 if campaign_repair_preview_layout else 320
                         target_height = min(target_height, int(preview_cap))
-                        user_top_height = getattr(self, "_left_list_container_user_top_height", None)
-                        if user_top_height is not None:
-                            target_height = self._clamp_left_list_container_top_height(user_top_height)
                     else:
                         target_height = min(target_height, 560)
                     left_settings_canvas.configure(height=target_height)
@@ -18623,13 +19140,21 @@ class AnnotationTab:
                     )
                 else:
                     title_text = self._format_z2_thematic_title(
-                        "Ustaw split i wyeksportuj dataset",
+                        "Eksport: dataset YOLO albo anotacje XML",
                         thematic_prefixes.get("export"),
                     )
                 title_label.configure(text=title_text)
             except Exception:
                 pass
-            self._set_widget_packed(intro_label, False)
+            if not campaign_context:
+                self.export_intro_var.set(
+                    "Masz dwa niezależne sposoby wyjścia z gotowego runu Z2:\n\n"
+                    "Dataset YOLO Pose - tworzy zbiór treningowy tablic, wymaga zatwierdzonych pozycji [OK] i korzysta ze splitu train/val/test.\n"
+                    "Anotacje XML - eksportuje zapisane anotacje do współpracy lub późniejszego importu w E1; nie używa splitu i nie wymaga bramki datasetu."
+                )
+                self._set_widget_packed(intro_label, True, anchor=tk.W, fill=tk.X, pady=(0, 10))
+            else:
+                self._set_widget_packed(intro_label, False)
             self._set_widget_packed(run_row, False)
             self._set_widget_packed(images_row, False)
             self._set_widget_packed(output_row, False)
@@ -18648,7 +19173,7 @@ class AnnotationTab:
                 )
             else:
                 base_title = self._format_z2_thematic_title(
-                    "Split i eksport datasetu z gotowego runu",
+                    "Eksport: dataset YOLO albo anotacje XML",
                     thematic_prefixes.get("export"),
                 )
             title_label.configure(text=base_title)
@@ -18657,6 +19182,12 @@ class AnnotationTab:
         if focused_export:
             self.export_intro_var.set(
                 "Opcjonalnie przygotuj dataset tablic z gotowego runu Z2, aby przekazac go do treningu w Z4."
+            )
+        elif not campaign_context:
+            self.export_intro_var.set(
+                "Masz dwa niezależne sposoby wyjścia z gotowego runu Z2:\n\n"
+                "Dataset YOLO Pose - tworzy zbiór treningowy tablic, wymaga zatwierdzonych pozycji [OK] i korzysta ze splitu train/val/test.\n"
+                "Anotacje XML - eksportuje zapisane anotacje do współpracy lub późniejszego importu w E1; nie używa splitu i nie wymaga bramki datasetu."
             )
         self._set_widget_packed(intro_label, True, anchor=tk.W, fill=tk.X, pady=(0, 8))
         self._set_widget_packed(run_row, True, fill=tk.X, pady=(0, 4))
@@ -18801,7 +19332,7 @@ class AnnotationTab:
         if not stage_images:
             messagebox.showinfo(
                 "Stage jest puste",
-                "Stage nie zawiera jeszcze zadnych zdjec. Najpierw wyeksportuj dataset lub dodaj nowa paczke zdjec do stage."
+                "Stage nie zawiera jeszcze zadnych zdjec. Najpierw wyeksportuj dataset lub dodaj nowy zestaw zdjec do stage."
             )
             return
 
@@ -18849,29 +19380,6 @@ class AnnotationTab:
     def _plate_dataset_output_preview(self, run_dir: Path | None = None) -> str:
         run_name = run_dir.name if isinstance(run_dir, Path) else "run_xxx"
         return str(self._get_plate_dataset_base_dir() / f"Plates_Z2_{run_name}_[DATA_I_CZAS]")
-
-    def _directory_has_supported_images_fast(self, directory: Path | None) -> bool:
-        try:
-            source_dir = Path(directory) if directory is not None else None
-        except Exception:
-            source_dir = None
-        if source_dir is None:
-            return False
-        try:
-            if not source_dir.exists() or not source_dir.is_dir():
-                return False
-        except Exception:
-            return False
-        try:
-            for candidate in source_dir.iterdir():
-                try:
-                    if candidate.is_file() and candidate.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            return False
-        return False
 
     def _reset_free_mode_branch_artifacts(self) -> None:
         self._free_mode_branch_artifacts = {
@@ -19515,6 +20023,8 @@ class AnnotationTab:
         source_run_dir: Path | str | None,
         *,
         compatible_images_dir: Path | str | None = None,
+        allowed_normalized_names: set[str] | None = None,
+        copy_images: bool = True,
     ) -> tuple[Path | None, str, bool]:
         source_run_dir = self._resolve_existing_run_dir(source_run_dir)
         if source_run_dir is None:
@@ -19529,8 +20039,25 @@ class AnnotationTab:
         except Exception as e:
             return None, f"Nie udalo sie odczytac annotations.xml:\n{e}", False
 
+        allowed_names = {
+            str(name or "").strip().lower()
+            for name in set(allowed_normalized_names or set())
+            if str(name or "").strip()
+        }
+        if allowed_names:
+            try:
+                from ..campaign_manager import CAMPAIGN
+                normalize_name = CAMPAIGN._normalize_image_set_name
+            except Exception:
+                normalize_name = lambda value: Path(str(value or "")).name.strip().lower()
+
+            annotations = [
+                ann for ann in annotations
+                if normalize_name(str(getattr(ann, "filename", "") or "")) in allowed_names
+            ]
+
         if not annotations:
-            return None, "Wybrany run nie zawiera obrazow do recznej korekty.", False
+            return None, "Wybrany run nie zawiera obrazow zgodnych z wybranym katalogiem zdjęć.", False
 
         source_manifest = self._load_annotation_run_manifest(source_run_dir)
         image_roots = self._get_external_run_image_roots(
@@ -19543,16 +20070,21 @@ class AnnotationTab:
             annotations,
             image_roots,
         )
+        should_copy_images = bool(copy_images)
         relative_name_map: dict[str, str] = {}
         used_import_paths: set[str] = set()
-        for idx, (filename, _raw_path, source_image_path) in enumerate(resolved_images):
-            relative_path = self._build_safe_imported_image_relative_path(
-                filename,
-                index=idx,
-                used_paths=used_import_paths,
-            )
-            relative_name_map[filename] = str(relative_path).replace("\\", "/")
-            resolved_images[idx] = (filename, relative_path, source_image_path)
+        if should_copy_images:
+            for idx, (filename, _raw_path, source_image_path) in enumerate(resolved_images):
+                relative_path = self._build_safe_imported_image_relative_path(
+                    filename,
+                    index=idx,
+                    used_paths=used_import_paths,
+                )
+                relative_name_map[filename] = str(relative_path).replace("\\", "/")
+                resolved_images[idx] = (filename, relative_path, source_image_path)
+        else:
+            for filename, _raw_path, _source_image_path in resolved_images:
+                relative_name_map[filename] = str(filename or "").replace("\\", "/")
 
         if missing_images:
             preview_missing = "\n".join(missing_images[:5])
@@ -19572,19 +20104,27 @@ class AnnotationTab:
                 suffix="import",
             )
             imported_images_dir = imported_run_dir / "images"
-            imported_images_dir.mkdir(parents=True, exist_ok=True)
 
-            for _original_name, relative_path, source_image_path in resolved_images:
-                target_image_path = imported_images_dir / relative_path
-                target_image_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_image_path, target_image_path)
+            if should_copy_images:
+                imported_images_dir.mkdir(parents=True, exist_ok=True)
+                for _original_name, relative_path, source_image_path in resolved_images:
+                    target_image_path = imported_images_dir / relative_path
+                    target_image_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_image_path, target_image_path)
 
             imported_xml_path = imported_run_dir / "annotations.xml"
             xml_tree = ET.parse(source_xml_path)
             xml_root = xml_tree.getroot()
-            for image_el in xml_root.findall(".//image"):
+            allowed_original_names = set(relative_name_map.keys())
+            parent_by_child = {child: parent for parent in xml_root.iter() for child in parent}
+            for image_el in list(xml_root.findall(".//image")):
                 original_name = str(image_el.get("name", "") or "").strip()
-                if original_name in relative_name_map:
+                if original_name not in allowed_original_names:
+                    parent = parent_by_child.get(image_el)
+                    if parent is not None:
+                        parent.remove(image_el)
+                    continue
+                if should_copy_images and original_name in relative_name_map:
                     image_el.set("name", relative_name_map[original_name])
             xml_tree.write(imported_xml_path, encoding="utf-8", xml_declaration=True)
 
@@ -19595,8 +20135,17 @@ class AnnotationTab:
             now_iso = datetime.datetime.now().isoformat(timespec="seconds")
             successful_images = sum(1 for ann in annotations if bool(getattr(ann, "is_successful", False)))
             _images_with_plates, total_plates = self._count_plate_annotations(annotations)
+            manifest_input_dir = (
+                str(imported_images_dir.resolve())
+                if should_copy_images
+                else (
+                    str(Path(compatible_images_dir).resolve())
+                    if compatible_images_dir
+                    else str(source_manifest.get("input_dir") or "").strip()
+                )
+            )
             imported_manifest = {
-                "input_dir": str(imported_images_dir.resolve()),
+                "input_dir": manifest_input_dir,
                 "run_dir": str(imported_run_dir.resolve()),
                 "mode": str(source_manifest.get("mode") or self.mode_var.get() or "").strip(),
                 "device": str(source_manifest.get("device") or self._get_effective_yolo_device_choice() or "").strip(),
@@ -19620,13 +20169,14 @@ class AnnotationTab:
                     or self._collect_preview_manually_touched_filenames(annotations, include_dirty=False)
                 ),
                 "approved_filenames": sorted(
-                    str(name or "").strip().lower()
+                    str(relative_name_map.get(str(name or "").strip(), str(name or "").strip()) or "").lower()
                     for name in list(source_manifest.get("approved_filenames") or [])
-                    if str(name or "").strip()
+                    if str(name or "").strip() in allowed_original_names
                 ),
                 "generated_at": str(source_manifest.get("generated_at") or now_iso).strip(),
                 "imported_at": now_iso,
                 "imported_from_run_dir": str(source_run_dir.resolve()),
+                "images_copied_to_import_run": bool(should_copy_images),
                 "imported_source_input_dir": (
                     str(Path(compatible_images_dir).resolve())
                     if compatible_images_dir
@@ -19749,20 +20299,863 @@ class AnnotationTab:
 
         return images_with_plates, total_plates
 
-    def _build_auto_followup_summary(self) -> str:
-        annotations = list(getattr(self, "current_annotations", []) or [])
-        total_images = len(annotations)
-        successful_images = sum(1 for ann in annotations if getattr(ann, "is_successful", False))
+    def _get_plate_annotation_exports_base_dir(self) -> Path:
+        return Path(CONFIG.DIR_2_AUTO_ANN) / "plate_annotation_exports"
+
+    def _get_plate_annotation_export_annotations(self, run_dir: Path) -> list[ImageAnnotation]:
+        current_run_dir = getattr(self, "current_annotation_run_dir", None)
+        if (
+            current_run_dir is not None
+            and self.current_annotations
+            and self._paths_equivalent(run_dir, current_run_dir)
+        ):
+            source_annotations = list(self.current_annotations or [])
+        else:
+            source_annotations = self._parse_cvat_preview_annotations(run_dir / "annotations.xml")
+
+        export_annotations = []
+        for ann in list(source_annotations or []):
+            try:
+                if len(self._get_plate_detections(ann)) <= 0:
+                    continue
+            except Exception:
+                continue
+            export_annotations.append(ann)
+        return export_annotations
+
+    def _get_plate_annotation_export_approved_filenames(self, run_dir: Path) -> set[str]:
+        current_run_dir = getattr(self, "current_annotation_run_dir", None)
+        if (
+            current_run_dir is not None
+            and self.current_annotations
+            and self._paths_equivalent(run_dir, current_run_dir)
+        ):
+            approved_names = self._get_preview_approved_filenames()
+        else:
+            approved_names = self._load_annotation_run_approved_filenames(run_dir)
+
+        return {
+            str(name or "").strip().replace("\\", "/").lower()
+            for name in set(approved_names or set())
+            if str(name or "").strip()
+        }
+
+    def _plate_annotation_filename_matches_lookup(self, filename: str, lookup: set[str]) -> bool:
+        if not lookup:
+            return False
+        safe_name = str(filename or "").strip().replace("\\", "/").lower()
+        if not safe_name:
+            return False
+        if safe_name in lookup:
+            return True
+        basename = Path(safe_name).name.lower()
+        return bool(basename and basename in lookup)
+
+    def _filter_plate_annotation_export_annotations_by_approved(
+        self,
+        run_dir: Path,
+        annotations: list[ImageAnnotation],
+    ) -> list[ImageAnnotation]:
+        approved_lookup = self._get_plate_annotation_export_approved_filenames(run_dir)
+        if not approved_lookup:
+            return []
+        return [
+            ann
+            for ann in list(annotations or [])
+            if self._plate_annotation_filename_matches_lookup(
+                str(getattr(ann, "filename", "") or ""),
+                approved_lookup,
+            )
+        ]
+
+    def _get_plate_annotation_package_export_state(self) -> dict:
+        result = {
+            "ok": False,
+            "run_dir": None,
+            "images_with_plates": 0,
+            "total_plates": 0,
+            "message": "Brak gotowego runu anotacji tablic.",
+        }
+        run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
+        if run_dir is None:
+            return result
+
+        result["run_dir"] = run_dir
+        try:
+            annotations = self._get_plate_annotation_export_annotations(run_dir)
+        except Exception as e:
+            result["message"] = f"Nie można odczytać annotations.xml: {e}"
+            return result
+
         images_with_plates, total_plates = self._count_plate_annotations(annotations)
-
-        if total_images <= 0:
-            return "Autoanotacja zostala zakonczona. Run anotacji Z2 jest zapisany w workspace projektu."
-
-        return (
-            f"Autoanotacja zakonczona. Przetworzono {total_images} obrazow, "
-            f"wynik dodatni uzyskano dla {successful_images}, a tablice wykryto na {images_with_plates} obrazach "
-            f"(lacznie {total_plates} tablic)."
+        result.update(
+            images_with_plates=int(images_with_plates),
+            total_plates=int(total_plates),
         )
+        if total_plates <= 0:
+            result["message"] = "Eksport anotacji jest dostępny po zapisaniu co najmniej jednej tablicy w annotations.xml."
+            return result
+
+        result["ok"] = True
+        result["message"] = (
+            f"Gotowe do eksportu anotacji XML: {images_with_plates} obrazów / {total_plates} tablic."
+        )
+        return result
+
+    def _set_plate_annotation_export_button_state(self) -> None:
+        button = getattr(self, "export_plate_annotations_btn", None)
+        if button is None:
+            return
+        try:
+            state = self._get_plate_annotation_package_export_state()
+            button.configure(state=(tk.NORMAL if state.get("ok") and not self.is_processing else tk.DISABLED))
+        except Exception:
+            try:
+                button.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+
+    def _prompt_z2_export_choice(self, state: dict) -> str | None:
+        result: dict = {}
+        dataset_ready = bool(state.get("dataset_ready"))
+        annotation_ready = bool(state.get("annotation_ready"))
+        if not dataset_ready and not annotation_ready:
+            messagebox.showwarning(
+                "Eksport Z2",
+                (
+                    "Nie ma jeszcze czego eksportować.\n\n"
+                    "Dataset YOLO wymaga spełnienia bramki zatwierdzonych tablic [OK]. "
+                    "Pakiet anotacji wymaga co najmniej jednej zapisanej tablicy w XML."
+                ),
+                parent=self.frame.winfo_toplevel(),
+            )
+            return None
+
+        dialog = tk.Toplevel(self.frame)
+        try:
+            dialog.title("Eksport Z2")
+            dialog.transient(getattr(self.app, "root", None) or self.frame.winfo_toplevel())
+            dialog.grab_set()
+            dialog.resizable(False, False)
+        except Exception:
+            pass
+
+        palette = getattr(self.app, "palette", {}) or {}
+        panel_bg = palette.get("panel", "#252526")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#4ec9b0")
+        warning = palette.get("warning", "#f39c12")
+        try:
+            dialog.configure(bg=panel_bg)
+        except Exception:
+            pass
+
+        body = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
+
+        tk.Label(
+            body,
+            text="Wybierz rodzaj eksportu",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+        tk.Label(
+            body,
+            text=(
+                "Dataset YOLO Pose służy do treningu modelu tablic i korzysta ze splitu train/val/test. "
+                "Pakiet anotacji XML służy do przenoszenia pracy między kopiami programu i nie używa splitu."
+            ),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=560,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
+
+        quality_info = dict(state.get("quality_info") or {})
+        quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+        quality_tone = str(quality_info.get("tone", "warning") or "warning").strip().lower()
+        quality_color = success if quality_tone == "success" else warning
+        stats_frame = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        stats_frame.pack(fill=tk.X, pady=(0, 12))
+        stats_rows = (
+            ("Wszystkie anotacje", f"{int(state.get('images_with_plates', 0) or 0)} obrazów / {int(state.get('total_plates', 0) or 0)} tablic", success),
+            ("Zatwierdzone [OK]", f"{int(state.get('approved_images', 0) or 0)} obrazów / {int(state.get('approved_plates', 0) or 0)} tablic", success if int(state.get("approved_plates", 0) or 0) > 0 else warning),
+            (
+                "Bramka datasetu YOLO",
+                (
+                    "otwarta"
+                    if dataset_ready
+                    else f"zamknięta, brakuje {int(state.get('dataset_missing_approved_plates', 0) or 0)} tablic [OK]"
+                ),
+                success if dataset_ready else warning,
+            ),
+            ("Jakość zbioru", quality_label, quality_color),
+        )
+        for row_idx, (label, value, color) in enumerate(stats_rows):
+            tk.Label(
+                stats_frame,
+                text=label,
+                bg=panel_bg,
+                fg=muted,
+                font=("Segoe UI", 9),
+                anchor="w",
+            ).grid(row=row_idx, column=0, sticky="w", pady=(0, 2))
+            tk.Label(
+                stats_frame,
+                text=value,
+                bg=panel_bg,
+                fg=color,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).grid(row=row_idx, column=1, sticky="w", padx=(14, 0), pady=(0, 2))
+
+        choice_var = tk.StringVar(value=("dataset" if dataset_ready else "annotations"))
+
+        def _option(parent, value: str, title: str, description: str, enabled: bool):
+            box = tk.Frame(parent, bg=panel_bg, bd=0, highlightthickness=1)
+            border = success if enabled else palette.get("border", "#3a3a3a")
+            try:
+                box.configure(highlightbackground=border, highlightcolor=border)
+            except Exception:
+                pass
+            box.pack(fill=tk.X, pady=(0, 8))
+            radio = ttk.Radiobutton(
+                box,
+                text=title,
+                variable=choice_var,
+                value=value,
+                state=(tk.NORMAL if enabled else tk.DISABLED),
+            )
+            radio.pack(anchor=tk.W, padx=8, pady=(7, 2))
+            tk.Label(
+                box,
+                text=description,
+                bg=panel_bg,
+                fg=(muted if enabled else palette.get("disabled_fg", "#777777")),
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=520,
+            ).pack(anchor=tk.W, fill=tk.X, padx=8, pady=(0, 7))
+            return box
+
+        _option(
+            body,
+            "dataset",
+            "Eksport datasetu YOLO Pose ze splitem",
+            (
+                "Tworzy dataset do treningu modelu tablic. Eksportuje wyłącznie obrazy zatwierdzone [OK], "
+                "a poniżej ustawiasz proporcje train/val/test."
+                if dataset_ready
+                else (
+                    "Niedostępne: dataset YOLO wymaga bramki [OK]. "
+                    f"Minimum to {int(state.get('dataset_min_approved_plates', 0) or 0)} zatwierdzonych tablic; "
+                    f"brakuje {int(state.get('dataset_missing_approved_plates', 0) or 0)}. "
+                    "Możesz nadal wyeksportować same anotacje XML."
+                )
+            ),
+            dataset_ready,
+        )
+
+        split_box = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        split_box.pack(fill=tk.X, pady=(0, 8))
+        train_var = tk.DoubleVar(value=float(self.plate_train_pct.get()))
+        val_var = tk.DoubleVar(value=float(self.plate_val_pct.get()))
+        train_lbl = tk.Label(split_box, bg=panel_bg, fg=fg, font=("Segoe UI", 8), width=9, anchor="w")
+        val_lbl = tk.Label(split_box, bg=panel_bg, fg=fg, font=("Segoe UI", 8), width=9, anchor="w")
+        test_lbl = tk.Label(split_box, bg=panel_bg, fg=fg, font=("Segoe UI", 8), width=9, anchor="w")
+
+        def _sync_split_labels(_event=None):
+            train = max(50.0, min(90.0, float(train_var.get())))
+            max_val = max(0.0, 100.0 - train)
+            val = max(0.0, min(max_val, float(val_var.get())))
+            if abs(val - float(val_var.get())) > 0.01:
+                try:
+                    val_var.set(val)
+                except Exception:
+                    pass
+            test = max(0.0, 100.0 - train - val)
+            try:
+                val_scale.configure(to=max_val)
+            except Exception:
+                pass
+            train_lbl.configure(text=f"Train {train:.0f}%")
+            val_lbl.configure(text=f"Val {val:.0f}%")
+            test_lbl.configure(text=f"Test {test:.0f}%")
+
+        ttk.Label(split_box, text="Split datasetu YOLO", style="Panel.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        train_lbl.grid(row=1, column=0, sticky="w", pady=(0, 3))
+        train_scale = ttk.Scale(split_box, from_=50, to=90, variable=train_var, command=_sync_split_labels)
+        train_scale.grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 3))
+        val_lbl.grid(row=2, column=0, sticky="w", pady=(0, 3))
+        val_scale = ttk.Scale(split_box, from_=0, to=20, variable=val_var, command=_sync_split_labels)
+        val_scale.grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(0, 3))
+        test_lbl.grid(row=3, column=0, sticky="w")
+        split_box.columnconfigure(1, weight=1)
+        _sync_split_labels()
+
+        annotation_option_box = _option(
+            body,
+            "annotations",
+            "Eksport anotacji XML do współpracy",
+            (
+                "Tworzy pakiet annotations.xml, opcjonalnie z obrazami. Ten wariant nie wykonuje splitu i nie wymaga bramki datasetu YOLO."
+                if annotation_ready
+                else "Niedostępne: w XML musi istnieć co najmniej jedna zapisana tablica."
+            ),
+            annotation_ready,
+        )
+
+        def _sync_export_choice_ui(*_args):
+            show_split = bool(choice_var.get() == "dataset" and dataset_ready)
+            try:
+                if show_split:
+                    if str(split_box.winfo_manager()) != "pack":
+                        split_box.pack(fill=tk.X, pady=(0, 8), before=annotation_option_box)
+                else:
+                    split_box.pack_forget()
+            except Exception:
+                pass
+
+        try:
+            choice_var.trace_add("write", _sync_export_choice_ui)
+        except Exception:
+            pass
+        _sync_export_choice_ui()
+
+        buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        buttons.pack(fill=tk.X, pady=(8, 0))
+
+        def close_dialog():
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def confirm_choice():
+            choice = str(choice_var.get() or "").strip()
+            if choice == "dataset" and not dataset_ready:
+                return
+            if choice == "annotations" and not annotation_ready:
+                return
+            if choice == "dataset":
+                try:
+                    self.plate_train_pct.set(float(train_var.get()))
+                    self.plate_val_pct.set(float(val_var.get()))
+                    self._update_plate_dataset_ratio_labels()
+                except Exception:
+                    pass
+            result["choice"] = choice
+            close_dialog()
+
+        ttk.Button(buttons, text="Anuluj", command=close_dialog).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Dalej", command=confirm_choice).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            dialog.bind("<Escape>", lambda _e: close_dialog())
+            self._fit_borderless_dialog(dialog, parent=self.frame, min_width=620, min_height=560)
+            dialog.update_idletasks()
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+        except Exception:
+            pass
+
+        dialog.wait_window()
+        return result.get("choice")
+
+    def _start_z2_export_choice_flow(self):
+        if not self._is_free_mode_session_context():
+            self._start_plate_dataset_export()
+            return
+        state = self._build_z2_free_export_status_state()
+        choice = self._prompt_z2_export_choice(state)
+        if choice == "dataset":
+            self._start_plate_dataset_export()
+        elif choice == "annotations":
+            self._start_plate_annotation_package_export()
+
+    def _prompt_plate_annotation_package_export_options(self, state: dict) -> dict | None:
+        default_root = self._get_plate_annotation_exports_base_dir()
+        result: dict = {}
+
+        dialog = tk.Toplevel(self.frame)
+        try:
+            dialog.title("Eksport anotacji tablic")
+            dialog.transient(getattr(self.app, "root", None) or self.frame.winfo_toplevel())
+            dialog.grab_set()
+            dialog.resizable(False, False)
+        except Exception:
+            pass
+
+        palette = getattr(self.app, "palette", {}) or {}
+        panel_bg = palette.get("panel", "#252526")
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#4ec9b0")
+        try:
+            dialog.configure(bg=panel_bg)
+        except Exception:
+            pass
+
+        body = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
+
+        images_with_plates = int(state.get("images_with_plates", 0) or 0)
+        total_plates = int(state.get("total_plates", 0) or 0)
+        approved_images = 0
+        approved_plates = 0
+        try:
+            run_dir = Path(state.get("run_dir")) if state.get("run_dir") else None
+            strict_state = self._get_run_plate_strict_approved_state(run_dir)
+            approved_images = int(strict_state.get("approved_images", 0) or 0)
+            approved_plates = int(strict_state.get("approved_plates", 0) or 0)
+        except Exception:
+            approved_images = 0
+            approved_plates = 0
+        tk.Label(
+            body,
+            text="Pakiet anotacji tablic do współpracy",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+        tk.Label(
+            body,
+            text=(
+                "Program utworzy katalog z annotations.xml. Obrazy możesz dołączyć do pakietu albo pominąć, "
+                "jeśli odbiorca ma już ten sam katalog zdjęć."
+            ),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=500,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
+
+        stats = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        stats.pack(fill=tk.X, pady=(0, 10))
+        for row, (label, value) in enumerate(
+            (
+                ("Obrazy z tablicami", str(images_with_plates)),
+                ("Liczba tablic", str(total_plates)),
+                ("Zatwierdzone [OK]", f"{approved_images} obrazów / {approved_plates} tablic"),
+            )
+        ):
+            tk.Label(
+                stats,
+                text=label,
+                bg=panel_bg,
+                fg=muted,
+                font=("Segoe UI", 9),
+                anchor="w",
+            ).grid(row=row, column=0, sticky="w", pady=(0, 2))
+            tk.Label(
+                stats,
+                text=value,
+                bg=panel_bg,
+                fg=success,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).grid(row=row, column=1, sticky="w", padx=(14, 0), pady=(0, 2))
+
+        path_var = tk.StringVar(value=str(default_root))
+        include_images_var = tk.BooleanVar(value=True)
+        export_scope_var = tk.StringVar(value="all_saved")
+
+        scope_frame = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        scope_frame.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            scope_frame,
+            text="Zakres anotacji",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(anchor=tk.W)
+        ttk.Radiobutton(
+            scope_frame,
+            text="Wszystkie zapisane anotacje",
+            variable=export_scope_var,
+            value="all_saved",
+        ).pack(anchor=tk.W, pady=(4, 0))
+        ttk.Radiobutton(
+            scope_frame,
+            text="Tylko obrazy zatwierdzone [OK]",
+            variable=export_scope_var,
+            value="approved_ok_only",
+        ).pack(anchor=tk.W, pady=(2, 0))
+        tk.Label(
+            scope_frame,
+            text=(
+                "Tryb [OK] pomija obrazy bez zatwierdzenia na liście wyników. "
+                "To dobry wybór, gdy eksport ma być filtrem jakości."
+            ),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=500,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        path_frame = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        path_frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(
+            path_frame,
+            text="Katalog eksportu",
+            bg=panel_bg,
+            fg=fg,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(anchor=tk.W)
+        path_row = tk.Frame(path_frame, bg=panel_bg, bd=0, highlightthickness=0)
+        path_row.pack(fill=tk.X, pady=(4, 0))
+        path_entry = ttk.Entry(path_row, textvariable=path_var, width=56)
+        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse_export_dir():
+            initialdir = str(path_var.get() or default_root)
+            selected = filedialog.askdirectory(
+                parent=dialog,
+                initialdir=initialdir,
+                title="Wybierz katalog, w którym utworzyć pakiet anotacji",
+            )
+            if selected:
+                path_var.set(selected)
+
+        ttk.Button(path_row, text="Wskaż", command=browse_export_dir).pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Checkbutton(
+            body,
+            text="Dołącz obrazy do pakietu",
+            variable=include_images_var,
+        ).pack(anchor=tk.W, pady=(8, 0))
+        tk.Label(
+            body,
+            text=(
+                "Jeśli odznaczysz tę opcję, eksport będzie lekki i przeniesie tylko XML. "
+                "Import E1 poprosi wtedy o wskazanie zgodnego katalogu zdjęć."
+            ),
+            bg=panel_bg,
+            fg=muted,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=500,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        buttons = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+        buttons.pack(fill=tk.X, pady=(16, 0))
+
+        def close_dialog():
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def confirm_export():
+            raw_dir = str(path_var.get() or "").strip()
+            if not raw_dir:
+                messagebox.showwarning(
+                    "Eksport anotacji tablic",
+                    "Wskaż katalog eksportu.",
+                    parent=dialog,
+                )
+                return
+            try:
+                export_root = Path(raw_dir).expanduser()
+            except Exception:
+                messagebox.showwarning(
+                    "Eksport anotacji tablic",
+                    "Podana ścieżka katalogu eksportu jest nieprawidłowa.",
+                    parent=dialog,
+                )
+                return
+            result["export_root"] = export_root
+            result["include_images"] = bool(include_images_var.get())
+            result["annotation_scope"] = str(export_scope_var.get() or "all_saved").strip() or "all_saved"
+            close_dialog()
+
+        ttk.Button(buttons, text="Anuluj", command=close_dialog).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Eksportuj", command=confirm_export).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            dialog.bind("<Escape>", lambda _e: close_dialog())
+            self._fit_borderless_dialog(dialog, parent=self.frame, min_width=560, min_height=430)
+            dialog.update_idletasks()
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+        except Exception:
+            pass
+
+        dialog.wait_window()
+        if not result:
+            return None
+        return result
+
+    def _start_plate_annotation_package_export(self):
+        if not self._is_free_mode_session_context():
+            return
+        if not self._ensure_preview_edits_saved("eksport anotacji tablic"):
+            return
+
+        state = self._get_plate_annotation_package_export_state()
+        if not state.get("ok"):
+            return messagebox.showwarning(
+                "Eksport anotacji tablic",
+                str(state.get("message") or "Najpierw przygotuj i zapisz anotacje tablic."),
+                parent=self.frame.winfo_toplevel(),
+            )
+
+        run_dir = Path(state["run_dir"])
+        options = self._prompt_plate_annotation_package_export_options(state)
+        if not options:
+            return
+        include_images = bool(options.get("include_images", True))
+        annotation_scope = str(options.get("annotation_scope") or "all_saved").strip() or "all_saved"
+        approved_only = annotation_scope == "approved_ok_only"
+        scope_label = "tylko zatwierdzone [OK]" if approved_only else "wszystkie zapisane"
+        export_root = Path(options.get("export_root") or self._get_plate_annotation_exports_base_dir())
+        try:
+            annotations = [copy.deepcopy(ann) for ann in self._get_plate_annotation_export_annotations(run_dir)]
+        except Exception as e:
+            return messagebox.showerror(
+                "Eksport anotacji tablic",
+                f"Nie udało się odczytać anotacji z annotations.xml:\n{e}",
+                parent=self.frame.winfo_toplevel(),
+            )
+
+        if approved_only:
+            annotations = self._filter_plate_annotation_export_annotations_by_approved(run_dir, annotations)
+            approved_export_images, approved_export_plates = self._count_plate_annotations(annotations)
+            if approved_export_images <= 0 or approved_export_plates <= 0:
+                return messagebox.showwarning(
+                    "Eksport anotacji tablic",
+                    (
+                        "Wybrano eksport tylko obrazów zatwierdzonych [OK], ale w tym runie nie ma "
+                        "zatwierdzonych obrazów z zapisaną anotacją tablicy.\n\n"
+                        "Zatwierdź poprawne obrazy na liście wyników prawym przyciskiem myszy, "
+                        "a potem uruchom eksport ponownie."
+                    ),
+                    parent=self.frame.winfo_toplevel(),
+                )
+
+        source_manifest = self._load_annotation_run_manifest(run_dir)
+        compatible_images_dir = (
+            self._resolve_existing_dir(str(self.plate_dataset_images_var.get() or "").strip())
+            or self._resolve_step3_images_dir_from_z2_run(run_dir)
+        )
+
+        resolved_images: list[tuple[str, Path, Path]] = []
+        if include_images:
+            image_roots = self._get_external_run_image_roots(
+                run_dir,
+                source_manifest,
+                compatible_images_dir=compatible_images_dir,
+            )
+            resolved_images, missing_images = self._resolve_external_run_source_images(annotations, image_roots)
+            if missing_images:
+                preview_missing = "\n".join(str(name) for name in missing_images[:6])
+                extra_missing = max(0, len(missing_images) - 6)
+                suffix = f"\n... i jeszcze {extra_missing} plików." if extra_missing else ""
+                return messagebox.showerror(
+                    "Eksport anotacji tablic",
+                    (
+                        "Nie można utworzyć kompletnego pakietu, bo brakuje obrazów powiązanych z annotations.xml.\n\n"
+                        f"Brakujące pliki:\n{preview_missing}{suffix}"
+                    ),
+                    parent=self.frame.winfo_toplevel(),
+                )
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        package_dir = export_root / f"PlateAnnotations_Z2_{run_dir.name}_{timestamp}"
+        images_dir = package_dir / "images"
+        xml_path = package_dir / "annotations.xml"
+        manifest_path = package_dir / "annotation_export_manifest.json"
+        readme_path = package_dir / "README.txt"
+
+        try:
+            package_dir.mkdir(parents=True, exist_ok=False)
+            if include_images:
+                images_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return messagebox.showerror(
+                "Eksport anotacji tablic",
+                f"Nie udało się utworzyć katalogu eksportu:\n{e}",
+                parent=self.frame.winfo_toplevel(),
+            )
+
+        self.is_processing = True
+        self._set_plate_annotation_export_button_state()
+        try:
+            self._set_preview_processing_overlay(
+                True,
+                title="Eksport anotacji tablic",
+                details=(
+                    f"Tworzę pakiet annotations.xml ({scope_label}) z obrazami potrzebnymi do importu w E1."
+                    if include_images
+                    else f"Tworzę lekki pakiet annotations.xml ({scope_label}). Zdjęcia zostaną wskazane dopiero przy imporcie E1."
+                ),
+                cancel_visible=False,
+            )
+            self._update_preview_processing_overlay_progress(
+                pct=0.0,
+                current=0,
+                total=max(1, len(resolved_images)) if include_images else 1,
+                filename="",
+                meta_text="0% | przygotowanie pakietu",
+            )
+            try:
+                self.frame.update_idletasks()
+            except Exception:
+                pass
+
+            relative_name_map: dict[str, str] = {}
+            used_export_paths: set[str] = set()
+            if include_images:
+                total_images = max(1, len(resolved_images))
+                for idx, (filename, _raw_path, source_image_path) in enumerate(resolved_images, start=1):
+                    relative_path = self._build_safe_imported_image_relative_path(
+                        filename,
+                        index=idx - 1,
+                        used_paths=used_export_paths,
+                    )
+                    relative_name = str(relative_path).replace("\\", "/")
+                    target_image_path = images_dir / relative_path
+                    target_image_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_image_path, target_image_path)
+                    relative_name_map[str(filename)] = relative_name
+
+                    if idx == len(resolved_images) or idx % 25 == 0:
+                        pct = (idx / total_images) * 100.0
+                        self._update_preview_processing_overlay_progress(
+                            pct=pct,
+                            current=idx,
+                            total=len(resolved_images),
+                            filename=Path(relative_name).name,
+                            meta_text=f"{int(round(pct))}% | kopiowanie obrazów {idx}/{len(resolved_images)}",
+                        )
+                        try:
+                            self.frame.update_idletasks()
+                        except Exception:
+                            pass
+
+                for ann in annotations:
+                    original_name = str(getattr(ann, "filename", "") or "").strip()
+                    mapped_name = relative_name_map.get(original_name)
+                    if mapped_name:
+                        ann.filename = mapped_name
+
+            if not CVATExporter(task_name="Z2 Plate Annotation Export").export(
+                annotations,
+                xml_path,
+                include_confidence=True,
+                only_successful=False,
+            ):
+                raise RuntimeError("Eksporter CVAT nie zapisał pliku annotations.xml.")
+
+            images_with_plates, total_plates = self._count_plate_annotations(annotations)
+            strict_approval_state = self._get_run_plate_strict_approved_state(run_dir)
+            approved_images = int(strict_approval_state.get("approved_images", 0) or 0)
+            approved_plates = int(strict_approval_state.get("approved_plates", 0) or 0)
+            now_iso = datetime.datetime.now().isoformat(timespec="seconds")
+            manifest_payload = {
+                "export_type": "z2_plate_annotations_package",
+                "created_at": now_iso,
+                "source_run_dir": str(run_dir.resolve()),
+                "source_xml_path": str((run_dir / "annotations.xml").resolve()),
+                "source_images_dir": str(Path(compatible_images_dir).resolve()) if compatible_images_dir else "",
+                "package_dir": str(package_dir.resolve()),
+                "annotations_xml": str(xml_path.resolve()),
+                "images_included": bool(include_images),
+                "images_dir": str(images_dir.resolve()) if include_images else "",
+                "annotation_scope": annotation_scope,
+                "annotation_scope_label": scope_label,
+                "exported_images": int(images_with_plates),
+                "exported_plates": int(total_plates),
+                "approved_images_in_source_run": int(approved_images),
+                "approved_plates_in_source_run": int(approved_plates),
+                "import_hint": "W E1 wybierz import anotacji tablic i wskaż plik annotations.xml z tego katalogu.",
+            }
+            manifest_path.write_text(
+                json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            readme_path.write_text(
+                (
+                    "Pakiet eksportu anotacji tablic Z2\n"
+                    "=================================\n\n"
+                    "Ten katalog służy do przeniesienia anotacji tablic na inną maszynę lub do innej kopii programu.\n"
+                    "W E1 użyj importu anotacji tablic i wskaż plik annotations.xml znajdujący się w tym katalogu.\n\n"
+                    f"Zakres anotacji: {scope_label}\n"
+                    f"Obrazy dołączone do pakietu: {'tak' if include_images else 'nie'}\n"
+                    f"Obrazy z anotacjami: {images_with_plates}\n"
+                    f"Tablice: {total_plates}\n"
+                    f"Status OK w runie źródłowym: {approved_images} obrazów / {approved_plates} tablic\n"
+                ),
+                encoding="utf-8",
+            )
+
+            self._update_preview_processing_overlay_progress(
+                pct=100.0,
+                current=(len(resolved_images) if include_images else 1),
+                total=(len(resolved_images) if include_images else 1),
+                filename="annotations.xml",
+                meta_text="100% | pakiet gotowy",
+            )
+            self._set_plate_export_status(
+                (
+                    f"Pakiet anotacji tablic gotowy ({scope_label}): {images_with_plates} obrazów / {total_plates} tablic. "
+                    "W E1 na drugiej maszynie wskaż plik annotations.xml z tego katalogu."
+                ),
+                "success",
+            )
+            message = (
+                "Utworzono pakiet anotacji tablic do importu w E1.\n\n"
+                f"Zakres anotacji: {scope_label}\n"
+                f"Obrazy dołączone do pakietu: {'tak' if include_images else 'nie'}\n"
+                f"Obrazy z anotacjami: {images_with_plates}\n"
+                f"Tablice: {total_plates}\n"
+                f"Status OK w runie źródłowym: {approved_images} obrazów / {approved_plates} tablic\n\n"
+                f"Plik do importu: {xml_path}\n"
+                f"Katalog pakietu: {package_dir}\n\n"
+                "Na drugiej maszynie otwórz E1, wybierz import anotacji tablic i wskaż ten plik annotations.xml. "
+                "Jeśli pakiet nie zawiera obrazów, import poprosi o zgodny katalog zdjęć."
+            )
+            themed_info = getattr(getattr(self, "app", None), "themed_info", None)
+            if callable(themed_info):
+                themed_info("Eksport anotacji tablic", message, parent=self.frame, tone="success")
+            else:
+                messagebox.showinfo("Eksport anotacji tablic", message, parent=self.frame.winfo_toplevel())
+        except Exception as e:
+            try:
+                shutil.rmtree(package_dir)
+            except Exception:
+                pass
+            messagebox.showerror(
+                "Eksport anotacji tablic",
+                f"Nie udało się utworzyć pakietu anotacji:\n{e}",
+                parent=self.frame.winfo_toplevel(),
+            )
+        finally:
+            self.is_processing = False
+            try:
+                self._set_preview_processing_overlay(False)
+            except Exception:
+                pass
+            self._set_plate_annotation_export_button_state()
+            self._refresh_step2_action_states()
 
     def _get_run_plate_annotation_counts(self, run_dir: Path | None) -> tuple[int, int]:
         if run_dir is None:
@@ -19828,10 +21221,14 @@ class AnnotationTab:
 
         try:
             from ..campaign_manager import CAMPAIGN
-            iteration_raw_dir = CAMPAIGN.get_iteration_raw_dir()
+            iteration_raw_dir = CAMPAIGN.get_iteration_image_source_dir() or CAMPAIGN.get_iteration_raw_dir()
+            iteration_manifest_count = int(CAMPAIGN.get_iteration_image_count() or 0)
+            ingest_manifest = CAMPAIGN.load_ingest_manifest() or {}
             approved_entries = list(CAMPAIGN.list_plate_approved_entries() or [])
         except Exception:
             iteration_raw_dir = None
+            iteration_manifest_count = 0
+            ingest_manifest = {}
             approved_entries = []
 
         try:
@@ -19853,8 +21250,21 @@ class AnnotationTab:
                 return 0
 
         image_names: set[str] = set()
+        for item in list((ingest_manifest or {}).get("selected_images") or []):
+            if not isinstance(item, dict):
+                continue
+            safe_name = str(item.get("name", "") or "").strip().lower()
+            if not safe_name:
+                for key in ("target_path", "source_path", "iteration_target_path"):
+                    candidate = str(item.get(key, "") or "").strip()
+                    if candidate:
+                        safe_name = Path(candidate).name.strip().lower()
+                        break
+            if safe_name:
+                image_names.add(safe_name)
+
         try:
-            if iter_dir is not None and iter_dir.exists() and iter_dir.is_dir():
+            if not image_names and iter_dir is not None and iter_dir.exists() and iter_dir.is_dir():
                 for image_path in iter_dir.iterdir():
                     if not image_path.is_file() or image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
                         continue
@@ -19863,6 +21273,9 @@ class AnnotationTab:
                         image_names.add(safe_name)
         except Exception:
             pass
+
+        if not image_names and iteration_manifest_count > 0:
+            return int(iteration_manifest_count)
 
         for entry in approved_entries:
             if not isinstance(entry, dict):
@@ -20027,7 +21440,11 @@ class AnnotationTab:
         return self._get_run_plate_strict_approved_state(candidate)
 
     def _is_plate_dataset_export_allowed_for_current_selection(self) -> bool:
-        return bool(self._get_plate_dataset_export_approval_state().get("ok"))
+        state = dict(self._get_plate_dataset_export_approval_state() or {})
+        if self._is_free_mode_session_context():
+            min_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            return bool(int(state.get("approved_plates", 0) or 0) >= int(min_plates))
+        return bool(state.get("ok"))
 
     def _warn_plate_dataset_export_requires_ok(self, approval_state: dict | None = None) -> None:
         state = dict(approval_state or self._get_plate_dataset_export_approval_state())
@@ -20035,18 +21452,24 @@ class AnnotationTab:
         approved_plates = int(state.get("approved_plates", 0) or 0)
         total_images = int(state.get("total_images", 0) or 0)
         total_plates = int(state.get("total_plates", 0) or 0)
+        min_dataset_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+        missing_dataset_plates = max(0, int(min_dataset_plates) - int(approved_plates or 0))
         message = (
-            "Eksport anotacji jest zablokowany, bo żadna anotacja w tym runie nie ma statusu OK.\n\n"
+            "Eksport datasetu YOLO Pose jest zablokowany, bo bramka datasetu nie jest spełniona.\n\n"
+            f"Minimum datasetu: {min_dataset_plates} zatwierdzonych tablic [OK]. "
+            f"Brakuje jeszcze: {missing_dataset_plates}.\n\n"
             "Warunek nadania [OK]: obraz musi mieć co najmniej jedną poprawną ramkę/poligon tablicy zapisaną w XML. "
             "Samo zaznaczenie obrazu bez ramki nie wystarczy.\n\n"
             "Po autoanotacji albo anotacji ręcznej zaznacz poprawne obrazy na liście, kliknij PPM "
-            "i wybierz „Oznacz zaznaczone jako OK”. Dopiero po tym eksport obejmie wyłącznie zatwierdzone pozycje.\n\n"
+            "i wybierz „Oznacz zaznaczone jako OK”. Eksport samych anotacji XML może być nadal dostępny, "
+            "jeśli XML zawiera zapisane tablice.\n\n"
             f"Status teraz: OK obrazy={approved_images}, OK tablice={approved_plates}, "
             f"wszystkie obrazy w runie={total_images}, wszystkie tablice={total_plates}."
         )
         self._set_plate_export_status(
             (
-                "Eksport zablokowany: oznacz co najmniej jeden poprawny obraz jako OK.\n\n"
+                "Eksport datasetu YOLO zablokowany: bramka [OK] nie jest spełniona.\n\n"
+                f"Brakuje do minimum: {missing_dataset_plates} tablic [OK].\n\n"
                 "Warunek [OK]: obraz musi mieć zapisaną ramkę/poligon tablicy.\n\n"
                 "Zaznacz obraz lub grupę obrazów na liście, kliknij PPM i wybierz „Oznacz zaznaczone jako OK”.\n\n"
                 f"OK: {approved_images} obrazów / {approved_plates} tablic."
@@ -20055,7 +21478,7 @@ class AnnotationTab:
         )
         try:
             messagebox.showwarning(
-                "Eksport wymaga statusu OK",
+                "Dataset YOLO wymaga bramki [OK]",
                 message,
                 parent=self.frame.winfo_toplevel(),
             )
@@ -20272,13 +21695,35 @@ class AnnotationTab:
             dataset_ready = False
 
         try:
-            self.export_plate_dataset_btn.configure(state=(tk.NORMAL if dataset_ready else tk.DISABLED))
+            if self._is_free_mode_session_context():
+                export_choice_ready = bool(
+                    (dataset_ready or self._get_plate_annotation_package_export_state().get("ok"))
+                    and not self.is_processing
+                )
+                self.export_plate_dataset_btn.configure(
+                    text="EKSPORT",
+                    command=self._start_z2_export_choice_flow,
+                    state=(tk.NORMAL if export_choice_ready else tk.DISABLED),
+                )
+            else:
+                self.export_plate_dataset_btn.configure(
+                    text="EKSPORTUJ DATASET",
+                    command=self._start_z2_export_choice_flow,
+                    state=(tk.NORMAL if dataset_ready else tk.DISABLED),
+                )
         except Exception:
             pass
+        self._set_plate_annotation_export_button_state()
 
         if dataset_xml_exists and dataset_images_dir is not None and dataset_total_plates <= 0:
-            self._set_plate_export_status(
-                (
+            if self._is_free_mode_session_context():
+                no_plate_message = (
+                    "Eksport Z2 jest jeszcze niedostępny: XML nie zawiera zapisanej tablicy.\n\n"
+                    "Eksport anotacji XML wymaga co najmniej jednej zapisanej tablicy. "
+                    "Dataset YOLO dodatkowo wymaga bramki pozycji [OK]."
+                )
+            else:
+                no_plate_message = (
                     "Eksport zablokowany: w runie nie ma jeszcze zapisanej tablicy.\n\n"
                     "Jak odblokować: narysuj i zapisz co najmniej jedną ramkę tablicy, potem zaznacz obraz na liście, "
                     "kliknij PPM i wybierz „Oznacz zaznaczone jako OK”. Bez statusu OK eksport nie będzie możliwy."
@@ -20286,20 +21731,40 @@ class AnnotationTab:
                     else "Eksport zablokowany: w runie nie ma jeszcze zapisanej tablicy.\n\n"
                     "Jak odblokować: popraw wynik albo dodaj co najmniej jedną tablicę, zapisz zmiany, potem zaznacz obraz na liście, "
                     "kliknij PPM i wybierz „Oznacz zaznaczone jako OK”. Bez statusu OK eksport nie będzie możliwy."
-                ),
+                )
+            self._set_plate_export_status(
+                no_plate_message,
                 "warning",
             )
         elif dataset_xml_exists and dataset_images_dir is not None and dataset_total_plates > 0 and dataset_approved_plates <= 0:
-            self._set_plate_export_status(
-                (
+            if self._is_free_mode_session_context():
+                no_ok_message = (
+                    "Eksport anotacji XML jest dostępny, bo XML zawiera zapisane tablice.\n\n"
+                    "Dataset YOLO Pose ze splitem jest zablokowany: wymaga zatwierdzonych pozycji [OK]. "
+                    "Zaznacz poprawne obrazy na liście, kliknij PPM i wybierz „Oznacz zaznaczone jako OK”.\n\n"
+                    f"OK: {dataset_approved_images} obrazów / {dataset_approved_plates} tablic; "
+                    f"w runie: {dataset_total_plates} tablic."
+                )
+            else:
+                no_ok_message = (
                     "Eksport zablokowany: żadna anotacja nie ma statusu OK.\n\n"
                     "Jak odblokować: zaznacz poprawne obrazy na liście, kliknij PPM i wybierz "
                     "„Oznacz zaznaczone jako OK”. Eksport obejmie wyłącznie pozycje zatwierdzone OK.\n\n"
                     f"OK: {dataset_approved_images} obrazów / {dataset_approved_plates} tablic; "
                     f"w runie: {dataset_total_plates} tablic."
-                ),
+                )
+            self._set_plate_export_status(
+                no_ok_message,
                 "warning",
             )
+
+        if self._is_free_mode_session_context():
+            try:
+                self._sync_main_pane_right_panel_visibility()
+                self._refresh_free_mode_manual_right_panel()
+            except Exception:
+                pass
+            return
 
         approval_context = self._get_campaign_step2_approval_context()
         approval_run_dir = approval_context.get("run_dir")
@@ -20316,7 +21781,8 @@ class AnnotationTab:
         approval_xml_exists = bool(approval_run_dir and (approval_run_dir / "annotations.xml").exists())
         approval_images_with_plates, approval_total_plates = self._get_run_plate_annotation_counts(approval_run_dir)
         approval_marked_images, approval_marked_plates = self._get_run_plate_approved_counts(approval_run_dir)
-        min_approval_images = 2
+        min_plate_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+        min_char_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
         project_approved_images = 0
         project_approved_plates = 0
         char_effective_images = 0
@@ -20357,8 +21823,7 @@ class AnnotationTab:
                         "images_with_plates": int(refreshed_char_effective_source.get("images_with_plates", 0) or 0),
                         "total_plates": int(refreshed_char_effective_source.get("total_plates", 0) or 0),
                         "ready": bool(
-                            int(refreshed_char_effective_source.get("images_with_plates", 0) or 0) >= int(min_approval_images)
-                            and int(refreshed_char_effective_source.get("total_plates", 0) or 0) > 0
+                            int(refreshed_char_effective_source.get("total_plates", 0) or 0) >= int(min_char_approval_plates)
                         ),
                         "has_source": bool(int(refreshed_char_effective_source.get("total_plates", 0) or 0) > 0),
                     }
@@ -20408,6 +21873,11 @@ class AnnotationTab:
                 effective_project_plate_images = int(project_approved_images or 0)
                 effective_project_plate_plates = int(project_approved_plates or 0)
         if project_active and approval_iteration_target == "char" and current_step == 2 and self.current_annotations:
+            try:
+                approval_images_with_plates, approval_total_plates = self._count_plate_annotations(self.current_annotations)
+                approval_marked_images, approval_marked_plates = self._get_current_preview_plate_approved_counts()
+            except Exception:
+                pass
             char_display_current_images = int(approval_marked_images or 0)
             char_display_current_plates = int(approval_marked_plates or 0)
             char_display_images = int(project_approved_images or 0) + int(char_display_current_images or 0)
@@ -20419,17 +21889,14 @@ class AnnotationTab:
                 f"i {int(char_display_plates or 0)} tablic."
             )
         current_iteration_plate_ready = bool(
-            approval_marked_plates > 0
-            and int(approval_marked_images or 0) >= int(min_approval_images)
+            int(approval_marked_plates or 0) >= int(min_plate_approval_plates)
         )
         cumulative_project_plate_ready = bool(
-            int(effective_project_plate_plates or 0) > 0
-            and int(effective_project_plate_images or 0) >= int(min_approval_images)
+            int(effective_project_plate_plates or 0) >= int(min_plate_approval_plates)
         )
         char_current_ready = bool(
             approval_xml_exists
-            and approval_marked_plates > 0
-            and int(approval_marked_images or 0) >= int(min_approval_images)
+            and int(approval_marked_plates or 0) >= int(min_char_approval_plates)
         )
         approve_ready = bool(
             (
@@ -20447,8 +21914,7 @@ class AnnotationTab:
                     char_current_ready
                     or (
                         char_effective_ready
-                        and char_effective_plates > 0
-                        and int(char_effective_images or 0) >= int(min_approval_images)
+                        and int(char_effective_plates or 0) >= int(min_char_approval_plates)
                     )
                 )
                 and not self.is_processing
@@ -20537,12 +22003,12 @@ class AnnotationTab:
                     )
                 approve_hint_tone = "success"
             elif approval_total_plates > 0:
-                missing_images = max(0, int(min_approval_images) - int(effective_project_plate_images or 0))
+                missing_plates = max(0, int(min_plate_approval_plates) - int(effective_project_plate_plates or 0))
                 hint_lines.append(
                     (
-                        f"Do odblokowania domknięcia E2 potrzebujesz jeszcze {missing_images} obrazu(ów) oznaczonego jako [OK]."
-                        if missing_images > 0
-                        else "Dodaj jeszcze poprawne oznaczenia i oznacz je jako [OK], aby domknąć E2."
+                        f"Do odblokowania domknięcia E2 potrzebujesz jeszcze {missing_plates} zatwierdzonych tablic."
+                        if missing_plates > 0
+                        else "Dodaj jeszcze poprawne oznaczenia i zatwierdź obrazy jako [OK], aby domknąć E2."
                     )
                 )
                 approve_hint_tone = "warning"
@@ -20564,13 +22030,13 @@ class AnnotationTab:
                 approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
                 approve_hint_tone = "success"
             elif char_effective_plates > 0:
-                missing_images = max(0, int(min_approval_images) - int(char_display_images or 0))
+                missing_plates = max(0, int(min_char_approval_plates) - int(char_display_plates or 0))
                 hint_lines = [char_effective_summary_line]
                 hint_lines.append(
                     (
-                        f"Do wejścia do Z3 brakuje jeszcze {missing_images} obrazu oznaczonego jako [OK]. "
+                        f"Do wejścia do Z3 brakuje jeszcze {missing_plates} tablic oznaczonych na obrazach ze statusem [OK]. "
                         f"Na liście Z2 masz obecnie {pending_count} obrazów tej iteracji do sprawdzenia."
-                        if missing_images > 0
+                        if missing_plates > 0
                         else f"Na liście Z2 masz obecnie {pending_count} obrazów tej iteracji do sprawdzenia."
                     )
                 )
@@ -20581,7 +22047,7 @@ class AnnotationTab:
                 approve_hint_text = (
                     "Ten etap przygotowuje źródło tablic dla Z3. "
                     f"Na liście Z2 masz obecnie {pending_count} obrazów tej iteracji do sprawdzenia. "
-                    "Uruchom autoanotację, popraw wynik ręcznie tam, gdzie trzeba, i oznacz jako [OK] co najmniej 2 obrazy z tablicami. "
+                    f"Utwórz XML, oznacz tablice i nadaj status [OK] obrazom z poprawnymi anotacjami. Minimum wejścia do E3 to {min_char_approval_plates} tablic. "
                     "Dopiero wtedy odblokuje się powrót do E3 i dalsza praca nad znakami."
                 )
                 approve_hint_tone = "info"
@@ -20592,28 +22058,27 @@ class AnnotationTab:
                     hint_lines.append("Minimalny próg wejścia do E3 jest już spełniony, ale jeśli masz jeszcze chwilę, zwykle warto dopisać kolejne poprawne tablice w Z2. Większy zatwierdzony zbiór poprawi skuteczność następnych iteracji modelu tablic.")
                     approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
                     approve_hint_tone = "success"
-                elif char_effective_ready and char_effective_plates > 0 and int(char_display_images or 0) >= int(min_approval_images):
+                elif char_effective_ready and int(char_display_plates or 0) >= int(min_char_approval_plates):
                     hint_lines = [char_effective_summary_line]
                     hint_lines.append("Możesz wrócić do E3 bez dokładania nowych [OK] w tej iteracji.")
                     hint_lines.append("To jest wystarczające minimum, ale zwykle lepszą decyzją jest dopisanie jeszcze kilku poprawnych tablic w Z2, zanim zamkniesz etap.")
                     approve_hint_text = "\n".join(line for line in hint_lines if str(line or "").strip())
                     approve_hint_tone = "success"
                 elif approval_total_plates > 0:
-                    missing_images = max(0, int(min_approval_images) - int(approval_marked_images or 0))
+                    missing_plates = max(0, int(min_char_approval_plates) - int(char_display_plates or 0))
                     approve_hint_text = (
                         (
-                            "Aby wrócić do E3 i przebudować dataset znaków, potrzebujesz co najmniej 2 obrazów z tablicami oznaczonych jako [OK]. "
+                            f"Aby wrócić do E3 i przebudować dataset znaków, potrzebujesz co najmniej {min_char_approval_plates} tablic na obrazach oznaczonych jako [OK]. "
                             if repair_mode
-                            else "Aby przejść z tablic do znaków, potrzebujesz co najmniej 2 obrazów oznaczonych jako [OK]. "
+                            else f"Aby przejść z tablic do znaków, potrzebujesz co najmniej {min_char_approval_plates} tablic na obrazach oznaczonych jako [OK]. "
                         )
                         + (
-                            f"Obecnie masz {approval_images_with_plates} obrazów z tablicami, "
-                            f"zatwierdzonych jako [OK]: {approval_marked_images}. "
-                            f"Minimum: {int(min_approval_images)}. "
+                            f"Obecnie źródło E3 ma {char_display_images} obrazów [OK] i {char_display_plates} tablic. "
+                            f"Minimum: {int(min_char_approval_plates)} tablic. "
                         )
                         + (
-                            f"Brakuje jeszcze {missing_images} obrazu oznaczonego jako [OK]. "
-                            if missing_images > 0
+                            f"Brakuje jeszcze {missing_plates} tablic. "
+                            if missing_plates > 0
                             else ""
                         )
                         + (
@@ -20626,9 +22091,9 @@ class AnnotationTab:
                 else:
                     approve_hint_text = (
                         (
-                            "Aby wrócić do E3 i przebudować dataset znaków, przygotuj poprawne tablice i oznacz jako [OK] co najmniej jeden obraz. "
+                            f"Aby wrócić do E3 i przebudować dataset znaków, przygotuj co najmniej {min_char_approval_plates} tablic i oznacz ich obrazy jako [OK]. "
                             if repair_mode
-                            else "Aby przejść do znaków w Z3, przygotuj poprawne tablice i oznacz jako [OK] co najmniej jeden obraz. "
+                            else f"Aby przejść do znaków w Z3, przygotuj co najmniej {min_char_approval_plates} tablic i oznacz ich obrazy jako [OK]. "
                         )
                         + (
                             "Dodaj lub popraw polygony tablic, a potem nadaj obrazom status [OK]. "
@@ -20638,41 +22103,41 @@ class AnnotationTab:
                     )
                     approve_hint_tone = "warning"
             else:
-                if approval_total_plates > 0 and int(approval_images_with_plates or 0) >= int(min_approval_images):
+                if int(effective_project_plate_plates or 0) >= int(min_plate_approval_plates):
                     approve_hint_text = (
-                        f"Gotowe do zamkniecia E2. Oznaczone obrazy: {approval_images_with_plates}. Zapisanych tablic: {approval_total_plates}. "
+                        f"Gotowe do zamknięcia E2. Zatwierdzonych tablic: {effective_project_plate_plates}. "
                         + (
-                            "Mozesz teraz od razu domknac ten etap."
+                            "Możesz teraz od razu domknąć ten etap."
                             if campaign_context
-                            else "Mozesz teraz wyeksportowac dataset YOLO Pose albo od razu domknac ten etap."
+                            else "Możesz teraz wyeksportować dataset YOLO Pose albo od razu domknąć ten etap."
                         )
                     )
                     approve_hint_tone = "success"
-                elif approval_total_plates > 0:
-                    missing_images = max(0, int(min_approval_images) - int(approval_images_with_plates or 0))
+                elif int(effective_project_plate_plates or 0) > 0:
+                    missing_plates = max(0, int(min_plate_approval_plates) - int(effective_project_plate_plates or 0))
                     approve_hint_text = (
-                        "Aby odblokowac domkniecie E2 w torze tablic, potrzebujesz co najmniej 2 oznaczonych obrazow. "
-                        f"Zatwierdzonych obrazow: {approval_images_with_plates}. Minimum: {int(min_approval_images)}. "
+                        f"Aby odblokować domknięcie E2 w torze tablic, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
+                        f"Zatwierdzonych tablic: {effective_project_plate_plates}. "
                         + (
-                            f"Brakuje jeszcze {missing_images} obrazu z zapisana tablica 'plate'. "
-                            if missing_images > 0
+                            f"Brakuje jeszcze {missing_plates} tablic. "
+                            if missing_plates > 0
                             else ""
                         )
-                        + "Dodaj brakujace oznaczenia i zapisz zmiany."
+                        + "Dodaj brakujące oznaczenia i zapisz zmiany."
                     )
                     approve_hint_tone = "warning"
                 else:
                     approve_hint_text = (
-                        "Aby odblokowac domkniecie E2, run musi zawierac co najmniej jedna tablice 'plate'. "
+                        f"Aby odblokować domknięcie E2, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic 'plate'. "
                         + (
-                            "Dodaj i zapisz przynajmniej jeden polygon recznie. "
+                            "Dodaj i zapisz polygony tablic, a potem oznacz poprawne obrazy jako [OK]. "
                             if manual_route
-                            else "Popraw wynik albo dodaj przynajmniej jedna tablice recznie. "
+                            else "Popraw wynik albo dodaj tablice ręcznie, a potem oznacz poprawne obrazy jako [OK]. "
                         )
                         + (
-                            "Ten sam warunek odblokowuje tez eksport datasetu YOLO Pose."
+                            "Ten sam warunek odblokowuje też eksport datasetu YOLO Pose."
                             if not campaign_context
-                            else "To warunek konieczny do domkniecia E2."
+                            else "To warunek konieczny do domknięcia E2."
                         )
                     )
                     approve_hint_tone = "warning"
@@ -20684,19 +22149,21 @@ class AnnotationTab:
         if project_active and current_step == 2 and approval_iteration_target == "plate":
             gate_current_images = int(effective_project_plate_images or 0)
             gate_current_plates = int(effective_project_plate_plates or 0)
-            gate_missing_images = max(0, int(min_approval_images) - gate_current_images)
-            gate_missing_plates = 0 if gate_current_plates > 0 else 1
+            gate_missing_plates = max(0, int(min_plate_approval_plates) - gate_current_plates)
             gate_xml_required = bool(int(current_iteration_num or 0) <= 1)
             gate_xml_missing = bool(gate_xml_required and not approval_xml_exists)
-            recommended_images = max(4, int(min_approval_images) * 2)
-            recommended_plates = max(4, recommended_images)
+            plate_gate_ready = bool(gate_current_plates >= int(min_plate_approval_plates) and not gate_xml_missing)
+            quality_info = CONFIG.describe_yolo_pose_dataset_quality(gate_current_plates)
+            quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+            quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
+            quality_ranges = str(quality_info.get("range_text", "") or "").strip()
             approve_hint_title_text = "Bramka kolejnego etapu"
             approve_hint_text = ""
             approve_hint_table_rows = [
                 (
                     "Status bramki",
-                    ("OTWARTA" if cumulative_project_plate_ready else "ZAMKNIETA"),
-                    ("success" if cumulative_project_plate_ready else "warning"),
+                    ("OTWARTA" if plate_gate_ready else "ZAMKNIĘTA"),
+                    ("success" if plate_gate_ready else "warning"),
                 ),
                 (
                     "Plik XML anotacji",
@@ -20704,26 +22171,84 @@ class AnnotationTab:
                     ("success" if approval_xml_exists else "warning"),
                 ),
                 (
-                    "Aktualnie po domknieciu E2",
-                    f"{gate_current_images} obrazow [OK] / {gate_current_plates} tablic",
-                    ("success" if cumulative_project_plate_ready else "warning"),
+                    "Aktualnie po domknięciu E2",
+                    f"{gate_current_images} obrazów [OK] / {gate_current_plates} tablic",
+                    ("success" if plate_gate_ready else "warning"),
                 ),
                 (
                     "Minimum",
-                    f"{int(min_approval_images)} obrazy [OK] / min. 1 tablica",
+                    f"{int(min_plate_approval_plates)} zatwierdzonych tablic [OK]",
                     "muted",
                 ),
                 (
                     "Brakuje do minimum",
                     (
-                        f"{gate_missing_images} obrazow [OK] / {gate_missing_plates} tablic"
+                        f"{gate_missing_plates} tablic"
                         + (" / XML" if gate_xml_missing else "")
                     ),
-                    ("success" if gate_missing_images == 0 and gate_missing_plates == 0 and not gate_xml_missing else "warning"),
+                    ("success" if gate_missing_plates == 0 and not gate_xml_missing else "warning"),
                 ),
                 (
-                    "Zalecane",
-                    f"{recommended_images}+ obrazow [OK] / {recommended_plates}+ tablic",
+                    "Jakość zbioru",
+                    quality_label,
+                    quality_tone,
+                ),
+                (
+                    "Progi jakości",
+                    quality_ranges,
+                    "info",
+                ),
+            ]
+        elif project_active and current_step == 2 and approval_iteration_target == "char":
+            gate_current_images = int(char_display_images or 0)
+            gate_current_plates = int(char_display_plates or 0)
+            gate_missing_plates = max(0, int(min_char_approval_plates) - gate_current_plates)
+            gate_xml_required = bool(int(current_iteration_num or 0) <= 1)
+            gate_xml_missing = bool(gate_xml_required and not approval_xml_exists)
+            char_gate_ready = bool(gate_current_plates >= int(min_char_approval_plates) and not gate_xml_missing)
+            quality_info = CONFIG.describe_yolo_pose_dataset_quality(gate_current_plates)
+            quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+            quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
+            quality_ranges = str(quality_info.get("range_text", "") or "").strip()
+            approve_hint_title_text = "Bramka kolejnego etapu"
+            approve_hint_text = ""
+            approve_hint_table_rows = [
+                (
+                    "Status bramki",
+                    ("OTWARTA" if char_gate_ready else "ZAMKNIĘTA"),
+                    ("success" if char_gate_ready else "warning"),
+                ),
+                (
+                    "Plik XML anotacji",
+                    ("UTWORZONY" if approval_xml_exists else ("WYMAGANY - BRAK" if gate_xml_required else "BRAK")),
+                    ("success" if approval_xml_exists else "warning"),
+                ),
+                (
+                    "Aktualnie dla E3",
+                    f"{gate_current_images} obrazów [OK] / {gate_current_plates} tablic",
+                    ("success" if gate_current_plates > 0 else "warning"),
+                ),
+                (
+                    "Minimum",
+                    f"{int(min_char_approval_plates)} tablic [OK]",
+                    "muted",
+                ),
+                (
+                    "Brakuje do minimum",
+                    (
+                        f"{gate_missing_plates} tablic"
+                        + (" / XML" if gate_xml_missing else "")
+                    ),
+                    ("success" if gate_missing_plates == 0 and not gate_xml_missing else "warning"),
+                ),
+                (
+                    "Jakość źródła tablic",
+                    quality_label,
+                    quality_tone,
+                ),
+                (
+                    "Progi jakości",
+                    quality_ranges,
                     "info",
                 ),
             ]
@@ -21127,24 +22652,55 @@ class AnnotationTab:
                     total_plates = int(approval_state.get("total_plates", 0) or 0)
                     if approval_state.get("ok"):
                         skipped_images = max(0, total_images - approved_images)
-                        self._set_plate_export_status(
-                            (
-                                f"Gotowe do eksportu: {approved_images} obrazów OK / {approved_plates} tablic OK. "
-                                f"Pozycje bez OK zostaną pominięte ({skipped_images} obrazów)."
-                            ),
-                            "success"
-                        )
+                        if self._is_free_mode_session_context():
+                            min_dataset_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+                            missing_dataset_plates = max(0, min_dataset_plates - approved_plates)
+                            if missing_dataset_plates > 0:
+                                self._set_plate_export_status(
+                                    (
+                                        "Eksport anotacji XML jest dostępny bez bramki datasetu.\n\n"
+                                        f"Dataset YOLO Pose ze splitem wymaga jeszcze {missing_dataset_plates} tablic [OK]. "
+                                        f"Teraz: {approved_images} obrazów OK / {approved_plates} tablic OK."
+                                    ),
+                                    "warning",
+                                )
+                            else:
+                                self._set_plate_export_status(
+                                    (
+                                        f"Gotowe: dataset YOLO może objąć {approved_images} obrazów OK / {approved_plates} tablic OK. "
+                                        f"Pakiet anotacji XML jest także dostępny. Pozycje bez OK zostaną pominięte w datasecie ({skipped_images} obrazów)."
+                                    ),
+                                    "success",
+                                )
+                        else:
+                            self._set_plate_export_status(
+                                (
+                                    f"Gotowe do eksportu: {approved_images} obrazów OK / {approved_plates} tablic OK. "
+                                    f"Pozycje bez OK zostaną pominięte ({skipped_images} obrazów)."
+                                ),
+                                "success"
+                            )
                     else:
-                        self._set_plate_export_status(
-                            (
-                                "Eksport zablokowany: żadna anotacja nie ma statusu OK.\n\n"
-                                "Jak odblokować: zaznacz poprawne obrazy na liście, kliknij PPM i wybierz "
-                                "„Oznacz zaznaczone jako OK”. Eksport obejmie wyłącznie pozycje zatwierdzone OK.\n\n"
-                                f"OK: {approved_images} obrazów / {approved_plates} tablic; "
-                                f"w runie: {total_images} obrazów / {total_plates} tablic."
-                            ),
-                            "warning"
-                        )
+                        if self._is_free_mode_session_context() and total_plates > 0:
+                            self._set_plate_export_status(
+                                (
+                                    "Eksport anotacji XML jest dostępny, bo XML zawiera zapisane tablice.\n\n"
+                                    "Dataset YOLO Pose ze splitem jest zablokowany do czasu nadania statusu [OK] "
+                                    "odpowiedniej liczbie obrazów."
+                                ),
+                                "warning",
+                            )
+                        else:
+                            self._set_plate_export_status(
+                                (
+                                    "Eksport zablokowany: żadna anotacja nie ma statusu OK.\n\n"
+                                    "Jak odblokować: zaznacz poprawne obrazy na liście, kliknij PPM i wybierz "
+                                    "„Oznacz zaznaczone jako OK”. Eksport obejmie wyłącznie pozycje zatwierdzone OK.\n\n"
+                                    f"OK: {approved_images} obrazów / {approved_plates} tablic; "
+                                    f"w runie: {total_images} obrazów / {total_plates} tablic."
+                                ),
+                                "warning"
+                            )
                 else:
                     self._set_plate_export_status(
                         "Wybrano run anotacji Z2, ale trzeba jeszcze wskazac folder zrodlowych obrazow dla tego runu anotacji.",
@@ -21276,6 +22832,16 @@ class AnnotationTab:
 
         if export_source_kind == "z2_run_export":
             approval_state = self._get_run_plate_strict_approved_state(run_dir)
+            min_dataset_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            approved_dataset_plates = int(approval_state.get("approved_plates", 0) or 0)
+            if (
+                self._is_free_mode_session_context()
+                and approved_dataset_plates < int(min_dataset_plates)
+            ):
+                self._warn_plate_dataset_export_requires_ok(approval_state)
+                self._refresh_step2_action_states()
+                self._refresh_free_mode_workflow_ui()
+                return
             if not approval_state.get("ok"):
                 self._warn_plate_dataset_export_requires_ok(approval_state)
                 self._refresh_step2_action_states()
@@ -21399,9 +22965,16 @@ class AnnotationTab:
                     logger.debug(f"Nie udalo sie zapisac manifestu zrodla datasetu tablic: {e}")
 
                 if manual_stage_enabled:
+                    stage_source_image_paths = None
+                    try:
+                        if self._get_campaign_iteration_manifest_image_count() > 0:
+                            stage_source_image_paths = self._get_campaign_iteration_manifest_image_paths(images_dir)
+                    except Exception:
+                        stage_source_image_paths = None
                     stage_ok, stage_msg, stage_stats = self.dataset_creator.sync_pending_stage(
                         images_dir,
                         self._get_manual_plate_stage_dir(),
+                        source_image_paths=stage_source_image_paths,
                     )
                     stage_result["ok"] = bool(stage_ok)
                     stage_result["message"] = str(stage_msg or "").strip()
@@ -21445,7 +23018,7 @@ class AnnotationTab:
                                     f"Do kolejnej rundy recznej anotacji wykorzystaj folder {stage_rel}."
                                 )
                             else:
-                                stage_note = " Wszystkie zdjecia z tej paczki maja juz oznaczone tablice."
+                                stage_note = " Wszystkie zdjecia z tego zestawu maja juz oznaczone tablice."
                                 stage_hint = stage_note
                         else:
                             stage_note = f" Dataset powstal, ale stage oczekujacych nie zostal zaktualizowany: {stage_result.get('message')}"
@@ -21509,7 +23082,7 @@ class AnnotationTab:
                         messagebox.showinfo(
                             "Stage oczekujacych",
                             (
-                                f"Do stage oczekujacych trafilo {pending_count} nieoznaczonych zdjec z tej paczki.\n\n"
+                                f"Do stage oczekujacych trafilo {pending_count} nieoznaczonych zdjec z tego zestawu.\n\n"
                                 f"Stage zawiera teraz lacznie {stage_total} obrazow.\n"
                                 f"{stage_result.get('stage_images_dir')}\n\n"
                                 "Ten folder mozesz wykorzystac pozniej jako kolejna pule do recznej anotacji."
@@ -23285,7 +24858,7 @@ class AnnotationTab:
                 self._set_inline_label_state(
                     hint_lbl,
                     text=(
-                        "To jest paczka obrazów przypisana już do tej iteracji przez E1. "
+                        "To jest zestaw obrazów przypisany już do tej iteracji przez E1. "
                         "W Z2 nie trzeba wskazywać jej ponownie."
                     ),
                     tone="muted",
@@ -23358,7 +24931,7 @@ class AnnotationTab:
             if defer_preview_load:
                 try:
                     self._set_status_label_state(
-                        "Otwieram Z2. Lista zdjęć tej paczki doładuje się za chwilę.",
+                        "Otwieram Z2. Lista zdjęć tego zestawu doładuje się za chwilę.",
                         "neutral",
                     )
                 except Exception:
@@ -23367,7 +24940,7 @@ class AnnotationTab:
                 try:
                     self._prime_campaign_source_preview(input_dir)
                 except Exception as e:
-                    logger.debug(f"Nie udało się przygotować podglądu paczki Z2: {e}")
+                    logger.debug(f"Nie udało się przygotować podglądu zestawu Z2: {e}")
 
         try:
             self._apply_campaign_iteration_model_defaults()
@@ -23573,14 +25146,14 @@ class AnnotationTab:
             try:
                 self._set_status_label_state(
                     (
-                        "Ta paczka nie zawiera już obrazów oczekujących na pracę w Z2. "
+                        "Ten zestaw nie zawiera już obrazów oczekujących na pracę w Z2. "
                         f"Wszystkie obrazy z tego wejścia są już w zatwierdzonym zbiorze projektu ({approved_skip_count})."
                         if approved_skip_count > 0
                         else (
-                            f"Ta paczka nie zawiera już obrazów oczekujących na pracę w Z2. "
+                            f"Ten zestaw nie zawiera już obrazów oczekujących na pracę w Z2. "
                             f"{char_effective_skip_count} obrazów zostało już użytych w aktywnym E3."
                             if char_effective_skip_count > 0
-                            else "Ta paczka nie zawiera już obrazów oczekujących na pracę w Z2. Wszystkie zdjęcia z tego wejścia są już w zatwierdzonym zbiorze projektu."
+                            else "Ten zestaw nie zawiera już obrazów oczekujących na pracę w Z2. Wszystkie zdjęcia z tego wejścia są już w zatwierdzonym zbiorze projektu."
                         )
                     ),
                     "info",
@@ -23599,11 +25172,11 @@ class AnnotationTab:
             )
             if approved_skip_count > 0:
                 status_text += (
-                    f" {approved_skip_count} obrazów jest już zatwierdzonych w projekcie i nie wraca do tej paczki."
+                    f" {approved_skip_count} obrazów jest już zatwierdzonych w projekcie i nie wraca do tego zestawu."
                 )
             if char_effective_skip_count > 0:
                 status_text += (
-                    f" {char_effective_skip_count} obrazów jest już użytych w aktywnym E3 i nie wraca do tej paczki."
+                    f" {char_effective_skip_count} obrazów jest już użytych w aktywnym E3 i nie wraca do tego zestawu."
                 )
             if reused_count > 0:
                 status_text += (
@@ -23723,7 +25296,7 @@ class AnnotationTab:
                     status_message=(
                         "Obraz źródłowy gotowy do utworzenia XML ręcznej anotacji."
                         if manual_preview
-                        else "Obraz źródłowy gotowy do autoanotacji. Użyj Start, aby uruchomić proces dla tej paczki."
+                        else "Obraz źródłowy gotowy do autoanotacji. Użyj Start, aby uruchomić proces dla tego zestawu."
                     ),
                 )
             )
@@ -23827,18 +25400,6 @@ class AnnotationTab:
             pass
         return True
 
-    def _ensure_free_mode_auto_workspace_preview(self) -> bool:
-        return self._ensure_free_mode_input_workspace_preview(
-            expected_route="auto",
-            expected_step="auto_start",
-        )
-
-    def _ensure_free_mode_manual_workspace_preview(self) -> bool:
-        return self._ensure_free_mode_input_workspace_preview(
-            expected_route="manual",
-            expected_step="manual_start",
-        )
-
     def _schedule_free_mode_input_workspace_preview_load(
         self,
         *,
@@ -23890,7 +25451,7 @@ class AnnotationTab:
         try:
             self._show_campaign_step2_splash(
                 title="Ładowanie katalogu obrazów",
-                body="Przygotowuję workspace Z2 dla wybranej paczki zdjęć.",
+                body="Przygotowuję workspace Z2 dla wybranego zestawu zdjęć.",
                 tone="info",
                 progress=0.0,
             )
@@ -24511,13 +26072,6 @@ class AnnotationTab:
             )
 
     @staticmethod
-    def _strip_workflow_step_prefix(text: str | None) -> str:
-        raw_text = str(text or "").strip()
-        if not raw_text:
-            return ""
-        return re.sub(r"^\d+[A-Za-z]?\.\s*", "", raw_text).strip()
-
-    @staticmethod
     def _strip_workflow_step_suffix(text: str | None) -> str:
         raw_text = str(text or "").strip()
         if not raw_text:
@@ -24622,23 +26176,6 @@ class AnnotationTab:
             "export": "4.",
             "split": "4.a",
         }
-
-    def _format_workflow_title(
-        self,
-        text: str | None,
-        *,
-        show_step_suffix: bool = False,
-        strip_step_prefix: bool = False,
-        current_index: int = 0,
-        total_steps: int = 0,
-    ) -> str:
-        base_text = self._strip_workflow_step_suffix(text)
-        if strip_step_prefix:
-            base_text = self._strip_workflow_step_prefix(base_text)
-        if show_step_suffix and current_index > 0 and total_steps > 0:
-            base_text = self._strip_workflow_step_prefix(base_text)
-            return f"{base_text} | Krok {current_index} z {total_steps}"
-        return base_text
 
     def _resolve_manual_review_history_created_at(self, entry: dict, safe_run_dir: Path) -> str:
         created_at = str(entry.get("created_at") or "").strip()
@@ -25333,7 +26870,7 @@ class AnnotationTab:
                         return
                     self._clear_free_mode_route_selection()
                 else:
-                    self._start_plate_dataset_export()
+                    self._start_z2_export_choice_flow()
                 return
 
         if self._dataset_export_completed and self._is_free_mode_session_context():
@@ -25472,9 +27009,6 @@ class AnnotationTab:
 
     def _on_manual_entry_mode_change(self):
         self._set_manual_entry_mode(self.manual_entry_mode_var.get())
-
-    def _on_manual_start_new_toggle(self):
-        self._on_manual_entry_mode_change()
 
     def _on_auto_vehicle_skip_toggle(self):
         normalized_choice = self._normalize_auto_vehicle_choice(self.auto_vehicle_choice_var.get())
@@ -25831,9 +27365,6 @@ class AnnotationTab:
             manual_template=manual_template,
             defer_ui_restore=defer_ui_restore,
         )
-
-    def _enter_manual_review_from_auto(self):
-        self._open_existing_run_for_manual_review(from_auto=True, show_dialog=False)
 
     def _build_z2_layout_state_campaign(
         self,
@@ -26245,8 +27776,10 @@ class AnnotationTab:
             try:
                 proceed = self._prompt_campaign_return_to_wizard_ok_modal(
                     approved_images=int(warning_ctx.get("approved_images", 0) or 0),
+                    approved_plates=int(warning_ctx.get("approved_plates", 0) or 0),
                     images_with_plates=int(warning_ctx.get("images_with_plates", 0) or 0),
                     required_images=int(warning_ctx.get("required_images", 0) or 0),
+                    required_plates=int(warning_ctx.get("required_plates", 0) or 0),
                     total_plates=int(warning_ctx.get("total_plates", 0) or 0),
                     xml_required=bool(warning_ctx.get("xml_required", False)),
                     xml_exists=bool(warning_ctx.get("xml_exists", False)),
@@ -26421,10 +27954,10 @@ class AnnotationTab:
 
     def _get_campaign_return_to_wizard_ok_warning_context(self) -> dict:
         if self._is_free_mode_session_context():
-            return {"show": False, "images_with_plates": 0, "approved_images": 0, "required_images": 0, "total_plates": 0, "xml_required": False, "xml_exists": False}
+            return {"show": False, "images_with_plates": 0, "approved_images": 0, "approved_plates": 0, "required_images": 0, "required_plates": 0, "total_plates": 0, "xml_required": False, "xml_exists": False}
 
         if bool(getattr(self, "is_processing", False)):
-            return {"show": False, "images_with_plates": 0, "approved_images": 0, "required_images": 0, "total_plates": 0, "xml_required": False, "xml_exists": False}
+            return {"show": False, "images_with_plates": 0, "approved_images": 0, "approved_plates": 0, "required_images": 0, "required_plates": 0, "total_plates": 0, "xml_required": False, "xml_exists": False}
 
         annotations = list(getattr(self, "current_annotations", []) or [])
         try:
@@ -26436,17 +27969,24 @@ class AnnotationTab:
             current_step = 0
             iteration_target = ""
             iteration_num = 1
-        required_images = 2 if current_step == 2 and iteration_target in {"plate", "char"} else 0
+        required_images = 0
+        required_plates = (
+            int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            if current_step == 2 and iteration_target in {"plate", "char"}
+            else 0
+        )
         xml_required = bool(current_step == 2 and iteration_target == "plate" and int(iteration_num or 1) <= 1)
         approval_context = self._get_campaign_step2_approval_context()
         approval_run_dir = approval_context.get("run_dir")
         xml_exists = bool(approval_run_dir and Path(approval_run_dir) and (Path(approval_run_dir) / "annotations.xml").exists())
         if not annotations:
             return {
-                "show": bool(required_images > 0 or (xml_required and not xml_exists)),
+                "show": bool(required_plates > 0 or (xml_required and not xml_exists)),
                 "images_with_plates": 0,
                 "approved_images": 0,
+                "approved_plates": 0,
                 "required_images": required_images,
+                "required_plates": required_plates,
                 "total_plates": 0,
                 "xml_required": xml_required,
                 "xml_exists": xml_exists,
@@ -26455,6 +27995,7 @@ class AnnotationTab:
         approved_names = set(self._get_preview_approved_filenames_base())
         images_with_plates = 0
         approved_images = 0
+        approved_plates = 0
         total_plates = 0
 
         for ann in annotations:
@@ -26469,19 +28010,22 @@ class AnnotationTab:
             try:
                 if self._preview_annotation_is_explicitly_approved(ann, approved_names=approved_names):
                     approved_images += 1
+                    approved_plates += int(plate_count or 0)
             except Exception:
                 pass
 
         show = bool(images_with_plates > 0 and approved_images < images_with_plates)
-        if required_images > 0:
-            show = bool(show or approved_images < required_images or total_plates <= 0)
+        if required_plates > 0:
+            show = bool(show or approved_plates < required_plates)
         if xml_required and not xml_exists:
             show = True
         return {
             "show": show,
             "images_with_plates": int(images_with_plates),
             "approved_images": int(approved_images),
+            "approved_plates": int(approved_plates),
             "required_images": int(required_images),
+            "required_plates": int(required_plates),
             "total_plates": int(total_plates),
             "xml_required": bool(xml_required),
             "xml_exists": bool(xml_exists),
@@ -26491,8 +28035,10 @@ class AnnotationTab:
         self,
         *,
         approved_images: int,
+        approved_plates: int,
         images_with_plates: int,
         required_images: int = 0,
+        required_plates: int = 0,
         total_plates: int = 0,
         xml_required: bool = False,
         xml_exists: bool = False,
@@ -26566,7 +28112,8 @@ class AnnotationTab:
             body,
             text=(
                 f"Zatwierdzonych obrazów [OK]: {int(approved_images)}. "
-                f"Minimum: {int(required_images or 0)}. "
+                f"Zatwierdzonych tablic: {int(approved_plates or 0)}. "
+                f"Minimum tablic: {int(required_plates or 0)}. "
                 f"Liczba oznaczonych tablic: {int(total_plates or 0)}."
             ),
             bg=panel_bg,
@@ -26576,16 +28123,20 @@ class AnnotationTab:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
 
-        if int(required_images or 0) > 0 or (xml_required and not xml_exists):
+        if int(required_plates or 0) > 0 or (xml_required and not xml_exists):
             missing_images = max(0, int(required_images or 0) - int(approved_images or 0))
-            missing_plate = 0 if int(total_plates or 0) > 0 else 1
+            missing_plate = max(0, int(required_plates or 0) - int(approved_plates or 0))
             missing_xml = bool(xml_required and not xml_exists)
             message_text = (
                 "Ten etap nie ma jeszcze minimalnej liczby anotacji potrzebnej do domknięcia E2.\n\n"
-                f"Minimum: {int(required_images or 0)} obrazy oznaczone jako [OK] oraz co najmniej 1 oznaczona tablica"
+                f"Minimum: {int(required_plates or 0)} zatwierdzonych tablic na obrazach oznaczonych jako [OK]"
                 + (" i utworzony plik XML anotacji." if xml_required else ".")
                 + "\n"
-                + f"Brakuje: {missing_images} obrazów [OK], {missing_plate} tablic"
+                + (
+                    f"Brakuje: {missing_plate} tablic"
+                    if missing_images <= 0
+                    else f"Brakuje: {missing_images} obrazów [OK], {missing_plate} tablic"
+                )
                 + (" i pliku XML." if missing_xml else ".")
                 + "\n\n"
                 "Aby zatwierdzić pojedynczy obraz, kliknij go PPM i wybierz „Oznacz jako OK”. "
@@ -26598,7 +28149,7 @@ class AnnotationTab:
                 "Aby zatwierdzić pojedynczy obraz, kliknij go PPM i wybierz „Oznacz jako OK”.\n"
                 "Możesz też zatwierdzić kilka obrazów naraz: zaznacz grupę na liście, kliknij PPM "
                 "i wybierz „Oznacz zaznaczone jako OK”.\n\n"
-                "Obrazy bez [OK] pozostaną w paczce roboczej do dalszej korekty."
+                "Obrazy bez [OK] pozostaną w zestawie roboczym do dalszej korekty."
             )
         tk.Label(
             body,
@@ -27103,11 +28654,11 @@ class AnnotationTab:
                         return messagebox.showinfo(
                             "Brak nowych obrazów",
                             (
-                                "Ta paczka nie zawiera już obrazów oczekujących na pracę w Z2.\n\n"
+                                "Ten zestaw nie zawiera już obrazów oczekujących na pracę w Z2.\n\n"
                                 f"{char_effective_skip_count} obrazów jest już użytych w aktywnym E3, "
                                 "a pozostałe są już w zatwierdzonym zbiorze projektu."
                                 if char_effective_skip_count > 0
-                                else "Ta paczka nie zawiera już obrazów oczekujących na pracę w Z2.\n\n"
+                                else "Ten zestaw nie zawiera już obrazów oczekujących na pracę w Z2.\n\n"
                                 "Wszystkie obrazy z tego wejścia są już w zatwierdzonym zbiorze projektu."
                             )
                         )
@@ -27124,7 +28675,7 @@ class AnnotationTab:
                         selected_scope_paths = self._dedupe_image_paths_by_name(pending_images)
                         scope_selection = {
                             "mode": "all",
-                            "label": "Cała paczka",
+                            "label": "Cały zestaw zdjęć",
                             "image_paths": selected_scope_paths,
                         }
                     if not selected_scope_paths:
@@ -27137,10 +28688,18 @@ class AnnotationTab:
                     except Exception:
                         pass
                     try:
-                        raw_base_images = get_image_files(Path(in_d))
+                        manifest_expected_count = self._get_campaign_iteration_manifest_image_count()
+                        manifest_base_images = self._get_campaign_iteration_manifest_image_paths(Path(in_d))
+                        raw_base_images = (
+                            manifest_base_images
+                            if manifest_expected_count > 0
+                            else get_image_files(Path(in_d))
+                        )
                     except Exception:
                         raw_base_images = []
                     needs_scope_dir = bool(
+                        bool(source_plan.get("manifest_scoped", False))
+                        or
                         int(source_plan.get("reused_count", 0) or 0) > 0
                         or int(source_plan.get("approved_skip_count", 0) or 0) > 0
                         or len(selected_scope_paths) != len(raw_base_images)
@@ -27162,15 +28721,15 @@ class AnnotationTab:
                         self._pending_source_image_map = {}
                     self._remember_annotation_run_scope_meta(
                         mode=str(scope_selection.get("mode") or "all"),
-                        label=str(scope_selection.get("label") or "Cała paczka"),
+                        label=str(scope_selection.get("label") or "Cały zestaw zdjęć"),
                         count=len(selected_scope_paths),
                     )
                     if manual_skip_count > 0:
                         logger.info(
-                            f"Z2 pominie {manual_skip_count} obrazów poprawionych ręcznie przy budowie paczki autoanotacji."
+                            f"Z2 pominie {manual_skip_count} obrazów poprawionych ręcznie przy budowie zestawu autoanotacji."
                         )
                 except Exception as e:
-                    logger.debug(f"Nie udało się przygotować paczki pending Z2: {e}")
+                    logger.debug(f"Nie udało się przygotować zestawu pending Z2: {e}")
                     effective_input_dir = Path(in_d)
             elif route == "auto" and not manual_template:
                 try:
@@ -27200,7 +28759,7 @@ class AnnotationTab:
                     selected_scope_paths = self._dedupe_image_paths_by_name(raw_scope_images)
                     scope_selection = {
                         "mode": "all",
-                        "label": "Cała paczka",
+                        "label": "Cały zestaw zdjęć",
                         "image_paths": selected_scope_paths,
                     }
                 if not selected_scope_paths:
@@ -27222,7 +28781,7 @@ class AnnotationTab:
                     self._pending_source_image_map = dict(scope_map or {})
                 self._remember_annotation_run_scope_meta(
                     mode=str(scope_selection.get("mode") or "all"),
-                    label=str(scope_selection.get("label") or "Cała paczka"),
+                    label=str(scope_selection.get("label") or "Cały zestaw zdjęć"),
                     count=len(selected_scope_paths),
                 )
             if route == "auto":
@@ -28143,30 +29702,6 @@ class AnnotationTab:
                 return f"{origin_tag}|OK"
             return "OK"
         return origin_tag
-
-    def _preview_annotation_manual_plate_count(self, ann) -> int:
-        if ann is None:
-            return 0
-
-        corrected = 0
-        for det in getattr(ann, "detections", []) or []:
-            if not self._is_plate_detection_label(getattr(det, "label", "")):
-                continue
-            attributes = dict(getattr(det, "attributes", {}) or {})
-            manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
-            manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-            if manually_edited or manual_source:
-                corrected += 1
-
-        if corrected <= 0 and self._preview_annotation_has_manual_touch(ann):
-            plate_count = sum(
-                1
-                for det in getattr(ann, "detections", []) or []
-                if self._is_plate_detection_label(getattr(det, "label", ""))
-            )
-            return int(plate_count or 0)
-
-        return corrected
 
     def _preview_annotation_has_auto_plate(self, ann) -> bool:
         if ann is None:
@@ -29260,9 +30795,6 @@ class AnnotationTab:
         except Exception:
             pass
 
-    def _on_preview_list_sort_changed(self, event=None):
-        self._set_preview_list_sort_mode(self.preview_list_sort_var.get())
-
     def _refresh_preview_list_summary(self, *, lightweight: bool = False):
         annotations = list(self.current_annotations or [])
         visible_entries = list(getattr(self, "_preview_list_display_indices", []) or [])
@@ -29854,19 +31386,6 @@ class AnnotationTab:
             pass
 
     @staticmethod
-    def _detection_attribute_float(det: Detection, attr_name: str, default: float = 0.0) -> float:
-        if det is None:
-            return float(default)
-        try:
-            raw_value = dict(getattr(det, "attributes", {}) or {}).get(str(attr_name), default)
-        except Exception:
-            raw_value = default
-        try:
-            return float(raw_value)
-        except Exception:
-            return float(default)
-
-    @staticmethod
     def _serialize_quality_metric_value(value: float) -> str:
         try:
             return f"{float(value):.3f}"
@@ -29888,21 +31407,6 @@ class AnnotationTab:
             polygon,
             bbox,
             keypoints=keypoints,
-            image_size=image_size,
-        )
-
-    @staticmethod
-    def _compute_character_box_fit_metrics_preview(
-        confidence: float,
-        bbox: tuple[float, float, float, float],
-        *,
-        plate_size: tuple[int, int] | None = None,
-        image_size: tuple[int, int] | None = None,
-    ) -> dict:
-        return compute_character_box_fit_metrics(
-            confidence,
-            bbox,
-            plate_size=plate_size,
             image_size=image_size,
         )
 
@@ -31108,7 +32612,7 @@ class AnnotationTab:
                     is_cancelled=is_cancelled,
                 )
             except Exception as e:
-                logger.debug(f"Nie udało się przygotować odroczonej paczki Z2: {e}")
+                logger.debug(f"Nie udało się przygotować odroczonego zestawu Z2: {e}")
 
             if is_cancelled():
                 return
@@ -31121,7 +32625,7 @@ class AnnotationTab:
                     if payload:
                         self._apply_campaign_source_preview_payload(payload)
                 except Exception as e:
-                    logger.debug(f"Nie udało się zastosować odroczonej paczki Z2: {e}")
+                    logger.debug(f"Nie udało się zastosować odroczonego zestawu Z2: {e}")
                 try:
                     self._hide_campaign_step2_splash(token=splash_token)
                 except Exception:
@@ -32550,7 +34054,136 @@ class AnnotationTab:
         final_bbox = canvas.bbox(rect_id) or bbox
         return float(final_bbox[2] - final_bbox[0]), float(final_bbox[3] - final_bbox[1])
 
-    def _draw_preview_legend_keycap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str):
+    @staticmethod
+    def _normalize_preview_legend_interaction(interaction: str | None) -> str:
+        value = str(interaction or "").strip().lower()
+        if value in {"tap", "click", "single", "1x", "once"}:
+            return "tap"
+        if value in {"hold", "press", "held", "down"}:
+            return "hold"
+        return ""
+
+    def _get_preview_legend_interaction_marker_photo(
+        self,
+        mode: str,
+        *,
+        width: int,
+        height: int,
+        fill: str,
+        outline: str,
+        text_fill: str,
+    ):
+        cache = getattr(self, "_preview_legend_image_cache", None)
+        if cache is None:
+            cache = {}
+            self._preview_legend_image_cache = cache
+
+        mode_value = self._normalize_preview_legend_interaction(mode)
+        safe_w = max(6, int(width))
+        safe_h = max(6, int(height))
+        key = (
+            "interaction_marker",
+            mode_value,
+            safe_w,
+            safe_h,
+            str(fill),
+            str(outline),
+            str(text_fill),
+        )
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        scale = 6
+        px_w = safe_w * scale
+        px_h = safe_h * scale
+        img = Image.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        marker_fill = self._hex_to_rgba(outline, 238)
+        if mode_value == "tap":
+            margin = max(1, int(1.2 * scale))
+            draw.ellipse(
+                (margin, margin, px_w - margin - 1, px_h - margin - 1),
+                fill=marker_fill,
+            )
+        else:
+            line_h = max(2, int(2.6 * scale))
+            y1 = max(1, int((px_h - line_h) / 2))
+            y2 = min(px_h - 1, y1 + line_h)
+            x1 = max(1, int(1.2 * scale))
+            x2 = min(px_w - 1, px_w - x1)
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=max(1, int(line_h / 2)),
+                fill=marker_fill,
+            )
+
+        photo = ImageTk.PhotoImage(img.resize((safe_w, safe_h), Image.Resampling.LANCZOS), master=self.frame)
+        cache[key] = photo
+        self._trim_preview_legend_image_cache()
+        return photo
+
+    def _draw_preview_legend_interaction_marker(
+        self,
+        canvas,
+        x: float,
+        y: float,
+        width: float,
+        *,
+        interaction: str | None,
+        fill: str,
+        outline: str,
+        text_fill: str,
+    ) -> None:
+        mode = self._normalize_preview_legend_interaction(interaction)
+        if not mode:
+            return
+
+        center_x = float(x) + (float(width) / 2.0)
+        if mode == "tap":
+            marker_w = 8.0
+            marker_h = 8.0
+            marker_x = center_x - (marker_w / 2.0)
+            marker_y = float(y) - marker_h - 3.0
+            photo = self._get_preview_legend_interaction_marker_photo(
+                mode,
+                width=int(math.ceil(marker_w)),
+                height=int(math.ceil(marker_h)),
+                fill=fill,
+                outline=outline,
+                text_fill=text_fill,
+            )
+            canvas.create_image(
+                marker_x,
+                marker_y,
+                image=photo,
+                anchor="nw",
+                tags=("preview_legend",),
+            )
+            return
+
+        marker_w = int(math.ceil(min(22.0, max(14.0, float(width) - 4.0))))
+        marker_h = 6
+        marker_x = center_x - (float(marker_w) / 2.0)
+        marker_y = float(y) - marker_h - 4.0
+        photo = self._get_preview_legend_interaction_marker_photo(
+            mode,
+            width=marker_w,
+            height=marker_h,
+            fill=fill,
+            outline=outline,
+            text_fill=text_fill,
+        )
+        canvas.create_image(
+            marker_x,
+            marker_y,
+            image=photo,
+            anchor="nw",
+            tags=("preview_legend",),
+        )
+
+    def _draw_preview_legend_keycap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str, interaction: str | None = None):
         photo, width, height = self._get_preview_legend_keycap_photo(
             str(text),
             fill=fill,
@@ -32563,6 +34196,16 @@ class AnnotationTab:
             image=photo,
             anchor="nw",
             tags=("preview_legend",),
+        )
+        self._draw_preview_legend_interaction_marker(
+            canvas,
+            x,
+            y,
+            width,
+            interaction=interaction,
+            fill=fill,
+            outline=outline,
+            text_fill=text_fill,
         )
         font_obj = self._get_preview_legend_font(7, "bold")
         canvas.create_text(
@@ -32945,10 +34588,13 @@ class AnnotationTab:
         current_step = int(approval_context.get("current_step") or 0)
         repair_mode = bool(approval_context.get("repair_mode"))
         iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
-        if iteration_target != "plate" or not (current_step == 2 or repair_mode):
+        if iteration_target not in {"plate", "char"} or not (current_step == 2 or repair_mode):
             return {}
 
-        min_images = 2
+        min_images = 0
+        min_plate_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+        min_char_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+        gate_metric = "plates"
         approval_run_dir = approval_context.get("run_dir")
         approval_xml_exists = bool(approval_run_dir and (Path(approval_run_dir) / "annotations.xml").exists())
         project_approved_images = 0
@@ -32982,30 +34628,43 @@ class AnnotationTab:
         effective_plates = int(project_approved_plates or 0) + int(run_ok_plates or 0)
         xml_required = bool(int(current_iteration_num or 0) <= 1)
         xml_missing = bool(xml_required and not approval_xml_exists)
-        missing_images = max(0, int(min_images) - int(effective_images or 0))
-        missing_plates = 0 if int(effective_plates or 0) > 0 else 1
-        ready = bool(
-            int(effective_images or 0) >= int(min_images)
-            and int(effective_plates or 0) > 0
-            and not xml_missing
-            and not bool(getattr(self, "is_processing", False))
-        )
+        if iteration_target == "char":
+            missing_images = 0
+            missing_plates = max(0, int(min_char_plates) - int(effective_plates or 0))
+            ready = bool(
+                int(effective_plates or 0) >= int(min_char_plates)
+                and not xml_missing
+                and not bool(getattr(self, "is_processing", False))
+            )
+        else:
+            missing_images = 0
+            missing_plates = max(0, int(min_plate_plates) - int(effective_plates or 0))
+            ready = bool(
+                int(effective_plates or 0) >= int(min_plate_plates)
+                and not xml_missing
+                and not bool(getattr(self, "is_processing", False))
+            )
 
-        missing_to_open = max(int(missing_images or 0), int(missing_plates or 0))
+        missing_to_open = int(missing_plates)
         if ready:
-            message = "Etap gotowy do zatwierdzenia w wizardzie."
+            message = (
+                "Etap gotowy do przejścia do E3."
+                if iteration_target == "char"
+                else "Etap gotowy do zatwierdzenia w wizardzie."
+            )
             detail = ""
             tone = "success"
         elif xml_missing and missing_to_open <= 0:
             message = "Do otwarcia bramki brakuje pliku anotacji XML."
             detail = "Utwórz XML anotacji tablic w kroku ręcznej korekty."
             tone = "warning"
+        elif iteration_target == "char":
+            noun = "tablicy" if missing_to_open == 1 else "tablic"
+            message = f"Do otwarcia bramki brakuje {missing_to_open} {noun}."
+            detail = "Zatwierdzaj obrazy z poprawnymi ramkami tablic jako OK."
+            tone = "warning"
         else:
-            noun = (
-                "zatwierdzonego zdjęcia z anotacją"
-                if missing_to_open == 1
-                else "zatwierdzonych zdjęć z anotacjami"
-            )
+            noun = "tablicy" if missing_to_open == 1 else "tablic"
             message = f"Do otwarcia bramki brakuje {missing_to_open} {noun}."
             detail = "Zatwierdź zdjęcia z ramkami tablic jako OK."
             tone = "warning"
@@ -33020,8 +34679,11 @@ class AnnotationTab:
             "approved_images": int(effective_images or 0),
             "approved_plates": int(effective_plates or 0),
             "required_images": int(min_images or 0),
+            "required_plates": int(min_char_plates if iteration_target == "char" else min_plate_plates),
             "missing_images": int(missing_images or 0),
+            "missing_plates": int(missing_plates or 0),
             "missing_to_open": int(missing_to_open or 0),
+            "gate_metric": gate_metric,
             "xml": "XML: OK" if approval_xml_exists else ("XML: wymagany" if xml_required else "XML: brak"),
             "iteration": int(current_iteration_num or 0),
         }
@@ -33083,16 +34745,17 @@ class AnnotationTab:
         required_images = int(state.get("required_images", 0) or 0)
         missing_images = int(state.get("missing_images", 0) or 0)
         missing_to_open = int(state.get("missing_to_open", missing_images) or 0)
+        gate_metric = str(state.get("gate_metric") or "images").strip().lower()
         xml_text = str(state.get("xml") or "").strip()
-        quality_score = min(max(0, approved_images), max(0, approved_plates))
-        if quality_score >= 50:
-            quality_label = "DOBRY"
+        quality_score = max(0, approved_plates) if gate_metric == "plates" else min(max(0, approved_images), max(0, approved_plates))
+        quality_info = CONFIG.describe_yolo_pose_dataset_quality(quality_score)
+        quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+        quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
+        if quality_tone == "success":
             quality_color = success
-        elif quality_score >= 10:
-            quality_label = "PRZECIĘTNY"
+        elif quality_tone == "warning":
             quality_color = warning
         else:
-            quality_label = "SŁABY"
             quality_color = error
         quality_fill = quality_color
         quality_text_fill = "#111111" if self._legend_color_is_light(quality_fill) else "#ffffff"
@@ -33104,11 +34767,14 @@ class AnnotationTab:
             instruction_text = "Utwórz XML i oznaczaj dalej."
         elif "wymagany" in xml_text.lower():
             instruction_text = "Utwórz XML."
+        elif gate_metric == "plates" and missing_to_open > 0:
+            instruction_text = "Oznaczaj tablice dalej."
         elif approved_plates <= 0:
             instruction_text = "Dodaj ramkę tablicy."
         else:
             instruction_text = "Oznaczaj dalej."
-        have_text = f"JEST\n{approved_images}"
+        have_value = approved_plates if gate_metric == "plates" else approved_images
+        have_text = f"JEST\n{have_value}"
         missing_text = f"BRAKUJE\n{missing_to_open}"
         render_key = (
             str(state.get("status") or ""),
@@ -33272,9 +34938,9 @@ class AnnotationTab:
             pass
 
     def _toggle_preview_overlay_dock(self, event=None):
-        self._preview_overlay_dock_expanded = not bool(
-            getattr(self, "_preview_overlay_dock_expanded", True)
-        )
+        # Szuflada Z2 jest stałym panelem akcji; statusy bramki i jakości są
+        # osobnymi kolorowymi blokami pod nią, więc nie zwijamy jej do starej ikony.
+        self._preview_overlay_dock_expanded = True
         self._preview_overlay_dock_render_key = None
         self._place_preview_overlay_dock(force_render=True)
         try:
@@ -33303,10 +34969,13 @@ class AnnotationTab:
             self._preview_metrics_overlay_render_key = None
             self._update_preview_canvas_metrics_overlay(force_render=True)
         elif key == "super":
-            self._preview_super_correction_badge_visible = not bool(
-                getattr(self, "_preview_super_correction_badge_visible", True)
-            )
-            self._refresh_preview_canvas()
+            self._preview_super_correction_badge_visible = False
+            result = self._toggle_preview_super_correction()
+            try:
+                self.preview_canvas.focus_set()
+            except Exception:
+                pass
+            return result
         self._preview_overlay_dock_render_key = None
         self._place_preview_overlay_dock(force_render=True)
         try:
@@ -33328,7 +34997,7 @@ class AnnotationTab:
         accent = str(legend_theme.get("badge_plate_outline", palette.get("accent", "#f1c40f")))
         active = str(palette.get("success", "#2fbf71"))
         hidden = str(palette.get("muted", "#8b949e"))
-        row_fill = blend_hex_colors(outline, fill, 0.12)
+        row_fill = blend_hex_colors(outline, fill, 0.07)
         active_fill = blend_hex_colors(active, fill, 0.22)
         hidden_fill = blend_hex_colors(outline, fill, 0.06)
         status_on_fill = blend_hex_colors(active, fill, 0.40)
@@ -33348,20 +35017,19 @@ class AnnotationTab:
             "status_on_text": text_fill,
             "status_off_fill": status_off_fill,
             "status_off_text": muted,
+            "action_fill": row_fill,
+            "action_outline": blend_hex_colors(outline, fill, 0.18),
+            "section_fill": blend_hex_colors(outline, fill, 0.05),
         }
 
     def _get_preview_overlay_dock_tools_state(self) -> dict[str, tuple[bool, str]]:
         legend_visible = bool(getattr(self, "_preview_controls_legend_visible", True))
         metrics_visible = bool(getattr(self, "_preview_metrics_overlay_visible", True))
-        super_visible = bool(getattr(self, "_preview_super_correction_badge_visible", True))
         super_active = bool(getattr(self, "_preview_super_correction_active", False))
         return {
             "legend": (legend_visible, "ON" if legend_visible else "OFF"),
             "metrics": (metrics_visible, "ON" if metrics_visible else "OFF"),
-            "super": (
-                super_visible,
-                ("AKT" if super_visible and super_active else ("ON" if super_visible else "OFF")),
-            ),
+            "super": (super_active, "ON" if super_active else "OFF"),
         }
 
     def _render_preview_overlay_dock(self, *, force_render: bool = False) -> tuple[int, int]:
@@ -33370,10 +35038,15 @@ class AnnotationTab:
         title = getattr(self, "preview_overlay_dock_title_lbl", None)
         toggle = getattr(self, "preview_overlay_dock_toggle_lbl", None)
         body = getattr(self, "preview_overlay_dock_body", None)
+        actions_title = getattr(self, "preview_overlay_dock_actions_title_lbl", None)
+        actions_frame = getattr(self, "preview_overlay_dock_actions_frame", None)
+        status_title = getattr(self, "preview_overlay_dock_status_title_lbl", None)
+        status_frame = getattr(self, "preview_overlay_dock_status_frame", None)
         if dock is None:
             return 0, 0
 
-        expanded = bool(getattr(self, "_preview_overlay_dock_expanded", True))
+        expanded = True
+        self._preview_overlay_dock_expanded = True
         theme = self._get_preview_overlay_dock_theme()
         tool_states = self._get_preview_overlay_dock_tools_state()
         render_key = (
@@ -33393,38 +35066,64 @@ class AnnotationTab:
                     header.configure(bg=fill)
                 if title is not None:
                     title.configure(
-                        text=("SZUFLADA" if expanded else "OL"),
+                        text="SZUFLADA Z2",
                         bg=fill,
                         fg=text_fill,
-                        anchor=("w" if expanded else "center"),
+                        anchor="w",
+                        cursor="arrow",
                     )
                 if toggle is not None:
-                    toggle.configure(text=("<" if expanded else ">"), bg=fill, fg=accent)
+                    toggle.configure(text="", bg=fill, fg=muted)
+                    if str(toggle.winfo_manager()):
+                        toggle.pack_forget()
                 if body is not None:
                     body.configure(bg=fill)
-                    if expanded and not str(body.winfo_manager()):
+                    if not str(body.winfo_manager()):
                         body.pack(fill=tk.X)
-                    elif (not expanded) and str(body.winfo_manager()):
-                        body.pack_forget()
+                if actions_title is not None:
+                    actions_title.configure(bg=theme["section_fill"], fg=muted, text="AKCJE")
+                    if not str(actions_title.winfo_manager()):
+                        actions_title.pack(fill=tk.X)
+                if actions_frame is not None:
+                    actions_frame.configure(bg=fill)
+                    if not str(actions_frame.winfo_manager()):
+                        actions_frame.pack(fill=tk.X)
+                for status_widget in (status_title, status_frame):
+                    if status_widget is not None and str(status_widget.winfo_manager()):
+                        status_widget.pack_forget()
             except Exception:
                 pass
 
             for key, widgets in dict(getattr(self, "_preview_overlay_dock_tool_rows", {}) or {}).items():
                 visible, status = tool_states.get(str(key), (False, "OFF"))
-                row_bg = theme["active_fill"] if visible else theme["hidden_fill"]
+                row_bg = theme["fill"]
                 row_fg = theme["text"] if visible else theme["muted"]
-                icon_bg = theme["active"] if visible else theme["row_fill"]
+                icon_bg = theme["fill"]
+                icon_fg = theme["muted"]
                 status_bg = theme["status_on_fill"] if visible else theme["status_off_fill"]
                 status_fg = theme["status_on_text"] if visible else theme["status_off_text"]
                 try:
                     widgets["row"].configure(
                         bg=row_bg,
-                        highlightbackground=(theme["active"] if visible else theme["outline"]),
-                        highlightcolor=(theme["active"] if visible else theme["outline"]),
+                        highlightbackground=theme["action_outline"],
+                        highlightcolor=theme["action_outline"],
                     )
-                    widgets["icon"].configure(bg=icon_bg, fg=theme["fill"] if visible else theme["muted"])
+                    widgets["icon"].configure(bg=icon_bg, fg=icon_fg)
                     widgets["label"].configure(bg=row_bg, fg=row_fg)
                     widgets["status"].configure(bg=status_bg, fg=status_fg, text=str(status))
+                except Exception:
+                    pass
+
+            for key, widgets in dict(getattr(self, "_preview_overlay_dock_status_rows", {}) or {}).items():
+                visible, status = tool_states.get(str(key), (False, "OFF"))
+                row_bg = theme["fill"]
+                status_fg = theme["active"] if visible else theme["muted"]
+                label_fg = theme["text"] if visible else theme["muted"]
+                try:
+                    widgets["row"].configure(bg=row_bg)
+                    widgets["dot"].configure(bg=row_bg, fg=status_fg)
+                    widgets["label"].configure(bg=row_bg, fg=label_fg)
+                    widgets["status"].configure(bg=row_bg, fg=status_fg, text=str(status))
                 except Exception:
                     pass
             self._preview_overlay_dock_render_key = render_key
@@ -33432,11 +35131,11 @@ class AnnotationTab:
         try:
             dock.update_idletasks()
             width = int(dock.winfo_reqwidth() or (118 if expanded else 42))
-            height = int(dock.winfo_reqheight() or (128 if expanded else 32))
+            height = int(dock.winfo_reqheight() or (178 if expanded else 32))
         except Exception:
             width = 118 if expanded else 42
-            height = 128 if expanded else 32
-        return int(max(38, min(142, width))), int(max(30, min(170, height)))
+            height = 178 if expanded else 32
+        return int(max(38, min(160, width))), int(max(30, min(230, height)))
 
     def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
         dock = getattr(self, "preview_overlay_dock", None)
@@ -33498,9 +35197,6 @@ class AnnotationTab:
             return None
         self._refresh_preview_controls_legend()
         return None
-
-    def _on_preview_super_correction_badge_click(self, event=None):
-        return self._on_preview_toggle_super_correction_shortcut(event)
 
     def _draw_preview_legend_compass_toggle(
         self,
@@ -33605,12 +35301,12 @@ class AnnotationTab:
                 "accent": "#2f80ed",
                 "columns": 2,
                 "items": [
-                    {"tokens": ["Q", "E"], "connector": "/", "label": nav_label},
-                    {"tokens": ["F"], "label": "obraz do okna"},
-                    {"tokens": ["R + LPM"], "label": "płynny zoom x2"},
-                    {"tokens": ["R + PPM"], "label": "cofnij zoom"},
-                    {"tokens": ["Enter"], "label": "pełny ekran / wyjście"},
-                    {"tokens": ["Y"], "label": "super korekta"},
+                    {"tokens": ["Q", "E"], "connector": "/", "modes": ["tap", "tap"], "label": nav_label},
+                    {"tokens": ["F"], "modes": ["tap"], "label": "obraz do okna"},
+                    {"tokens": ["R", "LPM"], "connector": "+", "modes": ["hold", "hold"], "label": "płynny zoom x2"},
+                    {"tokens": ["R", "PPM"], "connector": "+", "modes": ["hold", "tap"], "label": "cofnij zoom"},
+                    {"tokens": ["Enter"], "modes": ["tap"], "label": "pełny ekran / wyjście"},
+                    {"tokens": ["Y"], "modes": ["tap"], "label": "super korekta"},
                 ],
             },
             {
@@ -33618,9 +35314,9 @@ class AnnotationTab:
                 "accent": "#14b8a6",
                 "columns": 2,
                 "items": [
-                    {"tokens": ["A"], "label": "tablica +/-"},
-                    {"tokens": ["Spacja"], "label": "zatwierdź zdjęcie"},
-                    {"tokens": ["R"], "label": "ramka aktywnej tablicy"},
+                    {"tokens": ["A"], "modes": ["tap"], "label": "tablica +/-"},
+                    {"tokens": ["Spacja"], "modes": ["tap"], "label": "zatwierdź zdjęcie"},
+                    {"tokens": ["R"], "modes": ["tap"], "label": "ramka aktywnej tablicy"},
                 ],
             },
             {
@@ -33628,12 +35324,12 @@ class AnnotationTab:
                 "accent": "#f59e0b",
                 "columns": 2,
                 "items": [
-                    {"tokens": ["W + LPM"], "label": "przesuń róg"},
-                    {"tokens": ["D"], "label": "nowa tablica"},
-                    {"tokens": ["S"], "label": "zaznacz polygon"},
-                    {"tokens": ["PPM"], "label": "usuń aktywną"},
-                    {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "label": "historia"},
-                    {"tokens": ["Ctrl+S"], "label": "zapisz"},
+                    {"tokens": ["W", "LPM"], "connector": "+", "modes": ["hold", "hold"], "label": "przesuń róg"},
+                    {"tokens": ["D"], "modes": ["tap"], "label": "nowa tablica"},
+                    {"tokens": ["S"], "modes": ["tap"], "label": "zaznacz polygon"},
+                    {"tokens": ["PPM"], "modes": ["tap"], "label": "usuń aktywną"},
+                    {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "modes": ["tap", "tap"], "label": "historia"},
+                    {"tokens": ["Ctrl+S"], "modes": ["tap"], "label": "zapisz"},
                 ],
             },
         ]
@@ -33692,6 +35388,7 @@ class AnnotationTab:
                         (
                             tuple(str(token) for token in item.get("tokens", [])),
                             str(item.get("connector", "") or ""),
+                            tuple(str(mode) for mode in item.get("modes", []) or []),
                             str(item.get("label", "") or ""),
                         )
                         for item in section.get("items", []) or []
@@ -33858,8 +35555,8 @@ class AnnotationTab:
 
         outer_pad_x = 10.0
         outer_pad_y = separator_y + 10.0
-        section_gap_y = 12.0
-        token_gap = 4.0
+        section_gap_y = 16.0
+        token_gap = 12.0
         label_gap_x = 10.0
         title_font = self._get_preview_legend_font(7, "bold")
         desc_font = self._get_preview_legend_font(8, "normal")
@@ -33875,8 +35572,19 @@ class AnnotationTab:
             shortcut_col_w = max(136.0, (content_w - (shortcut_col_gap * (shortcut_cols - 1))) / float(shortcut_cols))
             section_rows = max(1, math.ceil(len(section.get("items", [])) / float(shortcut_cols)))
             section_box_x = outer_pad_x
-            section_box_y = current_y
-            section_box_h = 24.0 + (section_rows * item_row_h) + 18.0
+            section_title_y = current_y
+            title_h = float(title_font.metrics("linespace"))
+            section_box_y = section_title_y + title_h + 4.0
+            section_box_h = 14.0 + (section_rows * item_row_h) + 12.0
+            canvas.create_text(
+                section_box_x + 10.0,
+                section_title_y,
+                text=str(section.get("title", "")),
+                fill=legend_theme["section_title"],
+                anchor="nw",
+                font=title_font,
+                tags=("preview_legend",),
+            )
             section_shell = self._get_preview_legend_group_shell_photo(
                 legend_theme,
                 width=int(content_w),
@@ -33891,16 +35599,7 @@ class AnnotationTab:
                 tags=("preview_legend",),
             )
 
-            canvas.create_text(
-                section_box_x + 10.0,
-                section_box_y + 7.0,
-                text=str(section.get("title", "")),
-                fill=legend_theme["section_title"],
-                anchor="nw",
-                font=title_font,
-                tags=("preview_legend",),
-            )
-            row_base_y = section_box_y + 24.0
+            row_base_y = section_box_y + 12.0
 
             for item_idx, item in enumerate(section.get("items", [])):
                 local_col = item_idx % shortcut_cols
@@ -33910,47 +35609,44 @@ class AnnotationTab:
                 tokens = [str(token) for token in item.get("tokens", [])]
                 connector = str(item.get("connector", "") or "")
                 label = str(item.get("label", "") or "")
+                modes = [str(mode) for mode in item.get("modes", []) or []]
                 token_x = item_x
                 prev_right = None
-                token_group_width = 0.0
-
-                for token_idx, token_text in enumerate(tokens):
-                    token_group_width += self._measure_preview_legend_token("key", token_text, self._get_preview_legend_font(7, "bold"))
-                    if token_idx > 0 and connector:
-                        token_group_width += token_gap + max(8.0, float(self._get_preview_legend_font((8 if connector == "+" else 6), "bold").measure(connector)))
-                    elif token_idx > 0:
-                        token_group_width += token_gap
+                key_y = row_y + 7.0
+                label_y = row_y + 12.0
 
                 for token_idx, token_text in enumerate(tokens):
                     if token_idx > 0 and connector:
                         connector_x = float(prev_right) + (token_gap / 2.0)
                         canvas.create_text(
                             connector_x,
-                            row_y + 10.0,
+                            label_y + 5.0,
                             text=connector,
                             fill=plus_fill,
                             anchor="center",
                             font=self._get_preview_legend_font((8 if connector == "+" else 6), "bold"),
                             tags=("preview_legend",),
                         )
+                    token_mode = modes[token_idx] if token_idx < len(modes) else str(item.get("mode", "") or "")
                     token_w, _token_h = self._draw_preview_legend_keycap(
                         canvas,
                         token_x,
-                        row_y,
+                        key_y,
                         token_text,
                         fill=legend_theme["token_fill"],
                         outline=str(section.get("accent", "#3498db")),
                         text_fill=legend_theme["token_text"],
+                        interaction=token_mode,
                     )
                     prev_right = token_x + float(token_w)
                     if token_idx < (len(tokens) - 1):
                         token_x = prev_right + token_gap
 
-                label_x = max(item_x + token_group_width + label_gap_x + 6.0, float(prev_right or token_x) + label_gap_x)
+                label_x = float(prev_right or token_x) + max(5.0, label_gap_x - 3.0)
                 label_width = max(40.0, (item_x + shortcut_col_w) - label_x - 2.0)
                 canvas.create_text(
                     label_x,
-                    row_y + 5.0,
+                    label_y,
                     text=label,
                     fill=str(legend_theme.get("section_title", "#eef4fb")),
                     anchor="nw",
@@ -33959,7 +35655,7 @@ class AnnotationTab:
                     tags=("preview_legend",),
                 )
 
-            current_y += section_box_h + section_gap_y
+            current_y += title_h + 4.0 + section_box_h + section_gap_y
             max_bottom = max(max_bottom, current_y)
 
         total_height = max(float(shell_height), 160.0, max_bottom + 16.0)
@@ -34539,14 +36235,7 @@ class AnnotationTab:
             left_frame.grid_rowconfigure(0, weight=(1 if free_mode_expand_top else 0))
             left_frame.grid_rowconfigure(1, weight=(1 if show_preview else 0))
             left_frame.grid_rowconfigure(1, minsize=0)
-            if show_preview and getattr(self, "_left_list_container_user_top_height", None) is not None:
-                left_frame.grid_rowconfigure(
-                    0,
-                    minsize=self._clamp_left_list_container_top_height(
-                        getattr(self, "_left_list_container_user_top_height", None)
-                    ),
-                )
-            elif not show_preview:
+            if not show_preview:
                 left_frame.grid_rowconfigure(0, minsize=0)
         except Exception:
             pass
@@ -34853,6 +36542,7 @@ class AnnotationTab:
         return "break"
 
     def _toggle_preview_super_correction(self, event=None):
+        self._preview_super_correction_badge_visible = False
         if self._preview_draw_mode:
             self._update_preview_edit_status(
                 "Dokoncz albo anuluj rysowanie nowego polygonu przed użyciem Y."
@@ -36150,7 +37840,7 @@ class AnnotationTab:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else selected_idx + 1
             nav_hint = (
-                "Q/E przełącza poprzednią/następną tablicę w paczce."
+                "Q/E przełącza poprzednią/następną tablicę w zestawie."
                 if bool(getattr(self, "_preview_super_correction_active", False))
                 else "Q/E przełącza poprzednie/następne zdjęcie na liście."
             )
@@ -37571,7 +39261,7 @@ class AnnotationTab:
             selected_idx = self._get_selected_plate_index_for_ann(ann)
             plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
             nav_hint = (
-                "Q/E przełącza poprzednią/następną tablicę w paczce"
+                "Q/E przełącza poprzednią/następną tablicę w zestawie"
                 if bool(getattr(self, "_preview_super_correction_active", False))
                 else "Q/E przełącza poprzednie/następne zdjęcie na liście"
             )
@@ -39170,12 +40860,25 @@ class AnnotationTab:
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         try:
-            export_state = (
-                tk.NORMAL
-                if self._is_plate_dataset_export_allowed_for_current_selection()
-                else tk.DISABLED
-            )
-            self.export_plate_dataset_btn.config(state=export_state)
+            if self._is_free_mode_session_context():
+                export_state = tk.NORMAL if self._is_z2_free_export_choice_available() else tk.DISABLED
+                self.export_plate_dataset_btn.configure(
+                    text="EKSPORT",
+                    command=self._start_z2_export_choice_flow,
+                    state=export_state,
+                )
+            else:
+                export_state = (
+                    tk.NORMAL
+                    if self._is_plate_dataset_export_allowed_for_current_selection()
+                    else tk.DISABLED
+                )
+                self.export_plate_dataset_btn.configure(
+                    text="EKSPORTUJ DATASET",
+                    command=self._start_z2_export_choice_flow,
+                    state=export_state,
+                )
+            self._set_plate_annotation_export_button_state()
         except Exception:
             self.export_plate_dataset_btn.config(state=tk.DISABLED)
         self.progress.configure(value=(100 if success else 0))
@@ -39389,7 +41092,11 @@ class AnnotationTab:
             cumulative_plate_approved_images = 0
             cumulative_plate_approved_plates = 0
             cumulative_plate_gate_ready = False
-            if approval_iteration_target == "plate":
+            min_plate_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            min_char_approval_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+            cumulative_char_gate_ready = False
+            cumulative_char_approved_plates = 0
+            if approval_iteration_target in {"plate", "char"}:
                 try:
                     approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
                     project_approved_images = int(approved_stats.get("images", 0) or 0)
@@ -39403,46 +41110,58 @@ class AnnotationTab:
                     run_approved_images, run_approved_plates = 0, 0
                 cumulative_plate_approved_images = int(project_approved_images or 0) + int(run_approved_images or 0)
                 cumulative_plate_approved_plates = int(project_approved_plates or 0) + int(run_approved_plates or 0)
+                cumulative_char_approved_plates = int(cumulative_plate_approved_plates or 0)
                 cumulative_plate_gate_ready = bool(
-                    int(cumulative_plate_approved_plates or 0) > 0
-                    and int(cumulative_plate_approved_images or 0) >= 2
+                    approval_iteration_target == "plate"
+                    and int(cumulative_plate_approved_plates or 0) >= int(min_plate_approval_plates)
+                )
+                cumulative_char_gate_ready = bool(
+                    approval_iteration_target == "char"
+                    and int(cumulative_char_approved_plates or 0) >= int(min_char_approval_plates)
                 )
 
-            if approval_total_plates <= 0 and not (approval_iteration_target == "plate" and cumulative_plate_gate_ready):
+            if approval_total_plates <= 0 and not (
+                (approval_iteration_target == "plate" and cumulative_plate_gate_ready)
+                or (approval_iteration_target == "char" and cumulative_char_gate_ready)
+            ):
                 self._refresh_step2_action_states()
                 return messagebox.showwarning(
                     "Brak tablic do zatwierdzenia",
                     (
                         "Ten run anotacji Z2 nie zawiera jeszcze ani jednej zapisanej tablicy 'plate'.\n\n"
-                        "Dodaj i zapisz co najmniej jedną tablicę, a dopiero potem zatwierdź E2."
+                        f"Dodaj i zatwierdź co najmniej {min_plate_approval_plates if approval_iteration_target == 'plate' else min_char_approval_plates} tablic, a dopiero potem zatwierdź E2."
                         if bool(self._manual_xml_template_enabled())
                         else "Ten run anotacji Z2 nie zawiera jeszcze ani jednej zapisanej tablicy 'plate'.\n\n"
-                        "Popraw wynik albo dodaj co najmniej jedną tablicę ręcznie, a dopiero potem zatwierdź E2."
+                        f"Popraw wynik albo dodaj tablice ręcznie. Do zatwierdzenia E2 potrzebujesz co najmniej {min_plate_approval_plates if approval_iteration_target == 'plate' else min_char_approval_plates} zatwierdzonych tablic."
                     ),
                 )
 
             if (
                 approval_iteration_target == "char"
-                and int(_approval_images_with_plates or 0) < 2
+                and not cumulative_char_gate_ready
             ) or (
                 approval_iteration_target == "plate"
                 and not cumulative_plate_gate_ready
-                and int(_approval_images_with_plates or 0) < 2
+                and int(cumulative_plate_approved_plates or 0) < int(min_plate_approval_plates)
             ):
                 self._refresh_step2_action_states()
+                missing_char_plates = max(0, int(min_char_approval_plates) - int(cumulative_char_approved_plates or 0))
+                missing_plate_plates = max(0, int(min_plate_approval_plates) - int(cumulative_plate_approved_plates or 0))
                 return messagebox.showwarning(
-                    "Za mało oznaczonych obrazów",
+                    "Za mało zatwierdzonych tablic",
                     (
-                        "Aby domknąć E2 w torze tablic i przejść do E4, potrzebujesz co najmniej 2 oznaczonych obrazów.\n\n"
-                        f"Ten run ma teraz {_approval_images_with_plates} taki obraz(y).\n"
+                        f"Aby domknąć E2 w torze tablic i przejść do E4, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic.\n\n"
+                        f"Projekt i bieżący run mają teraz {cumulative_plate_approved_plates} takich tablic.\n"
+                        f"Brakuje jeszcze: {missing_plate_plates}.\n"
                         "Wróć do Z2, dodaj brakujące oznaczenia i dopiero wtedy zatwierdź etap."
                     )
                     if approval_iteration_target == "plate"
                     else (
-                        "Aby przejść z tablic do znaków, potrzebujesz co najmniej 2 oznaczonych obrazów.\n\n"
-                        f"Ten run ma teraz {_approval_images_with_plates} taki obraz(y).\n"
+                        f"Aby przejść z tablic do znaków, potrzebujesz co najmniej {min_char_approval_plates} tablic na obrazach oznaczonych jako [OK].\n\n"
+                        f"Projekt i bieżący run mają teraz {cumulative_char_approved_plates} takich tablic.\n"
+                        f"Brakuje jeszcze: {missing_char_plates}.\n"
                         "Wróć do Z2, dodaj brakujące oznaczenia i dopiero wtedy przejdź dalej. "
-                        "Przy jednej tablicy nie przygotujesz potem poprawnego train i val dla znaków."
+                        "Zbyt mała liczba tablic nie pozwoli przygotować sensownego zbioru train/val dla znaków."
                     ),
                 )
 
@@ -39544,18 +41263,19 @@ class AnnotationTab:
                             "plate_entry_mode": "ready_run",
                             "char_entry_mode": (
                                 "ready"
-                                if int(_approval_images_with_plates or 0) >= 2 and int(approval_total_plates or 0) > 0
+                                if int(cumulative_char_approved_plates or 0) >= int(min_char_approval_plates)
                                 else "needs_more_tables"
                             ),
                             "char_ready": bool(
-                                int(_approval_images_with_plates or 0) >= 2 and int(approval_total_plates or 0) > 0
+                                int(cumulative_char_approved_plates or 0) >= int(min_char_approval_plates)
                             ),
-                            "char_has_source": bool(int(approval_total_plates or 0) > 0),
+                            "char_has_source": bool(int(cumulative_char_approved_plates or 0) > 0),
                             "needs_more_tables": bool(
-                                int(approval_total_plates or 0) > 0 and int(_approval_images_with_plates or 0) < 2
+                                int(cumulative_char_approved_plates or 0) > 0
+                                and int(cumulative_char_approved_plates or 0) < int(min_char_approval_plates)
                             ),
-                            "images_with_plates": int(_approval_images_with_plates or 0),
-                            "total_plates": int(approval_total_plates or 0),
+                            "images_with_plates": int(cumulative_plate_approved_images or 0),
+                            "total_plates": int(cumulative_char_approved_plates or 0),
                         }
                     },
                 )

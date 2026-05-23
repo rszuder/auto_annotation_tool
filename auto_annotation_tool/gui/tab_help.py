@@ -294,8 +294,8 @@ class HelpTab:
             widget,
             [
                 "Jeżeli nazwy są niespójne, aplikacja może technicznie działać, ale ocena jakości znaków będzie myląca.",
-                "Jedna paczka wejściowa powinna mieć jedną konwencję nazewnictwa.",
-                "Najczytelniej trzymać paczki wejściowe w Workspace/1_raw_images/<nazwa_paczki>/.",
+                "Jeden katalog zdjęć wejściowych powinien mieć jedną konwencję nazewnictwa.",
+                "Najczytelniej trzymać katalogi zdjęć wejściowych w Workspace/1_raw_images/<nazwa_katalogu>/.",
             ],
         )
 
@@ -341,7 +341,7 @@ class HelpTab:
         self._paragraph(
             widget,
             "Kampania jest trybem uporządkowanym. Jej celem nie jest maksymalna swoboda, tylko powtarzalny proces: "
-            "ta sama paczka danych, jasny tor iteracji, kontrolowane bramki i czytelna decyzja, kiedy artefakt może iść dalej.",
+            "ten sam zestaw zdjęć iteracji, jasny tor iteracji, kontrolowane bramki i czytelna decyzja, kiedy artefakt może iść dalej.",
         )
 
         self._section(widget, "Rola Wizarda")
@@ -355,13 +355,13 @@ class HelpTab:
             ],
         )
 
-        self._section(widget, "E1. Paczka wejściowa")
+        self._section(widget, "E1. Katalog zdjęć wejściowych")
         self._bullet_list(
             widget,
             [
-                "E1 wybiera i zatwierdza paczkę obrazów iteracji.",
+                "E1 wybiera i zatwierdza katalog zdjęć albo manifestowy zestaw obrazów iteracji.",
                 "Samo istnienie plików w katalogu nie oznacza jeszcze, że E1 jest zamknięte.",
-                "Po zatwierdzeniu E1 kolejne kroki powinny korzystać z tej samej paczki, chyba że użytkownik jawnie zacznie nową iterację.",
+                "Po zatwierdzeniu E1 kolejne kroki powinny korzystać z tego samego zestawu zdjęć, chyba że użytkownik jawnie zacznie nową iterację.",
                 "Histogram i podgląd puli pomagają ocenić materiał, ale nie zastępują decyzji użytkownika.",
             ],
         )
@@ -511,7 +511,7 @@ class HelpTab:
                 "Run Z2: katalog pracy tablic, lista obrazów, XML i metadane procesu anotacji.",
                 "Run wycinania Z3/PZ1: cropy tablic przygotowane z pary XML + obrazy.",
                 "metadata.json Z3: statusy cropów, wyniki OCR/YOLO/hybrydy, perfecty, poprawki i dane do eksportów.",
-                "Review pack CVAT: paczka eksportowana z Z3/PZ3 do ręcznej korekty poza aplikacją.",
+                "Review pack CVAT: zestaw eksportowany z Z3/PZ3 do ręcznej korekty poza aplikacją.",
                 "Dataset YOLO: folder images/labels z data.yaml, gotowy do Z4.",
                 "training_history.json: historia runów treningowych dla danego obszaru treningu.",
                 "Checkpoint .pt: wynik treningu albo model bazowy używany do dalszej pracy.",

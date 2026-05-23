@@ -5,6 +5,7 @@ Tworzenie datasetu YOLO Pose z eksportu CVAT.
 """
 
 import json
+import os
 import shutil
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -386,9 +387,34 @@ class DatasetCreator:
     def get_annotated_image_names(self) -> set[str]:
         return set(self.annotated_image_names)
 
-    def get_pending_source_images(self, images_dir: Path) -> List[Path]:
-        images_dir = Path(images_dir)
+    def get_pending_source_images(
+        self,
+        images_dir: Path,
+        source_image_paths: Optional[List[Path]] = None,
+    ) -> List[Path]:
         annotated_names = self.get_annotated_image_names()
+        if source_image_paths is not None:
+            result: List[Path] = []
+            seen_names: set[str] = set()
+            for image_path in list(source_image_paths or []):
+                try:
+                    candidate = Path(image_path)
+                except Exception:
+                    continue
+                if not candidate.exists() or not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                    continue
+                if candidate.name in annotated_names:
+                    continue
+                safe_name = candidate.name.lower()
+                if safe_name in seen_names:
+                    continue
+                seen_names.add(safe_name)
+                result.append(candidate)
+            return result
+
+        images_dir = Path(images_dir)
         return [
             image_path
             for image_path in get_image_files(images_dir)
@@ -453,7 +479,12 @@ class DatasetCreator:
             counter += 1
         return candidate
 
-    def sync_pending_stage(self, images_dir: Path, stage_dir: Path) -> Tuple[bool, str, Dict]:
+    def sync_pending_stage(
+        self,
+        images_dir: Path,
+        stage_dir: Path,
+        source_image_paths: Optional[List[Path]] = None,
+    ) -> Tuple[bool, str, Dict]:
         images_dir = Path(images_dir)
         stage_dir = Path(stage_dir)
         stage_images_dir = stage_dir / "images"
@@ -464,7 +495,7 @@ class DatasetCreator:
         except Exception as e:
             return False, f"Nie udało się przygotować stage: {e}", {}
 
-        pending_paths = self.get_pending_source_images(images_dir)
+        pending_paths = self.get_pending_source_images(images_dir, source_image_paths=source_image_paths)
         source_dir_resolved = self._path_key(images_dir)
         stage_images_dir_resolved = self._path_key(stage_images_dir)
         source_is_stage = source_dir_resolved == stage_images_dir_resolved
@@ -581,7 +612,10 @@ class DatasetCreator:
 
                 if not self._paths_equivalent(source_path, target_path):
                     try:
-                        shutil.copy2(source_path, target_path)
+                        try:
+                            os.link(source_path, target_path)
+                        except Exception:
+                            shutil.copy2(source_path, target_path)
                     except Exception as e:
                         return False, f"Nie udało się skopiować obrazu do stage: {e}", {}
 
@@ -695,7 +729,10 @@ class DatasetCreator:
 
                 if not self._paths_equivalent(source_path, target_path):
                     try:
-                        shutil.copy2(source_path, target_path)
+                        try:
+                            os.link(source_path, target_path)
+                        except Exception:
+                            shutil.copy2(source_path, target_path)
                     except Exception as e:
                         return False, f"Nie udało się dodać obrazu do stage: {e}", {}
 

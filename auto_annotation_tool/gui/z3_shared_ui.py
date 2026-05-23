@@ -52,6 +52,7 @@ def build_step3_pz3_dataset_mode_view_model(
         )
         selected_plate_count = int(export_pool.get("selected_plate_count", 0) or 0)
         selected_char_count = int(export_pool.get("selected_char_count", 0) or 0)
+        export_ready = bool(selected_plate_count > 0 and selected_char_count > 0)
         try:
             preview_context = host._get_active_preview_context()
         except Exception:
@@ -66,7 +67,7 @@ def build_step3_pz3_dataset_mode_view_model(
             preview_dir = preview_context.get("preview_dir")
             preview_name = preview_dir.name if isinstance(preview_dir, Path) else str(preview_dir or "aktywny run")
             preview_plate_count = int(preview_context.get("plate_count", 0) or 0)
-            source_preview_text = f"Aktywny preview PZ2: {preview_name} | tablice w paczce: {preview_plate_count}"
+            source_preview_text = f"Aktywny preview PZ2: {preview_name} | wycięte tablice: {preview_plate_count}"
             source_preview_tone = "success"
         else:
             source_preview_text = str(preview_context.get("message") or "Brak aktywnego preview PZ2.")
@@ -78,7 +79,7 @@ def build_step3_pz3_dataset_mode_view_model(
                 f"Gotowe do gold packa: {selected_plate_count} tablic perfect | "
                 f"znaki: {selected_char_count}. Źródła: {source_breakdown}."
             )
-            source_pool_tone = "success" if selected_plate_count > 0 else "warning"
+            source_pool_tone = "success" if export_ready else "warning"
         else:
             source_pool_text = (
                 "Gotowe do gold packa: 0 tablic perfect. Oznacz tablice jako perfect w PZ2 "
@@ -87,15 +88,20 @@ def build_step3_pz3_dataset_mode_view_model(
             source_pool_tone = "warning"
         source_next_text = (
             "Następny krok: wybierz zakres gold packa i wyeksportuj dataset źródłowy znaków."
-            if selected_plate_count > 0
+            if export_ready
             else (
                 "Następny krok: przygotuj lub wskaż preview run w PZ1/PZ2, a potem oznacz "
                 "co najmniej jedną tablicę jako perfect. PZ3 nie wybiera źródła samodzielnie."
                 if not preview_ready
-                else "Następny krok: wróć do PZ2/PZ3 i przygotuj co najmniej jedną tablicę perfect."
+                else (
+                    "Następny krok: wróć do PZ2 i uzupełnij poprawne boxy znaków na tablicach perfect. "
+                    "Dataset YOLO wymaga tablic perfect z co najmniej jednym eksportowalnym znakiem."
+                    if selected_plate_count > 0
+                    else "Następny krok: wróć do PZ2/PZ3 i przygotuj co najmniej jedną tablicę perfect."
+                )
             )
         )
-        source_next_tone = "muted" if selected_plate_count > 0 else "warning"
+        source_next_tone = "muted" if export_ready else "warning"
         return Step3Pz3DatasetModeViewModel(
             in_campaign=in_campaign,
             mode="perfect",
@@ -128,7 +134,7 @@ def build_step3_pz3_dataset_mode_view_model(
             split_label="",
             primary_export_label="WYEKSPORTUJ DATASET ŹRÓDŁOWY ZNAKÓW",
             primary_export_command_id="run_yolo_gold_export",
-            primary_export_enabled=bool(selected_plate_count > 0),
+            primary_export_enabled=export_ready,
             primary_export_columnspan=1,
             show_classifier_export=True,
             classifier_export_enabled=bool(selected_char_count > 0),
@@ -145,7 +151,7 @@ def build_step3_pz3_dataset_mode_view_model(
                     else "Źródłowy dataset: brak tablic perfect gotowych do eksportu."
                 )
             ),
-            action_hint_tone=("muted" if selected_plate_count > 0 else "warning"),
+            action_hint_tone=("muted" if export_ready else "warning"),
             existing_dataset_status="",
             existing_dataset_status_tone="muted",
         )
@@ -225,7 +231,7 @@ def build_step3_extract_workflow_view_model(
         )
         source_hint = (
             "Nie musisz ponownie wskazywać runu, XML ani folderu obrazów. "
-            "W tym kroku przebudujesz tylko paczkę tablic potrzebną do dalszej pracy nad znakami."
+            "W tym kroku przebudujesz tylko zestaw wyciętych tablic potrzebny do dalszej pracy nad znakami."
         )
     elif linear_mode:
         source_intro = (
@@ -233,7 +239,7 @@ def build_step3_extract_workflow_view_model(
             "Nie musisz ręcznie wybierać runu Z2 ani przepisywać ścieżek."
         )
         source_hint = (
-            "Gdy źródło tablic będzie spójne, Z3 samo przygotuje paczkę tablic dla PZ2."
+            "Gdy źródło tablic będzie spójne, Z3 samo przygotuje zestaw wyciętych tablic dla PZ2."
         )
     elif route == "continue":
         if has_preview:
@@ -242,7 +248,7 @@ def build_step3_extract_workflow_view_model(
                 "PZ1 pokazuje tutaj tabelę kontrolną źródła i wynik wycinania, ale nie wymaga ponownej pracy."
             )
             source_hint = (
-                "Sprawdź tabelę i przejdź do PZ2. Jeśli chcesz świadomie przygotować inną paczkę, wróć do wyboru "
+                "Sprawdź tabelę i przejdź do PZ2. Jeśli chcesz świadomie przygotować inny zestaw wyciętych tablic, wróć do wyboru "
                 "i użyj kafla 'Wskaż anotacje do wyodrębnienia'."
             )
         else:
@@ -261,13 +267,13 @@ def build_step3_extract_workflow_view_model(
     if linear_mode:
         if has_preview:
             start_hint = (
-                "Paczka tablic dla znaków jest już odświeżona. "
+                "Zestaw wyciętych tablic dla znaków jest już odświeżony. "
                 "Za chwilę otwieram PZ2, aby kontynuować OCR i korektę znaków."
             )
         elif source_ready:
             start_hint = (
                 "Źródło tablic tej iteracji jest już gotowe. "
-                "Wyodrębnianie uruchomi się automatycznie i odświeży paczkę tablic dla PZ2."
+                "Wyodrębnianie uruchomi się automatycznie i odświeży zestaw wyciętych tablic dla PZ2."
             )
         else:
             start_hint = (
@@ -294,7 +300,7 @@ def build_step3_extract_workflow_view_model(
         if has_preview:
             start_hint = (
                 "Katalog wyodrębnionych tablic dla PZ2 jest już gotowy. "
-                "Ponowne wycinanie jest zablokowane dla tej paczki."
+                "Ponowne wycinanie jest zablokowane dla tego zestawu."
             )
         else:
             start_hint = (
@@ -306,7 +312,7 @@ def build_step3_extract_workflow_view_model(
     if linear_mode and step3_status == "needs_rework":
         run_hint = (
             "Źródło tablic dla tej iteracji jest już podpięte automatycznie. "
-            "Po tym kroku odświeżysz paczkę tablic, a potem wrócisz do OCR i korekty znaków."
+            "Po tym kroku odświeżysz zestaw wyciętych tablic, a potem wrócisz do OCR i korekty znaków."
         )
         run_hint_tone = "success"
     elif linear_mode:
@@ -350,12 +356,12 @@ def build_step3_extract_workflow_view_model(
 
     if linear_mode:
         source_title = "Potwierdź źródło tablic"
-        start_title = "Przebuduj paczkę tablic"
+        start_title = "Przebuduj zestaw wyciętych tablic"
         entry_card_description = "Kampania prowadzi ten etap na gotowym źródle tablic."
         source_card_description = "Źródło tablic tej iteracji jest obsługiwane automatycznie."
         start_card_description = (
-            "Paczka tablic dla PZ2 jest już odświeżona." if has_preview
-            else "Odśwież paczkę tablic, aby wrócić do OCR i korekty znaków."
+            "Zestaw wyciętych tablic dla PZ2 jest już odświeżony." if has_preview
+            else "Odśwież zestaw wyciętych tablic, aby wrócić do OCR i korekty znaków."
         )
     else:
         source_title = "Źródła wejścia"
@@ -371,7 +377,7 @@ def build_step3_extract_workflow_view_model(
         else:
             entry_card_description = "Wskażesz annotations.xml i obrazy."
         if route == "continue" and has_preview:
-            source_card_description = "Paczka PZ2 istnieje. Tabela pokazuje przejęty run i gotowy wynik."
+            source_card_description = "Zestaw PZ2 istnieje. Tabela pokazuje przejęty run i gotowy wynik."
         elif route == "continue" and source_ready:
             source_card_description = "Run anotacji jest potwierdzony i gotowy do wycinania."
         elif route == "continue":
@@ -775,7 +781,7 @@ def refresh_extract_entry_cards(host: "CharacterAnnotationTab"):
             if mode == "continue" and preview_ready:
                 desc_text = (
                     "Tablice są już wycięte. Otwórz kafel, aby przejrzeć tabelę przejętego runu "
-                    "i gotowego wyniku."
+                    "i gotowego wyniku, lub od razu przejdź do podzakładki PZ3 aby z nimi pracować."
                 )
             elif mode == "continue" and source_ready:
                 desc_text = (

@@ -62,7 +62,19 @@ def open_campaign_step3_entry(
         logger.debug(f"Nie udało się odświeżyć kanonicznego źródła E3 przed wejściem do Z3: {exc}")
 
     iter_num = CAMPAIGN.get_current_iteration_num()
-    default_folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+    try:
+        iteration_source_dir = (
+            CAMPAIGN.get_iteration_image_source_dir(iter_num)
+            or CAMPAIGN.get_iteration_raw_dir(iter_num)
+        )
+    except Exception:
+        iteration_source_dir = None
+    legacy_default_folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+    default_folder = (
+        Path(iteration_source_dir)
+        if iteration_source_dir is not None and Path(iteration_source_dir).exists()
+        else legacy_default_folder
+    )
     folder = default_folder
 
     source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
@@ -77,7 +89,11 @@ def open_campaign_step3_entry(
     using_preferred_source = False
 
     try:
-        restore_run_dir = source_context.get("restore_run_dir")
+        restore_run_dir = (
+            source_context.get("restore_run_dir")
+            or source_context.get("run_dir")
+            or source_context.get("annotation_run_dir")
+        )
         if restore_run_dir:
             candidate_run_dir = Path(restore_run_dir)
             candidate_xml = candidate_run_dir / "annotations.xml"
@@ -88,8 +104,28 @@ def open_campaign_step3_entry(
         preferred_run_dir = None
         preferred_xml = ""
 
+    if not preferred_xml:
+        try:
+            explicit_xml = (
+                source_context.get("xml_path")
+                or source_context.get("source_xml")
+                or source_context.get("source_xml_path")
+            )
+            if explicit_xml:
+                candidate_xml = Path(explicit_xml)
+                if candidate_xml.exists() and candidate_xml.is_file():
+                    preferred_xml = str(candidate_xml)
+                    if preferred_run_dir is None:
+                        preferred_run_dir = candidate_xml.parent
+        except Exception:
+            preferred_xml = ""
+
     try:
-        input_dir = source_context.get("input_dir")
+        input_dir = (
+            source_context.get("input_dir")
+            or source_context.get("images_dir")
+            or source_context.get("source_images_dir")
+        )
         if input_dir:
             candidate_input_dir = Path(input_dir)
             if candidate_input_dir.exists() and candidate_input_dir.is_dir():
@@ -155,11 +191,39 @@ def open_campaign_step3_entry(
     except Exception:
         latest_run_dir = ""
 
+    try:
+        effective_source_context = dict(source_context or {})
+    except Exception:
+        effective_source_context = {}
+
+    if latest_xml:
+        effective_source_context["xml_path"] = str(latest_xml)
+    if latest_run_dir:
+        effective_source_context["restore_run_dir"] = str(latest_run_dir)
+        effective_source_context.setdefault("run_dir", str(latest_run_dir))
+    if folder.exists():
+        effective_source_context["input_dir"] = str(folder)
+        effective_source_context.setdefault("images_dir", str(folder))
+    source_context = effective_source_context
+
     host.set_pending_z2_annotation_source(
         xml_path=latest_xml,
         images_dir=(str(folder) if folder.exists() else ""),
         run_dir=latest_run_dir,
     )
+    if latest_xml:
+        try:
+            host._source_binding_sync_in_progress = True
+            host.annotation_run_dir_var.set(latest_run_dir)
+            host.xml_path_var.set(str(latest_xml))
+            host.images_dir_var.set(str(folder) if folder.exists() else "")
+        except Exception:
+            pass
+        finally:
+            try:
+                host._source_binding_sync_in_progress = False
+            except Exception:
+                pass
     try:
         # Wejście kampanijne E3 nie może dziedziczyć wyniku walidacji PZ1/PZ2
         # z trybu swobodnego albo poprzedniego źródła. Stary licznik potrafił
@@ -192,7 +256,20 @@ def open_campaign_step3_entry(
     except Exception:
         has_saved_step3_progress = False
 
-    if latest_xml and not has_saved_step3_progress:
+    preview_missing_or_unusable = True
+    try:
+        saved_preview_dir = str(CAMPAIGN.get_step3_preview_dir() or "").strip()
+    except Exception:
+        saved_preview_dir = ""
+    if saved_preview_dir:
+        try:
+            preview_missing_or_unusable = not bool(
+                host._is_usable_step3_preview_dir(saved_preview_dir, require_plates=True)
+            )
+        except Exception:
+            preview_missing_or_unusable = False
+
+    if latest_xml and (not has_saved_step3_progress or preview_missing_or_unusable):
         try:
             CAMPAIGN.set_step3_extract_state(
                 entry_mode="continue",
@@ -489,7 +566,7 @@ def get_campaign_step3_entry_flow_view_model(
     if host.can_restore_step3_substep(2):
         return Step3EntryFlowViewModel(
             mode="open_detect",
-            message="Otwieram PZ2 na gotowej paczce tablic.",
+            message="Otwieram PZ2 na gotowym zestawie wyciętych tablic.",
             target_substep=2,
             should_hide_splash=True,
         )
@@ -552,7 +629,7 @@ def get_campaign_step3_source_refresh_state(
         result.update(
             needs_reextract=True,
             reason="missing_preview",
-            message="Tablice z Z2 są gotowe, ale w Z3 nie ma jeszcze aktualnej paczki tablic. Najpierw uruchom wycinanie w PZ1.",
+            message="Tablice z Z2 są gotowe, ale w Z3 nie ma jeszcze aktualnego zestawu wyciętych tablic. Najpierw uruchom wycinanie w PZ1.",
         )
         return result
 
@@ -562,7 +639,7 @@ def get_campaign_step3_source_refresh_state(
         result.update(
             needs_reextract=True,
             reason="invalid_preview_dir",
-            message="Poprzednia paczka tablic nie jest już dostępna. Najpierw uruchom ponowne wycinanie w PZ1.",
+            message="Poprzedni zestaw wyciętych tablic nie jest już dostępny. Najpierw uruchom ponowne wycinanie w PZ1.",
         )
         return result
 
@@ -572,9 +649,20 @@ def get_campaign_step3_source_refresh_state(
         result.update(
             needs_reextract=True,
             reason="incomplete_preview",
-            message="Poprzednia paczka tablic jest niepelna. Najpierw uruchom ponowne wycinanie w PZ1.",
+            message="Poprzedni zestaw wyciętych tablic jest niepełny. Najpierw uruchom ponowne wycinanie w PZ1.",
         )
         return result
+
+    try:
+        if hasattr(host, "_preview_matches_current_extract_source") and not host._preview_matches_current_extract_source(preview_dir):
+            result.update(
+                needs_reextract=True,
+                reason="preview_source_mismatch",
+                message="Poprzednio wycięte tablice pochodzą z innego źródła Z2. Najpierw uruchamiam ponowne wycinanie.",
+            )
+            return result
+    except Exception:
+        pass
 
     try:
         saved_state = CAMPAIGN.get_step3_extract_state() or {}

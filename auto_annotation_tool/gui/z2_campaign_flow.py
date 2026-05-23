@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from tkinter import messagebox
 from typing import TYPE_CHECKING, Any
 
 from ..config import logger
@@ -232,17 +231,21 @@ def open_campaign_step2_entry(
             except Exception:
                 char_source_state = {}
             char_has_existing_source = bool(char_source_state.get("has_source"))
-        if target == "char" and not plate_model_ready and not char_has_existing_source:
-            messagebox.showwarning(
-                "Brak modelu tablic",
-                "Tor znakow wymaga gotowego modelu tablic Pose przypisanego do projektu.\n\n"
-                "Najpierw wytrenuj model tablic w torze A, a potem wroc do toru B."
-            )
-            return {"ok": False, "reason": "missing_plate_model"}
+        char_manual_bootstrap = bool(target == "char" and not plate_model_ready and not char_has_existing_source)
 
         iter_num = CAMPAIGN.get_current_iteration_num()
-        folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-        input_dir = folder if folder.exists() else Path(raw_dir)
+        try:
+            iteration_source_dir = (
+                CAMPAIGN.get_iteration_image_source_dir(iter_num)
+                or CAMPAIGN.get_iteration_raw_dir(iter_num)
+            )
+        except Exception:
+            iteration_source_dir = None
+        fallback_folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+        if iteration_source_dir is not None and Path(iteration_source_dir).exists():
+            input_dir = Path(iteration_source_dir)
+        else:
+            input_dir = fallback_folder if fallback_folder.exists() else Path(raw_dir)
         base_input_dir = input_dir
 
         try:
@@ -393,6 +396,14 @@ def open_campaign_step2_entry(
             except Exception:
                 bootstrap = {}
 
+        if char_manual_bootstrap and not bootstrap.get("restore_run_dir"):
+            bootstrap = dict(bootstrap) if isinstance(bootstrap, dict) else {}
+            bootstrap["input_dir"] = base_input_dir
+            bootstrap["restore_run_dir"] = None
+            bootstrap["input_source"] = "raw_manual_for_char"
+            bootstrap["manual_template"] = True
+            bootstrap["plate_model_path"] = ""
+
         if target == "plate" and strategy == "raw":
             bootstrap = dict(bootstrap) if isinstance(bootstrap, dict) else {}
             bootstrap["input_dir"] = base_input_dir
@@ -407,8 +418,12 @@ def open_campaign_step2_entry(
         restore_run_dir = bootstrap.get("restore_run_dir")
         input_source = str(bootstrap.get("input_source") or "raw").strip()
         if target == "plate" and restore_run_dir is not None:
-            manual_template = False
-            bootstrap["manual_template"] = False
+            try:
+                restore_manifest = host._load_annotation_run_manifest(Path(restore_run_dir))
+            except Exception:
+                restore_manifest = {}
+            manual_template = bool(host._annotation_run_manifest_is_manual_template(restore_manifest))
+            bootstrap["manual_template"] = manual_template
         if not host._should_restore_existing_campaign_step2_run(target):
             restore_run_dir = None
             bootstrap["restore_run_dir"] = None
@@ -556,7 +571,7 @@ def open_campaign_step2_entry(
 
         force_campaign_preset = bool(
             not opened_existing_run
-            and target == "plate"
+            and target in {"plate", "char"}
             and effective_manual_template
             and current_route != "manual"
         )
@@ -775,6 +790,7 @@ def prepare_campaign_workflow_runtime(
         int(campaign_stage or 0) == 2
         and campaign_iteration_target in {"plate", "char"}
         and "auto" in available_primary_action_ids
+        and current_route != "manual"
         and (
             (campaign_iteration_target == "plate" and int(campaign_iteration_num or 1) > 1)
             or campaign_iteration_target == "char"
@@ -880,7 +896,7 @@ def build_z2_cta_state_campaign(
                 start_text = (
                     "Przygotuj XML + boxy"
                     if host._manual_vehicle_assist_enabled()
-                    else "Przygotuj XML paczki"
+                    else "Przygotuj XML"
                 )
             else:
                 start_text = (
@@ -935,7 +951,7 @@ def _apply_campaign_char_repair_copy_payload(
 
     if manual_review_active:
         payload["manual_hint"] = (
-            "Ten powrót otwiera pełne Z2 dla tej samej paczki: możesz użyć autoanotacji aktywnym modelem projektu, "
+            "Ten powrót otwiera pełne Z2 dla tego samego katalogu zdjęć: możesz użyć autoanotacji aktywnym modelem projektu, "
             "podmienić model tylko dla tego runu albo poprawiać tablice ręcznie."
         )
         payload["manual_hint_tone"] = "muted"
@@ -971,11 +987,6 @@ def build_z2_left_panel_copy_payload_campaign(
     manual_review_active = bool(ctx.manual_review_active)
     has_manual_history = bool(ctx.has_manual_history)
     auto_completed = bool(ctx.auto_completed)
-    current_batch_images = max(
-        int(len(host.current_annotations or [])),
-        int(dict(getattr(host, "_campaign_pending_batch_summary", {}) or {}).get("pending_count", 0) or 0),
-    )
-
     if not route and campaign_stage == 2 and campaign_iteration_target == "char":
         payload["run_title"] = "Anotacja i korekta tablic"
         payload["badge_text"] = "Aktywny tor: przygotowanie źródła dla znaków"
@@ -1007,11 +1018,7 @@ def build_z2_left_panel_copy_payload_campaign(
         )
 
     if route == "auto":
-        payload["run_title"] = (
-            "Anotacja i korekta tablic"
-            if campaign_iteration_target == "char"
-            else "Autoanotacja i korekta tablic"
-        )
+        payload["run_title"] = "Anotacja i korekta tablic"
         payload["badge_text"] = "Aktywny tor: przygotowanie tablic"
         payload["badge_tone"] = "success"
         payload["route_tone"] = "muted"
@@ -1025,13 +1032,13 @@ def build_z2_left_panel_copy_payload_campaign(
         )
         payload["workflow_input_title"] = "Wskaż folder obrazów"
         payload["workflow_input_hint"] = (
-            "To jest paczka obrazów bieżącej iteracji. Opcjonalnie możesz też dołączyć ręcznie anotowane zdjęcia z wcześniejszych iteracji, które mają pozostać widoczne na liście Z2. Model tablic, confidence i opcjonalne boxy pojazdów ustawisz przy starcie autoanotacji w modalu."
+            "To jest katalog zdjęć bieżącej iteracji. Opcjonalnie możesz też dołączyć ręcznie anotowane zdjęcia z wcześniejszych iteracji, które mają pozostać widoczne na liście Z2. Model tablic, confidence i opcjonalne boxy pojazdów ustawisz przy starcie autoanotacji w modalu."
         )
-        payload["workflow_start_title"] = "Start autoanotacji bieżącego runu"
+        payload["workflow_start_title"] = "Autoanotacja bieżącego runu"
         payload["workflow_start_intro"] = (
-            "Uruchom run na bieżącej paczce. Przy starcie wybierzesz w modalu zakres, model tablic, confidence "
-            "i ewentualne boxy pojazdów, a po zakończeniu od razu sprawdzisz wynik w tym samym Z2. "
-            "Zdjęcia już poprawione ręcznie albo oznaczone jako [OK] pozostaną na liście, ale nie będą ponownie przetwarzane."
+            "Masz otwarty roboczy run Z2. Możesz uruchomić autoanotację jako wsparcie korekty albo dalej pracować ręcznie "
+            "na liście i podglądzie. Przycisk startu otworzy modal wyboru zakresu, modelu tablic, confidence "
+            "oraz opcjonalnych boxów pojazdów."
         )
         payload["auto_plate_model_hint_text"] = (
             "Aktywny model projektu został już podstawiony do tego kroku. "
@@ -1052,9 +1059,10 @@ def build_z2_left_panel_copy_payload_campaign(
             payload["route_text"] = "Model tablic wybierzesz przy starcie autoanotacji."
             payload["action_text"] = "Kliknij Start, a w modalu wskażesz zakres pracy i model dla bieżącego runu Z2."
             payload["workflow_start_intro"] = (
-                "Start otworzy modal ustawień bieżącego runu Z2. Wybierzesz tam zakres obrazów, wymagany model tablic, "
-                "confidence oraz opcjonalne wsparcie modelem pojazdów. Po zatwierdzeniu modala program uruchomi autoanotację, "
-                "a wynik sprawdzisz i poprawisz na liście oraz podglądzie Z2."
+                "Autoanotacja jest dostępna jako wsparcie pracy na bieżącym runie Z2. "
+                "Przycisk startu otworzy modal wyboru zakresu obrazów, wymaganego modelu tablic, confidence "
+                "oraz opcjonalnego wsparcia modelem pojazdów. Po zakończeniu wynik sprawdzisz i poprawisz "
+                "na liście oraz podglądzie Z2."
             )
             payload["auto_plate_model_hint_text"] = (
                 "Na tym etapie możesz wskazać aktywny model projektu albo podmienić go na inny model dla bieżącego runu Z2. "
@@ -1106,9 +1114,9 @@ def build_z2_left_panel_copy_payload_campaign(
 
     elif route == "manual":
         payload["run_title"] = (
-            "Ręczna anotacja tablic" if manual_setup and not manual_review_active else "Korekta ręczna tablic"
+            "Anotacja i korekta tablic" if manual_setup and not manual_review_active else "Korekta tablic"
         )
-        payload["badge_text"] = "Aktywny tor: anotacja ręczna tablic"
+        payload["badge_text"] = "Aktywny etap: anotacja i korekta tablic"
         payload["badge_tone"] = "warning"
         payload["route_tone"] = "muted"
         payload["followup_title"] = "3. Ręczna korekta i stage"
@@ -1186,51 +1194,49 @@ def build_z2_left_panel_copy_payload_campaign(
                 "Tutaj wybierasz obrazy dla nowego runu ręcznej anotacji Z2 oraz opcjonalnie włączasz pomocnicze boxy pojazdów."
             )
             payload["workflow_start_title"] = (
-                "Przejdź do pracy na bieżącej paczce"
+                "Otwórz bieżący run anotacji tablic"
                 if campaign_reused_manual_count > 0
-                else "Rozpocznij pracę na bieżącej paczce"
+                else "Utwórz plik anotacji tablic XML"
             )
             payload["workflow_start_intro"] = (
-                f"BIEŻĄCA PACZKA ZDJĘĆ WEJŚCIOWYCH ({current_batch_images}) ITERACJI {campaign_iteration_num} jest już wczytana do Z2. Utwórz plik anotacji tablic XML przyciskiem poniżej, aby rozpocząć oznaczanie tablic i zapisywać wynik w runie tej iteracji."
-                if campaign_iteration_num > 0
-                else f"BIEŻĄCA PACZKA ZDJĘĆ WEJŚCIOWYCH ({current_batch_images}) tej iteracji jest już wczytana do Z2. Utwórz plik anotacji tablic XML przyciskiem poniżej, aby rozpocząć oznaczanie tablic."
+                "Utwórz plik XML anotacji tablic dla katalogu zdjęć wybranego w E1. "
+                "Po utworzeniu XML możesz rysować i poprawiać ramki tablic w Z2 oraz oznaczać poprawne obrazy statusem [OK]."
             )
             payload["route_text"] = (
-                "Pracujesz bezpośrednio na paczce tej iteracji. Wcześniejsze ręczne korekty zostaną zachowane."
+                "Pracujesz na katalogu zdjęć wybranym w E1. Wcześniejsze ręczne korekty zostaną zachowane."
                 if campaign_reused_manual_count > 0
-                else "Paczka tej iteracji jest już gotowa do pracy. Nie musisz otwierać dodatkowego runu ani wskazywać nowego źródła."
+                else "Katalog zdjęć tej iteracji jest przygotowany do pracy w Z2. Nie musisz wskazywać dodatkowego źródła ani otwierać osobnego runu."
             )
             payload["action_text"] = (
-                "Kliknij przycisk poniżej, aby wejść do pracy na tej paczce. Wcześniejsze poprawki pozostaną zachowane."
+                "Kliknij przycisk poniżej, aby wrócić do pracy na bieżącym runie. Wcześniejsze poprawki pozostaną zachowane."
                 if campaign_reused_manual_count > 0
-                else "Kliknij przycisk poniżej, aby zacząć oznaczać tablice na tej paczce. Gdy zapiszesz poprawne wyniki i oznaczysz obrazy jako [OK], odblokujesz domknięcie E2."
+                else "Kliknij przycisk poniżej, aby utworzyć XML i zacząć oznaczać tablice. Gdy zapiszesz poprawne wyniki i oznaczysz obrazy jako [OK], odblokujesz domknięcie E2."
             )
             payload["manual_hint"] = (
                 "Ten tor pracuje już na jednym runie tej iteracji, więc nie wymaga ręcznego zarządzania osobnym XML-em."
                 if campaign_reused_manual_count > 0
-                else "Z2 zapisuje wynik tej paczki w runie iteracji w tle. Użytkownik nie musi tworzyć ani otwierać dodatkowego runu ręcznie."
+                else "Z2 zapisuje wynik w runie tej iteracji. Użytkownik nie musi ręcznie zarządzać katalogami runu."
             )
             payload["manual_hint_tone"] = "muted"
             payload["manual_template_hint"] = (
-                "Po wejściu do pracy na tej paczce wcześniejsze ręczne oznaczenia pozostają zachowane, a dalsze zmiany zapiszą się już w XML tej iteracji."
+                "Po wejściu do pracy wcześniejsze ręczne oznaczenia pozostają zachowane, a dalsze zmiany zapiszą się w XML tej iteracji."
                 if campaign_reused_manual_count > 0
-                else "Wynik tej paczki zapisze się w workspace Z2 dla tej iteracji. Nie musisz ręcznie zarządzać plikami runu."
+                else "Wynik pracy zapisze się w workspace Z2 dla tej iteracji. Nie musisz ręcznie zarządzać plikami runu."
             )
             payload["manual_template_tone"] = "muted"
             payload["manual_vehicle_hint"] = "Opcjonalne boxy pojazdów są tylko pomocą przy ręcznej pracy."
             payload["manual_vehicle_tone"] = "muted"
             if campaign_iteration_num == 1 and not campaign_reused_manual_count:
                 payload["run_intro_text"] = (
-                    f"BIEŻĄCA PACZKA ZDJĘĆ WEJŚCIOWYCH ({current_batch_images}) ITERACJI 1 jest już wczytana do Z2 i gotowa do pracy. "
-                    "To jest pierwsze bazowe przygotowanie tablic w projekcie. "
-                    "Na niej przygotujesz pierwsze poprawne tablice potrzebne do odblokowania E2."
+                    "To jest pierwsze bazowe przygotowanie anotacji tablic w projekcie. "
+                    "Utwórz XML, oznacz ramki tablic i nadaj poprawnym obrazom status [OK], aby odblokować E2."
                 )
                 payload["route_text"] = (
-                    "To jest pierwszy bazowy zestaw tablic dla projektu. "
-                    "W tej iteracji pracujesz na już załadowanej paczce i przygotowujesz pierwsze poprawne tablice do odblokowania E2."
+                    "To jest pierwszy bazowy zestaw anotacji tablic dla projektu. "
+                    "W tej iteracji przygotowujesz pierwsze poprawne tablice do odblokowania E2."
                 )
                 payload["action_text"] = (
-                    "Przejdź do pracy na tej paczce, narysuj lub popraw tablice ręcznie i oznacz poprawne obrazy jako [OK]. "
+                    "Utwórz XML, narysuj lub popraw tablice ręcznie i oznacz poprawne obrazy jako [OK]. "
                     "To otworzy bramkę dalszego etapu."
                 )
             if vehicle_assist_enabled:
@@ -1245,7 +1251,7 @@ def build_z2_left_panel_copy_payload_campaign(
 
         if not str(payload.route_text or "").strip():
             payload["route_text"] = (
-                "Pracujesz ręcznie na bieżącej paczce tej iteracji. "
+                "Pracujesz ręcznie na katalogu zdjęć tej iteracji. "
                 "Możesz przygotować nowe oznaczenia albo poprawiać aktywny run Z2."
             )
         if not str(payload.action_text or "").strip():
@@ -1264,7 +1270,7 @@ def build_z2_left_panel_copy_payload_campaign(
         ):
             payload["run_intro_text"] = (
                 "Tutaj przygotowujesz pierwszy bazowy zestaw tablic dla projektu. "
-                "Na tej paczce ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
+                "Na katalogu zdjęć tej iteracji ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
                 "który później zatwierdzi E2 i posłuży do dalszego treningu."
             )
 

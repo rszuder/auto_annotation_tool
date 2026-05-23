@@ -58,10 +58,10 @@ def _build_plate_ready_dataset_summary(host: "TrainingTab") -> str:
         split_text = "Split: data.yaml wykryty, licznik obrazów nie został jeszcze obliczony."
 
     return (
-        "Gotowy wariant datasetu tablic jest już podpięty jako wejście treningowe.\n"
+        "Wariant datasetu tablic jest ustawiony jako wejście treningowe.\n"
         f"Dataset: {display_path}\n"
         f"{split_text}\n"
-        "Możesz przejść dalej do PZ2 i wybrać go z listy wariantów bez wskazywania XML i obrazów."
+        "W PZ2 wybierasz aktywny wariant i uruchamiasz trening."
     )
 
 
@@ -111,25 +111,14 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             if bool(vm.in_campaign):
                 creator_intro = (
                     "Dataset tablic powstaje z zatwierdzonych anotacji projektu. "
-                    "Ręczny wybór XML i folderu obrazów jest tutaj ukryty, bo źródła przygotował wcześniejszy etap."
-                )
-            elif source == "z2_export":
-                creator_intro = (
-                    "Masz już gotowy dataset tablic przekazany z eksportu Z2. "
-                    "Ten panel jest miejscem jawnego tworzenia nowych wariantów: użyj go tylko wtedy, "
-                    "gdy chcesz zbudować kolejny wariant YOLO Pose z pliku anotacji XML i zgodnego folderu obrazów. "
-                    "Utworzone warianty są dostępne w PZ2 na liście wariantów."
+                    "PZ1 tworzy wariant treningowy z podziałem train / val / test."
                 )
             else:
-                creator_intro = (
-                    "PZ1 tworzy wariant datasetu YOLO Pose. Wskaż plik anotacji XML oraz zgodny folder obrazów, "
-                    "a program zapisze osobny wariant treningowy z własnym splitem train / val / test. "
-                    "Utworzone tutaj datasety są dostępne w PZ2 na liście wariantów."
-                )
+                creator_intro = "Utwórz wariant splitu wybranego datasetu tablic, który został wyprodukowany w Z2."
             host._set_training_widget_text(host.creator_intro_lbl, creator_intro)
             host._set_training_widget_text(
                 host.btn_step4_create,
-                "Utwórz wariant datasetu",
+                "Utwórz split treningowy",
             )
             try:
                 host._refresh_dataset_creator_cta_state()
@@ -167,73 +156,29 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 if source_summary is not None:
                     host._set_training_widget_text(source_summary, str(vm.creator_summary or ""))
                     _set_pack_visible(source_summary, True, anchor=tk.W, fill=tk.X, pady=(0, 8), after=host.creator_intro_lbl)
-                _set_pack_visible(output_row, True, fill=tk.X, pady=2, after=source_summary)
-                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=10, after=output_row)
+                _set_pack_visible(output_row, False)
+                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=10, after=source_summary)
                 _set_pack_visible(create_frame, True, anchor=tk.W, pady=(10, 5))
                 _set_pack_visible(progress, True, fill=tk.X, pady=2)
                 _set_pack_visible(status, True, anchor=tk.W)
             else:
-                ready_summary = _build_plate_ready_dataset_summary(host)
-                _set_pack_visible(source_mode_frame, True, fill=tk.X, pady=(0, 10), after=host.creator_intro_lbl)
                 try:
-                    if ready_radio is not None:
-                        ready_radio.configure(state=tk.NORMAL)
-                    if xml_radio is not None:
-                        xml_radio.configure(state=tk.NORMAL)
+                    host._set_creator_source_mode("xml")
                 except Exception:
                     pass
-
-                try:
-                    xml_raw = str(host.cvat_xml_var.get() or "").strip()
-                    images_raw = str(host.cvat_images_var.get() or "").strip()
-                except Exception:
-                    xml_raw = images_raw = ""
-
-                try:
-                    current_mode = host._get_creator_source_mode()
-                    if current_mode not in {"ready", "xml"}:
-                        host._set_creator_source_mode("xml")
-                except Exception:
-                    pass
-
-                try:
-                    mode = host._get_creator_source_mode()
-                except Exception:
-                    mode = "xml"
-                show_ready_dataset = mode == "ready"
-                show_xml_builder = not show_ready_dataset
-
+                _set_pack_visible(source_mode_frame, False)
                 if ready_label is not None:
-                    if show_ready_dataset:
-                        host._set_training_widget_text(
-                            ready_label,
-                            ready_summary
-                            or (
-                                "Nie podpięto jeszcze gotowego datasetu tablic.\n"
-                                "Możesz przejść dalej i wybrać gotowy wariant w PZ2, "
-                                "albo przełączyć poniżej na utworzenie nowego wariantu z XML + obrazów."
-                            ),
-                        )
-                        _set_pack_visible(
-                            ready_label,
-                            True,
-                            anchor=tk.W,
-                            fill=tk.X,
-                            pady=(0, 8),
-                            after=source_mode_frame,
-                        )
-                    else:
-                        _set_pack_visible(ready_label, False)
+                    _set_pack_visible(ready_label, False)
 
                 if source_summary is not None:
                     _set_pack_visible(source_summary, False)
-                _set_pack_visible(xml_row, show_xml_builder, fill=tk.X, pady=2, after=source_mode_frame)
-                _set_pack_visible(images_row, show_xml_builder, fill=tk.X, pady=2, after=xml_row)
-                _set_pack_visible(output_row, show_xml_builder, fill=tk.X, pady=2, after=images_row)
-                _set_pack_visible(ratios_frame, show_xml_builder, fill=tk.X, pady=10, after=output_row)
-                _set_pack_visible(create_frame, show_xml_builder, anchor=tk.W, pady=(10, 5), after=ratios_frame)
-                _set_pack_visible(progress, show_xml_builder, fill=tk.X, pady=2, after=create_frame)
-                _set_pack_visible(status, show_xml_builder, anchor=tk.W, after=progress)
+                _set_pack_visible(xml_row, True, fill=tk.X, pady=2, after=host.creator_intro_lbl)
+                _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=xml_row)
+                _set_pack_visible(output_row, False)
+                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=10, after=images_row)
+                _set_pack_visible(create_frame, True, anchor=tk.W, pady=(10, 5), after=ratios_frame)
+                _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
+                _set_pack_visible(status, True, anchor=tk.W, after=progress)
 
             try:
                 host._refresh_dataset_creator_cta_state()
@@ -258,7 +203,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                     host.btn_step4_split_toggle.pack_forget()
             except Exception:
                 pass
-            host._set_training_widget_text(host.btn_step4_split, str(vm.split_action_label or "Utwórz wariant datasetu"))
+            host._set_training_widget_text(host.btn_step4_split, str(vm.split_action_label or "Utwórz split treningowy"))
             try:
                 host._refresh_dataset_split_cta_state()
             except Exception:
@@ -267,7 +212,6 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             if str(host.split_source_summary_lbl.winfo_manager()) != "pack":
                 host.split_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
             for widget, kwargs in (
-                (host.split_output_row, {"fill": tk.X, "pady": 2}),
                 (host.split_ratios_frame, {"fill": tk.X, "pady": 10}),
                 (host.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
             ):
@@ -289,8 +233,11 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             except Exception:
                 pass
         else:
-            host._set_training_widget_text(host.split_intro_lbl, str(vm.split_intro or ""))
-            host._set_training_widget_text(host.btn_step4_split, str(vm.split_action_label or "Utwórz wariant datasetu"))
+            host._set_training_widget_text(
+                host.split_intro_lbl,
+                "Utwórz wariant splitu wybranego datasetu znaków, który został wyprodukowany w Z3/PZ2.",
+            )
+            host._set_training_widget_text(host.btn_step4_split, "Utwórz split treningowy")
             try:
                 host._refresh_dataset_split_cta_state()
             except Exception:
@@ -303,7 +250,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 pass
             _set_pack_visible(
                 getattr(host, "split_source_hint_lbl", None),
-                True,
+                False,
                 anchor=tk.W,
                 fill=tk.X,
                 pady=(0, 6),
@@ -313,8 +260,11 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 host.split_source_row.pack(fill=tk.X, pady=2, before=host.split_source_summary_lbl)
             if str(host.split_source_summary_lbl.winfo_manager()) == "pack":
                 host.split_source_summary_lbl.pack_forget()
+            try:
+                host.split_output_row.pack_forget()
+            except Exception:
+                pass
             for widget, kwargs in (
-                (host.split_output_row, {"fill": tk.X, "pady": 2}),
                 (host.split_ratios_frame, {"fill": tk.X, "pady": 10}),
                 (host.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
             ):
@@ -362,6 +312,7 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     dataset_entry = getattr(host, "train_dataset_entry", None)
     dataset_btn = getattr(host, "train_dataset_pick_btn", None)
     dataset_yaml_btn = getattr(host, "train_dataset_yaml_btn", None)
+    dataset_refresh_btn = getattr(host, "dataset_variant_refresh_btn", None)
     dataset_row = getattr(host, "train_dataset_row", None)
     dataset_variant_row = getattr(host, "dataset_variant_row", None)
     dataset_variant_title = getattr(host, "dataset_variant_title_lbl", None)
@@ -395,12 +346,12 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     # PZ2 consumes prepared variants only. Manual source selection belongs to PZ1.
     show_manual_dataset_path = False
 
-    _set_pack_visible(dataset_required, show_dataset_section, anchor=tk.W, fill=tk.X, pady=(0, 4))
-    _set_pack_visible(dataset_caption, show_dataset_section, anchor=tk.W, fill=tk.X, pady=(2, 6))
+    _set_pack_visible(dataset_required, False, anchor=tk.W, fill=tk.X, pady=(0, 4))
+    _set_pack_visible(dataset_caption, show_dataset_section, anchor=tk.W, fill=tk.X, pady=(2, 4))
     _set_pack_visible(dataset_path_label, show_manual_dataset_path, anchor=tk.W, fill=tk.X, pady=(2, 2))
     _set_pack_visible(dataset_row, show_manual_dataset_path, fill=tk.X, pady=2)
     _set_pack_visible(dataset_variant_row, bool(vm.show_dataset_section), fill=tk.X, pady=(4, 2))
-    _set_pack_visible(dataset_hint, bool(vm.show_dataset_hint), anchor=tk.W, fill=tk.X, pady=(4, 8))
+    _set_pack_visible(dataset_hint, False, anchor=tk.W, fill=tk.X, pady=(4, 4))
     _set_pack_visible(scope_hint, bool(vm.show_scope_hint), anchor=tk.W, fill=tk.X, pady=(0, host._train_left_section_gap))
     _set_pack_visible(
         pose_warning,
@@ -417,27 +368,17 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     selected_target = str(selected_target or "char").strip().lower()
 
     if dataset_title is not None:
-        title_text = "Wariant datasetu YOLO Pose" if selected_target == "plate" else "Wariant datasetu YOLO Detect"
-        host._set_training_widget_text(dataset_title, title_text)
+        host._set_training_widget_text(dataset_title, "Wybór splitu")
 
     if bool(vm.in_campaign):
-        dataset_caption_text = (
-            "PZ2 korzysta z wariantów przygotowanych w PZ1. "
-            "Możesz przełączyć split, ale nowych źródeł nie wybieramy w tej karcie."
-        )
-        dataset_required_text = "Wymagane: gotowy wariant datasetu zgodny z torem kampanii."
+        dataset_caption_text = "Wybierz split zgodny z aktualnym torem projektu. Nowy split przygotujesz w PZ1."
+        dataset_required_text = ""
     elif selected_target == "plate":
-        dataset_required_text = "Wymagane: gotowy wariant datasetu YOLO Pose z data.yaml."
-        dataset_caption_text = (
-            "PZ2 nie podmienia ręcznie źródła datasetu. Jeśli chcesz zbudować albo przepiąć źródło, "
-            "wróć do PZ1. Tutaj wybierasz tylko gotowy wariant utworzony wcześniej."
-        )
+        dataset_required_text = ""
+        dataset_caption_text = "Wybierz split tablic do treningu YOLO Pose. Nowy split przygotujesz w PZ1."
     else:
-        dataset_required_text = "Wymagane: gotowy wariant datasetu YOLO Detect z data.yaml."
-        dataset_caption_text = (
-            "PZ2 nie wskazuje już folderu YOLO ręcznie. W PZ1 wybierasz źródło i tworzysz wariant splitu, "
-            "a tutaj wskazujesz gotowy wariant treningowy. Katalogi OCR/klasyfikacyjne manifest.json są pomijane."
-        )
+        dataset_required_text = ""
+        dataset_caption_text = "Wybierz split znaków do treningu YOLO Detect. Nowy split przygotujesz w PZ1."
     host._set_training_widget_text(dataset_required, dataset_required_text)
     host._set_training_widget_text(dataset_caption, dataset_caption_text)
     host._set_training_widget_text(
@@ -446,19 +387,13 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     )
 
     if dataset_variant_title is not None:
-        variant_text = (
-            "Gotowe warianty datasetu tablic:"
-            if selected_target == "plate"
-            else "Gotowe warianty datasetu znaków:"
-        )
-        host._set_training_widget_text(dataset_variant_title, variant_text)
+        host._set_training_widget_text(dataset_variant_title, "Dostępne splity:")
     if dataset_variant_caption is not None:
-        variant_caption_text = (
-            "Lista pokazuje gotowe warianty YOLO Pose z katalogu tablic. Wybór wariantu ustawia aktywny dataset treningowy."
-            if selected_target == "plate"
-            else "Lista pokazuje tylko gotowe warianty YOLO Detect z data.yaml. Jeśli lista jest pusta, wróć do PZ1 i przygotuj wariant."
-        )
-        host._set_training_widget_text(dataset_variant_caption, variant_caption_text)
+        host._set_training_widget_text(dataset_variant_caption, "")
+        try:
+            dataset_variant_caption.pack_forget()
+        except Exception:
+            pass
 
     if dataset_entry is not None:
         try:
@@ -475,6 +410,12 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     if dataset_yaml_btn is not None:
         try:
             dataset_yaml_btn.pack_forget()
+        except Exception:
+            pass
+
+    if dataset_refresh_btn is not None:
+        try:
+            dataset_refresh_btn.pack_forget()
         except Exception:
             pass
 
@@ -631,6 +572,11 @@ def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
 
     try:
         refresh_step4_route_choice_cards(host)
+    except Exception:
+        pass
+
+    try:
+        host._refresh_step4_dataset_summary_table()
     except Exception:
         pass
 
@@ -1028,7 +974,7 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
             if show_locked_message:
                 messagebox.showinfo(
                     "Tor iteracji jest stały",
-                    "Tor treningu został już ustalony dla bieżącej iteracji.\n\n"
+                    "Tor treningu jest stały w bieżącej iteracji.\n\n"
                     f"Ta iteracja pozostaje w torze {host._format_training_target_label(locked_target)}."
                 )
         mode = locked_target
