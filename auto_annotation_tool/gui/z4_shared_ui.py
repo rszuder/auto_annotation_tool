@@ -832,6 +832,16 @@ def accept_training_input_context(
         )
     except Exception:
         pass
+    try:
+        builder = getattr(host, "_build_step4_dataset_training_source", None)
+        if callable(builder):
+            host._last_training_source = builder(
+                dataset_text,
+                target=mode,
+                provenance=str(source or "pz1"),
+            )
+    except Exception:
+        pass
 
     if mode == "plate" and dataset_text:
         try:
@@ -901,6 +911,16 @@ def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | Non
             dataset_path=dataset_text,
             ready=bool(dataset_text),
         )
+    except Exception:
+        pass
+    try:
+        builder = getattr(host, "_build_step4_dataset_training_source", None)
+        if callable(builder):
+            host._last_training_source = builder(
+                dataset_text,
+                target=target,
+                provenance="pz1",
+            )
     except Exception:
         pass
 
@@ -1038,6 +1058,10 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
                 )
             except Exception:
                 pass
+            try:
+                host._last_training_source = None
+            except Exception:
+                pass
         elif mode == "plate":
             try:
                 current_dataset = str(host.dataset_var.get() or "").strip()
@@ -1066,6 +1090,10 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
                         dataset_path="",
                         ready=False,
                     )
+                except Exception:
+                    pass
+                try:
+                    host._last_training_source = None
                 except Exception:
                     pass
 

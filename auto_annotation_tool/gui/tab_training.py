@@ -64,7 +64,11 @@ from .z4_campaign_flow import (
     set_campaign_training_target,
 )
 from .z4_flow_models import (
+    CharYoloDatasetSourceAdapter,
+    PlateXmlImagesSourceAdapter,
     TrainingInputContext,
+    TrainingSource,
+    TrainingSourceStats,
     Z4CampaignRuntimeState,
     Z4CtaState,
     Z4FreeModeRuntimeState,
@@ -1477,6 +1481,25 @@ class TrainingTab:
         )
 
     def _resolve_training_dataset_yaml_path(self) -> Path | None:
+        try:
+            source = getattr(self, "_last_training_source", None)
+            if not isinstance(source, TrainingSource) or not source.has_dataset():
+                resolver = getattr(self, "_resolve_step4_dataset_summary_source", None)
+                if callable(resolver):
+                    source = resolver()
+            if isinstance(source, TrainingSource) and source.has_dataset():
+                candidates: list[Path] = []
+                if str(source.yaml_path or "").strip():
+                    candidates.append(Path(source.yaml_path))
+                if str(source.dataset_dir or "").strip():
+                    dataset_dir = Path(source.dataset_dir)
+                    candidates.append(dataset_dir / "data.yaml" if dataset_dir.is_dir() else dataset_dir)
+                for candidate in candidates:
+                    if candidate.exists() and candidate.is_file() and candidate.name.lower() == "data.yaml":
+                        return candidate
+        except Exception:
+            pass
+
         dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
         if not dataset_value:
             return None
@@ -1488,6 +1511,114 @@ class TrainingTab:
         if candidate.is_file() and candidate.name.lower() == "data.yaml":
             return candidate
         return None
+
+    def _validate_active_training_source_for_pz2(self) -> dict:
+        result = {
+            "ok": False,
+            "source": None,
+            "yaml_path": None,
+            "dataset_root": None,
+            "target": self._get_selected_training_target(),
+            "message": "Najpierw wskaż dataset treningowy.",
+            "stats": {},
+        }
+
+        yaml_path = self._resolve_training_dataset_yaml_path()
+        if yaml_path is None:
+            result["message"] = "Najpierw wskaż poprawny dataset treningowy z plikiem data.yaml."
+            return result
+
+        dataset_root = yaml_path.parent
+        selected_target = self._get_selected_training_target()
+        if not CAMPAIGN.get_active_project_name():
+            if not self._is_free_training_dataset_variant_selected(dataset_root):
+                result["message"] = (
+                    "Wybierz aktywny wariant splitu z listy PZ2 albo utwórz go w PZ1. "
+                    "Trening nie powinien startować na przypadkowej ścieżce."
+                )
+                return result
+
+        inferred_target = self._infer_dataset_target(str(dataset_root))
+        if inferred_target and inferred_target != selected_target:
+            result["message"] = (
+                "Wybrany dataset należy do innego toru niż aktywny trening.\n\n"
+                f"Aktywny tor: {self._format_training_target_label(selected_target)}\n"
+                f"Dataset: {self._format_training_target_label(inferred_target)}"
+            )
+            return result
+
+        def _safe_mtime(path: Path) -> float:
+            try:
+                return float(path.stat().st_mtime)
+            except Exception:
+                return 0.0
+
+        try:
+            root_key = str(dataset_root.resolve())
+        except Exception:
+            root_key = str(dataset_root)
+        cache_key = (
+            root_key,
+            str(selected_target),
+            _safe_mtime(yaml_path),
+            _safe_mtime(dataset_root / "images" / "train"),
+            _safe_mtime(dataset_root / "images" / "val"),
+            _safe_mtime(dataset_root / "images" / "test"),
+        )
+        cache = getattr(self, "_active_training_source_validation_cache", None)
+        if isinstance(cache, dict) and cache.get("key") == cache_key:
+            cached_result = dict(cache.get("result") or {})
+            cached_source = cached_result.get("source")
+            if isinstance(cached_source, TrainingSource):
+                try:
+                    self._last_training_source = cached_source
+                except Exception:
+                    pass
+            return cached_result
+
+        try:
+            is_valid, validation_msg, validation_stats = self.trainer.validate_dataset(dataset_root)
+        except Exception as exc:
+            is_valid = False
+            validation_msg = f"Błąd walidacji datasetu: {exc}"
+            validation_stats = {}
+
+        validation_stats = dict(validation_stats or {})
+        source = TrainingSource(
+            target=CONFIG.normalize_task_target(inferred_target or selected_target),
+            kind="yolo_dataset",
+            dataset_dir=str(dataset_root),
+            yaml_path=str(yaml_path),
+            validated=bool(is_valid),
+            stats=TrainingSourceStats.from_mapping(validation_stats),
+            provenance=str(getattr(self._resolve_step4_dataset_summary_source(), "provenance", "") or "Aktywny split"),
+            source_stage="Z4/PZ2",
+            message=str(validation_msg or "").strip(),
+        )
+        try:
+            self._last_training_source = source
+        except Exception:
+            pass
+
+        result.update(
+            {
+                "ok": bool(is_valid),
+                "source": source,
+                "yaml_path": yaml_path,
+                "dataset_root": dataset_root,
+                "target": source.target,
+                "message": str(validation_msg or "").strip(),
+                "stats": validation_stats,
+            }
+        )
+        try:
+            self._active_training_source_validation_cache = {
+                "key": cache_key,
+                "result": dict(result),
+            }
+        except Exception:
+            pass
+        return result
 
     def _looks_like_char_classification_dataset(self, path_like) -> bool:
         try:
@@ -1541,17 +1672,10 @@ class TrainingTab:
         if bool(getattr(self.trainer, "is_training", False)):
             return False
 
-        yaml_path = self._resolve_training_dataset_yaml_path()
-        if yaml_path is None:
+        source_state = self._validate_active_training_source_for_pz2()
+        if not bool(source_state.get("ok")):
             return False
-        if not CAMPAIGN.get_active_project_name():
-            if not self._is_free_training_dataset_variant_selected(yaml_path.parent):
-                return False
-
-        selected_target = self._get_selected_training_target()
-        inferred_target = self._infer_dataset_target(str(yaml_path.parent))
-        if inferred_target and inferred_target != selected_target:
-            return False
+        selected_target = CONFIG.normalize_task_target(str(source_state.get("target") or self._get_selected_training_target()))
 
         base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
         if not base_key:
@@ -2041,6 +2165,10 @@ class TrainingTab:
         target_label = self._format_training_target_label(target)
         base_model_display = self._resolve_selected_training_base_model_display()
         base_model_inspection_path, base_model_info = self._resolve_selected_training_base_model_info()
+        try:
+            active_source = self._resolve_step4_dataset_summary_source()
+        except Exception:
+            active_source = None
         dataset_yaml = self._resolve_training_dataset_yaml_path()
         epochs_value = self._safe_training_int_value("epochs_var", default=100, minimum=1)
 
@@ -2111,6 +2239,10 @@ class TrainingTab:
         rows.extend(
             [
                 ("Dataset", dataset_rel),
+                (
+                    "Źródło danych",
+                    str(getattr(active_source, "provenance", "") or "Aktywny split"),
+                ),
                 ("Typ datasetu", dataset_task + (f" | klasy: {class_count}" if class_count > 0 else "")),
                 ("Statystyki zestawu", f"razem={total_images}, train={train_images}, val={val_images}, test={test_images}"),
                 ("Split treningu", f"Uczenie na `train`, pomiar po każdej epoce na `val`, rezerwa w `test` | {split_usage}"),
@@ -2495,9 +2627,90 @@ class TrainingTab:
         counts["total"] = int(total)
         return counts
 
-    def _resolve_step4_dataset_summary_source(self) -> tuple[str, str, str]:
+    @staticmethod
+    def _format_training_source_provenance(provenance: str | None) -> str:
+        raw = str(provenance or "").strip()
+        key = raw.lower()
+        labels = {
+            "pz1": "Utworzony w PZ1",
+            "pz2_variant": "Wybrany wariant",
+            "campaign_ready_dataset": "Dataset kampanii",
+            "active": "Aktywny split",
+        }
+        return labels.get(key, raw or "Aktywny split")
+
+    def _build_step4_dataset_training_source(
+        self,
+        dataset_path: str | Path | None,
+        *,
+        target: str = "",
+        provenance: str = "Aktywny split",
+        source_stage: str = "Z4/PZ1",
+    ) -> TrainingSource:
+        dataset_text = str(dataset_path or "").strip()
+        normalized_target = str(target or getattr(self, "_step4_dataset_mode", "char") or "char").strip().lower()
+        try:
+            normalized_target = CONFIG.normalize_task_target(normalized_target)
+        except Exception:
+            normalized_target = normalized_target if normalized_target in {"plate", "char"} else "char"
+
+        if not dataset_text:
+            return TrainingSource(
+                target=normalized_target,
+                kind="yolo_dataset",
+                provenance=self._format_training_source_provenance(provenance),
+                source_stage=str(source_stage or ""),
+                message="Brak wybranego datasetu.",
+            )
+
+        dataset_dir = dataset_text
+        yaml_path = ""
+        validated = False
+        stats = TrainingSourceStats()
+        message = ""
+
+        try:
+            root = Path(dataset_text)
+            if root.is_file() and root.name.lower() == "data.yaml":
+                yaml_candidate = root
+                root = root.parent
+            else:
+                yaml_candidate = root / "data.yaml"
+            dataset_dir = str(root)
+            yaml_path = str(yaml_candidate)
+            validated = bool(yaml_candidate.exists())
+            if validated:
+                stats = TrainingSourceStats.from_mapping(self._get_dataset_split_image_counts(root))
+                message = "Dataset ma plik data.yaml i może być użyty jako wariant treningowy."
+                try:
+                    inferred_target = str(self._infer_dataset_target(str(root)) or "").strip().lower()
+                except Exception:
+                    inferred_target = ""
+                if inferred_target in {"plate", "char"}:
+                    normalized_target = inferred_target
+            else:
+                message = "Dataset wymaga pliku data.yaml."
+        except Exception:
+            dataset_dir = dataset_text
+            yaml_path = ""
+            validated = False
+            message = "Nie udało się odczytać źródła datasetu."
+
+        return TrainingSource(
+            target=normalized_target,
+            kind="yolo_dataset",
+            dataset_dir=dataset_dir,
+            yaml_path=yaml_path,
+            validated=validated,
+            stats=stats,
+            provenance=self._format_training_source_provenance(provenance),
+            source_stage=str(source_stage or ""),
+            message=message,
+        )
+
+    def _resolve_step4_dataset_summary_source(self) -> TrainingSource:
         dataset_path = ""
-        source_label = "Aktywny split"
+        provenance = "Aktywny split"
         target = str(getattr(self, "_step4_dataset_mode", "char") or "char").strip().lower()
 
         try:
@@ -2512,9 +2725,34 @@ class TrainingTab:
             if context_target in {"plate", "char"}:
                 target = context_target
             if dataset_path:
-                source_label = "Ostatnio przygotowany"
+                provenance = "Ostatnio przygotowany"
 
-        return dataset_path, target, source_label
+        cached_source = getattr(self, "_last_training_source", None)
+        if isinstance(cached_source, TrainingSource) and dataset_path:
+            cached_path = str(cached_source.dataset_dir or cached_source.yaml_path or "").strip()
+            try:
+                cached_root = Path(cached_path)
+                dataset_root = Path(dataset_path)
+                if dataset_root.is_file() and dataset_root.name.lower() == "data.yaml":
+                    dataset_root = dataset_root.parent
+                if cached_root.is_file() and cached_root.name.lower() == "data.yaml":
+                    cached_root = cached_root.parent
+                if cached_root and dataset_root and cached_root.resolve() == dataset_root.resolve():
+                    return cached_source
+            except Exception:
+                if cached_path == dataset_path:
+                    return cached_source
+
+        source = self._build_step4_dataset_training_source(
+            dataset_path,
+            target=target,
+            provenance=provenance,
+        )
+        try:
+            self._last_training_source = source
+        except Exception:
+            pass
+        return source
 
     def _refresh_step4_dataset_summary_table(self):
         frame = getattr(self, "step4_dataset_summary_frame", None)
@@ -2552,24 +2790,28 @@ class TrainingTab:
         accent = palette.get("accent", success)
         accent_text = palette.get("accent_text", "#ffffff")
 
-        dataset_path, target, source_label = self._resolve_step4_dataset_summary_source()
+        source = self._resolve_step4_dataset_summary_source()
+        dataset_path = str(source.dataset_dir or source.yaml_path or "").strip()
+        target = str(source.target or getattr(self, "_step4_dataset_mode", "char") or "char").strip().lower()
+        source_label = str(source.provenance or "Aktywny split")
         target = CONFIG.normalize_task_target(target)
         target_label = self._format_training_target_label(target)
         display_path = "Brak wybranego datasetu"
         data_yaml_text = "-"
-        counts = {"train": 0, "val": 0, "test": 0, "total": 0}
-        ready = False
+        counts = source.stats.split_counts()
+        ready = bool(source.validated)
 
         if dataset_path:
             try:
                 root = Path(dataset_path)
                 if root.is_file() and root.name.lower() == "data.yaml":
                     root = root.parent
-                data_yaml = root / "data.yaml"
-                ready = bool(data_yaml.exists())
+                data_yaml = Path(source.yaml_path) if str(source.yaml_path or "").strip() else root / "data.yaml"
+                ready = bool(source.validated or data_yaml.exists())
                 data_yaml_text = "jest" if ready else "brak"
                 display_path = self._format_workspace_relative_path(root)
-                counts = self._get_dataset_split_image_counts(root)
+                if int(counts.get("total", 0) or 0) <= 0:
+                    counts = self._get_dataset_split_image_counts(root)
             except Exception:
                 display_path = str(dataset_path)
                 data_yaml_text = "brak"
@@ -4083,9 +4325,18 @@ class TrainingTab:
         campaign_active = bool(CAMPAIGN.get_active_project_name())
         selected_target = self._get_selected_training_target()
         selected_label = self._format_training_target_label(selected_target)
+        try:
+            active_source = self._resolve_step4_dataset_summary_source()
+        except Exception:
+            active_source = None
 
         if campaign_active:
-            dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+            dataset_value = str(
+                getattr(active_source, "dataset_dir", "")
+                or getattr(active_source, "yaml_path", "")
+                or getattr(self, "dataset_var", tk.StringVar()).get()
+                or ""
+            ).strip()
             dataset_counts = self._get_dataset_split_image_counts(dataset_value)
             total_images = int(dataset_counts.get("total", 0) or 0)
             if total_images > 0:
@@ -4098,8 +4349,15 @@ class TrainingTab:
                 )
             return f"Tor kampanii: {selected_label}."
 
-        dataset_value = getattr(self, "dataset_var", None)
-        inferred_target = self._infer_dataset_target(dataset_value.get() if dataset_value is not None else "")
+        dataset_value = (
+            str(getattr(active_source, "dataset_dir", "") or getattr(active_source, "yaml_path", "") or "").strip()
+            if active_source is not None
+            else ""
+        )
+        if not dataset_value:
+            dataset_var = getattr(self, "dataset_var", None)
+            dataset_value = dataset_var.get() if dataset_var is not None else ""
+        inferred_target = self._infer_dataset_target(dataset_value)
         if inferred_target and inferred_target != selected_target:
             inferred_label = self._format_training_target_label(inferred_target)
             return (
@@ -12735,36 +12993,23 @@ class TrainingTab:
 
         xml_raw = str(getattr(self, "cvat_xml_var", tk.StringVar()).get() or "").strip()
         images_raw = str(getattr(self, "cvat_images_var", tk.StringVar()).get() or "").strip()
-
-        if not xml_raw:
-            return result
-        try:
-            xml_path = Path(xml_raw)
-        except Exception:
-            result["message"] = "Nie udało się odczytać ścieżki pliku XML."
-            return result
-        if not xml_path.exists() or not xml_path.is_file() or xml_path.suffix.lower() != ".xml":
-            result["message"] = "Wskaż istniejący plik anotacji XML."
-            return result
-
-        if not images_raw:
-            result["message"] = "Wskaż folder obrazów dla tego pliku XML."
-            return result
-        try:
-            images_dir = Path(images_raw)
-        except Exception:
-            result["message"] = "Nie udało się odczytać ścieżki folderu obrazów."
-            return result
-        if not images_dir.exists() or not images_dir.is_dir():
-            result["message"] = "Wskaż istniejący folder obrazów."
+        adapter = PlateXmlImagesSourceAdapter(
+            provenance=self._format_training_source_provenance("Źródło PZ1"),
+            source_stage="Z4/PZ1",
+        )
+        validation = adapter.validate(xml_raw, images_raw)
+        result["message"] = validation.message
+        result["training_source"] = validation.source
+        if not validation.ok:
             return result
 
         result.update(
             {
                 "ok": True,
-                "xml": xml_path,
-                "images_dir": images_dir,
-                "message": "Gotowy do utworzenia wariantu datasetu treningowego.",
+                "xml": validation.raw.get("xml"),
+                "images_dir": validation.raw.get("images_dir"),
+                "message": validation.message,
+                "training_source": validation.source,
             }
         )
         return result
@@ -12888,9 +13133,17 @@ class TrainingTab:
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
             elif enabled:
+                try:
+                    self._pending_step4_input_training_source = info.get("training_source")
+                except Exception:
+                    pass
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
             else:
+                try:
+                    self._pending_step4_input_training_source = None
+                except Exception:
+                    pass
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
         except Exception:
@@ -12907,19 +13160,23 @@ class TrainingTab:
         }
 
         src_raw = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
-        if not src_raw:
-            return result
-
-        validation = self._validate_char_yolo_split_source(src_raw, resolve_nested_dataset=True)
-        if not bool(validation.get("ok")):
-            result["message"] = str(validation.get("message") or result["message"])
+        adapter = CharYoloDatasetSourceAdapter(
+            validator=self._validate_char_yolo_split_source,
+            provenance=self._format_training_source_provenance("Źródło PZ1"),
+            source_stage="Z3/PZ2",
+        )
+        validation = adapter.validate(src_raw)
+        result["message"] = validation.message or result["message"]
+        result["training_source"] = validation.source
+        if not validation.ok:
             return result
 
         result.update(
             {
                 "ok": True,
-                "src": validation.get("src"),
-                "message": str(validation.get("message") or "Gotowy do utworzenia wariantu datasetu treningowego."),
+                "src": validation.raw.get("src") or validation.source.dataset_dir,
+                "message": validation.message or "Gotowy do utworzenia wariantu datasetu treningowego.",
+                "training_source": validation.source,
             }
         )
         return result
@@ -12949,9 +13206,17 @@ class TrainingTab:
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
             elif enabled:
+                try:
+                    self._pending_step4_input_training_source = info.get("training_source")
+                except Exception:
+                    pass
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
             else:
+                try:
+                    self._pending_step4_input_training_source = None
+                except Exception:
+                    pass
                 self._style_training_success_label(status)
                 self._set_training_widget_text(status, str(info.get("message") or "Uzupełnij źródło datasetu."))
         except Exception:
@@ -13070,6 +13335,23 @@ class TrainingTab:
         counts: dict | None = None,
     ):
         self._mark_step4_dataset_ready(dataset_path)
+        try:
+            dataset_root = Path(dataset_path)
+            yaml_path = dataset_root / "data.yaml" if dataset_root.is_dir() else dataset_root
+            source_stats = TrainingSourceStats.from_mapping(counts or self._get_dataset_split_image_counts(dataset_root))
+            self._last_training_source = TrainingSource(
+                target=CONFIG.normalize_task_target(target),
+                kind="yolo_dataset",
+                dataset_dir=str(yaml_path.parent if yaml_path.name.lower() == "data.yaml" else dataset_root),
+                yaml_path=str(yaml_path),
+                validated=bool(yaml_path.exists()),
+                stats=source_stats,
+                provenance="Utworzony w PZ1",
+                source_stage="Z4/PZ1",
+                message=str(message or "").strip(),
+            )
+        except Exception:
+            pass
         target_label = self._format_training_target_label(target)
         path_text = self._format_step4_dataset_result_path(dataset_path)
         counts = counts or {}
@@ -13135,6 +13417,10 @@ class TrainingTab:
                 critical=False,
             )
             return
+        try:
+            self._pending_step4_input_training_source = source_info.get("training_source")
+        except Exception:
+            pass
 
         xml = Path(source_info["xml"])
         images_dir = Path(source_info["images_dir"])
@@ -13326,6 +13612,10 @@ class TrainingTab:
                 critical=False,
             )
             return
+        try:
+            self._pending_step4_input_training_source = source_info.get("training_source")
+        except Exception:
+            pass
 
         src = Path(source_info["src"])
 
@@ -13452,28 +13742,27 @@ class TrainingTab:
         self._latest_training_metrics = {}
         self._set_training_metric_interpretation("Interpretacja pojawi się po zakończeniu pierwszej epoki.")
 
-        ds = self.dataset_var.get().strip()
-        if not ds:
-            return messagebox.showerror("Błąd", "Najpierw wskaż dataset treningowy.")
-
-        ds_path = Path(ds)
-        yaml_path = ds_path / "data.yaml" if ds_path.is_dir() else ds_path
-        if not yaml_path.exists():
-            if self._looks_like_char_classification_dataset(ds_path):
+        source_state = self._validate_active_training_source_for_pz2()
+        if not bool(source_state.get("ok")):
+            yaml_path_candidate = source_state.get("yaml_path")
+            dataset_root_candidate = source_state.get("dataset_root")
+            check_path = dataset_root_candidate or yaml_path_candidate
+            if check_path is not None and self._looks_like_char_classification_dataset(check_path):
                 return messagebox.showerror(
                     "Nieobsługiwany typ datasetu",
                     self._char_classification_dataset_message(),
                 )
-            return messagebox.showerror("Błąd", "Nie znaleziono pliku data.yaml.")
-        dataset_root = yaml_path.parent
-
-        is_valid_dataset, validation_msg, validation_stats = self.trainer.validate_dataset(dataset_root)
-        if not is_valid_dataset:
-            validation_details = self._build_training_dataset_validation_message(
-                dataset_root,
-                validation_msg,
-                validation_stats,
-            )
+            validation_msg = str(source_state.get("message") or "Dataset niegotowy do treningu.")
+            dataset_root = source_state.get("dataset_root")
+            validation_stats = dict(source_state.get("stats") or {})
+            if dataset_root is not None:
+                validation_details = self._build_training_dataset_validation_message(
+                    Path(dataset_root),
+                    validation_msg,
+                    validation_stats,
+                )
+            else:
+                validation_details = validation_msg
             self._append_train_log(f"[WALIDACJA] {validation_msg}")
             self._append_train_log(validation_details)
             self.train_progress_label.configure(
@@ -13481,6 +13770,15 @@ class TrainingTab:
                 foreground="#c0392b"
             )
             return messagebox.showerror("Dataset niegotowy do treningu", validation_details)
+
+        yaml_path = Path(source_state["yaml_path"])
+        dataset_root = Path(source_state["dataset_root"])
+        validation_msg = str(source_state.get("message") or "Dataset OK")
+        validation_stats = dict(source_state.get("stats") or {})
+        try:
+            self.dataset_var.set(str(dataset_root))
+        except Exception:
+            pass
 
         pose_dataset_warning = self._get_pose_dataset_size_warning(dataset_root, validation_stats)
         if pose_dataset_warning:
@@ -13500,7 +13798,7 @@ class TrainingTab:
             is_pose_dataset = "kpt_shape" in cfg
 
             self._current_training_dataset_is_pose = bool(is_pose_dataset)
-            inferred_target = self._infer_dataset_target(ds) or ("plate" if is_pose_dataset else "char")
+            inferred_target = self._infer_dataset_target(str(dataset_root)) or ("plate" if is_pose_dataset else "char")
             selected_target = self._get_selected_training_target()
 
             if not CAMPAIGN.get_active_project_name():

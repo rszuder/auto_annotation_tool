@@ -1249,3 +1249,43 @@ Kryteria akceptacji:
 - zmiany w `(F)` nie zmieniaja zachowania bramek, manifestow i etapow w `(C)`.
 
 Ocena: to jest ruch stabilizacyjny, a nie funkcja kosmetyczna. Celem jest zmniejszenie liczby miejsc, w ktorych UI, walidacja i trening samodzielnie interpretuja zrodla danych.
+
+Pierwszy krok wdrozenia:
+
+- dodano lekki kontrakt `TrainingSource` oraz `TrainingSourceStats` w modelach przeplywu Z4;
+- `PZ1(F)` zaczyna cache'owac ostatnie aktywne zrodlo treningowe jako jeden obiekt, zamiast rozrzucac interpretacje po samych zmiennych sciezek;
+- tabela `Podsumowanie splitu` korzysta juz z tego kontraktu, ale stare pola `dataset_var` i `TrainingInputContext` pozostaja jako fallback;
+- to jest celowo maly krok: najpierw stabilizujemy sposob reprezentacji zrodla, a dopiero pozniej przenosimy walidacje i modale na adaptery.
+
+Drugi krok wdrozenia:
+
+- walidacja wejscia `PZ1(F)` tworzy juz roboczy `TrainingSource` dla obu sciezek:
+  - `annotation_xml_images` dla tablic,
+  - `yolo_dataset` dla znakow;
+- po poprawnym utworzeniu wariantu splitu `PZ1(F)` zapisuje gotowy dataset jako `TrainingSource` z licznikami `train/val/test/total`;
+- dzieki temu `PZ2(F)` bedzie moglo docelowo czytac gotowy wariant z jednego kontraktu, zamiast z samych pol tekstowych i historycznego kontekstu.
+
+Trzeci krok wdrozenia:
+
+- start treningu w `PZ2(F)` zaczyna rozwiazywac aktywny dataset przez `TrainingSource`;
+- pole tekstowe datasetu pozostaje kompatybilnym fallbackiem, ale nie jest juz jedynym zrodlem prawdy;
+- to przygotowuje kolejny etap: przeniesienie walidacji treningu i komunikatow modali na wspolny kontrakt zrodla.
+
+Czwarty krok wdrozenia:
+
+- centralne rozpoznawanie `data.yaml` treningu korzysta teraz najpierw z `TrainingSource`, a dopiero pozniej z pola tekstowego;
+- podsumowanie uruchamianego treningu pokazuje pochodzenie aktywnego datasetu;
+- wskazowki zakresu treningu w `PZ2(F)` takze czytaja aktywne zrodlo przez kontrakt, co ogranicza ryzyko pracy na starym albo niejawnie odziedziczonym wariancie.
+
+Domkniecie fundamentu:
+
+- dodano adapter `PlateXmlImagesSourceAdapter`, ktory waliduje wejscie `XML + katalog obrazow` i zwraca `TrainingSource` typu `annotation_xml_images`;
+- dodano adapter `CharYoloDatasetSourceAdapter`, ktory korzysta z istniejacej walidacji datasetu znakow i zwraca `TrainingSource` typu `yolo_dataset`;
+- `PZ1(F)` nie sklada juz roboczego zrodla treningowego przez lokalne slowniki w `tab_training.py`, tylko przez adaptery;
+- usunieto lokalny helper budujacy wejściowy `TrainingSource`, bo po dodaniu adapterow stal sie martwa warstwa posrednia;
+- na tym etapie kampania `(C)` pozostaje odseparowana. Nowy kontrakt jest gotowy do stopniowego wykorzystania w `(C)`, ale nie zmienia jej bramek ani manifestow.
+
+Dwa kolejne kroki domykajace:
+
+- `PZ2(F)` ma teraz jedna brame walidacji aktywnego zrodla treningowego. Stan przycisku treningu i sam start treningu korzystaja z tego samego sprawdzenia `TrainingSource -> data.yaml -> validate_dataset`;
+- dodano cache walidacji aktywnego datasetu PZ2, oparty o sciezke datasetu, tor i czasy modyfikacji `data.yaml` oraz katalogow `images/train`, `images/val`, `images/test`. Dzieki temu odswiezanie UI nie musi za kazdym razem skanowac katalogow splitu.
