@@ -52,7 +52,7 @@ def _format_training_input_dataset(host: "TrainingTab", dataset_value: str, targ
     dataset_label = "Dataset YOLO Pose" if target == "plate" else "Dataset YOLO Detect"
     value = str(dataset_value or "").strip()
     if not value:
-        return f"{dataset_label}: brak - wróć do PZ1 i przygotuj wejście treningowe."
+        return f"{dataset_label}: brak wariantu treningowego."
     try:
         display = host._format_workspace_relative_path(value)
     except Exception:
@@ -104,11 +104,11 @@ def refresh_training_input_summary(host: "TrainingTab"):
     context = getattr(host, "_last_training_input_context", None)
     source = str(getattr(context, "source", "") or "").strip().lower()
     source_labels = {
-        "z2_export": "Źródło: eksport Z2",
-        "pz1": "Źródło: PZ1",
-        "pz2_variant": "Źródło: wariant wybrany w PZ2",
+        "z2_export": "Pochodzenie: eksport Z2",
+        "pz1": "Pochodzenie: PZ1",
+        "pz2_variant": "Pochodzenie: lista wariantów",
     }
-    source_text = source_labels.get(source, "Źródło: wariant wybrany w PZ2")
+    source_text = source_labels.get(source, "Pochodzenie: lista wariantów")
 
     badge_text = "WEJŚCIE GOTOWE" if dataset_ready else "BRAK WEJŚCIA"
     badge_color = success if dataset_ready else panel_alt
@@ -118,7 +118,7 @@ def refresh_training_input_summary(host: "TrainingTab"):
     dataset_text = _format_training_input_dataset(host, dataset_value, target)
     if dataset_value and not dataset_ready and not CAMPAIGN.get_active_project_name():
         dataset_label = "Dataset YOLO Pose" if target == "plate" else "Dataset YOLO Detect"
-        dataset_text = f"{dataset_label}: wybierz gotowy wariant z listy albo wróć do PZ1 i utwórz nowy."
+        dataset_text = f"{dataset_label}: wybierz wariant z listy."
 
     try:
         frame.configure(
@@ -164,10 +164,9 @@ def refresh_training_input_summary(host: "TrainingTab"):
             campaign_active = bool(CAMPAIGN.get_active_project_name())
             intro.configure(
                 text=(
-                    "PZ2 w kampanii korzysta z toru i datasetu ustawionych przez workflow projektu. "
-                    "To podgląd wejścia treningowego przed uruchomieniem treningu."
+                    "PZ2 pokazuje wejście treningowe zgodne z aktualnym torem projektu."
                     if campaign_active
-                    else "PZ2 nie wybiera już toru samodzielnie. Korzysta z kontekstu przygotowanego w PZ1 albo przekazanego z eksportu Z2."
+                    else "PZ2 uruchamia trening na wybranym wariancie datasetu."
                 )
             )
         except Exception:

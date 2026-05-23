@@ -452,32 +452,32 @@ def build_preview_legend_sections(host: "CharacterAnnotationTab"):
             "title": "Nawigacja",
             "accent": "#2f80ed",
             "items": [
-                {"tokens": ["Q", "E"], "connector": "/", "label": "poprz./nast. tablica"},
-                {"tokens": ["F"], "label": "tablica do okna"},
+                {"tokens": ["Q", "E"], "connector": "/", "modes": ["tap", "tap"], "label": "poprz./nast. tablica"},
+                {"tokens": ["F"], "modes": ["tap"], "label": "tablica do okna"},
                 {"tokens": ["Rolka"], "label": "zoom in / out"},
-                {"tokens": ["Enter"], "label": "pełny ekran / wyjście"},
+                {"tokens": ["Enter"], "modes": ["tap"], "label": "pełny ekran / wyjście"},
             ],
         },
         {
             "title": "Boxy",
             "accent": "#22c55e",
             "items": [
-                {"tokens": ["D", "LPM"], "connector": "+", "label": "nowy box"},
-                {"tokens": ["S"], "label": "select / off"},
-                {"tokens": ["LPM"], "label": "przesuń lub resize"},
-                {"tokens": ["PPM"], "label": "usuń aktywny"},
-                {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "label": "historia"},
+                {"tokens": ["D", "LPM"], "connector": "→", "modes": ["tap", "tap"], "label": "nowy box klik-klik"},
+                {"tokens": ["S"], "modes": ["tap"], "label": "select / off"},
+                {"tokens": ["LPM"], "modes": ["hold"], "label": "przesuń lub resize"},
+                {"tokens": ["PPM"], "modes": ["tap"], "label": "usuń aktywny"},
+                {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "modes": ["tap", "tap"], "label": "historia"},
             ],
         },
         {
             "title": "Znaki",
             "accent": "#f59e0b",
             "items": [
-                {"tokens": ["Alt+W"], "label": "tryb wpisywania"},
-                {"tokens": ["LPM"], "label": "wybierz pole"},
-                {"tokens": ["←", "→"], "connector": "/", "label": "pole +/-"},
-                {"tokens": ["0-9/A-Z"], "label": "wpisz znak"},
-                {"tokens": ["Esc"], "label": "wyjdz z wpisywania"},
+                {"tokens": ["Alt+W"], "modes": ["tap"], "label": "tryb wpisywania"},
+                {"tokens": ["LPM"], "modes": ["tap"], "label": "wybierz pole"},
+                {"tokens": ["←", "→"], "connector": "/", "modes": ["tap", "tap"], "label": "pole +/-"},
+                {"tokens": ["0-9/A-Z"], "modes": ["tap"], "label": "wpisz znak"},
+                {"tokens": ["Esc"], "modes": ["tap"], "label": "wyjdz z wpisywania"},
             ],
         },
     ]
@@ -555,13 +555,13 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
         section_gap_y = 8.0
         section_pad_x = 10.0
         section_pad_y = 8.0
-        title_gap_y = 6.0
-        item_gap_y = 6.0
-        token_gap = 5.0
+        title_block_y = 15.0
+        item_gap_y = 5.0
+        token_gap = 12.0
         label_gap_x = 8.0
-        item_row_height = 22.0
+        item_row_height = 32.0
         title_font = host._get_preview_legend_font(8, "bold")
-        desc_font = host._get_preview_legend_font(8, "bold")
+        desc_font = host._get_preview_legend_font(8, "normal")
 
         if width >= 920.0:
             column_count = 3
@@ -580,9 +580,8 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
         for section in sections:
             item_count = len(section.get("items", []))
             section_height = (
-                section_pad_y
-                + float(title_font.metrics("linespace"))
-                + title_gap_y
+                title_block_y
+                + section_pad_y
                 + max(1, item_count) * item_row_height
                 + max(0, item_count - 1) * item_gap_y
                 + section_pad_y
@@ -606,13 +605,24 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
             section_x = outer_pad_x + (col_idx * (section_width + section_gap_x))
             section_y = y_offsets[row_idx]
             section_height = section_heights[idx]
+            section_body_y = section_y + title_block_y
+            section_body_h = section_height - title_block_y
             accent = str(section.get("accent", "#3498db"))
 
+            canvas.create_text(
+                section_x + section_pad_x,
+                section_y,
+                text=str(section.get("title", "")),
+                fill=legend_theme["section_title"],
+                anchor="nw",
+                font=title_font,
+                tags=("preview_legend",)
+            )
             section_rect = canvas.create_rectangle(
                 section_x,
-                section_y,
+                section_body_y,
                 section_x + section_width,
-                section_y + section_height,
+                section_body_y + section_body_h,
                 fill=legend_theme["section_fill"],
                 outline=accent,
                 width=1,
@@ -620,44 +630,39 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
             )
             canvas.tag_lower(section_rect)
 
-            canvas.create_text(
-                section_x + section_pad_x,
-                section_y + section_pad_y,
-                text=str(section.get("title", "")),
-                fill=legend_theme["section_title"],
-                anchor="nw",
-                font=title_font,
-                tags=("preview_legend",)
-            )
-
-            item_y = section_y + section_pad_y + float(title_font.metrics("linespace")) + title_gap_y
+            item_y = section_body_y + section_pad_y
             for item in section.get("items", []):
                 tokens = [str(token) for token in item.get("tokens", [])]
                 connector = str(item.get("connector", "") or "")
                 label = str(item.get("label", "") or "")
+                modes = [str(mode) for mode in item.get("modes", [])]
                 token_x = section_x + section_pad_x
                 prev_right = None
+                key_y = item_y + 7.0
+                label_y = item_y + 17.0
 
                 for token_idx, token_text in enumerate(tokens):
                     if token_idx > 0 and connector:
                         connector_x = float(prev_right) + (token_gap / 2.0)
                         canvas.create_text(
                             connector_x,
-                            item_y + 10.0,
+                            label_y,
                             text=connector,
                             fill=plus_fill,
                             anchor="center",
                             font=host._get_preview_legend_font(7, "bold"),
                             tags=("preview_legend",)
                         )
+                    token_mode = modes[token_idx] if token_idx < len(modes) else str(item.get("mode", "") or "")
                     token_w, _token_h = host._draw_preview_legend_keycap(
                         canvas,
                         token_x,
-                        item_y,
+                        key_y,
                         token_text,
                         fill=legend_theme["token_fill"],
                         outline=accent,
                         text_fill=legend_theme["token_text"],
+                        interaction=token_mode,
                     )
                     prev_right = token_x + float(token_w)
                     if token_idx < (len(tokens) - 1):
@@ -669,7 +674,7 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
                 )
                 canvas.create_text(
                     label_x,
-                    item_y + 10.0,
+                    label_y,
                     text=label,
                     fill=legend_theme["section_muted"],
                     anchor="w",

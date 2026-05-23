@@ -9,13 +9,13 @@
     "full_help": "Globalny help kontekstowy. Najedź na kartę, przycisk, pole, listę albo panel, aby zobaczyć opis. Kliknięcie odświeża wskazówkę, a Ctrl+Alt rozwija pełniejszy opis w globalnym panelu."
   },
   "btn_export_cvat": {
-    "full_help": "Eksportuje z PZ3 paczkę kompatybilną z późniejszym importem CVAT. Dotyczy cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach. Używaj tylko wtedy, gdy chcesz poprawiać znaki poza aplikacją."
+    "full_help": "Eksportuje z PZ3 zestaw kompatybilny z późniejszym importem CVAT. Dotyczy cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach. Używaj tylko wtedy, gdy chcesz poprawiać znaki poza aplikacją."
   },
   "btn_export_yolo": {
     "full_help": "Buduje źródłowy dataset znaków z tablic oznaczonych jako perfect i z wybranych źródeł gold packa. PZ3 przygotowuje materiał źródłowy, a wariant treningowy, split i wybór modelu są dalej obsługiwane w Z4."
   },
   "btn_import_cvat": {
-    "full_help": "Importuje poprawki z CVAT z powrotem do aktywnej paczki PZ3. Import jest zgodny z eksportem PZ3: oczekuje cropów tablic i boxów znaków, a nie XML-a z boxami tablic na pełnych zdjęciach."
+    "full_help": "Importuje poprawki z CVAT z powrotem do aktywnego zestawu PZ3. Import jest zgodny z eksportem PZ3: oczekuje cropów tablic i boxów znaków, a nie XML-a z boxami tablic na pełnych zdjęciach."
   },
   "camp_advance": {
     "full_help": "Przycisk iteracyjny w Wizardzie. Jego znaczenie zmienia się wraz ze stanem projektu: może prowadzić do kolejnej iteracji albo do domknięcia projektu."
@@ -24,16 +24,16 @@
     "full_help": "Usuwa projekt wraz z jego katalogiem. Używaj tylko wtedy, gdy na pewno nie chcesz zachować iteracji, datasetów i runów."
   },
   "camp_e1_apply": {
-    "full_help": "Zatwierdza paczkę E1 i kopiuje ją do aktywnej iteracji. Dopiero po tym E2 odblokowuje dalszą pracę."
+    "full_help": "Zatwierdza katalog zdjęć lub manifestowy zestaw obrazów E1 dla aktywnej iteracji. Dopiero po tym E2 odblokowuje dalszą pracę."
   },
   "camp_e1_balance_chart": {
-    "full_help": "Bilans znaków pomaga ocenić, czy paczka jest sensowna dla dalszego treningu. Wysokość słupków pokazuje częstość znaków z nazw plików."
+    "full_help": "Bilans znaków pomaga ocenić, czy wybrany zestaw zdjęć jest sensowny dla dalszego treningu. Wysokość słupków pokazuje częstość znaków z nazw plików."
   },
   "camp_e1_master_pool": {
     "full_help": "Główna pula zdjęć projektu. To źródło, z którego pobierane są obrazy do kolejnych iteracji; nazwy plików są też ground truth dla znaków."
   },
   "camp_e1_panel": {
-    "full_help": "Panel E1 odpowiada za wejściową paczkę zdjęć tej iteracji. Tutaj wybierasz źródło obrazów, oglądasz bilans znaków i zatwierdzasz paczkę."
+    "full_help": "Panel E1 odpowiada za katalog zdjęć lub manifestowy zestaw obrazów tej iteracji. Tutaj wybierasz źródło obrazów, oglądasz bilans znaków i zatwierdzasz wejście iteracji."
   },
   "camp_exit_project": {
     "full_help": "Wychodzi z aktywnego projektu bez kasowania danych i przełącza aplikację do trybu swobodnego."
@@ -48,7 +48,7 @@
     "full_help": "Otwiera wybrany projekt i ładuje jego bieżącą iterację w Wizardzie. Samo wejście do projektu nie otwiera jeszcze Z2, Z3 ani Z4."
   },
   "camp_step1": {
-    "full_help": "Karta E1. Pokazuje stan paczki wejściowej tej iteracji i prowadzi do przygotowania zdjęć."
+    "full_help": "Karta E1. Pokazuje stan katalogu zdjęć wejściowych albo manifestowego zestawu obrazów tej iteracji i prowadzi do przygotowania zdjęć."
   },
   "camp_step2": {
     "full_help": "Karta E2. Tutaj wybierasz tor iteracji i przechodzisz do Z2 albo wracasz tam, by uzupełnić tablice."
@@ -105,10 +105,10 @@
     "full_help": "Urządzenie dla OCR i YOLO w Z3/PZ2. Auto próbuje użyć dostępnego GPU, a hint pod spodem pokazuje, jak aktualnie zostanie użyty backend."
   },
   "t2_fast_test": {
-    "full_help": "Uruchamia test OCR albo YOLO na aktywnej paczce tablic i porównuje wynik z ground truth z nazw plików."
+    "full_help": "Uruchamia test OCR albo YOLO na aktywnym zestawie tablic i porównuje wynik z ground truth z nazw plików."
   },
   "t2_img": {
-    "full_help": "Folder oryginalnych obrazów odpowiadających temu XML. To musi być ta sama paczka, nie dowolny podobny katalog. W trybie swobodnym najlepiej przygotować taki folder pod Workspace/1_raw_images/NazwaPaczki/. Nazwy plików tej paczki są potem traktowane jako ground truth napisu tablicy przy OCR, testach i rankingu."
+    "full_help": "Folder oryginalnych obrazów odpowiadających temu XML. To musi być ten sam zestaw zdjęć, nie dowolny podobny katalog. W trybie swobodnym najlepiej przygotować taki folder pod Workspace/1_raw_images/. Nazwy plików tego zestawu są potem traktowane jako ground truth napisu tablicy przy OCR, testach i rankingu."
   },
   "t2_lab_btn": {
     "full_help": "Otwiera Laboratorium OCR. Tam stroisz filtry obrazu, zapisujesz presety i testujesz, co najlepiej działa na Twoich tablicach."
@@ -120,7 +120,7 @@
     "full_help": "Wybór metody pracy nad znakami: OCR, YOLO albo hybryda. To ustawienie decyduje, skąd biorą się odczyty i boxy znaków."
   },
   "t2_preview_info": {
-    "full_help": "Status bieżącej paczki tablic: licznik, jakość odczytów, źródła ramek i podpowiedzi dla aktywnego wpisu."
+    "full_help": "Status bieżącego zestawu tablic: licznik, jakość odczytów, źródła ramek i podpowiedzi dla aktywnego wpisu."
   },
   "t2_preview_edit": {
     "full_help": "Narzędzia korekty boxów znaków w [Z3]/[PZ2]. Pozwalają wejść w edycję, dodać nowy box, zmienić przypisany znak albo usunąć błędną ramkę."
@@ -132,10 +132,10 @@
     "full_help": "Nawigacja podglądu w [Z3]/[PZ2]. Przełącza tablice w preview runie, dopasowuje widok i pozwala wejść w pełny ekran bez zmiany danych."
   },
   "t2_preview_run": {
-    "full_help": "Folder preview-run z wyciętymi tablicami analizowanymi w Z3/PZ2. Powinien zawierać metadata.json i paczkę obrazów z PZ1."
+    "full_help": "Folder preview-run z wyciętymi tablicami analizowanymi w Z3/PZ2. Powinien zawierać metadata.json i obrazy przygotowane w PZ1."
   },
   "t2_rank": {
-    "full_help": "Porównuje zapisane presety i pomaga znaleźć najlepszą konfigurację OCR dla bieżącej paczki."
+    "full_help": "Porównuje zapisane presety i pomaga znaleźć najlepszą konfigurację OCR dla bieżącego zestawu."
   },
   "t2_sources": {
     "full_help": "Sekcja źródeł [Z3]/[PZ1]. Potrzebujesz zgodnej pary: annotations.xml z tablicami oraz folderu oryginalnych obrazów, na których te tablice oznaczono. Program może szukać zgodnego folderu obrazów po XML, ale użytkownik musi potwierdzić podpięcie."
@@ -153,7 +153,7 @@
     "full_help": "Źródło pracy [Z3]/[PZ3]. Domyślnie PZ3 pracuje na perfectach z aktywnego runu PZ2 oraz ręcznych importach. Gotowe warianty treningowe i split przygotowujesz później w Z4."
   },
   "t2_to_dataset": {
-    "full_help": "Przechodzi z PZ2 do PZ3, gdy paczka jest gotowa do integracji i eksportu datasetu znaków."
+    "full_help": "Przechodzi z PZ2 do PZ3, gdy zestaw tablic jest gotowy do integracji i eksportu datasetu znaków."
   },
   "t2_xml": {
     "full_help": "Plik annotations.xml opisujący położenie tablic. Zwykle pochodzi z Z2 albo z importu CVAT."
@@ -183,7 +183,7 @@
     "full_help": "Folder obrazów odpowiadający wybranemu runowi Z2. Dataset tablic powstaje zawsze z pary: annotations.xml plus oryginalne obrazy."
   },
   "tab1_dataset_run": {
-    "full_help": "Źródłowy run Z2 do budowy datasetu tablic. Powinien zawierać poprawne annotations.xml dla obrazów z tej samej paczki."
+    "full_help": "Źródłowy run Z2 do budowy datasetu tablic. Powinien zawierać poprawne annotations.xml dla obrazów z tego samego zestawu."
   },
   "tab1_dataset_split": {
     "full_help": "Proporcje train/val/test przy eksporcie datasetu tablic."
@@ -192,7 +192,7 @@
     "full_help": "Urządzenie obliczeniowe dla Z2. Auto próbuje użyć GPU, a gdy go nie ma, spada do CPU."
   },
   "tab1_input": {
-    "full_help": "Folder wejściowy Z2. W kampanii ustawia go Wizard z aktywnej iteracji, a w trybie swobodnym wskazujesz własną paczkę zdjęć. Sam wybór ścieżki powinien być lekki; właściwe ładowanie obrazów odbywa się dopiero po przejściu dalej w miniflow."
+    "full_help": "Folder wejściowy Z2. W kampanii ustawia go Wizard z aktywnej iteracji, a w trybie swobodnym wskazujesz własny katalog zdjęć. Sam wybór ścieżki powinien być lekki; właściwe ładowanie obrazów odbywa się dopiero po przejściu dalej w miniflow."
   },
   "tab1_logs": {
     "full_help": "Pokazuje lub ukrywa terminal procesu Z2. Przydaje się do diagnostyki i śledzenia postępu."
@@ -216,7 +216,7 @@
     "full_help": "Główny podgląd obrazu Z2. Tutaj weryfikujesz polygony tablic, rysujesz nowe, poprawiasz wierzchołki i usuwasz błędne wykrycia."
   },
   "tab1_preview_list": {
-    "full_help": "Lista obrazów bieżącego runu albo aktualnej paczki wejściowej. Tu przełączasz zdjęcie do sprawdzenia i ręcznej korekty."
+    "full_help": "Lista obrazów bieżącego runu albo aktualnego zestawu wejściowego. Tu przełączasz zdjęcie do sprawdzenia i ręcznej korekty."
   },
   "tab1_return_wizard": {
     "full_help": "Wraca z Z2 do Wizarda kampanii bez domykania samego etapu. Użyj tego, gdy chcesz tylko podejrzeć status E1-E4 albo przejść dalej inną ścieżką."
@@ -225,7 +225,7 @@
     "full_help": "Sekcja stage przechowuje odłożoną pulę zdjęć do kolejnej ręcznej rundy. Pozwala powiększać zbiór bez mieszania go z już sprawdzonym materiałem."
   },
   "tab1_stage_add": {
-    "full_help": "Dodaje nową paczkę do stage. To sposób na powiększenie kolejki zdjęć do późniejszej korekty."
+    "full_help": "Dodaje nowy zestaw zdjęć do stage. To sposób na powiększenie kolejki zdjęć do późniejszej korekty."
   },
   "tab1_stage_use": {
     "full_help": "Przełącza Z2 na obrazy z stage/images, aby kontynuować ręczną pracę na odłożonej puli."
@@ -246,10 +246,10 @@
     "full_help": "Narzędzia ręcznej edycji podglądu Z2. Pozwalają dodać polygon tablicy, poprawić geometrię i zapisać zmiany do XML aktywnego runu."
   },
   "tab1_preview_nav": {
-    "full_help": "Nawigacja po obrazach w aktywnej paczce Z2. Przełącza poprzedni/następny obraz, dopasowuje widok i otwiera pełny ekran bez zmiany danych anotacji."
+    "full_help": "Nawigacja po obrazach w aktywnym zestawie Z2. Przełącza poprzedni/następny obraz, dopasowuje widok i otwiera pełny ekran bez zmiany danych anotacji."
   },
   "tab1_preview_stage_actions": {
-    "full_help": "Akcje porządkowe na bieżącym obrazie. Stage odkłada obraz do późniejszej rundy ręcznej pracy, a usunięcie obrazu usuwa go z aktywnej paczki roboczej zgodnie z logiką Z2."
+    "full_help": "Akcje porządkowe na bieżącym obrazie. Stage odkłada obraz do późniejszej rundy ręcznej pracy, a usunięcie obrazu usuwa go z aktywnego zestawu roboczego zgodnie z logiką Z2."
   },
   "tab1_workflow_nav": {
     "full_help": "Nawigacja miniflow Z2. Wstecz i Dalej przechodzą między formalnymi krokami wybranego toru. Cofnięcie do wyboru toru czyści roboczy kontekst miniflow, ale nie usuwa trwałych eksportów."

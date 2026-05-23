@@ -28,6 +28,28 @@ class PlateGenerator:
         self.metadata = {}  
         self.plate_counter = 0
 
+    @staticmethod
+    def _safe_int(value, default=None):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_json_list(value):
+        if isinstance(value, list):
+            return [str(item or "").strip().upper() for item in value if str(item or "").strip()]
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return []
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            parsed = []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item or "").strip().upper() for item in parsed if str(item or "").strip()]
+
     def generate_from_annotations(self,
                                  source_image_path: Path,
                                  annotation: ImageAnnotation,
@@ -159,15 +181,32 @@ class PlateGenerator:
                 plate_path = self.images_dir / plate_filename
                 
                 cv2.imwrite(str(plate_path), plate_image)
+                attributes = dict(plate_detection.attributes or {})
+                source_expected_text = str(
+                    attributes.get("source_expected_text")
+                    or attributes.get("expected_text")
+                    or ""
+                ).strip().upper()
+                source_expected_texts = self._safe_json_list(attributes.get("source_expected_texts"))
+                source_plate_index = self._safe_int(attributes.get("source_plate_index"), plate_idx)
+                source_plate_count = self._safe_int(attributes.get("source_plate_count"), len(plates))
                 
                 self.metadata[plate_id] = {
                     'source_image': str(source_image_path),
+                    'source_image_name': source_image_path.name,
                     'source_bbox': [float(x) for x in plate_detection.bbox],
                     'source_polygon': (
                         [[float(px), float(py)] for px, py in list(plate_detection.polygon or [])[:4]]
                         if plate_detection.polygon else None
                     ),
                     'is_square': bool(is_square),  # Zapisujemy typ, może się przydać do YOLO
+                    'source_plate_index': source_plate_index,
+                    'source_plate_count': source_plate_count,
+                    'source_expected_text': source_expected_text or None,
+                    'source_expected_texts': source_expected_texts,
+                    'source_expected_text_source': str(
+                        attributes.get("source_expected_text_source") or ""
+                    ).strip() or None,
                     'ocr_text': str(plate_detection.text) if plate_detection.text else None,
                     'ocr_confidence': float(plate_detection.text_confidence) if plate_detection.text_confidence else 0.0,
                     'detection_confidence': float(plate_detection.confidence),
@@ -175,7 +214,7 @@ class PlateGenerator:
                     'layout_row_count': 0 if is_square else 1,
                     'layout_confidence': 0.35 if is_square else 0.55,
                     'layout_source': 'plate_aspect',
-                    'plate_attributes': plate_detection.attributes,
+                    'plate_attributes': attributes,
                 }
                 
                 plate_detection.plate_id = plate_id

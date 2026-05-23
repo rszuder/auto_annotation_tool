@@ -51,6 +51,9 @@ class WizardStageStatus:
 
 class CampaignTab:
     _PROJECT_VIEW_CACHE_SCHEMA_VERSION = 2
+    STEP1_CHAR_MIN_IMAGES = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_IMAGES", 10) or 10)
+    STEP2_PLATE_MIN_PLATES = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+    STEP3_CHAR_MIN_PLATES = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
 
     def __init__(self, parent, app):
         self.parent = parent
@@ -229,12 +232,12 @@ class CampaignTab:
             "goal": "Karty wizarda pokazują aktualny etap projektu i akcje, które prowadzą do Z2, Z3 albo Z4.",
             "workflow": (
                 "Najpierw sprawdź kartę oznaczoną jako aktywną albo wymagającą uwagi.",
-                "Jeśli karta ma CTA, przejdź nim do właściwej zakładki roboczej.",
+                "Jeśli karta ma przycisk akcji, przejdź nim do właściwej zakładki roboczej.",
                 "Jeśli karta ma badge zatwierdzający, użyj go dopiero po spełnieniu warunków etapu.",
             ),
             "glossary": (
                 "Z1 = wizard kampanii",
-                "CTA = przycisk akcji",
+                "przycisk akcji = przejście do właściwej zakładki roboczej",
                     "badge = wyróżniony przycisk statusowy przy karcie etapu",
             ),
             "caution": "Jeśli AS nie opisuje tej karty, najedź kursorem na kartę wizarda i otwórz AS ponownie.",
@@ -516,6 +519,7 @@ class CampaignTab:
             ingest_manifest_path = CAMPAIGN.get_ingest_manifest_path(current_iteration)
             approved_set_path = CAMPAIGN.get_plate_approved_set_path()
             artifact_registry_path = CAMPAIGN.get_artifact_registry_path()
+            iter_image_source_dir = CAMPAIGN.get_iteration_image_source_dir(current_iteration)
             raw_iter_dir = CAMPAIGN.get_iteration_raw_dir(current_iteration)
             auto_ann_dir = CAMPAIGN.get_dir("auto_ann")
             step2_staging_run = CAMPAIGN.get_step2_staging_run()
@@ -549,6 +553,9 @@ class CampaignTab:
             "ingest_manifest_token": list(self._build_cache_token_for_path(ingest_manifest_path)),
             "approved_set_token": list(self._build_cache_token_for_path(approved_set_path)),
             "artifact_registry_token": list(self._build_cache_token_for_path(artifact_registry_path)),
+            "iter_image_source_dir_token": list(
+                self._build_cache_token_for_path(Path(iter_image_source_dir) if iter_image_source_dir is not None else None)
+            ),
             "raw_iter_dir_token": list(
                 self._build_cache_token_for_path(Path(raw_iter_dir) if raw_iter_dir is not None else None)
             ),
@@ -1027,8 +1034,8 @@ class CampaignTab:
                     "standardowego shift i lewego przycisku myszy LPM)."
                 ),
                 "workflow": (
-                    "Jeśli chcesz dopisać albo poprawić tablice, użyj CTA prowadzącego do Z2.",
-                    "Po pracy w Z2 wróć do E3 i kontynuuj budowę albo korektę paczki znaków.",
+                    "Jeśli chcesz dopisać albo poprawić tablice, użyj przycisku prowadzącego do Z2.",
+                    "Po pracy w Z2 wróć do E3 i kontynuuj budowę albo korektę danych znaków.",
                 ),
                 "glossary": (
                     "map50-90 = orientacyjna jakość modelu; im bliżej 1.0, tym pewniejsza detekcja",
@@ -1046,7 +1053,7 @@ class CampaignTab:
         if key == "step1":
             return {
                 "location": f"[Z1] Wizard / {title}",
-                "goal": summary or "W E1 wybierasz paczkę wejściową zdjęć i tor iteracji.",
+                "goal": summary or "W E1 wybierasz katalog zdjęć wejściowych i tor iteracji.",
                 "workflow": (
                     "Wskaż albo przygotuj zdjęcia wejściowe dla iteracji.",
                     "Wybierz tor: tablice albo znaki.",
@@ -1055,7 +1062,7 @@ class CampaignTab:
                 "glossary": (
                     "E1 = wejście i tor iteracji",
                     "tor = decyzja, czy iteracja służy tablicom czy znakom",
-                    "paczka wejściowa = zdjęcia wybrane do bieżącej iteracji",
+                    "katalog zdjęć wejściowych = zdjęcia wybrane do bieżącej iteracji",
                 ),
                 "caution": details or f"Stan karty: {state_label}.",
             }
@@ -1068,7 +1075,7 @@ class CampaignTab:
                     item
                     for item in (
                         details,
-                        f"Użyj CTA „{primary}”, jeśli chcesz przejść do pracy w Z2." if primary else "",
+                        f"Użyj przycisku „{primary}”, jeśli chcesz przejść do pracy w Z2." if primary else "",
                         f"Badge „{badge}” zamyka E2, gdy bramka jest spełniona." if badge else "",
                     )
                     if str(item or "").strip()
@@ -1090,8 +1097,8 @@ class CampaignTab:
                     item
                     for item in (
                         details,
-                        f"CTA „{primary}” uruchamia główną akcję tej karty." if primary else "",
-                        f"CTA „{secondary}” daje alternatywny powrót albo korektę." if secondary else "",
+                        f"Przycisk „{primary}” uruchamia główną akcję tej karty." if primary else "",
+                        f"Przycisk „{secondary}” daje alternatywny powrót albo korektę." if secondary else "",
                         f"Badge „{badge}” formalnie zamyka E3." if badge else "",
                     )
                     if str(item or "").strip()
@@ -1102,7 +1109,7 @@ class CampaignTab:
                     "gold pack = wybrane poprawne przykłady znaków",
                     "crop = wycięty fragment obrazu, np. sama tablica",
                 ),
-                "caution": f"Stan karty: {state_label}. Jeśli wracasz do Z2 po więcej tablic, potem przebuduj paczkę znaków w Z3.",
+                "caution": f"Stan karty: {state_label}. Jeśli wracasz do Z2 po więcej tablic, potem przebuduj dane znaków w Z3.",
             }
 
         if key == "step4":
@@ -1113,7 +1120,7 @@ class CampaignTab:
                     item
                     for item in (
                         details,
-                        f"Użyj CTA „{primary}”, aby przejść do Z4." if primary else "",
+                        f"Użyj przycisku „{primary}”, aby przejść do Z4." if primary else "",
                         f"Badge „{badge}” kończy etap bezpośrednio z wizarda." if badge else "",
                     )
                     if str(item or "").strip()
@@ -2141,7 +2148,7 @@ class CampaignTab:
         except Exception:
             pass
         self.ingest_start_assets_header_labels = []
-        for column, title in enumerate(("Zasób", "Źródło", "Walidacja", "Tryb", "Akcja", "Więcej")):
+        for column, title in enumerate(("Zasób", "Źródło", "Walidacja", "Źródło ścieżki danych", "Akcja", "Więcej")):
             header_lbl = tk.Label(
                 assets_table,
                 text=title,
@@ -2154,6 +2161,7 @@ class CampaignTab:
                 highlightthickness=1,
                 highlightbackground=subtle_border,
                 highlightcolor=subtle_border,
+                wraplength=(138 if column == 3 else 0),
                 padx=8,
                 pady=3,
             )
@@ -2448,6 +2456,7 @@ class CampaignTab:
                 command=lambda key=row_key: self._clear_project_start_asset(key),
                 tone="crt",
             )
+            self._set_project_start_badge_button_state(clear_button, enabled=False)
             clear_button.pack(anchor=tk.W, pady=2)
             self.btn_ingest_clear_asset[row_key] = clear_button
 
@@ -2704,9 +2713,6 @@ class CampaignTab:
         HELP.bind_help(self.ingest_insights_toggle_btn, "camp_e1_balance_chart")
         self._refresh_ingest_insights_visibility(mode_selected=False)
 
-    def _sync_project_browser_wraplength(self, event=None):
-        return
-
     def _build_model_status(self, parent, title, model_type, initial_dir: Path):
         palette = getattr(self.app, "palette", {})
 
@@ -2877,35 +2883,19 @@ class CampaignTab:
         return names
 
     def _collect_previous_project_image_names_for_step1(self) -> set[str]:
-        raw_root = CAMPAIGN.get_dir("raw")
         try:
-            target_iter_dir = CAMPAIGN.get_iteration_raw_dir()
+            current_iter = int(CAMPAIGN.get_current_iteration_num() or 1)
         except Exception:
-            target_iter_dir = None
-        if raw_root is None:
-            return set()
-
-        previous_names: set[str] = set()
+            current_iter = None
         try:
-            raw_root = Path(raw_root)
-            target_resolved = Path(target_iter_dir).resolve() if target_iter_dir is not None else None
-        except Exception:
-            target_resolved = None
-
-        try:
-            for iter_dir in raw_root.iterdir():
-                if not iter_dir.is_dir():
-                    continue
-                try:
-                    if target_resolved is not None and iter_dir.resolve() == target_resolved:
-                        continue
-                except Exception:
-                    if target_iter_dir is not None and str(iter_dir) == str(target_iter_dir):
-                        continue
-                previous_names.update(self._collect_image_names_in_dir(iter_dir, recursive=True))
+            registry = CAMPAIGN.get_project_packet_filename_registry(exclude_iteration_num=current_iter)
         except Exception:
             return set()
-        return previous_names
+        return {
+            str(name or "").strip().lower()
+            for name in list((registry or {}).get("filenames") or [])
+            if str(name or "").strip()
+        }
 
     @staticmethod
     def _normalize_project_start_mode(mode: str | None) -> str:
@@ -3001,20 +2991,6 @@ class CampaignTab:
 
         if refresh:
             self._refresh_ingest_panel()
-
-    def _start_project_from_zero(self) -> None:
-        previous_mode = self._get_project_start_mode()
-        self._set_project_start_mode("fresh")
-        if not self._choose_master_pool_dir():
-            master_pool = CAMPAIGN.get_master_pool_dir()
-            if previous_mode == "" and not master_pool:
-                self._set_project_start_mode("")
-
-    def _start_project_with_assets(self) -> None:
-        self._set_project_start_mode("assets")
-        master_pool = CAMPAIGN.get_master_pool_dir()
-        if master_pool is None or not Path(master_pool).exists():
-            self._choose_master_pool_dir()
 
     def _choose_project_start_model(self, model_type: str) -> None:
         self._set_project_start_mode("assets", refresh=False)
@@ -3286,13 +3262,37 @@ class CampaignTab:
     def _is_project_start_asset_clearable(self, row_key: str) -> bool:
         row_key = str(row_key or "").strip()
         if row_key == "images":
+            plan = getattr(self, "current_ingest_plan", None)
+            if isinstance(plan, dict):
+                try:
+                    if int(plan.get("selected_total", 0) or 0) > 0:
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if len(list(plan.get("selected", []) or [])) > 0:
+                        return True
+                except Exception:
+                    pass
+
             try:
-                return bool(CAMPAIGN.get_master_pool_dir() is not None or self.current_ingest_plan)
+                master_pool = CAMPAIGN.get_master_pool_dir()
             except Exception:
-                return bool(getattr(self, "current_ingest_plan", None))
+                master_pool = None
+            if master_pool is None:
+                return False
+            try:
+                master_pool_path = Path(master_pool)
+                return bool(
+                    master_pool_path.exists()
+                    and master_pool_path.is_dir()
+                    and self._count_images_in_dir(master_pool_path, recursive=True) > 0
+                )
+            except Exception:
+                return False
         if row_key == "plate_run":
             try:
-                source = CAMPAIGN.get_last_plate_manual_source() or {}
+                source = CAMPAIGN.get_project_start_plate_source() or {}
             except Exception:
                 source = {}
             return bool(
@@ -3335,7 +3335,7 @@ class CampaignTab:
             return
 
         label_map = {
-            "images": "paczki zdjęć",
+            "images": "katalogu zdjęć",
             "plate_run": "anotacji tablic",
             "plate_model": "modelu tablic",
             "char_model": "modelu znaków",
@@ -3372,7 +3372,7 @@ class CampaignTab:
                     pass
             elif row_key == "plate_run":
                 try:
-                    CAMPAIGN.set_last_plate_manual_source("", "", "")
+                    CAMPAIGN.clear_project_start_plate_source()
                 except Exception:
                     pass
                 self._set_project_start_asset_scope("plate_run", "", persist=True)
@@ -3478,15 +3478,15 @@ class CampaignTab:
 
     def _restore_project_start_asset_scopes_from_state(self) -> None:
         try:
-            last_manual_source = CAMPAIGN.get_last_plate_manual_source() or {}
+            imported_plate_source = CAMPAIGN.get_project_start_plate_source() or {}
         except Exception:
-            last_manual_source = {}
+            imported_plate_source = {}
         restore_specs = (
             (
                 "plate_run",
                 str(CAMPAIGN.get_project_start_asset_scope("plate_run") or "").strip().lower(),
-                str(last_manual_source.get("source_xml_path") or "").strip()
-                or str(last_manual_source.get("source_run_path") or "").strip(),
+                str(imported_plate_source.get("source_xml_path") or "").strip()
+                or str(imported_plate_source.get("source_run_path") or "").strip(),
             ),
             (
                 "plate_model",
@@ -3542,12 +3542,10 @@ class CampaignTab:
         return "freemode"
 
     def _get_project_start_plate_source_info(self) -> dict:
-        stored_plate_source = dict(CAMPAIGN.get_last_plate_manual_source() or {})
-        plate_ready_source = dict(self._get_plate_route_ready_source() or {})
+        stored_plate_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
 
         run_path = str(
             stored_plate_source.get("source_run_path")
-            or plate_ready_source.get("restore_run_dir")
             or ""
         ).strip()
         xml_path = str(stored_plate_source.get("source_xml_path") or "").strip()
@@ -3667,7 +3665,7 @@ class CampaignTab:
         except Exception:
             iteration_num = 1
 
-        master_pool = CAMPAIGN.get_master_pool_dir()
+        master_pool = CAMPAIGN.get_iteration_image_source_dir(iteration_num) or CAMPAIGN.get_master_pool_dir()
         if master_pool is None:
             master_pool = CAMPAIGN.get_iteration_raw_dir(iteration_num)
         if master_pool is None:
@@ -3700,8 +3698,7 @@ class CampaignTab:
             ) or ""
         ).strip()
 
-        stored_plate_source = dict(CAMPAIGN.get_last_plate_manual_source() or {})
-        plate_ready_source = dict(self._get_plate_route_ready_source() or {})
+        stored_plate_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
         existing_bundle = dict(
             CAMPAIGN.get_iteration_artifact_bundle(
                 images_dir=master_pool_path,
@@ -3712,7 +3709,6 @@ class CampaignTab:
 
         plate_run_dir_raw = str(
             stored_plate_source.get("source_run_path")
-            or plate_ready_source.get("restore_run_dir")
             or ""
         ).strip()
         plate_xml_raw = str(stored_plate_source.get("source_xml_path") or "").strip()
@@ -3773,8 +3769,9 @@ class CampaignTab:
 
         char_images_with_plates = int(existing_char_effective.get("images_with_plates", 0) or 0)
         char_total_plates = int(existing_char_effective.get("total_plates", 0) or 0)
+        min_char_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
         char_entry_mode = "blocked"
-        if char_total_plates > 0 and char_images_with_plates >= 2:
+        if char_total_plates >= min_char_plates:
             char_entry_mode = "ready"
         elif plate_total_plates > 0 or char_total_plates > 0 or plate_run_ready:
             char_entry_mode = "needs_more_tables"
@@ -3806,7 +3803,7 @@ class CampaignTab:
                 "expected_image_count": int(image_set_count or 0),
                 "image_set_match": bool(plate_image_set_match),
                 "scope": self._get_project_start_asset_scope("plate_run"),
-                "input_source": str(plate_ready_source.get("input_source") or "").strip(),
+                "input_source": "project_start_import" if plate_run_ready else "",
                 "images_with_plates": int(plate_images_with_plates or 0),
                 "total_plates": int(plate_total_plates or 0),
             },
@@ -4114,7 +4111,7 @@ class CampaignTab:
             canvas.create_text(
                 width // 2,
                 95,
-                text="Brak danych E1 do pokazania.\nWskaż wybrany folder zdjęć przez „Wybierz...”.",
+                text="Brak danych E1 do pokazania.",
                 fill=muted,
                 justify=tk.CENTER,
                 font=("Segoe UI", 9),
@@ -4264,7 +4261,7 @@ class CampaignTab:
             body,
             text=(
                 "Tutaj sprawdzisz bieżącą pulę E1: źródło obrazów, liczebność iteracji i histogram znaków, "
-                "który pokazuje rozkład tablic w wybranej paczce."
+                "który pokazuje rozkład tablic w wybranym katalogu zdjęć."
             ),
             justify=tk.LEFT,
             anchor="w",
@@ -4279,16 +4276,16 @@ class CampaignTab:
 
         summary_rows = [
             ("Katalog źródłowy projektu", self._format_project_start_asset_source(master_pool)),
-            ("Obrazy w paczce iteracji", str(selected_total)),
+            ("Obrazy w katalogu iteracji", str(selected_total)),
             ("Faktycznie nowe dla projektu", str(new_to_project)),
             ("Już wcześniej w projekcie", str(project_overlap)),
         ]
         if source_diverged:
             summary_rows.insert(1, ("Obrazy w obecnym katalogu źródłowym", str(master_pool_images)))
         if approved_overlap > 0:
-            summary_rows.append(("W tym już zatwierdzone do YOLO", str(approved_overlap)))
+            summary_rows.append(("W tym już w pudełku zatwierdzonych", str(approved_overlap)))
         if source_total > 0 and source_total != selected_total:
-            summary_rows.append(("Historyczny zapis paczki", str(source_total)))
+            summary_rows.append(("Historyczny zapis źródła zdjęć", str(source_total)))
 
         for row_idx, (label_text, value_text) in enumerate(summary_rows):
             tk.Label(
@@ -4359,8 +4356,8 @@ class CampaignTab:
             tk.Label(
                 body,
                 text=(
-                    f"Uwaga: paczka iteracji ma {selected_total} zdjęć, ale obecny katalog źródłowy projektu ma teraz {master_pool_images}. "
-                    "Dalsza praca tej iteracji opiera się na paczce iteracji."
+                    f"Uwaga: katalog zdjęć iteracji ma {selected_total} zdjęć, ale obecny katalog źródłowy projektu ma teraz {master_pool_images}. "
+                    "Dalsza praca tej iteracji opiera się na katalogu zdjęć iteracji."
                 ),
                 justify=tk.LEFT,
                 anchor="w",
@@ -4371,7 +4368,11 @@ class CampaignTab:
 
         tk.Label(
             body,
-            text="Obrazy iteracji są wymagane. Pozostałe zasoby E1 możesz dodać opcjonalnie.",
+            text=(
+                "Obrazy iteracji są wymagane. Pozostałe zasoby E1 są opcjonalne: anotacje tablic "
+                "mogą przenieść do projektu wcześniej wykonaną ręczną pracę, a modele wskazują punkt startowy, "
+                "który chcesz dalej wykorzystywać i dotrenowywać w kolejnych iteracjach."
+            ),
             justify=tk.LEFT,
             anchor="w",
             wraplength=760,
@@ -4411,20 +4412,31 @@ class CampaignTab:
             iteration_images_dir = CAMPAIGN.get_iteration_raw_dir()
         except Exception:
             iteration_images_dir = None
+        try:
+            logical_iteration_dir = CAMPAIGN.get_iteration_image_source_dir()
+        except Exception:
+            logical_iteration_dir = iteration_images_dir
+        try:
+            visible_iteration_dir = Path(logical_iteration_dir) if logical_iteration_dir is not None else None
+        except Exception:
+            visible_iteration_dir = Path(iteration_images_dir) if iteration_images_dir is not None else None
         iteration_images_exists = bool(
-            iteration_images_dir
-            and Path(iteration_images_dir).exists()
-            and Path(iteration_images_dir).is_dir()
+            visible_iteration_dir
+            and visible_iteration_dir.exists()
+            and visible_iteration_dir.is_dir()
         )
-        iteration_images_count = (
-            self._count_images_in_dir(Path(iteration_images_dir), recursive=True)
-            if iteration_images_exists
-            else 0
-        )
+        try:
+            iteration_images_count = int(CAMPAIGN.get_iteration_image_count() or 0)
+        except Exception:
+            iteration_images_count = (
+                self._count_images_in_dir(visible_iteration_dir, recursive=True)
+                if iteration_images_exists
+                else 0
+            )
 
         effective_images_dir = (
-            Path(iteration_images_dir)
-            if iteration_images_count > 0 and iteration_images_dir is not None
+            Path(logical_iteration_dir)
+            if iteration_images_count > 0 and logical_iteration_dir is not None
             else master_pool
         )
         effective_images_count = iteration_images_count if iteration_images_count > 0 else master_pool_count
@@ -4438,13 +4450,210 @@ class CampaignTab:
             "master_dir": master_pool,
             "master_count": int(master_pool_count or 0),
             "master_exists": bool(master_pool_exists),
-            "iteration_dir": Path(iteration_images_dir) if iteration_images_dir is not None else None,
+            "iteration_dir": visible_iteration_dir,
+            "physical_iteration_dir": Path(iteration_images_dir) if iteration_images_dir is not None else None,
             "iteration_count": int(iteration_images_count or 0),
             "iteration_exists": bool(iteration_images_exists),
             "effective_dir": effective_images_dir,
             "effective_count": int(effective_images_count or 0),
             "effective_exists": bool(effective_images_exists),
         }
+
+    def _scan_project_start_normalized_image_names(self, images_dir: Path | None) -> set[str]:
+        if images_dir is None:
+            return set()
+
+        try:
+            safe_dir = Path(images_dir)
+        except Exception:
+            return set()
+
+        image_names: set[str] = set()
+        try:
+            if not safe_dir.exists() or not safe_dir.is_dir():
+                return set()
+        except Exception:
+            return set()
+
+        try:
+            for image_path in safe_dir.rglob("*"):
+                if not image_path.is_file():
+                    continue
+                if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                    continue
+                normalized = CAMPAIGN._normalize_image_set_name(image_path.name)
+                if normalized:
+                    image_names.add(normalized)
+        except Exception:
+            return set()
+        return image_names
+
+    def _collect_project_start_image_paths_by_normalized_name(self, images_dir: Path | None) -> dict[str, Path]:
+        if images_dir is None:
+            return {}
+
+        try:
+            safe_dir = Path(images_dir)
+        except Exception:
+            return {}
+
+        try:
+            if not safe_dir.exists() or not safe_dir.is_dir():
+                return {}
+        except Exception:
+            return {}
+
+        image_paths: dict[str, Path] = {}
+        try:
+            for image_path in safe_dir.rglob("*"):
+                if not image_path.is_file() or image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                    continue
+                normalized = CAMPAIGN._normalize_image_set_name(image_path.name)
+                if normalized and normalized not in image_paths:
+                    image_paths[normalized] = image_path
+        except Exception:
+            return dict(image_paths)
+        return image_paths
+
+    def _maybe_extend_project_start_images_from_annotation_package(
+        self,
+        *,
+        current_images_dir: Path | None,
+        package_images_dir: Path | None,
+        compatibility: dict,
+    ) -> Path | None:
+        if current_images_dir is None or package_images_dir is None:
+            return None
+
+        missing_normalized = {
+            str(name or "").strip().lower()
+            for name in list((compatibility or {}).get("missing_normalized_names") or [])
+            if str(name or "").strip()
+        }
+        if not missing_normalized:
+            return None
+
+        current_paths = self._collect_project_start_image_paths_by_normalized_name(current_images_dir)
+        package_paths = self._collect_project_start_image_paths_by_normalized_name(package_images_dir)
+        addable_names = sorted(name for name in missing_normalized if name in package_paths and name not in current_paths)
+        if not addable_names:
+            return None
+
+        preview_names = "\n".join(Path(package_paths[name]).name for name in addable_names[:6])
+        extra_count = max(0, len(addable_names) - 6)
+        suffix = f"\n... i jeszcze {extra_count} zdjęć." if extra_count else ""
+        should_extend = self.app.themed_confirm(
+            "Import anotacji tablic",
+            (
+                "Wybrany pakiet anotacji zawiera zdjęcia, których nie ma w aktualnym katalogu zdjęć E1.\n\n"
+                f"Możliwe do dołączenia z pakietu: {len(addable_names)}\n"
+                f"Przykłady:\n{preview_names}{suffix}\n\n"
+                "Program nie zmieni oryginalnego katalogu zdjęć. Utworzy roboczy katalog scalony w projekcie: "
+                "obecne zdjęcia + brakujące zdjęcia z pakietu, bez kopiowania duplikatów nazw.\n\n"
+                "Czy dołączyć brakujące zdjęcia i ponowić walidację importu?"
+            ),
+            parent=self.frame,
+            confirm_label="Dołącz zdjęcia",
+            cancel_label="Importuj tylko zgodne",
+            tone="info",
+        )
+        if not should_extend:
+            return None
+
+        raw_root = CAMPAIGN.get_dir("raw")
+        if raw_root is None:
+            self.app.themed_error(
+                "Import anotacji tablic",
+                "Nie udało się ustalić katalogu projektu dla scalonego źródła zdjęć.",
+                parent=self.frame,
+            )
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        merged_dir = Path(raw_root) / "_imported_annotation_images" / f"import_anotacji_tablic_{timestamp}"
+        try:
+            merged_dir.mkdir(parents=True, exist_ok=False)
+            copied_names: set[str] = set()
+            for normalized, source_path in sorted(current_paths.items()):
+                if normalized in copied_names:
+                    continue
+                target_path = merged_dir / Path(source_path).name
+                shutil.copy2(source_path, target_path)
+                copied_names.add(normalized)
+            for normalized in addable_names:
+                if normalized in copied_names:
+                    continue
+                source_path = package_paths.get(normalized)
+                if source_path is None:
+                    continue
+                target_path = merged_dir / Path(source_path).name
+                shutil.copy2(source_path, target_path)
+                copied_names.add(normalized)
+        except Exception as e:
+            try:
+                shutil.rmtree(merged_dir)
+            except Exception:
+                pass
+            self.app.themed_error(
+                "Import anotacji tablic",
+                f"Nie udało się utworzyć roboczego katalogu scalonego:\n{e}",
+                parent=self.frame,
+            )
+            return None
+
+        if not CAMPAIGN.set_master_pool_dir(merged_dir):
+            self.app.themed_error(
+                "Import anotacji tablic",
+                "Roboczy katalog scalony został utworzony, ale nie udało się ustawić go jako katalogu zdjęć E1.",
+                parent=self.frame,
+            )
+            return None
+
+        self.current_ingest_plan = {}
+        self._existing_iteration_ingest_plan_signature = None
+        try:
+            self.app.update_status(
+                f"Dołączono {len(addable_names)} zdjęć z pakietu anotacji do roboczego katalogu E1.",
+                "info",
+            )
+        except Exception:
+            pass
+        return merged_dir
+
+    def _get_project_start_approved_normalized_image_names(self) -> set[str]:
+        approved_names: set[str] = set()
+
+        try:
+            registry = CAMPAIGN.get_used_image_registry() or {}
+            for name in list(registry.get("filenames") or []):
+                normalized = CAMPAIGN._normalize_image_set_name(name)
+                if normalized:
+                    approved_names.add(normalized)
+        except Exception:
+            pass
+
+        try:
+            for entry in list(CAMPAIGN.list_plate_approved_entries() or []):
+                if not isinstance(entry, dict):
+                    continue
+                for raw_name in (
+                    entry.get("image_name", ""),
+                    Path(str(entry.get("source_image_path", "") or "")).name if str(entry.get("source_image_path", "") or "").strip() else "",
+                ):
+                    normalized = CAMPAIGN._normalize_image_set_name(raw_name)
+                    if normalized:
+                        approved_names.add(normalized)
+        except Exception:
+            pass
+
+        return approved_names
+
+    def _get_project_start_adoptable_normalized_image_names(self, images_dir: Path | None) -> set[str]:
+        all_names = self._scan_project_start_normalized_image_names(images_dir)
+        if not all_names:
+            all_names = self._get_project_start_normalized_image_names(images_dir)
+        approved_names = self._get_project_start_approved_normalized_image_names()
+        return set(all_names) - set(approved_names)
 
     def _show_project_start_asset_details(self, row_key: str) -> None:
         row_key = str(row_key or "").strip()
@@ -4455,8 +4664,6 @@ class CampaignTab:
         master_pool = CAMPAIGN.get_master_pool_dir()
         master_pool_exists = bool(master_pool and master_pool.exists() and master_pool.is_dir())
         master_pool_images = self._count_images_in_dir(master_pool, recursive=True) if master_pool_exists else 0
-        plate_ready_source = self._get_plate_route_ready_source()
-        stored_plate_source = dict(CAMPAIGN.get_last_plate_manual_source() or {})
         plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
         char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
 
@@ -4480,19 +4687,25 @@ class CampaignTab:
                 effective_images_dir = image_source.get("effective_dir")
                 effective_images_count = int(image_source.get("effective_count", 0) or 0)
                 compatibility = (
-                    self._check_project_start_run_compatibility(plate_run_dir, effective_images_dir)
+                    self._check_project_start_run_compatibility(plate_run_dir, effective_images_dir, adoptable_only=True)
                     if plate_run_dir is not None and effective_images_dir is not None and effective_images_count > 0
                     else {}
                 )
                 if compatibility.get("checked"):
+                    approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    incomplete_count = int(compatibility.get("incomplete", 0) or 0)
                     body_lines.extend(
                         [
-                            f"Porównuję z paczką E1: {self._format_project_start_asset_source(effective_images_dir)}",
-                            f"Obrazy opisane w XML: {int(compatibility.get('total', 0) or 0)}",
-                            f"Zgodne obrazy: {int(compatibility.get('matched', 0) or 0)}",
-                            f"Brakujące obrazy: {int(compatibility.get('missing', 0) or 0)}",
+                            f"Porównuję z roboczą pulą zdjęć E1: {self._format_project_start_asset_source(effective_images_dir)}",
+                            self._format_project_start_annotation_adoption_summary(compatibility),
                         ]
                     )
+                    if approved_overlap > 0:
+                        body_lines.append(f"Pominięte, bo już zatwierdzone w projekcie: {approved_overlap}")
+                    if incomplete_count > 0:
+                        body_lines.append(
+                            f"Pominięte, bo anotacje nie obejmują wszystkich tablic zapisanych w nazwie pliku: {incomplete_count}"
+                        )
                     missing_preview = [str(name) for name in (compatibility.get("missing_names") or []) if str(name).strip()]
                     if missing_preview:
                         body_lines.append("")
@@ -4504,9 +4717,14 @@ class CampaignTab:
                 body_lines.append("Plik annotations.xml nie został jeszcze wskazany.")
             body_lines.append("")
             body_lines.append(
-                "Jeśli dodasz zgodny plik annotations.xml, tor A otworzy Z2 na gotowych tablicach zamiast "
-                "startować od zera. Jeśli ten zasób pasuje do bieżącej paczki i zawiera wystarczającą liczbę "
-                "tablic, tor B będzie można uruchomić już w tej iteracji."
+                "Ten zasób ma sens wtedy, gdy dla części albo całości wybranego katalogu zdjęć E1 istnieją już dobre, "
+                "ręczne anotacje tablic. Program porównuje nazwy obrazów z pliku annotations.xml z obrazami "
+                "w roboczej puli E1 i pozwala przyjąć tylko zgodne anotacje dla zdjęć, które nie są jeszcze zatwierdzone."
+            )
+            body_lines.append("")
+            body_lines.append(
+                "Po adopcji E2 może otworzyć Z2 na gotowych tablicach zamiast startować od zera. "
+                "Jeśli zgodnych anotacji jest wystarczająco dużo, tor znaków może szybciej przejść do Z3."
             )
         elif row_key in {"plate_model", "char_model"}:
             is_plate = row_key == "plate_model"
@@ -4532,9 +4750,9 @@ class CampaignTab:
             body_lines.append("")
             if is_plate:
                 body_lines.append(
-                    "Dodanie modelu tablic do projektu zapisuje go jako domyślny model toru tablic.\n"
-                    "Dzięki temu Z2 może od razu używać go do autoanotacji bez ponownego wskazywania pliku,\n"
-                    "a kolejne iteracje projektu zachowują ten model jako stały zasób startowy."
+                    "Model tablic w E1 jest opcjonalnym zasobem startowym projektu. Wybierz go wtedy, "
+                    "gdy chcesz używać go do autoanotacji tablic w Z2 i traktować jako model, który "
+                    "zamierzasz dalej poprawiać treningiem w kolejnych iteracjach."
                 )
                 body_lines.append("")
                 body_lines.append(
@@ -4543,9 +4761,9 @@ class CampaignTab:
                 )
             else:
                 body_lines.append(
-                    "Dodanie modelu znaków do projektu zapisuje go jako domyślny model toru znaków.\n"
-                    "Dzięki temu Z3 może podstawiać go automatycznie do detekcji znaków,\n"
-                    "a kolejne iteracje projektu zachowują ten model jako stały zasób startowy."
+                    "Model znaków w E1 jest opcjonalnym zasobem startowym projektu. Wybierz go wtedy, "
+                    "gdy chcesz używać go w Z3 do detekcji znaków i traktować jako model, który "
+                    "zamierzasz dalej dotrenowywać na kolejnych datasetach znaków."
                 )
                 body_lines.append("")
                 body_lines.append(
@@ -4557,10 +4775,59 @@ class CampaignTab:
         message = "\n".join(str(line or "").strip() for line in body_lines if str(line or "").strip())
         self.app.themed_info(title, message or "Brak danych.", parent=self.frame, tone="info")
 
+    @staticmethod
+    def _count_project_start_plate_detections(annotation_tab, ann) -> int:
+        getter = getattr(annotation_tab, "_get_plate_detections", None)
+        if callable(getter):
+            try:
+                return int(len(list(getter(ann) or [])))
+            except Exception:
+                pass
+
+        plate_labels = {str(label or "").strip().lower() for label in getattr(CONFIG, "PLATE_LABELS", [])}
+        count = 0
+        for det in list(getattr(ann, "detections", []) or []):
+            label = str(getattr(det, "label", "") or "").strip().lower()
+            if label and label in plate_labels:
+                count += 1
+        return int(count)
+
+    @staticmethod
+    def _get_project_start_filename_plate_texts(filename: str) -> list[str]:
+        try:
+            planner = CampaignIngestPlanner()
+            return [
+                str(text or "").strip().upper()
+                for text in planner.extract_true_texts_from_filename(str(filename or ""))
+                if str(text or "").strip()
+            ]
+        except Exception:
+            return []
+
+    def _project_start_annotation_covers_filename_plates(self, filename: str, plate_count: int) -> tuple[bool, int]:
+        expected_texts = self._get_project_start_filename_plate_texts(filename)
+        expected_count = int(len(expected_texts) or 0)
+        if expected_count <= 0:
+            return True, 0
+        return bool(int(plate_count or 0) >= expected_count), expected_count
+
+    @staticmethod
+    def _format_project_start_annotation_adoption_summary(compatibility: dict | None) -> str:
+        payload = dict(compatibility or {})
+        matched = int(payload.get("matched", 0) or 0)
+        plates = int(payload.get("matched_plate_count", 0) or 0)
+        return (
+            f"Zamierzasz importować {matched} kompatybilnych anotacji dla niezatwierdzonych obrazów. "
+            f"Zostaną one zastosowane do {matched} zgodnych po nazwie niezatwierdzonych obrazów, "
+            f"co obejmie {plates} tablic."
+        )
+
     def _check_project_start_run_compatibility(
         self,
         run_dir: Path | None,
         expected_images_dir: Path | None,
+        *,
+        adoptable_only: bool = False,
     ) -> dict:
         result = {
             "ok": False,
@@ -4569,11 +4836,21 @@ class CampaignTab:
             "matched": 0,
             "missing": 0,
             "missing_names": [],
+            "approved_overlap": 0,
+            "approved_overlap_names": [],
+            "adoptable_image_count": 0,
+            "matched_plate_count": 0,
+            "incomplete": 0,
+            "incomplete_names": [],
+            "matched_normalized_names": [],
+            "missing_normalized_names": [],
             "images_dir": None,
             "package_image_set_token": "",
             "package_image_count": 0,
             "xml_image_set_token": "",
             "xml_image_count": 0,
+            "plate_images": 0,
+            "plate_count": 0,
             "token_match": False,
         }
 
@@ -4590,7 +4867,14 @@ class CampaignTab:
             safe_run_dir = None
 
         if safe_run_dir is None:
-            return result
+            try:
+                external_run_dir = Path(run_dir)
+                if external_run_dir.exists() and external_run_dir.is_dir() and (external_run_dir / "annotations.xml").exists():
+                    safe_run_dir = external_run_dir
+                else:
+                    return result
+            except Exception:
+                return result
 
         try:
             images_dir = Path(expected_images_dir)
@@ -4603,10 +4887,17 @@ class CampaignTab:
         except Exception:
             return result
 
-        package_image_set_token, package_image_count = self._build_project_start_image_set_token(
-            images_dir=images_dir,
-            manifest=self._load_ingest_manifest_cached(),
-        )
+        if adoptable_only:
+            package_normalized_names = self._scan_project_start_normalized_image_names(images_dir)
+            if not package_normalized_names:
+                package_normalized_names = self._get_project_start_normalized_image_names(images_dir)
+            package_image_count = len(package_normalized_names)
+            package_image_set_token = CAMPAIGN.build_image_name_set_token(package_normalized_names, images_dir=images_dir)
+        else:
+            package_image_set_token, package_image_count = self._build_project_start_image_set_token(
+                images_dir=images_dir,
+                manifest=self._load_ingest_manifest_cached(),
+            )
         result["package_image_set_token"] = str(package_image_set_token or "").strip()
         result["package_image_count"] = int(package_image_count or 0)
 
@@ -4615,9 +4906,41 @@ class CampaignTab:
         except Exception:
             return result
 
+        plate_annotations = []
+        plate_count = 0
+        plate_count_by_normalized: dict[str, int] = {}
+        incomplete_name_by_normalized: dict[str, str] = {}
+        for ann in annotations:
+            ann_plate_count = self._count_project_start_plate_detections(annotation_tab, ann)
+            if ann_plate_count <= 0:
+                continue
+            filename = str(getattr(ann, "filename", "") or "").strip()
+            if not filename:
+                continue
+            normalized_name = CAMPAIGN._normalize_image_set_name(filename)
+            if not normalized_name:
+                continue
+            covers_filename, expected_plate_count = self._project_start_annotation_covers_filename_plates(
+                filename,
+                ann_plate_count,
+            )
+            if not covers_filename:
+                try:
+                    incomplete_name_by_normalized[normalized_name] = (
+                        f"{Path(filename).name} ({int(ann_plate_count)} z {int(expected_plate_count)} tablic z nazwy)"
+                    )
+                except Exception:
+                    incomplete_name_by_normalized[normalized_name] = str(filename)
+            plate_annotations.append(ann)
+            plate_count += int(ann_plate_count)
+            plate_count_by_normalized[normalized_name] = (
+                int(plate_count_by_normalized.get(normalized_name, 0) or 0)
+                + int(ann_plate_count)
+            )
+
         xml_image_names = [
             str(getattr(ann, "filename", "") or "").strip()
-            for ann in annotations
+            for ann in plate_annotations
             if str(getattr(ann, "filename", "") or "").strip()
         ]
         xml_name_by_normalized: dict[str, str] = {}
@@ -4629,47 +4952,174 @@ class CampaignTab:
                 except Exception:
                     xml_name_by_normalized[normalized_name] = name
         xml_normalized_names = set(xml_name_by_normalized.keys())
+        complete_xml_normalized_names = xml_normalized_names - set(incomplete_name_by_normalized.keys())
 
         xml_image_set_token = CAMPAIGN.build_image_name_set_token(xml_image_names)
         xml_image_count = len(xml_normalized_names)
         result["xml_image_set_token"] = str(xml_image_set_token or "").strip()
         result["xml_image_count"] = int(xml_image_count or 0)
+        result["plate_images"] = int(xml_image_count or 0)
+        result["plate_count"] = int(plate_count or 0)
         result["token_match"] = bool(
             package_image_set_token
             and xml_image_set_token
             and package_image_set_token == xml_image_set_token
         )
 
-        if not annotations:
+        if not plate_annotations:
             result["checked"] = True
             result["images_dir"] = images_dir
             return result
 
-        package_image_names = self._collect_project_start_image_names(
-            images_dir=images_dir,
-            manifest=self._load_ingest_manifest_cached(),
+        if not adoptable_only:
+            package_image_names = self._collect_project_start_image_names(
+                images_dir=images_dir,
+                manifest=self._load_ingest_manifest_cached(),
+            )
+            package_normalized_names = {
+                CAMPAIGN._normalize_image_set_name(name)
+                for name in package_image_names
+                if CAMPAIGN._normalize_image_set_name(name)
+            }
+
+        approved_normalized_names = (
+            self._get_project_start_approved_normalized_image_names()
+            if adoptable_only
+            else set()
         )
-        package_normalized_names = {
-            CAMPAIGN._normalize_image_set_name(name)
-            for name in package_image_names
-            if CAMPAIGN._normalize_image_set_name(name)
-        }
-        missing_normalized_names = sorted(xml_normalized_names - package_normalized_names)
+        adoption_candidate_names = set(package_normalized_names) - set(approved_normalized_names)
+        matched_normalized_names = complete_xml_normalized_names & adoption_candidate_names
+        missing_normalized_names = sorted(xml_normalized_names - matched_normalized_names)
+        approved_overlap_names = sorted(xml_normalized_names & set(approved_normalized_names) & set(package_normalized_names))
         missing_names = [
             xml_name_by_normalized.get(name, name)
             for name in missing_normalized_names
+            if name not in incomplete_name_by_normalized
+            and name not in set(approved_overlap_names)
         ]
+        approved_overlap_preview = [
+            xml_name_by_normalized.get(name, name)
+            for name in approved_overlap_names
+        ]
+        incomplete_names = [
+            incomplete_name_by_normalized.get(name, xml_name_by_normalized.get(name, name))
+            for name in sorted(set(incomplete_name_by_normalized.keys()) & xml_normalized_names)
+        ]
+        matched_plate_count = sum(
+            int(plate_count_by_normalized.get(name, 0) or 0)
+            for name in set(matched_normalized_names)
+        )
 
         result.update(
             checked=True,
             total=len(xml_normalized_names),
-            matched=max(0, len(xml_normalized_names) - len(missing_normalized_names)),
-            missing=len(missing_normalized_names),
+            matched=len(matched_normalized_names),
+            missing=len(missing_names),
             missing_names=list(missing_names[:5]),
+            approved_overlap=len(approved_overlap_names),
+            approved_overlap_names=list(approved_overlap_preview[:5]),
+            adoptable_image_count=len(adoption_candidate_names),
+            matched_plate_count=int(matched_plate_count or 0),
+            incomplete=len(incomplete_names),
+            incomplete_names=list(incomplete_names[:5]),
+            matched_normalized_names=sorted(matched_normalized_names),
+            missing_normalized_names=sorted(missing_normalized_names),
             images_dir=images_dir,
         )
         result["ok"] = bool(xml_normalized_names and not missing_normalized_names)
         return result
+
+    def _get_project_start_normalized_image_names(self, images_dir: Path | None) -> set[str]:
+        if images_dir is None:
+            return set()
+
+        try:
+            manifest = CAMPAIGN.load_ingest_manifest() or {}
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            selected_manifest_names = {
+                CAMPAIGN._normalize_image_set_name(str(item.get("name", "") or "").strip())
+                for item in list(manifest.get("selected_images") or [])
+                if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+            }
+            selected_manifest_names = {name for name in selected_manifest_names if name}
+            if selected_manifest_names:
+                try:
+                    manifest_source_dir = CAMPAIGN.get_iteration_image_source_dir()
+                except Exception:
+                    manifest_source_dir = None
+                candidate_dirs = [
+                    manifest_source_dir,
+                    manifest.get("source_dir"),
+                    manifest.get("master_pool_dir"),
+                    manifest.get("target_dir"),
+                ]
+                for candidate_dir in candidate_dirs:
+                    if candidate_dir and self._campaign_paths_equivalent(images_dir, candidate_dir):
+                        return selected_manifest_names
+
+        image_names: list[str] = []
+        try:
+            for image_path in Path(images_dir).rglob("*"):
+                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                    image_names.append(str(image_path.name or "").strip())
+        except Exception:
+            image_names = []
+        return {
+            CAMPAIGN._normalize_image_set_name(name)
+            for name in image_names
+            if CAMPAIGN._normalize_image_set_name(name)
+        }
+
+    def _summarize_project_start_xml_match(self, xml_path: Path | None, images_dir: Path | None) -> dict:
+        summary = {
+            "checked": False,
+            "total": 0,
+            "matched": 0,
+            "missing": 0,
+            "missing_names": [],
+            "package_image_count": 0,
+            "plate_images": 0,
+            "plate_count": 0,
+        }
+        if xml_path is None or images_dir is None:
+            return summary
+
+        annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+        if annotation_tab is None:
+            return summary
+
+        try:
+            annotations = annotation_tab._parse_cvat_preview_annotations(Path(xml_path))
+        except Exception:
+            return summary
+
+        xml_name_by_normalized: dict[str, str] = {}
+        plate_count = 0
+        for ann in annotations:
+            ann_plate_count = self._count_project_start_plate_detections(annotation_tab, ann)
+            if ann_plate_count <= 0:
+                continue
+            filename = str(getattr(ann, "filename", "") or "").strip()
+            normalized_name = CAMPAIGN._normalize_image_set_name(filename)
+            if normalized_name and normalized_name not in xml_name_by_normalized:
+                xml_name_by_normalized[normalized_name] = Path(filename).name
+            plate_count += int(ann_plate_count)
+
+        package_names = self._get_project_start_normalized_image_names(images_dir)
+        missing_names = sorted(set(xml_name_by_normalized.keys()) - package_names)
+        summary.update(
+            checked=True,
+            total=len(xml_name_by_normalized),
+            matched=max(0, len(xml_name_by_normalized) - len(missing_names)),
+            missing=len(missing_names),
+            missing_names=[xml_name_by_normalized.get(name, name) for name in missing_names[:5]],
+            package_image_count=len(package_names),
+            plate_images=len(xml_name_by_normalized),
+            plate_count=int(plate_count or 0),
+        )
+        return summary
 
     def _import_project_start_plate_run(self) -> None:
         if not CAMPAIGN.get_active_project_name():
@@ -4728,10 +5178,24 @@ class CampaignTab:
             )
             return
         selected_run_dir = selected_xml_path.parent
+        package_images_dir = selected_run_dir / "images"
+        try:
+            if (
+                not package_images_dir.exists()
+                or not package_images_dir.is_dir()
+                or self._count_images_in_dir(package_images_dir, recursive=True) <= 0
+            ):
+                package_images_dir = None
+        except Exception:
+            package_images_dir = None
 
-        project_images_dir = CAMPAIGN.get_master_pool_dir()
-        if project_images_dir is None:
-            project_images_dir = CAMPAIGN.get_iteration_raw_dir()
+        image_source = self._get_project_start_effective_images_source()
+        project_images_dir = (
+            image_source.get("effective_dir")
+            or CAMPAIGN.get_master_pool_dir()
+            or CAMPAIGN.get_iteration_image_source_dir()
+            or CAMPAIGN.get_iteration_raw_dir()
+        )
 
         try:
             safe_run_dir = annotation_tab._resolve_safe_annotation_run_dir(selected_run_dir, require_xml=True)
@@ -4746,14 +5210,49 @@ class CampaignTab:
                     selected_images_dir = None
             except Exception:
                 selected_images_dir = None
+        if selected_images_dir is None and package_images_dir is not None:
+            selected_images_dir = package_images_dir
+        selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
+        original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
+
+        if selected_images_dir is not None and package_images_dir is not None:
+            pre_import_compatibility = self._check_project_start_run_compatibility(
+                selected_run_dir,
+                selected_images_dir,
+                adoptable_only=True,
+            )
+            if pre_import_compatibility.get("checked") and not pre_import_compatibility.get("ok"):
+                extended_images_dir = self._maybe_extend_project_start_images_from_annotation_package(
+                    current_images_dir=selected_images_dir,
+                    package_images_dir=package_images_dir,
+                    compatibility=pre_import_compatibility,
+                )
+                if extended_images_dir is not None:
+                    selected_images_dir = extended_images_dir
+                    selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
+                    original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
+
+        if selected_images_dir is not None and not selected_image_names:
+            self.app.themed_error(
+                "Import anotacji tablic",
+                (
+                    "W wybranym katalogu nie ma zdjęć roboczych do adopcji anotacji.\n\n"
+                    "Wszystkie rozpoznane zdjęcia z tej puli są już zatwierdzone w projekcie albo katalog nie zawiera "
+                    "obrazów możliwych do powiązania z annotations.xml."
+                ),
+                parent=self.frame,
+            )
+            return
 
         if final_run_dir is None:
             imported_run_dir, error_message, needs_image_dir = annotation_tab._import_external_annotation_run_to_workspace(
                 selected_run_dir,
                 compatible_images_dir=selected_images_dir,
+                allowed_normalized_names=(selected_image_names or None),
+                copy_images=False,
             )
             if imported_run_dir is None and needs_image_dir:
-                prompt_dir = selected_images_dir if selected_images_dir is not None else Path(CONFIG.DIR_1_RAW)
+                prompt_dir = selected_images_dir or package_images_dir or Path(CONFIG.DIR_1_RAW)
                 compatible_dir = filedialog.askdirectory(
                     initialdir=str(prompt_dir),
                     title="Wskaż folder obrazów zgodnych z annotations.xml",
@@ -4761,9 +5260,23 @@ class CampaignTab:
                 if not compatible_dir:
                     return
                 selected_images_dir = Path(compatible_dir)
+                selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
+                original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
+                if not selected_image_names:
+                    self.app.themed_error(
+                        "Import anotacji tablic",
+                        (
+                            "W wybranym katalogu nie ma zdjęć roboczych do adopcji anotacji.\n\n"
+                            "Import E1 pomija zdjęcia już zatwierdzone w projekcie."
+                        ),
+                        parent=self.frame,
+                    )
+                    return
                 imported_run_dir, error_message, _needs_image_dir = annotation_tab._import_external_annotation_run_to_workspace(
                     selected_run_dir,
                     compatible_images_dir=selected_images_dir,
+                    allowed_normalized_names=(selected_image_names or None),
+                    copy_images=False,
                 )
             if imported_run_dir is None:
                 self.app.themed_error(
@@ -4777,30 +5290,171 @@ class CampaignTab:
         if final_run_dir is None:
             return
 
-        compatibility = self._check_project_start_run_compatibility(final_run_dir, selected_images_dir)
-        if compatibility.get("checked") and not compatibility.get("ok"):
-            images_dir = compatibility.get("images_dir")
-            missing_preview = "\n".join(str(name) for name in (compatibility.get("missing_names") or []))
-            missing_suffix = ""
-            remaining_missing = int(compatibility.get("missing", 0) or 0) - len(compatibility.get("missing_names") or [])
-            if remaining_missing > 0:
-                missing_suffix = f"\n... i jeszcze {remaining_missing} plikow."
+        resolved_images_dir = selected_images_dir or self._resolve_project_start_run_images_dir(final_run_dir)
+        if resolved_images_dir is not None:
+            try:
+                if not resolved_images_dir.exists() or not resolved_images_dir.is_dir() or self._count_images_in_dir(resolved_images_dir, recursive=True) <= 0:
+                    resolved_images_dir = None
+            except Exception:
+                resolved_images_dir = None
+        if resolved_images_dir is None:
             self.app.themed_error(
                 "Import anotacji tablic",
                 (
-                    "Wybrane anotacje tablic nie pasuja do obrazów ustawionych dla tej iteracji.\n\n"
-                    f"Obrazy iteracji: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
-                    f"Obrazy opisane w XML: {int(compatibility.get('total', 0) or 0)}\n"
-                    f"Zgodne obrazy: {int(compatibility.get('matched', 0) or 0)}\n"
-                    f"Brakujące obrazy: {int(compatibility.get('missing', 0) or 0)}\n\n"
-                    "Najpierw wskaż zgodny zestaw obrazów albo zaimportuj run przygotowany dla tej paczki."
-                    + (f"\n\nPrzyklady brakujacych plikow:\n{missing_preview}{missing_suffix}" if missing_preview else "")
+                    "Nie udało się ustalić katalogu zdjęć zgodnych z annotations.xml.\n\n"
+                    "Wskaż najpierw katalog zdjęć w E1 albo wybierz run anotacji, który zawiera obrazy lub manifest z input_dir."
                 ),
                 parent=self.frame,
             )
             return
 
-        resolved_images_dir = selected_images_dir or self._resolve_project_start_run_images_dir(final_run_dir)
+        if not selected_image_names:
+            selected_image_names = self._get_project_start_adoptable_normalized_image_names(resolved_images_dir)
+            original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, resolved_images_dir)
+
+        if not selected_image_names:
+            self.app.themed_error(
+                "Import anotacji tablic",
+                (
+                    "W wybranej puli projektu nie ma zdjęć, do których można adoptować anotacje.\n\n"
+                    "Import E1 pomija obrazy, które są już zatwierdzone w projekcie. "
+                    "Wskaż katalog zawierający zdjęcia jeszcze robocze albo usuń błędnie wybrane źródło."
+                ),
+                parent=self.frame,
+            )
+            return
+
+        compatibility = self._check_project_start_run_compatibility(final_run_dir, resolved_images_dir, adoptable_only=True)
+        if compatibility.get("checked") and not compatibility.get("ok"):
+            matched_count = int(compatibility.get("matched", 0) or 0)
+            if matched_count > 0 and selected_image_names:
+                matched_names = {
+                    str(name or "").strip()
+                    for name in list(compatibility.get("matched_normalized_names") or [])
+                    if str(name or "").strip()
+                }
+                imported_run_dir, error_message, _needs_image_dir = annotation_tab._import_external_annotation_run_to_workspace(
+                    final_run_dir,
+                    compatible_images_dir=resolved_images_dir,
+                    allowed_normalized_names=(matched_names or selected_image_names),
+                    copy_images=False,
+                )
+                if imported_run_dir is None:
+                    self.app.themed_error(
+                        "Import anotacji tablic",
+                        error_message or "Nie udało się przygotować zgodnego podzbioru anotacji.",
+                        parent=self.frame,
+                    )
+                    return
+                final_run_dir = imported_run_dir
+                compatibility = self._check_project_start_run_compatibility(final_run_dir, resolved_images_dir, adoptable_only=True)
+            else:
+                images_dir = compatibility.get("images_dir")
+                missing_preview = "\n".join(str(name) for name in (compatibility.get("missing_names") or []))
+                approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                missing_count = int(compatibility.get("missing", 0) or 0)
+                incomplete_count = int(compatibility.get("incomplete", 0) or 0)
+                missing_suffix = ""
+                remaining_missing = int(compatibility.get("missing", 0) or 0) - len(compatibility.get("missing_names") or [])
+                if remaining_missing > 0:
+                    missing_suffix = f"\n... i jeszcze {remaining_missing} plikow."
+                approved_line = (
+                    f"\nPominięte, bo już zatwierdzone w projekcie: {approved_overlap}"
+                    if approved_overlap > 0
+                    else ""
+                )
+                missing_line = f"\nBrakujące anotowane obrazy w roboczej puli: {missing_count}" if missing_count > 0 else ""
+                incomplete_line = (
+                    f"\nPominięte, bo anotacje nie obejmują wszystkich tablic zapisanych w nazwie pliku: {incomplete_count}"
+                    if incomplete_count > 0
+                    else ""
+                )
+                self.app.themed_error(
+                    "Import anotacji tablic",
+                    (
+                        "Wybrane anotacje tablic nie pasują do roboczych zdjęć projektu.\n\n"
+                        f"Pula zdjęć E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
+                        f"{self._format_project_start_annotation_adoption_summary(compatibility)}"
+                        f"{missing_line}{approved_line}{incomplete_line}\n\n"
+                        "Nie znaleziono żadnego zgodnego wpisu do adopcji."
+                        + (f"\n\nPrzykłady brakujących plików:\n{missing_preview}{missing_suffix}" if missing_preview else "")
+                    ),
+                    parent=self.frame,
+                )
+                return
+
+        if compatibility.get("checked") and not compatibility.get("ok"):
+            images_dir = compatibility.get("images_dir")
+            missing_preview = "\n".join(str(name) for name in (compatibility.get("missing_names") or []))
+            approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+            missing_count = int(compatibility.get("missing", 0) or 0)
+            incomplete_count = int(compatibility.get("incomplete", 0) or 0)
+            missing_suffix = ""
+            remaining_missing = int(compatibility.get("missing", 0) or 0) - len(compatibility.get("missing_names") or [])
+            if remaining_missing > 0:
+                missing_suffix = f"\n... i jeszcze {remaining_missing} plikow."
+            approved_line = (
+                f"\nPominięte, bo już zatwierdzone w projekcie: {approved_overlap}"
+                if approved_overlap > 0
+                else ""
+            )
+            missing_line = f"\nBrakujące anotowane obrazy w roboczej puli: {missing_count}" if missing_count > 0 else ""
+            incomplete_line = (
+                f"\nPominięte, bo anotacje nie obejmują wszystkich tablic zapisanych w nazwie pliku: {incomplete_count}"
+                if incomplete_count > 0
+                else ""
+            )
+            self.app.themed_error(
+                "Import anotacji tablic",
+                (
+                    "Wybrane anotacje tablic nie pasują do roboczych zdjęć projektu.\n\n"
+                    f"Pula zdjęć E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
+                    f"{self._format_project_start_annotation_adoption_summary(compatibility)}"
+                    f"{missing_line}{approved_line}{incomplete_line}\n\n"
+                    "Najpierw wskaż katalog zdjęć zawierający niezatwierdzone obrazy zgodne z annotations.xml."
+                    + (f"\n\nPrzyklady brakujacych plikow:\n{missing_preview}{missing_suffix}" if missing_preview else "")
+                ),
+                parent=self.frame,
+            )
+            return
+        if compatibility.get("checked") and compatibility.get("ok"):
+            images_dir = compatibility.get("images_dir")
+            matched_count = int(compatibility.get("matched", 0) or 0)
+            total_count = int(compatibility.get("total", 0) or 0)
+            original_total_count = int(original_xml_match.get("total", 0) or total_count)
+            original_missing_count = max(0, original_total_count - matched_count)
+            xml_label = self._format_project_start_asset_source(selected_xml_path)
+            images_label = (
+                self._format_project_start_asset_source(images_dir)
+                if images_dir is not None
+                else "brak"
+            )
+            partial_line = (
+                f"XML zawiera też {original_missing_count} anotowanych obrazów spoza roboczej puli do adopcji. "
+                "Program zaadoptuje tylko zgodny podzbiór zdjęć jeszcze niezatwierdzonych."
+                if original_missing_count > 0
+                else "Wszystkie anotowane obrazy z XML pasują do zdjęć roboczych możliwych do adopcji."
+            )
+            should_adopt = self.app.themed_confirm(
+                "Import anotacji tablic",
+                (
+                    "Program znalazł anotacje zgodne ze zdjęciami roboczymi w E1.\n\n"
+                    f"Plik anotacji: {xml_label}\n"
+                    f"Pula zdjęć E1: {images_label}\n"
+                    f"{self._format_project_start_annotation_adoption_summary(compatibility)}\n\n"
+                    f"{partial_line}\n\n"
+                    "Czy adoptować te anotacje do projektu? Po potwierdzeniu zostaną powiązane tylko ze zdjęciami, "
+                    "które nie są jeszcze zatwierdzone. E2 użyje ich jako gotowego źródła tablic, "
+                    "a w Z2 nadal będzie można je sprawdzić i poprawić."
+                ),
+                parent=self.frame,
+                confirm_label="Adoptuj anotacje",
+                cancel_label="Anuluj",
+                tone="info",
+            )
+            if not should_adopt:
+                return
+
         if resolved_images_dir is not None and resolved_images_dir.exists() and resolved_images_dir.is_dir():
             try:
                 CAMPAIGN.set_master_pool_dir(resolved_images_dir)
@@ -4814,6 +5468,14 @@ class CampaignTab:
             )
         except Exception as e:
             logger.debug(f"Nie udało się zapamietac importowanego runu tablic dla kampanii: {e}")
+        try:
+            CAMPAIGN.set_project_start_plate_source(
+                source_run_path=str(final_run_dir.resolve()),
+                source_xml_path=str((final_run_dir / "annotations.xml").resolve()),
+                source_input_path=str(resolved_images_dir.resolve()),
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się zapamietac źródła anotacji startowych E1: {e}")
 
         self.current_ingest_plan = {}
         self._set_project_start_asset_scope(
@@ -4836,13 +5498,21 @@ class CampaignTab:
         try:
             self.app.update_status(
                 (
-                    f"Podpieto gotowe anotacje tablic z pliku {run_name}/annotations.xml. "
-                    "E2 będzie mogło użyć ich zamiast startować od zera."
+                    f"Adoptowano gotowe anotacje tablic z pliku {run_name}/annotations.xml. "
+                    "E2 może użyć ich jako źródła tablic zamiast startować od zera."
                 ),
                 "info",
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _get_step1_assets_intro_text() -> str:
+        return (
+            "Wybierz obowiązkowy katalog zdjęć. Opcjonalnie możesz dołączyć zgodne anotacje tablic "
+            "z wcześniejszej pracy oraz modele, które mają być projektowym punktem startowym do dalszego "
+            "używania i dotrenowywania."
+        )
 
     def _refresh_project_start_panel(self) -> None:
         shell = getattr(self, "ingest_start_shell", None)
@@ -4887,7 +5557,6 @@ class CampaignTab:
         effective_images_exists = bool(image_source.get("effective_exists"))
         plate_ready_source = self._get_plate_route_ready_source()
         char_ready_source = self._get_char_route_ready_source()
-        stored_plate_source = dict(CAMPAIGN.get_last_plate_manual_source() or {})
         plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
         char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
         plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
@@ -4944,7 +5613,7 @@ class CampaignTab:
                 before=self.ingest_insights_shell,
             )
             self._set_pack_visibility(self.ingest_start_title_lbl, mode_selected, fill=tk.X)
-            self._set_pack_visibility(self.ingest_start_summary_lbl, mode_selected, fill=tk.X, pady=(4, 8))
+            self._set_pack_visibility(self.ingest_start_summary_lbl, False)
             self._set_pack_visibility(self.ingest_start_detected_lbl, False)
             self._set_pack_visibility(self.ingest_start_next_lbl, False)
             self._set_pack_visibility(self.ingest_status_shell, False)
@@ -4970,7 +5639,7 @@ class CampaignTab:
             self.ingest_start_summary_lbl.config(text="")
             self._set_pack_visibility(self.ingest_start_summary_lbl, False)
         if self.ingest_start_assets_title_lbl is not None:
-            self.ingest_start_assets_title_lbl.config(text="Tabela startowa E1: zasoby i walidacja")
+            self.ingest_start_assets_title_lbl.config(text="Tabela startowa E1: zasoby, cel i walidacja")
         if self.ingest_start_next_lbl is not None:
             self.ingest_start_next_lbl.config(text="")
 
@@ -5046,7 +5715,7 @@ class CampaignTab:
         plate_run_path = str(plate_source_info.get("run_path") or "").strip()
         plate_xml_path = str(plate_source_info.get("xml_path") or "").strip()
         plate_run_source_text = self._format_project_start_asset_source(plate_xml_path or plate_run_path)
-        plate_run_validation_text = "Opcjonalne | nie wskazano."
+        plate_run_validation_text = "Opcjonalne | import wcześniejszych anotacji."
         plate_run_validation_tone = "muted"
         if plate_run_path:
             try:
@@ -5063,21 +5732,48 @@ class CampaignTab:
                 plate_run_validation_text = "Najpierw wskaż obrazy tej iteracji."
                 plate_run_validation_tone = "warning"
             else:
-                compatibility = self._check_project_start_run_compatibility(plate_run_dir, effective_images_dir)
-                if compatibility.get("checked") and compatibility.get("ok"):
+                compatibility = self._check_project_start_run_compatibility(plate_run_dir, effective_images_dir, adoptable_only=True)
+                if compatibility.get("checked") and int(compatibility.get("total", 0) or 0) <= 0:
+                    plate_run_validation_text = "XML nie zawiera anotacji tablic do importu."
+                    plate_run_validation_tone = "warning"
+                elif compatibility.get("checked") and compatibility.get("ok"):
                     plate_run_validation_text = (
-                        f"OK | zgodne obrazy: {int(compatibility.get('matched', 0) or 0)}/"
-                        f"{int(compatibility.get('total', 0) or 0)}"
+                        f"OK | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
+                        f"{int(compatibility.get('matched', 0) or 0)} obrazów / "
+                        f"{int(compatibility.get('matched_plate_count', 0) or 0)} tablic"
+                    )
+                    plate_run_validation_tone = "success"
+                elif compatibility.get("checked") and int(compatibility.get("matched", 0) or 0) > 0:
+                    approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    incomplete_count = int(compatibility.get("incomplete", 0) or 0)
+                    overlap_text = f" | pominięte zatwierdzone: {approved_overlap}" if approved_overlap > 0 else ""
+                    incomplete_text = f" | niepełne wg nazwy: {incomplete_count}" if incomplete_count > 0 else ""
+                    plate_run_validation_text = (
+                        f"Do adopcji | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
+                        f"{int(compatibility.get('matched', 0) or 0)} obrazów / "
+                        f"{int(compatibility.get('matched_plate_count', 0) or 0)} tablic"
+                        f"{overlap_text}{incomplete_text}"
                     )
                     plate_run_validation_tone = "success"
                 elif compatibility.get("checked"):
-                    plate_run_validation_text = (
-                        f"Niezgodne z obrazami iteracji | brak {int(compatibility.get('missing', 0) or 0)} "
-                        f"z {int(compatibility.get('total', 0) or 0)} plików."
-                    )
+                    approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    incomplete_count = int(compatibility.get("incomplete", 0) or 0)
+                    if approved_overlap > 0:
+                        plate_run_validation_text = (
+                            "Brak zdjęć do adopcji | zgodne anotacje dotyczą obrazów już zatwierdzonych."
+                        )
+                    elif incomplete_count > 0:
+                        plate_run_validation_text = (
+                            f"Brak adopcji | {incomplete_count} anotacji nie obejmuje wszystkich tablic z nazwy pliku."
+                        )
+                    else:
+                        plate_run_validation_text = (
+                            f"Niezgodne z roboczą pulą E1 | brak {int(compatibility.get('missing', 0) or 0)} "
+                            f"z {int(compatibility.get('total', 0) or 0)} anotowanych obrazów."
+                        )
                     plate_run_validation_tone = "error"
                 else:
-                    plate_run_validation_text = "Run zapisany. Sprawdź zgodność po wskazaniu obrazów iteracji."
+                    plate_run_validation_text = "Run zapisany. Sprawdź zgodność po wskazaniu roboczej puli E1."
                     plate_run_validation_tone = "warning"
         self._set_project_start_asset_row_state(
             "plate_run",
@@ -5089,7 +5785,7 @@ class CampaignTab:
 
         plate_model_source_text = self._format_project_start_asset_source(plate_model_path)
         if not plate_model_ready:
-            plate_model_validation_text = "Opcjonalne | nie wskazano."
+            plate_model_validation_text = "Opcjonalne | model do dalszego dotrenowania."
             plate_model_validation_tone = "muted"
         else:
             try:
@@ -5113,7 +5809,7 @@ class CampaignTab:
 
         char_model_source_text = self._format_project_start_asset_source(char_model_path)
         if not char_model_ready:
-            char_model_validation_text = "Opcjonalne | nie wskazano."
+            char_model_validation_text = "Opcjonalne | model do dalszego dotrenowania."
             char_model_validation_tone = "muted"
         else:
             try:
@@ -5180,10 +5876,6 @@ class CampaignTab:
         except Exception:
             pass
 
-    def _toggle_ingest_insights(self) -> None:
-        self.ingest_insights_expanded = not bool(self.ingest_insights_expanded)
-        self._refresh_ingest_insights_visibility()
-
     def _refresh_ingest_insights_visibility(self, mode_selected: bool | None = None) -> None:
         if mode_selected is None:
             mode_selected = bool(CAMPAIGN.get_active_project_name())
@@ -5200,7 +5892,7 @@ class CampaignTab:
 
         if hint is not None:
             hint_text = (
-                "Histogram i rozkład znaków pomagają ocenić paczkę, ale nie są wymagane do zatwierdzenia E1."
+                "Histogram i rozkład znaków pomagają ocenić wybrany katalog zdjęć, ale nie są wymagane do zatwierdzenia E1."
                 if expanded
                 else "Histogram i rozkład znaków są dostępne jako sekcja dodatkowa."
             )
@@ -5266,11 +5958,15 @@ class CampaignTab:
                 pass
 
         try:
-            header_texts = ("Zasób", "Źródło", "Walidacja", "Tryb", "Akcja", "Więcej")
+            header_texts = ("Zasób", "Źródło", "Walidacja", "Źródło ścieżki danych", "Akcja", "Więcej")
             for idx, header_lbl in enumerate(list(getattr(self, "ingest_start_assets_header_labels", []) or [])):
                 if header_lbl is None or idx >= len(header_texts):
                     continue
-                header_lbl.config(text=header_texts[idx], font=("Segoe UI", 8, "bold"))
+                header_lbl.config(
+                    text=header_texts[idx],
+                    font=("Segoe UI", 8, "bold"),
+                    wraplength=(max(110, asset_col3 - 12) if idx == 3 else 0),
+                )
         except Exception:
             pass
 
@@ -5438,8 +6134,11 @@ class CampaignTab:
             pass
 
     def _get_iteration_image_count(self) -> int:
-        iter_dir = CAMPAIGN.get_iteration_raw_dir()
-        return self._count_images_in_dir(iter_dir, recursive=True)
+        try:
+            return int(CAMPAIGN.get_iteration_image_count() or 0)
+        except Exception:
+            iter_dir = CAMPAIGN.get_iteration_raw_dir()
+            return self._count_images_in_dir(iter_dir, recursive=True)
 
     def _load_ingest_manifest_cached(self) -> dict:
         try:
@@ -5645,6 +6344,9 @@ class CampaignTab:
             "project": str(manifest.get("project", CAMPAIGN.get_active_project_name() or "") or ""),
             "iteration": int(manifest.get("iteration", CAMPAIGN.get_current_iteration_num() or 1) or 1),
             "master_pool_dir": str(manifest.get("master_pool_dir", "") or ""),
+            "source_dir": str(manifest.get("source_dir", "") or ""),
+            "selection_mode": str(manifest.get("selection_mode", "") or ""),
+            "manifest_only": bool(manifest.get("manifest_only", False)),
             "batch_size": 0,
             "raw_total": selected_count,
             "candidates_total": selected_count,
@@ -5888,11 +6590,7 @@ class CampaignTab:
                 f"4. Najczęstsze znaki w tej chwili: {self._format_histogram_compact(selected_balance, limit=6)}."
             )
         else:
-            text = (
-                "Kliknij „Wybierz...”, aby wskazać główną pulę i automatycznie wczytać wybrany folder zdjęć do E1.\n"
-                "Następnie użyj badge'a „Zatwierdź etap”, aby skopiować zdjęcia do iteracji.\n"
-                f"Najrzadsze znaki w zaakceptowanym zbiorze treningowym teraz: {rare_preview}."
-            )
+            text = ""
 
         try:
             self.ingest_logic_lbl.config(text=text)
@@ -5998,9 +6696,6 @@ class CampaignTab:
                 ) or self.current_ingest_plan.get("selected_total", 0) or 0
             ),
         )
-
-    def _on_ingest_selection_changed(self, _event=None):
-        self._refresh_ingest_selection_info()
 
     def _theme_step1_ingest_panel(self):
         palette = getattr(self.app, "palette", {})
@@ -6260,17 +6955,17 @@ class CampaignTab:
             project_pool_total = max(int(source_total or 0), int(raw_plan_count or 0), int(current_iteration_package or 0))
 
         summary_rows = [
-            ("Łączna pula projektu", f"{project_pool_total} zdjęć"),
-            ("Zatwierdzone do YOLO", f"{approved_images} zdjęć / {approved_plates} tablic"),
-            ("Paczka tej iteracji", f"{current_iteration_package} zdjęć"),
+            ("Pudełko: tablice zatwierdzone", f"{approved_images} zdjęć / {approved_plates} tablic"),
+            ("Zdjęcia tej iteracji", f"{current_iteration_package} zdjęć"),
             ("Nowe względem projektu", f"{new_to_project_count} zdjęć"),
+            ("Pula projektu (informacyjnie)", f"{project_pool_total} zdjęć"),
         ]
         if source_total > 0:
-            summary_rows.insert(0, ("Źródło paczki", f"{source_total} zdjęć"))
+            summary_rows.insert(0, ("Źródło zdjęć", f"{source_total} zdjęć"))
         if project_overlap_count > 0:
             summary_rows.append(("Już wcześniej w projekcie", f"{project_overlap_count} zdjęć"))
         if skipped_approved_count > 0:
-            summary_rows.append(("W tym już w YOLO", f"{skipped_approved_count} zdjęć"))
+            summary_rows.append(("W tym już zatwierdzone", f"{skipped_approved_count} zdjęć"))
 
         self._set_ingest_status_lines(summary_rows, "")
 
@@ -6307,7 +7002,17 @@ class CampaignTab:
         if not selected:
             return False
 
-        CAMPAIGN.set_master_pool_dir(selected)
+        if not CAMPAIGN.set_master_pool_dir(selected):
+            self.app.themed_info(
+                "Nieprawidłowy katalog zdjęć",
+                (
+                    "Wybrany katalog jest zbyt szeroki albo nie zawiera obrazów. "
+                    "Wskaż konkretny katalog ze zdjęciami, a nie katalog aplikacji, Workspace ani katalog projektu."
+                ),
+                parent=self.frame,
+                tone="warning",
+            )
+            return False
         try:
             self._sync_iteration_artifact_registry_from_project_start()
         except Exception:
@@ -6539,7 +7244,7 @@ class CampaignTab:
                     "Brak nowych zdjęć do iteracji",
                     (
                         f"Wybrany folder zawiera {raw_total} zdjęć, ale wszystkie zostały odrzucone jako duble po nazwie.\n\n"
-                        "Ta paczka nie wnosi nowych obrazów do projektu."
+                        "Ten zestaw zdjęć nie wnosi nowych obrazów do projektu."
                     ),
                 )
                 return
@@ -6564,6 +7269,111 @@ class CampaignTab:
         except Exception:
             pass
 
+    def _should_reuse_step1_source_despite_duplicate_plan(self, plan: dict) -> bool:
+        if not isinstance(plan, dict) or not plan.get("ok", False):
+            return False
+        try:
+            current_iter = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            current_iter = 1
+        if current_iter <= 1:
+            return False
+        try:
+            raw_total = int(plan.get("raw_total", 0) or 0)
+            selected_total = int(plan.get("selected_total", 0) or 0)
+            project_overlap = int(plan.get("project_overlap_filenames", 0) or 0)
+            pending_overlap = int(plan.get("pending_iteration_overlap_filenames", 0) or 0)
+            invalid_gt = int(plan.get("skipped_invalid_ground_truth", 0) or 0)
+        except Exception:
+            return False
+        if raw_total <= 0 or selected_total > 0:
+            return False
+        if invalid_gt > 0:
+            return False
+        return bool(project_overlap + pending_overlap >= raw_total)
+
+    def _build_step1_source_reuse_plan(self, base_plan: dict | None = None) -> dict:
+        master_pool = CAMPAIGN.get_master_pool_dir()
+        if master_pool is None:
+            return {}
+        try:
+            master_pool = Path(master_pool)
+        except Exception:
+            return {}
+        if not master_pool.exists() or not master_pool.is_dir():
+            return {}
+
+        image_paths = sorted(
+            (
+                image_path
+                for image_path in master_pool.rglob("*")
+                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+            ),
+            key=lambda p: p.as_posix().lower(),
+        )
+        if not image_paths:
+            return {}
+
+        planner = CampaignIngestPlanner()
+        selected_hist = Counter()
+        selected_items = []
+        skipped_invalid_gt = 0
+        for image_path in image_paths:
+            gt_texts = planner.extract_true_texts_from_filename(image_path.name)
+            char_hist = planner.build_char_histogram(gt_texts)
+            if not gt_texts or not char_hist:
+                skipped_invalid_gt += 1
+            selected_hist.update(char_hist)
+            try:
+                source_path = str(image_path.resolve())
+            except Exception:
+                source_path = str(image_path.absolute())
+            selected_items.append(
+                {
+                    "name": image_path.name,
+                    "source_path": source_path,
+                    "source_key": planner.make_source_key(image_path, master_pool_dir=master_pool),
+                    "ground_truth_texts": list(gt_texts or []),
+                    "char_histogram": dict(char_hist or {}),
+                    "score": 0.0,
+                    "score_details": {"source_reuse": True},
+                }
+            )
+
+        base_plan = dict(base_plan or {})
+        raw_total = int(len(image_paths))
+        project_overlap = int(base_plan.get("project_overlap_filenames", raw_total) or 0)
+        pending_overlap = int(base_plan.get("pending_iteration_overlap_filenames", 0) or 0)
+        source_new_total = max(0, raw_total - project_overlap)
+
+        return {
+            "ok": True,
+            "planner_version": "source_reuse_v1",
+            "generated_at": datetime.now().isoformat(),
+            "project": CAMPAIGN.get_active_project_name() or "",
+            "iteration": int(CAMPAIGN.get_current_iteration_num() or 1),
+            "master_pool_dir": str(master_pool.resolve()),
+            "batch_size": 0,
+            "raw_total": raw_total,
+            "candidates_total": raw_total,
+            "selected_total": len(selected_items),
+            "new_to_project_total": source_new_total,
+            "source_new_to_project_total": source_new_total,
+            "skipped_used": 0,
+            "skipped_duplicate_filenames": 0,
+            "skipped_duplicate_approved_filenames": int(base_plan.get("skipped_duplicate_approved_filenames", 0) or 0),
+            "project_overlap_filenames": project_overlap,
+            "pending_iteration_overlap_filenames": pending_overlap,
+            "project_pool_total_before_iteration": int(base_plan.get("project_pool_total_before_iteration", project_overlap) or project_overlap),
+            "project_pool_total_after_iteration": int(base_plan.get("project_pool_total_after_iteration", project_overlap + source_new_total) or (project_overlap + source_new_total)),
+            "skipped_invalid_ground_truth": skipped_invalid_gt,
+            "source_reuse": True,
+            "current_balance": dict(base_plan.get("current_balance", {}) or {}),
+            "selected_balance": {ch: int(selected_hist.get(ch, 0)) for ch in CHAR_ALPHABET},
+            "predicted_balance_after": {ch: int(selected_hist.get(ch, 0)) for ch in CHAR_ALPHABET},
+            "selected": selected_items,
+        }
+
     def _ensure_current_ingest_plan_from_master_pool(self) -> bool:
         if (
             isinstance(self.current_ingest_plan, dict)
@@ -6575,6 +7385,20 @@ class CampaignTab:
         plan = self._load_latest_ingest_plan_for_current_iteration()
         if isinstance(plan, dict) and int(plan.get("selected_total", 0) or 0) > 0 and plan.get("selected"):
             self.current_ingest_plan = dict(plan)
+            self._recalculate_current_ingest_plan()
+            return True
+
+        manifest = self._load_ingest_manifest_cached()
+        manifest_plan = self._build_ingest_plan_from_manifest_for_display(
+            manifest,
+            current_balance=(self.last_ingest_snapshot or {}).get("char_balance", {}),
+        )
+        if (
+            isinstance(manifest_plan, dict)
+            and int(manifest_plan.get("selected_total", 0) or 0) > 0
+            and manifest_plan.get("selected")
+        ):
+            self.current_ingest_plan = manifest_plan
             self._recalculate_current_ingest_plan()
             return True
 
@@ -6603,6 +7427,16 @@ class CampaignTab:
         if not isinstance(plan, dict) or not plan.get("ok", False):
             return False
         if int(plan.get("selected_total", 0) or 0) <= 0 or not plan.get("selected"):
+            if self._should_reuse_step1_source_despite_duplicate_plan(plan):
+                reuse_plan = self._build_step1_source_reuse_plan(plan)
+                if int(reuse_plan.get("selected_total", 0) or 0) > 0 and reuse_plan.get("selected"):
+                    self.current_ingest_plan = reuse_plan
+                    self._recalculate_current_ingest_plan()
+                    try:
+                        CAMPAIGN.save_latest_ingest_plan(self.current_ingest_plan)
+                    except Exception:
+                        pass
+                    return True
             return False
 
         self.current_ingest_plan = plan
@@ -6677,20 +7511,19 @@ class CampaignTab:
         if int(CAMPAIGN.get_current_step() or 1) < 2:
             return False
 
+        preflight = self._get_step1_char_route_preflight_state()
+        if not bool(preflight.get("material_ready")):
+            return False
+
         ready_source = self._get_char_route_ready_source()
         if not ready_source:
             return False
 
-        try:
-            return bool(
-                self._finish_step2_char_and_focus_step3(
-                    ready_source,
-                    skip_no_progress_confirm=True,
-                )
-            )
-        except Exception as e:
-            logger.debug(f"Nie udało się automatycznie przejść z E1 do E3 dla toru znaków: {e}")
-            return False
+        logger.debug(
+            "[CampaignTab] Tor znaków ma gotowe źródło tablic po E1, ale E2 nie jest zatwierdzane automatycznie. "
+            "Użytkownik musi jawnie użyć badge'a E2."
+        )
+        return False
 
     def _approve_current_iteration_package(
         self,
@@ -6781,22 +7614,43 @@ class CampaignTab:
             if raw_dir is None:
                 return
             iter_num = CAMPAIGN.get_current_iteration_num()
-            target_iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-            if not target_iter_dir.exists() or not target_iter_dir.is_dir():
+            target_iter_dir = CAMPAIGN.get_iteration_raw_dir(iter_num) or (Path(raw_dir) / f"Iteracja_{iter_num:03d}")
+
+            try:
+                manifest = CAMPAIGN.load_ingest_manifest(iter_num) or {}
+            except Exception:
+                manifest = {}
+            manifest_images = []
+            if isinstance(manifest, dict):
+                try:
+                    manifest_images = list(CAMPAIGN.get_iteration_manifest_image_paths(iter_num) or [])
+                except Exception:
+                    manifest_images = []
+
+            source_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or target_iter_dir
+            selected_images = list(manifest_images or [])
+            if not selected_images and target_iter_dir.exists() and target_iter_dir.is_dir():
+                selected_images = [
+                    image_path for image_path in target_iter_dir.iterdir()
+                    if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+                ]
+                source_dir = target_iter_dir
+
+            if not selected_images:
                 messagebox.showwarning("Brak wybranego folderu zdjęć E1", "Załaduj najpierw wybrany folder zdjęć E1.")
                 return
-            existing_images = [
-                image_path for image_path in target_iter_dir.iterdir()
-                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-            ]
-            if not existing_images:
-                messagebox.showwarning("Brak wybranego folderu zdjęć E1", "Załaduj najpierw wybrany folder zdjęć E1.")
+            if not self._validate_step1_char_preflight_for_approval():
                 return
             if CAMPAIGN.get_step1_status() != "approved":
+                selection_mode = (
+                    str((manifest or {}).get("selection_mode", "") or "").strip()
+                    if isinstance(manifest, dict)
+                    else ""
+                ) or ("planned_manifest" if manifest_images else "existing")
                 should_approve = self.app.themed_confirm(
                     "Zatwierdzenie E1",
                     (
-                        f"Folder iteracji zawiera już {len(existing_images)} obrazów:\n{target_iter_dir}\n\n"
+                        f"Wybrany katalog zdjęć zawiera {len(selected_images)} obrazów dla bieżącej iteracji:\n{source_dir}\n\n"
                         "Czy zatwierdzić ten zestaw zdjęć jako E1 i odblokować E2?"
                     ),
                     parent=self.frame,
@@ -6807,13 +7661,17 @@ class CampaignTab:
                     return
                 self._approve_current_iteration_package(
                     target_iter_dir=target_iter_dir,
-                    selection_mode="existing",
+                    source_dir=source_dir,
+                    selected_source_files=selected_images,
+                    selection_mode=selection_mode,
                 )
             return
 
         selected_items = list(self.current_ingest_plan.get("selected", []) or [])
         if not selected_items:
             messagebox.showwarning("Brak wybranego folderu zdjęć E1", "Załaduj najpierw wybrany folder zdjęć E1.")
+            return
+        if not self._validate_step1_char_preflight_for_approval():
             return
 
         raw_dir = CAMPAIGN.get_dir("raw")
@@ -6822,77 +7680,38 @@ class CampaignTab:
             return
 
         iter_num = CAMPAIGN.get_current_iteration_num()
-        target_iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+        target_iter_dir = CAMPAIGN.get_iteration_raw_dir(iter_num) or (Path(raw_dir) / f"Iteracja_{iter_num:03d}")
         target_iter_dir.mkdir(parents=True, exist_ok=True)
 
-        copied = 0
-        copied_source_files = []
+        selected_source_files = []
         for item in selected_items:
             source_path = Path(str(item.get("source_path", "") or "").strip())
             if not source_path.exists() or not source_path.is_file():
                 continue
+            selected_source_files.append(source_path)
 
-            dst = target_iter_dir / source_path.name
-            if dst.exists():
-                continue
-
-            shutil.copy2(source_path, dst)
-            copied += 1
-            copied_source_files.append(source_path)
-
-        if copied == 0:
-            existing_images = [
-                image_path for image_path in target_iter_dir.iterdir()
-                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-            ]
-            if existing_images:
-                if CAMPAIGN.get_step1_status() != "approved":
-                    should_approve = self.app.themed_confirm(
-                        "Zatwierdzenie E1",
-                        (
-                            f"Folder iteracji zawiera już {len(existing_images)} obrazów:\n{target_iter_dir}\n\n"
-                            "Czy zatwierdzić ten zestaw zdjęć jako E1 i odblokować E2?"
-                        ),
-                        parent=self.frame,
-                        confirm_label="Zatwierdź",
-                        tone="info",
-                    )
-                    if not should_approve:
-                        return
-                    self._approve_current_iteration_package(
-                        target_iter_dir=target_iter_dir,
-                        selection_mode="existing",
-                    )
-                else:
-                    if CAMPAIGN.get_current_step() < 2:
-                        CAMPAIGN.set_current_step(2)
-                    self.current_ingest_plan = {}
-                    self._refresh_dashboard()
-                try:
-                    self.app.update_status(
-                        f"Iteracja {iter_num:03d} zawiera już zestaw zdjęć wejściowych. Krok 2 pozostaje odblokowany.",
-                        "info",
-                    )
-                except Exception:
-                    pass
-                messagebox.showinfo(
-                    "Zestaw zdjęć wejściowych już gotowy",
-                    f"Folder iteracji zawiera już {len(existing_images)} obrazów:\n{target_iter_dir}\n\n"
-                    "Nie kopiowano nowych plików, ale krok 1 został uznany za domknięty.",
-                )
-                return
+        if not selected_source_files:
             messagebox.showwarning(
-                "Brak nowych plików",
-                "Żadne nowe zdjęcia nie zostały skopiowane do iteracji.\n\n"
-                "Być może zestaw zdjęć został już wcześniej zatwierdzony.",
+                "Brak obrazów w manifeście E1",
+                "Nie udało się odczytać obrazów z wybranego katalogu zdjęć. Wybierz katalog ponownie.",
             )
             return
 
+        selection_mode = str(self.current_ingest_plan.get("selection_mode") or "").strip()
+        if not selection_mode:
+            selection_mode = "source_reuse" if bool(self.current_ingest_plan.get("source_reuse")) else "planned_manifest"
+        source_dir_text = str(self.current_ingest_plan.get("source_dir") or self.current_ingest_plan.get("master_pool_dir") or "").strip()
+        source_dir = Path(source_dir_text) if source_dir_text else (CAMPAIGN.get_master_pool_dir() or target_iter_dir)
+        try:
+            if source_dir is None or not Path(source_dir).exists() or not Path(source_dir).is_dir():
+                source_dir = selected_source_files[0].parent
+        except Exception:
+            source_dir = selected_source_files[0].parent
         self._approve_current_iteration_package(
             target_iter_dir=target_iter_dir,
-            source_dir=CAMPAIGN.get_master_pool_dir() or target_iter_dir,
-            selected_source_files=copied_source_files,
-            selection_mode="planned",
+            source_dir=source_dir,
+            selected_source_files=selected_source_files,
+            selection_mode=selection_mode,
             proposal_summary={
                 "planner_version": self.current_ingest_plan.get("planner_version", ""),
                 "generated_at": self.current_ingest_plan.get("generated_at", ""),
@@ -6910,16 +7729,16 @@ class CampaignTab:
 
         try:
             self.app.update_status(
-                f"Skopiowano {copied} zdjęć z wybranego folderu zdjęć do Iteracji {iter_num:03d}. Odblokowano Krok 2.",
+                f"Zatwierdzono E1 manifestem: {len(selected_source_files)} zdjęć z wybranego katalogu. Odblokowano Krok 2.",
                 "info",
             )
         except Exception:
             pass
 
         messagebox.showinfo(
-            "Przygotowanie zestawu zdjęć zakończone",
-            f"Skopiowano {copied} zdjęć do:\n{target_iter_dir}\n\n"
-            "Zestaw zdjęć zapisano jako zaakceptowaną porcję danych tej iteracji.",
+            "E1 zatwierdzone",
+            f"Zapisano manifest iteracji {iter_num:03d}: {len(selected_source_files)} zdjęć.\n\n"
+            "Zdjęcia nie są kopiowane do kolejnej iteracji. Program będzie korzystał z wybranego katalogu źródłowego.",
         )
 
     def apply_theme(self):
@@ -7249,12 +8068,12 @@ class CampaignTab:
         )
         intro_text = (
             "Jeśli wybierzesz przejście dalej, bieżąca iteracja zostanie domknięta, a nowa rozpocznie się w E1. "
-            "Tam wybierzesz katalog zdjęć wejściowych, tor pracy oraz zatwierdzisz paczkę startową. "
+            "Tam wybierzesz katalog zdjęć wejściowych, tor pracy oraz zatwierdzisz zdjęcia startowe. "
             "Aktywne modele projektu pozostają dostępne."
             if completed_with_training
             else "Jeśli wybierzesz przejście dalej, iteracja zostanie formalnie zamknięta bez treningu. "
             "Kolejny cykl rozpocznie się w E1, gdzie wybierzesz katalog zdjęć wejściowych, tor pracy "
-            "oraz zatwierdzisz paczkę startową. Modele projektu pozostają dostępne."
+            "oraz zatwierdzisz zdjęcia startowe. Modele projektu pozostają dostępne."
         )
 
         tk.Label(
@@ -7317,7 +8136,7 @@ class CampaignTab:
             text=(
                 "Program utworzy kolejną iterację, wyczyści roboczy stan E2-E4 i otworzy E1. "
                 "W E1 ustawisz wejścia, wybierzesz tor tablic albo znaków i zatwierdzisz etap dopiero wtedy, "
-                "gdy paczka startowa będzie gotowa."
+                "gdy zdjęcia startowe będą gotowe."
             ),
             bg=palette["field"],
             fg=palette.get("muted", palette["fg"]),
@@ -7787,18 +8606,18 @@ class CampaignTab:
     def _format_step1_selection_mode_label(selection_mode: str) -> str:
         normalized = str(selection_mode or "").strip().lower()
         labels = {
-            "planned": "Wybrano paczkę z głównego katalogu zdjęć",
-            "manual": "Wskazano paczkę ręcznie",
+            "planned": "Wybrano zdjęcia z głównego katalogu zdjęć",
+            "manual": "Wskazano katalog zdjęć ręcznie",
             "existing": "Użyto gotowego katalogu iteracji",
             "iteration_reuse": "Użyto tego samego zestawu zdjęć co poprzednio",
-            "pool_reuse": "Przygotowano kolejną paczkę z tej samej puli projektu",
+            "pool_reuse": "Przygotowano kolejny zestaw zdjęć z tej samej puli projektu",
             "stage_reuse": "Przejęto zdjęcia oczekujące w stage po poprzedniej iteracji",
         }
         return labels.get(normalized, "Tryb przygotowania nie jest jeszcze znany")
 
     @staticmethod
     def _format_effective_stage_reuse_label(base_count: int, manual_reuse_count: int) -> str:
-        return f"Ta sama paczka pracy: stage ({int(base_count)}) + wcześniejsze ręczne korekty ({int(manual_reuse_count)})"
+        return f"Ten sam zestaw pracy: stage ({int(base_count)}) + wcześniejsze ręczne korekty ({int(manual_reuse_count)})"
 
     @staticmethod
     def _load_plate_annotated_filenames_from_xml(xml_path: Path | None) -> set[str]:
@@ -7931,6 +8750,7 @@ class CampaignTab:
         if isinstance(cached_context, dict) and cached_context:
             return dict(cached_context)
         manifest_mode = str(manifest.get("selection_mode", "") or "").strip().lower()
+        planned_manifest_modes = {"planned", "planned_manifest", "manual", "existing", "source_reuse"}
         selected_count = int(manifest.get("selected_count", 0) or 0)
 
         proposal_summary = manifest.get("proposal_summary", {})
@@ -7946,7 +8766,7 @@ class CampaignTab:
                 "new_to_project_count",
                 (
                     current_iteration_package_count
-                    if manifest_mode in {"planned", "manual", "existing"}
+                    if manifest_mode in planned_manifest_modes
                     else max(0, current_iteration_package_count - project_overlap_filenames)
                 ),
             ) or 0
@@ -7987,10 +8807,6 @@ class CampaignTab:
             project_pool_total_after = max(project_pool_total_before, approved_images_before) + new_to_project_count
 
         try:
-            raw_root = CAMPAIGN.get_dir("raw")
-        except Exception:
-            raw_root = None
-        try:
             master_pool_dir = CAMPAIGN.get_master_pool_dir()
         except Exception:
             master_pool_dir = None
@@ -8017,43 +8833,25 @@ class CampaignTab:
                 return names
             return names
 
-        actual_master_pool_names = _collect_image_names_in_dir(
-            Path(master_pool_dir) if master_pool_dir is not None else None,
-            recursive=True,
-        )
-
-        if raw_root is not None and target_iter_dir is not None:
+        if target_iter_dir is not None:
             try:
-                raw_root = Path(raw_root)
                 target_iter_dir = Path(target_iter_dir)
-                previous_project_names: set[str] = set()
-                if raw_root.exists() and raw_root.is_dir():
-                    for iter_dir in raw_root.iterdir():
-                        if not iter_dir.is_dir():
-                            continue
-                        try:
-                            if iter_dir.resolve() == target_iter_dir.resolve():
-                                continue
-                        except Exception:
-                            if str(iter_dir) == str(target_iter_dir):
-                                continue
-                        for image_path in iter_dir.iterdir():
-                            if not image_path.is_file():
-                                continue
-                            if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
-                                continue
-                            filename = str(image_path.name or "").strip().lower()
-                            if filename:
-                                previous_project_names.add(filename)
+                registry = CAMPAIGN.get_project_packet_filename_registry(exclude_iteration_num=iter_num)
+                previous_project_names: set[str] = {
+                    str(name or "").strip().lower()
+                    for name in list((registry or {}).get("filenames") or [])
+                    if str(name or "").strip()
+                }
 
-                selected_names: set[str] = _collect_image_names_in_dir(target_iter_dir, recursive=False)
+                selected_names: set[str] = set()
+                for selected_item in list(manifest.get("selected_images") or []):
+                    if not isinstance(selected_item, dict):
+                        continue
+                    filename = str(selected_item.get("name", "") or "").strip().lower()
+                    if filename:
+                        selected_names.add(filename)
                 if not selected_names:
-                    for selected_item in list(manifest.get("selected_images") or []):
-                        if not isinstance(selected_item, dict):
-                            continue
-                        filename = str(selected_item.get("name", "") or "").strip().lower()
-                        if filename:
-                            selected_names.add(filename)
+                    selected_names = _collect_image_names_in_dir(target_iter_dir, recursive=False)
 
                 if selected_names:
                     overlap_actual = len(selected_names & previous_project_names)
@@ -8062,13 +8860,13 @@ class CampaignTab:
                     project_pool_total_after = max(project_pool_total_after, len(previous_project_names | selected_names))
                     current_iteration_package_count = int(len(selected_names))
                     selected_count = int(len(selected_names))
-                    if manifest_mode in {"planned", "manual", "existing"}:
+                    if manifest_mode in planned_manifest_modes:
                         source_total = int(len(selected_names))
 
                     stale_overlap = int(project_overlap_filenames or 0)
                     stale_new = int(new_to_project_count or 0)
                     if (
-                        manifest_mode in {"planned", "manual", "existing"}
+                        manifest_mode in planned_manifest_modes
                         and (
                             stale_overlap != overlap_actual
                             or stale_new != new_actual
@@ -8088,16 +8886,18 @@ class CampaignTab:
             source_summary = "Ta sama pula projektu"
         elif manifest_mode == "iteration_reuse":
             source_summary = "Ten sam zestaw zdjęć co poprzednio"
-        elif manifest_mode == "planned":
-            source_summary = "Wybrana paczka z głównej puli projektu"
+        elif manifest_mode in {"planned", "planned_manifest"}:
+            source_summary = "Wybrany zestaw zdjęć z głównej puli projektu"
+        elif manifest_mode == "source_reuse":
+            source_summary = "Wybrany katalog zdjęć użyty ponownie w tej iteracji"
         elif manifest_mode == "manual":
-            source_summary = "Ręcznie wskazana paczka wejściowa"
+            source_summary = "Ręcznie wskazany katalog zdjęć wejściowych"
         elif manifest_mode == "existing":
             source_summary = "Gotowy katalog bieżącej iteracji"
         else:
-            source_summary = "Źródło paczki nie jest jeszcze znane"
+            source_summary = "Źródło zdjęć nie jest jeszcze znane"
 
-        if manifest_mode in {"planned", "manual", "existing"} and int(current_iteration_package_count or 0) > 0:
+        if manifest_mode in planned_manifest_modes and int(current_iteration_package_count or 0) > 0:
             source_total = max(int(source_total or 0), int(current_iteration_package_count or 0))
 
         result = {
@@ -8133,9 +8933,8 @@ class CampaignTab:
             if isinstance(draft_plan, dict) and draft_plan:
                 latest_selected_total = int(draft_plan.get("selected_total", 0) or 0)
                 if latest_selected_total > 0:
-                    raw_dir = CAMPAIGN.get_dir("raw")
                     iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
-                    target_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}" if raw_dir is not None else None
+                    target_dir = CAMPAIGN.get_iteration_raw_dir(iter_num)
                     manifest = {
                         "iteration": iter_num,
                         "selection_mode": "planned",
@@ -8166,25 +8965,26 @@ class CampaignTab:
                 ):
                     manifest = self._load_previous_iteration_ingest_manifest()
             if not isinstance(manifest, dict) or not manifest:
-                raw_dir = CAMPAIGN.get_dir("raw")
-                if raw_dir is None:
-                    return {}
                 iter_num = int(CAMPAIGN.get_current_iteration_num() or 1)
-                target_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-                if not target_dir.exists() or not target_dir.is_dir():
-                    return {}
-                selected_count = sum(
-                    1
-                    for image_path in target_dir.iterdir()
-                    if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-                )
+                target_dir = CAMPAIGN.get_iteration_raw_dir(iter_num)
+                source_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or target_dir
+                try:
+                    selected_count = int(CAMPAIGN.get_iteration_image_count(iter_num) or 0)
+                except Exception:
+                    selected_count = 0
+                if selected_count <= 0 and target_dir is not None and target_dir.exists() and target_dir.is_dir():
+                    selected_count = sum(
+                        1
+                        for image_path in target_dir.iterdir()
+                        if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+                    )
                 if selected_count <= 0:
                     return {}
                 manifest = {
                     "iteration": iter_num,
                     "selection_mode": "existing",
-                    "source_dir": str(target_dir),
-                    "target_dir": str(target_dir),
+                    "source_dir": str(source_dir or target_dir or ""),
+                    "target_dir": str(target_dir or ""),
                     "master_pool_dir": str(CAMPAIGN.get_master_pool_dir() or ""),
                     "selected_count": selected_count,
                     "selected_images": [],
@@ -8216,6 +9016,36 @@ class CampaignTab:
             source_summary = f"{source_summary} ({source_label})"
 
         manifest_mode = str(manifest.get("selection_mode", "") or "").strip().lower()
+        manifest_image_names = list(manifest.get("selected_images") or [])
+        manifest_count = 0
+        try:
+            manifest_count = int(CAMPAIGN.get_iteration_manifest_image_count() or 0)
+        except Exception:
+            manifest_count = 0
+        if manifest_count <= 0:
+            manifest_count = int(len(manifest_image_names) or 0)
+        manifest_contract_modes = {
+            "planned",
+            "planned_manifest",
+            "source_reuse",
+            "pool_reuse",
+            "stage_reuse",
+            "iteration_reuse",
+        }
+        uses_manifest_contract = bool(
+            manifest.get("manifest_only", False)
+            or manifest_mode in manifest_contract_modes
+            or manifest_image_names
+            or manifest_count > 0
+        )
+        source_contract_text = (
+            "Manifestowy zestaw zdjęć"
+            if uses_manifest_contract
+            else "Fizyczny katalog iteracji"
+        )
+        if uses_manifest_contract and manifest_count > 0:
+            source_contract_text = f"{source_contract_text} ({manifest_count} w manifeście)"
+        selection_mode_text = self._format_step1_selection_mode_label(manifest_mode)
         current_iteration = int(manifest.get("iteration", CAMPAIGN.get_current_iteration_num()) or CAMPAIGN.get_current_iteration_num())
         total_pool_images = max(int(project_pool_total or 0), int(package_count or 0))
         previous_approved_images = max(0, int(approved_images or 0))
@@ -8246,15 +9076,19 @@ class CampaignTab:
         )
 
         rows = [
+            ("Tryb wejścia", source_contract_text),
+            ("Sposób wyboru", selection_mode_text),
+            (
+                "Pudełko: tablice zatwierdzone",
+                f"{previous_approved_images} zdjęć / {int(step1_context.get('approved_plates', 0) or 0)} tablic",
+            ),
             ("Anotacje tablic", plate_annotations_text),
             ("Model tablic", plate_model_text),
             ("Model znaków", char_model_text),
-            ("Paczka iteracji", f"{current_iteration_package} zdjęć"),
+            ("Zdjęcia iteracji", f"{current_iteration_package} zdjęć"),
             ("Nowe w historii projektu", f"{new_to_project_count} zdjęć"),
             ("Duble względem wcześniejszych iteracji", f"{project_overlap_count} zdjęć"),
-            ("Zatwierdzone do YOLO", f"{previous_approved_images} zdjęć"),
-            ("Zatwierdzone tablice", f"{int(step1_context.get('approved_plates', 0) or 0)}"),
-            ("Łączna pula projektu po E1", f"{total_pool_images} zdjęć"),
+            ("Pula projektu po E1 (informacyjnie)", f"{total_pool_images} zdjęć"),
         ]
         if source_diverged:
             rows.insert(1, ("Obecny katalog źródłowy", f"{current_source_dir_count} zdjęć"))
@@ -8266,6 +9100,8 @@ class CampaignTab:
             "source_diverged": bool(source_diverged),
             "current_source_dir_count": int(current_source_dir_count or 0),
             "package_count": int(current_iteration_package or 0),
+            "uses_manifest_contract": bool(uses_manifest_contract),
+            "source_contract_text": source_contract_text,
         }
 
     def _render_step1_stage_curtain(self, card: dict, status: WizardStageStatus, style: dict):
@@ -8914,12 +9750,12 @@ class CampaignTab:
         body = tk.Frame(content, bg=card_bg, bd=0, highlightthickness=0)
 
         badge_cta_shell = tk.Frame(
-            content,
+            action_row,
             bg=card_bg,
             bd=0,
-            highlightthickness=2,
-            padx=2,
-            pady=2,
+            highlightthickness=1,
+            padx=1,
+            pady=1,
         )
         badge_cta_btn = tk.Label(
             badge_cta_shell,
@@ -9095,12 +9931,42 @@ class CampaignTab:
                 button.configure(text="", command=(lambda: None), state="disabled")
             except Exception:
                 pass
+            try:
+                button.unbind("<ButtonPress-1>")
+                button.unbind("<ButtonPress-3>")
+            except Exception:
+                pass
             self._set_pack_visibility(button, False)
             return
 
         debug_suffix = f" ({debug_id})" if str(debug_id or "").strip() else ""
+
+        def _invoke_stage_button(event=None, _command=command, _button=button, _debug_id=debug_id):
+            now = perf_counter()
+            try:
+                last_invoke = float(getattr(_button, "_wizard_stage_last_invoke_at", 0.0) or 0.0)
+            except Exception:
+                last_invoke = 0.0
+            if now - last_invoke < 0.25:
+                return "break" if event is not None else None
+            try:
+                setattr(_button, "_wizard_stage_last_invoke_at", now)
+            except Exception:
+                pass
+            try:
+                _command()
+            except Exception as e:
+                logger.error(f"Nie udało się wykonać akcji panelu wizarda {_debug_id}: {e}")
+            return "break" if event is not None else None
+
         try:
-            button.configure(text=f"{label_text}{debug_suffix}", command=command, state="normal")
+            button.configure(text=f"{label_text}{debug_suffix}", command=_invoke_stage_button, state="normal")
+            # Standardowy ttk.Button odpala komendę dopiero przy puszczeniu LPM.
+            # Przy intensywnym odświeżaniu kart pierwszy klik potrafił zostać
+            # zużyty przez focus/przerysowanie, więc dla CTA etapów startujemy
+            # akcję już na naciśnięciu. PPM traktujemy tak samo dla tych CTA.
+            button.bind("<ButtonPress-1>", _invoke_stage_button)
+            button.bind("<ButtonPress-3>", _invoke_stage_button)
         except Exception:
             pass
         self._set_pack_visibility(button, True, side=side, padx=padx)
@@ -9147,7 +10013,7 @@ class CampaignTab:
                 bg=glow,
                 highlightbackground=border,
                 highlightcolor=border,
-                highlightthickness=2,
+                highlightthickness=1,
             )
         except Exception:
             pass
@@ -9198,14 +10064,7 @@ class CampaignTab:
                 shell.pack_forget()
             elif str(shell.winfo_manager()) == "grid":
                 shell.grid_remove()
-            action_row = card.get("action_row")
-            pack_options = {
-                "anchor": tk.E,
-                "pady": (8, 0),
-            }
-            if action_row is not None and str(action_row.winfo_manager()) == "pack":
-                pack_options["after"] = action_row
-            shell.pack(**pack_options)
+            shell.pack(side=tk.RIGHT, padx=(8, 0))
             shell.lift()
         except Exception:
             pass
@@ -9406,7 +10265,7 @@ class CampaignTab:
                 and finish_iteration == current_iteration
             ):
                 return "Zatwierdź etap", self._finish_step4_iteration
-            return "Zamknij bez treningu", self._finish_step4_without_training
+            return "Zakończ etap bez treningu", self._finish_step4_without_training
 
         return "", None
 
@@ -9641,6 +10500,7 @@ class CampaignTab:
         footer_actions_visible = bool(
             str(row_primary_label or "").strip()
             or str(status.secondary_label or "").strip()
+            or inline_approve
         )
         self._set_pack_visibility(
             card.get("action_row"),
@@ -9899,29 +10759,9 @@ class CampaignTab:
             except Exception:
                 ready_source = {}
             if ready_source:
-                contribution = self._get_step2_current_iteration_contribution_state(source_state=ready_source)
-                has_current_contribution = bool(
-                    int(contribution.get("current_images", 0) or 0) > 0
-                    or int(contribution.get("current_plates", 0) or 0) > 0
-                )
-            else:
-                has_current_contribution = False
-            if ready_source and has_current_contribution:
-                try:
-                    CAMPAIGN.approve_step2()
-                    CAMPAIGN.set_current_step(3)
-                    curr_step = 3
-                    step2_status = "approved"
-                    self.request_wizard_stage_focus(step_num=3)
-                    logger.debug(
-                        "[CampaignTab] Automatycznie pominięto E2 po E1: tor znaków ma gotowe źródło E3."
-                    )
-                except Exception as e:
-                    logger.debug(f"Nie udało się automatycznie podnieść toru znaków z E2 do E3: {e}")
-            elif ready_source:
                 logger.debug(
-                    "[CampaignTab] E2 ma gotowe historyczne źródło E3, ale brak nowego wkładu bieżącej iteracji. "
-                    "Nie zatwierdzam automatycznie; decyzję obsłuży badge E2 z modalem ostrzegawczym."
+                    "[CampaignTab] E2 ma gotowe źródło tablic dla toru znaków. "
+                    "Nie zatwierdzam automatycznie; decyzję obsługuje wyłącznie badge E2."
                 )
 
         if (
@@ -10331,34 +11171,17 @@ class CampaignTab:
         badge = str(badge_label or "").strip()
 
         if state_key == "ready":
-            action_parts = []
-            if primary:
-                action_parts.append(f"CTA „{primary}”")
-            if secondary:
-                action_parts.append(f"CTA „{secondary}”")
+            actions = []
             if badge:
-                action_parts.append(f"badge „{badge}”")
-            if action_parts:
-                if len(action_parts) == 1:
-                    actions_text = action_parts[0]
-                else:
-                    actions_text = f"{', '.join(action_parts[:-1])} albo {action_parts[-1]}"
-                primary_text = (
-                    f"„{primary}” wraca do Z2 po więcej tablic"
-                    if primary
-                    else "Pierwsze CTA prowadzi do głównej akcji etapu"
-                )
-                secondary_text = (
-                    f"„{secondary}” otwiera Z3/PZ2 i PZ3 do dopracowania znaków oraz eksportu"
-                    if secondary
-                    else "druga akcja jest niedostępna w tym stanie"
-                )
-                badge_text = (
-                    f"„{badge}” formalnie zamyka E3 i odblokowuje E4"
-                    if badge
-                    else "zatwierdzenie pojawi się dopiero po spełnieniu bramki"
-                )
-                return f"W panelu E3 wybierz {actions_text}. {primary_text}, {secondary_text}, a {badge_text}."
+                actions.append(f"zamknąć E3 przyciskiem „{badge}”")
+            if primary:
+                actions.append(f"wrócić do Z2 przez „{primary}”")
+            if secondary:
+                actions.append(f"pracować dalej w Z3 przez „{secondary}”")
+            if actions:
+                if len(actions) == 1:
+                    return f"Możesz {actions[0]}."
+                return f"Możesz {', '.join(actions[:-1])} albo {actions[-1]}."
 
         return str(details or "").strip()
 
@@ -10414,7 +11237,8 @@ class CampaignTab:
             "reason": "",
             "message": "",
             "annotated_images": 0,
-            "required_images": 2,
+            "required_images": 0,
+            "required_plates": int(getattr(self, "STEP2_PLATE_MIN_PLATES", 10) or 10),
             "source_run": "",
         }
         char_step4_gate = {
@@ -10565,12 +11389,12 @@ class CampaignTab:
         target_selected = bool(iteration_target in {"plate", "char"})
 
         project_scope_parts: list[str] = []
-        if project_pool_total > 0:
-            project_scope_parts.append(f"Łączna pula projektu: {project_pool_total} zdjęć.")
         if approved_images > 0 or approved_plates > 0:
             project_scope_parts.append(
-                f"Aktualnie zatwierdzone w projekcie: {approved_images} zdjęć / {approved_plates} tablic."
+                f"Pudełko tablic zatwierdzonych: {approved_images} zdjęć / {approved_plates} tablic."
             )
+        if project_pool_total > 0:
+            project_scope_parts.append(f"Pula projektu informacyjnie: {project_pool_total} zdjęć.")
         project_scope_text = " ".join(project_scope_parts).strip()
         step1_has_selected_image_folder = bool(current_source_dir_count > 0)
         step1_ready_for_approval = bool(
@@ -10579,6 +11403,13 @@ class CampaignTab:
             and target_selected
             and not step1_approved
             and step1_has_selected_image_folder
+        )
+        step1_body_visible = bool(
+            not project_suspended
+            and (
+                (current_step == 1 and not step1_approved)
+                or (current_step >= 2 and not target_selected)
+            )
         )
 
         if step1_approved and not target_selected:
@@ -10606,6 +11437,14 @@ class CampaignTab:
             step1_summary = ""
             step1_details = ""
 
+        if step1_body_visible and current_step == 1 and not step1_approved:
+            step1_intro = self._get_step1_assets_intro_text()
+            step1_details = (
+                f"{step1_intro}\n{step1_details}"
+                if str(step1_details or "").strip()
+                else step1_intro
+            )
+
         statuses.append(
             WizardStageStatus(
                 key="step1",
@@ -10618,13 +11457,7 @@ class CampaignTab:
                 badge_action_label=("Zatwierdź etap" if step1_ready_for_approval else ""),
                 badge_action_command=(self._approve_step1_from_wizard if step1_ready_for_approval else None),
                 body_mode="step1_ingest",
-                body_visible=bool(
-                    not project_suspended
-                    and (
-                        (current_step == 1 and not step1_approved)
-                        or (current_step >= 2 and not target_selected)
-                    )
-                ),
+                body_visible=step1_body_visible,
                 is_current=bool(not project_suspended and current_step == 1),
             )
         )
@@ -10665,7 +11498,7 @@ class CampaignTab:
             step2_summary = "Brak wybranego toru iteracji."
             step2_details = (
                 "Wybór toru należy teraz do E1. Wróć do E1, wybierz tor tablic albo tor znaków, "
-                "a dopiero potem zatwierdź paczkę wejściową."
+                "a dopiero potem zatwierdź katalog zdjęć wejściowych."
             )
             step2_primary_label = ""
             step2_primary_command = None
@@ -10683,10 +11516,10 @@ class CampaignTab:
 
             if current_step == 2 and step1_approved:
                 step2_state = "in_progress"
-                step2_summary = "E2 jest bieżącym etapem projektu."
+                step2_summary = "E2 jest w toku: przygotuj anotacje tablic w Z2."
                 step2_details = (
-                    "Projekt został odtworzony na etapie E2. "
-                    "Możesz kontynuować pracę nad anotacjami tablic w Z2."
+                    "Przejdź do Z2, aby utworzyć albo poprawić anotacje tablic "
+                    "dla wybranego katalogu zdjęć z E1."
                 )
             elif current_step > 2 or str(step2_status or "").strip().lower() == "approved":
                 step2_state = "done"
@@ -10696,7 +11529,7 @@ class CampaignTab:
                 step2_primary_command = None
             else:
                 step2_state = "locked"
-                step2_summary = "E2 odblokuje się po zatwierdzeniu paczki wejściowej z E1."
+                step2_summary = "E2 odblokuje się po zatwierdzeniu katalogu zdjęć wejściowych z E1."
                 step2_details = "Najpierw domknij E1."
 
         if current_step == 2 and not iteration_target:
@@ -10766,7 +11599,7 @@ class CampaignTab:
             )
             if approval_iteration_target == "char" and step2_approval_action == "continue_characters":
                 step2_state = "ready"
-                step2_summary = "Źródło tablic dla tej paczki jest już gotowe."
+                step2_summary = "Źródło tablic dla wybranego katalogu zdjęć jest już gotowe."
                 step2_details = (
                     "Minimalny próg wejścia do E3 jest już spełniony, więc badge po prawej może od razu zamknąć E2. "
                     "Jeśli jednak masz jeszcze chwilę, zwykle więcej daje dopisanie kolejnych poprawnych tablic w Z2 niż samo szybkie przejście dalej."
@@ -10851,14 +11684,13 @@ class CampaignTab:
         )
 
         if step3_state.lower() == "ready":
-            step3_summary = "Etap 3 jest gotowy do zamknięcia albo dalszych poprawek."
+            step3_summary = "Etap 3 jest gotowy do zamknięcia albo dalszej pracy."
             step3_details = (
-                "Masz teraz trzy opcje: przygotować więcej tablic w Z2, wrócić do dopracowania znaków i eksportu w Z3 "
-                "albo użyć badge'a „Zatwierdź etap”, aby formalnie zamknąć E3 i odblokować E4."
+                "Możesz zamknąć E3, oznaczyć więcej tablic w Z2 albo pracować dalej na znakach tablic w Z3."
             )
-            step3_primary_label = "Przygotuj więcej tablic w Z2"
+            step3_primary_label = "Oznacz więcej tablic"
             step3_primary_command = self._step_return_to_annotation_review
-            step3_secondary_label = "Dopracuj znaki i eksport w Z3"
+            step3_secondary_label = "Pracuj na znakach tablic"
             step3_secondary_command = self._step_goto_characters
 
         step3_badge_label = "Zatwierdź etap" if step3_state.lower() == "ready" else ""
@@ -10941,12 +11773,12 @@ class CampaignTab:
             else:
                 step4_summary = "Z4 czeka na uzupełnienie oznaczeń w Z2."
                 step4_details = str(plate_step4_gate.get("message") or "").strip() or (
-                    "W torze tablic potrzebujesz co najmniej 2 oznaczonych obrazów, zanim wejdziesz do Z4."
+                    f"W torze tablic potrzebujesz co najmniej {int(getattr(self, 'STEP2_PLATE_MIN_PLATES', 10) or 10)} zatwierdzonych tablic, zanim wejdziesz do Z4."
                 )
             step4_secondary_label = ""
             step4_secondary_command = None
             if not project_suspended and current_step == 4:
-                step4_badge_label = "Zamknij bez treningu"
+                step4_badge_label = "Zakończ etap bez treningu"
                 step4_badge_command = self._finish_step4_without_training
         elif current_step == 4:
             step4_state = "in_progress"
@@ -10968,7 +11800,7 @@ class CampaignTab:
                 step4_details = "W torze znaków Z4 zbuduje dataset znaków i uruchomi trening modelu YOLO Detect."
             step4_secondary_label = ""
             step4_secondary_command = None
-            step4_badge_label = "Zamknij bez treningu"
+            step4_badge_label = "Zakończ etap bez treningu"
             step4_badge_command = self._finish_step4_without_training
         else:
             step4_state = "locked"
@@ -10996,7 +11828,7 @@ class CampaignTab:
             step4_secondary_label = ""
             step4_secondary_command = None
             if not project_suspended and current_step == 4:
-                step4_badge_label = "Zamknij bez treningu"
+                step4_badge_label = "Zakończ etap bez treningu"
                 step4_badge_command = self._finish_step4_without_training
 
         step4_primary_label = ""
@@ -11132,7 +11964,7 @@ class CampaignTab:
             iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
         except Exception:
             iteration_num = 1
-        images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        images_dir = CAMPAIGN.get_iteration_image_source_dir(iteration_num) or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
         if images_dir is None:
             return {}
 
@@ -11171,6 +12003,7 @@ class CampaignTab:
                     step2_active_run.get("images_dir")
                     or plate_source.get("images_dir")
                     or image_source.get("master_pool_dir")
+                    or CAMPAIGN.get_iteration_image_source_dir(iteration_num)
                     or CAMPAIGN.get_iteration_raw_dir(iteration_num)
                     or ""
                 ).strip()
@@ -11311,7 +12144,8 @@ class CampaignTab:
             or project_approved_plates > 0
             or str(route_hints.get("char_entry_mode") or "").strip().lower() in {"ready", "needs_more_tables"}
         )
-        ready = bool(approved_char_plates > 0 and approved_char_images >= 2)
+        min_char_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
+        ready = bool(approved_char_plates >= min_char_plates)
         needs_more_tables = bool(has_source and not ready)
         char_source_scope = (
             "campaign_approved_set"
@@ -11533,6 +12367,8 @@ class CampaignTab:
         resolved_run = None
         run_images = 0
         run_plates = 0
+        min_char_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
+        min_plate_plates = int(getattr(self, "STEP2_PLATE_MIN_PLATES", 10) or 10)
         seen: set[str] = set()
         for raw_candidate in candidates:
             candidate = resolve_run(raw_candidate)
@@ -11550,7 +12386,10 @@ class CampaignTab:
                 resolved_run = candidate
                 run_images = int(images or 0)
                 run_plates = int(plates or 0)
-            if run_images >= 2 and run_plates > 0:
+            if target == "char":
+                if run_plates >= min_char_plates:
+                    break
+            elif run_plates >= min_plate_plates:
                 break
 
         try:
@@ -11561,7 +12400,10 @@ class CampaignTab:
         project_plates = max(0, int(approved_stats.get("plates", 0) or 0))
         total_images = project_images + int(run_images or 0)
         total_plates = project_plates + int(run_plates or 0)
-        ready = bool(total_images >= 2 and total_plates > 0)
+        if target == "char":
+            ready = bool(total_plates >= min_char_plates)
+        else:
+            ready = bool(total_plates >= min_plate_plates)
 
         action = ""
         if ready:
@@ -11715,14 +12557,17 @@ class CampaignTab:
             "chcesz kontynuować bez powiększania materiału wejściowego."
             f"{repair_hint}"
         )
+        title = "Brak nowych tablic w tej iteracji" if target == "char" else "E2 bez nowych danych"
+        confirm_label = "Kontynuuj bez nowych tablic" if target == "char" else "Zatwierdź mimo to"
+        cancel_label = "Oznacz więcej tablic" if target == "char" else "Wróć do E2"
         try:
             return bool(
                 self.app.themed_confirm(
-                    "E2 bez nowych danych",
+                    title,
                     message,
                     parent=self.frame,
-                    confirm_label="Zatwierdź mimo to",
-                    cancel_label="Wróć do E2",
+                    confirm_label=confirm_label,
+                    cancel_label=cancel_label,
                     tone="warning",
                 )
             )
@@ -11823,10 +12668,7 @@ class CampaignTab:
                         pass
                     return
                 try:
-                    self._finish_step2_char_and_focus_step3(
-                        ready_source,
-                        skip_no_progress_confirm=True,
-                    )
+                    self._finish_step2_char_and_focus_step3(ready_source)
                 except Exception as e:
                     logger.error(f"Nie udało się zatwierdzić E2 z badge wizarda (char source): {e}")
                 return
@@ -12329,17 +13171,16 @@ class CampaignTab:
 
         if can_approve_step3:
             state = "ready"
-            summary = "Etap 3 jest gotowy do zamknięcia albo dalszych poprawek."
+            summary = "Etap 3 jest gotowy do zamknięcia albo dalszej pracy."
             details = (
-                "Masz teraz trzy opcje: przygotować więcej tablic w Z2, wrócić do dopracowania znaków i eksportu w Z3 "
-                "albo użyć badge'a „Zatwierdź etap”, aby formalnie zamknąć E3 i odblokować E4."
+                "Możesz zamknąć E3, oznaczyć więcej tablic w Z2 albo pracować dalej na znakach tablic w Z3."
             )
             primary_cta = Step2CtaViewModel(
-                label="Przygotuj więcej tablic w Z2",
+                label="Oznacz więcej tablic",
                 command_id="open_z2_step3_repair",
             )
             secondary_cta = Step2CtaViewModel(
-                label="Dopracuj znaki i eksport w Z3",
+                label="Pracuj na znakach tablic",
                 command_id=("continue_z3" if ready_source else "open_z3"),
                 command_context=(dict(ready_source) if ready_source else {}),
                 tone="secondary",
@@ -12348,7 +13189,7 @@ class CampaignTab:
             primary_command_id = "open_z3_detect" if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair" else "open_z2_step3_repair"
             primary_context = dict(ready_source or {}) if primary_command_id == "open_z3_detect" else {}
             primary_cta = Step2CtaViewModel(
-                label=str(repair_guidance.get("primary_label") or "Przygotuj więcej tablic w Z2"),
+                label=str(repair_guidance.get("primary_label") or "Oznacz więcej tablic"),
                 command_id=primary_command_id,
                 command_context=primary_context,
             )
@@ -12356,7 +13197,7 @@ class CampaignTab:
             secondary_command_id = "open_z3_detect" if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair" else ""
             secondary_context = dict(ready_source or {})
             if secondary_label:
-                if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                if secondary_label.lower().startswith(("przygotuj więcej tablic", "oznacz więcej tablic")):
                     secondary_command_id = "open_z2_step3_repair"
                     secondary_context = {}
                 secondary_cta = Step2CtaViewModel(
@@ -12365,7 +13206,7 @@ class CampaignTab:
                     command_context=secondary_context,
                 )
             state = "needs_attention"
-            summary = "Paczka znaków wymaga korekty przed treningiem."
+            summary = "Dane znaków wymagają korekty przed treningiem."
             details = str(repair_guidance.get("details") or "Najpierw przygotuj poprawna sciezke naprawy dla toru znaków.")
             body_mode = "step3_rework"
             body_visible = not bool(project_completed)
@@ -12377,7 +13218,7 @@ class CampaignTab:
             primary_command_id = "open_z3_detect" if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair" else "open_z2_step3_repair"
             primary_context = dict(ready_source or {}) if primary_command_id == "open_z3_detect" else {}
             primary_cta = Step2CtaViewModel(
-                label=str(repair_guidance.get("primary_label") or "Przygotuj więcej tablic w Z2"),
+                label=str(repair_guidance.get("primary_label") or "Oznacz więcej tablic"),
                 command_id=primary_command_id,
                 command_context=primary_context,
             )
@@ -12385,7 +13226,7 @@ class CampaignTab:
             secondary_command_id = "open_z3_detect" if str(repair_guidance.get("mode") or "").strip().lower() == "z3_pz2_repair" else ""
             secondary_context = dict(ready_source or {})
             if secondary_label:
-                if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                if secondary_label.lower().startswith(("przygotuj więcej tablic", "oznacz więcej tablic")):
                     secondary_command_id = "open_z2_step3_repair"
                     secondary_context = {}
                 secondary_cta = Step2CtaViewModel(
@@ -12406,9 +13247,9 @@ class CampaignTab:
         elif int(current_step or 0) == 3 and not can_approve_step3:
             if ready_source and step2_approved:
                 state = "in_progress"
-                summary = "Etap 3 czeka teraz na przebudowę paczki znaków po poprawkach tablic."
+                summary = "Pracuj na znakach tablic w Z3."
                 primary_cta = Step2CtaViewModel(
-                    label="Kontynuuj pracę nad znakami (Z3)",
+                    label="Pracuj na znakach tablic",
                     command_id="continue_z3",
                     command_context=dict(ready_source),
                 )
@@ -12420,7 +13261,7 @@ class CampaignTab:
                 )
                 secondary_context = dict(ready_source or {})
                 if secondary_label:
-                    if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                    if secondary_label.lower().startswith(("przygotuj więcej tablic", "oznacz więcej tablic")):
                         secondary_command_id = "open_z2_step3_repair"
                         secondary_context = {}
                     secondary_cta = Step2CtaViewModel(
@@ -12430,7 +13271,7 @@ class CampaignTab:
                     )
                 if secondary_cta is None:
                     secondary_cta = Step2CtaViewModel(
-                        label="Wróć do Z2 i popraw tablice",
+                        label="Oznacz więcej tablic",
                         command_id="open_z2_step3_repair",
                         command_context={},
                         tone="secondary",
@@ -12438,10 +13279,8 @@ class CampaignTab:
                 primary_label = str(getattr(primary_cta, "label", "") or "").strip()
                 secondary_label = str(getattr(secondary_cta, "label", "") or "").strip()
                 details = (
-                    f"CTA „{primary_label}” wraca do Z3 i przebudowuje paczkę cropów tablic z aktualnych anotacji Z2. "
-                    "Po zakończeniu wycinania program otworzy PZ2, gdzie dokończysz OCR, korektę znaków i eksport w PZ3. "
-                    f"CTA „{secondary_label}” nie przebudowuje paczki znaków; cofa do Z2, jeśli chcesz najpierw dopisać "
-                    "albo poprawić ramki tablic, a dopiero potem wrócić do E3."
+                    f"„{primary_label}” otwiera Z3 i przebudowuje dane znaków z aktualnych anotacji tablic. "
+                    f"„{secondary_label}” wraca do Z2, jeśli chcesz najpierw dopisać albo poprawić tablice."
                 )
             elif str(repair_guidance.get("primary_label") or "").strip():
                 primary_command_id = (
@@ -12451,7 +13290,7 @@ class CampaignTab:
                 )
                 primary_context = dict(ready_source or {}) if primary_command_id == "open_z3_detect" else {}
                 primary_cta = Step2CtaViewModel(
-                    label=str(repair_guidance.get("primary_label") or "Przygotuj więcej tablic w Z2"),
+                    label=str(repair_guidance.get("primary_label") or "Oznacz więcej tablic"),
                     command_id=primary_command_id,
                     command_context=primary_context,
                 )
@@ -12463,7 +13302,7 @@ class CampaignTab:
                 )
                 secondary_context = dict(ready_source or {})
                 if secondary_label:
-                    if secondary_label.lower().startswith("przygotuj więcej tablic"):
+                    if secondary_label.lower().startswith(("przygotuj więcej tablic", "oznacz więcej tablic")):
                         secondary_command_id = "open_z2_step3_repair"
                         secondary_context = {}
                     secondary_cta = Step2CtaViewModel(
@@ -12487,7 +13326,7 @@ class CampaignTab:
             details = "Źródła tablic są już przygotowane i możesz zacząć pracę nad znakami."
             if secondary_cta is None:
                 secondary_cta = Step2CtaViewModel(
-                    label="Wróć do Z2 i popraw tablice",
+                    label="Oznacz więcej tablic",
                     command_id="open_z2_step3_repair",
                     command_context={},
                     tone="secondary",
@@ -12814,7 +13653,7 @@ class CampaignTab:
 
         result = {
             "mode": "z2_more_tables",
-            "primary_label": "Przygotuj więcej tablic w Z2",
+            "primary_label": "Oznacz więcej tablic",
             "primary_command": self._step_open_z2_repair_from_later_stage,
             "secondary_label": "",
             "secondary_command": None,
@@ -12826,17 +13665,17 @@ class CampaignTab:
 
         if source_scope == "step3_pending_union":
             source_intro = (
-                f"Aktywna paczka Z3/PZ2 wraz z nowymi [OK] z Z2 ({run_name})"
+                f"Aktywny zbiór Z3/PZ2 wraz z nowymi [OK] z Z2 ({run_name})"
                 if run_name
-                else "Aktywna paczka Z3/PZ2 wraz z nowymi [OK] z Z2"
+                else "Aktywny zbiór Z3/PZ2 wraz z nowymi [OK] z Z2"
             )
         elif source_scope == "campaign_approved_set":
             source_intro = "Zatwierdzony zbiór tablic projektu"
         elif source_scope == "step3_preview":
             source_intro = (
-                f"Aktywna paczka Z3/PZ2 ({run_name})"
+                f"Aktywny zbiór Z3/PZ2 ({run_name})"
                 if run_name
-                else "Aktywna paczka Z3/PZ2"
+                else "Aktywny zbiór Z3/PZ2"
             )
         else:
             source_intro = (
@@ -12850,7 +13689,7 @@ class CampaignTab:
                 mode="z3_pz2_repair",
                 primary_label="Popraw anotacje znaków w Z3/PZ2",
                 primary_command=(lambda ctx=dict(source_context): self._step_goto_characters_detect(ctx)),
-                secondary_label="Przygotuj więcej tablic w Z2",
+                secondary_label="Oznacz więcej tablic",
                 secondary_command=self._step_open_z2_repair_from_later_stage,
             )
             result["details"] = (
@@ -12906,7 +13745,7 @@ class CampaignTab:
             try:
                 bundle = dict(
                     CAMPAIGN.get_iteration_artifact_bundle(
-                        images_dir=CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(),
+                        images_dir=CAMPAIGN.get_iteration_image_source_dir() or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(),
                         iteration_num=int(CAMPAIGN.get_current_iteration_num() or 1),
                     ) or {}
                 )
@@ -13055,9 +13894,9 @@ class CampaignTab:
             result["preview_total_plates"] = int(pending_union_state.get("preview_total_plates", 0) or 0)
             result["pending_images_with_plates"] = int(pending_union_state.get("pending_images_with_plates", 0) or 0)
             result["pending_total_plates"] = int(pending_union_state.get("pending_total_plates", 0) or 0)
+            min_char_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
             result["ready"] = bool(
-                int(result.get("images_with_plates", 0) or 0) >= 2
-                and int(result.get("total_plates", 0) or 0) > 0
+                int(result.get("total_plates", 0) or 0) >= min_char_plates
             )
             result["needs_more_tables"] = bool(
                 result["has_source"] and not result["ready"]
@@ -13140,7 +13979,7 @@ class CampaignTab:
     def _describe_step2_bootstrap_source(source_key: str | None = None) -> str:
         key = str(source_key or "").strip().lower()
         labels = {
-            "manual_source_run": "ręczne tablice dla tej paczki",
+            "manual_source_run": "ręczne tablice dla tego katalogu zdjęć",
             "reused_manual_source_run": "ręczne tablice z poprzedniej iteracji",
             "reused_training_source_run": "run wykorzystany w poprzednim treningu",
             "reused_iteration_run": "run odzyskany z poprzedniej iteracji",
@@ -13169,8 +14008,14 @@ class CampaignTab:
             rows.append(key)
 
         current_target = self._normalize_iteration_target(current_target)
-        iter_dir = CAMPAIGN.get_iteration_raw_dir()
-        image_count = self._count_step2_images_in_dir(iter_dir)
+        try:
+            iter_dir = CAMPAIGN.get_iteration_image_source_dir()
+        except Exception:
+            iter_dir = CAMPAIGN.get_iteration_raw_dir()
+        try:
+            image_count = int(CAMPAIGN.get_iteration_image_count() or 0)
+        except Exception:
+            image_count = self._count_step2_images_in_dir(iter_dir)
         if iter_dir is not None:
             iter_name = Path(iter_dir).name
             add_row("E1", f"{iter_name} | {image_count} obrazów" if image_count else f"{iter_name} | brak obrazów")
@@ -13283,10 +14128,11 @@ class CampaignTab:
             if CAMPAIGN.get_step2_status() == "generated":
                 return "Sprawdź tablice w Z2"
             char_source_state = self._get_char_route_source_state()
+            preflight = self._get_step1_char_route_preflight_state()
             plate_source_state = self._get_annotation_step2_source_state("plate")
             plate_model_ready = bool(plate_source_state.get("plate_model_ready"))
-            if bool(char_source_state.get("ready")):
-                return "Kontynuuj pracę nad znakami (Z3)"
+            if bool(char_source_state.get("ready")) and bool(preflight.get("material_ready")):
+                return "Pracuj na znakach tablic"
             if bool(char_source_state.get("has_source")):
                 return "Uzupełnij tablice w Z2"
             if plate_model_ready:
@@ -13357,73 +14203,273 @@ class CampaignTab:
 
         return ""
 
-    def _get_step1_char_route_block_reason(self) -> str:
-        plate_model_ready = False
+    def _get_step1_char_preflight_image_count(self) -> int:
         try:
-            plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
-            plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
+            plan = dict(self.current_ingest_plan or {})
         except Exception:
-            plate_model_ready = False
+            plan = {}
+
+        if plan:
+            try:
+                selected_total = int(plan.get("selected_total", 0) or 0)
+            except Exception:
+                selected_total = 0
+            if selected_total > 0:
+                return selected_total
+            try:
+                selected_items = list(plan.get("selected") or [])
+                if selected_items:
+                    return int(len(selected_items))
+            except Exception:
+                pass
 
         try:
-            plate_source_state = self._get_annotation_step2_source_state("plate")
-            plate_model_ready = bool(plate_model_ready or plate_source_state.get("plate_model_ready"))
+            image_source = dict(self._get_project_start_effective_images_source() or {})
         except Exception:
-            pass
+            image_source = {}
+
+        counts = []
+        for key in ("iteration_count", "effective_count", "master_count"):
+            try:
+                counts.append(int(image_source.get(key, 0) or 0))
+            except Exception:
+                counts.append(0)
+        return max(counts) if counts else 0
+
+    @staticmethod
+    def _count_plate_annotations_in_xml(xml_path: Path | str | None) -> int:
+        try:
+            path = Path(xml_path) if xml_path is not None else None
+        except Exception:
+            path = None
+        if path is None or not path.exists() or not path.is_file():
+            return 0
 
         try:
-            char_source_state = self._get_char_route_source_state()
+            root = ET.parse(path).getroot()
+        except Exception:
+            return 0
+
+        negative_label_parts = ("vehicle", "car", "pojazd")
+        positive_label_parts = ("plate", "tablic")
+        count = 0
+        for image_node in root.findall(".//image"):
+            for det_node in list(image_node):
+                tag_name = str(getattr(det_node, "tag", "") or "").strip().lower()
+                if tag_name not in {"polygon", "box"}:
+                    continue
+                label = str(det_node.get("label", "") or "").strip().lower()
+                if label and any(part in label for part in negative_label_parts):
+                    continue
+                if not label or any(part in label for part in positive_label_parts):
+                    count += 1
+        return int(count)
+
+    def _count_step1_imported_plate_annotations(self) -> int:
+        try:
+            plate_source_info = dict(self._get_project_start_plate_source_info() or {})
+        except Exception:
+            plate_source_info = {}
+
+        candidates: list[Path] = []
+        xml_path = str(plate_source_info.get("xml_path") or "").strip()
+        run_path = str(plate_source_info.get("run_path") or "").strip()
+        if xml_path:
+            try:
+                candidates.append(Path(xml_path))
+            except Exception:
+                pass
+        if run_path:
+            try:
+                candidates.append(Path(run_path) / "annotations.xml")
+            except Exception:
+                pass
+
+        for candidate in candidates:
+            count = self._count_plate_annotations_in_xml(candidate)
+            if count > 0:
+                return count
+        return 0
+
+    def _get_step1_char_route_preflight_state(self) -> dict:
+        min_images = int(getattr(self, "STEP1_CHAR_MIN_IMAGES", 10) or 10)
+        min_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
+        image_count = self._get_step1_char_preflight_image_count()
+
+        try:
+            approved_stats = dict(self._get_plate_approved_set_stats() or {})
+        except Exception:
+            approved_stats = {}
+        approved_plate_count = int(approved_stats.get("plates", 0) or 0)
+        approved_image_count = int(approved_stats.get("images", 0) or 0)
+
+        try:
+            char_source_state = dict(self._get_char_route_source_state() or {})
         except Exception:
             char_source_state = {}
-        char_source_ready = bool(
-            char_source_state.get("ready")
-            or char_source_state.get("has_source")
-            or char_source_state.get("needs_more_tables")
+        source_plate_count = max(
+            int(char_source_state.get("total_plates", 0) or 0),
+            int(char_source_state.get("project_total_plates", 0) or 0),
+            int(char_source_state.get("current_total_plates", 0) or 0),
+            int(char_source_state.get("pending_total_plates", 0) or 0),
+            approved_plate_count,
+        )
+        source_image_count = max(
+            int(char_source_state.get("images_with_plates", 0) or 0),
+            int(char_source_state.get("project_images_with_plates", 0) or 0),
+            int(char_source_state.get("current_images_with_plates", 0) or 0),
+            int(char_source_state.get("pending_images_with_plates", 0) or 0),
+            approved_image_count,
         )
 
-        plate_ready_source_has_annotations = False
-        try:
-            plate_ready_source = self._get_plate_route_ready_source()
-        except Exception:
-            plate_ready_source = {}
-        if isinstance(plate_ready_source, dict) and plate_ready_source:
-            try:
-                restore_run_dir = plate_ready_source.get("restore_run_dir")
-                if restore_run_dir is not None:
-                    restore_run_dir = Path(restore_run_dir)
-                    plate_ready_source_has_annotations = bool((restore_run_dir / "annotations.xml").exists())
-            except Exception:
-                plate_ready_source_has_annotations = False
+        imported_plate_count = self._count_step1_imported_plate_annotations()
+        plate_material_count = max(source_plate_count, approved_plate_count, imported_plate_count)
+        material_ready = bool(plate_material_count >= min_plates)
+        image_potential = bool(image_count >= min_images)
+        allow_route = bool(material_ready or image_potential)
 
-        imported_plate_run_ready = False
-        try:
-            plate_source_info = self._get_project_start_plate_source_info()
-            plate_xml_path = str(plate_source_info.get("xml_path") or "").strip()
-            plate_run_path = str(plate_source_info.get("run_path") or "").strip()
-            if plate_xml_path and Path(plate_xml_path).exists():
-                imported_plate_run_ready = True
-            elif plate_run_path and (Path(plate_run_path) / "annotations.xml").exists():
-                imported_plate_run_ready = True
-        except Exception:
-            imported_plate_run_ready = False
+        if material_ready:
+            mode = "material_ready"
+        elif image_potential:
+            mode = "image_potential"
+        else:
+            mode = "blocked"
 
-        if plate_model_ready or char_source_ready or plate_ready_source_has_annotations or imported_plate_run_ready:
-            return ""
-
-        try:
-            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
-        except Exception:
-            current_iteration = 1
-        if current_iteration <= 1:
-            return (
-                "Tor znaków jest zablokowany w świeżym projekcie, dopóki E1 nie ma modelu tablic "
-                "albo gotowych anotacji tablic. Zacznij od toru tablic albo dodaj odpowiedni zasób w tabeli."
+        if allow_route:
+            block_reason = ""
+        elif image_count <= 0 and plate_material_count <= 0:
+            block_reason = (
+                "Najpierw wybierz katalog zdjęć w E1 albo dodaj zgodne anotacje tablic. "
+                f"Tor znaków potrzebuje co najmniej {min_images} obrazów na start lub "
+                f"{min_plates} gotowych tablic z wcześniejszych albo importowanych anotacji."
+            )
+        else:
+            block_reason = (
+                f"Tor znaków nie ma jeszcze bezpiecznego minimum wejściowego: E1 widzi {image_count} obrazów "
+                f"oraz {plate_material_count} gotowych tablic. Wybierz co najmniej {min_images} obrazów "
+                f"albo dostarcz {min_plates} gotowych tablic."
             )
 
+        return {
+            "mode": mode,
+            "allow_route": allow_route,
+            "block_reason": block_reason,
+            "image_count": int(image_count),
+            "min_images": int(min_images),
+            "plate_material_count": int(plate_material_count),
+            "source_plate_count": int(source_plate_count),
+            "source_image_count": int(source_image_count),
+            "approved_plate_count": int(approved_plate_count),
+            "approved_image_count": int(approved_image_count),
+            "imported_plate_count": int(imported_plate_count),
+            "min_plates": int(min_plates),
+            "material_ready": material_ready,
+            "image_potential": image_potential,
+        }
+
+    def _get_step1_char_preflight_signature(self, state: dict | None = None) -> tuple:
+        state = dict(state or self._get_step1_char_route_preflight_state() or {})
+        try:
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            iteration_num = 1
         return (
-            "Tor znaków wymaga modelu tablic albo gotowego źródła tablic z projektu. "
-            "Dodaj zasób w tabeli E1 albo wróć do toru tablic."
+            str(CAMPAIGN.get_active_project_name() or "").strip(),
+            int(iteration_num),
+            int(state.get("image_count", 0) or 0),
+            int(state.get("plate_material_count", 0) or 0),
+            int(state.get("imported_plate_count", 0) or 0),
         )
+
+    def _confirm_step1_char_preflight_warning(self, state: dict | None = None) -> bool:
+        state = dict(state or self._get_step1_char_route_preflight_state() or {})
+        if str(state.get("mode") or "").strip() != "image_potential":
+            return True
+
+        signature = self._get_step1_char_preflight_signature(state)
+        if getattr(self, "_step1_char_preflight_ack_signature", None) == signature:
+            return True
+
+        image_count = int(state.get("image_count", 0) or 0)
+        min_plates = int(state.get("min_plates", self.STEP3_CHAR_MIN_PLATES) or self.STEP3_CHAR_MIN_PLATES)
+        message = (
+            f"E1 widzi {image_count} obrazów, ale nie ma jeszcze {min_plates} gotowych tablic do pracy w E3.\n\n"
+            "Możesz wybrać tor znaków, ale E2/Z2 będzie wtedy etapem przygotowania tablic. "
+            "Dopiero po oznaczeniu i zatwierdzeniu odpowiedniej liczby obrazów program będzie miał realny materiał "
+            "do wycinania tablic i dalszej pracy nad znakami.\n\n"
+            "Jeśli okaże się, że wybrany katalog zdjęć nie pozwala uzyskać minimum, wrócisz do E1 po większy katalog "
+            "albo do E2/Z2, żeby przygotować więcej tablic."
+        )
+        try:
+            confirmed = self.app.themed_confirm(
+                "Tor znaków: preflight E1",
+                message,
+                parent=self.frame,
+                confirm_label="Wybierz tor znaków",
+                cancel_label="Zostań w E1",
+                tone="warning",
+            )
+        except Exception:
+            confirmed = messagebox.askyesno("Tor znaków: preflight E1", message, parent=self.frame)
+        if confirmed:
+            self._step1_char_preflight_ack_signature = signature
+        return bool(confirmed)
+
+    def _validate_step1_char_preflight_for_approval(self) -> bool:
+        if self._get_iteration_target() != "char":
+            return True
+
+        state = self._get_step1_char_route_preflight_state()
+        if not bool(state.get("allow_route")):
+            message = str(state.get("block_reason") or "").strip()
+            if not message:
+                message = (
+                    "Tor znaków wymaga wybranego katalogu zdjęć albo gotowych anotacji tablic. "
+                    "Uzupełnij E1 przed zatwierdzeniem."
+                )
+            try:
+                self.app.themed_info(
+                    "E1 nie jest gotowe dla toru znaków",
+                    message,
+                    parent=self.frame,
+                    tone="warning",
+                )
+            except Exception:
+                messagebox.showwarning("E1 nie jest gotowe dla toru znaków", message, parent=self.frame)
+            return False
+
+        return self._confirm_step1_char_preflight_warning(state)
+
+    def _format_step1_char_route_card_body(self, state: dict | None = None, block_reason: str = "") -> str:
+        state = dict(state or self._get_step1_char_route_preflight_state() or {})
+        if block_reason:
+            return block_reason
+
+        min_plates = int(state.get("min_plates", self.STEP3_CHAR_MIN_PLATES) or self.STEP3_CHAR_MIN_PLATES)
+        if bool(state.get("material_ready")):
+            return (
+                f"E1 widzi {int(state.get('plate_material_count', 0) or 0)} gotowych tablic. "
+                "Po zatwierdzeniu E1 możesz przejść do E3/Z3 i pracować na znakach tablic."
+            )
+        if bool(state.get("image_potential")):
+            return (
+                f"E1 widzi {int(state.get('image_count', 0) or 0)} obrazów. "
+                f"To bezpieczny start, ale minimum pracy w E3 to {min_plates} tablic przygotowanych w E2/Z2."
+            )
+        return str(state.get("block_reason") or "")
+
+    def _get_step1_char_route_block_reason(self) -> str:
+        try:
+            if (
+                str(CAMPAIGN.get_step1_status() or "").strip().lower() == "approved"
+                or int(CAMPAIGN.get_current_step() or 1) > 1
+            ):
+                return ""
+        except Exception:
+            return ""
+
+        state = self._get_step1_char_route_preflight_state()
+        return "" if bool(state.get("allow_route")) else str(state.get("block_reason") or "")
 
     def _has_saved_step3_progress(self) -> bool:
         try:
@@ -13517,7 +14563,7 @@ class CampaignTab:
             pass
 
         try:
-            current_iter_dir = CAMPAIGN.get_iteration_raw_dir()
+            current_iter_dir = CAMPAIGN.get_iteration_image_source_dir() or CAMPAIGN.get_iteration_raw_dir()
         except Exception:
             current_iter_dir = None
         if current_iter_dir is None:
@@ -13562,12 +14608,15 @@ class CampaignTab:
         if target not in {"plate", "char"}:
             return
         if target == "char":
+            preflight_state = self._get_step1_char_route_preflight_state()
             block_reason = self._get_step1_char_route_block_reason()
             if block_reason:
                 try:
                     messagebox.showinfo("Tor znaków jest zablokowany", block_reason, parent=self.frame)
                 except Exception:
                     pass
+                return
+            if not self._confirm_step1_char_preflight_warning(preflight_state):
                 return
 
         previous_target = self._normalize_iteration_target(CAMPAIGN.get_iteration_target())
@@ -13744,7 +14793,9 @@ class CampaignTab:
         except Exception:
             pass
 
+        char_preflight_state = self._get_step1_char_route_preflight_state()
         char_block_reason = self._get_step1_char_route_block_reason()
+        char_route_body = self._format_step1_char_route_card_body(char_preflight_state, char_block_reason)
         if current_target == "char" and char_block_reason:
             try:
                 CAMPAIGN.set_iteration_target("")
@@ -13802,10 +14853,7 @@ class CampaignTab:
             {
                 "target": "char",
                 "title": "Tor znaków",
-                "body": (
-                    char_block_reason
-                    or "E2: tablice jako źródło dla znaków. Po zatwierdzeniu projekt przechodzi do E3/Z3 i dalej do treningu znaków."
-                ),
+                "body": char_route_body,
                 "enabled": bool(not target_locked and current_target != "char" and not char_block_reason),
             },
         ]
@@ -14848,191 +15896,16 @@ class CampaignTab:
         if not CAMPAIGN.get_active_project_name():
             return
 
-        raw_dir = CAMPAIGN.get_dir("raw")
-        if raw_dir is None:
-            logger.error("Brak katalogu raw dla aktywnego projektu.")
+        if not self._choose_master_pool_dir():
             return
-
-        iter_num = CAMPAIGN.get_current_iteration_num()
-        target_iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-        target_iter_dir.mkdir(parents=True, exist_ok=True)
-
-        # Jeśli folder iteracji zawiera już zdjęcia, zestaw zdjęć wejściowych jest gotowy.
-        existing_images = [f for f in target_iter_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS]
-        if existing_images:
-            if CAMPAIGN.get_step1_status() != "approved":
-                should_approve = self.app.themed_confirm(
-                    "Zatwierdzenie E1",
-                    (
-                        f"Folder iteracji zawiera już {len(existing_images)} obrazów:\n{target_iter_dir}\n\n"
-                        "Czy zatwierdzić ten zestaw zdjęć jako E1 i odblokować E2?"
-                    ),
-                    parent=self.frame,
-                    confirm_label="Zatwierdź",
-                    tone="info"
-                )
-                if not should_approve:
-                    return
-                self._approve_current_iteration_package(
-                    target_iter_dir=target_iter_dir,
-                    selection_mode="existing",
-                )
-            else:
-                if CAMPAIGN.get_current_step() < 2:
-                    CAMPAIGN.set_current_step(2)
-                self._refresh_dashboard()
+        try:
+            self._refresh_ingest_panel()
+            self._refresh_active_project_wizard_only()
+        except Exception:
             try:
-                self.app.update_status(
-                    f"✅ Iteracja {iter_num:03d} zawiera już {len(existing_images)} obrazów. Krok 1 zatwierdzony.",
-                    "info"
-                )
+                self._refresh_dashboard()
             except Exception:
                 pass
-            return
-
-        # Użytkownik wskazuje folder źródłowy, a wizard kopiuje zdjęcia do projektu.
-        source_dir = filedialog.askdirectory(
-            initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()),
-            title="Wybierz folder źródłowy z NOWYM zestawem zdjęć do tej iteracji"
-        )
-        if not source_dir:
-            return
-
-        source_dir = Path(source_dir)
-        if not source_dir.exists():
-            return messagebox.showerror("Błąd", "Wskazany folder źródłowy nie istnieje.")
-
-        image_files = [f for f in source_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS]
-        if not image_files:
-            return messagebox.showwarning(
-                "Brak zdjęć",
-                "W wybranym folderze nie znaleziono żadnych obrazów obsługiwanych przez aplikację."
-            )
-
-        approved_registry = CAMPAIGN.get_used_image_registry()
-        project_packet_registry = CAMPAIGN.get_project_packet_filename_registry()
-        approved_names = {
-            str(name or "").strip().lower()
-            for name in (approved_registry.get("filenames", []) or [])
-            if str(name or "").strip()
-        }
-        project_packet_names = {
-            str(name or "").strip().lower()
-            for name in (project_packet_registry.get("filenames", []) or [])
-            if str(name or "").strip()
-        }
-        project_packet_total = int(project_packet_registry.get("total_filenames", 0) or 0)
-
-        accepted_source_files = []
-        skipped_duplicate_total = 0
-        skipped_duplicate_approved = 0
-        project_overlap_total = 0
-        for img_file in image_files:
-            name_key = str(img_file.name or "").strip().lower()
-            if name_key and name_key in project_packet_names:
-                skipped_duplicate_total += 1
-                project_overlap_total += 1
-                if name_key in approved_names:
-                    skipped_duplicate_approved += 1
-                continue
-            accepted_source_files.append(img_file)
-
-        accepted_total = len(accepted_source_files)
-        new_to_project_total = accepted_total
-
-        if skipped_duplicate_total > 0:
-            duplicate_lines = [
-                f"Wybrany folder zawiera {len(image_files)} zdjęć.",
-                f"Do bieżącej iteracji trafi: {accepted_total}",
-                f"Nie było wcześniej w projekcie: {new_to_project_total}",
-                f"Odrzucone jako już obecne w projekcie: {project_overlap_total}",
-            ]
-            if skipped_duplicate_approved > 0:
-                duplicate_lines.append(f"W tym już zatwierdzone w projekcie: {skipped_duplicate_approved}")
-            duplicate_lines.append("")
-            duplicate_lines.append("Czy przygotować iterację z pominięciem tylko zdjęć już zatwierdzonych do treningu YOLO?")
-            should_continue = self.app.themed_confirm(
-                "Wykryto duble w paczce wejściowej",
-                "\n".join(duplicate_lines),
-                parent=self.frame,
-                confirm_label="Przygotuj iterację",
-                tone="info",
-            )
-            if not should_continue:
-                return
-
-        copied = 0
-        copied_source_files = []
-        for img_file in accepted_source_files:
-            dst = target_iter_dir / img_file.name
-            if not dst.exists():
-                shutil.copy2(img_file, dst)
-                copied += 1
-                copied_source_files.append(img_file)
-
-        if copied == 0:
-            return messagebox.showwarning(
-                "Brak nowych plików",
-                "Żadne nowe zdjęcia nie zostały skopiowane.\n\n"
-                "Być może ten zestaw został już wcześniej użyty w tej iteracji."
-            )
-
-        self._approve_current_iteration_package(
-            target_iter_dir=target_iter_dir,
-            source_dir=source_dir,
-            selected_source_files=copied_source_files,
-            selection_mode="manual",
-            proposal_summary={
-                "source_total": len(image_files),
-                "accepted_total": copied,
-                "current_iteration_package_count": copied,
-                "skipped_duplicate_filenames": skipped_duplicate_total,
-                "skipped_duplicate_approved_filenames": skipped_duplicate_approved,
-                "project_overlap_filenames": project_overlap_total,
-                "new_to_project_count": new_to_project_total,
-                "project_pool_total_before_iteration": project_packet_total,
-                "project_pool_total_after_iteration": project_packet_total + new_to_project_total,
-            },
-        )
-
-        try:
-            status_suffix = (
-                f" Pominięto {skipped_duplicate_total} zdjęć już obecnych w projekcie."
-                if skipped_duplicate_total > 0
-                else ""
-            )
-            self.app.update_status(
-                f"✅ Skopiowano {copied} nowych zdjęć do Iteracji {iter_num:03d}. Odblokowano Krok 2.{status_suffix}",
-                "info"
-            )
-        except Exception:
-            pass
-
-        summary_lines = [
-            f"Skopiowano {copied} zdjęć do:\n{target_iter_dir}",
-        ]
-        if skipped_duplicate_total > 0:
-            summary_lines.extend(
-                [
-                    "",
-                    f"Pominięto {skipped_duplicate_total} zdjęć już obecnych w projekcie.",
-                    (
-                        f"Z tego już zatwierdzone w projekcie: {skipped_duplicate_approved}"
-                        if skipped_duplicate_approved > 0
-                        else None
-                    ),
-                ]
-            )
-        summary_lines.extend(
-            [
-                "",
-                "Bieżąca iteracja pracuje na zdjęciach z tej paczki, z pominięciem tych, które były już obecne w projekcie.",
-            ]
-        )
-        messagebox.showinfo(
-            "Przygotowanie zestawu zdjęć zakończone",
-            "\n".join(line for line in summary_lines if line)
-        )
 
     def _step_open_z2_from_step2_review(self):
         self._step_return_to_annotation_review(mark_step3_rework=False)
@@ -15069,7 +15942,7 @@ class CampaignTab:
 
                 try:
                     self.app.update_status(
-                        "Przygotowuję kontekst naprawczy Z2 dla tej paczki.",
+                        "Przygotowuję kontekst naprawczy Z2 dla tego katalogu zdjęć.",
                         "info",
                     )
                 except Exception:
@@ -15148,8 +16021,11 @@ class CampaignTab:
             return
 
         iter_num = CAMPAIGN.get_current_iteration_num()
-        folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
-        input_dir = folder if folder.exists() else raw_dir
+        try:
+            input_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or Path(raw_dir)
+        except Exception:
+            folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+            input_dir = folder if folder.exists() else raw_dir
         v_mod = CAMPAIGN.get_global_model("vehicle")
         p_mod = CAMPAIGN.get_global_model("plate")
         plate_source_state = self._get_annotation_step2_source_state("plate")
@@ -15204,6 +16080,14 @@ class CampaignTab:
             if not result.get("ok"):
                 try:
                     tab_ann._hide_campaign_step2_splash(token=splash_token)
+                except Exception:
+                    pass
+                try:
+                    reason = str(result.get("reason") or "nieznany powód").strip()
+                    self.app.update_status(
+                        f"Nie udało się otworzyć Z2 z STEP2-P1: {reason}.",
+                        "warning",
+                    )
                 except Exception:
                     pass
                 return
@@ -15264,13 +16148,13 @@ class CampaignTab:
                     elif input_source == "manual_source_run":
                         extra_hint += " Przywrócono ostatnie ręczne anotacje tablic dla tego zestawu zdjęć."
                     elif input_source == "reused_manual_source_run":
-                        extra_hint += " Przywrócono ręczne anotacje z poprzedniej iteracji dla tej samej paczki."
+                        extra_hint += " Przywrócono ręczne anotacje z poprzedniej iteracji dla tego samego katalogu zdjęć."
                     elif input_source == "latest_approved_run":
                         extra_hint += " Przywrócono też ostatni zatwierdzony run anotacji tablic projektu."
                     elif input_source == "reused_training_source_run":
                         extra_hint += " Przywrócono ręczne anotacje z runu anotacji Z2, który zasilił trening w poprzedniej iteracji."
                     elif input_source == "reused_iteration_run":
-                        extra_hint += " Przywrócono zatwierdzony run anotacji Z2 z poprzedniej iteracji dla tej samej paczki."
+                        extra_hint += " Przywrócono zatwierdzony run anotacji Z2 z poprzedniej iteracji dla tego samego katalogu zdjęć."
                     if input_source == "project_imported_manual_source":
                         extra_hint += " Wykorzystano run tablic podpiety na starcie projektu."
                     elif input_source == "project_imported_images":
@@ -15301,18 +16185,29 @@ class CampaignTab:
                             "info"
                         )
                     else:
-                        self.app.update_status(
-                            f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
-                            "Model tablic aktywnego projektu został podstawiony automatycznie. Przygotuj tablice w Z2, a po zatwierdzeniu przejdziesz do Z3.",
-                            "info"
-                        )
+                        if manual_template:
+                            message = (
+                                f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                                "Projekt nie ma jeszcze modelu tablic, więc startujesz ręcznie: utwórz XML, oznacz tablice i zatwierdź poprawne zdjęcia."
+                            )
+                        elif plate_bootstrap_model:
+                            message = (
+                                f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                                "Model tablic aktywnego projektu został podstawiony automatycznie. Przygotuj tablice w Z2, a po zatwierdzeniu przejdziesz do Z3."
+                            )
+                        else:
+                            message = (
+                                f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                                "Przygotuj źródło tablic w Z2 ręcznie albo wskaż model dopiero przy starcie autoanotacji."
+                            )
+                        self.app.update_status(message, "info")
             except Exception:
                 pass
             if bool(result.get("deferred_existing_run_restore")):
                 try:
                     tab_ann._schedule_deferred_campaign_run_restore(
                         Path(str(result.get("restore_run_dir") or "").strip()),
-                        status_message="Otworzono Z2. Wczytuję aktywny run i listę obrazów tej paczki...",
+                        status_message="Otworzono Z2. Wczytuję aktywny run i listę obrazów tego katalogu...",
                         splash_token=splash_token,
                     )
                 except Exception as e:
@@ -15330,11 +16225,11 @@ class CampaignTab:
                     try:
                         tab_ann._schedule_deferred_campaign_source_preview_load(
                             deferred_input_dir,
-                            status_message="Otworzono Z2. Wczytuje liste obrazow tej paczki...",
+                            status_message="Otworzono Z2. Wczytuje liste obrazow tego katalogu...",
                             splash_token=splash_token,
                         )
                     except Exception as e:
-                        logger.debug(f"Nie udało się odroczyć wczytania paczki Z2 po otwarciu zakładki: {e}")
+                        logger.debug(f"Nie udało się odroczyć wczytania obrazów Z2 po otwarciu zakładki: {e}")
                         try:
                             tab_ann._hide_campaign_step2_splash(token=splash_token)
                         except Exception:
@@ -15356,11 +16251,90 @@ class CampaignTab:
         except Exception:
             _finish_open()
 
+    def _return_to_step1_for_char_source_rework(self, *, clear_target: bool = False) -> None:
+        try:
+            CAMPAIGN.reset_step3()
+            CAMPAIGN.reset_step2()
+            CAMPAIGN.reset_step1()
+            CAMPAIGN.set_current_step(1)
+            if clear_target:
+                CAMPAIGN.set_iteration_target("")
+        except Exception as e:
+            logger.debug(f"Nie udało się cofnąć kampanii do E1 po braku minimum tablic: {e}")
+
+        self.current_ingest_plan = {}
+        self.step1_panel_expanded = True
+        try:
+            self.request_wizard_stage_focus(step_num=1)
+        except Exception:
+            pass
+        try:
+            self._refresh_dashboard()
+        except Exception:
+            pass
+        try:
+            self.app.open_controlled_tab("campaign")
+        except Exception:
+            pass
+        try:
+            if clear_target:
+                self.app.update_status(
+                    "Wrócono do E1. Wybierz tor iteracji i katalog zdjęć przed ponownym zatwierdzeniem.",
+                    "warning",
+                )
+            else:
+                self.app.update_status(
+                    "Wrócono do E1. Wybierz większy katalog zdjęć albo ponownie zatwierdź E1 po uzupełnieniu źródła.",
+                    "warning",
+                )
+        except Exception:
+            pass
+
+    def _show_step2_char_minimum_not_met_dialog(
+        self,
+        *,
+        source_images: int,
+        source_plates: int,
+        min_plates: int,
+        run_name: str = "",
+    ) -> str:
+        source_images = max(0, int(source_images or 0))
+        source_plates = max(0, int(source_plates or 0))
+        min_plates = max(1, int(min_plates or self.STEP3_CHAR_MIN_PLATES))
+        missing_plates = max(0, min_plates - source_plates)
+        run_line = f"Źródło: {run_name}\n" if str(run_name or "").strip() else ""
+        message = (
+            f"{run_line}"
+            "E2 nie ma jeszcze minimum do przejścia w tor znaków.\n\n"
+            f"Zatwierdzone obrazy z tablicami: {source_images}\n"
+            f"Gotowe tablice: {source_plates}\n"
+            f"Minimum dla E3: {min_plates} tablic\n"
+            f"Brakuje: {missing_plates} tablic\n\n"
+            "Możesz dalej oznaczać tablice w Z2, wrócić do E1 po większy katalog zdjęć "
+            "albo wrócić do E1 i zmienić tor iteracji."
+        )
+        buttons = ["Zmień tor", "Wróć do E1", "Oznacz dalej w Z2"]
+        try:
+            choice = self.app.themed_message_dialog(
+                "Za mało tablic dla toru znaków",
+                message,
+                parent=self.frame,
+                buttons=buttons,
+                default_button="Oznacz dalej w Z2",
+                tone="warning",
+                wraplength=560,
+            )
+        except Exception:
+            try:
+                messagebox.showwarning("Za mało tablic dla toru znaków", message, parent=self.frame)
+            except Exception:
+                pass
+            choice = "Oznacz dalej w Z2"
+        return str(choice or "Oznacz dalej w Z2").strip()
+
     def _finish_step2_char_and_focus_step3(
         self,
         preferred_source_context: dict | None = None,
-        *,
-        skip_no_progress_confirm: bool = False,
     ) -> bool:
         if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 2:
             return False
@@ -15369,26 +16343,38 @@ class CampaignTab:
         if source_state.get("needs_more_tables"):
             source_images = int(source_state.get("images_with_plates", 0) or 0)
             source_plates = int(source_state.get("total_plates", 0) or 0)
-            missing_images = max(0, 2 - source_images)
+            min_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
+            missing_plates = max(0, min_plates - source_plates)
             run_name = str(source_state.get("run_name", "") or "").strip()
             try:
                 self.app.update_status(
                     (
                         f"Run {run_name}: zatwierdzonych obrazów {source_images}, zapisanych tablic {source_plates}. "
-                        f"Minimum do wejścia do znaków: 2 zatwierdzone obrazy; brakuje {missing_images}. "
+                        f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
                         "Najpierw przygotuj więcej tablic w Z2, a dopiero potem przejdź do znaków."
                     )
                     if run_name
                     else (
                         f"Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
-                        f"Minimum do wejścia do znaków: 2 zatwierdzone obrazy; brakuje {missing_images}. "
+                        f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
                         "Najpierw przygotuj więcej tablic w Z2, a dopiero potem przejdź do znaków."
                     ),
                     "warning",
                 )
             except Exception:
                 pass
-            self._step_return_to_annotation_review()
+            choice = self._show_step2_char_minimum_not_met_dialog(
+                source_images=source_images,
+                source_plates=source_plates,
+                min_plates=min_plates,
+                run_name=run_name,
+            )
+            if choice == "Wróć do E1":
+                self._return_to_step1_for_char_source_rework(clear_target=False)
+            elif choice == "Zmień tor":
+                self._return_to_step1_for_char_source_rework(clear_target=True)
+            else:
+                self._step_return_to_annotation_review(mark_step3_rework=False)
             return False
 
         source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
@@ -15397,25 +16383,12 @@ class CampaignTab:
         if not source_context:
             try:
                 self.app.update_status(
-                    "Nie znaleziono gotowych tablic dla tej paczki. Najpierw przygotuj tablice, potem przejdź do pracy nad znakami.",
+                    "Nie znaleziono gotowych tablic dla tego katalogu zdjęć. Najpierw przygotuj tablice, potem przejdź do pracy nad znakami.",
                     "warning",
                 )
             except Exception:
                 pass
             return False
-
-        if not skip_no_progress_confirm:
-            if not self._confirm_step2_without_current_iteration_contribution(
-                source_state=source_context,
-            ):
-                try:
-                    self.app.update_status(
-                        "Zatwierdzenie E2 przerwane. Dodaj nowe zatwierdzone tablice albo świadomie zatwierdź E2 bez nowego wkładu.",
-                        "warning",
-                    )
-                except Exception:
-                    pass
-                return False
 
         ready_run_dir = source_context.get("restore_run_dir")
         ready_run_name = str(
@@ -15452,7 +16425,7 @@ class CampaignTab:
         try:
             run_hint = f" Korzystam z runu anotacji {ready_run_name}." if ready_run_name else ""
             self.app.update_status(
-                "Znaleziono gotowe ręczne tablice dla tej paczki. "
+                "Znaleziono gotowe ręczne tablice dla tego katalogu zdjęć. "
                 "E2 zostało zatwierdzone. Przechodzę do E3 w wizardzie."
                 + run_hint,
                 "info"
@@ -15612,6 +16585,10 @@ class CampaignTab:
                     except Exception:
                         pass
                     return
+            elif isinstance(readiness, dict):
+                reason = str(readiness.get("reason") or "").strip().lower()
+                if iteration_target == "char" and reason == "source_dataset_ready_for_split":
+                    preferred_subtab = "dataset"
 
             target_label = "tablic" if iteration_target == "plate" else "znaków"
             try:
@@ -15763,6 +16740,10 @@ class CampaignTab:
                     self.app.update_status(warn_msg, "warning")
                 except Exception:
                     pass
+                try:
+                    messagebox.showwarning("Z4/PZ1 jeszcze zablokowane", warn_msg, parent=self.frame)
+                except Exception:
+                    pass
             return
 
         try:
@@ -15847,7 +16828,7 @@ class CampaignTab:
         try:
             if mode == "reuse_input":
                 self.app.update_status(
-                    "Przygotowuję nową iterację z tej samej puli zdjęć. To może chwilę potrwać przy dużej paczce.",
+                    "Przygotowuję nową iterację z tej samej puli zdjęć. To może chwilę potrwać przy dużym katalogu zdjęć.",
                     "info",
                 )
             else:
@@ -16131,7 +17112,7 @@ class CampaignTab:
                 )
             elif reason == "missing_remaining_images":
                 self.app.themed_info(
-                    "Brak kolejnej paczki",
+                    "Brak kolejnego zestawu zdjęć",
                     (
                         "Nie ma już kolejnych zdjęć do pobrania z tej samej puli projektu.\n"
                         "System pomija tu obrazy już zatwierdzone w projekcie.\n\n"
@@ -16141,12 +17122,12 @@ class CampaignTab:
                     parent=self.frame,
                     tone="warning",
                 )
-            elif reason == "copy_failed":
+            elif reason in {"copy_failed", "manifest_save_failed"}:
                 self.app.themed_info(
                     "Nie udało się przygotować iteracji",
                     (
-                        "Nie udało się skopiować kolejnej paczki zdjęć z tej samej puli.\n\n"
-                        "Spróbuj ponownie albo rozpocznij iterację od nowego zestawu zdjęć."
+                        "Nie udało się zapisać manifestu kolejnego katalogu zdjęć.\n\n"
+                        "Spróbuj ponownie albo rozpocznij iterację od innego katalogu zdjęć."
                     ),
                     parent=self.frame,
                     tone="warning",
@@ -16162,7 +17143,10 @@ class CampaignTab:
 
         try:
             annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-            next_input_dir = CAMPAIGN.get_iteration_raw_dir()
+            try:
+                next_input_dir = CAMPAIGN.get_iteration_image_source_dir()
+            except Exception:
+                next_input_dir = CAMPAIGN.get_iteration_raw_dir()
             if annotation_tab is not None and hasattr(annotation_tab, "prepare_campaign_iteration_transition"):
                 annotation_tab.prepare_campaign_iteration_transition(
                     input_dir=(Path(next_input_dir) if next_input_dir else None)
@@ -16187,13 +17171,13 @@ class CampaignTab:
                     "warning"
                 )
             elif effective_mode == "reuse_input":
-                copied = int(result.get("copied_images", 0) or 0)
+                manifest_images = int(result.get("manifest_images", result.get("copied_images", 0)) or 0)
                 source_kind = str(result.get("source_kind") or "").strip().lower()
                 if source_kind == "stage":
                     self.app.update_status(
                         (
-                            f"Rozpoczęto iterację {iter_num:03d}. Do E1 przeniesiono {copied} zdjęć "
-                            "ze stage oczekujących. Wybierz tor iteracji i zatwierdź etap. "
+                            f"Rozpoczęto iterację {iter_num:03d}. E1 korzysta z manifestu {manifest_images} zdjęć "
+                            "ze źródła zatwierdzonych tablic. Wybierz tor iteracji i zatwierdź etap. "
                             "Aktywne modele projektu pozostały zachowane."
                         ),
                         "info"
@@ -16201,8 +17185,9 @@ class CampaignTab:
                 else:
                     self.app.update_status(
                         (
-                            f"Rozpoczęto iterację {iter_num:03d} na kolejnej paczce z tej samej puli zdjęć "
-                            f"({copied} obrazów). Paczka czeka w E1: wybierz tor iteracji i zatwierdź etap. "
+                            f"Rozpoczęto iterację {iter_num:03d} na manifeście kolejnych zdjęć z tej samej puli "
+                            f"({manifest_images} obrazów). Zdjęcia nie są kopiowane między iteracjami. "
+                            "Wybierz tor iteracji i zatwierdź etap. "
                             "Aktywne modele projektu pozostały zachowane."
                         ),
                         "info"
@@ -16240,10 +17225,9 @@ class CampaignTab:
 
         if bool(result.get("needs_new_image_source")):
             message = (
-                "Stage oczekujących zdjęć jest pusty, więc program nie ma już czego przenieść "
-                "do kolejnej iteracji.\n\n"
-                "W E1 wskaż nowy katalog zdjęć wejściowych, wybierz tor iteracji i dopiero wtedy "
-                "zatwierdź etap."
+                "Nie udało się odtworzyć katalogu zdjęć z poprzedniej iteracji.\n\n"
+                "W E1 wskaż katalog zdjęć wejściowych, wybierz tor iteracji i dopiero wtedy "
+                "zatwierdź etap. Jeśli poprzedni katalog nadal istnieje, możesz wskazać go ponownie."
             )
             try:
                 self.app.themed_info(

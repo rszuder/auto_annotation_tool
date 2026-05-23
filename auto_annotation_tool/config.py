@@ -148,6 +148,23 @@ class Config:
     # Wersja
     VERSION: str = "4.0"
     APP_NAME: str = "Auto-Annotation Tool dla CVAT"
+
+    # Progi kampanii
+    CAMPAIGN_MIN_CHAR_IMAGES: int = 10
+    CAMPAIGN_MIN_PLATE_ANNOTATIONS: int = 10
+    CAMPAIGN_MIN_CHAR_PLATES: int = 10
+
+    # Progi jakości datasetów YOLO. Minimum kampanii powyżej jest techniczne;
+    # poniższe wartości opisują sensowność materiału do realnego treningu.
+    YOLO_POSE_AVERAGE_PLATES: int = 50
+    YOLO_POSE_GOOD_PLATES: int = 200
+    YOLO_POSE_VERY_GOOD_PLATES: int = 500
+    YOLO_CHAR_AVERAGE_PLATES: int = 10
+    YOLO_CHAR_AVERAGE_BOXES: int = 100
+    YOLO_CHAR_GOOD_PLATES: int = 50
+    YOLO_CHAR_GOOD_BOXES: int = 1000
+    YOLO_CHAR_VERY_GOOD_PLATES: int = 150
+    YOLO_CHAR_VERY_GOOD_BOXES: int = 5000
     
     # Rozszerzenia plików
     IMAGE_EXTENSIONS: FrozenSet[str] = field(
@@ -289,6 +306,109 @@ class Config:
         if normalized == "plate":
             return self.DIR_6_MODELS_BASE_POSE
         return self.DIR_6_MODELS_BASE_DETECT
+
+    @staticmethod
+    def _safe_count(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def describe_yolo_pose_dataset_quality(self, plate_count: int | None = None) -> dict:
+        plates = self._safe_count(plate_count)
+        average_min = self._safe_count(self.YOLO_POSE_AVERAGE_PLATES)
+        good_min = self._safe_count(self.YOLO_POSE_GOOD_PLATES)
+        very_good_min = self._safe_count(self.YOLO_POSE_VERY_GOOD_PLATES)
+
+        if plates >= good_min:
+            label = "DOBRY"
+            tone = "success"
+            next_label = "BARDZO DOBRY"
+            missing_next = max(0, very_good_min - plates)
+        elif plates >= average_min:
+            label = "PRZECIĘTNY"
+            tone = "warning"
+            next_label = "DOBRY"
+            missing_next = max(0, good_min - plates)
+        else:
+            label = "SŁABY"
+            tone = "error"
+            next_label = "PRZECIĘTNY"
+            missing_next = max(0, average_min - plates)
+
+        return {
+            "label": label,
+            "tone": tone,
+            "score": plates,
+            "metric": "tablice",
+            "average_min": average_min,
+            "good_min": good_min,
+            "very_good_min": very_good_min,
+            "next_label": next_label,
+            "missing_next": missing_next,
+            "range_text": (
+                f"SŁABY < {average_min} tablic, "
+                f"PRZECIĘTNY {average_min}-{max(average_min, good_min - 1)}, "
+                f"DOBRY {good_min}+"
+            ),
+        }
+
+    def describe_yolo_char_dataset_quality(
+        self,
+        *,
+        perfect_plates: int | None = None,
+        char_boxes: int | None = None,
+    ) -> dict:
+        plates = self._safe_count(perfect_plates)
+        boxes = self._safe_count(char_boxes)
+        average_plates = self._safe_count(self.YOLO_CHAR_AVERAGE_PLATES)
+        average_boxes = self._safe_count(self.YOLO_CHAR_AVERAGE_BOXES)
+        good_plates = self._safe_count(self.YOLO_CHAR_GOOD_PLATES)
+        good_boxes = self._safe_count(self.YOLO_CHAR_GOOD_BOXES)
+        very_good_plates = self._safe_count(self.YOLO_CHAR_VERY_GOOD_PLATES)
+        very_good_boxes = self._safe_count(self.YOLO_CHAR_VERY_GOOD_BOXES)
+
+        good_ready = plates >= good_plates and boxes >= good_boxes
+        average_ready = plates >= average_plates and boxes >= average_boxes
+        if good_ready:
+            label = "DOBRY"
+            tone = "success"
+            next_label = "BARDZO DOBRY"
+            missing_plates = max(0, very_good_plates - plates)
+            missing_boxes = max(0, very_good_boxes - boxes)
+        elif average_ready:
+            label = "PRZECIĘTNY"
+            tone = "warning"
+            next_label = "DOBRY"
+            missing_plates = max(0, good_plates - plates)
+            missing_boxes = max(0, good_boxes - boxes)
+        else:
+            label = "SŁABY"
+            tone = "error"
+            next_label = "PRZECIĘTNY"
+            missing_plates = max(0, average_plates - plates)
+            missing_boxes = max(0, average_boxes - boxes)
+
+        return {
+            "label": label,
+            "tone": tone,
+            "perfect_plates": plates,
+            "char_boxes": boxes,
+            "average_plates": average_plates,
+            "average_boxes": average_boxes,
+            "good_plates": good_plates,
+            "good_boxes": good_boxes,
+            "very_good_plates": very_good_plates,
+            "very_good_boxes": very_good_boxes,
+            "next_label": next_label,
+            "missing_next_plates": missing_plates,
+            "missing_next_boxes": missing_boxes,
+            "range_text": (
+                f"SŁABY < {average_plates} tablic perfect lub < {average_boxes} znaków, "
+                f"PRZECIĘTNY {average_plates}+ tablic / {average_boxes}+ znaków, "
+                f"DOBRY {good_plates}+ tablic / {good_boxes}+ znaków"
+            ),
+        }
 
     def get_model_search_dirs(self, target: str | None = None) -> list[Path]:
         normalized = self.normalize_task_target(target)

@@ -516,6 +516,26 @@ def build_z2_layout_state_free_mode(
             or show_manual_review_followup
         )
     )
+    try:
+        has_active_annotation_run = bool(
+            getattr(host, "current_annotations", None)
+            or host._get_preferred_annotation_run_dir(require_xml=True) is not None
+        )
+    except Exception:
+        has_active_annotation_run = bool(getattr(host, "current_annotations", None))
+    show_free_mode_right_panel = bool(
+        route
+        and has_active_annotation_run
+        and (
+            show_auto_followup
+            or show_export_followup
+            or show_manual_review_followup
+            or (
+                show_workflow_steps
+                and str(host._coerce_workflow_step() or "").strip().lower() in {"auto_start", "manual_start"}
+            )
+        )
+    )
     return Z2LayoutState(
         show_route_choice=show_route_choice,
         show_export_followup=show_export_followup,
@@ -528,7 +548,7 @@ def build_z2_layout_state_free_mode(
         compact_left_column_layout=compact_left_column_layout,
         show_campaign_context_header=False,
         show_nav_panel=show_nav_panel,
-        show_right_panel=False,
+        show_right_panel=show_free_mode_right_panel,
     )
 
 
@@ -630,23 +650,22 @@ def build_z2_cta_state_free_mode(
         back_enabled = bool(not host.is_processing)
         next_enabled = bool(not host.is_processing and approved_ready)
         back_text = "Ponowna autoanotacja"
-        next_text = "Eksport i split datasetu"
+        next_text = "Eksport"
     elif free_mode_screen == "manual_review":
         approved_ready = _has_approved_plate_positions()
         if route == "manual":
             back_enabled = bool(not host.is_processing and approved_ready)
             next_enabled = bool(not host.is_processing and approved_ready)
             back_text = "Wytnij tablice"
-            next_text = "Przejdź do splitu i eksportu"
+            next_text = "Eksport"
         else:
             back_enabled = bool(not host.is_processing and has_existing_run)
             next_enabled = bool(not host.is_processing and approved_ready)
             next_text = "Dalej do Z3/PZ1"
     elif free_mode_screen == "export":
         back_enabled = bool(not host.is_processing)
-        export_allowed = bool(host._is_plate_dataset_export_allowed_for_current_selection())
-        next_enabled = bool(not host.is_processing and not host._dataset_export_completed and export_allowed)
-        next_text = "" if host._dataset_export_completed else "Eksportuj"
+        next_enabled = False
+        next_text = ""
     else:
         back_enabled = False
         next_enabled = False
@@ -903,13 +922,13 @@ def build_z2_left_panel_copy_payload_free_mode(
                 "i zatwierdzeniu go statusem [OK]."
             )
             payload["route_text"] = "Ręcznie oznaczysz tablice na obrazach z tej iteracji."
-            payload["action_text"] = "Kliknij przycisk poniżej, aby otworzyć paczkę do ręcznej anotacji i przygotować XML tej iteracji."
+            payload["action_text"] = "Kliknij przycisk poniżej, aby otworzyć katalog zdjęć do ręcznej anotacji i przygotować XML tej iteracji."
             payload["manual_hint"] = "Ten tor tworzy nowy run ręcznej anotacji Z2 i nie nadpisuje starszych XML-i."
             payload["manual_hint_tone"] = "muted"
             payload["manual_template_hint"] = "Nowy run ręcznej anotacji Z2 nie nadpisuje starszych XML-i i jest zapisywany w workspace Z2."
             payload["manual_template_tone"] = "muted"
             payload["manual_vehicle_hint"] = (
-                "Opcja przydatna głównie przy trudnych paczkach: pojazdy pomagają zorientować się, gdzie szukać tablicy. "
+                "Opcja przydatna głównie przy trudnych zestawach zdjęć: pojazdy pomagają zorientować się, gdzie szukać tablicy. "
                 "Te boxy są pomocnicze i nie trafiają do finalnego eksportu YOLO tablic."
             )
             payload["manual_vehicle_tone"] = "muted"

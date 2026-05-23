@@ -932,6 +932,28 @@ Roznica polega na celu mechanizmu. W edytorze sluzy on walidacji datasetu i stat
 
 Alternatywa architektoniczna to trenowanie modelu/pipeline, ktory zwraca cala sekwencje znakow tablicy bez skladania z pojedynczych boxow. Przy obecnym podejsciu detekcyjnym `YOLO Detect` logika kolejnosci odczytu pozostaje jednak potrzebnym elementem aplikacji koncowej.
 
+## 2026-05-20
+
+### Diagnoza krytyczna - przeciek trybu `(F)` do kampanii `(C)`
+
+Zidentyfikowano wazna przyczyne powracajacych rozjazdow copy i paneli `Z2`: o wyborze kontekstu decydowala flaga `app.campaign_free_mode`, nawet wtedy, gdy `CAMPAIGN` mial aktywny projekt. W praktyce oznaczalo to, ze stary albo niezsynchronizowany stan trybu swobodnego mogl wymusic buildery i payloady `(F)` w ekranie kampanii `(C)`.
+
+Decyzja architektoniczna:
+
+- aktywny projekt `CAMPAIGN.get_active_project_name()` jest nadrzednym zrodlem prawdy dla kontekstu kampanii;
+- jezeli istnieje aktywny projekt, `campaign_free_mode` nie moze wybierac buildera `(F)`;
+- w takim przypadku flaga `campaign_free_mode` ma byc defensywnie czyszczona;
+- brak aktywnego projektu oznacza tryb swobodny `(F)`;
+- `Z2` ma miec dodatkowy bezpiecznik przy budowie `Z2WorkflowBaseContext`, aby aktywny projekt wymuszal `campaign_context=True` przed wyborem payloadu copy i runtime.
+
+Zmiany wdrozone jako invariant:
+
+- `auto_annotation_tool/gui/app.py` - metoda `_is_free_mode_session_context()` oraz bramki nawigacji glownej respektuja aktywny projekt jako kontekst `(C)`;
+- `auto_annotation_tool/gui/tab_annotation.py` - metoda `_is_free_mode_session_context()` nie pozwala juz, aby stale `campaign_free_mode=True` wprowadzilo `(F)` do aktywnego projektu;
+- `auto_annotation_tool/gui/z2_shared_ui.py` - `build_z2_workflow_base_context()` ma drugi bezpiecznik na wypadek przyszlej regresji flagi.
+
+Wniosek stabilizacyjny: przy kazdej kolejnej zmianie workflow `(C)/(F)` nie poprawiamy najpierw copy, tylko najpierw sprawdzamy router kontekstu. Jezeli panel freemode pojawia sie w kampanii, to jest to blad separacji kontekstu, a nie blad tekstu.
+
 ### Rzeczy do dalszej stabilizacji
 
 - Oddzielic jeszcze mocniej runtime `(C)` i `(F)`, szczegolnie tam, gdzie `Z2` i `Z3` przekazuja sobie artefakty.
@@ -949,3 +971,281 @@ Alternatywa architektoniczna to trenowanie modelu/pipeline, ktory zwraca cala se
   - pipeline `O/YB/YS`,
   - eksport modeli z `Z4` do katalogow trybu swobodnego,
   - odtwarzanie projektu po restarcie aplikacji.
+
+## 2026-05-21
+
+### Decyzja architektoniczna - preflight toru znakow w E1 i bramka E3
+
+Ustalono, ze `E1` nie zna i nie powinien udawac, ze zna stan bramki `E3`. W `E1` uzytkownik wybiera tor pracy i ewentualnie moze zostac skierowany do `E3`, ale `E1` wykonuje tylko preflight toru znakow, czyli ocene, czy start toru znakow ma sens przy dostepnych danych.
+
+Wlasciwa bramka `E3` pozostaje domena kampanii i etapow `Z3/PZ2/PZ3`. Otwiera sie dopiero wtedy, gdy istnieje realny material do eksportu datasetu znakow.
+
+#### Trzy filary preflightu toru znakow w E1
+
+1. Obrazy wejsciowe biezacej iteracji.
+
+   W pierwszej iteracji albo wtedy, gdy nie ma jeszcze anotacji, `E1` zna zasadniczo tylko liczbe obrazow w wybranym katalogu. To jest jedynie potencjal, a nie gwarancja liczby tablic.
+
+   Bezpieczny prog startowy: minimum `10 obrazow`.
+
+   Komunikat powinien mowic wprost: program widzi liczbe zdjec, ale nie wie jeszcze, ile tablic uda sie z nich przygotowac.
+
+2. Zatwierdzone anotacje tablic z poprzednich iteracji.
+
+   W kolejnych iteracjach `E1` moze korzystac z historii projektu. Jezeli istnieje pula zatwierdzonych anotacji tablic, to program zna liczbe tablic mozliwych do wyciecia.
+
+   Jezeli liczba takich tablic jest wystarczajaca, tor znakow moze prowadzic do `E3/PZ1` albo `E3/PZ2`, zaleznie od tego, czy tablice sa juz wyciete.
+
+3. Anotacje zaimportowane w biezacej iteracji.
+
+   Jezeli uzytkownik importuje zgodne anotacje dla aktualnego katalogu zdjec, `E1` moze potraktowac je jako biezacy material tablicowy. Program powinien walidowac zgodnosc importu z obrazami i dopiero po potwierdzeniu dolaczac je do projektu.
+
+#### Decyzje E1
+
+- Jezeli `anotacje z poprzednich iteracji + import biezacej iteracji >= 10 tablic`, tor znakow ma realny material wejsciowy.
+- Jezeli material tablicowy jest mniejszy niz `10`, ale katalog obrazow ma co najmniej `10 obrazow`, tor znakow jest dopuszczalny z ostrzezeniem. Uzytkownik musi przejsc przez `E2/Z2`, aby przygotowac tablice.
+- Jezeli katalog obrazow ma mniej niz `10 obrazow` i nie ma wystarczajacych anotacji, tor znakow powinien byc blokowany albo bardzo mocno ostrzegany.
+
+#### E2/Z2 - przygotowanie tablic
+
+`E2/Z2` odpowiada za uzyskanie zatwierdzonych anotacji tablic. Dla toru znakow celem jest przygotowanie minimum `10` tablic, ktore bedzie mozna wyciac w `E3/PZ1`.
+
+Jezeli uzytkownik nie osiaga minimum, powinien dostac modal z jasnymi wyjsciami:
+
+- oznaczaj dalej w `Z2`;
+- wroc do `E1` po wiekszy katalog zdjec;
+- zmien tor pracy.
+
+#### E3/PZ1 - wycinanie tablic
+
+`PZ1` sprawdza, czy istnieje material do wyciecia:
+
+- zatwierdzone anotacje z `E2`;
+- zatwierdzone anotacje z poprzednich iteracji;
+- importowane anotacje biezacej iteracji.
+
+Po wycieciu tablic:
+
+- jezeli powstalo co najmniej `10` cropow tablic, przejscie do `PZ2` ma sens;
+- jezeli powstalo mniej niz `10`, uzytkownik powinien dostac modal awaryjny.
+
+#### E3/PZ2/PZ3 - wlasciwa bramka E3
+
+Bramka `E3` nie sprawdza juz potencjalu, tylko realna gotowosc datasetu znakow.
+
+Warunek otwarcia bramki `E3`:
+
+- minimum `10` tablic `perfect`;
+- kazda liczona tablica ma poprawne boxy znakow;
+- boxy maja etykiety znakow;
+- tablice przechodza przez aktywny zakres `gold packa`;
+- `PZ3` moze fizycznie zbudowac z nich zrodlowy dataset YOLO znakow.
+
+Szuflada `PZ2(C)` powinna pokazywac:
+
+- `Bramka E3`: `OTWARTA` albo `ZAMKNIETA`;
+- `Warunek PZ3`: `OK` albo `BRAK`;
+- `Jakosc zbioru`: `SLABY`, `PRZECIETNY`, `DOBRY`;
+- `JEST`: liczba tablic spelniajacych warunek;
+- `BRAKUJE`: ile brakuje do minimum `10`.
+
+#### Scenariusz awaryjny
+
+Mozliwy jest scenariusz, w ktorym `E1` przepuszcza tor znakow, bo katalog ma minimum `10 obrazow`, ale pozniej okazuje sie, ze z tych obrazow nie da sie uzyskac minimum tablic do otwarcia bramki `E3`.
+
+Wtedy nie przechodzimy automatycznie przez `E4`, bo brak materialu nie jest zakonczeniem treningu. To jest problem zrodel.
+
+Modal awaryjny powinien dac uzytkownikowi trzy wyjscia:
+
+- `Wroc do E1 po wiekszy katalog`;
+- `Oznacz wiecej tablic w E2/Z2`;
+- `Zostan w E3 i poprawiaj recznie`.
+
+`E4 bez treningu` pozostaje swiadomym wyborem uzytkownika, a nie automatyczna droga awaryjna.
+
+#### Zasada stabilizacyjna
+
+`E1` sprawdza potencjal startu toru znakow.
+
+`E3` sprawdza realna gotowosc datasetu znakow.
+
+Nie mieszamy tych dwoch rzeczy w copy, w szufladzie, w modalach ani w statusach kampanii.
+
+#### Implementacja - pierwszy krok
+
+W `Z1/E1` dodano preflight toru znakow:
+
+- prog startowy `10 obrazow` dla scenariusza, w ktorym nie ma jeszcze gotowych tablic;
+- prog `10 gotowych tablic` dla scenariusza przejscia na podstawie materialu z poprzednich iteracji albo importu;
+- ostrzegawczy modal przy wyborze toru znakow, gdy E1 widzi tylko potencjal obrazowy, ale nie widzi jeszcze materialu tablicowego;
+- blokade automatycznego przeskoku z E1 do E3, jesli projekt ma tylko obrazy, a nie ma realnych gotowych tablic;
+- karte toru znakow w E1 opisujaca aktualny stan preflightu prostym jezykiem.
+
+Drugi krok stabilizacji ujednolica znaczenie `ready` dla toru znakow:
+
+- stare kryterium `2 obrazy + dowolna liczba tablic` zostalo zastapione progiem `10 tablic`;
+- `needs_more_tables` oznacza teraz realnie: sa jakies tablice, ale brakuje do minimum wejscia w prace nad znakami;
+- badge i fallback E2 nie powinny juz otwierac E3 tylko dlatego, ze projekt ma pojedyncze zatwierdzone tablice.
+
+Trzeci krok stabilizacji dodaje modal awaryjny dla `E2` w torze znakow:
+
+- jezeli `E2/Z2` ma mniej niz `10` tablic, program nie przechodzi cicho do `E3`;
+- uzytkownik dostaje licznik: obrazy z tablicami, gotowe tablice, minimum i brakujace tablice;
+- dostepne sa trzy decyzje: oznaczaj dalej w `Z2`, wroc do `E1` po wiekszy katalog zdjec albo wroc do `E1` i zmien tor;
+- powrot do `Z2` z tego miejsca nie ustawia juz trybu naprawczego `E3`, bo problem nadal nalezy do domkniecia `E2`.
+
+Czwarty krok stabilizacji domyka `E3/PZ1`:
+
+- gotowy preview wycietych tablic nie odblokowuje `PZ2`, jezeli zawiera mniej niz `10` tablic;
+- przy probie pracy na zbyt malym preview uzytkownik dostaje modal awaryjny z trzema decyzjami: wroc do `E1`, oznacz wiecej w `Z2` albo zostan w `PZ1`;
+- powtorne wejscie do `PZ1` nie przepuszcza juz historycznego preview z poprzedniego, zbyt malego wyciecia;
+- po wycieciu mniej niz `10` tablic program pokazuje ostrzezenie i nie skacze automatycznie do `PZ2`;
+- warunek dotyczy tylko kontekstu kampanii `E3` w torze znakow, dlatego tryb swobodny nie powinien zostac zmieniony.
+
+Piaty krok stabilizacji poprawia wejscie `E2/Z2` w torze znakow:
+
+- brak modelu tablic `YOLO Pose` nie blokuje wejscia do `Z2`;
+- model tablic jest traktowany jako przyspieszenie autoanotacji, a nie jako warunek startu;
+- jezeli tor znakow nie ma jeszcze gotowego zrodla tablic ani modelu tablic, `Z2` startuje w trybie recznym: uzytkownik tworzy XML, oznacza tablice i zatwierdza poprawne zdjecia;
+- status po otwarciu `Z2` nie komunikuje juz, ze model projektu zostal podstawiony, jezeli projekt takiego modelu nie ma.
+
+Szosty krok stabilizacji rozpoczyna odejscie od fizycznego kopiowania zdjec miedzy iteracjami:
+
+- `E1` i kolejne iteracje opieraja sie na manifeście wyboru zdjec, a nie na kopiowaniu calego katalogu do `1_raw_images/Iteracja_XXX`;
+- `CampaignManager` dostal centralny kontrakt odczytu: liczba zdjec iteracji, katalog zrodla iteracji oraz realne sciezki plikow z manifestu;
+- tryby `pool_reuse`, `stage_reuse` i `iteration_reuse` zapisuja manifest logicznego zrodla, nie przenosza zdjec do nowego katalogu iteracji;
+- `Z2` korzysta z listy plikow manifestu, dzieki czemu nie powinno przypadkiem wczytywac calej duzej puli, jezeli iteracja ma pracowac tylko na podzbiorze;
+- `Z3` i `Z4` zaczynaja korzystac z efektywnego zrodla obrazow iteracji zamiast zakladac, ze prawda lezy zawsze w fizycznym katalogu `Iteracja_XXX`;
+- stare katalogi fizyczne pozostaja obslugiwane jako fallback dla projektow utworzonych przed ta zmiana.
+
+Doprecyzowanie szostego kroku:
+
+- walidacja importu anotacji w `E1` korzysta z nazw zdjec wybranych w manifeście, a nie z calego katalogu zrodlowego;
+- autoanotacja `Z2(C)` traktuje manifest jako twardy zakres pracy. Jezeli manifest wskazuje 299 zdjec z katalogu 3000+, program nie moze sam rozszerzyc pracy na caly katalog;
+- bundle artefaktow kampanii jest teraz odczytywany najpierw przez efektywne zrodlo iteracji, dopiero pozniej przez katalog glowny i stare `Iteracja_XXX`;
+- w podsumowaniach `E2` liczba obrazow ma pochodzic z kontraktu `CampaignManager.get_iteration_image_count()`, zeby UI nie liczyl pustego katalogu fizycznego jako prawdy.
+- cleanup stage dostal bezpiecznik: jezeli manifest iteracji wskazuje na pliki lezace w stage, katalog stage nie jest usuwany przez porzadkowanie po zmianie toru.
+- `artifact_registry` dostal centralny token zestawu obrazow iteracji. Z2, Z3 i Z4 powinny dopisywac artefakty do jednego pakietu iteracji, zamiast tworzyc osobne pakiety dla katalogow roboczych albo tymczasowych subsetow.
+- tymczasowy zakres autoanotacji w Z2 probuje teraz tworzyc linki twarde do obrazow zamiast pelnych kopii. Jezeli system plikow na to nie pozwoli, program wraca do bezpiecznego kopiowania pojedynczych plikow.
+- synchronizacja stage po eksporcie datasetu tablic korzysta z listy obrazow manifestu, jezeli manifest istnieje. Dzięki temu stage kolejnej iteracji nie powinien zbierac calego katalogu zrodlowego, tylko faktyczny zestaw obrazow bieżącej iteracji.
+
+Kolejne doprecyzowanie szostego kroku:
+
+- wyciagniete buildery `Z2`, `Z3` i `Z4` nie powinny juz samodzielnie skladac glownego zrodla przez `1_raw_images/Iteracja_XXX`. Najpierw pytaja `CampaignManager` o efektywne zrodlo iteracji, a dopiero potem uzywaja starego katalogu jako fallbacku;
+- fallback zatwierdzania `E1` po restarcie programu korzysta z manifestu iteracji, jezeli taki manifest istnieje. Dzieki temu pusty fizyczny katalog `Iteracja_XXX` nie powinien juz powodowac falszywego komunikatu o braku zdjec;
+- manifest iteracji niesie jawne pola `manifest_only` oraz `image_set_token`, co ulatwia trzymanie artefaktow `Z2/Z3/Z4` przy tym samym logicznym zestawie zdjec.
+- przeniesienie wejscia do kolejnej iteracji nie liczy juz calego katalogu zrodlowego, jezeli poprzednia iteracja byla manifestowym podzbiorem. Najpierw wykorzystywana jest lista plikow z manifestu poprzedniej iteracji;
+- starszy tryb manifestu `planned` jest traktowany jak tryb manifestowy tak samo jak `planned_manifest`, zeby starsze projekty nie wracaly do pustego albo zbyt szerokiego fizycznego katalogu iteracji.
+- roboczy merge katalogu wejscia `Z2` takze probuje uzywac linkow twardych przed pelnym kopiowaniem plikow. To ogranicza koszt czasowy i pamieciowy w sytuacjach, w ktorych Z2 musi zlozyc tymczasowy zakres pracy.
+- reczne dodawanie obrazow do stage datasetu korzysta z tego samego wzorca: link twardy, a dopiero potem bezpieczny fallback do kopii.
+
+Backlog stabilizacyjny po tej zmianie:
+
+- przejrzec wszystkie miejsca, ktore nadal wyswietlaja uzytkownikowi pojecie `paczka`, i zamienic je na precyzyjne `katalog zdjec`, `manifest iteracji` albo `zestaw zdjec iteracji`;
+- dodac w UI E1 czytelna informacje, czy iteracja korzysta z manifestu czy ze starego fizycznego katalogu;
+- po testach GUI usunac ostatnie nieuzywane sciezki awaryjne oparte o reczne tworzenie katalogu `Iteracja_XXX`, jezeli nie beda juz potrzebne do zgodnosci wstecznej.
+
+Kolejny krok porzadkowania slownika UI - 2026-05-21:
+
+- aktywne komunikaty GUI nie uzywaja juz pojecia `paczka` dla katalogu zdjec, manifestowego wyboru obrazow ani zestawu roboczego Z2;
+- w `Z2` nazewnictwo zakresu autoanotacji zostalo ujednolicone do `zestawu zdjec`, zeby modal i statusy nie sugerowaly fizycznego kopiowania katalogu;
+- w `Z3/PZ1/PZ2` dawna `paczka tablic` zostala nazwana `zestawem wycietych tablic`, co lepiej opisuje wynik procesu wycinania i ogranicza pomieszanie z katalogiem zdjec z `E1`;
+- globalny AS, help i opisy treningu rozrozniaja teraz `dataset`, `preview run`, `review pack` i `zestaw`, zamiast wrzucac wszystko do jednego potocznego pojecia;
+- pozostawiono tylko wewnetrzne komentarze techniczne oraz nazwy domenowe typu `review pack`/`gold pack`, gdzie jest to swiadome pojecie funkcjonalne.
+
+E1 jako panel kontrolny zrodla iteracji:
+
+### Backlog - import boxow tablic i wielonumerowe nazwy obrazow - 2026-05-22
+
+Do dalszej stabilizacji importu anotacji i przyszlego importu boxow tablic dopisujemy ryzyko kolizji semantycznej nazw plikow.
+
+Przyklad:
+
+- `1111_2222_3333_4444_001.jpg`;
+- `1111_2222_8888_001.jpg`.
+
+Problem polega na tym, ze dwa rozne obrazy moga miec czesciowo wspolne numery tablic w nazwie. Jezeli jakikolwiek mechanizm zaczalby dopasowywac ramki po pojedynczym tokenie, np. `1111`, zamiast po pelnej nazwie obrazu albo stabilnym kluczu z manifestu, mogloby dojsc do przypisania boxa z niewlasciwego obrazu.
+
+Aktualna diagnoza:
+
+- import anotacji w `E1` porownuje obrazy po pelnej znormalizowanej nazwie pliku, a nie po pojedynczym numerze tablicy;
+- `Z3/PZ1` wycina tablice z konkretnego `source_image`, wiec same cropy nie sa tworzone przez dopasowanie po tokenie `1111`;
+- do metadanych cropow PZ1 dodano `source_plate_index`, `source_plate_count`, `source_expected_text` oraz `source_expected_texts`;
+- konkretny `source_expected_text` jest nadawany tylko wtedy, gdy liczba numerow odczytanych z nazwy pliku zgadza sie z liczba polygonow tablic w obrazie;
+- jezeli przypadek jest niejednoznaczny, program nie powinien udawac, ze zna przypisanie konkretnego cropa do konkretnego numeru tablicy.
+
+Wymaganie dla przyszlego importu boxow tablic:
+
+- podstawowym kluczem dopasowania musi byc pelna nazwa obrazu, relatywna sciezka z manifestu albo stabilny `source key`, nigdy sam pojedynczy numer tablicy;
+- nazwy wielonumerowe nalezy traktowac jako uporzadkowany zestaw oczekiwanych tablic, a nie jako niezalezne globalne identyfikatory;
+- jezeli liczba boxow w imporcie nie zgadza sie z liczba numerow w nazwie, uzytkownik powinien dostac modal o niejednoznacznym dopasowaniu;
+- dla duplikatow tej samej nazwy pliku w roznych folderach nie wystarczy basename. Trzeba uzyc relatywnej sciezki, manifestu albo tokenu zestawu zdjec;
+- przy adopcji boxow warto dodatkowo zapisywac `source_bbox`, `source_polygon`, `source_plate_index` i ewentualnie wynik dopasowania po geometrii, zeby pozniejszy import mogl walidowac zgodnosc.
+
+Ocena: to nie jest tylko detal importu. To zasada tozsamosci danych w calym przeplywie `E1 -> Z2 -> Z3/PZ1 -> PZ2`. Po stabilizacji warto wrocic do tego przed pelnoprawnym importem boxow tablic.
+
+Ujednolicenie progow bramek tablic - 2026-05-21:
+
+- prog `2 oznaczone obrazy` zostal uznany za zbyt liberalny i historyczny;
+- centralne progi kampanii sa teraz zapisane w `CONFIG`:
+  - `CAMPAIGN_MIN_CHAR_IMAGES = 10`,
+  - `CAMPAIGN_MIN_PLATE_ANNOTATIONS = 10`,
+  - `CAMPAIGN_MIN_CHAR_PLATES = 10`;
+- `E2/Z2`, overlay bramki, modal wyjscia do wizarda, panel E2 i blokada E4 w torze tablic licza minimum po zatwierdzonych tablicach, a nie po samej liczbie obrazow;
+- tor znakow zachowuje ten sam prog `10 tablic`, zeby wejscie do `E3/Z3` nie bylo otwierane na zbyt malym materiale.
+
+- w podsumowaniu E1 dodano wiersz `Tryb wejscia`, ktory pokazuje, czy iteracja korzysta z manifestowego zestawu zdjec, czy ze starego fizycznego katalogu iteracji;
+- dodano wiersz `Sposob wyboru`, ktory przeklada techniczny `selection_mode` na jezyk uzytkownika;
+- to jest celowo element stabilizacyjny: podczas testow widac od razu, czy Z2/Z3 powinny pracowac na manifeście, stage, ponownym uzyciu poprzedniego zestawu czy legacy katalogu.
+
+### Stabilizacja Z4/PZ1/PZ2(F): wspolny wzorzec zrodla treningowego - 2026-05-23
+
+Problem do uporzadkowania:
+
+- w trybie swobodnym `Z4/PZ1` pokazuje rozne techniczne formaty wejscia zalezne od toru: dla tablic `XML + obrazy`, dla znakow gotowy dataset YOLO z `data.yaml`;
+- technicznie jest to poprawne, ale dla uzytkownika tworzy wrazenie dwoch roznych filozofii pracy;
+- UI nie powinno zmuszac uzytkownika do myslenia w kategoriach `XML` kontra `YAML`, tylko w kategoriach: `zrodlo datasetu`, `walidacja`, `split treningowy`, `wariant treningu`;
+- porzadkowanie musi zaczac sie od `(F)`, bez ruszania kampanii `(C)`, zeby nie rozlac bramek, manifestow i logiki etapow.
+
+Decyzja stabilizacyjna:
+
+- zachowujemy fakt, ze rozne tory moga miec rozne formaty fizyczne;
+- wprowadzamy wspolny kontrakt logiczny zrodla treningowego, ktory ukrywa roznice techniczne przed reszta UI;
+- `PZ1(F)` ma sluzyc do wyboru albo utworzenia zrodla splitu, a `PZ2(F)` ma trenowac na wybranym wariancie, bez ponownego recznego skladania sciezek;
+- statusy typu `Gotowy do PZ2` nie moga pojawiac sie bez aktywnie wybranego albo utworzonego zrodla.
+
+Planowany kontrakt roboczy:
+
+- `target`: `plates` albo `chars`;
+- `kind`: `annotation_xml_images` albo `yolo_dataset`;
+- `annotation_file`: plik anotacji, jezeli zrodlem jest XML;
+- `images_dir`: katalog obrazow zgodnych z anotacjami, jezeli jest wymagany;
+- `dataset_dir`: katalog datasetu, jezeli zrodlem jest gotowy dataset YOLO;
+- `yaml_path`: plik `data.yaml`, jezeli dataset juz go ma albo program go wygenerowal;
+- `validated`: wynik walidacji zrodla;
+- `stats`: liczba obrazow, etykiet, klas, elementow train/val/test i ewentualne ostrzezenia;
+- `provenance`: informacja, skad zrodlo pochodzi, np. `Z2`, `Z3/PZ2`, import albo reczny wybor.
+
+Adaptery docelowe:
+
+- `PlateXmlImagesSourceAdapter` waliduje zgodnosc XML z katalogiem obrazow i przygotowuje wariant YOLO Pose;
+- `CharYoloDatasetSourceAdapter` waliduje `images/labels/data.yaml`, potrafi zaproponowac utworzenie brakujacego `data.yaml` i przygotowuje wariant splitu;
+- oba adaptery zwracaja ten sam typ podsumowania, dzieki czemu tabele, modale i walidatory moga korzystac ze wspolnego wzorca.
+
+Etapy wdrozenia:
+
+- Etap 1: uporzadkowac jezyk UI `Z4/PZ1/PZ2(F)`, usunac zbedne radiobuttony zrodel i nie pokazywac technicznych formatow jako glownej decyzji uzytkownika;
+- Etap 2: dodac lekki model `TrainingSource` bez przepinania calej logiki naraz;
+- Etap 3: nauczyc `PZ1(F)` produkowac `TrainingSource`, a `PZ2(F)` czytac go jako jedyne zrodlo prawdy;
+- Etap 4: przeniesc walidacje, tabele i modale na `TrainingSource.stats`;
+- Etap 5: dopiero po stabilizacji `(F)` ocenic, czy kampania `(C)` potrzebuje mostu do tego samego kontraktu.
+
+Kryteria akceptacji:
+
+- uzytkownik widzi jedno pojecie `dataset treningowy` niezaleznie od toru;
+- `XML`, `obrazy`, `data.yaml` i `labels` sa szczegolami technicznymi walidacji, a nie glownymi wyborami w UI;
+- `PZ1(F)` nie pokazuje falszywej gotowosci bez aktywnego zrodla;
+- `PZ2(F)` nie pozwala trenowac na niejawnie odziedziczonym albo starym wariancie;
+- zmiany w `(F)` nie zmieniaja zachowania bramek, manifestow i etapow w `(C)`.
+
+Ocena: to jest ruch stabilizacyjny, a nie funkcja kosmetyczna. Celem jest zmniejszenie liczby miejsc, w ktorych UI, walidacja i trening samodzielnie interpretuja zrodla danych.

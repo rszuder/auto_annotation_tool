@@ -446,12 +446,32 @@ def open_campaign_step4_entry(
     readiness = host.get_campaign_step4_readiness(iteration_target=target)
     readiness_reason = str(readiness.get("reason") or "").strip().lower()
     ready_dataset_text = str(readiness.get("ready_dataset") or "").strip()
-    has_training_ready_dataset = bool(readiness.get("ok", False) and ready_dataset_text)
+    source_dataset_text = str(readiness.get("source_dataset") or "").strip()
+    if target == "char" and readiness_reason == "source_dataset_ready_for_split":
+        preferred_subtab = "dataset"
+        if source_dataset_text:
+            try:
+                source_dataset_path = Path(source_dataset_text)
+                if source_dataset_path.exists() and source_dataset_path.is_dir():
+                    latest_source = source_dataset_path
+            except Exception:
+                pass
+        ready_dataset_text = ""
+
+    ready_train = int(readiness.get("train_images", 0) or 0)
+    ready_val = int(readiness.get("val_images", 0) or 0)
+    has_training_ready_dataset = bool(
+        readiness.get("ok", False)
+        and ready_dataset_text
+        and readiness_reason != "source_dataset_ready_for_split"
+        and ready_train > 0
+        and ready_val > 0
+    )
     allow_dataset_source_entry = bool(
         target == "char"
         and preferred_subtab == "dataset"
         and latest_source is not None
-        and readiness_reason in {"invalid_char_dataset", "missing_char_dataset"}
+        and readiness_reason in {"invalid_char_dataset", "missing_char_dataset", "source_dataset_ready_for_split"}
     )
 
     if (
@@ -638,8 +658,11 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
 
     try:
         raw_dir = CAMPAIGN.get_dir("raw")
-        if raw_dir is not None:
-            iter_num = CAMPAIGN.get_current_iteration_num()
+        iter_num = CAMPAIGN.get_current_iteration_num()
+        iter_source_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or CAMPAIGN.get_iteration_raw_dir(iter_num)
+        if iter_source_dir is not None and Path(iter_source_dir).exists():
+            current_iter_images = str(Path(iter_source_dir))
+        elif raw_dir is not None:
             iter_dir = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
             if iter_dir.exists():
                 current_iter_images = str(iter_dir)

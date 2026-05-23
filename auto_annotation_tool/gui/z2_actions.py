@@ -49,7 +49,7 @@ class Z2Action:
             if ctx.campaign_repair_mode:
                 return (
                     "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
                 )
             return (
                 "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
@@ -67,7 +67,7 @@ class Z2Action:
             if ctx.campaign_repair_mode:
                 return (
                     "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
                 )
             return (
                 "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
@@ -114,7 +114,7 @@ class PlateManualAction(Z2Action):
             if ctx.campaign_repair_mode:
                 return (
                     "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
                 )
             return (
                 "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
@@ -131,7 +131,7 @@ class PlateManualAction(Z2Action):
             if ctx.campaign_repair_mode:
                 return (
                     "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
                 )
             return (
                 "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
@@ -276,7 +276,7 @@ def _plate_manual_action_description_override(self, ctx: Z2ActionContext) -> str
         if ctx.campaign_repair_mode:
             return (
                 "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                "dla tej samej paczki, zanim znów przejdziesz dalej w wizardzie."
+                "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
             )
         return (
             "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
@@ -318,7 +318,7 @@ class PlateAutoAction(Z2Action):
             if ctx.campaign_repair_mode:
                 return (
                     "W tym trybie naprawczym autoanotacja projektowym modelem jest ukryta celowo. "
-                    "Powrót z E3 służy ręcznej naprawie źródła tablic dla tej samej paczki."
+                    "Powrót z E3 służy ręcznej naprawie źródła tablic dla tego samego zestawu zdjęć."
                 )
             if ctx.has_plate_model:
                 return (

@@ -432,7 +432,6 @@ class AutoAnnotationApp:
         self._startup_finalize_attempts = 0
         self._startup_ready_streak = 0
         self._startup_tabs_present_since = None
-        self._startup_tabs_prewarmed = False
         self._startup_progress_peak = 0.0
         self._main_window_hidden_for_startup = False
         self._main_window_revealed = False
@@ -1294,76 +1293,6 @@ class AutoAnnotationApp:
 
         return True, []
 
-    def _prewarm_startup_tabs(self):
-        if bool(getattr(self, "_startup_tabs_prewarmed", False)):
-            return
-
-        notebook = getattr(self, "notebook", None)
-        if notebook is None:
-            return
-
-        expected = self._get_expected_startup_tab_keys()
-        try:
-            original_widget = str(notebook.select() or "")
-        except Exception:
-            original_widget = ""
-
-        state_by_widget = {}
-        try:
-            for key in expected:
-                tab = self.tabs.get(key)
-                frame = getattr(tab, "frame", None)
-                if frame is None:
-                    continue
-
-                widget_name = str(frame)
-                try:
-                    state_by_widget[widget_name] = str(notebook.tab(widget_name, "state") or "normal")
-                except Exception:
-                    state_by_widget[widget_name] = "normal"
-
-                try:
-                    if state_by_widget[widget_name] == "disabled":
-                        notebook.tab(widget_name, state="normal")
-                except Exception:
-                    pass
-
-                try:
-                    notebook.select(widget_name)
-                except Exception:
-                    continue
-
-                try:
-                    self.root.update_idletasks()
-                except Exception:
-                    pass
-
-                self._wait_for_startup_marker(delay_ms=90, timeout_ms=2000)
-
-                try:
-                    self.root.update_idletasks()
-                except Exception:
-                    pass
-        finally:
-            for widget_name, state in state_by_widget.items():
-                try:
-                    notebook.tab(widget_name, state=state)
-                except Exception:
-                    pass
-
-            if original_widget:
-                try:
-                    notebook.select(original_widget)
-                except Exception:
-                    pass
-
-            try:
-                self.root.update_idletasks()
-            except Exception:
-                pass
-
-        self._startup_tabs_prewarmed = True
-
     def _schedule_startup_finalize(self, delay_ms: int = 0):
         pending = getattr(self, "_startup_finalize_after_id", None)
         if pending:
@@ -1374,7 +1303,6 @@ class AutoAnnotationApp:
         if int(delay_ms or 0) == 0 and self._startup_finalize_attempts == 0:
             self._startup_ready_streak = 0
             self._startup_tabs_present_since = None
-            self._startup_tabs_prewarmed = False
         try:
             self._startup_finalize_after_id = self.root.after(
                 max(0, int(delay_ms)),
@@ -1543,11 +1471,19 @@ class AutoAnnotationApp:
     def _is_free_mode_session_context(self) -> bool:
         try:
             from ..campaign_manager import CAMPAIGN
-            active_project = CAMPAIGN.get_active_project_name()
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
         except Exception:
-            active_project = None
+            active_project = ""
 
-        return bool(self.campaign_free_mode) or not active_project
+        # Aktywny projekt jest źródłem prawdy dla kontekstu kampanii.
+        # Flaga campaign_free_mode bywa stanem przejściowym po wyjściu z projektu
+        # i nie może nadpisywać aktywnego projektu.
+        if active_project:
+            if bool(getattr(self, "campaign_free_mode", False)):
+                self.campaign_free_mode = False
+            return False
+
+        return True
 
     def _load_active_main_tab_preference(self) -> str:
         return "campaign" if "campaign" in self.tabs else "annotation"
@@ -3825,12 +3761,15 @@ class AutoAnnotationApp:
                 iter_num = max(1, int(CAMPAIGN.get_current_iteration_num() or 1))
             except Exception:
                 iter_num = 1
+            stage_label = self._format_campaign_step_badge_label(
+                getattr(CAMPAIGN, "get_current_step", lambda: 1)()
+            )
             route_label = self._format_iteration_target_badge_label(
                 getattr(CAMPAIGN, "get_iteration_target", lambda: "")()
             )
 
             title = (
-                f"{base_title} | Projekt: {active_project} | Iteracja {iter_num} | "
+                f"{base_title} | Projekt: {active_project} | Iteracja {iter_num} | {stage_label} | "
                 f"Tor: {route_label}"
             )
             if created_label:
@@ -3906,6 +3845,9 @@ class AutoAnnotationApp:
             tab_state = "normal"
 
         self._lazy_tab_load_in_progress = True
+        self._lazy_tab_loading_key = tab_key
+        if select:
+            self._lazy_tab_pending_select_key = tab_key
         started = time.perf_counter()
         try:
             try:
@@ -3945,6 +3887,12 @@ class AutoAnnotationApp:
                     self.notebook.select(str(real_tab.frame))
                 except Exception:
                     pass
+                try:
+                    self.root.after_idle(
+                        lambda key=tab_key, tab=real_tab: self._restore_lazy_tab_selection(key, tab)
+                    )
+                except Exception:
+                    self._restore_lazy_tab_selection(tab_key, real_tab)
 
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             logger.info(f"Leniwie załadowano zakładkę {tab_key} w {elapsed_ms:.0f} ms")
@@ -3955,6 +3903,8 @@ class AutoAnnotationApp:
             return real_tab
         except Exception as e:
             self.tabs[tab_key] = current
+            if select and str(getattr(self, "_lazy_tab_pending_select_key", "") or "").strip() == tab_key:
+                self._lazy_tab_pending_select_key = ""
             logger.error(f"Nie udało się leniwie załadować zakładki {tab_key}: {e}")
             try:
                 self.update_status(f"Nie udało się załadować {self.get_main_tab_label(tab_key)}.", "error")
@@ -3963,6 +3913,23 @@ class AutoAnnotationApp:
             return current
         finally:
             self._lazy_tab_load_in_progress = False
+            self._lazy_tab_loading_key = ""
+
+    def _restore_lazy_tab_selection(self, tab_key: str, tab) -> None:
+        pending_key = str(getattr(self, "_lazy_tab_pending_select_key", "") or "").strip()
+        tab_key = str(tab_key or "").strip()
+        if pending_key and pending_key != tab_key:
+            return
+        try:
+            if self._get_selected_tab_key() != tab_key:
+                self.notebook.select(str(tab.frame))
+        except Exception:
+            pass
+        try:
+            if str(getattr(self, "_lazy_tab_pending_select_key", "") or "").strip() == tab_key:
+                self._lazy_tab_pending_select_key = ""
+        except Exception:
+            pass
 
     def _create_tabs(self, progress_callback=None):
         def _progress(value, message):
@@ -4150,19 +4117,34 @@ class AutoAnnotationApp:
             from ..campaign_manager import CAMPAIGN
             active_project = (CAMPAIGN.get_active_project_name() or "").strip()
             active_iteration = int(CAMPAIGN.get_current_iteration_num() or 1) if active_project else 0
+            active_step = int(getattr(CAMPAIGN, "get_current_step", lambda: 1)() or 1) if active_project else 0
             active_target = str(getattr(CAMPAIGN, "get_iteration_target", lambda: "")() or "").strip().lower()
         except Exception:
             active_project = ""
             active_iteration = 0
+            active_step = 0
             active_target = ""
 
         if active_project:
             target_label = self._format_iteration_target_badge_label(active_target)
+            stage_label = self._format_campaign_step_badge_label(active_step)
             return (
-                f"Projekt: {active_project} | Iteracja {max(1, int(active_iteration or 1))} | "
+                f"Projekt: {active_project} | Iteracja {max(1, int(active_iteration or 1))} | {stage_label} | "
                 f"Tor: {target_label}"
             )
         return "Projekt: tryb swobodny"
+
+    @staticmethod
+    def _format_campaign_step_badge_label(step: int | str | None) -> str:
+        try:
+            step_num = int(step or 1)
+        except Exception:
+            step_num = 1
+        if step_num < 1:
+            step_num = 1
+        if step_num > 4:
+            step_num = 4
+        return f"Etap E{step_num}"
 
     @staticmethod
     def _format_iteration_target_badge_label(target: str | None) -> str:
@@ -5632,7 +5614,7 @@ class AutoAnnotationApp:
                     "PZ3 zbiera perfecty, obsługuje opcjonalny CVAT i eksportuje źródłowy dataset znaków.",
                 ),
                 glossary=(
-                    "preview run = robocza paczka cropów tablic",
+                    "preview run = roboczy zestaw cropów tablic",
                     "perfect = tablica gotowa do datasetu",
                     "gold pack = wybrane poprawne przykłady",
                 ),
@@ -5753,11 +5735,14 @@ class AutoAnnotationApp:
 
         from ..campaign_manager import CAMPAIGN
 
-        active = CAMPAIGN.get_active_project_name()
+        active = str(CAMPAIGN.get_active_project_name() or "").strip()
         active_step_tab_key = None
 
-        # ręczny free mode albo brak aktywnego projektu = pełna swoboda
-        if self.campaign_free_mode or not active:
+        if active and bool(getattr(self, "campaign_free_mode", False)):
+            self.campaign_free_mode = False
+
+        # Brak aktywnego projektu = pełna swoboda.
+        if not active:
             self.campaign_mode_active = False
 
             for key, tab in self.tabs.items():
@@ -5847,8 +5832,11 @@ class AutoAnnotationApp:
         except Exception:
             return
 
-        if self.campaign_free_mode or not CAMPAIGN.get_active_project_name():
+        active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        if not active_project:
             return
+        if bool(getattr(self, "campaign_free_mode", False)):
+            self.campaign_free_mode = False
 
         if bool(getattr(self, "_campaign_nav_guard_in_progress", False)):
             return
@@ -5896,8 +5884,26 @@ class AutoAnnotationApp:
             _restore_previous_tab()
 
     def _on_main_notebook_tab_changed(self, event=None):
+        if bool(getattr(self, "_lazy_tab_load_in_progress", False)):
+            loading_key = str(getattr(self, "_lazy_tab_loading_key", "") or "").strip()
+            selected_key = self._get_selected_tab_key()
+            if loading_key and selected_key != loading_key:
+                return
         self._guard_campaign_navigation(event)
         selected_key = self._get_selected_tab_key()
+        pending_lazy_key = str(getattr(self, "_lazy_tab_pending_select_key", "") or "").strip()
+        if pending_lazy_key and selected_key != pending_lazy_key:
+            pending_tab = getattr(self, "tabs", {}).get(pending_lazy_key)
+            if pending_tab is not None and not isinstance(pending_tab, _LazyNotebookTab):
+                try:
+                    self.root.after_idle(
+                        lambda key=pending_lazy_key, tab=pending_tab: self._restore_lazy_tab_selection(key, tab)
+                    )
+                except Exception:
+                    self._restore_lazy_tab_selection(pending_lazy_key, pending_tab)
+                return
+        elif pending_lazy_key and selected_key == pending_lazy_key:
+            self._lazy_tab_pending_select_key = ""
         if selected_key and self._is_lazy_tab_key(selected_key):
             self._ensure_tab_loaded(selected_key, select=True)
             return
@@ -5905,7 +5911,10 @@ class AutoAnnotationApp:
             try:
                 annotation_tab = getattr(self, "tabs", {}).get("annotation")
                 from ..campaign_manager import CAMPAIGN
-                if not self.campaign_free_mode and CAMPAIGN.get_active_project_name():
+                active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+                if active_project:
+                    if bool(getattr(self, "campaign_free_mode", False)):
+                        self.campaign_free_mode = False
                     ensure_context = (
                         getattr(annotation_tab, "ensure_campaign_context_ready_for_active_project", None)
                         if annotation_tab is not None
@@ -5913,6 +5922,16 @@ class AutoAnnotationApp:
                     )
                     if callable(ensure_context):
                         self.root.after_idle(ensure_context)
+                    reset_selection = (
+                        getattr(annotation_tab, "reset_preview_selection_to_first_visible_on_tab_entry", None)
+                        if annotation_tab is not None
+                        else None
+                    )
+                    if callable(reset_selection):
+                        self.root.after(
+                            240,
+                            lambda reset=reset_selection: reset(reason="campaign-tab-entry"),
+                        )
                 else:
                     ensure_preview = (
                         getattr(annotation_tab, "ensure_free_mode_session_preview_ready", None)
@@ -5921,6 +5940,16 @@ class AutoAnnotationApp:
                     )
                     if callable(ensure_preview):
                         self.root.after_idle(ensure_preview)
+                    reset_selection = (
+                        getattr(annotation_tab, "reset_preview_selection_to_first_visible_on_tab_entry", None)
+                        if annotation_tab is not None
+                        else None
+                    )
+                    if callable(reset_selection):
+                        self.root.after(
+                            240,
+                            lambda reset=reset_selection: reset(reason="free-tab-entry"),
+                        )
             except Exception:
                 pass
         elif selected_key == "training":

@@ -23,6 +23,7 @@ import shutil
 import copy
 import math
 import time
+import textwrap
 from types import SimpleNamespace
 
 from ..config import CONFIG, logger, get_yolo_class
@@ -50,8 +51,6 @@ from .z3_campaign_flow import (
     auto_progress_campaign_step3_entry,
     back_to_substep_1_campaign,
     back_to_substep_2_campaign,
-    build_step3_campaign_navigation_view_model,
-    build_step3_finish_action_view_model,
     build_step3_pz3_path_selection_view_model,
     build_step3_pz3_status_panel_view_model,
     enter_campaign_step3_mode,
@@ -88,7 +87,6 @@ from .z3_preview_ui import (
     build_preview_legend_sections,
     clamp_preview_controls_legend_offsets,
     focus_preview_canvas,
-    get_preview_mode_overlay_collision_rects,
     get_preview_mode_overlay_default_position,
     on_preview_controls_legend_drag,
     on_preview_controls_legend_leave,
@@ -101,8 +99,6 @@ from .z3_preview_ui import (
     place_preview_hint_overlay,
     plan_preview_canvas_info_overlay_layout,
     refresh_preview_controls_legend,
-    resolve_preview_canvas_cursor,
-    resolve_preview_mode_overlay_collision_position,
     toggle_preview_controls_legend,
     update_preview_controls_legend_cursor,
     update_preview_toolbar_state,
@@ -403,7 +399,7 @@ class CharacterAnnotationTab:
         self._preview_layout_filter_hover_key = None
         self._preview_active_pid = None
         self._preview_zoom_level = 1.0
-        self._preview_zoom_min = 1.0
+        self._preview_zoom_min = 0.65
         self._preview_zoom_max = 6.0
         self._preview_zoom_step = 1.15
         self._preview_pan_x = 0.0
@@ -421,6 +417,7 @@ class CharacterAnnotationTab:
         self._preview_char_edit_mode = False
         self._preview_char_add_mode = False
         self._preview_char_add_modifier_down = False
+        self._preview_char_add_click_armed = False
         self._preview_alt_modifier_down = False
         self._preview_char_label_mode = False
         self._preview_char_selected_index = None
@@ -468,7 +465,7 @@ class CharacterAnnotationTab:
         self._preview_fullscreen_toggle_rect = None
         self._preview_controls_legend_visible = True
         self._preview_operation_assistant_visible = True
-        self._preview_overlay_dock_expanded = False
+        self._preview_overlay_dock_expanded = True
         self._preview_overlay_dock_render_key = None
         self._preview_overlay_dock_tool_rows = {}
         self.preview_edit_status_var = tk.StringVar(value="W PZ2 tutaj poprawisz boxy znaków.")
@@ -699,6 +696,7 @@ class CharacterAnnotationTab:
         self._preview_char_edit_mode = False
         self._preview_char_add_mode = False
         self._preview_char_add_modifier_down = False
+        self._preview_char_add_click_armed = False
         self._preview_alt_modifier_down = False
         self._preview_char_label_mode = False
         self._preview_char_hover_index = None
@@ -741,6 +739,7 @@ class CharacterAnnotationTab:
         self._preview_char_drag_state = None
         self._preview_char_add_state = None
         self._preview_char_add_modifier_down = False
+        self._preview_char_add_click_armed = False
         self._preview_alt_modifier_down = False
         self._preview_char_hover_index = None
         self._preview_char_hover_label_index = None
@@ -801,9 +800,9 @@ class CharacterAnnotationTab:
         top_reserved = max(0.0, float(top_reserved))
         available_h = max(min_visible, canvas_h - top_reserved)
 
-        if image_w <= canvas_w and preferred_x is not None:
-            min_x = float(preferred_x)
-            max_x = float(preferred_x)
+        if image_w <= canvas_w:
+            min_x = 0.0
+            max_x = canvas_w - image_w
         else:
             min_x = float(min_visible) - image_w
             max_x = canvas_w - float(min_visible)
@@ -812,11 +811,11 @@ class CharacterAnnotationTab:
                 min_x = center_x
                 max_x = center_x
 
-        if image_h <= available_h and preferred_y is not None:
-            min_y = float(preferred_y)
-            max_y = float(preferred_y)
-        else:
+        if image_h <= available_h:
             min_y = top_reserved
+            max_y = canvas_h - image_h
+        else:
+            min_y = top_reserved + float(min_visible) - image_h
             max_y = canvas_h - float(min_visible)
             if max_y < min_y:
                 fallback_y = float(preferred_y) if preferred_y is not None else min_y
@@ -892,12 +891,6 @@ class CharacterAnnotationTab:
         bottom = min(ay2, by2)
         return max(0.0, right - left) * max(0.0, bottom - top)
 
-    def _get_preview_mode_overlay_collision_rects(self):
-        return get_preview_mode_overlay_collision_rects(self)
-
-    def _resolve_preview_mode_overlay_collision_position(self, x: float, y: float):
-        return resolve_preview_mode_overlay_collision_position(self, x, y)
-
     def _get_preview_mode_overlay_default_position(self, *, fullscreen: bool = False):
         return get_preview_mode_overlay_default_position(self, fullscreen=fullscreen)
 
@@ -912,9 +905,6 @@ class CharacterAnnotationTab:
 
     def _focus_preview_canvas(self):
         focus_preview_canvas(self)
-
-    def _resolve_preview_canvas_cursor(self) -> str:
-        return resolve_preview_canvas_cursor(self)
 
     def _apply_preview_canvas_cursor(self, cursor: str | None = None):
         apply_preview_canvas_cursor(self, cursor)
@@ -1505,6 +1495,14 @@ class CharacterAnnotationTab:
 
     def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
         source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+        if isinstance(source_data, dict):
+            for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
+                prepared = str(source_data.get(field_name, "") or "").strip().upper()
+                if prepared:
+                    return [prepared]
+            expected_source = str(source_data.get("source_expected_text_source") or "").strip().lower()
+            if expected_source == "ambiguous_filename_tokens":
+                return []
         normalized = []
         seen = set()
         for candidate in self._get_preview_reference_text_values(source_data):
@@ -1647,7 +1645,7 @@ class CharacterAnnotationTab:
     def _persist_preview_metadata(self, *, success_message: str | None = None, refresh_list: bool = True):
         meta_path = self._get_preview_metadata_path()
         if meta_path is None:
-            raise RuntimeError("Brak aktywnej paczki preview do zapisania.")
+            raise RuntimeError("Brak aktywnego preview runu do zapisania.")
 
         self._atomic_write_json(meta_path, self.preview_metadata)
         self._loaded_meta_path = meta_path
@@ -1766,6 +1764,7 @@ class CharacterAnnotationTab:
                 self._preview_char_runtime = {}
                 self._preview_char_record_render_tags = {}
                 box_chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
+                self._draw_preview_plate_status_frame(data)
                 self._draw_preview_canvas_info_overlay(
                     canvas,
                     max(50, int(canvas.winfo_width() or 50)),
@@ -1775,6 +1774,7 @@ class CharacterAnnotationTab:
                 )
                 for idx, _rec in enumerate(self._get_preview_active_character_records(create=False)):
                     self._redraw_preview_character_overlay_only(idx)
+                self._draw_preview_clear_action_bucket(canvas)
                 try:
                     canvas.tag_raise("preview_overlay")
                     canvas.tag_raise("preview_overlay_action")
@@ -1935,6 +1935,7 @@ class CharacterAnnotationTab:
             self._preview_char_selected_index = None
             self._preview_char_drag_state = None
             self._preview_char_add_state = None
+            self._preview_char_add_click_armed = False
             self._preview_char_hover_index = None
             self._preview_char_hover_label_index = None
             self._preview_char_label_active_index = None
@@ -2270,12 +2271,17 @@ class CharacterAnnotationTab:
     def _format_preview_operation_assistant_status(self) -> str:
         if not self._preview_status_overlay_available():
             return ""
+        add_state = getattr(self, "_preview_char_add_state", None)
+        if isinstance(add_state, dict) and bool(add_state.get("click_draw")):
+            return "AS: D aktywne - przesuń mysz i kliknij drugi narożnik boxa."
+        if bool(getattr(self, "_preview_char_add_click_armed", False)):
+            return "AS: D uzbraja box - kliknij pierwszy narożnik."
         if self._preview_char_add_requested():
-            return "AS: rysuj box - D + przeciągnij LPM."
+            return "AS: rysuj box - LPM przeciąga narożniki."
         if bool(getattr(self, "_preview_char_edit_mode", False)):
             return "AS: edycja boxów - S zaznacza, LPM przesuwa, uchwyty skalują."
         return (
-            "AS: Q/E tablice, D+LPM nowy box, S zaznacza, Alt+W wpisywanie. "
+            "AS: Q/E tablice, D nowy box, S zaznacza, Alt+W wpisywanie. "
             f"{self._format_preview_layout_semantics(short=True)}"
         )
 
@@ -2352,6 +2358,47 @@ class CharacterAnnotationTab:
         y = min(y, max_y)
         return float(x), float(y)
 
+    def _configure_preview_typing_overlay_text(self, text: str, wraplength: int) -> None:
+        widget = getattr(self, "preview_typing_overlay_lbl", None)
+        if widget is None:
+            return
+
+        content = str(text or "")
+        if not isinstance(widget, tk.Text):
+            try:
+                widget.configure(text=content, wraplength=wraplength, font=("Segoe UI", 8, "normal"))
+            except Exception:
+                pass
+            return
+
+        width_chars = max(18, min(34, int(max(130, wraplength) / 7)))
+        wrapped = textwrap.wrap(content, width=width_chars) if content else [""]
+        height_lines = max(1, min(5, len(wrapped)))
+        key_pattern = re.compile(
+            r"(?<![\w+])(?:Ctrl\+Z|Ctrl\+Y|Alt\+W|D\+LPM|LPM\+drag|Q/E|0-9|A-Z|LPM|PPM|Esc|Enter|Spacja|Space|D|S|N|F|Q|E)(?![\w+])"
+        )
+
+        try:
+            widget.configure(state=tk.NORMAL, width=width_chars, height=height_lines)
+            widget.delete("1.0", tk.END)
+            cursor = 0
+            for match in key_pattern.finditer(content):
+                if match.start() > cursor:
+                    widget.insert(tk.END, content[cursor:match.start()], ("body",))
+                widget.insert(tk.END, match.group(0), ("key",))
+                cursor = match.end()
+            if cursor < len(content):
+                widget.insert(tk.END, content[cursor:], ("body",))
+            widget.configure(state=tk.DISABLED)
+        except Exception:
+            try:
+                widget.configure(state=tk.NORMAL)
+                widget.delete("1.0", tk.END)
+                widget.insert(tk.END, content)
+                widget.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+
     def _refresh_preview_typing_overlay_visibility(self):
         overlay = getattr(self, "preview_typing_overlay", None)
         label = getattr(self, "preview_typing_overlay_lbl", None)
@@ -2372,10 +2419,7 @@ class CharacterAnnotationTab:
             return
 
         wraplength = max(130, min(185, int(canvas_w * 0.18)))
-        try:
-            label.configure(text=overlay_text, wraplength=wraplength)
-        except Exception:
-            pass
+        self._configure_preview_typing_overlay_text(overlay_text, wraplength)
 
         try:
             overlay.update_idletasks()
@@ -2411,8 +2455,17 @@ class CharacterAnnotationTab:
         overlay_available = self._preview_operation_overlay_available()
 
         if not message:
-            if self._preview_char_add_requested():
-                message = "Przytrzymaj D i przeciągnij LPM po tablicy, aby narysować nowy box."
+            add_state = getattr(self, "_preview_char_add_state", None)
+            if isinstance(add_state, dict) and bool(add_state.get("click_draw")):
+                message = "Rysowanie boxa: przesuń mysz i kliknij drugi narożnik."
+                tone = "info"
+                overlay_only_message = message if overlay_available else ""
+            elif bool(getattr(self, "_preview_char_add_click_armed", False)):
+                message = "D uzbrojone: kliknij pierwszy narożnik boxa na tablicy."
+                tone = "info"
+                overlay_only_message = message if overlay_available else ""
+            elif self._preview_char_add_requested():
+                message = "Narysuj nowy box przeciągnięciem LPM po tablicy."
                 tone = "info"
                 overlay_only_message = message if overlay_available else ""
             elif label_mode_active:
@@ -2429,7 +2482,7 @@ class CharacterAnnotationTab:
                 overlay_only_message = message if overlay_available else ""
             else:
                 message = (
-                    "Q/E przełącza poprzednią/następną tablicę na liście, D+LPM rysuje nowy box, "
+                    "Q/E przełącza poprzednią/następną tablicę na liście, D uzbraja nowy box, "
                     "S zaznacza lub odznacza hoverowany box, Alt+W włącza wpisywanie znaków, "
                     "Enter przełącza pełny ekran. "
                     f"{self._format_preview_layout_semantics(short=True)}"
@@ -2857,6 +2910,7 @@ class CharacterAnnotationTab:
             getattr(self, "_preview_char_add_state", None) is not None
             or getattr(self, "_preview_char_add_mode", False)
             or getattr(self, "_preview_char_add_modifier_down", False)
+            or getattr(self, "_preview_char_add_click_armed", False)
         )
 
     @staticmethod
@@ -2894,6 +2948,7 @@ class CharacterAnnotationTab:
         self._preview_char_edit_mode = False if label_mode_active else True
         self._preview_char_add_mode = False
         self._preview_char_add_modifier_down = False
+        self._preview_char_add_click_armed = False
         self._preview_char_add_state = None
         self._preview_char_selected_index = safe_idx
         self._preview_char_hover_index = safe_idx
@@ -3234,6 +3289,71 @@ class CharacterAnnotationTab:
                 pass
         return True
 
+    def _draw_preview_plate_status_frame(self, data: dict | None = None) -> bool:
+        canvas = getattr(self, "preview_canvas", None)
+        state = getattr(self, "_preview_render_state", None) or {}
+        if canvas is None or not state:
+            return False
+
+        try:
+            canvas.delete("preview_plate_status_frame")
+        except Exception:
+            pass
+
+        source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+        if not isinstance(source_data, dict):
+            return False
+
+        try:
+            status_info = self._get_preview_status_presentation(
+                data=source_data,
+                chars=source_data.get("characters", []),
+                plate_id=str(source_data.get("plate_id", "") or getattr(self, "_preview_active_pid", "") or ""),
+            )
+            status = str(status_info.get("status", "") or "").strip().lower()
+        except Exception:
+            status = str(source_data.get("status", "") or "").strip().lower()
+        if status != "perfect":
+            return False
+
+        try:
+            left = float(state.get("image_left", 0.0) or 0.0)
+            top = float(state.get("image_top", 0.0) or 0.0)
+            right = float(state.get("image_right", left) or left)
+            bottom = float(state.get("image_bottom", top) or top)
+        except Exception:
+            return False
+        if right <= left or bottom <= top:
+            return False
+
+        palette = getattr(self.app, "palette", {})
+        success = palette.get("success", "#2ecc71")
+        panel = palette.get("panel", "#101010")
+        glow = blend_hex_colors(success, panel, 0.36)
+        tags = ("preview_plate_status_frame",)
+        try:
+            canvas.create_rectangle(
+                left - 7,
+                top - 7,
+                right + 7,
+                bottom + 7,
+                outline=glow,
+                width=5,
+                tags=tags,
+            )
+            canvas.create_rectangle(
+                left - 3,
+                top - 3,
+                right + 3,
+                bottom + 3,
+                outline=success,
+                width=3,
+                tags=tags,
+            )
+            return True
+        except Exception:
+            return False
+
     def _redraw_preview_character_overlay_only(self, char_idx: int, *, drag_preview: bool = False) -> bool:
         canvas = getattr(self, "preview_canvas", None)
         state = getattr(self, "_preview_render_state", None) or {}
@@ -3490,6 +3610,8 @@ class CharacterAnnotationTab:
         self._preview_char_runtime = {}
         self._preview_char_record_render_tags = {}
 
+        self._draw_preview_plate_status_frame()
+
         redrawn = False
         chars = self._get_preview_active_character_records(create=False)
         for idx in range(len(chars)):
@@ -3600,6 +3722,9 @@ class CharacterAnnotationTab:
                 self._unbind_preview_char_drag_session()
                 self._preview_char_drag_state = None
             else:
+                self._preview_char_add_click_armed = False
+                self._preview_char_add_modifier_down = False
+                self._preview_char_add_state = None
                 self._preview_char_label_mode = False
                 self._preview_char_label_active_index = None
                 self._preview_char_hover_label_index = None
@@ -3607,7 +3732,11 @@ class CharacterAnnotationTab:
             self._preview_char_add_mode = bool(add)
             if not self._preview_char_add_mode:
                 self._preview_char_add_state = None
+                self._preview_char_add_click_armed = False
+                self._preview_char_add_modifier_down = False
             else:
+                self._preview_char_add_click_armed = False
+                self._preview_char_add_modifier_down = False
                 self._preview_char_label_mode = False
                 self._preview_char_label_active_index = None
                 self._preview_char_hover_label_index = None
@@ -3657,6 +3786,7 @@ class CharacterAnnotationTab:
         self._preview_char_edit_mode = False
         self._preview_char_add_mode = False
         self._preview_char_add_modifier_down = False
+        self._preview_char_add_click_armed = False
         self._preview_char_add_state = None
         self._preview_char_drag_state = None
 
@@ -3984,6 +4114,21 @@ class CharacterAnnotationTab:
     def _on_preview_canvas_motion(self, event=None):
         if event is None:
             return
+        click_add_state = getattr(self, "_preview_char_add_state", None)
+        if isinstance(click_add_state, dict) and bool(click_add_state.get("click_draw")):
+            if self._preview_point_inside_image(event.x, event.y):
+                img_x, img_y = self._preview_canvas_to_image_point(event.x, event.y)
+                click_add_state["bbox"] = [
+                    float(click_add_state.get("start_img_x", img_x)),
+                    float(click_add_state.get("start_img_y", img_y)),
+                    float(img_x),
+                    float(img_y),
+                ]
+                click_add_state["dirty"] = True
+                if not self._redraw_preview_add_box_overlay_only():
+                    self._on_preview_select(None)
+            self._apply_preview_canvas_cursor("crosshair")
+            return
         if (
             self._preview_badge_drag_state is not None
             or self._preview_pan_drag_state is not None
@@ -3993,7 +4138,7 @@ class CharacterAnnotationTab:
             return
 
         action_key = self._extract_preview_action_from_current_item()
-        if action_key in {"reset_view", "edit_source_filename", "toggle_plate_layout"}:
+        if action_key in {"reset_view", "edit_source_filename", "toggle_plate_layout", "clear_action"}:
             previous_hover_box = getattr(self, "_preview_char_hover_index", None)
             previous_hover_label = getattr(self, "_preview_char_hover_label_index", None)
             had_hover = bool(
@@ -4169,10 +4314,25 @@ class CharacterAnnotationTab:
             )
         if keysym == "d":
             if active_label_idx is None:
+                if self._get_preview_active_data(create=False) is None:
+                    self._set_preview_box_info("Najpierw wybierz tablicę z listy.", "warning")
+                    return "break"
                 self._ensure_preview_final_box_mode()
-                self._preview_char_add_modifier_down = True
+                self._preview_char_add_click_armed = True
+                self._preview_char_add_modifier_down = False
+                self._preview_char_add_mode = False
+                self._preview_char_add_state = None
+                self._preview_char_edit_mode = False
+                self._preview_char_label_mode = False
+                self._preview_char_label_active_index = None
+                self._preview_char_hover_label_index = None
+                self._refresh_preview_editor_toolbar()
                 self._apply_preview_canvas_cursor()
-                self._update_preview_edit_status("Przytrzymaj D i przeciągnij LPM, aby narysować nowy box znaku.", tone="info")
+                self._update_preview_edit_status(
+                    "D uzbrojone. Kliknij pierwszy narożnik boxa, przesuń mysz i kliknij drugi narożnik.",
+                    tone="info",
+                )
+                self._on_preview_select(None)
                 return "break"
             return None
         if keysym == "n":
@@ -4431,10 +4591,181 @@ class CharacterAnnotationTab:
         final_bbox = canvas.bbox(rect_id) or bbox
         return float(final_bbox[2] - final_bbox[0]), float(final_bbox[3] - final_bbox[1])
 
-    def _draw_preview_legend_keycap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str):
+    @staticmethod
+    def _normalize_preview_legend_interaction(interaction: str | None) -> str:
+        value = str(interaction or "").strip().lower()
+        if value in {"tap", "click", "single", "1x", "once"}:
+            return "tap"
+        if value in {"hold", "press", "held", "down"}:
+            return "hold"
+        return ""
+
+    def _get_preview_legend_interaction_marker_photo(
+        self,
+        mode: str,
+        *,
+        width: int,
+        height: int,
+        fill: str,
+        outline: str,
+        text_fill: str,
+    ):
+        if not PIL_AVAILABLE:
+            return None
+        cache = getattr(self, "_preview_legend_image_cache", None)
+        if cache is None:
+            cache = {}
+            self._preview_legend_image_cache = cache
+
+        mode_value = self._normalize_preview_legend_interaction(mode)
+        safe_w = max(6, int(width))
+        safe_h = max(6, int(height))
+        key = (
+            "interaction_marker",
+            mode_value,
+            safe_w,
+            safe_h,
+            str(fill),
+            str(outline),
+            str(text_fill),
+        )
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        scale = 6
+        px_w = safe_w * scale
+        px_h = safe_h * scale
+        img = Image.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        marker_fill = self._hex_to_rgba(outline, 238)
+        if mode_value == "tap":
+            margin = max(1, int(1.2 * scale))
+            draw.ellipse(
+                (margin, margin, px_w - margin - 1, px_h - margin - 1),
+                fill=marker_fill,
+            )
+        else:
+            line_h = max(2, int(2.6 * scale))
+            y1 = max(1, int((px_h - line_h) / 2))
+            y2 = min(px_h - 1, y1 + line_h)
+            x1 = max(1, int(1.2 * scale))
+            x2 = min(px_w - 1, px_w - x1)
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=max(1, int(line_h / 2)),
+                fill=marker_fill,
+            )
+
+        photo = ImageTk.PhotoImage(img.resize((safe_w, safe_h), Image.Resampling.LANCZOS), master=self.frame)
+        cache[key] = photo
+        while len(cache) > 64:
+            try:
+                cache.pop(next(iter(cache)), None)
+            except Exception:
+                break
+        return photo
+
+    def _draw_preview_legend_interaction_marker(
+        self,
+        canvas,
+        x: float,
+        y: float,
+        width: float,
+        *,
+        interaction: str | None,
+        fill: str,
+        outline: str,
+        text_fill: str,
+    ) -> None:
+        mode = self._normalize_preview_legend_interaction(interaction)
+        if not mode:
+            return
+
+        center_x = float(x) + (float(width) / 2.0)
+        if mode == "tap":
+            marker_w = 8.0
+            marker_h = 8.0
+            marker_x = center_x - (marker_w / 2.0)
+            marker_y = float(y) - marker_h - 3.0
+            photo = self._get_preview_legend_interaction_marker_photo(
+                mode,
+                width=int(math.ceil(marker_w)),
+                height=int(math.ceil(marker_h)),
+                fill=fill,
+                outline=outline,
+                text_fill=text_fill,
+            )
+            if photo is not None:
+                canvas.create_image(
+                    marker_x,
+                    marker_y,
+                    image=photo,
+                    anchor="nw",
+                    tags=("preview_legend",),
+                )
+            else:
+                dot_r = marker_w / 2.0
+                canvas.create_oval(
+                    marker_x,
+                    marker_y,
+                    marker_x + (dot_r * 2.0),
+                    marker_y + (dot_r * 2.0),
+                    fill=outline,
+                    outline="",
+                    width=0,
+                    tags=("preview_legend",),
+                )
+            return
+
+        marker_w = int(math.ceil(min(22.0, max(14.0, float(width) - 4.0))))
+        marker_h = 6
+        marker_x = center_x - (float(marker_w) / 2.0)
+        marker_y = float(y) - marker_h - 4.0
+        photo = self._get_preview_legend_interaction_marker_photo(
+            mode,
+            width=marker_w,
+            height=marker_h,
+            fill=fill,
+            outline=outline,
+            text_fill=text_fill,
+        )
+        if photo is not None:
+            canvas.create_image(
+                marker_x,
+                marker_y,
+                image=photo,
+                anchor="nw",
+                tags=("preview_legend",),
+            )
+            return
+
+        canvas.create_rectangle(
+            marker_x,
+            marker_y + 2.0,
+            marker_x + marker_w,
+            marker_y + 4.0,
+            fill=str(outline),
+            outline="",
+            width=0,
+            tags=("preview_legend",),
+        )
+
+    def _draw_preview_legend_keycap(self, canvas, x: float, y: float, text: str, *, fill: str, outline: str, text_fill: str, interaction: str | None = None):
         font_obj = self._get_preview_legend_font(8, "bold")
         width = self._measure_preview_legend_token("key", text, font_obj)
         height = 21.0
+        self._draw_preview_legend_interaction_marker(
+            canvas,
+            x,
+            y,
+            width,
+            interaction=interaction,
+            fill=fill,
+            outline=outline,
+            text_fill=text_fill,
+        )
         canvas.create_rectangle(
             x,
             y,
@@ -4674,7 +5005,7 @@ class CharacterAnnotationTab:
         place_preview_hint_overlay(self, refresh=refresh)
 
     def _toggle_preview_overlay_dock(self, event=None):
-        self._preview_overlay_dock_expanded = not bool(getattr(self, "_preview_overlay_dock_expanded", False))
+        self._preview_overlay_dock_expanded = True
         self._preview_overlay_dock_render_key = None
         self._place_preview_overlay_dock(force_render=True)
         self._place_preview_hint_overlay(refresh=True)
@@ -4730,6 +5061,9 @@ class CharacterAnnotationTab:
         muted = str(legend_theme.get("section_muted", palette.get("muted", "#c7c7c7")))
         active = str(palette.get("success", legend_theme.get("badge_plate_outline", "#2fbf71")))
         accent = str(legend_theme.get("badge_plate_outline", active))
+        info = str(palette.get("info", accent))
+        warning = str(palette.get("warning", "#f4c27a"))
+        error = str(palette.get("error", "#e74c3c"))
         return {
             "fill": fill,
             "outline": outline,
@@ -4737,11 +5071,88 @@ class CharacterAnnotationTab:
             "muted": muted,
             "active": active,
             "accent": accent,
+            "info": info,
+            "warning": warning,
+            "error": error,
             "row_fill": blend_hex_colors(outline, fill, 0.12),
             "active_fill": blend_hex_colors(active, fill, 0.22),
             "hidden_fill": blend_hex_colors(outline, fill, 0.06),
             "status_on_fill": blend_hex_colors(active, fill, 0.40),
             "status_off_fill": blend_hex_colors(outline, fill, 0.32),
+        }
+
+    def _get_preview_step3_gate_overlay_state(self) -> dict:
+        try:
+            in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        except Exception:
+            in_campaign = False
+        if not in_campaign:
+            return {"visible": False}
+
+        try:
+            readiness = self._get_campaign_step3_annotation_readiness()
+        except Exception:
+            readiness = {}
+
+        ready = bool(readiness.get("ok"))
+        try:
+            perfect_count = int(readiness.get("perfect_count", 0) or 0)
+        except Exception:
+            perfect_count = 0
+        try:
+            exportable_plate_count = int(readiness.get("exportable_plate_count", 0) or 0)
+        except Exception:
+            exportable_plate_count = 0
+        try:
+            exportable_char_count = int(readiness.get("exportable_char_count", 0) or 0)
+        except Exception:
+            exportable_char_count = 0
+        try:
+            min_exportable_plate_count = int(readiness.get("min_exportable_plate_count", 10) or 10)
+        except Exception:
+            min_exportable_plate_count = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+        try:
+            missing_exportable_plate_count = int(
+                readiness.get(
+                    "missing_exportable_plate_count",
+                    max(0, int(min_exportable_plate_count) - int(exportable_plate_count or 0)),
+                )
+                or 0
+            )
+        except Exception:
+            missing_exportable_plate_count = max(0, int(min_exportable_plate_count) - int(exportable_plate_count or 0))
+
+        quality_plate_count = max(0, int(perfect_count), int(exportable_plate_count))
+        quality_info = CONFIG.describe_yolo_char_dataset_quality(
+            perfect_plates=quality_plate_count,
+            char_boxes=exportable_char_count,
+        )
+        quality_text = str(quality_info.get("label", "SŁABY") or "SŁABY")
+        quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
+        quality_have_text = f"{quality_plate_count} tab. / {int(exportable_char_count)} zn."
+        quality_missing_plates = int(quality_info.get("missing_next_plates", 0) or 0)
+        quality_missing_boxes = int(quality_info.get("missing_next_boxes", 0) or 0)
+        quality_missing_text = f"{quality_missing_plates} tab. / {quality_missing_boxes} zn."
+        quality_missing_ready = bool(quality_missing_plates <= 0 and quality_missing_boxes <= 0)
+
+        return {
+            "visible": True,
+            "ready": ready,
+            "gate_text": "OTWARTA" if ready else "ZAMKNIĘTA",
+            "gate_tone": "success" if ready else "error",
+            "export_condition_text": "OK" if ready else "BRAK",
+            "export_condition_tone": "success" if ready else "error",
+            "quality_text": quality_text,
+            "quality_tone": quality_tone,
+            "quality_have": quality_have_text,
+            "quality_missing": quality_missing_text,
+            "quality_missing_ready": quality_missing_ready,
+            "quality_ranges": str(quality_info.get("range_text", "") or "").strip(),
+            "perfect_count": int(perfect_count),
+            "exportable_plate_count": int(exportable_plate_count),
+            "exportable_char_count": int(exportable_char_count),
+            "min_exportable_plate_count": int(min_exportable_plate_count),
+            "missing_exportable_plate_count": int(missing_exportable_plate_count),
         }
 
     def _render_preview_overlay_dock(self, *, force_render: bool = False) -> tuple[int, int]:
@@ -4753,53 +5164,174 @@ class CharacterAnnotationTab:
         if dock is None:
             return 0, 0
 
-        expanded = bool(getattr(self, "_preview_overlay_dock_expanded", False))
+        self._preview_overlay_dock_expanded = True
+        expanded = True
         legend_visible = bool(getattr(self, "_preview_controls_legend_visible", True))
         assistant_visible = bool(getattr(self, "_preview_operation_assistant_visible", True))
         theme = self._get_preview_overlay_dock_theme()
+        data = self._get_preview_active_data(create=False)
+        layout_text, layout_tone = self._get_preview_plate_layout_dock_text(data)
+        status_meta = self._get_preview_status_presentation(data=data if isinstance(data, dict) else None)
+        status_raw = str(status_meta.get("status", "unknown") or "unknown").strip().lower()
+        status_severity = str(status_meta.get("severity", "muted") or "muted").strip().lower()
+        plate_status_text = "PERFECT" if status_raw == "perfect" else "KOREKTA"
+        if plate_status_text == "PERFECT":
+            status_severity = "success"
+        elif status_severity not in {"warning", "error"}:
+            status_severity = "warning"
+        gate_state = self._get_preview_step3_gate_overlay_state()
+        gate_visible = bool(gate_state.get("visible"))
+        gate_text = str(gate_state.get("gate_text", "—") or "—").strip()
+        gate_tone = str(gate_state.get("gate_tone", "muted") or "muted").strip().lower()
+        export_condition_text = str(gate_state.get("export_condition_text", "—") or "—").strip()
+        export_condition_tone = str(gate_state.get("export_condition_tone", "muted") or "muted").strip().lower()
+        quality_text = str(gate_state.get("quality_text", "—") or "—").strip()
+        quality_tone = str(gate_state.get("quality_tone", "muted") or "muted").strip().lower()
+        quality_have = str(gate_state.get("quality_have", "0") or "0").strip()
+        quality_missing = str(gate_state.get("quality_missing", "0") or "0").strip()
+        quality_missing_ready = bool(gate_state.get("quality_missing_ready", False))
         render_key = (
             int(expanded),
             int(legend_visible),
             int(assistant_visible),
+            layout_text,
+            layout_tone,
+            plate_status_text,
+            status_severity,
+            int(gate_visible),
+            gate_text,
+            gate_tone,
+            export_condition_text,
+            export_condition_tone,
+            quality_text,
+            quality_tone,
+            quality_have,
+            quality_missing,
+            int(quality_missing_ready),
+            int(gate_state.get("perfect_count", 0) or 0),
+            int(gate_state.get("exportable_plate_count", 0) or 0),
+            int(gate_state.get("exportable_char_count", 0) or 0),
             tuple(sorted((str(key), str(value)) for key, value in theme.items())),
         )
         if bool(force_render) or render_key != getattr(self, "_preview_overlay_dock_render_key", None):
             fill = theme["fill"]
-            outline = theme["active"] if expanded else theme["accent"]
+            outline = theme["active"]
             try:
                 dock.configure(bg=fill, highlightbackground=outline, highlightcolor=outline)
                 if header is not None:
                     header.configure(bg=fill)
                 if title is not None:
                     title.configure(
-                        text=("SZUFLADA" if expanded else "OL"),
+                        text="SZUFLADA",
                         bg=fill,
                         fg=theme["text"],
-                        anchor=("w" if expanded else "center"),
+                        anchor="w",
                     )
                 if toggle is not None:
-                    toggle.configure(text=("<" if expanded else ">"), bg=fill, fg=theme["accent"])
+                    toggle.configure(text="", bg=fill, fg=theme["accent"])
+                    try:
+                        toggle.pack_forget()
+                    except Exception:
+                        pass
                 if body is not None:
                     body.configure(bg=fill)
-                    if expanded and not str(body.winfo_manager()):
+                    if not str(body.winfo_manager()):
                         body.pack(fill=tk.X, pady=(5, 0))
-                    elif (not expanded) and str(body.winfo_manager()):
-                        body.pack_forget()
             except Exception:
                 pass
 
             for key, widgets in dict(getattr(self, "_preview_overlay_dock_tool_rows", {}) or {}).items():
+                row_key = str(key)
                 if str(key) == "legend":
                     visible = legend_visible
+                    tone = "success" if visible else "muted"
+                    status_text = "ON" if visible else "OFF"
                 elif str(key) == "assistant":
                     visible = assistant_visible
+                    tone = "success" if visible else "muted"
+                    status_text = "ON" if visible else "OFF"
+                elif row_key == "layout":
+                    visible = True
+                    tone = layout_tone
+                    status_text = layout_text
+                elif row_key == "plate_status":
+                    visible = True
+                    tone = status_severity
+                    status_text = plate_status_text
+                elif row_key == "gate":
+                    if not gate_visible:
+                        row = widgets.get("row")
+                        try:
+                            if row is not None and str(row.winfo_manager()):
+                                row.pack_forget()
+                        except Exception:
+                            pass
+                        continue
+                    visible = True
+                    tone = gate_tone
+                    status_text = gate_text
+                elif row_key == "export_condition":
+                    if not gate_visible:
+                        row = widgets.get("row")
+                        try:
+                            if row is not None and str(row.winfo_manager()):
+                                row.pack_forget()
+                        except Exception:
+                            pass
+                        continue
+                    visible = True
+                    tone = export_condition_tone
+                    status_text = export_condition_text
+                elif row_key == "quality":
+                    if not gate_visible:
+                        row = widgets.get("row")
+                        try:
+                            if row is not None and str(row.winfo_manager()):
+                                row.pack_forget()
+                        except Exception:
+                            pass
+                        continue
+                    visible = True
+                    tone = quality_tone
+                    status_text = quality_text
+                elif row_key == "quality_have":
+                    if not gate_visible:
+                        row = widgets.get("row")
+                        try:
+                            if row is not None and str(row.winfo_manager()):
+                                row.pack_forget()
+                        except Exception:
+                            pass
+                        continue
+                    visible = True
+                    tone = quality_tone
+                    status_text = quality_have
+                elif row_key == "quality_missing":
+                    if not gate_visible:
+                        row = widgets.get("row")
+                        try:
+                            if row is not None and str(row.winfo_manager()):
+                                row.pack_forget()
+                        except Exception:
+                            pass
+                        continue
+                    visible = True
+                    tone = "success" if quality_missing_ready else quality_tone
+                    status_text = quality_missing
                 else:
                     visible = False
-                status_text = "ON" if visible else "OFF"
-                row_bg = theme["active_fill"] if visible else theme["hidden_fill"]
+                    tone = "muted"
+                    status_text = "OFF"
+                tone_color = {
+                    "success": theme["active"],
+                    "info": theme["info"],
+                    "warning": theme["warning"],
+                    "error": theme["error"],
+                }.get(tone, theme["outline"])
+                row_bg = fill
                 row_fg = theme["text"] if visible else theme["muted"]
-                icon_bg = theme["active"] if visible else theme["row_fill"]
-                status_bg = theme["status_on_fill"] if visible else theme["status_off_fill"]
+                icon_bg = fill
+                status_bg = blend_hex_colors(tone_color, fill, 0.40) if visible else theme["status_off_fill"]
                 status_fg = theme["text"] if visible else theme["muted"]
                 row = widgets.get("row")
                 try:
@@ -4807,10 +5339,10 @@ class CharacterAnnotationTab:
                         row.pack(fill=tk.X)
                     row.configure(
                         bg=row_bg,
-                        highlightbackground=(theme["active"] if visible else theme["outline"]),
-                        highlightcolor=(theme["active"] if visible else theme["outline"]),
+                        highlightbackground=theme["outline"],
+                        highlightcolor=theme["outline"],
                     )
-                    widgets["icon"].configure(bg=icon_bg, fg=theme["fill"] if visible else theme["muted"])
+                    widgets["icon"].configure(bg=icon_bg, fg=theme["muted"])
                     widgets["label"].configure(bg=row_bg, fg=row_fg)
                     widgets["status"].configure(bg=status_bg, fg=status_fg, text=status_text)
                 except Exception:
@@ -4824,7 +5356,7 @@ class CharacterAnnotationTab:
         except Exception:
             width = 118 if expanded else 36
             height = 96 if expanded else 30
-        return int(max(34, min(160, width))), int(max(28, min(132, height)))
+        return int(max(138, min(220, width))), int(max(136, min(318, height)))
 
     def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
         dock = getattr(self, "preview_overlay_dock", None)
@@ -5043,6 +5575,40 @@ class CharacterAnnotationTab:
                 return str(tag).split("preview_action::", 1)[1]
         return None
 
+    def _clear_preview_canvas_action(self, event=None):
+        cleared_typing = self._cancel_preview_char_label_interaction(reset_mode=True, clear_hover=True)
+        if cleared_typing:
+            self._preview_char_selected_index = None
+            self._preview_pan_drag_state = None
+            self._preview_badge_drag_state = None
+            self._preview_char_drag_state = None
+            self._preview_char_add_state = None
+            self._refresh_preview_editor_toolbar()
+            self._update_preview_edit_status("Zakończono tryb wpisywania znaków.", tone="muted")
+            self._on_preview_select(None)
+            return "break"
+
+        if (
+            getattr(self, "_preview_char_add_state", None) is not None
+            or getattr(self, "_preview_char_add_click_armed", False)
+            or getattr(self, "_preview_char_add_modifier_down", False)
+            or getattr(self, "_preview_char_add_mode", False)
+        ):
+            self._preview_char_add_state = None
+            self._preview_char_add_click_armed = False
+            self._preview_char_add_modifier_down = False
+            self._preview_char_add_mode = False
+            self._preview_pan_drag_state = None
+            self._preview_badge_drag_state = None
+            self._refresh_preview_editor_toolbar()
+            self._apply_preview_canvas_cursor()
+            self._update_preview_edit_status("Wyczyszczono rysowanie nowego boxa.", tone="muted")
+            self._on_preview_select(None)
+            return "break"
+
+        self._update_preview_edit_status("Brak aktywnej akcji do wyczyszczenia.", tone="muted")
+        return "break"
+
     def _start_preview_character_box_drag(self, char_idx, mode, event, *, handle_name=None, cursor="fleur") -> bool:
         chars = self._get_preview_active_character_records(create=False)
         try:
@@ -5093,6 +5659,8 @@ class CharacterAnnotationTab:
             return self._edit_preview_source_filename(event)
         if action_key == "toggle_plate_layout":
             return self._cycle_preview_plate_layout_override(event)
+        if action_key == "clear_action":
+            return self._clear_preview_canvas_action(event)
 
         badge_key = self._extract_preview_badge_key_from_current_item()
         if badge_key:
@@ -5121,6 +5689,54 @@ class CharacterAnnotationTab:
         self._preview_pan_drag_state = None
         edit_mode = bool(getattr(self, "_preview_char_edit_mode", False))
         label_mode = bool(getattr(self, "_preview_char_label_mode", False))
+
+        click_add_state = getattr(self, "_preview_char_add_state", None)
+        if isinstance(click_add_state, dict) and bool(click_add_state.get("click_draw")):
+            if not self._preview_point_inside_image(event.x, event.y):
+                self._update_preview_edit_status(
+                    "Drugi narożnik boxa musi być wewnątrz tablicy.",
+                    tone="warning",
+                )
+                return "break"
+            img_x, img_y = self._preview_canvas_to_image_point(event.x, event.y)
+            click_add_state["bbox"] = [
+                float(click_add_state.get("start_img_x", img_x)),
+                float(click_add_state.get("start_img_y", img_y)),
+                float(img_x),
+                float(img_y),
+            ]
+            click_add_state["dirty"] = True
+            click_add_state["click_finalize"] = True
+            return self._finalize_preview_char_add_state()
+
+        if bool(getattr(self, "_preview_char_add_click_armed", False)):
+            if not self._preview_point_inside_image(event.x, event.y):
+                self._update_preview_edit_status(
+                    "Kliknij pierwszy narożnik boxa wewnątrz tablicy.",
+                    tone="warning",
+                )
+                return "break"
+            self._preview_char_edit_mode = False
+            self._preview_char_add_mode = False
+            self._preview_char_add_modifier_down = False
+            img_x, img_y = self._preview_canvas_to_image_point(event.x, event.y)
+            self._preview_char_selected_index = None
+            self._preview_char_add_state = {
+                "start_img_x": float(img_x),
+                "start_img_y": float(img_y),
+                "bbox": [float(img_x), float(img_y), float(img_x), float(img_y)],
+                "dirty": False,
+                "click_draw": True,
+            }
+            self._refresh_preview_editor_toolbar()
+            self._apply_preview_canvas_cursor("crosshair")
+            self._update_preview_edit_status(
+                "Pierwszy narożnik ustawiony. Przesuń mysz i kliknij drugi narożnik boxa.",
+                tone="info",
+            )
+            if not self._redraw_preview_add_box_overlay_only():
+                self._on_preview_select(None)
+            return "break"
 
         if edit_mode and not label_mode:
             handle_hit = self._find_preview_character_handle_hit(event.x, event.y)
@@ -5251,7 +5867,8 @@ class CharacterAnnotationTab:
                 "Najedź kursorem na box i naciśnij S, aby go zaznaczyć. Zaznaczony box przesuniesz LPM, zmienisz uchwytami i usuniesz PPM.",
                 tone="info",
             )
-            return "break"
+            if edit_mode or label_mode:
+                return "break"
 
         self._preview_char_selected_index = None
         self._refresh_preview_editor_toolbar()
@@ -5398,6 +6015,67 @@ class CharacterAnnotationTab:
         self._on_preview_select(None)
         return "break"
 
+    def _finalize_preview_char_add_state(self) -> str:
+        char_add_state = getattr(self, "_preview_char_add_state", None)
+        if not isinstance(char_add_state, dict):
+            return "break"
+
+        click_draw = bool(char_add_state.get("click_draw"))
+        self._preview_char_add_state = None
+        if click_draw:
+            self._preview_char_add_click_armed = False
+            self._preview_char_add_modifier_down = False
+            self._preview_char_add_mode = False
+
+        try:
+            self.preview_canvas.configure(cursor=("crosshair" if self._preview_char_add_requested() else "arrow"))
+        except Exception:
+            pass
+
+        bbox = self._normalize_preview_char_bbox(char_add_state.get("bbox"))
+        if bbox is None:
+            if click_draw:
+                self._preview_char_add_click_armed = True
+            self._on_preview_select(None)
+            return "break"
+
+        width = float(bbox[2]) - float(bbox[0])
+        height = float(bbox[3]) - float(bbox[1])
+        if width < 6.0 or height < 6.0:
+            if click_draw:
+                self._preview_char_add_click_armed = True
+            self._set_preview_box_info("Nowy box jest zbyt mały. Spróbuj ponownie.", "warning")
+            self._update_preview_edit_status("Nowy box jest zbyt mały. Wskaż pierwszy narożnik ponownie.", tone="warning")
+            self._apply_preview_canvas_cursor("crosshair" if click_draw else None)
+            self._on_preview_select(None)
+            return "break"
+
+        chars = self._get_preview_active_character_records(create=True)
+        self._push_preview_history_snapshot()
+        new_record = {
+            "character": "",
+            "bbox": bbox,
+            "confidence": 1.0,
+            "method": "manual",
+            "source_tag": "ocr",
+        }
+        chars.append(new_record)
+        self._mark_preview_char_record_manual(new_record)
+        self._preview_char_edit_mode = True
+        self._preview_char_label_active_index = None
+        self._preview_char_hover_label_index = None
+        self._persist_active_preview_characters(
+            selected_record=new_record,
+            success_message="Dodano nowy box znaku do metadata.json.",
+        )
+        if click_draw:
+            status_message = "Dodano nowy box. Tryb rysowania z D został wyłączony."
+        else:
+            status_message = "Dodano nowy box. Pozostaje zaznaczony do dalszej korekty, ale nie włącza pola wpisywania znaku."
+        self._update_preview_edit_status(status_message, tone="success")
+        self._on_preview_select(None)
+        return "break"
+
     def _on_preview_canvas_release(self, event):
         char_drag_state = getattr(self, "_preview_char_drag_state", None)
         if isinstance(char_drag_state, dict):
@@ -5426,49 +6104,9 @@ class CharacterAnnotationTab:
 
         char_add_state = getattr(self, "_preview_char_add_state", None)
         if isinstance(char_add_state, dict):
-            self._preview_char_add_state = None
-            try:
-                self.preview_canvas.configure(cursor=("crosshair" if self._preview_char_add_requested() else "arrow"))
-            except Exception:
-                pass
-
-            bbox = self._normalize_preview_char_bbox(char_add_state.get("bbox"))
-            if bbox is None:
-                self._on_preview_select(None)
+            if bool(char_add_state.get("click_draw")) and not bool(char_add_state.get("click_finalize")):
                 return "break"
-
-            width = float(bbox[2]) - float(bbox[0])
-            height = float(bbox[3]) - float(bbox[1])
-            if width < 6.0 or height < 6.0:
-                self._set_preview_box_info("Nowy box jest zbyt mały. Spróbuj ponownie.", "warning")
-                self._update_preview_edit_status("Nowy box jest zbyt mały. Spróbuj ponownie.", tone="warning")
-                self._on_preview_select(None)
-                return "break"
-
-            chars = self._get_preview_active_character_records(create=True)
-            self._push_preview_history_snapshot()
-            new_record = {
-                "character": "",
-                "bbox": bbox,
-                "confidence": 1.0,
-                "method": "manual",
-                "source_tag": "ocr",
-            }
-            chars.append(new_record)
-            self._mark_preview_char_record_manual(new_record)
-            self._preview_char_edit_mode = True
-            self._preview_char_label_active_index = None
-            self._preview_char_hover_label_index = None
-            self._persist_active_preview_characters(
-                selected_record=new_record,
-                success_message="Dodano nowy box znaku do metadata.json.",
-            )
-            self._update_preview_edit_status(
-                "Dodano nowy box. Pozostaje zaznaczony do dalszej korekty, ale nie włącza pola wpisywania znaku.",
-                tone="success",
-            )
-            self._on_preview_select(None)
-            return "break"
+            return self._finalize_preview_char_add_state()
 
         if self._preview_badge_drag_state is None and self._preview_pan_drag_state is None:
             return
@@ -5618,13 +6256,37 @@ class CharacterAnnotationTab:
     def _preview_dir_has_plate_entries(self, preview_dir=None) -> bool:
         return self._get_preview_dir_plate_count(preview_dir) > 0
 
-    def _get_campaign_expected_step3_preview_plate_count(self) -> int:
+    def _is_campaign_char_step3_context(self) -> bool:
         try:
-            in_campaign = bool(
+            return bool(
                 getattr(self, "_step3_linear_mode", False)
                 and CAMPAIGN.get_active_project_name()
                 and str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char"
             )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _get_campaign_step3_min_extracted_plate_count() -> int:
+        return 10
+
+    def _campaign_preview_meets_min_extracted_plate_count(self, preview_dir=None) -> bool:
+        if not self._is_campaign_char_step3_context():
+            return True
+        return bool(
+            self._get_preview_dir_plate_count(preview_dir)
+            >= self._get_campaign_step3_min_extracted_plate_count()
+        )
+
+    def _campaign_preview_is_below_min_extracted_plate_count(self, preview_dir=None) -> bool:
+        if not self._is_campaign_char_step3_context():
+            return False
+        count = self._get_preview_dir_plate_count(preview_dir)
+        return bool(0 <= int(count) < self._get_campaign_step3_min_extracted_plate_count())
+
+    def _get_campaign_expected_step3_preview_plate_count(self) -> int:
+        try:
+            in_campaign = self._is_campaign_char_step3_context()
         except Exception:
             in_campaign = False
         if not in_campaign:
@@ -5708,8 +6370,8 @@ class CharacterAnnotationTab:
 
     def _find_latest_preview_run_dir(self, require_plates: bool = False) -> str:
         """
-        Szuka najnowszej poprawnej paczki preview w katalogu chars projektu.
-        Poprawna paczka to katalog zawierający:
+        Szuka najnowszego poprawnego preview runu w katalogu chars projektu.
+        Poprawny preview run to katalog zawierający:
         - metadata.json
         - images/
         """
@@ -6070,7 +6732,7 @@ class CharacterAnnotationTab:
         
     def _restore_preview_context_from_project(self, require_plates: bool = False):
         """
-        Przywraca ostatnią paczkę preview projektu, jeśli istnieje.
+        Przywraca ostatni preview run projektu, jeśli istnieje.
         """
         preview_dir = self._get_preferred_step3_preview_dir(
             require_plates=require_plates,
@@ -6085,7 +6747,7 @@ class CharacterAnnotationTab:
             self._load_preview_data(quiet=True)
             return True
         except Exception as e:
-            logger.debug(f"Nie udało się przywrócić preview paczki projektu: {e}")
+            logger.debug(f"Nie udało się przywrócić preview runu projektu: {e}")
             return False
 
     def _ensure_detection_preview_loaded(self, force_reload: bool = False) -> bool:
@@ -6133,7 +6795,7 @@ class CharacterAnnotationTab:
             self._reset_preview_cache()
             self._load_preview_data(quiet=True)
         except Exception as e:
-            logger.debug(f"Nie udało się automatycznie wczytać paczki PZ2: {e}")
+            logger.debug(f"Nie udało się automatycznie wczytać zestawu PZ2: {e}")
             return False
 
         return bool(self.preview_plate_ids)
@@ -6304,8 +6966,13 @@ class CharacterAnnotationTab:
         return layout_meta
 
     def _get_preview_plate_layout_label(self, data) -> tuple[str, str]:
+        override = str((data or {}).get("plate_layout_override", "") or "").strip().lower()
+        if override == "single_row":
+            return "1R*", "success"
+        if override == "two_row":
+            return "2R*", "warning"
+
         layout = str((data or {}).get("plate_layout", "") or "").strip().lower()
-        manual_override = str((data or {}).get("plate_layout_override", "") or "").strip().lower() in {"single_row", "two_row"}
         confidence = (data or {}).get("layout_confidence", None)
         confidence_suffix = ""
         try:
@@ -6314,8 +6981,6 @@ class CharacterAnnotationTab:
                 confidence_suffix = "?"
         except Exception:
             confidence_suffix = "?"
-        if manual_override:
-            confidence_suffix = "*"
 
         if layout == "two_row":
             return f"2R{confidence_suffix}", "warning"
@@ -6325,16 +6990,43 @@ class CharacterAnnotationTab:
             return f"1R{confidence_suffix}", "success"
         return "?", "muted"
 
+    def _get_preview_plate_layout_dock_text(self, data) -> tuple[str, str]:
+        override = str((data or {}).get("plate_layout_override", "") or "").strip().lower()
+        if override == "single_row":
+            return "RĘCZ. 1R", "success"
+        if override == "two_row":
+            return "RĘCZ. 2R", "warning"
+
+        layout_text, tone = self._get_preview_plate_layout_label(data)
+        normalized = str(layout_text or "").strip().upper()
+        if normalized.startswith("1R?"):
+            return "AUTO 1R?", tone
+        if normalized.startswith("1R"):
+            return "AUTO 1R", tone
+        if normalized.startswith("2R?"):
+            return "AUTO 2R?", tone
+        if normalized.startswith("2R"):
+            return "AUTO 2R", tone
+        return "AUTO ?", "muted"
+
     def _get_preview_plate_layout_button_text(self, data) -> str:
+        override = str((data or {}).get("plate_layout_override", "") or "").strip().lower()
+        if override == "single_row":
+            return "Ręcznie: 1 rząd"
+        if override == "two_row":
+            return "Ręcznie: 2 rzędy"
+
         layout_text, _tone = self._get_preview_plate_layout_label(data)
         normalized = str(layout_text or "").strip().upper()
+        if normalized.startswith("1R?"):
+            return "Auto: sprawdź 1R"
         if normalized.startswith("1R"):
-            return "Rzędy: 1"
+            return "Auto: 1 rząd"
         if normalized.startswith("2R?"):
-            return "Rzędy: sprawdź"
+            return "Auto: sprawdź 2R"
         if normalized.startswith("2R"):
-            return "Rzędy: 2"
-        return "Rzędy: auto"
+            return "Auto: 2 rzędy"
+        return "Auto: brak danych"
 
     def _get_preview_character_reading_position_label(self, rec, data=None) -> str:
         if not isinstance(rec, dict):
@@ -6353,10 +7045,12 @@ class CharacterAnnotationTab:
 
     def _format_preview_layout_semantics(self, *, short: bool = False) -> str:
         if short:
-            return "Rzędy: 1 = jeden rząd, 2 = dwa rzędy, „sprawdź” = układ niepewny, „ręcznie” = decyzja użytkownika; 1.2 = rząd 1, znak 2."
+            return "AUTO pokazuje wykryty układ. Ręczna decyzja ma pierwszeństwo; 1.2 = rząd 1, znak 2."
         return (
-            "Semantyka układu: 1R oznacza tablicę jednorzędową, 2R tablicę dwurzędową, "
+            "Semantyka układu: AUTO 1R/2R/2R? pokazuje układ wykryty przez program, "
+            "1R oznacza tablicę jednorzędową, 2R tablicę dwurzędową, "
             "znak ? oznacza rozpoznanie niepewne, a * decyzję ręcznie wymuszoną przez użytkownika. "
+            "Ręcznie wymuszony układ ma pierwszeństwo przed automatyczną inferencją. "
             "Małe indeksy przy boxach, np. 1.2, oznaczają kolejność czytania: rząd 1, znak 2."
         )
 
@@ -7033,19 +7727,6 @@ class CharacterAnnotationTab:
 
         self._persist_preview_metadata(success_message=None, refresh_list=True)
 
-        preset_label = {
-            "yolo": "YOLO",
-            "ocr": "OCR",
-            "auto": "AUTO",
-            "all": "WSZYSTKO",
-        }[normalized]
-        message = (
-            f"Wyczyszczono źródło {preset_label} dla {touched} tablic: "
-            f"final={int(total_removed_final)}, warstwy YOLO={int(total_removed_yolo_layers)}."
-        )
-        self._update_preview_edit_status(message, tone="success")
-        self._set_preview_box_info(message, "success")
-
     def _is_manual_character_record(self, rec, data=None) -> bool:
         try:
             source_kind = str(self._get_character_source_kind(rec, data=data) or "").strip().lower()
@@ -7551,6 +8232,97 @@ class CharacterAnnotationTab:
             selected_strategies=selected_strategies,
             selected_sources=selected_sources,
         )
+
+    def _get_step3_yolo_export_readiness_snapshot(self, *, selected_strategies=None, selected_sources=None) -> dict:
+        try:
+            in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        except Exception:
+            in_campaign = False
+        min_exportable_plate_count = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10) if in_campaign else 1
+        selected_buckets = set(selected_strategies if selected_strategies is not None else self._get_selected_gold_export_strategy_buckets())
+        selected_source_buckets = set(selected_sources if selected_sources is not None else self._get_selected_gold_export_source_buckets())
+        result = {
+            "ok": False,
+            "reason": "",
+            "message": "",
+            "selected_plate_count": 0,
+            "selected_char_count": 0,
+            "candidate_count": 0,
+            "min_exportable_plate_count": int(min_exportable_plate_count),
+            "missing_exportable_plate_count": int(min_exportable_plate_count),
+        }
+
+        if not selected_buckets:
+            result.update(
+                reason="missing_strategy_filter",
+                message="PZ3 nie ma wybranej strategii gold packa, więc eksport datasetu znaków nie jest możliwy.",
+            )
+            return result
+        if not selected_source_buckets:
+            result.update(
+                reason="missing_source_filter",
+                message="PZ3 nie ma wybranego źródła gold packa, więc eksport datasetu znaków nie jest możliwy.",
+            )
+            return result
+
+        try:
+            plate_entries, _strategy_counts, _selected_strategy_counts, _source_counts, _selected_source_counts = (
+                self._collect_gold_export_plate_candidates(selected_buckets, selected_source_buckets)
+            )
+        except Exception as exc:
+            result.update(
+                reason="candidate_scan_failed",
+                message=f"Nie udało się sprawdzić gotowości eksportu PZ3: {exc}",
+            )
+            return result
+
+        exportable_plate_count = 0
+        exportable_char_count = 0
+        for plate_entry in list(plate_entries or []):
+            data = plate_entry.get("data", {}) if isinstance(plate_entry, dict) else {}
+            chars = list(data.get("characters", []) or []) if isinstance(data, dict) else []
+            char_count = sum(1 for rec in chars if self._is_exportable_character_record(rec))
+            if char_count <= 0:
+                continue
+            exportable_plate_count += 1
+            exportable_char_count += int(char_count)
+
+        missing_exportable = max(0, int(min_exportable_plate_count) - int(exportable_plate_count or 0))
+        result.update(
+            ok=bool(exportable_plate_count >= int(min_exportable_plate_count) and exportable_char_count > 0),
+            selected_plate_count=int(exportable_plate_count),
+            selected_char_count=int(exportable_char_count),
+            candidate_count=int(len(plate_entries or [])),
+            missing_exportable_plate_count=int(missing_exportable),
+        )
+        if not result["ok"]:
+            if exportable_plate_count < int(min_exportable_plate_count):
+                message = (
+                    (
+                        f"Bramka E3 pozostaje zamknięta. Minimum kampanii to {min_exportable_plate_count} "
+                        f"eksportowalnych tablic perfect, obecnie PZ3 widzi {exportable_plate_count}. "
+                        f"Brakuje {missing_exportable}."
+                    )
+                    if in_campaign
+                    else (
+                        f"PZ3 potrzebuje co najmniej {min_exportable_plate_count} eksportowalnej tablicy perfect, "
+                        f"obecnie widzi {exportable_plate_count}."
+                    )
+                )
+            else:
+                message = (
+                    "Bramka E3 pozostaje zamknięta, bo PZ3 nie ma jeszcze poprawnych boxów znaków i etykiet "
+                    "objętych aktualnym zakresem gold packa."
+                    if in_campaign
+                    else (
+                        "PZ3 nie ma jeszcze poprawnych boxów znaków, etykiet i aktualnego zakresu gold packa."
+                    )
+                )
+            result.update(
+                reason="no_exportable_yolo_candidates",
+                message=message,
+            )
+        return result
 
     def _get_gold_export_meta_candidates(self) -> list[Path]:
         in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
@@ -9277,7 +10049,7 @@ class CharacterAnnotationTab:
                     highlightthickness=1,
                     highlightbackground=shell_border,
                     highlightcolor=shell_border,
-                    padx=(4 if idx == 1 else 3),
+                    padx=3,
                     pady=5,
                 )
             except Exception:
@@ -9473,24 +10245,36 @@ class CharacterAnnotationTab:
         if overlay is None or label is None:
             return
 
-        panel_alt = palette.get("panel_alt", palette.get("panel", "#252526"))
-        warning = palette.get("warning", "#f39c12")
-        border = blend_hex_colors(warning, panel_alt, 0.42)
-        fill = blend_hex_colors(warning, panel_alt, 0.84)
-        fg = palette.get("fg", "#f3f3f3")
+        panel = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", panel)
+        accent = palette.get("accent", palette.get("success", "#2ecc71"))
+        border = blend_hex_colors(accent, panel_alt, 0.28)
+        fill = blend_hex_colors(panel_alt, panel, 0.22)
+        fg = palette.get("muted", palette.get("fg", "#f3f3f3"))
+        key_fg = palette.get("success", accent)
 
         try:
             overlay.configure(
                 bg=fill,
                 highlightbackground=border,
                 highlightcolor=border,
-                padx=8,
-                pady=10,
+                padx=6,
+                pady=4,
             )
         except Exception:
             pass
         try:
-            label.configure(bg=fill, fg=fg, font=("Segoe UI", 9, "bold"))
+            label.configure(
+                bg=fill,
+                fg=fg,
+                font=("Segoe UI", 8, "normal"),
+                insertbackground=fg,
+                selectbackground=blend_hex_colors(accent, fill, 0.42),
+                selectforeground=palette.get("fg", "#f3f3f3"),
+            )
+            if isinstance(label, tk.Text):
+                label.tag_configure("body", foreground=fg, font=("Segoe UI", 8, "normal"))
+                label.tag_configure("key", foreground=key_fg, font=("Segoe UI", 8, "bold"))
         except Exception:
             pass
 
@@ -10259,9 +11043,6 @@ class CharacterAnnotationTab:
                 "block_key": block_key,
             }
 
-        def _select_from_tag(selected=selected_index):
-            return selected
-
         for idx in self._detection_pipeline_runtime.keys():
             canvas.tag_bind(
                 f"det_pipeline_block::{idx}",
@@ -10625,12 +11406,6 @@ class CharacterAnnotationTab:
     def _toggle_detection_advanced_panel(self):
         self._detection_advanced_expanded = not bool(getattr(self, "_detection_advanced_expanded", False))
         self._refresh_detection_advanced_sections()
-
-    def _toggle_ocr_advanced_panel(self):
-        self._toggle_detection_advanced_panel()
-
-    def _toggle_yolo_advanced_panel(self):
-        self._toggle_detection_advanced_panel()
 
     def _get_detection_advanced_toggle_label(self) -> str:
         expanded = bool(getattr(self, "_detection_advanced_expanded", False))
@@ -11523,6 +12298,141 @@ class CharacterAnnotationTab:
                 "offset_dy": float(offset_dy),
             }
 
+    def _draw_preview_clear_action_bucket(self, canvas=None) -> bool:
+        canvas = canvas or getattr(self, "preview_canvas", None)
+        state = getattr(self, "_preview_render_state", None) or {}
+        if canvas is None or not state:
+            return False
+
+        try:
+            canvas.delete("preview_clear_action")
+        except Exception:
+            pass
+
+        try:
+            image_left = float(state.get("image_left", 0.0) or 0.0)
+            image_top = float(state.get("image_top", 0.0) or 0.0)
+            image_bottom = float(state.get("image_bottom", image_top) or image_top)
+            canvas_w = max(40.0, float(canvas.winfo_width() or 40))
+            canvas_h = max(40.0, float(canvas.winfo_height() or 40))
+        except Exception:
+            return False
+
+        size = 30.0
+        gap = 10.0
+        pad = 6.0
+        x = image_left - size - gap
+        y = image_bottom + gap
+        if x < pad:
+            x = image_left + gap
+        if y + size > canvas_h - pad:
+            x = image_left - size - gap
+            y = image_bottom - size - gap
+            if x < pad:
+                x = image_left + gap
+                y = min(max(pad, image_bottom + gap), canvas_h - size - pad)
+        x = max(pad, min(canvas_w - size - pad, x))
+        y = max(pad, min(canvas_h - size - pad, y))
+        x2 = x + size
+        y2 = y + size
+        tags = ("preview_clear_action", "preview_overlay_action", "preview_action::clear_action")
+
+        palette = getattr(self.app, "palette", {})
+        panel = str(palette.get("panel", "#252526"))
+        border = str(palette.get("border", "#3c3c3c"))
+        success = str(palette.get("success", "#2ecc71"))
+        info = str(palette.get("info", "#60a5fa"))
+        fg = str(palette.get("fg", "#f3f3f3"))
+        active = bool(
+            getattr(self, "_preview_char_label_mode", False)
+            or getattr(self, "_preview_char_label_active_index", None) is not None
+        )
+        fill = blend_hex_colors(success if active else border, panel, 0.28 if active else 0.18)
+        outline = success if active else border
+        bucket_fill = blend_hex_colors(fg, fill, 0.18)
+        water_fill = blend_hex_colors(info, fill, 0.30)
+
+        try:
+            link_end_x = x2 if x2 <= image_left else x + (size / 2.0)
+            link_end_y = y + (size / 2.0) if x2 <= image_left else y
+            control_x = (image_left + link_end_x) / 2.0
+            control_y = (image_bottom + link_end_y) / 2.0 + 5.0
+            canvas.create_line(
+                image_left,
+                image_bottom,
+                control_x,
+                control_y,
+                link_end_x,
+                link_end_y,
+                fill=outline,
+                width=1,
+                dash=(3, 2),
+                smooth=True,
+                tags=tags,
+            )
+            canvas.create_rectangle(
+                x,
+                y,
+                x2,
+                y2,
+                fill=fill,
+                outline=outline,
+                width=2 if active else 1,
+                tags=tags,
+            )
+            bucket_points = (
+                x + 8.0, y + 11.0,
+                x + 22.0, y + 11.0,
+                x + 20.0, y + 24.0,
+                x + 10.0, y + 24.0,
+            )
+            canvas.create_polygon(
+                bucket_points,
+                fill=bucket_fill,
+                outline=fg,
+                width=1,
+                tags=tags,
+            )
+            canvas.create_arc(
+                x + 9.0,
+                y + 4.0,
+                x + 21.0,
+                y + 16.0,
+                start=20,
+                extent=140,
+                style=tk.ARC,
+                outline=fg,
+                width=1,
+                tags=tags,
+            )
+            canvas.create_line(
+                x + 10.0,
+                y + 16.0,
+                x + 13.0,
+                y + 14.5,
+                x + 16.0,
+                y + 16.0,
+                x + 20.0,
+                y + 14.5,
+                fill=water_fill,
+                width=2,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
+                tags=tags,
+            )
+            canvas.create_line(
+                x + 8.0,
+                y + 27.0,
+                x + 22.0,
+                y + 27.0,
+                fill=outline,
+                width=1,
+                tags=tags,
+            )
+            return True
+        except Exception:
+            return False
+
     def _draw_preview_canvas_info_overlay(
         self,
         canvas,
@@ -11560,13 +12470,6 @@ class CharacterAnnotationTab:
         source_counts = self._count_character_sources(box_chars, data=data)
         source_image = str((data or {}).get("source_image", "") or "").strip()
         source_name = self._truncate_preview_filename(Path(source_image).name if source_image else "Brak pliku", max_chars=24)
-        layout_text, layout_tone = self._get_preview_plate_layout_label(data)
-        layout_button_text = self._get_preview_plate_layout_button_text(data)
-        layout_color = {
-            "success": success_fg,
-            "warning": warning_fg,
-            "error": error_fg,
-        }.get(layout_tone, muted_fg)
         current_idx = self._get_current_preview_list_index()
         total = len(getattr(self, "_listbox_pid_by_index", []))
         current_no = (int(current_idx) + 1) if current_idx is not None and total > 0 else 0
@@ -11683,13 +12586,6 @@ class CharacterAnnotationTab:
                 "outline": warning_fg,
                 "width": 78.0,
                 "tags": ("preview_overlay",),
-            },
-            {
-                "text": layout_button_text,
-                "fill": blend_hex_colors(layout_color, panel_bg, 0.84),
-                "outline": layout_color,
-                "width": 118.0,
-                "tags": ("preview_overlay", "preview_overlay_action", "preview_action::toggle_plate_layout"),
             },
         ]
         row_start_x = 10.0
@@ -12052,6 +12948,7 @@ class CharacterAnnotationTab:
             self._preview_char_edit_mode = False
             self._preview_char_add_mode = False
             self._preview_char_add_modifier_down = False
+            self._preview_char_add_click_armed = False
             self._preview_char_drag_state = None
             self._preview_char_add_state = None
         try:
@@ -13524,7 +14421,7 @@ class CharacterAnnotationTab:
             ),
             ("Liczba zdjęć", images_count, "Pula sprawdzona względem XML"),
             ("Liczba anotacji", plates_text, "Tablice do przygotowania w PZ2"),
-            ("Wynik", output_text, "Docelowa paczka PZ2"),
+            ("Wynik", output_text, "Docelowy zestaw wyciętych tablic PZ2"),
         ]
 
     def _set_extract_start_summary_rows(self, rows: list[tuple[str, ...]]) -> None:
@@ -13870,6 +14767,7 @@ class CharacterAnnotationTab:
             return bool(
                 self._is_usable_step3_preview_dir(preview_dir_raw, require_plates=True)
                 and self._preview_matches_current_extract_source(preview_dir_raw)
+                and self._campaign_preview_meets_min_extracted_plate_count(preview_dir_raw)
             )
         except Exception:
             return False
@@ -13894,10 +14792,27 @@ class CharacterAnnotationTab:
             return
 
         source_ready = bool(getattr(self, "_extract_last_source_binding_result", {}).get("ok"))
+        technical_preview_ready = bool(
+            self._is_usable_step3_preview_dir(
+                self.preview_dir_var.get() if hasattr(self, "preview_dir_var") else "",
+                require_plates=True,
+            )
+            and self._preview_matches_current_extract_source(
+                self.preview_dir_var.get() if hasattr(self, "preview_dir_var") else ""
+            )
+        )
         preview_ready = self._is_extract_preview_ready()
         if bool(getattr(self, "is_processing", False)):
             text = "Wycinanie w toku"
             state = tk.DISABLED
+        elif technical_preview_ready and self._campaign_preview_is_below_min_extracted_plate_count():
+            text = "Za mało tablic"
+            state = tk.DISABLED
+            try:
+                self._set_subtab_state(self.tab_detect, "disabled")
+                self._set_button_state("btn_to_detect", False)
+            except Exception:
+                pass
         elif preview_ready:
             text = "Tablice wycięte"
             state = tk.DISABLED
@@ -13909,6 +14824,11 @@ class CharacterAnnotationTab:
         else:
             text = "Wytnij tablice do PZ2"
             state = tk.NORMAL if source_ready else tk.DISABLED
+            try:
+                self._set_subtab_state(self.tab_detect, "disabled")
+                self._set_button_state("btn_to_detect", False)
+            except Exception:
+                pass
 
         try:
             btn.config(text=text, state=state)
@@ -13993,13 +14913,13 @@ class CharacterAnnotationTab:
         if preview_ready:
             badge_text = "PZ2 GOTOWE"
             action_note = (
-                f"Wycinanie zostało już wykonane poprawnie. Aktywna paczka PZ2 zawiera {ready_count} tablic. "
-                "Przejdź do PZ2 albo zmień źródła, jeśli chcesz świadomie przygotować inną paczkę."
+                f"Wycinanie zostało już wykonane poprawnie. Aktywny zestaw PZ2 zawiera {ready_count} tablic. "
+                "Przejdź do PZ2 albo zmień źródła, jeśli chcesz świadomie przygotować inny zestaw."
             )
         else:
             badge_text = "ŹRÓDŁA OK" if source_ready else "SPRAWDŹ ŹRÓDŁA"
             action_note = (
-                "PZ1 wytnie cropy tablic z potwierdzonych ramek/polygonów i przygotuje paczkę do PZ2."
+                "PZ1 wytnie cropy tablic z potwierdzonych ramek/polygonów i przygotuje zestaw do PZ2."
                 if source_ready
                 else "Wróć do źródeł i potwierdź zgodność XML z katalogiem obrazów, zanim uruchomisz wycinanie."
             )
@@ -14023,7 +14943,7 @@ class CharacterAnnotationTab:
             if preview_ready:
                 title_text = "PZ2 gotowe. Tablice są już wycięte"
                 desc_text = (
-                    "Poniżej widzisz tabelę kontrolną przejętego runu Z2 i gotowej paczki tablic. "
+                    "Poniżej widzisz tabelę kontrolną przejętego runu Z2 i gotowego zestawu wyciętych tablic. "
                     "Nie uruchamiaj ponownego wycinania; przejdź do PZ2, jeśli chcesz pracować nad znakami."
                 )
             else:
@@ -14040,7 +14960,7 @@ class CharacterAnnotationTab:
                     ("Wynik", output_text),
                 ]
             )
-            title_text = "Gotowe do przygotowania paczki tablic"
+            title_text = "Gotowe do przygotowania zestawu wyciętych tablic"
             desc_text = (
                 "Ten krok tworzy preview run: cropy tablic wycięte z obrazów na podstawie potwierdzonego XML. "
                 "To wejście dla PZ2."
@@ -14637,6 +15557,27 @@ class CharacterAnnotationTab:
         needs_fix = max(0, int(counts.get("needs_fix", 0) or 0))
         unknown = max(0, int(counts.get("unknown", 0) or 0))
         total = max(0, int(counts.get("total", 0) or 0))
+        exportable_plate_count = 0
+        exportable_char_count = 0
+        try:
+            export_pool = self._get_step3_yolo_export_readiness_snapshot(
+                selected_strategies=self._get_selected_gold_export_strategy_buckets(),
+                selected_sources=self._get_selected_gold_export_source_buckets(),
+            )
+            exportable_plate_count = max(0, int(export_pool.get("selected_plate_count", 0) or 0))
+            exportable_char_count = max(0, int(export_pool.get("selected_char_count", 0) or 0))
+            min_required_perfect = max(1, int(export_pool.get("min_exportable_plate_count", 1) or 1))
+            export_ready = bool(export_pool.get("ok"))
+        except Exception:
+            exportable_plate_count = self._count_exportable_perfect_plates_in_metadata(self.preview_metadata)
+            try:
+                exportable_char_count = int(
+                    sum(int(v or 0) for v in dict(counts.get("strategy_char_counts", {}) or {}).values())
+                )
+            except Exception:
+                exportable_char_count = 0
+            min_required_perfect = 10 if bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name()) else 1
+            export_ready = bool(exportable_plate_count >= int(min_required_perfect) and exportable_char_count > 0)
         progress_value = (float(perfect) / float(total) * 100.0) if total > 0 else 0.0
 
         train_count = 0
@@ -14645,46 +15586,57 @@ class CharacterAnnotationTab:
         train_pct = 0.0
         val_pct = 0.0
         test_pct = 0.0
-        split_ready = bool(perfect > 0)
-        min_required_perfect = 1
-        missing_for_split = max(0, int(min_required_perfect) - int(perfect or 0))
+        split_ready = bool(export_ready)
+        missing_for_split = max(0, int(min_required_perfect) - int(exportable_plate_count or 0))
 
         if total <= 0:
             tone = "muted"
-            summary = "Cel datasetu: czekam na paczkę tablic."
-            details = "Wczytaj paczkę i zacznij poprawiać znaki, aby ocenić gotowość datasetu."
+            summary = "Warunek eksportu PZ3: czekam na tablice."
+            details = (
+                f"Warunek eksportu PZ3 w kampanii: co najmniej {min_required_perfect} tablic perfect, "
+                "z przynajmniej jednym poprawnym boxem znaku i etykietą, objęta aktywnym zakresem gold packa."
+            )
         elif not split_ready:
             tone = "error"
-            summary = f"Gotowe perfect: {perfect}/{total} tablic."
-            details = (
-                "Brakuje jeszcze co najmniej jednej tablicy perfect do utworzenia źródłowego datasetu znaków. "
-                "Split i wariant treningowy przygotujesz później w Z4."
-            )
+            summary = f"Warunek eksportu PZ3 niespełniony: do datasetu przechodzi {exportable_plate_count} tablic / {exportable_char_count} znaków."
+            if perfect > 0:
+                details = (
+                    f"W PZ2 są tablice perfect ({perfect}), ale minimum kampanii to {min_required_perfect} "
+                    "tablic eksportowalnych do PZ3. Każda musi mieć zapisany przynajmniej jeden poprawny box znaku "
+                    "z etykietą i przechodzić przez aktualne strategie oraz źródła gold packa."
+                )
+            else:
+                details = (
+                    f"Aby wejście do PZ3 miało sens, przygotuj w PZ2 co najmniej {min_required_perfect} tablic perfect: "
+                    "oznacz wszystkie znaki, zapisz boxy z etykietami i doprowadź tablicę do statusu perfect."
+                )
         else:
             ready_target = (
-                "Paczka jest gotowa do E4."
+                "Materiał spełnia warunek E3."
                 if getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name()
-                else "Paczka jest gotowa do eksportu źródłowego datasetu."
+                else "Materiał jest gotowy do eksportu źródłowego datasetu."
             )
             ratio = (float(perfect) / float(total)) if total > 0 else 0.0
             if ratio < 0.6:
                 tone = "warning"
                 details = (
-                    "Możesz już utworzyć źródłowy dataset znaków, ale warto oznaczyć perfect "
-                    "na większej liczbie tablic przed przejściem do Z4."
+                    f"Warunek eksportu PZ3 jest spełniony: minimum {min_required_perfect} eksportowalnych tablic perfect jest osiągnięte. "
+                    "Dataset można utworzyć, ale im więcej tablic perfect, tym większy sens treningu w Z4."
                 )
             else:
                 tone = "success"
                 details = (
                     f"{ready_target} Wariant treningowy i split train / val / test przygotujesz w Z4."
                 )
-            summary = f"Gotowe perfect: {perfect}/{total} tablic."
+            summary = f"Warunek eksportu PZ3 spełniony: do datasetu przechodzi {exportable_plate_count} tablic / {exportable_char_count} znaków."
 
         return {
             "perfect": perfect,
             "needs_fix": needs_fix,
             "unknown": unknown,
             "total": total,
+            "exportable_plate_count": int(exportable_plate_count),
+            "exportable_char_count": int(exportable_char_count),
             "progress_value": max(0.0, min(100.0, progress_value)),
             "tone": tone,
             "summary": summary,
@@ -14744,6 +15696,11 @@ class CharacterAnnotationTab:
 
         detail = str(snapshot.get("details") or "").strip()
         self._set_preview_repair_progress_status(detail, tone=tone)
+        try:
+            if bool(getattr(self, "_step3_linear_mode", False)) and CAMPAIGN.get_active_project_name():
+                self.frame.after_idle(lambda: self._place_preview_overlay_dock(force_render=False))
+        except Exception:
+            pass
 
     def _set_preview_fusion_info(self, text: str, tone: str = "muted"):
         label = getattr(self, "preview_fusion_info_lbl", None)
@@ -15848,7 +16805,7 @@ class CharacterAnnotationTab:
     def _update_step3_source_path_lock(self):
         """
         Źródła w PZ1 maja być kontrolowane swiadomie przez użytkownika.
-        Nie blokujemy już recznego wyboru XML/paczki obrazów ani jawnego
+        Nie blokujemy już recznego wyboru XML/zestawu obrazów ani jawnego
         pobierania źródła z Z2. Readonly zostawiamy jedynie pole runu.
         """
         for attr_name in ("xml_path_entry", "images_dir_entry"):
@@ -15966,6 +16923,116 @@ class CharacterAnnotationTab:
             "images_with_plates": int(images_with_plates),
             "xml_images_total": int(len(image_elements)),
         }
+
+    @staticmethod
+    def _extract_source_plate_tokens_from_filename(filename: str) -> list[str]:
+        stem = Path(str(filename or "")).stem.upper()
+        return [
+            match.group(0).strip().upper()
+            for match in re.finditer(r"[A-Z0-9]{4,}", stem)
+            if match.group(0).strip()
+        ]
+
+    @staticmethod
+    def _plate_cut_reading_order_key(index_and_detection):
+        original_index, detection = index_and_detection
+        try:
+            x1, y1, x2, y2 = detection.bbox
+            height = max(1.0, float(y2) - float(y1))
+            row_bucket = int(round(float(y1) / max(24.0, height * 0.75)))
+            return (row_bucket, float(y1), float(x1), int(original_index))
+        except Exception:
+            return (0, 0.0, 0.0, int(original_index))
+
+    def _prepare_plate_cut_detections_for_source(self, image_name: str, plates: list[Detection]) -> list[Detection]:
+        ordered_pairs = sorted(
+            list(enumerate(list(plates or []))),
+            key=self._plate_cut_reading_order_key,
+        )
+        ordered_plates = [detection for _, detection in ordered_pairs]
+        expected_tokens = self._extract_source_plate_tokens_from_filename(image_name)
+        has_direct_mapping = bool(expected_tokens and len(expected_tokens) == len(ordered_plates))
+        expected_tokens_json = json.dumps(expected_tokens, ensure_ascii=False) if expected_tokens else "[]"
+
+        for sorted_index, detection in enumerate(ordered_plates):
+            attributes = dict(getattr(detection, "attributes", {}) or {})
+            attributes["source_plate_index"] = str(sorted_index)
+            attributes["source_plate_count"] = str(len(ordered_plates))
+            attributes["source_expected_texts"] = expected_tokens_json
+            if has_direct_mapping:
+                attributes["source_expected_text"] = expected_tokens[sorted_index]
+                attributes["source_expected_text_source"] = "filename_order"
+            elif expected_tokens:
+                attributes["source_expected_text_source"] = "ambiguous_filename_tokens"
+            detection.attributes = attributes
+
+        return ordered_plates
+
+    def _backfill_preview_expected_texts_from_sources(self, metadata_map: dict) -> bool:
+        if not isinstance(metadata_map, dict):
+            return False
+
+        groups: dict[str, list[tuple[str, dict]]] = {}
+        changed = False
+        for plate_id, data in metadata_map.items():
+            if not isinstance(data, dict):
+                continue
+            source_image = str(
+                data.get("source_image")
+                or data.get("source_name")
+                or data.get("filename")
+                or ""
+            ).strip()
+            if not source_image:
+                continue
+            groups.setdefault(source_image, []).append((str(plate_id), data))
+
+        for source_image, items in groups.items():
+            expected_tokens = self._extract_source_plate_tokens_from_filename(source_image)
+            if not expected_tokens:
+                continue
+            expected_tokens_json = json.dumps(expected_tokens, ensure_ascii=False)
+
+            ordered_items = sorted(
+                list(items),
+                key=lambda item: self._plate_cut_reading_order_key(
+                    (
+                        int(str(item[0]).rsplit("_", 1)[-1]) if str(item[0]).rsplit("_", 1)[-1].isdigit() else 0,
+                        SimpleNamespace(bbox=tuple(item[1].get("source_bbox", (0, 0, 0, 0)) or (0, 0, 0, 0))),
+                    )
+                ),
+            )
+            direct_mapping = bool(len(expected_tokens) == len(ordered_items))
+            for sorted_index, (_plate_id, data) in enumerate(ordered_items):
+                if data.get("source_plate_index") != sorted_index:
+                    data["source_plate_index"] = sorted_index
+                    changed = True
+                if data.get("source_plate_count") != len(ordered_items):
+                    data["source_plate_count"] = len(ordered_items)
+                    changed = True
+                if data.get("source_expected_texts") != expected_tokens:
+                    data["source_expected_texts"] = list(expected_tokens)
+                    changed = True
+
+                if direct_mapping and not str(data.get("source_expected_text") or "").strip():
+                    data["source_expected_text"] = expected_tokens[sorted_index]
+                    data["source_expected_text_source"] = "filename_order_backfill"
+                    changed = True
+                elif not direct_mapping and not str(data.get("source_expected_text_source") or "").strip():
+                    data["source_expected_text_source"] = "ambiguous_filename_tokens"
+                    changed = True
+
+                attrs = data.get("plate_attributes")
+                if isinstance(attrs, dict):
+                    if attrs.get("source_expected_texts") != expected_tokens_json:
+                        attrs["source_expected_texts"] = expected_tokens_json
+                        changed = True
+                    if direct_mapping and not str(attrs.get("source_expected_text") or "").strip():
+                        attrs["source_expected_text"] = expected_tokens[sorted_index]
+                        attrs["source_expected_text_source"] = "filename_order_backfill"
+                        changed = True
+
+        return changed
 
     def _format_extract_cut_plan(self, payload: dict | None = None) -> str:
         data = dict(payload or getattr(self, "_extract_last_source_binding_result", {}) or {})
@@ -16129,7 +17196,7 @@ class CharacterAnnotationTab:
                         )
                         entry["sample_hits"].add(rel_name)
             except Exception as e:
-                logger.debug(f"Nie udało się przeskanować {search_root} podczas auto-odnajdywania paczki obrazów: {e}")
+                logger.debug(f"Nie udało się przeskanować {search_root} podczas auto-odnajdywania zestawu obrazów: {e}")
 
         if not candidate_hits:
             return None
@@ -16228,7 +17295,7 @@ class CharacterAnnotationTab:
             result["tone"] = "error"
             result["message"] = self._append_extract_cut_plan(
                 "XML został odczytany, ale PZ1 nie znalazł w nim poprawnych polygonów tablic. "
-                "Wycinanie utworzyłoby pustą paczkę, więc najpierw popraw lub wybierz właściwy annotations.xml.",
+                "Wycinanie utworzyłoby pusty zestaw tablic, więc najpierw popraw lub wybierz właściwy annotations.xml.",
                 result,
             )
             self._set_source_binding_status(result["message"], result["tone"])
@@ -16298,7 +17365,7 @@ class CharacterAnnotationTab:
             elif recommended:
                 result["message"] = (
                     f"Powiązanie potwierdzone: {current_stats['matched']}/{current_stats['total']} plików z XML "
-                    f"znaleziono w tej paczce obrazów."
+                    f"znaleziono w tym zestawie obrazów."
                 )
             else:
                 result["message"] = (
@@ -16367,7 +17434,7 @@ class CharacterAnnotationTab:
 
     def _get_step3_chars_root_dir(self, ensure_exists: bool = False) -> Path:
         """
-        Zwraca katalog bazowy paczek tablic znakowych dla Z3.
+        Zwraca katalog bazowy zestawów tablic znakowych dla Z3.
         Po wyjściu z kampanii _campaign_chars_dir może istnieć, ale mieć wartość None,
         wiec zawsze wracamy bezpiecznie do katalogu free mode.
         """
@@ -16660,26 +17727,34 @@ class CharacterAnnotationTab:
             "ok": False,
             "reason": "missing_char_boxes",
             "message": (
-                "E3 nie jest jeszcze gotowe do zatwierdzenia. W PZ2 oznacz boxy znaków na tablicach, "
-                "uzupełnij ich znaki i dopiero wtedy oznacz tablice jako perfect oraz wykonaj eksport w PZ3."
+                "Warunek eksportu PZ3 nie jest jeszcze spełniony. W kampanii potrzeba co najmniej 10 tablic "
+                "ze statusem perfect, z poprawnymi boxami znaków i etykietami, objętych aktualnym zakresem gold packa."
             ),
             "exportable_plate_count": 0,
             "exportable_char_count": 0,
             "perfect_count": 0,
+            "min_exportable_plate_count": 10,
+            "missing_exportable_plate_count": 10,
         }
 
         try:
             selected_strategies = self._get_selected_gold_export_strategy_buckets()
             selected_sources = self._get_selected_gold_export_source_buckets()
-            counts = self._build_campaign_aware_gold_export_counts(
+            export_readiness = self._get_step3_yolo_export_readiness_snapshot(
                 selected_strategies=selected_strategies,
                 selected_sources=selected_sources,
             )
-            exportable_chars = int(counts.get("selected_char_count", 0) or 0)
-            selected_plates = int(counts.get("selected_plate_count", 0) or 0)
+            exportable_chars = int(export_readiness.get("selected_char_count", 0) or 0)
+            selected_plates = int(export_readiness.get("selected_plate_count", 0) or 0)
+            min_exportable_plates = int(export_readiness.get("min_exportable_plate_count", 10) or 10)
+            missing_exportable_plates = int(export_readiness.get("missing_exportable_plate_count", 0) or 0)
+            export_message = str(export_readiness.get("message", "") or "")
         except Exception:
             exportable_chars = 0
             selected_plates = 0
+            min_exportable_plates = 10
+            missing_exportable_plates = 10
+            export_message = ""
 
         try:
             perfect_count = int(self._count_preview_statuses().get("perfect", 0) or 0)
@@ -16690,22 +17765,26 @@ class CharacterAnnotationTab:
             exportable_plate_count=int(selected_plates),
             exportable_char_count=int(exportable_chars),
             perfect_count=int(perfect_count),
+            min_exportable_plate_count=int(min_exportable_plates),
+            missing_exportable_plate_count=int(max(0, int(min_exportable_plates) - int(selected_plates or 0))),
         )
-        if perfect_count <= 0:
+        if perfect_count < int(min_exportable_plates):
+            missing_perfect = max(0, int(min_exportable_plates) - int(perfect_count or 0))
             result.update(
                 reason="missing_perfect_plates",
                 message=(
-                    "E3 nie jest jeszcze gotowe do zatwierdzenia. W PZ2 oznacz znaki na tablicach tak, "
-                    "aby co najmniej jedna tablica otrzymała status perfect, a następnie wykonaj eksport w PZ3."
+                    f"Warunek wejścia dalej w E3 nie jest jeszcze spełniony. Minimum kampanii to {min_exportable_plates} "
+                    f"tablic perfect z poprawnymi boxami znaków i etykietami. Masz {perfect_count}, brakuje {missing_perfect}."
                 ),
             )
             return result
 
-        if exportable_chars <= 0:
+        if selected_plates < int(min_exportable_plates) or exportable_chars <= 0:
             if perfect_count > 0 or selected_plates > 0:
-                result["message"] = (
-                    "E3 ma tablice oznaczone jako perfect, ale nie widzę w nich poprawnych boxów znaków. "
-                    "W PZ2 popraw lub dodaj ramki znaków na tablicach, zapisz je i ponownie wykonaj eksport w PZ3."
+                result["message"] = export_message or (
+                    "E3 ma tablice oznaczone jako perfect, ale PZ3 nie ma jeszcze materiału, "
+                    "który da się wyeksportować do datasetu YOLO. W PZ2 popraw lub dodaj ramki znaków, "
+                    "zapisz je i sprawdź filtry gold packa w PZ3."
                 )
             return result
 
@@ -16836,7 +17915,7 @@ class CharacterAnnotationTab:
 
     def _get_char_manual_pool_dir(self) -> Path | None:
         """
-        Katalog na ręcznie poprawione paczki znaków importowane z CVAT.
+        Katalog na ręcznie poprawione zestawy znaków importowane z CVAT.
         """
         campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
         if not campaign_chars_dir:
@@ -16852,7 +17931,7 @@ class CharacterAnnotationTab:
 
     def _get_char_gold_pool_dir(self) -> Path | None:
         """
-        Katalog na złotą paczkę znaków projektu.
+        Katalog na złoty zestaw znaków projektu.
         """
         campaign_chars_dir = getattr(self, "_campaign_chars_dir", None)
         if not campaign_chars_dir:
@@ -17101,7 +18180,7 @@ class CharacterAnnotationTab:
         return review_dir
     def _store_current_preview_in_manual_char_pool(self, metadata: dict):
         """
-        Zapisuje aktualnie poprawioną paczkę preview do manual_char_pool,
+        Zapisuje aktualnie poprawiony preview run do manual_char_pool,
         aby mogła później zasilić trening modelu znaków.
         """
         manual_pool_dir = self._get_char_manual_pool_dir()
@@ -17245,6 +18324,7 @@ class CharacterAnnotationTab:
 
                 if max(int(default_result.get("perfect_count", 0) or 0), summary_perfect_count) <= 0:
                     merged = dict(default_result)
+                    min_exportable_plates = int(default_result.get("min_exportable_plate_count", 10) or 10)
                     merged.update(
                         ok=False,
                         reason="missing_perfect_plates",
@@ -17252,8 +18332,8 @@ class CharacterAnnotationTab:
                         dataset_hint=str(dataset_path),
                         validation_message=validation_message,
                         message=(
-                            "Dataset znaków istnieje, ale E3 nie ma potwierdzonej tablicy ze statusem perfect. "
-                            "W PZ2 oznacz znaki na tablicach tak, aby co najmniej jedna tablica była perfect, "
+                            f"Dataset znaków istnieje, ale E3 nie ma wymaganego minimum {min_exportable_plates} tablic ze statusem perfect. "
+                            "W PZ2 oznacz znaki na tablicach, doprowadź je do statusu perfect, "
                             "a następnie ponownie wykonaj eksport w PZ3."
                         ),
                     )
@@ -17317,8 +18397,9 @@ class CharacterAnnotationTab:
         validation_msg = str(readiness.get("validation_message", "") or "").strip()
 
         if reason == "missing_char_boxes":
+            min_exportable_plates = int(readiness.get("min_exportable_plate_count", 10) or 10)
             return str(readiness.get("message") or "").strip() or (
-                "E3 wymaga co najmniej jednej tablicy perfect z poprawnymi boxami znaków. "
+                f"E3 wymaga co najmniej {min_exportable_plates} tablic perfect z poprawnymi boxami znaków i etykietami. "
                 "Wróć do PZ2, oznacz znaki na tablicach i ponownie wykonaj eksport w PZ3."
             )
 
@@ -17451,12 +18532,6 @@ class CharacterAnnotationTab:
             return self._finalize_step3_from_existing_outputs
         return None
 
-    def _get_step3_campaign_navigation_view_model(self) -> Step3CampaignNavigationViewModel:
-        return build_step3_campaign_navigation_view_model(self)
-
-    def _get_step3_finish_action_view_model(self) -> Step3FinishActionViewModel:
-        return build_step3_finish_action_view_model(self)
-
     def _get_step3_pz3_path_selection_view_model(self) -> Step3Pz3PathSelectionViewModel:
         return build_step3_pz3_path_selection_view_model(self)
 
@@ -17505,7 +18580,7 @@ class CharacterAnnotationTab:
     def _update_preview_path_lock(self):
         """
         W aktywnym, liniowym kroku 3 użytkownik nie powinien ręcznie
-        zmieniać paczki preview ani ścieżki do niej.
+        zmieniać preview runu ani ścieżki do niego.
         W trybie swobodnym pole ma być readonly, a przycisk aktywny.
         """
         locked = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
@@ -17559,11 +18634,11 @@ class CharacterAnnotationTab:
 
         if preview_dir_raw and count > 0:
             status_text = f"Aktywny preview run z PZ1: {preview_name}"
-            detail_text = f"Tablice w paczce: {count}. PZ2 pracuje teraz na tej paczce cropów."
+            detail_text = f"Wycięte tablice: {count}. PZ2 pracuje teraz na tym zestawie cropów."
             tone = "success"
         elif preview_dir_raw:
             status_text = f"Aktywny preview run wymaga sprawdzenia: {preview_name}"
-            detail_text = "Nie widzę poprawnego metadata.json + images/ albo paczka nie zawiera tablic. Uruchom PZ1 ponownie lub użyj trybu awaryjnego."
+            detail_text = "Nie widzę poprawnego metadata.json + images/ albo zestaw nie zawiera tablic. Uruchom PZ1 ponownie lub użyj trybu awaryjnego."
             tone = "warning"
         else:
             status_text = "Brak aktywnego preview runu z PZ1"
@@ -17677,7 +18752,7 @@ class CharacterAnnotationTab:
                 ),
                 "glossary": (
                     "crop = wycięty obraz samej tablicy",
-                    "preview run = robocza paczka cropów",
+                    "preview run = roboczy zestaw cropów",
                     "źródło Z2 = XML + zgodne obrazy",
                 ),
                 "caution": "XML i katalog obrazów muszą pochodzić z tego samego zestawu; inaczej cropy będą niespójne.",
@@ -17727,7 +18802,7 @@ class CharacterAnnotationTab:
                 ),
                 "glossary": (
                     "gold pack = wybrane tablice perfect używane jako zaufane źródło datasetu znaków",
-                    "review pack = paczka cropów tablic wysyłana do ręcznego sprawdzenia w CVAT",
+                    "review pack = zestaw cropów tablic wysyłany do ręcznego sprawdzenia w CVAT",
                     "Poprawki CVAT = ręczne korekty boxów znaków wracające z CVAT do PZ3 i włączane do datasetu",
                 ),
                 "caution": "CVAT w PZ3 używa cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach.",
@@ -17827,7 +18902,7 @@ class CharacterAnnotationTab:
     def back_to_substep_2(self):
         """
         Powrót z PZ3 do PZ2 zostawia użytkownika w tym samym etapie E3,
-        ale otwiera z powrotem aktywną paczkę wykrywania znaków.
+        ale otwiera z powrotem aktywny zestaw wykrywania znaków.
         """
         if self._step3_linear_mode:
             back_to_substep_2_campaign(self)
@@ -17855,7 +18930,7 @@ class CharacterAnnotationTab:
             img_ok = bool((self.images_dir_var.get() or "").strip())
             return xml_ok and img_ok
 
-        # substep 2 i 3 wymagają paczki preview z metadata i katalogiem images
+        # substep 2 i 3 wymagają preview runu z metadata i katalogiem images
         preview_dir_raw = (self.preview_dir_var.get() or "").strip()
         if not preview_dir_raw:
             return False
@@ -17871,6 +18946,9 @@ class CharacterAnnotationTab:
             return False
 
         if not images_dir.exists() or not images_dir.is_dir():
+            return False
+
+        if substep >= 2 and not self._campaign_preview_meets_min_extracted_plate_count(preview_dir):
             return False
 
         # substep 3 dodatkowo wymaga, żeby etap 2 był realnie zakończony
@@ -18020,9 +19098,6 @@ class CharacterAnnotationTab:
         event_widget = getattr(event, "widget", None)
         if event is None or str(event_widget) == str(self.app.root):
             self._force_save_all()
-
-    def _on_method_change(self, event=None):
-        self._update_yolo_visibility()
 
     def _update_yolo_visibility(self):
         if not hasattr(self, "yolo_panel"):
@@ -18297,10 +19372,6 @@ class CharacterAnnotationTab:
             self.app.set_button_emphasis(btn, enabled)
         except Exception as e:
             logger.debug(f"Nie udało się ustawić podświetlenia przycisku dla {frame_attr}: {e}")
-
-    def _ensure_yolo_model_available(self) -> str:
-        """Zachowane dla kompatybilnosci wstecznej; deleguje do checkpoint-only resolvera."""
-        return self._ensure_yolo_model_checkpoint()
 
     # =========================================================
     # Resolvers
@@ -18657,9 +19728,6 @@ class CharacterAnnotationTab:
     def _handle_extract_entry_selection(self, mode: str):
         handle_extract_entry_selection(self, mode)
 
-    def _reset_extract_source_inputs(self):
-        reset_extract_source_inputs(self)
-
     def _persist_step3_extract_state(self):
         if not CAMPAIGN.get_active_project_name():
             return
@@ -18728,7 +19796,7 @@ class CharacterAnnotationTab:
         except Exception:
             iteration_num = 1
 
-        package_images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        package_images_dir = CAMPAIGN.get_iteration_image_source_dir(iteration_num) or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
         if package_images_dir is None:
             return
 
@@ -18762,7 +19830,7 @@ class CharacterAnnotationTab:
         except Exception:
             iteration_num = 1
 
-        package_images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        package_images_dir = CAMPAIGN.get_iteration_image_source_dir(iteration_num) or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
         if package_images_dir is None:
             return
 
@@ -19022,7 +20090,7 @@ class CharacterAnnotationTab:
         except Exception:
             iteration_num = 1
 
-        package_images_dir = CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
+        package_images_dir = CAMPAIGN.get_iteration_image_source_dir(iteration_num) or CAMPAIGN.get_master_pool_dir() or CAMPAIGN.get_iteration_raw_dir(iteration_num)
         if package_images_dir is None:
             return {}
 
@@ -20000,7 +21068,7 @@ class CharacterAnnotationTab:
         )
         self.extract_start_action_title_lbl = tk.Label(
             self.extract_start_header_row,
-            text="Gotowe do przygotowania paczki tablic",
+            text="Gotowe do przygotowania zestawu wyciętych tablic",
             anchor="w",
             justify=tk.LEFT,
             bd=0,
@@ -20345,16 +21413,82 @@ class CharacterAnnotationTab:
             messagebox.showinfo(
                 "Wycinanie zakończone",
                 (
-                    "Tablice zostały wycięte poprawnie i paczka PZ2 jest gotowa.\n\n"
+                    "Tablice zostały wycięte poprawnie i zestaw PZ2 jest gotowy.\n\n"
                     f"Liczba wyciętych tablic: {int(plate_count or 0)}.\n"
                     f"Run PZ2: {Path(run_dir).name}\n\n"
-                    "Przycisk „Wytnij tablice do PZ2” został wyłączony dla tej paczki. "
+                    "Przycisk „Wytnij tablice do PZ2” został wyłączony dla tego zestawu. "
                     "Po potwierdzeniu otworzę PZ2, gdzie odbywa się dalsza praca na wyciętych tablicach."
                 ),
                 parent=parent,
             )
             if not bool(getattr(self, "_step3_linear_mode", False)):
                 self.go_to_substep_2()
+        except Exception:
+            pass
+
+    def _show_campaign_extract_below_minimum_modal(self, plate_count: int, run_dir: Path) -> None:
+        min_count = self._get_campaign_step3_min_extracted_plate_count()
+        plate_count = max(0, int(plate_count or 0))
+        missing = max(0, int(min_count) - plate_count)
+        try:
+            parent = self.frame.winfo_toplevel()
+        except Exception:
+            parent = getattr(self.app, "root", None)
+
+        try:
+            self._hide_campaign_detect_splash()
+        except Exception:
+            pass
+
+        message = (
+            "Wycinanie tablic zakończyło się, ale wynik jest za mały dla toru znaków.\n\n"
+            f"Wycięte tablice: {plate_count}\n"
+            f"Minimum dla PZ2/PZ3: {min_count}\n"
+            f"Brakuje: {missing}\n"
+            f"Run PZ1: {Path(run_dir).name}\n\n"
+            "Możesz wrócić do Z2 i oznaczyć więcej tablic, wrócić do E1 po większy katalog zdjęć "
+            "albo zostać w PZ1 i sprawdzić wynik wycinania."
+        )
+        buttons = ["Wróć do E1", "Oznacz więcej w Z2", "Zostań w PZ1"]
+        try:
+            choice = self.app.themed_message_dialog(
+                "Za mało wyciętych tablic",
+                message,
+                parent=parent,
+                buttons=buttons,
+                default_button="Oznacz więcej w Z2",
+                tone="warning",
+                wraplength=560,
+            )
+        except Exception:
+            try:
+                messagebox.showwarning("Za mało wyciętych tablic", message, parent=parent)
+            except Exception:
+                pass
+            choice = "Zostań w PZ1"
+
+        campaign_tab = None
+        try:
+            campaign_tab = getattr(self.app, "tabs", {}).get("campaign")
+        except Exception:
+            campaign_tab = None
+
+        if choice == "Oznacz więcej w Z2" and campaign_tab is not None:
+            try:
+                campaign_tab._step_open_z2_repair_from_later_stage()
+            except Exception as exc:
+                logger.debug(f"Nie udało się wrócić do Z2 po zbyt małym PZ1: {exc}")
+            return
+
+        if choice == "Wróć do E1" and campaign_tab is not None:
+            try:
+                campaign_tab._return_to_step1_for_char_source_rework(clear_target=False)
+            except Exception as exc:
+                logger.debug(f"Nie udało się wrócić do E1 po zbyt małym PZ1: {exc}")
+            return
+
+        try:
+            self._select_subtab(self.tab_extract)
         except Exception:
             pass
 
@@ -20377,13 +21511,38 @@ class CharacterAnnotationTab:
                 messagebox.showinfo(
                     "Tablice są już wycięte",
                     (
-                        f"Paczka tablic dla PZ2 została już przygotowana poprawnie.\n\n"
-                        f"Liczba tablic w aktywnej paczce: {plate_count}.\n\n"
+                        f"Zestaw wyciętych tablic dla PZ2 został już przygotowany poprawnie.\n\n"
+                        f"Liczba tablic w aktywnym zestawie: {plate_count}.\n\n"
                         "Przycisk wycinania pozostaje nieaktywny, aby nie uruchamiać tej samej operacji wielokrotnie. "
-                        "Przejdź do PZ2 albo zmień źródło w PZ1, jeśli chcesz świadomie przygotować inną paczkę."
+                        "Przejdź do PZ2 albo zmień źródło w PZ1, jeśli chcesz świadomie przygotować inny zestaw."
                     ),
                     parent=self.frame.winfo_toplevel(),
                 )
+            except Exception:
+                pass
+            return
+
+        preview_dir_raw = str(self.preview_dir_var.get() if hasattr(self, "preview_dir_var") else "").strip()
+        if (
+            preview_dir_raw
+            and self._is_usable_step3_preview_dir(preview_dir_raw, require_plates=True)
+            and self._preview_matches_current_extract_source(preview_dir_raw)
+            and self._campaign_preview_is_below_min_extracted_plate_count(preview_dir_raw)
+        ):
+            plate_count = self._get_extract_preview_ready_count(preview_dir_raw)
+            self._refresh_extract_action_state()
+            try:
+                self._set_extraction_status(
+                    (
+                        f"Wycięto {plate_count} tablic. Minimum toru znaków to "
+                        f"{self._get_campaign_step3_min_extracted_plate_count()} tablic."
+                    ),
+                    "warning",
+                )
+            except Exception:
+                pass
+            try:
+                self._show_campaign_extract_below_minimum_modal(plate_count, Path(preview_dir_raw))
             except Exception:
                 pass
             return
@@ -20484,6 +21643,7 @@ class CharacterAnnotationTab:
                             )
 
                     if plates:
+                        plates = self._prepare_plate_cut_detections_for_source(img_name, plates)
                         ann = ImageAnnotation(img_name, int(img_el.get("width", 0)), int(img_el.get("height", 0)), plates)
                         generator.generate_from_annotations(
                             img_path, ann,
@@ -20536,25 +21696,45 @@ class CharacterAnnotationTab:
                 finally:
                     self._campaign_step3_reextract_seed_metadata = {}
                 if self.is_processing and session_token == self._project_reset_token:
+                    campaign_below_minimum = bool(
+                        getattr(self, "_step3_linear_mode", False)
+                        and CAMPAIGN.get_active_project_name()
+                        and str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char"
+                        and generated_count < self._get_campaign_step3_min_extracted_plate_count()
+                    )
                     self.frame.after(
                         0,
                         lambda: self._set_extraction_status(
                             (
+                                f"Wycinanie zakończone, ale powstało za mało tablic ({generated_count})."
+                                if campaign_below_minimum
+                                else (
                                 f"Wycinanie zakończone. Zachowano poprzednie boxy dla {int(merge_summary.get('matched', 0) or 0)} tablic."
                                 if int(merge_summary.get("matched", 0) or 0) > 0
                                 else "Wycinanie zakończone. Możesz przejść do PZ2."
+                                )
                             ),
-                            "success",
+                            "warning" if campaign_below_minimum else "success",
                         ),
                     )
                     self.frame.after(0, lambda: self._load_preview_data(quiet=True))
-                    self.frame.after(0, self.unlock_detection_subtab)
-                    if generated_count > 0:
+                    if campaign_below_minimum:
+                        self.frame.after(
+                            0,
+                            lambda count=generated_count, path=run_dir: self._show_campaign_extract_below_minimum_modal(count, path),
+                        )
+                    else:
+                        self.frame.after(0, self.unlock_detection_subtab)
+                    if generated_count > 0 and not campaign_below_minimum:
                         self.frame.after(
                             0,
                             lambda count=generated_count, path=run_dir: self._show_extract_completed_modal(count, path),
                         )
-                    if getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name():
+                    if (
+                        getattr(self, "_step3_linear_mode", False)
+                        and CAMPAIGN.get_active_project_name()
+                        and not campaign_below_minimum
+                    ):
                         self.frame.after(0, self.go_to_substep_2)
                         self.frame.after(
                             0,
@@ -20861,7 +22041,7 @@ class CharacterAnnotationTab:
 
         self.preview_shortcuts_lbl = tk.Label(
             self.preview_tools,
-            text="Skróty: Q/E przełącza poprzednią/następną tablicę na liście, D+LPM rysuje nowy box, S zaznacza lub odznacza hoverowany box, PPM usuwa zaznaczony box, Alt+W włącza tryb wpisywania znaków, LPM albo strzałki lewo/prawo wybierają pole, 0-9/A-Z wpisuje znak, Esc wychodzi z wpisywania, Enter przełącza pełny ekran, Ctrl+Z/Y cofa i ponawia.",
+            text="Skróty: Q/E przełącza poprzednią/następną tablicę na liście, D uzbraja rysowanie nowego boxa, S zaznacza lub odznacza hoverowany box, PPM usuwa zaznaczony box, Alt+W włącza tryb wpisywania znaków, LPM albo strzałki lewo/prawo wybierają pole, 0-9/A-Z wpisuje znak, Esc wychodzi z wpisywania, Enter przełącza pełny ekran, Ctrl+Z/Y cofa i ponawia.",
             anchor="w",
             justify=tk.LEFT,
             wraplength=780,
@@ -20945,17 +22125,21 @@ class CharacterAnnotationTab:
         self.preview_mode_overlay = tk.Frame(self.preview_canvas, bd=0, highlightthickness=1, padx=8, pady=8)
         self.preview_mode_overlay.place_forget()
 
-        self.preview_typing_overlay = tk.Frame(self.preview_canvas, bd=0, highlightthickness=1, padx=6, pady=5)
+        self.preview_typing_overlay = tk.Frame(self.preview_canvas, bd=0, highlightthickness=1, padx=6, pady=4)
         self.preview_typing_overlay.place_forget()
-        self.preview_typing_overlay_lbl = tk.Label(
+        self.preview_typing_overlay_lbl = tk.Text(
             self.preview_typing_overlay,
-            text="",
-            anchor="w",
-            justify=tk.LEFT,
-            wraplength=185,
+            width=26,
+            height=2,
+            wrap=tk.WORD,
             font=("Segoe UI", 8),
             bd=0,
             highlightthickness=0,
+            relief=tk.FLAT,
+            cursor="arrow",
+            takefocus=0,
+            padx=0,
+            pady=0,
         )
         self.preview_typing_overlay_lbl.pack(fill=tk.X)
 
@@ -21097,9 +22281,9 @@ class CharacterAnnotationTab:
             highlightthickness=1,
             padx=6,
             pady=5,
-            cursor="hand2",
+            cursor="arrow",
         )
-        self.preview_overlay_dock_header = tk.Frame(self.preview_overlay_dock, bd=0, highlightthickness=0, cursor="hand2")
+        self.preview_overlay_dock_header = tk.Frame(self.preview_overlay_dock, bd=0, highlightthickness=0, cursor="arrow")
         self.preview_overlay_dock_header.pack(fill=tk.X)
         self.preview_overlay_dock_title_lbl = tk.Label(
             self.preview_overlay_dock_header,
@@ -21109,7 +22293,7 @@ class CharacterAnnotationTab:
             font=("Segoe UI", 8, "bold"),
             bd=0,
             highlightthickness=0,
-            cursor="hand2",
+            cursor="arrow",
         )
         self.preview_overlay_dock_title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.preview_overlay_dock_toggle_lbl = tk.Label(
@@ -21120,7 +22304,7 @@ class CharacterAnnotationTab:
             font=("Segoe UI", 8, "bold"),
             bd=0,
             highlightthickness=0,
-            cursor="hand2",
+            cursor="arrow",
         )
         self.preview_overlay_dock_toggle_lbl.pack(side=tk.RIGHT)
         self.preview_overlay_dock_body = tk.Frame(self.preview_overlay_dock, bd=0, highlightthickness=0)
@@ -21211,17 +22395,313 @@ class CharacterAnnotationTab:
             "label": assistant_label,
             "status": assistant_status,
         }
-        for widget in (
-            self.preview_overlay_dock,
-            self.preview_overlay_dock_header,
-            self.preview_overlay_dock_title_lbl,
-            self.preview_overlay_dock_toggle_lbl,
-        ):
-            widget.bind("<Button-1>", self._toggle_preview_overlay_dock, add="+")
+        layout_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="hand2")
+        layout_icon = tk.Label(
+            layout_row,
+            text="RZ",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        layout_label = tk.Label(
+            layout_row,
+            text="Układ tablicy",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        layout_status = tk.Label(
+            layout_row,
+            text="AUTO",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="hand2",
+        )
+        layout_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        layout_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        layout_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["layout"] = {
+            "row": layout_row,
+            "icon": layout_icon,
+            "label": layout_label,
+            "status": layout_status,
+        }
+        plate_status_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        plate_status_icon = tk.Label(
+            plate_status_row,
+            text="ST",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        plate_status_label = tk.Label(
+            plate_status_row,
+            text="Status tablicy",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        plate_status_value = tk.Label(
+            plate_status_row,
+            text="KOREKTA",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        plate_status_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        plate_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        plate_status_value.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["plate_status"] = {
+            "row": plate_status_row,
+            "icon": plate_status_icon,
+            "label": plate_status_label,
+            "status": plate_status_value,
+        }
+        export_condition_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        export_condition_icon = tk.Label(
+            export_condition_row,
+            text="PZ",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        export_condition_label = tk.Label(
+            export_condition_row,
+            text="Warunek PZ3",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        export_condition_status = tk.Label(
+            export_condition_row,
+            text="BRAK",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        export_condition_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        export_condition_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        export_condition_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["export_condition"] = {
+            "row": export_condition_row,
+            "icon": export_condition_icon,
+            "label": export_condition_label,
+            "status": export_condition_status,
+        }
+        gate_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        gate_icon = tk.Label(
+            gate_row,
+            text="E3",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        gate_label = tk.Label(
+            gate_row,
+            text="Bramka E3",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        gate_status = tk.Label(
+            gate_row,
+            text="ZAMKNIĘTA",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        gate_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        gate_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        gate_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["gate"] = {
+            "row": gate_row,
+            "icon": gate_icon,
+            "label": gate_label,
+            "status": gate_status,
+        }
+        quality_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        quality_icon = tk.Label(
+            quality_row,
+            text="J",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_label = tk.Label(
+            quality_row,
+            text="Jakość zbioru",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_status = tk.Label(
+            quality_row,
+            text="SŁABY",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        quality_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        quality_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        quality_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["quality"] = {
+            "row": quality_row,
+            "icon": quality_icon,
+            "label": quality_label,
+            "status": quality_status,
+        }
+        quality_have_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        quality_have_icon = tk.Label(
+            quality_have_row,
+            text="+",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_have_label = tk.Label(
+            quality_have_row,
+            text="JEST",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_have_status = tk.Label(
+            quality_have_row,
+            text="0",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        quality_have_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        quality_have_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        quality_have_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["quality_have"] = {
+            "row": quality_have_row,
+            "icon": quality_have_icon,
+            "label": quality_have_label,
+            "status": quality_have_status,
+        }
+        quality_missing_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+        quality_missing_icon = tk.Label(
+            quality_missing_row,
+            text="!",
+            width=2,
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_missing_label = tk.Label(
+            quality_missing_row,
+            text="BRAKUJE",
+            anchor="w",
+            justify=tk.LEFT,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        quality_missing_status = tk.Label(
+            quality_missing_row,
+            text="0",
+            anchor="center",
+            justify=tk.CENTER,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            highlightthickness=0,
+            padx=5,
+            pady=1,
+            cursor="arrow",
+        )
+        quality_missing_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
+        quality_missing_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+        quality_missing_status.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+        self._preview_overlay_dock_tool_rows["quality_missing"] = {
+            "row": quality_missing_row,
+            "icon": quality_missing_icon,
+            "label": quality_missing_label,
+            "status": quality_missing_status,
+        }
         for widget in (row, icon, label, status):
             widget.bind("<Button-1>", lambda _event: self._toggle_preview_overlay_dock_tool("legend"), add="+")
         for widget in (assistant_row, assistant_icon, assistant_label, assistant_status):
             widget.bind("<Button-1>", lambda _event: self._toggle_preview_overlay_dock_tool("assistant"), add="+")
+        for widget in (layout_row, layout_icon, layout_label, layout_status):
+            widget.bind("<Button-1>", self._cycle_preview_plate_layout_override, add="+")
         self.preview_overlay_dock.place_forget()
         self.frame.after_idle(
             lambda: (
@@ -22516,7 +23996,7 @@ class CharacterAnnotationTab:
 
         self.preview_repair_progress_title_lbl = tk.Label(
             preview_status_lf,
-            text="Postęp poprawek: czekam na paczkę tablic.",
+            text="Postęp poprawek: czekam na zestaw wyciętych tablic.",
             justify="left",
             wraplength=320,
             anchor="w",
@@ -22536,7 +24016,7 @@ class CharacterAnnotationTab:
 
         self.preview_repair_progress_status_lbl = tk.Label(
             preview_status_lf,
-            text="Ocena zbioru pojawi się po wczytaniu paczki i pierwszych poprawkach.",
+            text="Ocena zbioru pojawi się po wczytaniu zestawu i pierwszych poprawkach.",
             justify="left",
             wraplength=320,
             anchor="w",
@@ -22546,7 +24026,7 @@ class CharacterAnnotationTab:
         self.preview_repair_progress_status_lbl.grid(row=6, column=0, sticky="ew", pady=(4, 0))
         self._set_inline_status_label_state(
             self.preview_repair_progress_status_lbl,
-            text="Ocena zbioru pojawi się po wczytaniu paczki i pierwszych poprawkach.",
+            text="Ocena zbioru pojawi się po wczytaniu zestawu i pierwszych poprawkach.",
             tone="muted",
             emphasis=False,
         )
@@ -23419,6 +24899,8 @@ class CharacterAnnotationTab:
                     loaded = {}
 
                 changed = False
+                if self._backfill_preview_expected_texts_from_sources(loaded):
+                    changed = True
                 for pid, d in loaded.items():
                     if not isinstance(d, dict):
                         continue
@@ -23714,7 +25196,8 @@ class CharacterAnnotationTab:
 
                 scale_w = usable_w / float(orig_w)
                 scale_h = usable_h / float(orig_h)
-                SCALE = max(1.0, min(min(scale_w, scale_h), 5.0))
+                default_fit_ratio = 0.90
+                SCALE = max(self._preview_zoom_min, min(min(scale_w, scale_h), 5.0) * default_fit_ratio)
 
                 new_w, new_h = int(orig_w * SCALE), int(orig_h * SCALE)
                 reevaluated_rows, reevaluated_badge_height = self._estimate_preview_badge_layout(
@@ -23786,6 +25269,7 @@ class CharacterAnnotationTab:
             self._preview_badge_runtime = {}
             self._preview_char_runtime = {}
             self._preview_char_record_render_tags = {}
+            self._draw_preview_plate_status_frame(data)
             badge_specs = []
             image_bottom_y = y_off + new_h
             self._draw_preview_canvas_info_overlay(
@@ -24079,6 +25563,7 @@ class CharacterAnnotationTab:
                     top_limit=info_bar_height + 6,
                 )
                 self._apply_preview_badge_selection_style()
+            self._draw_preview_clear_action_bucket(self.preview_canvas)
             self.preview_canvas.create_text(
                 10,
                 max(14, c_h - 10),
@@ -25760,7 +27245,7 @@ class CharacterAnnotationTab:
             self.gold_export_sources_import_host,
             "IMPORT",
             "Wczytaj poprawki z CVAT",
-            "Przyjmuje XML z paczki cropów tablic wyeksportowanej wcześniej z PZ3 i włącza korektę do datasetu.",
+            "Przyjmuje XML z zestawu cropów tablic wyeksportowanego wcześniej z PZ3 i włącza korektę do datasetu.",
             clickable=True,
         )
         self._pz3_cvat_import_card = cvat_import_card
@@ -25859,7 +27344,7 @@ class CharacterAnnotationTab:
                 pass
             self._set_inline_status_label_state(
                 card_info["desc"],
-                text="Przyjmuje XML z paczki cropów tablic wyeksportowanej z PZ3 i włącza korektę do datasetu.",
+                text="Przyjmuje XML z zestawu cropów tablic wyeksportowanego z PZ3 i włącza korektę do datasetu.",
                 tone=("default" if expanded else "muted"),
                 emphasis=False,
             )
@@ -26084,7 +27569,7 @@ class CharacterAnnotationTab:
             optional_cvat_lf,
             text=(
                 "Ten blok nie jest częścią głównego flow PZ3. Rozwiń go tylko wtedy, gdy chcesz "
-                "przygotować paczkę błędnych tablic do ręcznej korekty poza aplikacją."
+                "przygotować zestaw błędnych tablic do ręcznej korekty poza aplikacją."
             ),
             wraplength=900,
             justify=tk.LEFT,
@@ -26134,7 +27619,7 @@ class CharacterAnnotationTab:
         self._set_inline_status_label_state(self.review_intro_lbl, text=self.review_intro_lbl.cget("text"), tone="muted", emphasis=False)
         ensure_wrap(self.review_intro_lbl, review_section, padding=28, min_wrap=280)
 
-        review_pack_lf = ttk.LabelFrame(review_section, text=" Paczka cropów tablic do poprawy ", padding=8)
+        review_pack_lf = ttk.LabelFrame(review_section, text=" Zestaw cropów tablic do poprawy ", padding=8)
         review_pack_lf.pack(fill=tk.X, pady=(4, 0))
 
         self.cvat_option1_title_lbl = tk.Label(
@@ -26151,7 +27636,7 @@ class CharacterAnnotationTab:
         self.cvat_option1_desc_lbl = tk.Label(
             review_pack_lf,
             text=(
-                "Eksport tworzy paczkę do wysłania do CVAT: annotations.xml + obrazy cropów tablic. "
+                "Eksport tworzy zestaw do wysłania do CVAT: annotations.xml + obrazy cropów tablic. "
                 "Po korekcie w CVAT wracasz tutaj i importujesz poprawiony XML w bloku 'Wczytaj poprawki z CVAT'. "
                 "Poprawiasz boxy znaków, nie boxy tablic na pełnych zdjęciach."
             ),
@@ -26167,7 +27652,7 @@ class CharacterAnnotationTab:
 
         btn_cvat = ttk.Button(
             review_pack_lf,
-            text="WYGENERUJ PACZKE .ZIP DLA CVAT",
+            text="WYGENERUJ ZIP DLA CVAT",
             command=self._run_cvat_export,
             style="Accent.TButton",
         )
@@ -26871,7 +28356,7 @@ class CharacterAnnotationTab:
                     logger.debug(f"Nie udało się zapisać review_manifest.json: {e}")
 
                 summary = self._build_step3_local_success_message(
-                    "Przygotowano paczkę CVAT.",
+                    "Przygotowano zestaw CVAT.",
                     out_zip,
                     "Otwórz CVAT, wykonaj poprawki i wróć do Z3 / PZ3 -> Import ręcznych poprawek.",
                 )
@@ -26910,6 +28395,8 @@ class CharacterAnnotationTab:
     def _run_yolo_gold_export(self):
         selected_buckets = self._get_selected_gold_export_strategy_buckets()
         selected_labels = self._format_selected_gold_export_strategy_labels()
+        split_enabled = False
+        split_stats = {}
 
         if not selected_buckets:
             self._set_console_text(
@@ -27074,7 +28561,7 @@ class CharacterAnnotationTab:
                 pass
             self._log(
                 self.export_console,
-                f"[INFO] Dostępne tablice perfect we wszystkich paczkach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
+                f"[INFO] Dostępne tablice perfect we wszystkich zestawach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
                 "INFO"
             )
             try:
@@ -27085,7 +28572,7 @@ class CharacterAnnotationTab:
 
             try:
                 self.app.update_status(
-                    "Paczka YOLO została utworzona poprawnie. Możesz zakończyć ten krok przyciskiem finish.",
+                    "Dataset YOLO został utworzony poprawnie. Możesz zakończyć ten krok przyciskiem finish.",
                     "info"
                 )
             except Exception:
@@ -27391,6 +28878,18 @@ class CharacterAnnotationTab:
                         "characters": list(item.get("characters", []) or []),
                     }
                 )
+            exported_plate_count = int(len(manifest_items))
+            exported_char_count = int(
+                sum(len(item.get("characters", []) or []) for item in manifest_items)
+            )
+            layout_counts_text = (
+                " | ".join(
+                    f"{str(label)}: {int(count)}"
+                    for label, count in sorted(layout_counts.items())
+                )
+                if layout_counts
+                else "brak danych"
+            )
 
             self._atomic_write_json(
                 yolo_out / "metadata_manifest.json",
@@ -27400,23 +28899,34 @@ class CharacterAnnotationTab:
                     "split_enabled": bool(split_enabled),
                     "selected_strategies": sorted(selected_buckets),
                     "selected_sources": sorted(selected_sources),
-                    "plate_count": int(len(manifest_items)),
-                    "character_count": int(sum(len(item.get("characters", []) or []) for item in manifest_items)),
+                    "plate_count": int(exported_plate_count),
+                    "character_count": int(exported_char_count),
                     "layout_counts": {str(key): int(value) for key, value in sorted(layout_counts.items())},
                     "items": manifest_items,
                 },
             )
 
-            split_info = (
-                f"\nSplit: train={split_stats.get('train', 0)}, val={split_stats.get('val', 0)}, test={split_stats.get('test', 0)}"
+            split_info_text = (
+                f"train={split_stats.get('train', 0)}, val={split_stats.get('val', 0)}, test={split_stats.get('test', 0)}"
                 if split_enabled
-                else "\nSplit: wyłączony (flat images/labels)"
+                else "wyłączony (flat images/labels)"
             )
 
-            export_summary = self._build_step3_local_success_message(
-                "Utworzono źródłowy dataset YOLO znaków.",
-                yolo_out,
-                "Przejdź do Z4, aby przygotować wariant treningowy i split, albo zostań w Z3 / PZ3 i wykonaj kolejny eksport źródłowy.",
+            export_summary = "\n".join(
+                [
+                    "Proces zakończył się sukcesem: utworzono źródłowy dataset YOLO znaków.",
+                    f"Wyeksportowane tablice: {exported_plate_count}",
+                    f"Wyeksportowane znaki: {exported_char_count}",
+                    f"Układ tablic: {layout_counts_text}",
+                    f"Strategie: {selected_labels}",
+                    f"Źródła: {selected_source_labels}",
+                    f"Split: {split_info_text}",
+                    f"Ścieżka: {yolo_out}",
+                    (
+                        "Dalej: przejdź do Z4, aby przygotować wariant treningowy i split, "
+                        "albo zostań w Z3 / PZ3 i wykonaj kolejny eksport źródłowy."
+                    ),
+                ]
             )
             self._set_console_text(self.export_console, export_summary)
             self._show_pz3_operation_summary_modal(
@@ -27425,18 +28935,17 @@ class CharacterAnnotationTab:
                 tone="success",
             )
             try:
-                exported_char_count = sum(
-                    len([line for line in str(item.get("label_text", "") or "").splitlines() if line.strip()])
-                    for item in export_entries
-                )
                 success_summary = self._build_step3_export_summary(
                     gold_dataset_path=str(yolo_out),
                     review_pack_path="",
                     retry_pack_path="",
                     note="Bieżący eksport źródłowego gold packa znaków zakończył się powodzeniem. Wariant treningowy i split przygotuj w Z4."
                 )
-                success_summary["exportable_plate_count"] = int(copied)
+                success_summary["exportable_plate_count"] = int(exported_plate_count)
                 success_summary["exportable_char_count"] = int(exported_char_count)
+                success_summary["layout_counts"] = {
+                    str(key): int(value) for key, value in sorted(layout_counts.items())
+                }
                 success_summary["gold_dataset_valid"] = True
                 success_summary["gold_dataset_validation_message"] = ""
                 self._write_step3_export_summary(success_summary)
@@ -27444,7 +28953,7 @@ class CharacterAnnotationTab:
                 pass
             self._log(
                 self.export_console,
-                f"[INFO] Dostępne tablice perfect we wszystkich paczkach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
+                f"[INFO] Dostępne tablice perfect we wszystkich zestawach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
                 "INFO"
             )
             self._log(
@@ -27920,7 +29429,7 @@ class CharacterAnnotationTab:
             )
             self._log(
                 self.export_console,
-                f"[INFO] Dostępne tablice perfect we wszystkich paczkach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
+                f"[INFO] Dostępne tablice perfect we wszystkich zestawach przed deduplikacją i filtrem: {self._format_perfect_strategy_counts(total_strategy_counts)}",
                 "INFO"
             )
             self._log(
@@ -27946,7 +29455,7 @@ class CharacterAnnotationTab:
 
             try:
                 self.app.update_status(
-                    "Paczka znaków do klasyfikacji została utworzona poprawnie.",
+                    "Dataset znaków do klasyfikacji został utworzony poprawnie.",
                     "info"
                 )
             except Exception:
@@ -28192,7 +29701,7 @@ class CharacterAnnotationTab:
                 )
                 self._set_console_text(self.import_console, final_import_summary)
             except Exception as e:
-                logger.debug(f"Nie udało się zapisać paczki do manual_char_pool: {e}")
+                logger.debug(f"Nie udało się zapisać zestawu do manual_char_pool: {e}")
             self._show_pz3_operation_summary_modal(
                 "Import CVAT zakończony",
                 final_import_summary,

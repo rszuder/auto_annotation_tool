@@ -63,6 +63,10 @@ class CampaignManager:
             "project_start_scope_plate_run": "",
             "project_start_scope_plate_model": "",
             "project_start_scope_char_model": "",
+            "project_start_plate_source_run": "",
+            "project_start_plate_source_xml": "",
+            "project_start_plate_source_input": "",
+            "project_start_plate_source_iteration": 0,
             "step1_source_manual_clear_iteration": 0,
             "step1_restored_image_source_dir": "",
             "step1_status": "pending",
@@ -112,6 +116,10 @@ class CampaignManager:
             "project_start_scope_plate_run": "",
             "project_start_scope_plate_model": "",
             "project_start_scope_char_model": "",
+            "project_start_plate_source_run": "",
+            "project_start_plate_source_xml": "",
+            "project_start_plate_source_input": "",
+            "project_start_plate_source_iteration": 0,
             "step1_status": "pending",
             "step2_status": "pending",
             "step2_staging_run": "",
@@ -382,6 +390,72 @@ class CampaignManager:
 
         raw_value = self.state["projects"][project_name].get(state_key, "")
         return self._normalize_project_start_asset_scope(raw_value)
+
+    def set_project_start_plate_source(
+        self,
+        source_run_path: str = "",
+        source_xml_path: str = "",
+        source_input_path: str = "",
+        project_name: str = None,
+    ) -> bool:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return False
+
+        project_data = self.state["projects"][project_name]
+        source_run = str(source_run_path or "").strip()
+        source_xml = str(source_xml_path or "").strip()
+        source_input = str(source_input_path or "").strip()
+        has_source = bool(source_run or source_xml or source_input)
+        try:
+            current_iteration = int(project_data.get("current_iteration", 1) or 1)
+        except Exception:
+            current_iteration = 1
+
+        project_data["project_start_plate_source_run"] = source_run
+        project_data["project_start_plate_source_xml"] = source_xml
+        project_data["project_start_plate_source_input"] = source_input
+        project_data["project_start_plate_source_iteration"] = int(current_iteration if has_source else 0)
+        self.save_state()
+        return True
+
+    def clear_project_start_plate_source(self, project_name: str = None) -> bool:
+        return self.set_project_start_plate_source("", "", "", project_name=project_name)
+
+    def get_project_start_plate_source(self, project_name: str = None) -> Dict[str, str]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {
+                "source_run_path": "",
+                "source_xml_path": "",
+                "source_input_path": "",
+                "source_iteration": "",
+            }
+
+        project_data = self.state["projects"].get(project_name, {})
+        try:
+            source_iteration = int(project_data.get("project_start_plate_source_iteration", 0) or 0)
+        except Exception:
+            source_iteration = 0
+        try:
+            current_iteration = int(project_data.get("current_iteration", 1) or 1)
+        except Exception:
+            current_iteration = 1
+
+        if source_iteration and source_iteration != current_iteration:
+            return {
+                "source_run_path": "",
+                "source_xml_path": "",
+                "source_input_path": "",
+                "source_iteration": "",
+            }
+
+        return {
+            "source_run_path": str(project_data.get("project_start_plate_source_run", "") or "").strip(),
+            "source_xml_path": str(project_data.get("project_start_plate_source_xml", "") or "").strip(),
+            "source_input_path": str(project_data.get("project_start_plate_source_input", "") or "").strip(),
+            "source_iteration": str(source_iteration or ""),
+        }
 
     @staticmethod
     def _normalize_iteration_target(target: str | None) -> str:
@@ -749,7 +823,22 @@ class CampaignManager:
                     item_name = Path(target_path).name
             if not item_name:
                 continue
-            cloned_item["target_path"] = str((target_raw_dir / item_name).resolve())
+            actual_image_path = ""
+            for key in ("target_path", "source_path"):
+                candidate = str(cloned_item.get(key, "") or "").strip()
+                if not candidate:
+                    continue
+                try:
+                    candidate_path = Path(candidate)
+                except Exception:
+                    continue
+                if candidate_path.exists() and candidate_path.is_file():
+                    actual_image_path = str(candidate_path.resolve())
+                    break
+            logical_target_path = target_raw_dir / item_name
+            if actual_image_path:
+                cloned_item["target_path"] = actual_image_path
+            cloned_item["iteration_target_path"] = str(logical_target_path.resolve())
             selected_images.append(cloned_item)
 
         cloned_manifest = dict(manifest)
@@ -758,9 +847,13 @@ class CampaignManager:
         cloned_manifest["selection_mode"] = "iteration_reuse"
         cloned_manifest["reused_from_iteration"] = int(source_iteration)
         cloned_manifest["target_dir"] = str(target_raw_dir.resolve())
+        cloned_manifest["manifest_only"] = True
         cloned_manifest["selected_images"] = selected_images
         cloned_manifest["selected_count"] = int(
             len(selected_images) or manifest.get("selected_count", 0) or 0
+        )
+        cloned_manifest["image_set_token"] = self.build_image_name_set_token(
+            [str(item.get("name") or "").strip() for item in selected_images]
         )
 
         return bool(self.save_ingest_manifest(cloned_manifest, target_iteration, project_name))
@@ -771,7 +864,7 @@ class CampaignManager:
         target_iteration: int,
         project_name: str,
     ) -> Dict[str, Any]:
-        source_raw_dir = self.get_iteration_raw_dir(source_iteration, project_name)
+        source_raw_dir = self.get_iteration_image_source_dir(source_iteration, project_name)
         target_raw_dir = self.get_iteration_raw_dir(target_iteration, project_name)
         if source_raw_dir is None or target_raw_dir is None:
             return {"ok": False, "reason": "missing_project_dirs"}
@@ -779,18 +872,28 @@ class CampaignManager:
         if not source_raw_dir.exists() or not source_raw_dir.is_dir():
             return {"ok": False, "reason": "missing_source_dir"}
 
-        image_files = [
-            path for path in source_raw_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-        ]
+        manifest_image_files = []
+        try:
+            manifest_image_files = list(
+                self.get_iteration_manifest_image_paths(source_iteration, project_name) or []
+            )
+        except Exception:
+            manifest_image_files = []
+        if manifest_image_files:
+            image_files = [
+                Path(path)
+                for path in manifest_image_files
+                if Path(path).exists()
+                and Path(path).is_file()
+                and Path(path).suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+            ]
+        else:
+            image_files = [
+                path for path in source_raw_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+            ]
         if not image_files:
             return {"ok": False, "reason": "missing_images"}
-
-        target_raw_dir.mkdir(parents=True, exist_ok=True)
-        copied = 0
-        for source_path in image_files:
-            shutil.copy2(source_path, target_raw_dir / source_path.name)
-            copied += 1
 
         manifest_cloned = self._clone_iteration_ingest_manifest(
             source_iteration=source_iteration,
@@ -798,14 +901,128 @@ class CampaignManager:
             target_raw_dir=target_raw_dir,
             project_name=project_name,
         )
+        if not manifest_cloned:
+            selected_images = []
+            for source_path in image_files:
+                logical_target_path = target_raw_dir / source_path.name
+                selected_images.append(
+                    {
+                        "name": source_path.name,
+                        "source_path": str(source_path.resolve()),
+                        "target_path": str(source_path.resolve()),
+                        "iteration_target_path": str(logical_target_path.resolve()),
+                    }
+                )
+            manifest_cloned = bool(
+                self.save_ingest_manifest(
+                    {
+                        "project": project_name,
+                        "iteration": int(target_iteration),
+                        "created_at": datetime.now().isoformat(),
+                        "selection_mode": "iteration_reuse",
+                        "reused_from_iteration": int(source_iteration),
+                        "source_dir": str(source_raw_dir.resolve()),
+                        "target_dir": str(target_raw_dir.resolve()),
+                        "selected_count": int(len(selected_images)),
+                        "selected_images": selected_images,
+                        "manifest_only": True,
+                        "image_set_token": self.build_image_name_set_token(
+                            [str(item.get("name") or "").strip() for item in selected_images]
+                        ),
+                        "proposal_summary": {
+                            "source_iteration": int(source_iteration),
+                            "source_kind": "iteration_manifest",
+                            "current_iteration_package_count": int(len(selected_images)),
+                        },
+                    },
+                    target_iteration,
+                    project_name,
+                )
+            )
+        if not manifest_cloned:
+            return {
+                "ok": False,
+                "reason": "manifest_save_failed",
+                "source_dir": str(source_raw_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_images": 0,
+                "manifest_cloned": False,
+                "source_kind": "iteration",
+            }
 
         return {
             "ok": True,
             "source_dir": str(source_raw_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
-            "copied_images": int(copied),
+            "copied_images": 0,
+            "manifest_images": int(len(image_files)),
             "manifest_cloned": bool(manifest_cloned),
+            "source_kind": "iteration",
         }
+
+    def _is_broad_image_source_dir(self, candidate: str | Path | None, project_name: str = None) -> bool:
+        if candidate is None:
+            return False
+        try:
+            path = Path(str(candidate or "").strip()).resolve()
+        except Exception:
+            return False
+
+        broad_roots: list[Path] = []
+        for root_candidate in (
+            Path.cwd(),
+            CONFIG.WORKSPACE_DIR,
+            self.get_project_root_dir(project_name) if project_name else None,
+        ):
+            if root_candidate is None:
+                continue
+            try:
+                broad_roots.append(Path(root_candidate).resolve())
+            except Exception:
+                pass
+
+        for root in broad_roots:
+            if path == root:
+                return True
+
+        # Nie pozwalamy, aby katalog aplikacji albo jego rodzic udawal katalog zdjec.
+        # W przeciwnym razie rekurencyjne liczenie obrazow podlapuje artefakty z calego Workspace.
+        try:
+            workspace_root = Path(CONFIG.WORKSPACE_DIR).resolve()
+            return workspace_root.is_relative_to(path) and workspace_root != path
+        except Exception:
+            try:
+                return path in workspace_root.parents
+            except Exception:
+                return False
+
+    def _resolve_valid_image_source_dir(
+        self,
+        candidate: str | Path | None,
+        *,
+        project_name: str = None,
+        recursive: bool = True,
+        reject_broad: bool = True,
+    ) -> str:
+        if candidate is None:
+            return ""
+        try:
+            path = Path(str(candidate or "").strip())
+        except Exception:
+            return ""
+        if not path.exists() or not path.is_dir():
+            return ""
+        if reject_broad and self._is_broad_image_source_dir(path, project_name):
+            return ""
+        try:
+            iterator = path.rglob("*") if recursive else path.iterdir()
+            for image_path in iterator:
+                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                    return str(path.resolve())
+        except Exception:
+            return ""
+        return ""
 
     def _resolve_previous_iteration_image_source_for_e1(
         self,
@@ -822,6 +1039,38 @@ class CampaignManager:
             stage_images_dir = str(stage_state.get("images_dir") or "").strip()
             if stage_images_dir:
                 return stage_images_dir
+
+        # E4->E1 nie moze utozsamiac pustego stage z pusta pula projektu.
+        # Po torze znakow najczesciej chcemy odtworzyc katalog zdjec z E1,
+        # mimo ze stage tablic jest pusty.
+        master_pool = self._resolve_valid_image_source_dir(
+            project_data.get("master_pool_dir", ""),
+            project_name=project_name,
+        )
+        if master_pool:
+            return master_pool
+
+        try:
+            manifest = self.load_ingest_manifest(current_iteration, project_name)
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            for key in ("master_pool_dir", "source_dir", "target_dir"):
+                source = self._resolve_valid_image_source_dir(
+                    manifest.get(key, ""),
+                    project_name=project_name,
+                )
+                if source:
+                    return source
+
+        raw_source = self._resolve_valid_image_source_dir(
+            self.get_iteration_raw_dir(current_iteration, project_name),
+            project_name=project_name,
+            recursive=False,
+            reject_broad=False,
+        )
+        if raw_source:
+            return raw_source
         return ""
 
     def get_manual_plate_stage_images_state(
@@ -852,6 +1101,19 @@ class CampaignManager:
             try:
                 if not images_dir.exists() or not images_dir.is_dir():
                     continue
+                manifest_path = stage_dir / "stage_manifest.json"
+                if manifest_path.exists():
+                    manifest = self._read_json_file(manifest_path)
+                    if isinstance(manifest, dict):
+                        try:
+                            pending_images = int(
+                                manifest.get("pending_images", manifest.get("stage_images_total", 0)) or 0
+                            )
+                        except Exception:
+                            pending_images = 0
+                        entries = manifest.get("entries", {})
+                        if pending_images <= 0 and (not isinstance(entries, dict) or not entries):
+                            continue
                 count = 0
                 for image_path in images_dir.iterdir():
                     if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
@@ -889,8 +1151,19 @@ class CampaignManager:
             return ""
         if current_step != 1 or current_iteration <= 1:
             return ""
-        if str(project_data.get("master_pool_dir", "") or "").strip():
-            return ""
+        current_source = str(project_data.get("master_pool_dir", "") or "").strip()
+        if current_source:
+            valid_current_source = self._resolve_valid_image_source_dir(
+                current_source,
+                project_name=project_name,
+            )
+            if valid_current_source:
+                if valid_current_source != current_source:
+                    project_data["master_pool_dir"] = valid_current_source
+                    self.save_state()
+                return ""
+            project_data["master_pool_dir"] = ""
+            project_data["step1_restored_image_source_dir"] = ""
         try:
             manual_clear_iteration = int(project_data.get("step1_source_manual_clear_iteration", 0) or 0)
         except Exception:
@@ -978,11 +1251,11 @@ class CampaignManager:
                 "source_dir": str(master_pool_dir.resolve()),
                 "target_dir": str(target_raw_dir.resolve()),
                 "copied_images": 0,
+                "manifest_images": 0,
                 "manifest_cloned": False,
             }
 
-        target_raw_dir.mkdir(parents=True, exist_ok=True)
-        copied = 0
+        linked = 0
         selected_images: list[Dict[str, Any]] = []
         total_hist: Dict[str, int] = {ch: 0 for ch in CHAR_ALPHABET}
 
@@ -994,9 +1267,8 @@ class CampaignManager:
             if not source_path.exists() or not source_path.is_file():
                 continue
 
-            target_path = target_raw_dir / source_path.name
-            shutil.copy2(source_path, target_path)
-            copied += 1
+            logical_target_path = target_raw_dir / source_path.name
+            linked += 1
 
             char_hist = {
                 str(ch): int(value)
@@ -1011,7 +1283,8 @@ class CampaignManager:
                     "name": source_path.name,
                     "source_path": str(source_path.resolve()),
                     "source_key": str(item.get("source_key", "") or "").strip(),
-                    "target_path": str(target_path.resolve()),
+                    "target_path": str(source_path.resolve()),
+                    "iteration_target_path": str(logical_target_path.resolve()),
                     "ground_truth_texts": list(item.get("ground_truth_texts", []) or []),
                     "char_histogram": char_hist,
                     "score": float(item.get("score", 0.0) or 0.0),
@@ -1019,13 +1292,14 @@ class CampaignManager:
                 }
             )
 
-        if copied <= 0:
+        if linked <= 0:
             return {
                 "ok": False,
-                "reason": "copy_failed",
+                "reason": "missing_remaining_images",
                 "source_dir": str(master_pool_dir.resolve()),
                 "target_dir": str(target_raw_dir.resolve()),
                 "copied_images": 0,
+                "manifest_images": 0,
                 "manifest_cloned": False,
             }
 
@@ -1039,6 +1313,10 @@ class CampaignManager:
             "target_dir": str(target_raw_dir.resolve()),
             "master_pool_dir": str(master_pool_dir.resolve()),
             "selected_count": len(selected_images),
+            "manifest_only": True,
+            "image_set_token": self.build_image_name_set_token(
+                [str(item.get("name") or "").strip() for item in selected_images]
+            ),
             "char_histogram": {k: int(v) for k, v in total_hist.items() if int(v) > 0},
             "selected_images": selected_images,
             "proposal_summary": {
@@ -1048,10 +1326,23 @@ class CampaignManager:
                 "batch_size": int(plan.get("batch_size", plan.get("selected_total", 0)) or 0),
                 "skipped_used": int(plan.get("skipped_used", 0) or 0),
                 "source_iteration": int(source_iteration),
+                "current_iteration_package_count": int(len(selected_images)),
+                "source_kind": "master_pool",
             },
         }
 
         manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+        if not manifest_saved:
+            return {
+                "ok": False,
+                "reason": "manifest_save_failed",
+                "source_dir": str(master_pool_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_images": 0,
+                "manifest_cloned": False,
+                "source_kind": "master_pool",
+            }
         try:
             plan["ok"] = True
             plan["project"] = project_name
@@ -1066,15 +1357,17 @@ class CampaignManager:
                 "[CampaignManager][PERF] seed_iteration_from_master_pool: "
                 f"{elapsed_ms:.1f} ms | batch={int(preferred_batch_size)} "
                 f"candidates={int(plan.get('candidates_total', 0) or 0)} "
-                f"selected={int(plan.get('selected_total', 0) or 0)}"
+                f"selected={int(plan.get('selected_total', 0) or 0)} manifest_only=1"
             )
 
         return {
             "ok": True,
             "source_dir": str(master_pool_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
-            "copied_images": int(copied),
+            "copied_images": 0,
+            "manifest_images": int(linked),
             "manifest_cloned": manifest_saved,
+            "source_kind": "master_pool",
         }
 
     def _seed_iteration_from_stage(
@@ -1112,6 +1405,7 @@ class CampaignManager:
                 "source_dir": str(missing_images_dir.resolve()),
                 "target_dir": str(target_raw_dir.resolve()),
                 "copied_images": 0,
+                "manifest_images": 0,
                 "manifest_cloned": False,
             }
 
@@ -1126,58 +1420,32 @@ class CampaignManager:
                 "source_dir": str(stage_images_dir.resolve()),
                 "target_dir": str(target_raw_dir.resolve()),
                 "copied_images": 0,
+                "manifest_images": 0,
                 "manifest_cloned": False,
             }
 
-        stage_image_count = int(len(stage_images))
-        moved = 0
-        transfer_mode = "per_file"
-        fast_move_fallback = False
+        selected_images = []
+        for source_path in stage_images:
+            if not source_path.exists() or not source_path.is_file():
+                continue
+            logical_target_path = target_raw_dir / source_path.name
+            selected_images.append(
+                {
+                    "name": source_path.name,
+                    "source_path": str(source_path.resolve()),
+                    "target_path": str(source_path.resolve()),
+                    "iteration_target_path": str(logical_target_path.resolve()),
+                }
+            )
 
-        target_parent = target_raw_dir.parent
-        target_parent.mkdir(parents=True, exist_ok=True)
-
-        can_use_dir_move = not target_raw_dir.exists()
-        if target_raw_dir.exists():
-            try:
-                if any(target_raw_dir.iterdir()):
-                    can_use_dir_move = False
-                else:
-                    target_raw_dir.rmdir()
-                    can_use_dir_move = True
-            except Exception:
-                can_use_dir_move = False
-
-        if can_use_dir_move:
-            try:
-                shutil.move(str(stage_images_dir), str(target_raw_dir))
-                stage_images_dir.mkdir(parents=True, exist_ok=True)
-                moved = stage_image_count
-                transfer_mode = "dir_move"
-            except Exception:
-                fast_move_fallback = True
-
-        if moved <= 0:
-            target_raw_dir.mkdir(parents=True, exist_ok=True)
-            for source_path in stage_images:
-                if not source_path.exists() or not source_path.is_file():
-                    continue
-                target_path = target_raw_dir / source_path.name
-                if target_path.exists():
-                    try:
-                        target_path.unlink()
-                    except Exception:
-                        pass
-                shutil.move(str(source_path), str(target_path))
-                moved += 1
-
-        if moved <= 0:
+        if not selected_images:
             return {
                 "ok": False,
-                "reason": "copy_failed",
+                "reason": "missing_stage_images",
                 "source_dir": str(stage_images_dir.resolve()),
                 "target_dir": str(target_raw_dir.resolve()),
                 "copied_images": 0,
+                "manifest_images": 0,
                 "manifest_cloned": False,
             }
 
@@ -1189,17 +1457,32 @@ class CampaignManager:
             "reused_from_iteration": int(source_iteration),
             "source_dir": str(stage_images_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
-            "selected_count": int(moved),
-            "selected_images": [],
+            "selected_count": int(len(selected_images)),
+            "selected_images": selected_images,
+            "manifest_only": True,
+            "image_set_token": self.build_image_name_set_token(
+                [str(item.get("name") or "").strip() for item in selected_images]
+            ),
             "char_histogram": {},
             "proposal_summary": {
                 "source_iteration": int(source_iteration),
                 "source_kind": "stage",
-                "current_iteration_package_count": int(moved),
-                "stage_transfer_mode": transfer_mode,
+                "current_iteration_package_count": int(len(selected_images)),
+                "stage_transfer_mode": "manifest_link",
             },
         }
         manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+        if not manifest_saved:
+            return {
+                "ok": False,
+                "reason": "manifest_save_failed",
+                "source_dir": str(stage_images_dir.resolve()),
+                "target_dir": str(target_raw_dir.resolve()),
+                "copied_images": 0,
+                "manifest_images": 0,
+                "manifest_cloned": False,
+                "source_kind": "stage",
+            }
 
         manifest_path = stage_iteration_dir / "stage_manifest.json"
         if manifest_path.exists():
@@ -1226,15 +1509,15 @@ class CampaignManager:
         if elapsed_ms >= 40.0:
             logger.debug(
                 "[CampaignManager][PERF] seed_iteration_from_stage: "
-                f"{elapsed_ms:.1f} ms | images={int(moved)} mode={transfer_mode} "
-                f"fallback={1 if fast_move_fallback else 0}"
+                f"{elapsed_ms:.1f} ms | images={int(len(selected_images))} mode=manifest_link"
             )
 
         return {
             "ok": True,
             "source_dir": str(stage_images_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
-            "copied_images": int(moved),
+            "copied_images": 0,
+            "manifest_images": int(len(selected_images)),
             "manifest_cloned": manifest_saved,
             "source_kind": "stage",
         }
@@ -1312,6 +1595,11 @@ class CampaignManager:
         project_data["step1_status"] = "pending"
         project_data["step1_source_manual_clear_iteration"] = 0
         project_data["step1_restored_image_source_dir"] = ""
+        project_data["project_start_plate_source_run"] = ""
+        project_data["project_start_plate_source_xml"] = ""
+        project_data["project_start_plate_source_input"] = ""
+        project_data["project_start_plate_source_iteration"] = 0
+        project_data["project_start_scope_plate_run"] = ""
 
         if current_target in {"plate", "char"}:
             project_data["last_iteration_target"] = current_target
@@ -1616,6 +1904,45 @@ class CampaignManager:
         digest = hashlib.sha1("\n".join(unique_names).encode("utf-8")).hexdigest()[:20]
         return f"iset_{len(unique_names):05d}_{digest}"
 
+    def get_iteration_image_set_token(
+        self,
+        iteration_num: int = None,
+        project_name: str = None,
+    ) -> str:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return ""
+
+        try:
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+
+        try:
+            manifest = self.load_ingest_manifest(iter_value, project_name)
+        except Exception:
+            manifest = {}
+
+        if isinstance(manifest, dict):
+            token = str(manifest.get("image_set_token", "") or "").strip()
+            if token:
+                return token
+
+            manifest_names = [
+                str(item.get("name", "") or "").strip()
+                for item in list(manifest.get("selected_images") or [])
+                if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+            ]
+            token = self.build_image_name_set_token(manifest_names)
+            if token:
+                return token
+
+        try:
+            source_dir = self.get_iteration_image_source_dir(iter_value, project_name)
+        except Exception:
+            source_dir = self.get_iteration_raw_dir(iter_value, project_name)
+        return self.build_image_name_set_token(images_dir=source_dir)
+
     @staticmethod
     def _deep_merge_registry_dict(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in dict(updates or {}).items():
@@ -1789,8 +2116,16 @@ class CampaignManager:
         if not project_name:
             return {}
 
-        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
-        normalized_images_dir = self._safe_registry_path_value(images_dir or self.get_master_pool_dir(project_name))
+        try:
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+
+        try:
+            default_images_dir = self.get_iteration_image_source_dir(iter_value, project_name)
+        except Exception:
+            default_images_dir = None
+        normalized_images_dir = self._safe_registry_path_value(images_dir or default_images_dir or self.get_master_pool_dir(project_name))
         registry = self.load_artifact_registry(project_name)
         packages = registry.setdefault("packages", {})
         iteration_index = registry.setdefault("iteration_index", {})
@@ -1802,6 +2137,7 @@ class CampaignManager:
             image_set_token
             or updates_image_source.get("image_set_token")
             or dict(existing_package.get("image_source") or {}).get("image_set_token")
+            or self.get_iteration_image_set_token(iter_value, project_name)
             or ""
         ).strip()
 
@@ -1823,6 +2159,17 @@ class CampaignManager:
         package["iteration_last_seen"] = int(iter_value)
         package["images_dir"] = normalized_images_dir or str(package.get("images_dir", "") or "").strip()
         package["images_token"] = self._build_registry_path_token(package.get("images_dir"))
+        if resolved_image_set_token:
+            image_source = package.setdefault("image_source", {})
+            if isinstance(image_source, dict):
+                image_source.setdefault("image_set_token", resolved_image_set_token)
+                try:
+                    image_source.setdefault(
+                        "image_set_count",
+                        int(str(resolved_image_set_token).split("_", 2)[1]),
+                    )
+                except Exception:
+                    pass
         iterations = {
             int(value)
             for value in list(package.get("iterations") or [])
@@ -1861,19 +2208,26 @@ class CampaignManager:
         if not isinstance(packages, dict):
             return {}
 
-        normalized_images_dir = self._safe_registry_path_value(images_dir)
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        resolved_image_set_token = str(
+            image_set_token
+            or self.get_iteration_image_set_token(iter_value, project_name)
+            or ""
+        ).strip()
+        normalized_images_dir = self._safe_registry_path_value(
+            images_dir or self.get_iteration_image_source_dir(iter_value, project_name)
+        )
         if normalized_images_dir:
             package_id = self.build_iteration_artifact_package_id(
                 normalized_images_dir,
-                iteration_num=iteration_num,
-                image_set_token=image_set_token,
+                iteration_num=iter_value,
+                image_set_token=resolved_image_set_token,
                 project_name=project_name,
             )
             package = packages.get(package_id)
             if isinstance(package, dict):
                 return dict(package)
 
-        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
         package_id = str((registry.get("iteration_index") or {}).get(str(iter_value), "") or "").strip()
         package = packages.get(package_id)
         return dict(package) if isinstance(package, dict) else {}
@@ -1893,6 +2247,202 @@ class CampaignManager:
         raw_dir.mkdir(parents=True, exist_ok=True)
         iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1))
         return raw_dir / f"Iteracja_{iter_value:03d}"
+
+    def count_images_in_dir(self, path_like: str | Path | None, *, recursive: bool = False) -> int:
+        if path_like is None:
+            return 0
+        try:
+            path = Path(path_like)
+        except Exception:
+            return 0
+        if not path.exists() or not path.is_dir():
+            return 0
+        count = 0
+        try:
+            iterator = path.rglob("*") if recursive else path.iterdir()
+            for image_path in iterator:
+                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                    count += 1
+        except Exception:
+            return 0
+        return int(count)
+
+    def get_iteration_manifest_image_count(self, iteration_num: int = None, project_name: str = None) -> int:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return 0
+        try:
+            manifest = self.load_ingest_manifest(iteration_num, project_name)
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            return 0
+        try:
+            selected_images = list(manifest.get("selected_images", []) or [])
+        except Exception:
+            selected_images = []
+        if selected_images:
+            return int(len(selected_images))
+        try:
+            return max(0, int(manifest.get("selected_count", 0) or 0))
+        except Exception:
+            return 0
+
+    def get_iteration_manifest_image_paths(
+        self,
+        iteration_num: int = None,
+        project_name: str = None,
+        *,
+        base_dir: str | Path | None = None,
+    ) -> List[Path]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return []
+
+        try:
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+
+        try:
+            manifest = self.load_ingest_manifest(iter_value, project_name)
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            return []
+
+        selected_items = list(manifest.get("selected_images") or [])
+        if not selected_items:
+            return []
+
+        candidate_roots: list[Path] = []
+        for root_candidate in (
+            base_dir,
+            manifest.get("source_dir"),
+            manifest.get("master_pool_dir"),
+            manifest.get("target_dir"),
+            self.get_iteration_raw_dir(iter_value, project_name),
+        ):
+            if not root_candidate:
+                continue
+            try:
+                root_path = Path(root_candidate)
+            except Exception:
+                continue
+            try:
+                if root_path.exists() and root_path.is_dir():
+                    candidate_roots.append(root_path)
+            except Exception:
+                continue
+
+        image_paths: list[Path] = []
+        seen_names: set[str] = set()
+        for item in selected_items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            candidates: list[Path] = []
+            for key in ("target_path", "source_path", "iteration_target_path"):
+                raw_path = str(item.get(key, "") or "").strip()
+                if not raw_path:
+                    continue
+                try:
+                    candidates.append(Path(raw_path))
+                except Exception:
+                    pass
+            if name:
+                for root_path in candidate_roots:
+                    candidates.append(root_path / name)
+
+            resolved_path = None
+            for candidate in candidates:
+                try:
+                    if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                        resolved_path = candidate
+                        break
+                except Exception:
+                    continue
+            if resolved_path is None:
+                continue
+
+            safe_name = str(resolved_path.name or name or "").strip().lower()
+            if not safe_name or safe_name in seen_names:
+                continue
+            seen_names.add(safe_name)
+            image_paths.append(resolved_path)
+
+        return image_paths
+
+    def get_iteration_image_count(self, iteration_num: int = None, project_name: str = None) -> int:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return 0
+        try:
+            manifest = self.load_ingest_manifest(iteration_num, project_name)
+        except Exception:
+            manifest = {}
+        manifest_mode = str((manifest or {}).get("selection_mode", "") or "").strip().lower() if isinstance(manifest, dict) else ""
+        manifest_count = int(self.get_iteration_manifest_image_count(iteration_num, project_name) or 0)
+        if manifest_count > 0 and (
+            bool((manifest or {}).get("manifest_only", False))
+            or manifest_mode in {"planned", "planned_manifest", "source_reuse", "pool_reuse", "stage_reuse", "iteration_reuse"}
+        ):
+            return int(manifest_count)
+
+        raw_dir = self.get_iteration_raw_dir(iteration_num, project_name)
+        physical_count = self.count_images_in_dir(raw_dir, recursive=False)
+        if physical_count > 0:
+            return int(physical_count)
+        return int(manifest_count)
+
+    def get_iteration_image_source_dir(
+        self,
+        iteration_num: int = None,
+        project_name: str = None,
+    ) -> Path | None:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return None
+        iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1))
+
+        raw_dir = self.get_iteration_raw_dir(iter_value, project_name)
+        try:
+            manifest = self.load_ingest_manifest(iter_value, project_name)
+        except Exception:
+            manifest = {}
+        manifest_mode = str((manifest or {}).get("selection_mode", "") or "").strip().lower() if isinstance(manifest, dict) else ""
+        if manifest_mode in {"planned", "planned_manifest", "source_reuse", "pool_reuse", "stage_reuse", "iteration_reuse"}:
+            for key in ("source_dir", "master_pool_dir", "target_dir"):
+                source = self._resolve_valid_image_source_dir(
+                    manifest.get(key, "") if isinstance(manifest, dict) else "",
+                    project_name=project_name,
+                    recursive=(key != "target_dir"),
+                    reject_broad=(key != "target_dir"),
+                )
+                if source:
+                    return Path(source)
+
+        if self.count_images_in_dir(raw_dir, recursive=False) > 0:
+            return raw_dir
+
+        if isinstance(manifest, dict):
+            for key in ("target_dir", "source_dir", "master_pool_dir"):
+                source = self._resolve_valid_image_source_dir(
+                    manifest.get(key, ""),
+                    project_name=project_name,
+                    recursive=(key != "target_dir"),
+                    reject_broad=(key != "target_dir"),
+                )
+                if source:
+                    return Path(source)
+
+        master_pool = self._resolve_valid_image_source_dir(
+            self.state["projects"][project_name].get("master_pool_dir", ""),
+            project_name=project_name,
+        )
+        if master_pool:
+            return Path(master_pool)
+        return raw_dir
 
     def get_dir(self, key: str) -> Path | None:
         """Zwraca katalog dla aktywnego projektu."""
@@ -1946,7 +2496,13 @@ class CampaignManager:
             return False
 
         target = Path(path).expanduser()
-        self.state["projects"][project_name]["master_pool_dir"] = str(target)
+        resolved_target = self._resolve_valid_image_source_dir(
+            target,
+            project_name=project_name,
+        )
+        if not resolved_target:
+            return False
+        self.state["projects"][project_name]["master_pool_dir"] = str(resolved_target)
         self.state["projects"][project_name]["step1_source_manual_clear_iteration"] = 0
         self.state["projects"][project_name]["step1_restored_image_source_dir"] = ""
         self.save_state()
@@ -2327,6 +2883,7 @@ class CampaignManager:
         current_images = max(0, int(len(union_source_names)) - int(len(union_project_names)))
         current_plates = max(0, int(union_total_plates) - int(union_project_plates))
 
+        min_char_route_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
         return {
             "source_scope": (
                 "step3_pending_union"
@@ -2352,9 +2909,12 @@ class CampaignManager:
             "pending_source_names": set(pending_added_names),
             "run_name": str(preview_state.get("run_name") or "").strip(),
             "run_dir": str(preview_state.get("run_dir") or "").strip(),
-            "ready": bool(int(len(union_source_names)) >= 2 and int(union_total_plates) > 0),
+            "ready": bool(int(union_total_plates) >= int(min_char_route_plates)),
             "has_source": bool(int(union_total_plates) > 0),
-            "needs_more_tables": bool(int(union_total_plates) > 0 and int(len(union_source_names)) < 2),
+            "needs_more_tables": bool(
+                int(union_total_plates) > 0
+                and int(union_total_plates) < int(min_char_route_plates)
+            ),
         }
 
     def get_plate_approved_set_stats(self, project_name: str = None) -> Dict[str, Any]:
@@ -2688,45 +3248,66 @@ class CampaignManager:
             }
 
         filenames = set()
-        raw_root = self.get_dir("raw") if project_name == self.get_active_project_name() else self.get_project_root_dir(project_name) / "1_raw_images"
-        if raw_root is None:
-            return {
-                "filenames": [],
-                "total_filenames": 0,
-            }
-
         try:
-            raw_root = Path(raw_root)
+            raw_root = self.get_dir("raw") if project_name == self.get_active_project_name() else self.get_project_root_dir(project_name) / "1_raw_images"
         except Exception:
-            return {
-                "filenames": [],
-                "total_filenames": 0,
-            }
+            raw_root = None
 
-        if not raw_root.exists() or not raw_root.is_dir():
-            return {
-                "filenames": [],
-                "total_filenames": 0,
-            }
+        if raw_root is not None:
+            try:
+                raw_root = Path(raw_root)
+            except Exception:
+                raw_root = None
+
+        if raw_root is not None and raw_root.exists() and raw_root.is_dir():
+            try:
+                for image_path in raw_root.rglob("*"):
+                    if not image_path.is_file():
+                        continue
+                    if exclude_iteration_num is not None:
+                        try:
+                            excluded_dir = raw_root / f"Iteracja_{int(exclude_iteration_num):03d}"
+                            if excluded_dir in image_path.parents:
+                                continue
+                        except Exception:
+                            pass
+                    if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                        continue
+                    filename = str(image_path.name or "").strip().lower()
+                    if filename:
+                        filenames.add(filename)
+            except Exception:
+                pass
 
         try:
-            for image_path in raw_root.rglob("*"):
-                if not image_path.is_file():
-                    continue
-                if exclude_iteration_num is not None:
+            ingest_dir = self.get_project_ingest_state_dir(project_name)
+        except Exception:
+            ingest_dir = None
+        if ingest_dir is not None and ingest_dir.exists():
+            try:
+                for manifest_path in ingest_dir.glob("iter_*_manifest.json"):
                     try:
-                        excluded_dir = raw_root / f"Iteracja_{int(exclude_iteration_num):03d}"
-                        if excluded_dir in image_path.parents:
-                            continue
+                        match = re.search(r"iter_(\d+)_manifest\.json$", manifest_path.name)
+                        manifest_iter = int(match.group(1)) if match else 0
                     except Exception:
-                        pass
-                if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
-                    continue
-                filename = str(image_path.name or "").strip().lower()
-                if filename:
-                    filenames.add(filename)
-        except Exception:
-            pass
+                        manifest_iter = 0
+                    if exclude_iteration_num is not None and manifest_iter == int(exclude_iteration_num):
+                        continue
+                    manifest = self._read_json_file(manifest_path)
+                    for item in list((manifest or {}).get("selected_images") or []):
+                        if not isinstance(item, dict):
+                            continue
+                        filename = str(item.get("name") or "").strip().lower()
+                        if not filename:
+                            for key in ("target_path", "source_path", "iteration_target_path"):
+                                candidate = str(item.get(key) or "").strip()
+                                if candidate:
+                                    filename = Path(candidate).name.strip().lower()
+                                    break
+                        if filename:
+                            filenames.add(filename)
+            except Exception:
+                pass
 
         return {
             "filenames": sorted(filenames),
@@ -2836,24 +3417,29 @@ class CampaignManager:
             for ch, value in char_hist.items():
                 total_hist[ch] = total_hist.get(ch, 0) + int(value)
 
+            logical_target_path = target_dir / source_path.name
+            actual_image_path = logical_target_path if logical_target_path.exists() else source_path
             selected_images.append({
                 "name": source_path.name,
                 "source_path": str(source_path.resolve()),
                 "source_key": planner.make_source_key(source_path, master_pool_dir=master_pool_dir),
-                "target_path": str((target_dir / source_path.name).resolve()),
+                "target_path": str(actual_image_path.resolve()),
+                "iteration_target_path": str(logical_target_path.resolve()),
                 "ground_truth_texts": true_texts,
                 "char_histogram": char_hist,
             })
 
+        normalized_selection_mode = str(selection_mode or "manual").strip() or "manual"
         manifest = {
             "project": project_name,
             "iteration": iteration,
             "created_at": datetime.now().isoformat(),
-            "selection_mode": str(selection_mode or "manual").strip() or "manual",
+            "selection_mode": normalized_selection_mode,
             "source_dir": str(source_dir.resolve()),
             "target_dir": str(target_dir.resolve()),
             "master_pool_dir": str(master_pool_dir.resolve()) if master_pool_dir else "",
             "selected_count": len(selected_images),
+            "manifest_only": bool(normalized_selection_mode in {"planned", "planned_manifest", "source_reuse", "pool_reuse", "stage_reuse", "iteration_reuse"}),
             "image_set_token": self.build_image_name_set_token(
                 [str(item.get("name") or "").strip() for item in selected_images]
             ),

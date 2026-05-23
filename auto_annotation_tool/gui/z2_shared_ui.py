@@ -14,6 +14,20 @@ def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> 
     actual_route = host._get_workflow_route()
     route = host._get_z2_thematic_route()
     campaign_context = not host._is_free_mode_session_context()
+    if not campaign_context:
+        try:
+            from ..campaign_manager import CAMPAIGN
+
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        except Exception:
+            active_project = ""
+        if active_project:
+            campaign_context = True
+            try:
+                host.app.campaign_free_mode = False
+            except Exception:
+                pass
+    free_mode_context = not campaign_context
     manual_entry_mode = host._get_manual_entry_mode()
     auto_vehicle_choice = host._get_auto_vehicle_choice()
     plate_model_selected = bool(str(host.plate_custom_var.get() or "").strip())
@@ -27,11 +41,11 @@ def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> 
     manual_run_already_created = bool(manual_setup and host._has_active_manual_template_run())
     current_step = host._coerce_workflow_step()
     if host._get_workflow_step() != current_step:
-        host._set_workflow_step_state(current_step, campaign_context=host._is_campaign_step2_context())
+        host._set_workflow_step_state(current_step, campaign_context=campaign_context)
     manual_review_screen_active = False
     try:
         manual_review_screen_active = bool(
-            host._is_free_mode_session_context()
+            free_mode_context
             and host._coerce_free_mode_screen() == "manual_review"
             and host._manual_review_active
         )
@@ -53,7 +67,7 @@ def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> 
         route=route,
         campaign_context=campaign_context,
         auto_setup_pending=bool(
-            host._is_free_mode_session_context()
+            free_mode_context
             and route == "auto"
             and getattr(host, "_auto_route_settings_pending", False)
         ),
@@ -291,9 +305,20 @@ def apply_z2_workflow_left_layout(
         pady=(10, 0),
     )
     host._set_widget_packed(
-        host.export_plate_dataset_btn,
+        getattr(host, "plate_export_split_frame", None),
         show_export_followup and campaign_context,
         fill=tk.X,
+        pady=(0, 8),
+    )
+    host._set_widget_packed(
+        host.export_plate_dataset_btn,
+        show_export_followup,
+        fill=tk.X,
+        pady=(14, 0),
+    )
+    host._set_widget_packed(
+        getattr(host, "export_plate_annotations_btn", None),
+        False,
     )
     progress_anchor = None
     if show_actions_section:
@@ -763,8 +788,80 @@ def apply_z2_workflow_left_layout(
     except Exception:
         pass
 
+    try:
+        header_widgets = [
+            (getattr(host, "run_title_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 6)}),
+            (getattr(host, "run_intro_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 6)}),
+            (getattr(host, "route_badge_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 2)}),
+            (getattr(host, "route_summary_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 2)}),
+            (getattr(host, "workflow_action_hint_lbl", None), {"anchor": tk.W, "fill": tk.X, "pady": (0, 3)}),
+        ]
+        visible_headers = []
+        for widget, pack_kwargs in header_widgets:
+            if widget is None:
+                continue
+            try:
+                if str(widget.winfo_manager()) == "pack":
+                    visible_headers.append((widget, pack_kwargs))
+            except Exception:
+                continue
+
+        if visible_headers:
+            content_anchor = None
+            for candidate in (
+                getattr(host, "return_to_campaign_btn", None),
+                getattr(host, "route_selector_frame", None),
+                getattr(host, "manual_entry_section", None),
+                getattr(host, "manual_history_section", None),
+                getattr(host, "auto_plate_model_section", None),
+                getattr(host, "workflow_conf_section", None),
+                getattr(host, "auto_vehicle_choice_section", None),
+                getattr(host, "workflow_vehicle_model_section", None),
+                getattr(host, "workflow_input_section", None),
+                getattr(host, "workflow_start_section", None),
+                getattr(host, "run_output_info_lbl", None),
+            ):
+                try:
+                    if candidate is not None and str(candidate.winfo_manager()) == "pack":
+                        content_anchor = candidate
+                        break
+                except Exception:
+                    continue
+
+            for widget, _pack_kwargs in visible_headers:
+                try:
+                    widget.pack_forget()
+                except Exception:
+                    continue
+
+            for widget, pack_kwargs in visible_headers:
+                safe_kwargs = dict(pack_kwargs)
+                if content_anchor is not None:
+                    safe_kwargs["before"] = content_anchor
+                try:
+                    widget.pack(**safe_kwargs)
+                except Exception:
+                    safe_kwargs.pop("before", None)
+                    try:
+                        widget.pack(**safe_kwargs)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    show_free_mode_right_panel = bool((not campaign_context) and show_right_panel)
     host._set_widget_packed(host.right_scroll_host, False)
-    host._set_widget_packed(host.approve_btn_row, show_right_panel, fill=tk.X, pady=(8, 0))
+    host._set_widget_packed(
+        host.approve_btn_row,
+        bool(show_right_panel and (campaign_context or show_free_mode_right_panel)),
+        fill=tk.X,
+        pady=(8, 0),
+    )
+    if show_free_mode_right_panel:
+        try:
+            host._refresh_free_mode_manual_right_panel()
+        except Exception:
+            pass
     host._set_widget_packed(host.mode_title_lbl, False)
     host._set_widget_packed(host.mode_combo, False)
     host._set_widget_packed(host.mode_hint_lbl, False)
@@ -926,10 +1023,14 @@ def apply_z2_workflow_cta_ui(
     next_text = str(cta_state.next_text or "Dalej")
     show_next_button = bool(str(cta_state.next_text or "").strip())
     try:
+        back_label = back_text.strip()
+        back_width = max(10, min(22, len(back_label) + 2))
+        if back_label.casefold() == "wstecz":
+            back_width = 10
         host.workflow_back_btn.configure(
             state=(tk.NORMAL if back_enabled else tk.DISABLED),
             text=back_text,
-            width=max(18, min(28, len(back_text) + 2)),
+            width=back_width,
         )
         host.workflow_next_btn.configure(
             state=(tk.NORMAL if next_enabled else tk.DISABLED),
