@@ -58,6 +58,125 @@ class TrainingReportGenerator:
         return rows
 
     @classmethod
+    def _draw_csv_line_chart_matplotlib(
+        cls,
+        rows: List[Dict[str, str]],
+        out_path: Path,
+        *,
+        title: str,
+        series_specs: List[tuple[str, tuple[str, ...], str]],
+        parameter_legend: List[str] | None = None,
+        width: int = 1800,
+        height: int = 1050,
+    ) -> Path | None:
+        if not rows:
+            return None
+        try:
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+
+        epochs: list[float] = []
+        for idx, row in enumerate(rows):
+            epoch = cls._to_float(row.get("epoch") or row.get("Epoch"))
+            epochs.append(epoch if epoch is not None else float(idx + 1))
+
+        series: list[tuple[str, list[float], list[float], str]] = []
+        for label, keys, color in series_specs:
+            xs: list[float] = []
+            ys: list[float] = []
+            for epoch, row in zip(epochs, rows):
+                value = None
+                for key in keys:
+                    value = cls._to_float(row.get(key))
+                    if value is not None:
+                        break
+                if value is not None:
+                    xs.append(float(epoch))
+                    ys.append(float(value))
+            if xs and ys:
+                series.append((label, xs, ys, color))
+        if not series:
+            return None
+
+        dpi = 180
+        fig_w = max(8.0, float(width) / dpi)
+        fig_h = max(5.0, float(height) / dpi)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+        fig.patch.set_facecolor("#17212b")
+        ax.set_facecolor("#1f2933")
+        fig.subplots_adjust(
+            left=0.08,
+            right=0.98,
+            top=0.88,
+            bottom=0.34 if parameter_legend else 0.23,
+        )
+
+        for label, xs, ys, color in series:
+            ax.plot(xs, ys, label=label, color=color, linewidth=2.4, marker="o", markersize=3.8)
+
+        ax.set_title(title, color="#e5e7eb", fontsize=15, fontweight="bold", pad=16)
+        ax.set_xlabel("Epoka", color="#cbd5e1", fontsize=11)
+        ax.set_ylabel("Wartość", color="#cbd5e1", fontsize=11)
+        ax.grid(True, color="#334155", linewidth=0.8, alpha=0.65)
+        ax.tick_params(colors="#cbd5e1", labelsize=10)
+        for spine in ax.spines.values():
+            spine.set_color("#8fd19e")
+            spine.set_linewidth(1.2)
+
+        legend = ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.11),
+            ncol=min(4, max(1, len(series))),
+            frameon=True,
+            fontsize=9,
+        )
+        legend.get_frame().set_facecolor("#1f2933")
+        legend.get_frame().set_edgecolor("#334155")
+        for text in legend.get_texts():
+            text.set_color("#e5e7eb")
+
+        if parameter_legend:
+            fig.text(
+                0.02,
+                0.055,
+                "Legenda parametrów\n" + "\n".join(f"• {line}" for line in parameter_legend),
+                color="#dbeafe",
+                fontsize=8.8,
+                va="bottom",
+                ha="left",
+                linespacing=1.32,
+                bbox={
+                    "boxstyle": "round,pad=0.65,rounding_size=0.12",
+                    "facecolor": "#111827",
+                    "edgecolor": "#4ade80",
+                    "linewidth": 1.05,
+                    "alpha": 0.96,
+                },
+            )
+
+        fig.text(
+            0.01,
+            0.01,
+            "Czytelny wykres wygenerowany przez aplikację z results.csv. Surowe wykresy Ultralytics pozostają w folderze runu.",
+            color="#94a3b8",
+            fontsize=9,
+        )
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out_path, dpi=dpi, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.25)
+            plt.close(fig)
+            return out_path
+        except Exception:
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
+            return None
+
+    @classmethod
     def _draw_csv_line_chart(
         cls,
         rows: List[Dict[str, str]],
@@ -211,6 +330,12 @@ class TrainingReportGenerator:
                     ("mAP50(P)", ("metrics/mAP50(P)", "pose_map50"), "#fb7185"),
                     ("mAP50-95(P)", ("metrics/mAP50-95(P)", "pose_map50_95"), "#c084fc"),
                 ],
+                [
+                    "B = ramki obiektów; P = punkty/narożniki w modelu pose.",
+                    "precision = jaki odsetek predykcji był trafny; recall = ile obiektów z etykiet model odnalazł.",
+                    "mAP50 = łagodniejsza ocena trafienia przy IoU 0.50; mAP50-95 = surowsza, główna miara jakości.",
+                    "Dla decyzji projektowej patrz przede wszystkim na stabilny trend mAP50-95 oraz brak spadku recall.",
+                ],
             ),
             (
                 "train_val_losses_from_csv.png",
@@ -225,6 +350,12 @@ class TrainingReportGenerator:
                     ("val dfl", ("val/dfl_loss",), "#2dd4bf"),
                     ("val pose", ("val/pose_loss",), "#c084fc"),
                 ],
+                [
+                    "train = błąd na danych treningowych; val = błąd na danych walidacyjnych.",
+                    "box = położenie ramki; cls = klasa; dfl = granice ramki; pose = punkty/narożniki.",
+                    "Niżej zwykle znaczy lepiej. Rosnący val przy malejącym train sugeruje przeuczenie.",
+                    "Nagłe skoki loss warto zestawić z RAM/VRAM i zmianami learning rate.",
+                ],
             ),
             (
                 "train_learning_rate_from_csv.png",
@@ -234,12 +365,25 @@ class TrainingReportGenerator:
                     ("lr/pg1", ("lr/pg1",), "#34d399"),
                     ("lr/pg2", ("lr/pg2",), "#fbbf24"),
                 ],
+                [
+                    "lr = współczynnik uczenia; pg0/pg1/pg2 = grupy parametrów optymalizatora.",
+                    "To harmonogram treningu, a nie bezpośrednia jakość modelu.",
+                    "Zmiany learning rate pomagają wyjaśnić tempo poprawy metryk albo nagłe skoki loss.",
+                ],
             ),
         ]
 
         generated: List[Path] = []
-        for filename, title, specs in chart_specs:
-            rendered = cls._draw_csv_line_chart(rows, out_dir / filename, title=title, series_specs=specs)
+        for filename, title, specs, parameter_legend in chart_specs:
+            rendered = cls._draw_csv_line_chart_matplotlib(
+                rows,
+                out_dir / filename,
+                title=title,
+                series_specs=specs,
+                parameter_legend=parameter_legend,
+            )
+            if rendered is None:
+                rendered = cls._draw_csv_line_chart(rows, out_dir / filename, title=title, series_specs=specs)
             if rendered is not None:
                 generated.append(rendered)
         return generated

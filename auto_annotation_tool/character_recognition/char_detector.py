@@ -75,6 +75,7 @@ class CharacterDetector:
         yolo_sequence_max_width_ratio: float = 2.60,
         yolo_sequence_soft_overlap: float = 0.18,
         yolo_sequence_hard_overlap: float = 0.30,
+        ocr_min_height_ratio: float = 0.58,
     ):
         self.method = method
         self.ocr_engine = ocr_engine
@@ -90,6 +91,10 @@ class CharacterDetector:
         self.yolo_sequence_max_width_ratio = float(yolo_sequence_max_width_ratio)
         self.yolo_sequence_soft_overlap = float(yolo_sequence_soft_overlap)
         self.yolo_sequence_hard_overlap = float(yolo_sequence_hard_overlap)
+        try:
+            self.ocr_min_height_ratio = max(0.20, min(1.00, float(ocr_min_height_ratio)))
+        except Exception:
+            self.ocr_min_height_ratio = 0.58
         self.last_ocr_detections: List[CharacterDetection] = []
         self.last_yolo_raw_detections: List[CharacterDetection] = []
         self.last_yolo_nms_detections: List[CharacterDetection] = []
@@ -228,6 +233,7 @@ class CharacterDetector:
         scale_y: float,
         orig_w: int,
         orig_h: int,
+        min_height_ratio: float = 0.58,
     ) -> tuple[float, float, float, float] | None:
         if processed_img is None or getattr(processed_img, "size", 0) == 0:
             return None
@@ -282,6 +288,27 @@ class CharacterDetector:
         bottom = min(roi_gray.shape[0], bottom + pad_y)
         left = max(0, left - pad_x)
         right = min(roi_gray.shape[1], right + pad_x)
+
+        # Pure OCR refines X tightly, but Y must stay comparable with the
+        # EasyOCR text-line box. Otherwise glyphs such as Y/1 can become tiny
+        # vertical boxes and break row/layout heuristics before YOLO is used.
+        parent_height = max(1, int(roi_gray.shape[0]))
+        try:
+            safe_min_height_ratio = max(0.20, min(1.00, float(min_height_ratio)))
+        except Exception:
+            safe_min_height_ratio = 0.58
+        min_height = max(4, int(round(parent_height * safe_min_height_ratio)))
+        refined_height = max(1, int(bottom - top))
+        if refined_height < min_height and parent_height >= min_height:
+            center_y = (float(top) + float(bottom)) / 2.0
+            top = int(round(center_y - (float(min_height) / 2.0)))
+            bottom = top + min_height
+            if top < 0:
+                bottom = min(parent_height, bottom - top)
+                top = 0
+            if bottom > parent_height:
+                top = max(0, top - (bottom - parent_height))
+                bottom = parent_height
 
         refined_x1 = max(0.0, min(float(orig_w), float((px1 + left) * scale_x)))
         refined_x2 = max(0.0, min(float(orig_w), float((px1 + right) * scale_x)))
@@ -374,6 +401,7 @@ class CharacterDetector:
                         scale_y=scale_y,
                         orig_w=orig_w,
                         orig_h=orig_h,
+                        min_height_ratio=self.ocr_min_height_ratio,
                     )
                     if refined_bbox is None:
                         refined_bbox = (char_x1, y1, char_x2, y2)

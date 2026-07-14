@@ -12,10 +12,41 @@ from .z4_view_models import (
     Step4DatasetWorkflowViewModel,
     Step4TrainingInputsViewModel,
 )
-from .z4_flow_models import TrainingInputContext
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
+
+
+def _apply_campaign_project_base_model_selection(host: "TrainingTab", target: str | None) -> bool:
+    normalized_target = str(target or "").strip().lower()
+    if normalized_target not in {"plate", "char"}:
+        return False
+
+    try:
+        model_info = dict(
+            CAMPAIGN.get_effective_project_model(
+                normalized_target,
+                before_iteration=int(CAMPAIGN.get_current_iteration_num() or 1),
+            )
+            or {}
+        )
+    except Exception:
+        model_info = {}
+
+    model_path = str(model_info.get("path") or "").strip()
+    if not model_path:
+        return False
+
+    try:
+        path = Path(model_path)
+    except Exception:
+        return False
+    if not path.exists() or not path.is_file():
+        return False
+
+    host.base_model_var.set(host._get_custom_base_model_label())
+    host.base_custom_var.set(str(path))
+    return True
 
 
 def build_step4_dataset_workflow_view_model(
@@ -29,11 +60,11 @@ def build_step4_dataset_workflow_view_model(
 
     creator_summary = ""
     split_intro = (
-        "PZ1 tworzy wariant datasetu znaków do treningu: strukturę train / val / test. "
-        "Utworzone tutaj datasety są dostępne w PZ2 na liście wariantów."
+        "PZ1 tworzy wariant splitu train / val / test. "
+        "PZ2 wybiera ten wariant z listy i uruchamia na nim trening."
     )
     split_summary = ""
-    split_action_label = "Utwórz wariant datasetu"
+    split_action_label = "Utwórz wariant treningowy"
     show_split_toggle = False
     split_toggle_label = "Popraw split"
     show_split_details = True
@@ -86,30 +117,30 @@ def build_step4_dataset_workflow_view_model(
                 host._format_workspace_relative_path(char_ready_path),
                 96,
             )
-            split_intro = "Dataset znaków jest już przygotowany do treningu. Nie musisz wykonywać tego kroku ponownie."
+            split_intro = "Wariant treningowy znaków jest już gotowy. Możesz przejść do PZ2 i trenować model."
             split_summary = (
-                "Dataset znaków jest już gotowy do treningu.\n"
-                f"Gotowy dataset: {split_ready_value}\n"
+                "Źródłowy dataset znaków z T06 ma już przygotowany wariant train/val/test.\n"
+                f"Gotowy wariant: {split_ready_value}\n"
                 f"Split: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}\n"
-                "Nie musisz przygotowywać datasetu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
+                "Nie musisz przygotowywać wariantu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
                 "jeśli chcesz świadomie przebudować strukturę train / val / test."
             )
             show_split_toggle = True
             show_split_details = bool(getattr(host, "_step4_char_split_details_visible", False))
             split_toggle_label = "Ukryj opcje splitu" if show_split_details else "Popraw split"
-            split_action_label = "Przygotuj dataset ponownie"
+            split_action_label = "Przebuduj wariant treningowy"
         else:
             split_src_value = host._shorten_training_text(
                 host._format_workspace_relative_path(host.split_src_var.get()),
                 96,
             )
             split_intro = (
-                "Utwórz wariant datasetu znaków, aby odblokować trening. "
-                "Utworzone warianty są dostępne w PZ2 na liście wariantów."
+                "Źródłowy dataset znaków został już wyeksportowany w T06. "
+                "Teraz przygotuj z niego wariant treningowy train/val/test, aby odblokować PZ2."
             )
             split_summary = (
-                "Źródło do podziału datasetu znaków zostało już wybrane wcześniej.\n"
-                f"Dataset źródłowy: {split_src_value}"
+                "To nie jest ponowny eksport datasetu z T06, tylko przygotowanie wariantu pod trening.\n"
+                f"Źródłowy dataset z T06: {split_src_value}"
             )
 
     if campaign_active and not route_selected:
@@ -129,11 +160,16 @@ def build_step4_dataset_workflow_view_model(
         )
 
     if mode == "plate":
-        description = (
-            "Tor tablic prowadzi do treningu modelu YOLO Pose. Jeśli masz gotowy dataset z eksportu Z2, "
-            "możesz przejść dalej do PZ2. Kreator poniżej buduje nowy wariant datasetu "
-            "z pliku anotacji XML i zgodnego folderu obrazów."
-        )
+        if campaign_active:
+            description = (
+                "Tor tablic prowadzi do treningu modelu YOLO Pose. Jeśli masz gotowy dataset z eksportu Z2, "
+                "możesz przejść dalej do PZ2. Kreator poniżej buduje nowy wariant datasetu "
+                "z pliku anotacji XML i zgodnego folderu obrazów."
+            )
+        else:
+            description = (
+                "PZ1 przygotowuje wariant splitu datasetu tablic. PZ2 wybierze ten wariant do treningu modelu."
+            )
         if route_locked:
             campaign_plate_stats = {}
             try:
@@ -143,28 +179,46 @@ def build_step4_dataset_workflow_view_model(
             approved_images = int(campaign_plate_stats.get("images", 0) or 0)
             approved_plates = int(campaign_plate_stats.get("plates", 0) or 0)
             description = (
-                "Ten etap korzysta z zatwierdzonych źródeł projektu, więc nie wymaga ponownego wybierania XML ani obrazów. "
-                f"Aktualnie zbiór projektu ma {approved_images} obraz(y) i {approved_plates} tablic(e)."
+                "Bramka T06 korzysta z zatwierdzonych tablic projektu. "
+                f"Materiał: {approved_images} obraz(y), {approved_plates} tablic(e). "
+                "Utwórz wariant treningowy train/val/test, aby przejść do treningu modelu tablic."
             )
     else:
-        description = (
-            "Wybierz ten tor, jeśli chcesz przygotować i podzielić dataset znaków "
-            "i trenować model znaków na tablicach."
-        )
+        if campaign_active:
+            description = (
+                "Wybierz ten tor, jeśli chcesz przygotować i podzielić dataset znaków "
+                "i trenować model znaków na tablicach."
+            )
+        else:
+            description = (
+                "PZ1 przygotowuje wariant splitu datasetu znaków. PZ2 wybierze ten wariant do treningu modelu."
+            )
         if route_locked:
             if char_ready_dataset:
                 description = (
-                    "Ten etap ma już gotowy dataset znaków z poprawnym splitem treningowym. "
+                    "Ten etap ma już gotowy wariant treningowy znaków z poprawnym splitem. "
                     f"Aktualny stan: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}. "
-                    "Możesz przejść dalej do treningu, a ponowne przygotowanie datasetu traktować tylko jako opcjonalne narzędzie."
+                    "Możesz przejść dalej do treningu, a ponowne przygotowanie wariantu traktować tylko jako opcjonalne narzędzie."
                 )
             else:
                 description = (
-                    "Ten etap korzysta z gotowego źródła datasetu znaków projektu i prowadzi do przygotowania datasetu treningowego oraz treningu."
+                    "Ten etap korzysta z gotowego źródłowego datasetu znaków z T06. "
+                    "PZ1 przygotuje z niego wariant treningowy train/val/test, a PZ2 uruchomi trening."
                 )
 
     if route_locked:
-        description = str(description or "").strip() + " Tor tej iteracji jest stały w Z4; zmienisz go dopiero w kolejnej iteracji."
+        description = str(description or "").strip() + " Tor jest stały dla tej iteracji."
+
+    title = (
+        ("Tor tablic (YOLO Pose)" if mode == "plate" else "Tor znaków (YOLO Detect)")
+        if campaign_active
+        else ("Dataset tablic (YOLO Pose)" if mode == "plate" else "Dataset znaków (YOLO Detect)")
+    )
+
+    next_label = "Dalej do treningu"
+    if campaign_active:
+        next_target_label = "tablic" if mode == "plate" else "znak\u00f3w"
+        next_label = f"Przejd\u017a do treningu modelu {next_target_label}"
 
     return Step4DatasetWorkflowViewModel(
         mode=mode,
@@ -173,11 +227,11 @@ def build_step4_dataset_workflow_view_model(
         route_locked=route_locked,
         show_route_panel=not route_locked,
         show_waiting_panel=False,
-        title=("Tor tablic (YOLO Pose)" if mode == "plate" else "Tor znaków (YOLO Detect)"),
+        title=title,
         description=description,
         show_creator_section=(mode == "plate"),
         show_split_section=(mode == "char"),
-        next_label="Dalej do treningu",
+        next_label=next_label,
         creator_summary=creator_summary,
         split_intro=split_intro,
         split_summary=split_summary,
@@ -185,11 +239,6 @@ def build_step4_dataset_workflow_view_model(
         show_split_toggle=show_split_toggle,
         split_toggle_label=split_toggle_label,
         show_split_details=show_split_details,
-        char_ready_dataset=char_ready_dataset,
-        char_ready_dataset_path=char_ready_path,
-        char_ready_train=char_ready_train,
-        char_ready_val=char_ready_val,
-        char_ready_test=char_ready_test,
     )
 
 
@@ -199,37 +248,16 @@ def build_step4_training_inputs_view_model(
     campaign_active = bool(CAMPAIGN.get_active_project_name())
     current_base_key = str(getattr(host, "base_model_var", None).get() or "").strip()
     current_custom_value = str(getattr(host, "base_custom_var", None).get() or "").strip()
-    show_project_custom_row = bool(campaign_active and current_base_key == "Custom" and current_custom_value)
+    show_project_custom_row = bool(host._is_custom_base_model_key(current_base_key))
     return Step4TrainingInputsViewModel(
         in_campaign=campaign_active,
-        show_session_name=(not campaign_active),
         show_dataset_section=True,
-        dataset_caption=(
-            "Aktywny dataset treningowy wynika z bieżącego workflow projektu. "
-            "W PZ2 możesz wybrać gotowy wariant utworzony wcześniej w PZ1, "
-            "ale nie wskazujesz tutaj nowych źródeł."
-            if campaign_active
-            else "PZ2 wybiera gotowy wariant treningowy przygotowany wcześniej w PZ1 albo przekazany z eksportu Z2."
-        ),
-        dataset_entry_state="readonly",
-        show_dataset_pick_button=False,
-        show_dataset_hint=True,
         show_scope_hint=(not campaign_active),
         show_pose_warning=(not campaign_active),
-        base_caption=(
-            "W kampanii projekt może automatycznie podstawić aktywny model z poprzednich iteracji. "
-            "To tylko propozycja startowa: możesz zmienić wybór w comboboxie, a trening uruchomi się "
-            "dokładnie na modelu widocznym teraz na liście. "
-            "Jeśli widzisz 'Custom', poniżej pokazuję aktualny model projektu."
-            if campaign_active
-            else "Dla tablic wybieraj modele YOLO Pose. "
-                 "Dla znaków wybieraj modele YOLO Detect. "
-                 "Możesz też wskazać własny plik modelu .pt do fine-tuningu."
-        ),
         base_combo_state="readonly",
         show_custom_model=((not campaign_active) or show_project_custom_row),
         custom_entry_state=("readonly" if show_project_custom_row else "disabled"),
-        show_custom_pick_button=(not campaign_active),
+        show_custom_pick_button=show_project_custom_row,
     )
 
 
@@ -242,6 +270,11 @@ def build_step4_campaign_navigation_view_model(
     dataset_tab_visible = bool(getattr(host, "_step4_dataset_tab_visible", False))
     finish_ready = bool(getattr(host, "_step4_campaign_finish_ready", False))
     dataset_vm = build_step4_dataset_workflow_view_model(host)
+    train_back_label = (
+        "Wróć do bramki T06 i zakończ decyzję"
+        if campaign_active and finish_ready
+        else ("Wróć do bramki T06 w grafie" if campaign_active else "Wstecz do PZ1")
+    )
 
     return Step4CampaignNavigationViewModel(
         in_campaign=campaign_active,
@@ -250,11 +283,10 @@ def build_step4_campaign_navigation_view_model(
         next_enabled=(not campaign_active) or (route_selected and train_unlocked),
         next_label=str(dataset_vm.next_label or "Dalej do treningu"),
         show_dataset_back=campaign_active,
-        dataset_back_label=("Wróć do kampanii" if campaign_active else ""),
+        dataset_back_label=("Wróć do bramki T06 w grafie" if campaign_active else ""),
         show_train_nav=True,
         show_train_back=True,
-        train_back_label=("Wróć do kampanii" if campaign_active else "Wstecz do PZ1"),
-        finish_enabled=campaign_active and finish_ready,
+        train_back_label=train_back_label,
         show_complete_project=False,
         force_dataset_tab_selection=campaign_active and dataset_tab_visible and not train_unlocked,
     )
@@ -487,15 +519,6 @@ def open_campaign_step4_entry(
             host.dataset_var.set(ready_dataset_text)
         except Exception:
             pass
-        try:
-            host._last_training_input_context = TrainingInputContext(
-                source="campaign_ready_dataset",
-                target=target,
-                dataset_path=ready_dataset_text,
-                ready=True,
-            )
-        except Exception:
-            pass
     elif target == "char" and preferred_subtab == "dataset":
         try:
             host.dataset_var.set("")
@@ -511,22 +534,12 @@ def open_campaign_step4_entry(
 
     host._step4_suppress_base_model_state_save = True
     try:
-        restored_saved_selection = host._apply_saved_step4_training_model_selection(target)
-        if not restored_saved_selection:
-            if target == "plate":
-                plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-
-                if plate_model and Path(plate_model).exists():
-                    host.base_model_var.set("Custom")
-                    host.base_custom_var.set(plate_model)
-                else:
+        if not _apply_campaign_project_base_model_selection(host, target):
+            restored_saved_selection = host._apply_saved_step4_training_model_selection(target)
+            if not restored_saved_selection:
+                if target == "plate":
                     host.base_model_var.set(host._get_preferred_plate_pose_base_model())
                     host.base_custom_var.set("")
-            else:
-                char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-                if char_model and Path(char_model).exists():
-                    host.base_model_var.set("Custom")
-                    host.base_custom_var.set(char_model)
                 else:
                     host.base_model_var.set(host._get_default_base_model_for_mode("char"))
                     host.base_custom_var.set("")
@@ -545,10 +558,12 @@ def open_campaign_step4_entry(
     try:
         if preferred_subtab == "dataset":
             host.main_nb.select(host.tab_dataset)
-        elif preferred_subtab == "train":
+        elif preferred_subtab == "train" and bool(getattr(host, "_step4_train_unlocked", False)):
+            host._ensure_step4_train_tab_built()
             host.main_nb.select(host.tab_train)
             host._select_step4_analysis_tab(host.hist_tab)
         elif bool(getattr(host, "_step4_train_unlocked", False)):
+            host._ensure_step4_train_tab_built()
             host.main_nb.select(host.tab_train)
             host._select_step4_analysis_tab(host.hist_tab)
         else:
@@ -734,21 +749,12 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
         finish_target = active_target
         finish_iteration = 0
     elif not finish_ready or not finish_run_id:
-        recovered_finish_state = host._recover_campaign_finish_state_from_history(active_target)
-        if recovered_finish_state:
-            finish_ready = bool(recovered_finish_state.get("ready", False))
-            finish_run_id = str(recovered_finish_state.get("run_id", "") or "").strip()
-            finish_target = str(recovered_finish_state.get("target", active_target) or "").strip().lower()
-            finish_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
-            try:
-                CAMPAIGN.set_step4_finish_state(
-                    finish_ready,
-                    run_id=finish_run_id,
-                    target=finish_target,
-                    iteration_num=finish_iteration,
-                )
-            except Exception:
-                pass
+        # Do not reopen T06 from training history alone. A completed run is a
+        # candidate; the user must explicitly choose the project model.
+        finish_ready = False
+        finish_run_id = ""
+        finish_target = active_target
+        finish_iteration = 0
 
     if finish_ready and finish_target == active_target and finish_iteration == int(CAMPAIGN.get_current_iteration_num() or 0):
         host._step4_campaign_finish_ready = True
@@ -791,20 +797,11 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
 
     try:
         host._step4_suppress_base_model_state_save = True
-        if not host._apply_saved_step4_training_model_selection(active_target):
-            if active_target == "plate":
-                plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
-                if plate_model and Path(plate_model).exists():
-                    host.base_model_var.set("Custom")
-                    host.base_custom_var.set(plate_model)
-                else:
+        if not _apply_campaign_project_base_model_selection(host, active_target):
+            if not host._apply_saved_step4_training_model_selection(active_target):
+                if active_target == "plate":
                     host.base_model_var.set(host._get_preferred_plate_pose_base_model())
                     host.base_custom_var.set("")
-            else:
-                char_model = str(CAMPAIGN.get_global_model("char") or "").strip()
-                if char_model and Path(char_model).exists():
-                    host.base_model_var.set("Custom")
-                    host.base_custom_var.set(char_model)
                 else:
                     host.base_model_var.set(host._get_default_base_model_for_mode("char"))
                     host.base_custom_var.set("")
@@ -830,6 +827,7 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
     try:
         campaign_active = bool(CAMPAIGN.get_active_project_name())
         if campaign_active and bool(getattr(host, "_step4_train_unlocked", False)):
+            host._ensure_step4_train_tab_built()
             target_tab = host.tab_train
         else:
             target_tab = host.tab_dataset if campaign_active else host.tab_train
@@ -876,7 +874,7 @@ def return_to_campaign_from_step4(host: "TrainingTab"):
 
     try:
         host.app.update_status(
-            "Wracam do wizarda kampanii.",
+            "Wracam do grafu kampanii.",
             "info"
         )
     except Exception:
@@ -933,7 +931,7 @@ def finish_campaign_step4(host: "TrainingTab"):
         if str(next_mode or "").strip().lower() not in {"reuse_input", "new_input"}:
             try:
                 host.app.update_status(
-                    "Pozostajesz w E4. Iteracja nie została domknięta, więc zatwierdzenie pozostaje dostępne.",
+                    f"Pozostajesz w {'E4T' if target == 'plate' else 'E4Z' if target == 'char' else 'E4T/E4Z'}. Iteracja nie została domknięta, więc zatwierdzenie pozostaje dostępne.",
                     "info",
                 )
             except Exception:
@@ -1095,8 +1093,22 @@ def promote_trained_model_to_campaign_if_needed(host: "TrainingTab"):
     best_model = host._find_best_weights_for_run(host.current_run_id)
     if best_model is None or not best_model.exists():
         return False
+    try:
+        label = "znakow" if target == "char" else "tablic"
+        host._append_train_log(
+            f"[MODEL] Trening utworzyl kandydata modelu {label}: {best_model}. "
+            "Model projektu nie zostal podmieniony automatycznie."
+        )
+    except Exception:
+        pass
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+        if campaign_tab:
+            campaign_tab._refresh_dashboard()
+    except Exception:
+        pass
+    return False
 
-    CAMPAIGN.set_global_model(target, str(best_model))
 
     try:
         if target == "char":
@@ -1117,13 +1129,7 @@ def promote_trained_model_to_campaign_if_needed(host: "TrainingTab"):
     except Exception:
         pass
 
-    try:
-        complete_campaign_step4_if_needed(host, target)
-    except Exception:
-        pass
-
-    host._pending_campaign_model_type = None
-    return True
+    return False
 
 
 def complete_campaign_step4_if_needed(host: "TrainingTab", target: str) -> bool:
@@ -1208,7 +1214,7 @@ def show_training_completion_summary(host: "TrainingTab", *, promoted: bool, can
     lines = []
     if run is not None:
         lines.append(f"Run: {run.name}")
-        lines.append(f"Model bazowy: {run.base_model}")
+        lines.append(f"Preset / plik startowy YOLO: {run.base_model}")
         lines.append(f"Dataset: {run.dataset_path}")
         if float(getattr(run, "best_map50_95", 0.0) or 0.0) > 0.0:
             lines.append(f"Najlepsze mAP50-95: {float(run.best_map50_95):.3f}")
@@ -1220,15 +1226,20 @@ def show_training_completion_summary(host: "TrainingTab", *, promoted: bool, can
         else:
             lines.append("")
             lines.append(f"Aktywny model {target_label} projektu nie został podmieniony.")
-        if str(target or "").strip().lower() == "char":
+        if not promoted:
             lines.append(
-                "Dalej: wróć do wizarda E4, aby formalnie domknąć etap. "
-                "Jeśli chcesz, możesz jeszcze wrócić do PZ1 i poprawić split datasetu znaków."
+                "Dalej: wybierz jawnie model projektu w historii treningow albo w rankingu. "
+                "Dopiero po takim wyborze bramka T06 bedzie gotowa do zatwierdzenia."
             )
-        else:
+        if promoted and str(target or "").strip().lower() == "char":
             lines.append(
-                "Dalej: wróć do wizarda E4, aby formalnie domknąć etap. "
-                "W Z4 możesz jeszcze przebudować dataset tablic w PZ1, jeśli chcesz."
+                "Dalej: wróć do grafu i użyj pola Zatwierdź na bramce T06. "
+                "To utrwali wynik treningu jako finał tej iteracji. Jeśli chcesz, możesz jeszcze wrócić do PZ1 i poprawić split datasetu znaków."
+            )
+        elif promoted:
+            lines.append(
+                "Dalej: wróć do grafu i użyj pola Zatwierdź na bramce T06. "
+                "To utrwali wynik treningu jako finał tej iteracji. W Z4 możesz jeszcze przebudować dataset tablic w PZ1, jeśli chcesz."
             )
     else:
         lines.append("")
@@ -1328,7 +1339,7 @@ def poll_training_completion(host: "TrainingTab"):
             except Exception:
                 pass
             host._set_training_ui_idle_state(
-                "Trening zakończył się błędem. Etap E4 nie może zostać jeszcze domknięty.",
+                "Trening zakończył się błędem. Bieżący węzeł treningowy nie może zostać jeszcze domknięty.",
                 "#c0392b"
             )
             try:
@@ -1347,7 +1358,13 @@ def poll_training_completion(host: "TrainingTab"):
                 pass
             return
 
-        if can_finish_step4 and promoted:
+        finish_available = bool(
+            can_finish_step4
+            and promoted
+            and run_status == TrainingStatus.COMPLETED.value
+        )
+
+        if finish_available:
             host._step4_campaign_finish_ready = True
             finish_target = host.get_campaign_training_target()
             if finish_target not in ("char", "plate"):
@@ -1358,47 +1375,15 @@ def poll_training_completion(host: "TrainingTab"):
                     run_id=str(host.current_run_id or ""),
                     target=finish_target,
                     iteration_num=int(CAMPAIGN.get_current_iteration_num() or 0),
+                    selection_confirmed=True,
+                    model_path=str(host._find_best_weights_for_run(host.current_run_id) or ""),
                 )
             except Exception:
                 pass
             host._set_training_ui_idle_state(
-                "Trening zakończony. Wróć do wizarda E4, aby formalnie domknąć etap iteracji.",
+                "Trening zakończony. Wynik jest gotowy: wróć do grafu i zatwierdź bramkę T06, aby utrwalić finał iteracji.",
                 "#1e8449"
             )
-        elif can_finish_step4:
-            target = host.get_campaign_training_target()
-            if target not in ("char", "plate"):
-                target = (host._pending_campaign_model_type or "").strip().lower()
-            target_label = "model projektu" if target not in ("char", "plate") else (
-                "model znaków projektu" if target == "char" else "model tablic projektu"
-            )
-
-            host._step4_campaign_finish_ready = True
-            try:
-                CAMPAIGN.set_step4_finish_state(
-                    True,
-                    run_id=str(host.current_run_id or ""),
-                    target=target,
-                    iteration_num=int(CAMPAIGN.get_current_iteration_num() or 0),
-                )
-            except Exception:
-                pass
-            host._set_training_ui_idle_state(
-                (
-                    "Trening zakończony lub zatrzymany bez podmiany aktywnego "
-                    f"{target_label}. Wróć do wizarda E4, aby formalnie domknąć etap iteracji "
-                    "albo kontynuować pracę nad datasetem w Z4."
-                ),
-                "#7f8c8d"
-            )
-            try:
-                host._append_train_log(
-                    "[KAMPANIA] Ten run treningu nie wypromował nowego aktywnego modelu projektu. "
-                    "Wróć do wizarda E4, aby formalnie domknąć etap iteracji, "
-                    "albo pozostań w Z4 i dopracuj dataset treningowy."
-                )
-            except Exception:
-                pass
         else:
             host._step4_campaign_finish_ready = False
             try:
@@ -1414,11 +1399,15 @@ def poll_training_completion(host: "TrainingTab"):
             pass
 
         try:
-            show_training_completion_summary(host, promoted=promoted, can_finish_step4=can_finish_step4)
+            show_training_completion_summary(
+                host,
+                promoted=promoted,
+                can_finish_step4=bool(can_finish_step4 and run_status == TrainingStatus.COMPLETED.value),
+            )
         except Exception:
             pass
 
-        if can_finish_step4:
+        if finish_available:
             try:
                 host._guide_step4_finish_action()
             except Exception:

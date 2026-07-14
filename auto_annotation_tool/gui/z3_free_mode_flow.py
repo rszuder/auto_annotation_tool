@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tkinter as tk
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -140,7 +139,11 @@ def reset_step3_subtab_flow(host: "CharacterAnnotationTab") -> None:
         pass
 
     try:
-        host._refresh_extract_workflow_ui()
+        schedule_refresh = getattr(host, "_schedule_extract_workflow_refresh", None)
+        if callable(schedule_refresh):
+            schedule_refresh(delay_ms=40 if not host.is_startup_ui_ready() else 0)
+        else:
+            host._refresh_extract_workflow_ui()
     except Exception:
         pass
 
@@ -262,7 +265,15 @@ def go_to_substep_2_free_mode(host: "CharacterAnnotationTab") -> None:
     except Exception:
         pass
 
-    host._select_subtab(host.tab_detect)
+    opened = False
+    opener = getattr(host, "_open_detection_subtab_with_preview", None)
+    if callable(opener):
+        try:
+            opened = bool(opener(force_reload=True))
+        except Exception:
+            opened = False
+    if not opened:
+        host._select_subtab(host.tab_detect)
     try:
         host._persist_step3_progress()
     except Exception:

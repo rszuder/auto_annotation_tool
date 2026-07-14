@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 import threading
 
-from ..config import CONFIG, logger, YOLO_AVAILABLE, resolve_runtime_device
-from ..data_models import Detection, ImageAnnotation, AnnotationReport
-from ..utils import get_image_files, cleanup_gpu_memory
+from ..config import CONFIG, logger, YOLO_AVAILABLE, resolve_runtime_device, CV2_AVAILABLE, cv2, PIL_AVAILABLE
+from ..data_models import Detection, ImageAnnotation, AnnotationReport, AnnotationStatus
+from ..utils import get_image_files, cleanup_gpu_memory, get_image_size
 
 
 class BaseAnnotator(ABC):
@@ -53,6 +53,58 @@ class BaseAnnotator(ABC):
     def reset_stop(self):
         """Resetuje flagę zatrzymania."""
         self._stop_event.clear()
+
+    def _make_image_error_annotation(self, image_path: Path, message: str) -> ImageAnnotation:
+        annotation = ImageAnnotation(
+            filename=Path(image_path).name,
+            width=0,
+            height=0,
+        )
+        annotation.status = AnnotationStatus.ERROR
+        annotation.status_message = str(message or "Nie można załadować obrazu")
+        return annotation
+
+    def _describe_image_read_error(self, image_path: Path) -> str:
+        try:
+            prefix = Path(image_path).read_bytes()[:128].lstrip().lower()
+            if prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html"):
+                return "Plik ma rozszerzenie obrazu, ale zawiera HTML zamiast danych obrazu"
+        except Exception:
+            pass
+        return "Nie można załadować obrazu przed detekcją YOLO"
+
+    def _read_image_for_yolo(self, image_path: Path):
+        """
+        Wstępnie waliduje obraz przed przekazaniem ścieżki do Ultralytics.
+
+        YOLO potrafi zakończyć pojedynczy nieczytelny plik błędem
+        `need at least one array to stack`; tutaj sprowadzamy to do statusu
+        ERROR dla jednego obrazu i pozwalamy kontynuować cały run.
+        """
+        try:
+            image_path = Path(image_path)
+            if not image_path.exists() or not image_path.is_file():
+                return None
+        except Exception:
+            return None
+
+        if CV2_AVAILABLE and cv2 is not None:
+            try:
+                image = cv2.imread(str(image_path))
+                return image if image is not None else None
+            except Exception:
+                return None
+
+        if PIL_AVAILABLE:
+            try:
+                from PIL import Image
+                with Image.open(image_path) as image_obj:
+                    image_obj.verify()
+                return True
+            except Exception:
+                return None
+
+        return True
     
     def _normalize_keypoints(self, raw_keypoints) -> list[tuple[float, float, float]]:
         """

@@ -5,7 +5,10 @@ Funkcje pomocnicze.
 """
 
 import gc
+import os
+import time
 from pathlib import Path
+from threading import RLock
 from typing import Dict, Any, Tuple, List
 
 from .config import (
@@ -15,6 +18,10 @@ from .config import (
     CV2_AVAILABLE, cv2,
     is_cuda_available, get_torch_module
 )
+
+_IMAGE_FILES_CACHE_LOCK = RLock()
+_IMAGE_FILES_CACHE: dict[str, dict[str, object]] = {}
+_IMAGE_FILES_CACHE_TTL_SECONDS = 5.0
 
 
 def cleanup_gpu_memory():
@@ -121,11 +128,47 @@ def get_image_files(directory: Path) -> List[Path]:
     """Zwraca posortowaną listę plików obrazów."""
     if not directory.exists() or not directory.is_dir():
         return []
-    
-    return sorted([
+
+    try:
+        cache_key = os.path.normcase(os.path.abspath(os.fsdecode(os.fspath(directory))))
+    except Exception:
+        cache_key = str(directory)
+    try:
+        stat = directory.stat()
+        signature = (
+            int(getattr(stat, "st_mtime_ns", 0) or 0),
+            int(getattr(stat, "st_size", 0) or 0),
+        )
+    except Exception:
+        signature = None
+    now = time.monotonic()
+
+    if cache_key and signature is not None:
+        with _IMAGE_FILES_CACHE_LOCK:
+            cached = _IMAGE_FILES_CACHE.get(cache_key)
+            if (
+                isinstance(cached, dict)
+                and cached.get("signature") == signature
+                and (now - float(cached.get("saved_at", 0.0) or 0.0)) <= _IMAGE_FILES_CACHE_TTL_SECONDS
+            ):
+                return [Path(item) for item in list(cached.get("paths") or [])]
+
+    image_files = sorted([
         f for f in directory.iterdir()
         if f.is_file() and f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
     ])
+
+    if cache_key and signature is not None:
+        with _IMAGE_FILES_CACHE_LOCK:
+            if len(_IMAGE_FILES_CACHE) > 128:
+                _IMAGE_FILES_CACHE.clear()
+            _IMAGE_FILES_CACHE[cache_key] = {
+                "signature": signature,
+                "saved_at": now,
+                "paths": [str(path) for path in image_files],
+            }
+
+    return image_files
 
 
 def format_duration(seconds: float) -> str:

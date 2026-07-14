@@ -94,7 +94,7 @@ class Z3CtaState(_CompatModel):
     dataset_back_command: Callable[..., Any] | None = None
     finish_enabled: bool = False
     finish_visible: bool = False
-    finish_label: str = "Wróć do wizarda"
+    finish_label: str = "Wróć do grafu"
     finish_command_id: str = ""
 
 

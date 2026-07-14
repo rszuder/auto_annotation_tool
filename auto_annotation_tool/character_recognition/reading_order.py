@@ -47,6 +47,61 @@ def _height(bbox: BBox) -> float:
     return max(1.0, float(bbox[3]) - float(bbox[1]))
 
 
+def separator_y_at_x(separator: dict[str, Any] | None, x: float) -> float | None:
+    if not isinstance(separator, dict):
+        return None
+    try:
+        x1 = float(separator.get("x1", 0.0) or 0.0)
+        y1 = float(separator.get("y1", 0.0) or 0.0)
+        x2 = float(separator.get("x2", x1) or x1)
+        y2 = float(separator.get("y2", y1) or y1)
+        probe_x = float(x)
+    except Exception:
+        return None
+    if abs(x2 - x1) < 0.001:
+        return y1
+    ratio = max(0.0, min(1.0, (probe_x - x1) / (x2 - x1)))
+    return y1 + ((y2 - y1) * ratio)
+
+
+def group_records_by_separator(
+    records: Iterable[Any],
+    separator: dict[str, Any] | None,
+) -> List[List[Any]]:
+    positioned = []
+    unpositioned = []
+    for original_index, record in enumerate(list(records or [])):
+        bbox = record_bbox(record)
+        if bbox is None:
+            unpositioned.append((original_index, record))
+            continue
+        cx = _center_x(bbox)
+        cy = _center_y(bbox)
+        sep_y = separator_y_at_x(separator, cx)
+        row_index = 0 if sep_y is not None and cy <= sep_y else 1
+        positioned.append((row_index, float(cx), int(original_index), record))
+
+    if not positioned:
+        return [[record for _index, record in unpositioned]] if unpositioned else []
+
+    rows = []
+    for row_index in (0, 1):
+        row = [
+            record
+            for _row, _cx, _index, record in sorted(
+                (item for item in positioned if int(item[0]) == row_index),
+                key=lambda item: (float(item[1]), int(item[2])),
+            )
+        ]
+        if row:
+            rows.append(row)
+    if unpositioned:
+        if not rows:
+            rows.append([])
+        rows[-1].extend(record for _index, record in sorted(unpositioned, key=lambda item: item[0]))
+    return rows
+
+
 def group_records_into_reading_rows(
     records: Iterable[Any],
     *,
@@ -144,10 +199,14 @@ def rows_for_reading_order(
     records: Sequence[Any] | Iterable[Any],
     *,
     forced_layout: str | None = None,
+    separator: dict[str, Any] | None = None,
 ) -> List[List[Any]]:
-    if str(forced_layout or "").strip().lower() == "single_row":
+    layout = str(forced_layout or "").strip().lower()
+    if layout == "single_row":
         row = sort_records_single_row(records)
         return [row] if row else []
+    if layout == "two_row" and isinstance(separator, dict):
+        return group_records_by_separator(records, separator)
     return group_records_into_reading_rows(records)
 
 
@@ -155,8 +214,9 @@ def sort_records_reading_order(
     records: Sequence[Any] | Iterable[Any],
     *,
     forced_layout: str | None = None,
+    separator: dict[str, Any] | None = None,
 ) -> List[Any]:
-    rows = rows_for_reading_order(records, forced_layout=forced_layout)
+    rows = rows_for_reading_order(records, forced_layout=forced_layout, separator=separator)
     ordered: list[Any] = []
     for row in rows:
         ordered.extend(row)
@@ -167,8 +227,9 @@ def annotate_records_reading_order(
     records: Sequence[Any] | Iterable[Any],
     *,
     forced_layout: str | None = None,
+    separator: dict[str, Any] | None = None,
 ) -> List[Any]:
-    rows = rows_for_reading_order(records, forced_layout=forced_layout)
+    rows = rows_for_reading_order(records, forced_layout=forced_layout, separator=separator)
     annotated: list[Any] = []
     reading_index = 1
 

@@ -1,0 +1,2524 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Zakładka Treningu: trening YOLO + analiza modeli.
+
+W trybie swobodnym Z4 konsumuje gotowy dataset z Z2 lub Z3.
+Pomost datasetowy pozostaje tylko na potrzeby kampanii.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import threading
+import datetime
+import time
+import webbrowser
+import csv
+import textwrap
+import xml.etree.ElementTree as ET
+from pathlib import Path, PurePosixPath
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+from ..campaign_manager import CAMPAIGN
+from ..config import (
+    CONFIG,
+    YOLO_AVAILABLE,
+    AVAILABLE_POSE_MODELS,
+    AVAILABLE_DETECT_MODELS,
+    PIL_AVAILABLE,
+    get_torch_module,
+    get_yolo_class,
+    is_cuda_available,
+    logger,
+)
+from ..icons import IconManager
+from ..validators import validate_model_file, format_yolo_model_identity
+from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
+from ..ranking import ModelRanking
+from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
+from .help_manager import HELP
+from .inertial_scroll import InertialScrollController
+from .section_header_label import SectionHeaderLabel
+from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .zoomable_canvas import ZoomableCanvas
+from .z4_campaign_flow import (
+    build_step4_campaign_navigation_view_model,
+    build_step4_dataset_workflow_view_model,
+    build_step4_training_inputs_view_model,
+    clear_campaign_context,
+    complete_campaign_project,
+    finish_campaign_step4,
+    get_campaign_training_target,
+    open_campaign_step4_entry,
+    poll_training_completion,
+    restore_step4_campaign_project_state,
+    set_campaign_context,
+    set_campaign_training_target,
+)
+from .z4_flow_models import (
+    CharYoloDatasetSourceAdapter,
+    PlateXmlImagesSourceAdapter,
+    TrainingSource,
+    TrainingSourceStats,
+)
+from .z4_free_mode_flow import (
+    refresh_free_training_route_cards,
+    refresh_free_training_route_ui,
+    update_step4_notebook_mode,
+)
+from .z4_shared_ui import (
+    accept_training_input_context,
+    clear_step4_guidance,
+    guide_step4_builder_action,
+    guide_step4_finish_action,
+    guide_step4_next_action,
+    guide_step4_route_selection,
+    mark_step4_dataset_ready,
+    open_step4_dataset_stage,
+    refresh_step4_campaign_builder_inputs_ui,
+    refresh_step4_analysis_tab_visibility,
+    refresh_step4_campaign_navigation_ui,
+    refresh_step4_dataset_mode_ui,
+    refresh_step4_training_inputs_mode_ui,
+    set_step4_dataset_mode,
+    sync_step4_analysis_nav_buttons,
+    step4_dataset_go_back,
+    step4_dataset_go_next,
+    step4_train_go_back,
+)
+from . import z4_dataset_sources
+from .z4_view_models import (
+    Step4CampaignNavigationViewModel,
+    Step4DatasetWorkflowViewModel,
+    Step4TrainingInputsViewModel,
+)
+
+NAV_BUTTON_WIDTH = 18
+
+if PIL_AVAILABLE:
+    from PIL import Image, ImageDraw, ImageFont
+
+YOLO = None
+def _metric_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+def _describe_metric_band(value: float, profile: str) -> tuple[str, str]:
+    val = max(0.0, min(1.0, float(value)))
+    if profile == "strict_map":
+        if val < 0.40:
+            return "slaby", "< 0.40"
+        if val < 0.60:
+            return "używalny", "0.40 - 0.60"
+        if val < 0.80:
+            return "dobry", "0.60 - 0.80"
+        return "bardzo dobry", "> 0.80"
+
+    if profile == "loose_map":
+        if val < 0.70:
+            return "slaby", "< 0.70"
+        if val < 0.85:
+            return "używalny", "0.70 - 0.85"
+        if val < 0.93:
+            return "dobry", "0.85 - 0.93"
+        return "bardzo dobry", "> 0.93"
+
+    if val < 0.60:
+        return "slaby", "< 0.60"
+    if val < 0.75:
+        return "używalny", "0.60 - 0.75"
+    if val < 0.90:
+        return "dobry", "0.75 - 0.90"
+    return "bardzo dobry", "> 0.90"
+
+def _build_training_metric_reference_text(self) -> str:
+    target = self.get_campaign_training_target()
+    if target == "plate":
+        return (
+            "Progi w tabeli są orientacyjne. Dla tablic najważniejsze jest pose mAP50-95, "
+            "a loss porównuj tylko między epokami tego samego treningu."
+        )
+
+    return (
+        "Progi w tabeli są orientacyjne. Najważniejsze jest mAP50-95, "
+        "a loss porównuj tylko między epokami tego samego treningu."
+    )
+
+def _refresh_training_metric_reference(self):
+    label = getattr(self, "train_metric_reference_lbl", None)
+    if label is None:
+        return
+    self._set_training_widget_text(label, self._build_training_metric_reference_text())
+
+def _set_training_metric_interpretation(self, text: str):
+    label = getattr(self, "train_metric_hint_lbl", None)
+    if label is None:
+        return
+    self._set_training_widget_text(label, str(text or "").strip())
+
+def _build_training_metric_interpretation(self, metrics: dict | None) -> str:
+    if not isinstance(metrics, dict) or not metrics:
+        return "Interpretacja pojawi się po pierwszej zakończonej epoce."
+
+    target = self.get_campaign_training_target()
+    loss = self._metric_float(metrics.get("loss", 0.0))
+
+    if target == "plate":
+        strict_value = self._metric_float(metrics.get("pose_map50_95", metrics.get("map50_95", 0.0)))
+        loose_value = self._metric_float(metrics.get("pose_map50", metrics.get("map50", 0.0)))
+        strict_name = "pose mAP50-95 (rogi)"
+
+        strict_label, strict_range = self._describe_metric_band(strict_value, "strict_map")
+        loose_label, loose_range = self._describe_metric_band(loose_value, "loose_map")
+
+        if strict_value < 0.40:
+            note = "Model dopiero uczy się precyzji rogów; do rektyfikacji będzie jeszcze dużo poprawek ręcznych."
+        elif strict_value < 0.60:
+            note = "Wynik jest już używalny do dalszej autoanotacji, ale rogi tablic nadal będą wymagaly korekt."
+        elif strict_value < 0.80:
+            note = "Rogi są lokalizowane dobrze; model nadaje się do codziennej pracy i dalszego dotrenowania."
+        else:
+            note = "Rogi są lapane bardzo dobrze; to mocny poziom do autoanotacji i rektyfikacji."
+
+        return (
+            f"Jakość: {strict_label}. {strict_name}: {strict_value:.3f}; "
+            f"mAP50: {loose_value:.3f}; loss: {loss:.3f}."
+        )
+
+    strict_value = self._metric_float(metrics.get("map50_95", 0.0))
+    loose_value = self._metric_float(metrics.get("map50", 0.0))
+    strict_label, strict_range = self._describe_metric_band(strict_value, "strict_map")
+    loose_label, loose_range = self._describe_metric_band(loose_value, "loose_map")
+
+    if strict_value < 0.40:
+        note = "Model wykrywa jeszcze zbyt malo stabilnie, wiec potrzeba dalszego treningu albo lepszego datasetu."
+    elif strict_value < 0.60:
+        note = "Wynik jest już używalny, ale model nadal będzie się mylic w trudniejszych przypadkach."
+    elif strict_value < 0.80:
+        note = "Model wykrywa dobrze i nadaje się do praktycznej pracy."
+    else:
+        note = "Model wykrywa bardzo dobrze i jest gotowy do mocnego użycia."
+
+    return (
+        f"Jakość: {strict_label}. mAP50-95: {strict_value:.3f}; "
+        f"mAP50: {loose_value:.3f}; loss: {loss:.3f}."
+    )
+
+def _shorten_training_text(value, limit: int = 58) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    if len(text) <= int(limit):
+        return text
+    if int(limit) <= 3:
+        return text[:limit]
+    return text[: max(1, int(limit) - 3)] + "..."
+
+def _format_training_metric_name(metric_key: str) -> str:
+    mapping = {
+        "loss": "Loss",
+        "map50": "mAP50",
+        "map50_95": "mAP50-95",
+        "precision": "Precision",
+        "recall": "Recall",
+        "box_map50": "Box mAP50",
+        "box_map50_95": "Box mAP50-95",
+        "box_precision": "Box precision",
+        "box_recall": "Box recall",
+        "pose_map50": "Pose mAP50",
+        "pose_map50_95": "Pose mAP50-95",
+        "pose_precision": "Pose precision",
+        "pose_recall": "Pose recall",
+    }
+    return mapping.get(str(metric_key or "").strip(), str(metric_key or "").strip() or "Metryka")
+
+def _resolve_training_metric_profile(self, metric_key: str) -> str | None:
+    raw = str(metric_key or "").strip().lower()
+    if not raw:
+        return None
+    if raw == "loss":
+        return None
+    if "map50_95" in raw or raw.endswith("map"):
+        return "strict_map"
+    if "map50" in raw:
+        return "loose_map"
+    if "precision" in raw or "recall" in raw:
+        return "standard"
+    return None
+
+def _format_training_metric_value(self, metric_key: str, value) -> str:
+    if value in (None, "", "-"):
+        return "-"
+    try:
+        numeric = float(value)
+    except Exception:
+        return str(value)
+    if str(metric_key or "").strip().lower() == "loss":
+        return f"{numeric:.3f}"
+    return f"{numeric:.3f}"
+
+def _format_training_metric_band(self, metric_key: str, value) -> tuple[str, str]:
+    raw = str(metric_key or "").strip().lower()
+    if value in (None, "", "-"):
+        return "-", "-"
+    if raw == "loss":
+        return "monitoruj", "powinien spadac"
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-", "-"
+
+    profile = self._resolve_training_metric_profile(raw)
+    if not profile:
+        return "-", "-"
+
+    label, range_text = self._describe_metric_band(numeric, profile)
+    return label, range_text
+
+def _iter_training_metric_keys(self, target: str | None = None) -> list[str]:
+    normalized_target = CONFIG.normalize_task_target(target or self.get_campaign_training_target())
+    if normalized_target == "plate":
+        return [
+            "pose_map50_95",
+            "pose_map50",
+            "box_map50_95",
+            "box_map50",
+            "loss",
+        ]
+    return [
+        "map50_95",
+        "map50",
+        "precision",
+        "recall",
+        "loss",
+    ]
+
+def _build_training_metric_rows(self, metrics: dict | None, target: str | None = None) -> list[tuple[str, str, str, str]]:
+    if not isinstance(metrics, dict) or not metrics:
+        return []
+
+    rows: list[tuple[str, str, str, str]] = []
+    for key in self._iter_training_metric_keys(target):
+        value = metrics.get(key)
+        if value is None and key == "pose_map50_95":
+            value = metrics.get("map50_95")
+        elif value is None and key == "pose_map50":
+            value = metrics.get("map50")
+        elif value is None and key == "box_map50_95":
+            value = metrics.get("map50_95")
+        elif value is None and key == "box_map50":
+            value = metrics.get("map50")
+
+        if value is None:
+            continue
+
+        band, range_text = self._format_training_metric_band(key, value)
+        rows.append(
+            (
+                self._format_training_metric_name(key),
+                self._format_training_metric_value(key, value),
+                band,
+                range_text,
+            )
+        )
+    return rows
+
+def _training_status_palette(self) -> dict:
+    palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+    panel_alt = palette.get("panel_alt", palette.get("panel", "#252526"))
+    return {
+        "ok": (
+            palette.get("success", "#2ecc71"),
+            palette.get("surface_success", blend_hex_colors(palette.get("success", "#2ecc71"), panel_alt, 0.86)),
+        ),
+        "warn": (
+            palette.get("warning", "#f0b44c"),
+            palette.get("surface_warning", blend_hex_colors(palette.get("warning", "#f0b44c"), panel_alt, 0.86)),
+        ),
+        "danger": (
+            palette.get("error", palette.get("danger", "#e05d5d")),
+            palette.get("surface_error", blend_hex_colors(palette.get("error", "#e05d5d"), panel_alt, 0.86)),
+        ),
+        "info": (
+            palette.get("accent", "#569cd6"),
+            palette.get("surface_info", blend_hex_colors(palette.get("accent", "#569cd6"), panel_alt, 0.88)),
+        ),
+        "muted": (
+            palette.get("muted", "#c7c7c7"),
+            panel_alt,
+        ),
+    }
+
+def _configure_training_status_table_tags(self, tree):
+    if tree is None:
+        return
+    for tag, (fg, bg) in _training_status_palette(self).items():
+        try:
+            tree.tag_configure(f"training_{tag}", foreground=fg, background=bg)
+        except Exception:
+            pass
+
+def _training_status_tag_from_text(self, text) -> str:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return "training_muted"
+    if "kryt" in raw or "blad" in raw or "błąd" in raw or "slab" in raw or "słab" in raw:
+        return "training_danger"
+    if "wys" in raw or "uwag" in raw or "uzy" in raw or "uży" in raw or "ywal" in raw:
+        return "training_warn"
+    if "dobry" in raw or raw == "ok" or "gotow" in raw:
+        return "training_ok"
+    if "monitor" in raw or "czek" in raw:
+        return "training_info"
+    return "training_muted"
+
+def _set_training_status_tree_rows(self, tree, rows):
+    if tree is None:
+        return
+    _configure_training_status_table_tags(self, tree)
+    try:
+        tree.delete(*tree.get_children())
+    except Exception:
+        pass
+    for row in rows or []:
+        try:
+            values, tag = row
+        except Exception:
+            values, tag = row, "training_muted"
+        try:
+            tree.insert("", tk.END, values=tuple(values), tags=(tag,))
+        except Exception:
+            continue
+
+def _format_training_resource_mib(value) -> str:
+    try:
+        mib = float(value or 0.0)
+    except Exception:
+        mib = 0.0
+    if mib <= 0:
+        return "-"
+    if mib >= 1024.0:
+        return f"{mib / 1024.0:.2f} GB"
+    return f"{mib:.0f} MB"
+
+def _format_training_resource_table_value(value, *, precision: int = 0) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-"
+    if numeric <= 0:
+        return "-"
+    if int(precision) <= 0:
+        return f"{numeric:.0f}"
+    return f"{numeric:.{int(precision)}f}"
+
+def _format_training_resource_percent(value) -> str:
+    try:
+        return f"{float(value):.1f}%"
+    except Exception:
+        return "-"
+
+def _format_training_resource_percent_value(value) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return "-"
+
+def _training_resource_extrema(self, key: str, current) -> tuple[str, str]:
+    try:
+        numeric = float(current)
+    except Exception:
+        return "-", "-"
+    if numeric <= 0:
+        return "-", "-"
+    extrema = getattr(self, "_training_resource_live_extrema", None)
+    if not isinstance(extrema, dict):
+        extrema = {}
+        try:
+            self._training_resource_live_extrema = extrema
+        except Exception:
+            pass
+    entry = dict(extrema.get(key) or {})
+    min_value = float(entry.get("min", numeric) or numeric)
+    max_value = float(entry.get("max", numeric) or numeric)
+    min_value = min(min_value, numeric)
+    max_value = max(max_value, numeric)
+    entry["min"] = min_value
+    entry["max"] = max_value
+    extrema[key] = entry
+    return _format_training_resource_table_value(min_value, precision=1 if key.endswith("_pct") else 0), _format_training_resource_table_value(max_value, precision=1 if key.endswith("_pct") else 0)
+
+def _get_training_resource_extrema(self, key: str) -> tuple[str, str]:
+    extrema = getattr(self, "_training_resource_live_extrema", None)
+    if not isinstance(extrema, dict):
+        return "-", "-"
+    entry = dict(extrema.get(key) or {})
+    return (
+        _format_training_resource_table_value(entry.get("min"), precision=1 if key.endswith("_pct") else 0),
+        _format_training_resource_table_value(entry.get("max"), precision=1 if key.endswith("_pct") else 0),
+    )
+
+def _training_resource_tone(percent, *, warning: float, danger: float) -> tuple[str, str]:
+    try:
+        value = float(percent)
+    except Exception:
+        return "Monitoruj", "training_info"
+    if value >= float(danger):
+        return "Krytycznie", "training_danger"
+    if value >= float(warning):
+        return "Wysoko", "training_warn"
+    return "OK", "training_ok"
+
+def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tuple[tuple[str, str, str, str], str]]:
+    if not isinstance(sample, dict) or not sample:
+        try:
+            self._training_resource_live_extrema = {}
+        except Exception:
+            pass
+        return [
+            (("RAM", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("VRAM", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("CPU", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("Aplikacja", "-", "-", "-", "-", "czekam"), "training_info"),
+        ]
+
+    system = dict(sample.get("system") or {})
+    process = dict(sample.get("process") or {})
+    gpu = dict(sample.get("gpu") or {})
+    rows: list[tuple[tuple[str, str, str, str], str]] = []
+
+    ram_pct = system.get("ram_percent")
+    ram_state, ram_tag = _training_resource_tone(ram_pct, warning=82.0, danger=92.0)
+    ram_used = system.get("ram_used_mib")
+    ram_min, ram_max = _training_resource_extrema(self, "ram_used_mib", ram_used)
+    rows.append(
+        (
+            (
+                "RAM",
+                _format_training_resource_table_value(ram_used),
+                ram_min,
+                ram_max,
+                _format_training_resource_table_value(system.get("ram_available_mib")),
+                ram_state,
+            ),
+            ram_tag,
+        )
+    )
+
+    if bool(gpu.get("available")):
+        total = float(gpu.get("total_mib") or 0.0)
+        reserved = float(gpu.get("reserved_mib") or 0.0)
+        allocated = float(gpu.get("allocated_mib") or 0.0)
+        used = max(allocated, reserved)
+        used_pct = (used / total * 100.0) if total > 0 else None
+        gpu_state, gpu_tag = _training_resource_tone(used_pct, warning=82.0, danger=92.0)
+        gpu_min, gpu_max = _training_resource_extrema(self, "gpu_used_mib", used)
+        rows.append(
+            (
+                (
+                    "VRAM",
+                    _format_training_resource_table_value(used),
+                    gpu_min,
+                    gpu_max,
+                    _format_training_resource_table_value(gpu.get("free_mib")),
+                    gpu_state,
+                ),
+                gpu_tag,
+            )
+        )
+    else:
+        rows.append((("VRAM", "-", "-", "-", "-", "niedostępne"), "training_info"))
+
+    cpu_pct = system.get("cpu_percent")
+    cpu_state, cpu_tag = _training_resource_tone(cpu_pct, warning=85.0, danger=96.0)
+    cpu_min, cpu_max = _training_resource_extrema(self, "cpu_pct", cpu_pct)
+    rows.append(
+        (
+            (
+                "CPU",
+                _format_training_resource_percent_value(cpu_pct),
+                cpu_min,
+                cpu_max,
+                "-",
+                cpu_state,
+            ),
+            cpu_tag,
+        )
+    )
+
+    rss = process.get("rss_mib")
+    process_min, process_max = _training_resource_extrema(self, "process_rss_mib", rss)
+    rows.append(
+        (
+            (
+                "Aplikacja",
+                _format_training_resource_table_value(rss),
+                process_min,
+                process_max,
+                "-",
+                "Monitoruj",
+            ),
+            "training_info",
+        )
+    )
+    return rows
+
+def _build_training_resource_report_rows(self, report: dict | None) -> list[tuple[tuple[str, str, str, str], str]]:
+    if not isinstance(report, dict) or not report:
+        return _build_training_resource_sample_rows(self, None)
+
+    last_sample = dict(report.get("last_sample") or {})
+    system = dict(last_sample.get("system") or {})
+    process = dict(last_sample.get("process") or {})
+    gpu = dict(last_sample.get("gpu") or {})
+    rows: list[tuple[tuple[str, str, str, str], str]] = []
+
+    ram_pct = report.get("max_ram_percent")
+    ram_state, ram_tag = _training_resource_tone(ram_pct, warning=82.0, danger=92.0)
+    ram_min, _ram_live_max = _get_training_resource_extrema(self, "ram_used_mib")
+    rows.append((
+        (
+            "RAM",
+            _format_training_resource_table_value(system.get("ram_used_mib")),
+            ram_min,
+            _format_training_resource_table_value(report.get("max_ram_used_mib")),
+            _format_training_resource_table_value(system.get("ram_available_mib")),
+            ram_state,
+        ),
+        ram_tag,
+    ))
+
+    gpu_total = float(report.get("gpu_total_mib") or 0.0)
+    gpu_reserved = float(report.get("max_gpu_reserved_mib") or 0.0)
+    if gpu_total > 0:
+        gpu_pct = gpu_reserved / gpu_total * 100.0
+        gpu_state, gpu_tag = _training_resource_tone(gpu_pct, warning=82.0, danger=92.0)
+        gpu_min, _gpu_live_max = _get_training_resource_extrema(self, "gpu_used_mib")
+        gpu_current = max(float(gpu.get("allocated_mib") or 0.0), float(gpu.get("reserved_mib") or 0.0))
+        rows.append(
+            (
+                (
+                    "VRAM",
+                    _format_training_resource_table_value(gpu_current),
+                    gpu_min,
+                    _format_training_resource_table_value(gpu_reserved),
+                    _format_training_resource_table_value(gpu.get("free_mib") or report.get("min_gpu_free_mib")),
+                    gpu_state,
+                ),
+                gpu_tag,
+            )
+        )
+    else:
+        rows.append((("VRAM", "-", "-", "-", "-", "brak GPU"), "training_info"))
+
+    cpu_pct = report.get("max_cpu_percent")
+    cpu_state, cpu_tag = _training_resource_tone(cpu_pct, warning=85.0, danger=96.0)
+    cpu_min, _cpu_live_max = _get_training_resource_extrema(self, "cpu_pct")
+    rows.append((("CPU", _format_training_resource_percent_value(system.get("cpu_percent")), cpu_min, _format_training_resource_percent_value(cpu_pct), "-", cpu_state), cpu_tag))
+
+    process_min, _process_live_max = _get_training_resource_extrema(self, "process_rss_mib")
+    rows.append((
+        (
+            "Aplikacja",
+            _format_training_resource_table_value(process.get("rss_mib")),
+            process_min,
+            _format_training_resource_table_value(report.get("max_process_rss_mib")),
+            "-",
+            "Monitoruj",
+        ),
+        "training_info",
+    ))
+    return rows
+
+def _set_training_resource_sample(self, sample: dict | None):
+    tree = getattr(self, "train_resource_tree", None)
+    _set_training_status_tree_rows(self, tree, _build_training_resource_sample_rows(self, sample))
+
+def _set_training_resource_report(self, report: dict | None):
+    tree = getattr(self, "train_resource_tree", None)
+    _set_training_status_tree_rows(self, tree, _build_training_resource_report_rows(self, report))
+
+def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
+    if run is None:
+        return []
+
+    dataset_display = self._format_workspace_relative_path(getattr(run, "dataset_path", "")) or "-"
+    best_weights = self._shorten_training_text(Path(getattr(run, "best_weights", "") or "").name or "-", 36)
+    last_weights_raw = str(getattr(run, "last_weights", "") or "").strip()
+    last_weights_name = self._shorten_training_text(Path(last_weights_raw).name or "-", 36) if last_weights_raw else "-"
+    base_model = self._shorten_training_text(Path(getattr(run, "base_model", "") or "").name or "-", 36)
+    def _format_run_datetime(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "-"
+        try:
+            return datetime.datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return raw.replace("T", " ") or "-"
+
+    created_at = _format_run_datetime(getattr(run, "created_at", None))
+    started_at = _format_run_datetime(getattr(run, "started_at", None))
+
+    def _metric_float(row: dict, keys: tuple[str, ...]) -> float | None:
+        if not isinstance(row, dict):
+            return None
+        for key in keys:
+            try:
+                value = row.get(key)
+            except Exception:
+                value = None
+            if value is None or value == "":
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return None
+
+    def _best_weights_epoch_text() -> str:
+        rows = [row for row in list(getattr(run, "metrics_history", []) or []) if isinstance(row, dict)]
+        if not rows:
+            return ""
+
+        metric_keys = (
+            "map50_95",
+            "pose_map50_95",
+            "box_map50_95",
+            "metrics/mAP50-95(B)",
+            "metrics/mAP50-95(P)",
+            "metrics/mAP50-95",
+        )
+        scored_rows: list[tuple[float, dict]] = []
+        for row in rows:
+            score = _metric_float(row, metric_keys)
+            if score is not None:
+                scored_rows.append((score, row))
+
+        if not scored_rows:
+            fallback_keys = (
+                "map50",
+                "pose_map50",
+                "box_map50",
+                "metrics/mAP50(B)",
+                "metrics/mAP50(P)",
+                "metrics/mAP50",
+            )
+            for row in rows:
+                score = _metric_float(row, fallback_keys)
+                if score is not None:
+                    scored_rows.append((score, row))
+
+        if not scored_rows:
+            return ""
+
+        _score, best_row = max(scored_rows, key=lambda item: item[0])
+        epoch_value = _metric_float(best_row, ("epoch", "Epoch"))
+        if epoch_value is None:
+            return ""
+        try:
+            return f" | epoka {int(epoch_value)}"
+        except Exception:
+            return f" | epoka {epoch_value:g}"
+
+    best_weights_detail = f"{best_weights}{_best_weights_epoch_text()}" if best_weights != "-" else best_weights
+    resumable = self._is_history_run_resume_allowed(run)
+    technically_resumable = self._is_history_run_resumable(run)
+    if resumable:
+        resume_hint = "TAK - zaznacz ten run w historii, kliknij PPM i wybierz `Wznów trening`."
+    elif technically_resumable:
+        resume_hint = "NIE - w kampanii można wznowić tylko najnowszy run aktywnego toru."
+    else:
+        resume_hint = "NIE - brakuje poprawnego checkpointu last.pt."
+
+    return [
+        ("Status", self._format_history_run_status_label(run)),
+        ("Dataset", dataset_display),
+        ("Preset / plik startowy YOLO", base_model),
+        ("Start treningu", started_at),
+        ("Postęp", f"{int(getattr(run, 'current_epoch', 0) or 0)}/{int(getattr(run, 'epochs', 0) or 0)} epok"),
+        (
+            "Ustawienia",
+            (
+                f"rozdzielczość wejściowa {int(getattr(run, 'img_size', 0) or 0)} px | "
+                f"rozmiar partii {int(getattr(run, 'batch_size', 0) or 0)} | "
+                f"współczynnik uczenia {float(getattr(run, 'lr0', 0.0) or 0.0):.4f}"
+            ),
+        ),
+        ("Urządzenie", self._shorten_training_text(str(getattr(run, "device", "") or "-"), 28)),
+        ("Najlepsze wagi", best_weights_detail),
+        ("Checkpoint last.pt", last_weights_name),
+        ("Wznowienie", resume_hint),
+        ("Utworzono", created_at),
+    ]
+
+def _build_training_run_metric_rows(self, run) -> list[tuple[str, str, str, str]]:
+    if run is None:
+        return []
+
+    history = list(getattr(run, "metrics_history", []) or [])
+    if not history:
+        latest_map = getattr(run, "best_map50", 0.0) or 0.0
+        latest_map95 = getattr(run, "best_map50_95", 0.0) or 0.0
+        fallback_metrics = {
+            "map50": latest_map,
+            "map50_95": latest_map95,
+        }
+        live_rows = self._build_training_metric_rows(fallback_metrics, self._infer_dataset_target(getattr(run, "dataset_path", "")))
+        return [(label, value, value, band) for label, value, band, _range in live_rows]
+
+    latest = history[-1]
+    target = self._infer_dataset_target(getattr(run, "dataset_path", "")) or self.get_campaign_training_target()
+    rows: list[tuple[str, str, str, str]] = []
+
+    for key in self._iter_training_metric_keys(target):
+        numeric_values: list[float] = []
+        for item in history:
+            try:
+                if key in item:
+                    numeric_values.append(float(item[key]))
+                elif key == "pose_map50_95" and "map50_95" in item:
+                    numeric_values.append(float(item["map50_95"]))
+                elif key == "pose_map50" and "map50" in item:
+                    numeric_values.append(float(item["map50"]))
+                elif key == "box_map50_95" and "map50_95" in item:
+                    numeric_values.append(float(item["map50_95"]))
+                elif key == "box_map50" and "map50" in item:
+                    numeric_values.append(float(item["map50"]))
+            except Exception:
+                continue
+
+        latest_value = latest.get(key)
+        if latest_value is None and key == "pose_map50_95":
+            latest_value = latest.get("map50_95")
+        elif latest_value is None and key == "pose_map50":
+            latest_value = latest.get("map50")
+        elif latest_value is None and key == "box_map50_95":
+            latest_value = latest.get("map50_95")
+        elif latest_value is None and key == "box_map50":
+            latest_value = latest.get("map50")
+
+        if latest_value is None and not numeric_values:
+            continue
+
+        if str(key).lower() == "loss":
+            best_value = min(numeric_values) if numeric_values else latest_value
+        else:
+            best_value = max(numeric_values) if numeric_values else latest_value
+
+        band, _range_text = self._format_training_metric_band(key, best_value)
+        rows.append(
+            (
+                self._format_training_metric_name(key),
+                self._format_training_metric_value(key, latest_value),
+                self._format_training_metric_value(key, best_value),
+                band,
+            )
+        )
+
+    return rows
+
+def _set_train_live_metrics(self, metrics: dict | None):
+    tree = getattr(self, "train_live_metrics_tree", None)
+    rows = self._build_training_metric_rows(metrics)
+    if not rows:
+        try:
+            if tree is not None:
+                tree.configure(height=3)
+        except Exception:
+            pass
+        _set_training_status_tree_rows(
+            self,
+            tree,
+            [
+                (("mAP50-95", "-", "czekam", "po 1. epoce"), "training_info"),
+                (("mAP50", "-", "czekam", "po 1. epoce"), "training_info"),
+                (("Loss", "-", "monitoruj", "trend epok"), "training_info"),
+            ],
+        )
+        return
+
+    styled_rows = []
+    for metric_name, value, band, range_text in rows:
+        styled_rows.append(
+            (
+                (metric_name, value, band, range_text),
+                _training_status_tag_from_text(self, band),
+            )
+        )
+    try:
+        if tree is not None:
+            tree.configure(height=max(3, min(5, len(styled_rows))))
+    except Exception:
+        pass
+    _set_training_status_tree_rows(self, tree, styled_rows)
+
+def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
+    target = self._get_selected_training_target()
+    target_label = self._format_training_target_label(target)
+    dataset_yaml = self._resolve_training_dataset_yaml_path()
+
+    cards: list[tuple[str, str, str]] = []
+    dataset_ready = dataset_yaml is not None
+    if dataset_yaml is None:
+        cards.extend(
+            [
+                ("Dataset", "Brak wariantu", "Najpierw wybierz albo utwórz split w PZ1."),
+                ("Próbka", "-", "Po wyborze datasetu pokażemy train / val / test."),
+            ]
+        )
+    else:
+        dataset_root = dataset_yaml.parent
+        variant_name = str(getattr(self, "dataset_variant_var", tk.StringVar()).get() or "").strip()
+        dataset_name = variant_name or dataset_root.name
+        counts = {"train": 0, "val": 0, "test": 0, "total": 0}
+        source = getattr(self, "_last_training_source", None)
+        source_stats = getattr(source, "stats", None)
+        try:
+            source_root = Path(str(getattr(source, "dataset_dir", "") or getattr(source, "yaml_path", "") or ""))
+            if source_root.is_file():
+                source_root = source_root.parent
+            same_source = source_root.exists() and source_root.resolve() == dataset_root.resolve()
+        except Exception:
+            same_source = False
+        if same_source and hasattr(source_stats, "split_counts"):
+            try:
+                counts = dict(source_stats.split_counts())
+            except Exception:
+                counts = {"train": 0, "val": 0, "test": 0, "total": 0}
+        if int(counts.get("total", 0) or 0) <= 0:
+            try:
+                counts = self._get_dataset_split_image_counts(dataset_root)
+            except Exception:
+                counts = {"train": 0, "val": 0, "test": 0, "total": 0}
+
+        try:
+            cfg = safe_load_yaml(dataset_yaml) or {}
+        except Exception:
+            cfg = {}
+        try:
+            class_count = int(cfg.get("nc", 0) or 0)
+        except Exception:
+            class_count = 0
+        if class_count <= 0:
+            try:
+                class_count = len(self._extract_dataset_class_names(cfg))
+            except Exception:
+                class_count = 0
+        dataset_task = "Pose" if bool(cfg.get("kpt_shape")) else "Detect"
+
+        total = int(counts.get("total", 0) or 0)
+        train = int(counts.get("train", 0) or 0)
+        val = int(counts.get("val", 0) or 0)
+        test = int(counts.get("test", 0) or 0)
+        cards.extend(
+            [
+                ("Dataset", self._shorten_training_text(dataset_name, 42), f"{target_label} | YOLO {dataset_task}"),
+                ("Próbka", f"{total} obrazów", f"train {train} | val {val} | test {test} | klasy {class_count}"),
+            ]
+        )
+
+    base_display = self._resolve_selected_training_base_model_display()
+    try:
+        model_state = _resolve_selected_training_base_model_training_state(self)
+    except Exception:
+        model_state = {}
+    model_hint = str(model_state.get("detail") or "Model bazowy do fine-tuningu.").strip()
+    try:
+        _model_path, model_info = self._resolve_selected_training_base_model_info()
+        model_value = self._build_training_model_summary_value(base_display, model_info)
+    except Exception:
+        model_value = base_display
+    if not str(model_value or "").strip():
+        model_value = "Nie wybrano modelu"
+    cards.append(("Model", self._shorten_training_text(model_value, 54), model_hint))
+
+    try:
+        recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
+    except Exception:
+        recommendation = {}
+    try:
+        batch = self._safe_training_int_value("batch_var", default=int(recommendation.get("batch", 16) or 16), minimum=1)
+    except Exception:
+        batch = int(recommendation.get("batch", 16) or 16)
+    try:
+        imgsz = self._safe_training_int_value("imgsz_var", default=int(recommendation.get("imgsz", 640) or 640), minimum=32)
+    except Exception:
+        imgsz = int(recommendation.get("imgsz", 640) or 640)
+    try:
+        epochs = self._safe_training_int_value("epochs_var", default=100, minimum=1)
+    except Exception:
+        epochs = 100
+    try:
+        memory_gb = float(recommendation.get("memory_gb", 0.0) or 0.0)
+    except Exception:
+        memory_gb = 0.0
+    if str(recommendation.get("effective_raw") or "").lower() == "cpu":
+        device_value = "CPU"
+    else:
+        device_value = str(recommendation.get("device_name") or "GPU").strip() or "GPU"
+        if memory_gb > 0:
+            device_value = f"{device_value} | {memory_gb:.1f} GB VRAM"
+    cards.append(("Sprzęt", self._shorten_training_text(device_value, 54), f"batch {batch} | imgsz {imgsz} | epoki {epochs}"))
+
+    if ready is None:
+        try:
+            ready = bool(self._is_training_configuration_ready())
+        except Exception:
+            ready = False
+
+    if ready:
+        status = "Gotowe do startu"
+        subtitle = "Masz wariant datasetu, zgodny model i dobrane parametry treningu."
+        tone = "success"
+    elif dataset_ready:
+        status = "Uzupełnij model"
+        subtitle = "Dataset jest wybrany. Sprawdź model bazowy i zgodność typu treningu."
+        tone = "warning"
+    else:
+        status = "Czekam na wariant"
+        subtitle = "Utwórz lub wybierz wariant splitu w PZ1, a potem wróć do treningu."
+        tone = "muted"
+
+    return {
+        "status": status,
+        "subtitle": subtitle,
+        "tone": tone,
+        "cards": cards,
+    }
+
+def _refresh_training_cockpit(self, *, ready: bool | None = None):
+    shell = getattr(self, "train_cockpit_shell", None)
+    cards = list(getattr(self, "_train_cockpit_cards", []) or [])
+    if shell is None or not cards:
+        return
+
+    palette = getattr(self.app, "palette", {})
+    summary = self._build_training_cockpit_summary(ready=ready)
+    tone = str(summary.get("tone") or "muted").strip().lower()
+    tone_colors = {
+        "success": (
+            palette.get("success", "#2ecc71"),
+            palette.get("surface_success", palette.get("panel_alt", "#2d2d30")),
+            palette.get("success", "#2ecc71"),
+        ),
+        "warning": (
+            palette.get("warning", "#f0b44c"),
+            palette.get("surface_warning", palette.get("panel_alt", "#2d2d30")),
+            palette.get("warning", "#f0b44c"),
+        ),
+        "muted": (
+            palette.get("muted", "#c7c7c7"),
+            palette.get("panel_alt", "#2d2d30"),
+            palette.get("muted", "#c7c7c7"),
+        ),
+    }
+    accent, status_bg, status_fg = tone_colors.get(tone, tone_colors["muted"])
+    shell_bg = blend_hex_colors(accent, palette.get("panel", "#252526"), 0.88)
+    shell_border = blend_hex_colors(
+        palette.get("success", "#2ecc71"),
+        palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        0.72,
+    )
+    card_bg = palette.get("field", palette.get("panel_alt", "#2d2d30"))
+    muted_fg = palette.get("muted", "#c7c7c7")
+    fg = palette.get("fg", "#f3f3f3")
+
+    for widget_name in ("train_cockpit_shell", "train_cockpit_header", "train_cockpit_grid"):
+        widget = getattr(self, widget_name, None)
+        if widget is None:
+            continue
+        try:
+            widget.configure(bg=shell_bg)
+        except Exception:
+            pass
+    try:
+        shell.configure(highlightbackground=shell_border, highlightcolor=shell_border)
+    except Exception:
+        pass
+    for widget_name in ("train_cockpit_title_lbl", "train_cockpit_subtitle_lbl"):
+        widget = getattr(self, widget_name, None)
+        if widget is None:
+            continue
+        try:
+            widget.configure(bg=shell_bg)
+        except Exception:
+            pass
+    try:
+        self.train_cockpit_title_lbl.configure(fg=fg)
+    except Exception:
+        pass
+    self._set_training_widget_text(getattr(self, "train_cockpit_status_lbl", None), summary.get("status", ""))
+    self._set_training_widget_text(getattr(self, "train_cockpit_subtitle_lbl", None), summary.get("subtitle", ""))
+    try:
+        self.train_cockpit_status_lbl.configure(bg=status_bg, fg=status_fg)
+    except Exception:
+        pass
+    try:
+        self.train_cockpit_subtitle_lbl.configure(fg=muted_fg)
+    except Exception:
+        pass
+
+    summary_cards = list(summary.get("cards") or [])
+    for index, card_widgets in enumerate(cards):
+        title, value, hint = summary_cards[index] if index < len(summary_cards) else ("", "", "")
+        frame = card_widgets.get("frame")
+        title_lbl = card_widgets.get("title")
+        value_lbl = card_widgets.get("value")
+        hint_lbl = card_widgets.get("hint")
+        for widget in (frame, title_lbl, value_lbl, hint_lbl):
+            if widget is None:
+                continue
+            try:
+                widget.configure(bg=card_bg)
+            except Exception:
+                pass
+        if frame is not None:
+            try:
+                frame.configure(
+                    highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                )
+            except Exception:
+                pass
+        self._set_training_widget_text(title_lbl, str(title or ""))
+        self._set_training_widget_text(value_lbl, str(value or "-"))
+        self._set_training_widget_text(hint_lbl, str(hint or ""))
+        try:
+            title_lbl.configure(fg=muted_fg)
+            value_lbl.configure(fg=fg)
+            hint_lbl.configure(fg=muted_fg)
+        except Exception:
+            pass
+
+def _build_training_recommendation_rows(self) -> tuple[str, str, list[tuple[str, ...]], str]:
+    recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
+    memory_gb = float(recommendation.get("memory_gb", 0.0) or 0.0)
+    if recommendation.get("effective_raw") == "cpu":
+        device_label = "Wykryty sprzęt: CPU"
+    else:
+        device_label = (
+            f"Wykryty sprzęt: {recommendation.get('device_name', 'GPU')} | "
+            f"{memory_gb:.1f} GB VRAM"
+        )
+    model_label = str(recommendation.get("model_detected_label") or "").strip()
+    if not model_label:
+        model_label = self._build_training_recommendation_model_text()
+
+    rows = [
+        ("Epoki", "ręcznie"),
+        ("Batch", str(int(recommendation.get("batch", 0) or 0))),
+        ("Rozdzielczość", str(int(recommendation.get("imgsz", 0) or 0))),
+        ("LR", f"{float(recommendation.get('lr0', 0.0) or 0.0):.4f}"),
+    ]
+    note = str(
+        recommendation.get("note")
+        or "Jeśli zabraknie pamięci, najpierw zmniejsz rozmiar partii, a potem rozdzielczość wejściową."
+    )
+    return device_label, model_label, rows, note
+
+def _refresh_training_recommendation_table(self):
+    hardware_text, model_text, rows, note_text = self._build_training_recommendation_rows()
+    hardware_label = getattr(self, "train_recommendation_hardware_label", None)
+    self._set_training_widget_text(hardware_label, hardware_text)
+    model_label = getattr(self, "train_recommendation_model_label", None)
+    self._set_training_widget_text(model_label, model_text)
+
+    cells = list(getattr(self, "_train_recommendation_cells", []) or [])
+    for row_index, row_values in enumerate(rows):
+        if len(row_values) >= 3:
+            label_text, current_text, recommended_text = row_values[:3]
+        else:
+            label_text, recommended_text = row_values[:2]
+            current_text = None
+        if row_index >= len(cells):
+            continue
+        row = cells[row_index]
+        self._set_training_widget_text(row.get("key"), str(label_text))
+        if current_text is not None:
+            self._set_training_widget_text(row.get("current"), str(current_text))
+        if row.get("card") is not None:
+            self._set_training_widget_text(row.get("recommended"), f"Rekomendacja: {recommended_text}")
+        else:
+            self._set_training_widget_text(row.get("recommended"), str(recommended_text))
+
+    note_var = getattr(self, "train_recommendation_note_var", None)
+    self._set_training_stringvar_text(note_var, note_text)
+
+def _apply_training_recommendation_table_theme(self):
+    palette = getattr(self.app, "palette", {})
+    panel = palette.get("panel", "#252526")
+    panel_alt = palette.get("panel_alt", "#2d2d30")
+    border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    section_border = blend_hex_colors(palette.get("success", "#2ecc71"), border, 0.72)
+    card_border = blend_hex_colors(border, panel, 0.30)
+    container_bg = panel
+    card_bg = blend_hex_colors(panel_alt, panel, 0.72)
+    header_bg = blend_hex_colors(panel_alt, border, 0.70)
+    header_fg = palette.get("fg", "#f3f3f3")
+    cell_bg = panel
+    alt_cell_bg = blend_hex_colors(panel_alt, panel, 0.62)
+    cell_fg = palette.get("fg", "#f3f3f3")
+    title_bg = container_bg
+    title_fg = palette.get("fg", "#f3f3f3")
+    hardware_bg = container_bg
+    hardware_fg = palette.get("muted", "#c7c7c7")
+    subtle_bg = blend_hex_colors(panel_alt, panel, 0.64)
+    subtle_fg = palette.get("muted", "#c7c7c7")
+
+    shell = getattr(self, "train_recommendation_table_shell", None)
+    grid = getattr(self, "train_recommendation_grid", None)
+    cards_grid = getattr(self, "train_recommendation_cards_grid", None)
+    title_row = getattr(self, "train_recommendation_title_row", None)
+    if shell is not None:
+        try:
+            shell.configure(bg=container_bg, highlightbackground=section_border, highlightcolor=section_border)
+        except Exception:
+            pass
+    if grid is not None:
+        try:
+            grid.configure(bg=container_bg)
+        except Exception:
+            pass
+    if cards_grid is not None:
+        try:
+            cards_grid.configure(bg=container_bg)
+        except Exception:
+            pass
+    if title_row is not None:
+        try:
+            title_row.configure(bg=title_bg)
+        except Exception:
+            pass
+
+    for label_name, bg, fg in (
+        ("train_recommendation_title_label", title_bg, title_fg),
+        ("train_recommendation_hardware_label", hardware_bg, hardware_fg),
+        ("train_recommendation_model_label", hardware_bg, hardware_fg),
+    ):
+        label = getattr(self, label_name, None)
+        if label is None:
+            continue
+        try:
+            label.configure(bg=bg, fg=fg)
+        except Exception:
+            pass
+
+    for label in list(getattr(self, "_train_recommendation_header_labels", []) or []):
+        if label is None:
+            continue
+        try:
+            label.configure(bg=header_bg, fg=header_fg)
+        except Exception:
+            pass
+
+    for row_index, row in enumerate(list(getattr(self, "_train_recommendation_cells", []) or [])):
+        card_widget = row.get("card")
+        key_widget = row.get("key")
+        current_widget = row.get("current")
+        editor_host = row.get("editor_host")
+        recommended_widget = row.get("recommended")
+        if card_widget is not None:
+            key_bg = card_bg
+            editor_bg = card_bg
+            try:
+                card_widget.configure(
+                    bg=card_bg,
+                    highlightbackground=card_border,
+                    highlightcolor=card_border,
+                )
+            except Exception:
+                pass
+        else:
+            key_bg = alt_cell_bg if row_index % 2 == 1 else cell_bg
+            editor_bg = alt_cell_bg if row_index % 2 == 1 else cell_bg
+        if key_widget is not None:
+            try:
+                key_widget.configure(bg=key_bg, fg=cell_fg)
+            except Exception:
+                pass
+        if editor_host is not None:
+            try:
+                editor_host.configure(bg=editor_bg, highlightbackground=editor_bg, highlightcolor=editor_bg)
+            except Exception:
+                pass
+        if current_widget is not None:
+            try:
+                current_widget.configure(bg=editor_bg, fg=cell_fg)
+            except Exception:
+                pass
+        if recommended_widget is not None:
+            try:
+                recommended_widget.configure(
+                    bg=card_bg if card_widget is not None else subtle_bg,
+                    fg=subtle_fg,
+                )
+            except Exception:
+                pass
+
+def _apply_training_device_recommendation(self):
+    self._apply_training_recommended_start_params()
+
+def _on_training_base_model_value_write(self, *_args):
+    try:
+        self._refresh_training_base_model_selection_ui()
+    except Exception:
+        pass
+    try:
+        self._refresh_training_execution_summary()
+    except Exception:
+        pass
+    try:
+        self._refresh_training_start_state()
+    except Exception:
+        pass
+
+def _schedule_step4_deferred_model_refresh(self):
+    frame = getattr(self, "frame", None)
+    if frame is None:
+        return
+
+    pending_job = getattr(self, "_step4_deferred_model_refresh_job", None)
+    if pending_job is not None:
+        try:
+            frame.after_cancel(pending_job)
+        except Exception:
+            pass
+
+    def run_refresh():
+        self._step4_deferred_model_refresh_job = None
+        try:
+            self._refresh_base_model_choices()
+        except Exception:
+            pass
+        try:
+            self._apply_training_recommended_start_params()
+        except Exception:
+            pass
+        try:
+            self._refresh_training_execution_summary()
+        except Exception:
+            pass
+
+    try:
+        self._step4_deferred_model_refresh_job = frame.after(25, run_refresh)
+    except Exception:
+        self._step4_deferred_model_refresh_job = None
+
+def _apply_training_recommended_start_params(self):
+    recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
+    try:
+        current_batch = self._safe_training_int_value("batch_var", default=16, minimum=1)
+        self.batch_var.set(int(recommendation.get("batch", current_batch) or current_batch))
+    except Exception:
+        pass
+    try:
+        current_imgsz = self._safe_training_int_value("imgsz_var", default=640, minimum=32)
+        self.imgsz_var.set(int(recommendation.get("imgsz", current_imgsz) or current_imgsz))
+    except Exception:
+        pass
+    try:
+        current_lr0 = self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001)
+        self.lr0_var.set(float(recommendation.get("lr0", current_lr0) or current_lr0))
+    except Exception:
+        pass
+    self._refresh_training_recommendation_table()
+    self._refresh_training_start_state()
+
+def _safe_training_numeric_var_value(
+    self,
+    attr_name: str,
+    *,
+    default,
+    cast,
+    minimum=None,
+):
+    var_obj = getattr(self, attr_name, None)
+    raw_value = None
+    if var_obj is not None:
+        try:
+            raw_value = var_obj.get()
+        except Exception:
+            raw_value = None
+
+    try:
+        value = cast(raw_value)
+    except Exception:
+        value = cast(default)
+
+    if minimum is not None:
+        try:
+            value = max(cast(minimum), value)
+        except Exception:
+            pass
+    return value
+
+def _safe_training_int_value(self, attr_name: str, *, default: int, minimum: int | None = None) -> int:
+    return int(
+        self._safe_training_numeric_var_value(
+            attr_name,
+            default=int(default),
+            cast=lambda value: int(float(value)),
+            minimum=minimum,
+        )
+    )
+
+def _safe_training_float_value(self, attr_name: str, *, default: float, minimum: float | None = None) -> float:
+    return float(
+        self._safe_training_numeric_var_value(
+            attr_name,
+            default=float(default),
+            cast=float,
+            minimum=minimum,
+        )
+    )
+
+def _resolve_training_dataset_yaml_path(self) -> Path | None:
+    try:
+        source = getattr(self, "_last_training_source", None)
+        if not isinstance(source, TrainingSource) or not source.has_dataset():
+            resolver = getattr(self, "_resolve_step4_dataset_summary_source", None)
+            if callable(resolver):
+                source = resolver()
+        if isinstance(source, TrainingSource) and source.has_dataset():
+            candidates: list[Path] = []
+            if str(source.yaml_path or "").strip():
+                candidates.append(Path(source.yaml_path))
+            if str(source.dataset_dir or "").strip():
+                dataset_dir = Path(source.dataset_dir)
+                candidates.append(dataset_dir / "data.yaml" if dataset_dir.is_dir() else dataset_dir)
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_file() and candidate.name.lower() == "data.yaml":
+                    return candidate
+    except Exception:
+        pass
+
+    dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+    if not dataset_value:
+        return None
+
+    candidate = Path(dataset_value)
+    if candidate.is_dir():
+        yaml_path = candidate / "data.yaml"
+        return yaml_path if yaml_path.exists() else None
+    if candidate.is_file() and candidate.name.lower() == "data.yaml":
+        return candidate
+    return None
+
+def _validate_active_training_source_for_pz2(self) -> dict:
+    result = {
+        "ok": False,
+        "source": None,
+        "yaml_path": None,
+        "dataset_root": None,
+        "target": self._get_selected_training_target(),
+        "message": "Najpierw wskaż dataset treningowy.",
+        "stats": {},
+    }
+
+    yaml_path = self._resolve_training_dataset_yaml_path()
+    if yaml_path is None:
+        result["message"] = "Najpierw wskaż poprawny dataset treningowy z plikiem data.yaml."
+        return result
+
+    dataset_root = yaml_path.parent
+    selected_target = self._get_selected_training_target()
+    if not CAMPAIGN.get_active_project_name():
+        if not self._is_free_training_dataset_variant_selected(dataset_root):
+            result["message"] = (
+                "Wybierz aktywny wariant splitu z listy PZ2 albo utwórz go w PZ1. "
+                "Trening nie powinien startować na przypadkowej ścieżce."
+            )
+            return result
+
+    inferred_target = self._infer_dataset_target(str(dataset_root))
+    if inferred_target and inferred_target != selected_target:
+        target_context = "tor" if CAMPAIGN.get_active_project_name() else "typ datasetu"
+        result["message"] = (
+            f"Wybrany dataset należy do innego {target_context} niż aktywny trening.\n\n"
+            f"Aktywny {target_context}: {self._format_training_target_label(selected_target)}\n"
+            f"Dataset: {self._format_training_target_label(inferred_target)}"
+        )
+        return result
+
+    def _safe_mtime(path: Path) -> float:
+        try:
+            return float(path.stat().st_mtime)
+        except Exception:
+            return 0.0
+
+    try:
+        root_key = str(dataset_root.resolve())
+    except Exception:
+        root_key = str(dataset_root)
+    cache_key = (
+        root_key,
+        str(selected_target),
+        _safe_mtime(yaml_path),
+        _safe_mtime(dataset_root / "images" / "train"),
+        _safe_mtime(dataset_root / "images" / "val"),
+        _safe_mtime(dataset_root / "images" / "test"),
+    )
+    cache = getattr(self, "_active_training_source_validation_cache", None)
+    if isinstance(cache, dict) and cache.get("key") == cache_key:
+        cached_result = dict(cache.get("result") or {})
+        cached_source = cached_result.get("source")
+        if isinstance(cached_source, TrainingSource):
+            try:
+                self._last_training_source = cached_source
+            except Exception:
+                pass
+        return cached_result
+
+    try:
+        is_valid, validation_msg, validation_stats = self.trainer.validate_dataset(dataset_root)
+    except Exception as exc:
+        is_valid = False
+        validation_msg = f"Błąd walidacji datasetu: {exc}"
+        validation_stats = {}
+
+    validation_stats = dict(validation_stats or {})
+    source = TrainingSource(
+        target=CONFIG.normalize_task_target(inferred_target or selected_target),
+        kind="yolo_dataset",
+        dataset_dir=str(dataset_root),
+        yaml_path=str(yaml_path),
+        validated=bool(is_valid),
+        stats=TrainingSourceStats.from_mapping(validation_stats),
+        provenance=str(getattr(self._resolve_step4_dataset_summary_source(), "provenance", "") or "Aktywny split"),
+        source_stage="Z4/PZ2",
+        message=str(validation_msg or "").strip(),
+    )
+    try:
+        self._last_training_source = source
+    except Exception:
+        pass
+
+    result.update(
+        {
+            "ok": bool(is_valid),
+            "source": source,
+            "yaml_path": yaml_path,
+            "dataset_root": dataset_root,
+            "target": source.target,
+            "message": str(validation_msg or "").strip(),
+            "stats": validation_stats,
+        }
+    )
+    try:
+        self._active_training_source_validation_cache = {
+            "key": cache_key,
+            "result": dict(result),
+        }
+    except Exception:
+        pass
+    return result
+
+def _looks_like_char_classification_dataset(self, path_like) -> bool:
+    try:
+        path = Path(path_like)
+    except Exception:
+        return False
+
+    if path.is_file():
+        if path.name.lower() == "manifest.json":
+            manifest_path = path
+            root = path.parent
+        else:
+            root = path.parent
+            manifest_path = root / "manifest.json"
+    else:
+        root = path
+        manifest_path = root / "manifest.json"
+
+    if not manifest_path.exists():
+        return False
+
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        dataset_type = str(data.get("dataset_type") or "").strip().lower()
+        if dataset_type == "char_classification":
+            return True
+    except Exception:
+        pass
+
+    try:
+        has_class_splits = all((root / split).exists() for split in ("train", "val", "test"))
+        has_yolo_shape = (root / "images").exists() or (root / "labels").exists() or (root / "data.yaml").exists()
+        return bool(has_class_splits and not has_yolo_shape)
+    except Exception:
+        return False
+
+def _char_classification_dataset_message(self) -> str:
+    return (
+        "Wybrane źródło wygląda na dataset OCR/klasyfikacyjny znaków (manifest.json). "
+        "Z4/PZ1/PZ2 trenuje tutaj modele YOLO, więc wymaga datasetu YOLO Detect: "
+        "folderu z images/labels oraz data.yaml. Wybierz np. katalog YOLO_MegaDataset_Chars_* "
+        "albo najpierw wygeneruj/wyeksportuj dataset YOLO dla znaków. "
+        "Datasety klasyfikacyjne są odkładane osobno w 4_training_datasets/4_char_classification."
+    )
+
+def _is_training_configuration_ready(self) -> bool:
+    if not YOLO_AVAILABLE:
+        return False
+    if self._step4_has_active_operation():
+        return False
+    if bool(getattr(self.trainer, "is_training", False)):
+        return False
+
+    source_state = self._validate_active_training_source_for_pz2()
+    if not bool(source_state.get("ok")):
+        return False
+    selected_target = CONFIG.normalize_task_target(str(source_state.get("target") or self._get_selected_training_target()))
+
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return False
+    if self._is_custom_base_model_key(base_key):
+        custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+        if not custom_model or not Path(custom_model).exists():
+            return False
+        if _selected_training_base_model_nonfinal_run(self) is not None:
+            return False
+        valid_selection, _selection_message = self._validate_training_base_model_target_compatibility(
+            target=selected_target,
+            show_dialog=False,
+        )
+        if not valid_selection:
+            return False
+
+    return True
+
+def _validate_training_base_model_target_compatibility(
+    self,
+    *,
+    target: str | None = None,
+    show_dialog: bool = False,
+) -> tuple[bool, str]:
+    normalized_target = CONFIG.normalize_task_target(target or self._get_selected_training_target())
+    if normalized_target not in {"char", "plate"}:
+        return True, ""
+
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return False, "Nie wybrano modelu bazowego."
+
+    base_model = (
+        str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+        if self._is_custom_base_model_key(base_key)
+        else base_key
+    )
+    if not base_model:
+        return False, "Nie wybrano modelu bazowego."
+
+    if self._is_custom_base_model_key(base_key):
+        try:
+            model_path = Path(base_model)
+        except Exception:
+            model_path = None
+        if model_path is None or not model_path.exists():
+            return False, "Wskaż poprawny plik modelu .pt."
+
+        ok, message, _info = validate_model_file(model_path)
+        if not ok:
+            if show_dialog:
+                messagebox.showerror(
+                    "Nieprawidłowy model",
+                    f"Nie udało się użyć wybranego modelu:\n{message}",
+                )
+            return False, message
+
+        nonfinal_run = _selected_training_base_model_nonfinal_run(self)
+        if nonfinal_run is not None:
+            run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
+            status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
+            if status_value in {TrainingStatus.FAILED.value, TrainingStatus.PAUSED.value}:
+                message = (
+                    "Wybrany plik pochodzi z niedokończonego treningu.\n\n"
+                    f"Run: {run_id or '-'} | status: {status_value or '-'}.\n"
+                    "Jeśli chcesz kontynuować ten trening, użyj akcji `Wznów trening` w historii. "
+                    "`Rozpocznij trening` tworzy nowy run i nie powinien po cichu wznawiać checkpointu."
+                )
+            else:
+                message = (
+                    "Wybrany plik pochodzi z treningu, który nie został ukończony.\n\n"
+                    f"Run: {run_id or '-'} | status: {status_value or '-'}.\n"
+                    "Wybierz ukończony model bazowy albo uruchom właściwą akcję wznowienia."
+                )
+            if show_dialog:
+                messagebox.showerror("To nie jest model bazowy", message)
+            return False, message
+
+    is_pose_model = self._is_pose_base_model(base_key, base_model)
+    if normalized_target == "plate" and not is_pose_model:
+        message = (
+            "Tor tablic wymaga modelu POSE.\n\n"
+            "Wybierz model z dopiskiem '-pose' albo model .pt wytrenowany wcześniej dla tablic."
+        )
+        if show_dialog:
+            messagebox.showerror("Niezgodny model bazowy", message)
+        return False, message
+
+    if normalized_target == "char" and is_pose_model:
+        message = (
+            "Tor znaków wymaga zwykłego modelu DETECT.\n\n"
+            "Wybierz model typu detect, np. `yolo11n` albo `yolo11s`, "
+            "zamiast modelu pose."
+        )
+        if show_dialog:
+            messagebox.showerror("Niezgodny model bazowy", message)
+        return False, message
+
+    return True, ""
+
+def _ensure_new_training_uses_final_base_model(self) -> bool:
+    if not CAMPAIGN.get_active_project_name():
+        return False
+    if bool(getattr(self, "_step4_sanitizing_base_model_selection", False)):
+        return False
+
+    nonfinal_run = _selected_training_base_model_nonfinal_run(self)
+    if nonfinal_run is None:
+        return False
+
+    target = CONFIG.normalize_task_target(self._get_selected_training_target())
+    fallback = (
+        self._get_preferred_plate_pose_base_model()
+        if target == "plate"
+        else self._get_default_base_model_for_mode(target)
+    )
+    if not fallback or self._is_custom_base_model_key(fallback):
+        return False
+
+    self._step4_sanitizing_base_model_selection = True
+    try:
+        self.base_model_var.set(fallback)
+        self.base_custom_var.set("")
+        try:
+            run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
+            logger.info(
+                "Z4/PZ2: checkpoint niedokończonego runu nie jest modelem bazowym nowego treningu; "
+                f"zdjęto z wyboru modelu bazowego run={run_id or '-'} i ustawiono {fallback}."
+            )
+        except Exception:
+            pass
+    finally:
+        self._step4_sanitizing_base_model_selection = False
+    return True
+
+def _refresh_training_start_state(self):
+    button = getattr(self, "btn_start_train", None)
+    if button is None:
+        return
+    ready = False
+    try:
+        _ensure_new_training_uses_final_base_model(self)
+        ready = bool(self._is_training_configuration_ready())
+        button.configure(state=(tk.NORMAL if ready else tk.DISABLED))
+    except Exception:
+        pass
+    try:
+        self._refresh_training_cockpit(ready=ready)
+    except Exception:
+        pass
+    try:
+        self._refresh_training_start_gate(ready=ready)
+    except Exception:
+        pass
+    try:
+        self._refresh_training_execution_summary()
+    except Exception:
+        pass
+    try:
+        self._refresh_training_base_model_identity_ui()
+    except Exception:
+        pass
+
+def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, str]:
+    if ready:
+        try:
+            resumable_run_id = str(self._get_latest_campaign_resumable_run_id() or "").strip()
+        except Exception:
+            resumable_run_id = ""
+        if resumable_run_id:
+            return (
+                "Gotowe do nowego treningu",
+                (
+                    "Kliknięcie rozpocznie nowy run na aktualnym wariancie datasetu i modelu bazowym. "
+                    f"Aby wznowić niedokończony run {resumable_run_id}: w historii treningów zaznacz jego wiersz, "
+                    "kliknij prawym przyciskiem myszy i wybierz `Wznów trening`."
+                ),
+                "success",
+            )
+        return (
+            "Gotowe",
+            "Po kliknięciu rozpoczniemy trening na wybranym wariancie datasetu i modelu bazowym.",
+            "success",
+        )
+    if not YOLO_AVAILABLE:
+        return (
+            "Brak YOLO",
+            "Trening wymaga dostępnej biblioteki Ultralytics YOLO.",
+            "error",
+        )
+    try:
+        if self._step4_has_active_operation():
+            return (
+                "Zajęte",
+                "Poczekaj na zakończenie bieżącej operacji w Z4.",
+                "warning",
+            )
+    except Exception:
+        pass
+    try:
+        if bool(getattr(self.trainer, "is_training", False)):
+            return (
+                "Trwa trening",
+                "Aktualny trening jest już uruchomiony.",
+                "success",
+            )
+    except Exception:
+        pass
+
+    dataset_yaml = None
+    try:
+        dataset_yaml = self._resolve_training_dataset_yaml_path()
+    except Exception:
+        dataset_yaml = None
+    if dataset_yaml is None:
+        return (
+            "Brakuje datasetu",
+            "Wybierz wariant splitu przygotowany w PZ1.",
+            "warning",
+        )
+
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return (
+            "Brakuje modelu",
+            "Wybierz model bazowy zgodny z torem treningu.",
+            "warning",
+        )
+    if self._is_custom_base_model_key(base_key):
+        custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+        if not custom_model or not Path(custom_model).exists():
+            return (
+                "Brakuje modelu",
+                "Wskaż poprawny plik .pt dla modelu bazowego.",
+                "warning",
+            )
+        nonfinal_run = _selected_training_base_model_nonfinal_run(self)
+        if nonfinal_run is not None:
+            status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
+            return (
+                "Checkpoint wznowienia",
+                (
+                    f"Wybrany plik pochodzi z runu {status_value or 'nieukończonego'} i nie jest modelem bazowym. "
+                    "Aby kontynuować: zaznacz ten run w historii treningów, kliknij PPM i wybierz `Wznów trening`. "
+                    "Aby zacząć od nowa: wybierz preset albo ukończony model bazowy."
+                ),
+                "warning",
+            )
+    return (
+        "Do sprawdzenia",
+        "Sprawdź zgodność datasetu, modelu i toru treningu.",
+        "warning",
+    )
+
+def _refresh_training_start_gate(self, *, ready: bool):
+    status_label = getattr(self, "train_start_gate_status_lbl", None)
+    hint_label = getattr(self, "train_start_gate_hint_lbl", None)
+    if status_label is None and hint_label is None:
+        return
+    status_text, hint_text, tone = self._build_training_start_gate_message(ready=ready)
+    palette = getattr(self.app, "palette", {}) or {}
+    tone_colors = {
+        "success": (
+            palette.get("surface_success", palette.get("panel_alt", "#2d2d30")),
+            palette.get("success", "#2fa36b"),
+        ),
+        "warning": (
+            palette.get("surface_warning", palette.get("panel_alt", "#2d2d30")),
+            palette.get("warning", "#f0b44c"),
+        ),
+        "error": (
+            palette.get("surface_error", palette.get("panel_alt", "#2d2d30")),
+            palette.get("error", "#e05d5d"),
+        ),
+    }
+    status_bg, status_fg = tone_colors.get(tone, tone_colors["warning"])
+    try:
+        if status_label is not None:
+            status_label.configure(text=status_text, bg=status_bg, fg=status_fg)
+    except Exception:
+        pass
+    try:
+        if hint_label is not None:
+            hint_label.configure(text=hint_text)
+    except Exception:
+        pass
+
+def _resolve_selected_training_base_model_training_state(self) -> dict:
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return {
+            "label": "BRAK MODELU",
+            "detail": "Nie wybrano modelu bazowego.",
+            "tone": "warning",
+        }
+
+    if not self._is_custom_base_model_key(base_key):
+        return {
+            "label": "NIEWYTRENOWANE W PROJEKCIE",
+            "detail": "Preset YOLO. Nie jest artefaktem treningu tej kampanii.",
+            "tone": "muted",
+        }
+
+    custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+    if not custom_model:
+        return {
+            "label": "BRAK PLIKU",
+            "detail": "Wskaż plik .pt albo wybierz preset YOLO.",
+            "tone": "warning",
+        }
+
+    try:
+        model_path = Path(custom_model)
+    except Exception:
+        model_path = None
+
+    if model_path is None or not model_path.exists():
+        return {
+            "label": "BRAK PLIKU",
+            "detail": "Wskazany plik .pt nie istnieje.",
+            "tone": "danger",
+        }
+
+    source_run = None
+    try:
+        source_run = self._resolve_training_run_from_model_path(model_path)
+    except Exception:
+        source_run = None
+
+    if source_run is not None:
+        status_value = str(getattr(source_run, "status", "") or "").strip().lower()
+        run_label = self._format_training_model_run_label(source_run)
+        if status_value == TrainingStatus.COMPLETED.value:
+            return {
+                "label": "WYTRENOWANY MODEL",
+                "detail": f"Artefakt ukończonego runu: {run_label}.",
+                "tone": "success",
+            }
+        return {
+            "label": "CHECKPOINT NIEUKOŃCZONY",
+            "detail": f"Run {run_label} ma status: {status_value or 'nieznany'}. Do kontynuacji użyj `Wznów trening`.",
+            "tone": "warning",
+        }
+
+    return {
+        "label": "ZEWNĘTRZNY MODEL .PT",
+        "detail": "Aplikacja nie zna historii treningu tego pliku.",
+        "tone": "info",
+    }
+
+
+def _refresh_training_base_model_identity_ui(self):
+    label = getattr(self, "train_base_identity_lbl", None)
+    status_label = getattr(self, "train_base_status_lbl", None)
+    state = _resolve_selected_training_base_model_training_state(self)
+    palette = getattr(self.app, "palette", {}) or {}
+    tone = str(state.get("tone") or "muted")
+    panel = palette.get("panel", "#252526")
+    tone_colors = {
+        "success": palette.get("success", "#2ecc71"),
+        "warning": palette.get("warning", "#f0b44c"),
+        "danger": palette.get("danger", "#e74c3c"),
+        "info": palette.get("accent", "#0e639c"),
+        "muted": palette.get("muted", "#c7c7c7"),
+    }
+    tone_fg = tone_colors.get(tone, palette.get("muted", "#c7c7c7"))
+    tone_bg = blend_hex_colors(tone_fg, panel, 0.82)
+
+    if status_label is not None:
+        try:
+            status_label.configure(
+                text=str(state.get("label") or "STATUS MODELU"),
+                bg=tone_bg,
+                fg=tone_fg,
+                highlightbackground=blend_hex_colors(tone_fg, palette.get("panel_border", "#3c3c3c"), 0.55),
+                highlightcolor=blend_hex_colors(tone_fg, palette.get("panel_border", "#3c3c3c"), 0.55),
+            )
+        except Exception:
+            pass
+
+    if label is None:
+        return
+
+    lines = self._build_selected_training_base_model_identity_lines()
+    detail = str(state.get("detail") or "").strip()
+    if detail:
+        lines.insert(0, detail)
+    text = "\n".join(lines).strip()
+    try:
+        label.configure(text=text)
+    except Exception:
+        pass
+    try:
+        if text:
+            if not str(label.winfo_manager()):
+                label.pack(anchor=tk.W, fill=tk.X, padx=8, pady=(0, 8))
+        else:
+            label.pack_forget()
+    except Exception:
+        pass
+
+def _resolve_selected_training_base_model_display(self) -> str:
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return "Nie wybrano modelu"
+    if not self._is_custom_base_model_key(base_key):
+        return base_key
+
+    custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+    if not custom_model:
+        return "Własny plik .pt (brak pliku)"
+    try:
+        return f"Własny plik .pt -> {Path(custom_model).name}"
+    except Exception:
+        return f"Własny plik .pt -> {custom_model}"
+
+def _resolve_selected_training_base_model_path(self) -> Path | None:
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not self._is_custom_base_model_key(base_key):
+        return None
+
+    custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+    if not custom_model:
+        return None
+
+    try:
+        model_path = Path(custom_model)
+    except Exception:
+        return None
+    return model_path if model_path.exists() else None
+
+def _resolve_selected_training_base_model_source_run(self):
+    model_path = self._resolve_selected_training_base_model_path()
+    if model_path is None:
+        return None
+    try:
+        return self._resolve_training_run_from_model_path(model_path)
+    except Exception:
+        return None
+
+def _selected_training_base_model_nonfinal_run(self):
+    run = _resolve_selected_training_base_model_source_run(self)
+    if run is None:
+        return None
+    status_value = str(getattr(run, "status", "") or "").strip().lower()
+    if status_value and status_value != TrainingStatus.COMPLETED.value:
+        return run
+    return None
+
+def _resolve_selected_training_base_model_inspection_path(self) -> Path | None:
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not base_key:
+        return None
+    if self._is_custom_base_model_key(base_key):
+        return self._resolve_selected_training_base_model_path()
+
+    target = self._get_selected_training_target()
+    catalog = AVAILABLE_POSE_MODELS if target == "plate" else AVAILABLE_DETECT_MODELS
+    entry = catalog.get(base_key, {}) if isinstance(catalog, dict) else {}
+    candidate_names = [str(entry.get("file") or "").strip(), base_key]
+    search_roots = [Path.cwd(), CONFIG.get_base_models_dir(target)]
+
+    for candidate_name in candidate_names:
+        if not candidate_name:
+            continue
+        try:
+            direct_path = Path(candidate_name)
+        except Exception:
+            continue
+        if direct_path.exists():
+            return direct_path
+        for root in search_roots:
+            try:
+                candidate_path = root / candidate_name
+            except Exception:
+                continue
+            if candidate_path.exists():
+                return candidate_path
+    return None
+
+def _resolve_selected_training_base_model_info(self) -> tuple[Path | None, dict]:
+    model_path = self._resolve_selected_training_base_model_inspection_path()
+    if model_path is None or not model_path.exists():
+        return None, {}
+    ok, _message, info = validate_model_file(model_path)
+    return model_path, info if ok and isinstance(info, dict) else {}
+
+def _build_selected_training_base_model_identity_lines(self) -> list[str]:
+    model_path, info = self._resolve_selected_training_base_model_info()
+    if model_path is None or not info:
+        return []
+
+    lines: list[str] = []
+    nonfinal_run = _selected_training_base_model_nonfinal_run(self)
+    if nonfinal_run is not None:
+        run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
+        status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
+        lines.append(f"Checkpoint niedokończonego treningu: {run_id or '-'} ({status_value or '-'})")
+        lines.append("Do kontynuacji użyj `Wznów trening`; to nie jest finalny model bazowy.")
+
+    identity_label = format_yolo_model_identity(info)
+    if identity_label:
+        lines.append(f"Wykryto z pliku .pt: {identity_label}")
+
+    source_architecture = str(info.get("source_architecture_label") or "").strip()
+    source_model_name = str(info.get("source_model_name") or "").strip()
+    source_display = source_architecture or source_model_name
+    is_checkpoint_like = (
+        model_path.name.lower() == "best.pt"
+        or model_path.stem.lower().startswith("epoch")
+    )
+    if is_checkpoint_like and source_display and source_model_name:
+        lines.append(f"Model po wcześniejszym treningu: {source_display}")
+
+    return lines
+
+def _build_training_recommendation_model_text(self) -> str:
+    model_path, info = self._resolve_selected_training_base_model_info()
+    base_display = self._resolve_selected_training_base_model_display()
+    identity_label = format_yolo_model_identity(info)
+    if not identity_label:
+        return f"Model: {base_display}"
+
+    source_architecture = str(info.get("source_architecture_label") or "").strip()
+    source_model_name = str(info.get("source_model_name") or "").strip()
+    source_display = source_architecture or source_model_name
+    is_checkpoint_like = bool(
+        model_path is not None
+        and (
+            model_path.name.lower() == "best.pt"
+            or model_path.stem.lower().startswith("epoch")
+        )
+    )
+
+    text = f"Model: {identity_label}"
+    if is_checkpoint_like and source_display:
+        text += f" | po wcześniejszym treningu: {source_display}"
+    return text
+
+def _format_training_model_run_label(run) -> str:
+    if run is None:
+        return "-"
+    run_name = str(getattr(run, "name", "") or "").strip()
+    run_id = str(getattr(run, "id", "") or "").strip()
+    if run_name and run_id and run_name != run_id:
+        return f"{run_name} [{run_id}]"
+    return run_name or run_id or "-"
+
+def _format_training_model_size_label(raw_size: str | None) -> str:
+    size = str(raw_size or "").strip().lower()
+    labels = {
+        "n": "n (najmniejszy)",
+        "s": "s (mały)",
+        "m": "m (średni)",
+        "l": "l (duży)",
+        "x": "x (bardzo duży)",
+    }
+    return labels.get(size, size)
+
+def _build_training_model_summary_value(self, base_display: str, info: dict | None) -> str:
+    if not isinstance(info, dict) or not info:
+        return base_display
+
+    identity_label = format_yolo_model_identity(info)
+    version = str(info.get("yolo_version") or "").strip()
+    size = self._format_training_model_size_label(
+        str(info.get("yolo_size") or info.get("model_scale") or "").strip().lower()
+    )
+
+    extras: list[str] = []
+    if version:
+        extras.append(f"wersja {version}")
+    if size:
+        extras.append(f"rozmiar {size}")
+
+    if identity_label and extras:
+        return f"{identity_label} | {', '.join(extras)}"
+    if identity_label:
+        return identity_label
+    return base_display
+
+def _resolve_training_model_version_from_info(info: dict | None) -> str:
+    if not isinstance(info, dict):
+        return ""
+    version = str(info.get("yolo_version") or "").strip()
+    return f"YOLO {version}" if version else ""
+
+def _resolve_training_model_size_from_info(self, info: dict | None) -> str:
+    if not isinstance(info, dict):
+        return ""
+    return self._format_training_model_size_label(
+        str(info.get("yolo_size") or info.get("model_scale") or "").strip().lower()
+    )
+
+def _get_pose_model_memory_bucket(info: dict | None) -> str:
+    if not isinstance(info, dict):
+        return ""
+    size = str(info.get("yolo_size") or info.get("model_scale") or "").strip().lower()
+    if size in {"n", "s", "m", "l", "x"}:
+        return size
+
+    architecture = str(info.get("architecture_label") or info.get("source_architecture_label") or "").strip().lower()
+    for candidate in ("x", "l", "m", "s", "n"):
+        if f"yolo26{candidate}" in architecture or f"yolo11{candidate}" in architecture or f"yolov8{candidate}" in architecture:
+            return candidate
+    return ""
+
+def _get_training_gpu_capacity_block_reason(
+    self,
+    *,
+    is_pose_dataset: bool,
+    base_model_info: dict | None,
+    effective_device_profile: dict | None,
+) -> str:
+    if not is_pose_dataset:
+        return ""
+    if not isinstance(effective_device_profile, dict):
+        return ""
+
+    try:
+        memory_gb = float(effective_device_profile.get("memory_gb", 0.0) or 0.0)
+    except Exception:
+        memory_gb = 0.0
+    if memory_gb <= 0.0:
+        return ""
+
+    bucket = self._get_pose_model_memory_bucket(base_model_info)
+    if bucket not in {"m", "l", "x"}:
+        return ""
+    if memory_gb > 4.5:
+        return ""
+
+    architecture_label = format_yolo_model_identity(base_model_info) or "duży model YOLO Pose"
+    gpu_name = str(effective_device_profile.get("name") or "GPU").strip()
+    return (
+        f"Wybrany model bazowy to {architecture_label}, a aktywne urządzenie to {gpu_name} "
+        f"z około {memory_gb:.1f} GB VRAM.\n\n"
+        "Ten rozmiar modelu pose na 4 GB VRAM w obecnym środowisku kończy się błędami pamięci CUDA "
+        "jeszcze przed stabilnym startem treningu albo w pierwszych batchach.\n\n"
+        "Aby trening miał realną szansę powodzenia:\n"
+        "1. wybierz mniejszy model pose, najlepiej `yolo11s-pose` albo `yolo26s-pose`,\n"
+        "2. albo uruchom trening na CPU,\n"
+        "3. albo użyj GPU z większym VRAM, jeśli chcesz kontynuować właśnie ten model."
+    )
+
+def _resolve_training_run_from_model_path(self, model_path: Path | None):
+    if model_path is None:
+        return None
+
+    try:
+        resolved_model_path = model_path.resolve()
+    except Exception:
+        resolved_model_path = model_path
+
+    history = getattr(self, "history", None)
+    if history is None:
+        return None
+
+    try:
+        runs = list(history.get_all_runs() or [])
+    except Exception:
+        runs = []
+
+    for run in runs:
+        best_weights = str(getattr(run, "best_weights", "") or "").strip()
+        if not best_weights:
+            continue
+        try:
+            if Path(best_weights).resolve() == resolved_model_path:
+                return run
+        except Exception:
+            continue
+
+    for run in runs:
+        output_dir = str(getattr(run, "output_dir", "") or "").strip()
+        if not output_dir:
+            continue
+        try:
+            resolved_output_dir = Path(output_dir).resolve()
+            if resolved_output_dir == resolved_model_path or resolved_output_dir in resolved_model_path.parents:
+                return run
+        except Exception:
+            continue
+
+    try:
+        model_parts = {str(part) for part in resolved_model_path.parts}
+    except Exception:
+        model_parts = set()
+
+    for run in runs:
+        run_id = str(getattr(run, "id", "") or "").strip()
+        if run_id and run_id in model_parts:
+            return run
+
+    return None
+
+def _build_selected_training_base_model_origin_rows(self, base_model_path: Path | None) -> list[tuple[str, str]]:
+    if base_model_path is None or base_model_path.name.lower() != "best.pt":
+        return []
+
+    source_run = self._resolve_training_run_from_model_path(base_model_path)
+    if source_run is None:
+        return []
+
+    run_label = self._format_training_model_run_label(source_run)
+    return [("Pochodzenie modelu", f"Model z wcześniejszego treningu: {run_label}")]
+
+def _append_training_execution_summary_row_widget(self, row_index: int) -> None:
+    summary_grid = getattr(self, "train_run_summary_rows_frame", None)
+    if summary_grid is None:
+        summary_grid = getattr(self, "train_run_summary_grid", None)
+        if summary_grid is None:
+            return
+
+    palette = getattr(self.app, "palette", {}) or {}
+    row_frame = tk.Frame(
+        summary_grid,
+        bd=0,
+        highlightthickness=0,
+        bg=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+    )
+    row_frame.pack(fill=tk.X, padx=0, pady=(0, 1))
+    key_label = tk.Label(
+        row_frame,
+        text="",
+        font=("Segoe UI", 8, "bold"),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        bd=0,
+        padx=7,
+        pady=3,
+        width=12,
+        bg=palette.get("panel", "#252526"),
+        fg=palette.get("fg", "#f3f3f3"),
+    )
+    key_label.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 1), pady=0)
+    value_label = tk.Label(
+        row_frame,
+        text="",
+        font=("Segoe UI", 8),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        bd=0,
+        padx=7,
+        pady=3,
+        wraplength=250,
+        bg=palette.get("panel_alt", palette.get("panel", "#252526")),
+        fg=palette.get("muted", "#c7c7c7"),
+    )
+    value_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=0, pady=0)
+    self._register_train_left_wrap_target(value_label, container=self.train_run_summary_shell, padding=140, min_wrap=180)
+    row_frame.pack_forget()
+    self._train_run_summary_row_widgets.append(
+        {"frame": row_frame, "key": key_label, "value": value_label, "row_index": row_index}
+    )
+
+def _ensure_training_execution_summary_row_capacity(self, required_rows: int) -> None:
+    summary_grid = getattr(self, "train_run_summary_grid", None)
+    if summary_grid is None:
+        return
+    row_widgets = getattr(self, "_train_run_summary_row_widgets", None)
+    if not isinstance(row_widgets, list):
+        self._train_run_summary_row_widgets = []
+        row_widgets = self._train_run_summary_row_widgets
+    while len(row_widgets) < max(0, int(required_rows)):
+        self._append_training_execution_summary_row_widget(len(row_widgets))
+
+def _build_training_execution_summary_rows(self) -> list[tuple[str, str]]:
+    target = self._get_selected_training_target()
+    target_label = self._format_training_target_label(target)
+    base_model_display = self._resolve_selected_training_base_model_display()
+    _, base_model_info = self._resolve_selected_training_base_model_info()
+    dataset_yaml = self._resolve_training_dataset_yaml_path()
+    epochs_value = self._safe_training_int_value("epochs_var", default=100, minimum=1)
+    batch_value = self._safe_training_int_value("batch_var", default=16, minimum=1)
+    imgsz_value = self._safe_training_int_value("imgsz_var", default=640, minimum=32)
+    lr0_value = self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001)
+    model_summary = self._build_training_model_summary_value(base_model_display, base_model_info)
+
+    if dataset_yaml is None:
+        return [
+            ("Tor", target_label),
+            ("Dataset", "Wybierz wariant splitu z PZ1."),
+            ("Model", model_summary),
+            ("Parametry", f"{epochs_value} epok | batch {batch_value} | {imgsz_value}px | LR {lr0_value:.4f}"),
+            ("Status", "Trening będzie dostępny po wskazaniu poprawnego datasetu YOLO."),
+        ]
+
+    dataset_root = dataset_yaml.parent
+    dataset_rel = self._format_workspace_relative_path(dataset_root)
+    counts = self._get_dataset_split_image_counts(dataset_root)
+    total_images = int(counts.get("total", 0) or 0)
+    train_images = int(counts.get("train", 0) or 0)
+    val_images = int(counts.get("val", 0) or 0)
+    test_images = int(counts.get("test", 0) or 0)
+
+    try:
+        cfg = safe_load_yaml(dataset_yaml) or {}
+    except Exception:
+        cfg = {}
+    class_names = self._extract_dataset_class_names(cfg)
+    class_count = len(class_names)
+    if class_count <= 0:
+        try:
+            class_count = max(0, int(cfg.get("nc", 0) or 0))
+        except Exception:
+            class_count = 0
+    dataset_task = "YOLO Pose" if bool(cfg.get("kpt_shape")) else "YOLO Detect"
+    class_suffix = f" | klasy: {class_count}" if class_count > 0 else ""
+
+    return [
+        ("Tor", target_label),
+        ("Dataset", dataset_rel),
+        ("Próbka", f"{total_images} obrazów | train {train_images}, val {val_images}, test {test_images}"),
+        ("Typ", f"{dataset_task}{class_suffix}"),
+        ("Model", model_summary),
+        ("Parametry", f"{epochs_value} epok | batch {batch_value} | {imgsz_value}px | LR {lr0_value:.4f}"),
+    ]
+
+def _refresh_training_execution_summary(self):
+    if getattr(self, "train_run_summary_shell", None) is None:
+        return
+    row_widgets = list(getattr(self, "_train_run_summary_row_widgets", []) or [])
+    if not row_widgets:
+        return
+    rows = self._build_training_execution_summary_rows()
+    self._ensure_training_execution_summary_row_capacity(len(rows))
+    for widgets in row_widgets:
+        row_frame = widgets.get("frame")
+        if row_frame is None:
+            continue
+        try:
+            row_frame.pack_forget()
+        except Exception:
+            pass
+    for row_index, widgets in enumerate(row_widgets):
+        row_frame = widgets.get("frame")
+        key_label = widgets.get("key")
+        value_label = widgets.get("value")
+        row_visible = row_index < len(rows)
+        if row_visible:
+            key_text, value_text = rows[row_index]
+        else:
+            key_text, value_text = "", ""
+        if row_visible and row_frame is not None:
+            try:
+                row_frame.pack(fill=tk.X, padx=0, pady=(0, 1))
+            except Exception:
+                pass
+        try:
+            if key_label is not None:
+                key_label.configure(text=str(key_text or ""))
+        except Exception:
+            pass
+        try:
+            if value_label is not None:
+                value_label.configure(text=str(value_text or ""))
+        except Exception:
+            pass
+
+def _terminal_metric_tag(band: str) -> str:
+    normalized = str(band or "").strip().lower()
+    if normalized in {"bardzo dobry", "dobry"}:
+        return "terminal_success"
+    if normalized in {"używalny", "monitoruj"}:
+        return "terminal_warning"
+    if normalized == "slaby":
+        return "terminal_error"
+    return "terminal_default"
+
+def _format_terminal_table_line(values: list[str], widths: list[int], alignments: list[str]) -> str:
+    cells = []
+    for value, width, alignment in zip(values, widths, alignments):
+        text = str(value or "")
+        if alignment == "center":
+            cells.append(text.center(width))
+        elif alignment == "right":
+            cells.append(text.rjust(width))
+        else:
+            cells.append(text.ljust(width))
+    return "| " + " | ".join(cells) + " |"
+
+def _build_training_metric_terminal_entries(self, epoch: int, total_epochs: int, metrics: dict | None) -> list[tuple[str, str]]:
+    rows = self._build_training_metric_rows(metrics)
+    if not rows:
+        return []
+
+    headers = ["Metryka", "Wynik", "Ocena", "Zakres"]
+    alignments = ["left", "center", "center", "center"]
+    widths = []
+    for idx, header in enumerate(headers):
+        max_width = len(header)
+        for row in rows:
+            max_width = max(max_width, len(str(row[idx] if idx < len(row) else "")))
+        widths.append(max_width)
+
+    separator = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+    header_row = self._format_terminal_table_line(headers, widths, alignments)
+    entries: list[tuple[str, str]] = []
+
+    target_label = "tablice" if self.get_campaign_training_target() == "plate" else "znaki"
+    entries.append((f"[Z4] BIEZACE WYNIKI | epoka {int(epoch)}/{int(total_epochs)} | tor: {target_label}", "terminal_info"))
+    entries.append((separator, "terminal_border"))
+    entries.append((header_row, "terminal_header"))
+    entries.append((separator, "terminal_border"))
+
+    for row in rows:
+        band = str(row[2] or "")
+        entries.append(
+            (
+                self._format_terminal_table_line([str(cell) for cell in row], widths, alignments),
+                self._terminal_metric_tag(band),
+            )
+        )
+
+    entries.append((separator, "terminal_border"))
+    return entries
+
+def _append_training_metric_table_to_global(self, epoch: int, total_epochs: int, metrics: dict | None):
+    try:
+        entries = self._build_training_metric_terminal_entries(epoch, total_epochs, metrics)
+        if not entries:
+            return
+        if hasattr(self.app, "append_global_terminal_entries"):
+            self.app.append_global_terminal_entries(entries + [("", "terminal_default")])
+    except Exception:
+        pass
+
+def _set_history_run_tables(self, run):
+    if run is None:
+        self._set_metric_table_rows(getattr(self, "hist_detail_tree", None), [])
+        self._set_metric_table_rows(getattr(self, "hist_metrics_tree", None), [])
+        return
+
+    self._set_metric_table_rows(
+        getattr(self, "hist_detail_tree", None),
+        self._build_training_run_detail_rows(run),
+    )
+    self._set_metric_table_rows(
+        getattr(self, "hist_metrics_tree", None),
+        self._build_training_run_metric_rows(run),
+    )

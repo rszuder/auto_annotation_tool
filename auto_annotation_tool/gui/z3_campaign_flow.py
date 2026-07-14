@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
+from ..project_cache import PROJECT_CACHE
+from .z2_shared_ui import campaign_visible_gate_id
 from .z3_view_models import (
     Step3CampaignNavigationViewModel,
     Step3EntryFlowViewModel,
@@ -17,6 +21,197 @@ from .z3_view_models import (
 
 if TYPE_CHECKING:
     from .tab_character_annotation import CharacterAnnotationTab
+
+
+CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+
+
+def _is_t06_z3_work_context(host: "CharacterAnnotationTab", context: dict | None = None) -> bool:
+    if not getattr(host, "_step3_linear_mode", False) or not CAMPAIGN.get_active_project_name():
+        return False
+    ctx = {}
+    try:
+        ctx.update(dict(getattr(host, "_campaign_graph_entry_context", {}) or {}))
+    except Exception:
+        pass
+    if isinstance(context, dict):
+        try:
+            ctx.update(dict(context or {}))
+        except Exception:
+            pass
+    gate_id = str(ctx.get("graph_gate_id") or ctx.get("gate_id") or "").strip().upper()
+    edge_key = str(ctx.get("graph_edge_key") or ctx.get("edge_key") or "").strip().lower()
+    if gate_id == "T06" or edge_key == "e3_to_e4":
+        return True
+    try:
+        session = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_work_session") or {})
+        return (
+            str(session.get("working_gate_id") or "").strip().upper() == "T06"
+            and str(session.get("work_area") or "").strip().lower() == "z3"
+            and bool(session.get("active"))
+        )
+    except Exception:
+        return False
+
+
+def _mark_t06_z3_work_session(
+    host: "CharacterAnnotationTab",
+    *,
+    state: str = "active",
+    substep: int | None = None,
+    reason: str = "",
+    context: dict | None = None,
+    force: bool = False,
+) -> None:
+    if not force and not _is_t06_z3_work_context(host, context=context):
+        return
+    normalized_state = str(state or "active").strip().lower()
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
+        session = dict(iteration_state.get("t06_work_session") or {})
+    except Exception:
+        session = {}
+    if session and str(session.get("work_area") or "").strip().lower() not in {"", "z3"}:
+        # Nie nadpisujemy przerwanej pracy Z2 zaległymi [OK].
+        return
+    try:
+        current_substep = int(substep if substep is not None else CAMPAIGN.get_step3_substep() or 1)
+    except Exception:
+        current_substep = 1
+    active = normalized_state not in {"resolved", "closed", "complete", "completed", "paused"}
+    session.update(
+        {
+            "active": bool(active),
+            "state": normalized_state,
+            "working_gate_id": "T06",
+            "work_area": "z3",
+            "substep": max(1, current_substep),
+            "updated_at": now,
+        }
+    )
+    if active:
+        session.setdefault("started_at", now)
+        session["last_active_at"] = now
+    else:
+        session["closed_at"] = now
+    if reason:
+        session["reason"] = str(reason or "").strip()
+    try:
+        preview_dir = str(host.preview_dir_var.get() if hasattr(host, "preview_dir_var") else "").strip()
+    except Exception:
+        preview_dir = ""
+    if preview_dir:
+        session["preview_dir"] = preview_dir
+    try:
+        CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
+    except Exception as exc:
+        logger.debug(f"Nie udało się zapisać sesji pracy T06/Z3: {exc}")
+
+
+def _mark_t06_contract(
+    host: "CharacterAnnotationTab",
+    contract_key: str,
+    payload: dict | None = None,
+) -> None:
+    if not getattr(host, "_step3_linear_mode", False) or not CAMPAIGN.get_active_project_name():
+        return
+    key = str(contract_key or "").strip()
+    if not key:
+        return
+    contract = dict(payload or {})
+    contract.setdefault("fulfilled", True)
+    contract.setdefault("iteration", int(CAMPAIGN.get_current_iteration_num() or 1))
+    contract.setdefault("updated_at", datetime.now().isoformat(timespec="seconds"))
+    try:
+        CAMPAIGN.upsert_iteration_state(updates={"t06_contracts": {key: contract}})
+    except Exception as exc:
+        logger.debug(f"Nie udało się zapisać kontraktu T06/{key}: {exc}")
+
+
+def _mark_t06_pz2_contract(
+    host: "CharacterAnnotationTab",
+    *,
+    reason: str = "enter_pz3",
+    force: bool = False,
+) -> None:
+    if not force and not _is_t06_z3_work_context(host):
+        return
+    try:
+        readiness = dict(host._get_campaign_step3_annotation_readiness() or {})
+    except Exception:
+        readiness = {}
+    if not bool(readiness.get("ok")):
+        return
+    _mark_t06_contract(
+        host,
+        "pz2_char_boxes",
+        {
+            "fulfilled": True,
+            "product": "char_boxes_on_plates",
+            "source": "PZ2",
+            "reason": str(reason or "enter_pz3"),
+            "exportable_plate_count": int(readiness.get("exportable_plate_count", 0) or 0),
+            "exportable_char_count": int(readiness.get("exportable_char_count", 0) or 0),
+            "perfect_count": int(readiness.get("perfect_count", 0) or 0),
+            "min_exportable_plate_count": int(readiness.get("min_exportable_plate_count", 0) or 0),
+            "missing_exportable_plate_count": int(readiness.get("missing_exportable_plate_count", 0) or 0),
+            "fulfilled_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+
+
+def _mark_t06_pz3_contract(
+    host: "CharacterAnnotationTab",
+    summary: dict | None,
+    *,
+    reason: str = "dataset_exported",
+    force: bool = False,
+) -> None:
+    if not force and not _is_t06_z3_work_context(host):
+        return
+    data = dict(summary or {})
+    dataset_path = str(data.get("gold_dataset_path") or "").strip()
+    valid = bool(data.get("gold_dataset_created")) and bool(data.get("gold_dataset_valid", True)) and bool(dataset_path)
+    if not valid:
+        return
+    _mark_t06_contract(
+        host,
+        "pz3_char_dataset",
+        {
+            "fulfilled": True,
+            "product": "char_yolo_dataset",
+            "source": "PZ3",
+            "reason": str(reason or "dataset_exported"),
+            "dataset_path": dataset_path,
+            "exportable_plate_count": int(data.get("exportable_plate_count", 0) or 0),
+            "exportable_char_count": int(data.get("exportable_char_count", 0) or 0),
+            "gold_dataset_valid": bool(data.get("gold_dataset_valid", True)),
+            "fulfilled_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+
+
+def _read_ready_step3_export_summary(host: "CharacterAnnotationTab") -> dict:
+    try:
+        summary = dict(host._read_step3_export_summary() or {})
+    except Exception:
+        summary = {}
+    if not summary:
+        return {}
+    dataset_path = str(summary.get("gold_dataset_path") or "").strip()
+    if not (
+        bool(summary.get("gold_dataset_created"))
+        and bool(summary.get("gold_dataset_valid", True))
+        and dataset_path
+    ):
+        return {}
+    try:
+        if not Path(dataset_path).exists():
+            return {}
+    except Exception:
+        return {}
+    return summary
 
 
 def enter_campaign_step3_mode(host: "CharacterAnnotationTab"):
@@ -33,10 +228,387 @@ def enter_campaign_step3_mode(host: "CharacterAnnotationTab"):
         pass
 
 
+def _set_campaign_step3_hold_pz2_after_reextract(host: "CharacterAnnotationTab", active: bool) -> None:
+    try:
+        host._campaign_step3_hold_pz2_after_reextract = bool(active)
+    except Exception:
+        pass
+
+
+def _campaign_step3_hold_pz2_after_reextract(host: "CharacterAnnotationTab") -> bool:
+    try:
+        return bool(getattr(host, "_campaign_step3_hold_pz2_after_reextract", False))
+    except Exception:
+        return False
+
+
+def _apply_campaign_step3_pz2_hold(host: "CharacterAnnotationTab") -> None:
+    if not _campaign_step3_hold_pz2_after_reextract(host):
+        return
+
+    try:
+        host._set_subtab_state(host.tab_dataset, "disabled")
+        host._set_button_state("btn_to_dataset", False)
+        host._set_button_emphasis("btn_to_dataset_frame", False)
+    except Exception:
+        pass
+    try:
+        CAMPAIGN.set_step3_stage2_done(False)
+    except Exception:
+        pass
+
+
+def get_step3_finish_block_message(readiness: dict | None = None) -> str:
+    readiness = dict(readiness or {})
+    if bool(readiness.get("ok")):
+        return ""
+
+    reason = str(readiness.get("reason", "") or "").strip().lower()
+    train_images = int(readiness.get("train_images", 0) or 0)
+    val_images = int(readiness.get("val_images", 0) or 0)
+    test_images = int(readiness.get("test_images", 0) or 0)
+    validation_msg = str(readiness.get("validation_message", "") or "").strip()
+
+    if reason == "missing_char_boxes":
+        min_exportable_plates = int(readiness.get("min_exportable_plate_count", 10) or 10)
+        return str(readiness.get("message") or "").strip() or (
+            f"E3 wymaga co najmniej {min_exportable_plates} tablic perfect z poprawnymi boxami znaków i etykietami. "
+            "Wróć do PZ2, oznacz znaki na tablicach i ponownie wykonaj eksport w PZ3."
+        )
+
+    if reason == "invalid_char_dataset":
+        if validation_msg in {"Brak obrazów w images/val", "Brak obrazów w images/val"}:
+            return (
+                f"Dataset znaków nadal nie ma walidacji: train={train_images}, val={val_images}, test={test_images}. "
+                "W PZ3 przebuduj eksport źródłowy, a wariant treningowy/split przygotuj w Z4."
+            )
+        if validation_msg in {"Brak obrazów w images/train", "Brak obrazów w images/train"}:
+            return "Dataset znaków nie ma jeszcze danych treningowych. W PZ3 przebuduj eksport źródłowy, a split przygotuj w Z4."
+        return (
+            f"Dataset znaków nadal nie jest gotowy do treningu: train={train_images}, val={val_images}, test={test_images}. "
+            "W PZ3 popraw eksport źródłowy, a wariant treningowy/split przygotuj w Z4."
+        )
+
+    return "Aby zakończyć etap 3, przygotuj źródłowy dataset znaków w PZ3, a wariant treningowy/split przygotuj w Z4."
+
+
+def set_step3_finish_hint(host: "CharacterAnnotationTab", text: str = "", tone: str = "muted") -> None:
+    action_card = getattr(host, "step3_finish_action_card", None)
+    if action_card is not None:
+        try:
+            action_card.set_description(str(text or "").strip(), tone=str(tone or "muted"))
+            return
+        except Exception:
+            pass
+
+    label = getattr(host, "step3_finish_hint_lbl", None)
+    if label is None:
+        return
+
+    msg = str(text or "").strip()
+    try:
+        host._set_inline_status_label_state(label, text=msg, tone=tone, emphasis=False)
+    except Exception:
+        try:
+            label.configure(text=msg)
+        except Exception:
+            pass
+
+
+def has_any_step3_export_outputs(host: "CharacterAnnotationTab") -> bool:
+    try:
+        if getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name():
+            summary = host._read_step3_export_summary()
+            if not isinstance(summary, dict) or not summary:
+                return False
+            if summary.get("gold_dataset_created") is False or summary.get("gold_dataset_valid") is False:
+                return False
+            summary_dataset_path = str(summary.get("gold_dataset_path", "") or "").strip()
+            if not (summary.get("gold_dataset_created") and summary_dataset_path):
+                return False
+            try:
+                return Path(summary_dataset_path).exists()
+            except Exception:
+                return False
+        return host._get_preferred_step3_training_dataset_dir() is not None
+    except Exception:
+        return False
+
+
+def return_to_wizard_for_step3_rework(host: "CharacterAnnotationTab") -> None:
+    try:
+        host._hide_campaign_detect_splash()
+    except Exception:
+        pass
+
+    focus_step = 3
+    status_message = "Wracasz do grafu. Praca w Z3 pozostaje w toku."
+    status_tone = "info"
+    t06_session_recorded = False
+    try:
+        if CAMPAIGN.get_active_project_name():
+            current_step = int(CAMPAIGN.get_current_step() or 3)
+            current_status = str(CAMPAIGN.get_step3_status() or "").strip().lower() or "pending"
+            readiness = host._get_campaign_step3_training_readiness()
+            ready_summary = _read_ready_step3_export_summary(host)
+            ready_for_approval = bool(
+                (
+                    host._has_any_step3_export_outputs()
+                    and bool(readiness.get("ok"))
+                )
+                or bool(ready_summary)
+            )
+
+            if current_status == "approved":
+                _mark_t06_z3_work_session(
+                    host,
+                    state="completed",
+                    substep=3,
+                    reason="return_to_graph_approved",
+                    force=True,
+                )
+                t06_session_recorded = True
+                CAMPAIGN.set_current_step(max(4, current_step))
+                focus_step = 4
+                status_message = f"Wracasz do grafu. {CHAR_WORK_GATE_DISPLAY_ID} jest już zatwierdzona, więc możesz kontynuować kolejny krok."
+                status_tone = "info"
+            elif ready_for_approval:
+                try:
+                    _mark_t06_pz2_contract(host, reason="return_ready_to_graph", force=True)
+                    summary = dict(ready_summary or host._read_step3_export_summary() or {})
+                    _mark_t06_pz3_contract(host, summary, reason="return_ready_to_graph", force=True)
+                    if not bool(summary.get("gold_dataset_created")):
+                        dataset_path = str(
+                            readiness.get("ready_dataset")
+                            or readiness.get("dataset_hint")
+                            or readiness.get("dataset_path")
+                            or ""
+                        ).strip()
+                        if dataset_path:
+                            _mark_t06_contract(
+                                host,
+                                "pz3_char_dataset",
+                                {
+                                    "fulfilled": True,
+                                    "product": "char_yolo_dataset",
+                                    "source": "PZ3",
+                                    "reason": "return_ready_to_graph",
+                                    "dataset_path": dataset_path,
+                                    "exportable_plate_count": int(readiness.get("exportable_plate_count", 0) or 0),
+                                    "exportable_char_count": int(readiness.get("exportable_char_count", 0) or 0),
+                                    "perfect_count": int(readiness.get("perfect_count", 0) or 0),
+                                    "gold_dataset_valid": True,
+                                    "fulfilled_at": datetime.now().isoformat(timespec="seconds"),
+                                },
+                            )
+                    _mark_t06_z3_work_session(
+                        host,
+                        state="completed",
+                        substep=3,
+                        reason="return_ready_to_graph",
+                        force=True,
+                    )
+                    t06_session_recorded = True
+                except Exception as exc:
+                    logger.debug(f"Nie udało się domknąć kontraktu T06/PZ3 przy powrocie do grafu: {exc}")
+                CAMPAIGN.set_current_step(3)
+                CAMPAIGN.set_step3_ready()
+                status_message = f"Wracasz do grafu. Dataset znaków jest gotowy do zatwierdzenia na {CHAR_WORK_GATE_DISPLAY_ID}."
+                status_tone = "success"
+            elif current_status == "needs_rework":
+                _mark_t06_z3_work_session(host, state="paused", substep=3, reason="return_to_graph_needs_rework")
+                t06_session_recorded = True
+                CAMPAIGN.set_current_step(3)
+                CAMPAIGN.set_step3_needs_rework()
+                status_message = f"Wracasz do grafu w trybie poprawy pracy {CHAR_WORK_GATE_DISPLAY_ID}."
+                status_tone = "warning"
+            else:
+                _mark_t06_z3_work_session(host, state="paused", substep=3, reason="return_to_graph_pending")
+                t06_session_recorded = True
+                CAMPAIGN.set_current_step(3)
+                CAMPAIGN.set_step3_pending()
+    except Exception as e:
+        logger.debug(f"Nie udało się ustawić stanu powrotu dla kroku 3: {e}")
+    finally:
+        if not t06_session_recorded:
+            try:
+                _mark_t06_z3_work_session(host, state="paused", substep=3, reason="return_to_graph")
+            except Exception:
+                pass
+
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+        if campaign_tab:
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=focus_step)
+            except Exception:
+                pass
+            campaign_tab._rebuild_roadmap_ui()
+            campaign_tab._refresh_dashboard()
+    except Exception as e:
+        logger.debug(f"Nie udało się odświeżyć wizarda po powrocie z kroku 3: {e}")
+
+    try:
+        host.app.open_controlled_tab("campaign")
+        host.app.update_campaign_tab_access()
+        host.app.update_status(status_message, status_tone)
+    except Exception as e:
+        logger.debug(f"Nie udało się wrócić do grafu dla kroku 3: {e}")
+
+
+def return_step3_result_to_wizard(host: "CharacterAnnotationTab", summary: dict) -> None:
+    """
+    Single return contract for campaign E3.
+
+    If a valid gold dataset exists, E3 becomes ready for approval.
+    Otherwise the wizard stays on E3 in rework mode.
+    """
+    gold_ok = bool(summary.get("gold_dataset_created")) and bool(summary.get("gold_dataset_valid", True))
+
+    if gold_ok:
+        _mark_t06_pz2_contract(host, reason="dataset_exported", force=True)
+        _mark_t06_pz3_contract(host, summary, reason="dataset_exported", force=True)
+        _mark_t06_z3_work_session(
+            host,
+            state="completed",
+            substep=3,
+            reason="dataset_exported",
+            force=True,
+        )
+        CAMPAIGN.set_current_step(3)
+        CAMPAIGN.set_step3_ready()
+        status_msg = (
+            "Z3 przygotowało poprawny dataset znaków. "
+            f"Wróć do grafu i zatwierdź bramkę {CHAR_WORK_GATE_DISPLAY_ID}, aby odblokować dalszą pracę."
+        )
+        status_kind = "success"
+    else:
+        _mark_t06_z3_work_session(host, state="paused", substep=3, reason="dataset_not_ready")
+        CAMPAIGN.set_current_step(3)
+        CAMPAIGN.set_step3_needs_rework()
+        status_msg = (
+            "Z3 nie utworzyło datasetu znaków. "
+            f"Wracasz do grafu w trybie poprawy pracy {CHAR_WORK_GATE_DISPLAY_ID}."
+        )
+        status_kind = "warning"
+
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+        if campaign_tab:
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=3)
+            except Exception:
+                pass
+            campaign_tab._rebuild_roadmap_ui()
+            campaign_tab._refresh_dashboard()
+    except Exception as e:
+        logger.debug(f"Nie udało się odświeżyć Wizarda po etapie 3: {e}")
+
+    try:
+        host.app.open_controlled_tab("campaign")
+        host.app.update_campaign_tab_access()
+    except Exception as e:
+        logger.debug(f"Nie udało się wrócić do Wizarda po etapie 3: {e}")
+
+    try:
+        host.app.update_status(status_msg, status_kind)
+    except Exception:
+        pass
+
+
+def finalize_step3_from_existing_outputs(host: "CharacterAnnotationTab") -> None:
+    """
+    Soft-finalize E3 from artifacts that already exist after PZ3 export.
+
+    This function does not build a dataset. It evaluates existing outputs,
+    writes export_summary.json and returns the result to the wizard.
+    """
+    gold_dataset_path = ""
+    review_pack_path = ""
+
+    summary_override = host._read_step3_export_summary()
+    if (
+        getattr(host, "_step3_linear_mode", False)
+        and CAMPAIGN.get_active_project_name()
+        and isinstance(summary_override, dict)
+        and summary_override
+        and (
+            summary_override.get("gold_dataset_created") is False
+            or summary_override.get("gold_dataset_valid") is False
+        )
+    ):
+        host._return_step3_result_to_wizard(summary_override)
+        return
+
+    campaign_readiness = None
+    try:
+        if getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name():
+            campaign_readiness = host._get_campaign_step3_training_readiness()
+    except Exception:
+        campaign_readiness = None
+
+    preferred_dataset_dir = None
+    if isinstance(campaign_readiness, dict):
+        ready_dataset = str(campaign_readiness.get("ready_dataset", "") or "").strip()
+        if bool(campaign_readiness.get("ok")) and ready_dataset:
+            preferred_dataset_dir = Path(ready_dataset)
+    else:
+        preferred_dataset_dir = host._get_preferred_step3_training_dataset_dir()
+
+    if preferred_dataset_dir is not None:
+        gold_dataset_path = str(preferred_dataset_dir)
+
+    campaign_chars_dir = getattr(host, "_campaign_chars_dir", None)
+    if campaign_chars_dir:
+        chars_root = Path(campaign_chars_dir)
+        review_dir = chars_root / "review"
+        if review_dir.exists():
+            review_pack_path = str(review_dir)
+
+    summary = host._build_step3_export_summary(
+        gold_dataset_path=gold_dataset_path,
+        review_pack_path=review_pack_path,
+        retry_pack_path="",
+        note=(
+            "Finalizacja kroku 3 na podstawie najlepszego dostępnego datasetu "
+            "znaków projektu (merged preferowany, fallback do istniejącego datasetu)."
+        ),
+    )
+
+    if isinstance(campaign_readiness, dict):
+        summary["gold_dataset_valid"] = bool(campaign_readiness.get("ok"))
+        summary["gold_dataset_validation_message"] = str(campaign_readiness.get("message", "") or "").strip()
+
+    host._write_step3_export_summary(summary)
+    host._return_step3_result_to_wizard(summary)
+
+
+def resolve_step3_campaign_action_command(host: "CharacterAnnotationTab", command_id: str):
+    normalized = str(command_id or "").strip().lower()
+    if normalized in {"return_to_wizard_rework", "return_to_wizard_step3"}:
+        return host._return_to_wizard_for_step3_rework
+    if normalized == "finalize_step3":
+        return host._finalize_step3_from_existing_outputs
+    return None
+
+
 def open_campaign_step3_entry(
     host: "CharacterAnnotationTab",
     preferred_source_context: dict | None = None,
 ) -> dict:
+    entry_started = time.perf_counter()
+    entry_phase_started = entry_started
+    entry_phase_marks: list[str] = []
+
+    def _mark_entry_phase(label: str, *, threshold_ms: float = 180.0) -> None:
+        nonlocal entry_phase_started
+        now = time.perf_counter()
+        delta_ms = (now - entry_phase_started) * 1000.0
+        total_ms = (now - entry_started) * 1000.0
+        entry_phase_started = now
+        if delta_ms >= threshold_ms:
+            entry_phase_marks.append(f"{label}={delta_ms:.0f}ms/{total_ms:.0f}ms")
+
     if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 3:
         return {"ok": False, "reason": "campaign_inactive"}
 
@@ -48,8 +620,70 @@ def open_campaign_step3_entry(
     if raw_dir is None or auto_dir is None:
         return {"ok": False, "reason": "missing_campaign_dirs"}
 
+    incoming_source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
+
+    def _context_points_to_ready_source(context: dict | None) -> bool:
+        if not isinstance(context, dict) or not context:
+            return False
+        try:
+            restore_run = (
+                context.get("restore_run_dir")
+                or context.get("run_dir")
+                or context.get("annotation_run_dir")
+            )
+            xml_value = (
+                context.get("xml_path")
+                or context.get("source_xml")
+                or context.get("source_xml_path")
+            )
+            images_value = (
+                context.get("input_dir")
+                or context.get("images_dir")
+                or context.get("source_images_dir")
+            )
+            xml_path = Path(str(xml_value or "").strip()) if str(xml_value or "").strip() else None
+            if xml_path is None and str(restore_run or "").strip():
+                xml_path = Path(str(restore_run).strip()) / "annotations.xml"
+            images_dir = Path(str(images_value or "").strip()) if str(images_value or "").strip() else None
+            return bool(
+                xml_path is not None
+                and xml_path.exists()
+                and images_dir is not None
+                and images_dir.exists()
+                and images_dir.is_dir()
+            )
+        except Exception:
+            return False
+
+    def _registry_points_to_ready_char_source() -> bool:
+        try:
+            bundle = dict(host._get_campaign_iteration_artifact_bundle() or {})
+        except Exception:
+            bundle = {}
+        char_effective = dict(bundle.get("char_effective_source") or {})
+        if not char_effective:
+            return False
+        try:
+            run_dir = Path(str(char_effective.get("run_dir") or "").strip())
+            images_dir = Path(str(char_effective.get("images_dir") or "").strip())
+            xml_path = Path(str(char_effective.get("xml_path") or "").strip())
+            return bool(
+                run_dir.exists()
+                and run_dir.is_dir()
+                and images_dir.exists()
+                and images_dir.is_dir()
+                and xml_path.exists()
+                and xml_path.is_file()
+            )
+        except Exception:
+            return False
+
     try:
-        if str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char":
+        if (
+            str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char"
+            and not _context_points_to_ready_source(incoming_source_context)
+            and not _registry_points_to_ready_char_source()
+        ):
             annotation_tab = getattr(getattr(host, "app", None), "tabs", {}).get("annotation")
             if annotation_tab is not None:
                 flush_approved = getattr(annotation_tab, "_flush_preview_approved_persist", None)
@@ -60,6 +694,7 @@ def open_campaign_step3_entry(
                     rebuild_source()
     except Exception as exc:
         logger.debug(f"Nie udało się odświeżyć kanonicznego źródła E3 przed wejściem do Z3: {exc}")
+    _mark_entry_phase("source_flush")
 
     iter_num = CAMPAIGN.get_current_iteration_num()
     try:
@@ -143,10 +778,12 @@ def open_campaign_step3_entry(
         using_preferred_source = True
     else:
         try:
-            xml_files = list(Path(auto_dir).rglob("annotations.xml"))
+            run_dirs = PROJECT_CACHE.list_annotation_run_dirs(Path(auto_dir), require_xml=True)
+            xml_files = [Path(run_dir) / "annotations.xml" for run_dir in run_dirs]
         except Exception:
             xml_files = []
         latest_xml = str(max(xml_files, key=lambda p: p.stat().st_mtime)) if xml_files else ""
+    _mark_entry_phase("source_resolution")
 
     host._set_preview_dir_runtime_value("", persist_registry=False)
     try:
@@ -185,6 +822,7 @@ def open_campaign_step3_entry(
             getattr(host, attr_name).set("")
         except Exception:
             pass
+    _mark_entry_phase("clear_preview_ui")
 
     try:
         latest_run_dir = str(Path(latest_xml).parent) if latest_xml else ""
@@ -205,6 +843,25 @@ def open_campaign_step3_entry(
         effective_source_context["input_dir"] = str(folder)
         effective_source_context.setdefault("images_dir", str(folder))
     source_context = effective_source_context
+
+    try:
+        host._campaign_graph_entry_context = {
+            key: str(source_context.get(key) or "").strip()
+            for key in (
+                "source",
+                "graph_edge_key",
+                "graph_gate_id",
+                "graph_gate_label",
+                "graph_transition_title",
+                "graph_transition_source",
+                "graph_transition_target",
+                "graph_path_key",
+            )
+            if str(source_context.get(key) or "").strip()
+        }
+    except Exception:
+        host._campaign_graph_entry_context = {}
+    _mark_entry_phase("graph_context")
 
     host.set_pending_z2_annotation_source(
         xml_path=latest_xml,
@@ -242,6 +899,51 @@ def open_campaign_step3_entry(
     except Exception:
         saved_substep = 1
 
+    force_detect_entry = False
+    force_dataset_entry = False
+    try:
+        target_substep_hint = str(
+            source_context.get("target_substep")
+            or source_context.get("graph_target_substep")
+            or source_context.get("preferred_substep")
+            or ""
+        ).strip().lower()
+        force_detect_entry = (
+            bool(source_context.get("force_pz2"))
+            or target_substep_hint in {"2", "detect", "pz2", "z3_pz2"}
+        )
+        force_dataset_entry = (
+            bool(source_context.get("force_pz3"))
+            or target_substep_hint in {"3", "dataset", "pz3", "z3_pz3"}
+        ) and not force_detect_entry
+    except Exception:
+        force_detect_entry = False
+        force_dataset_entry = False
+    if force_detect_entry:
+        saved_substep = 2
+        try:
+            CAMPAIGN.set_step3_substep(2)
+        except Exception:
+            pass
+    elif force_dataset_entry:
+        saved_substep = 3
+        try:
+            CAMPAIGN.set_step3_substep(3)
+        except Exception:
+            pass
+    try:
+        host._campaign_force_detect_entry = bool(force_detect_entry)
+    except Exception:
+        pass
+    _mark_t06_z3_work_session(
+        host,
+        state="active",
+        substep=saved_substep,
+        reason="enter_z3",
+        context=source_context,
+    )
+    _mark_entry_phase("bind_source_vars")
+
     try:
         has_saved_step3_progress = bool(
             saved_substep > 1
@@ -264,7 +966,11 @@ def open_campaign_step3_entry(
     if saved_preview_dir:
         try:
             preview_missing_or_unusable = not bool(
-                host._is_usable_step3_preview_dir(saved_preview_dir, require_plates=True)
+                host._is_usable_step3_preview_dir(
+                    saved_preview_dir,
+                    require_plates=True,
+                    check_campaign_inflated=False,
+                )
             )
         except Exception:
             preview_missing_or_unusable = False
@@ -291,12 +997,24 @@ def open_campaign_step3_entry(
         except Exception:
             pass
 
+    _mark_entry_phase("saved_step3_state")
+
     host._campaign_chars_dir = str(chars_dir) if chars_dir else None
     host._campaign_datasets_dir = str(datasets_dir) if datasets_dir else None
 
     registry_bundle = host._get_campaign_iteration_artifact_bundle()
     registry_char_model = dict(registry_bundle.get("char_model") or {})
-    char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
+    try:
+        effective_char_model = dict(
+            CAMPAIGN.get_effective_project_model(
+                "char",
+                before_iteration=int(CAMPAIGN.get_current_iteration_num() or 1),
+            )
+            or {}
+        )
+    except Exception:
+        effective_char_model = {}
+    char_model_path = str(effective_char_model.get("path") or "").strip()
     if not char_model_path or not Path(char_model_path).exists():
         char_model_path = str(registry_char_model.get("path") or "").strip()
     if char_model_path and Path(char_model_path).exists():
@@ -338,39 +1056,204 @@ def open_campaign_step3_entry(
         except Exception:
             pass
 
+    _mark_entry_phase("model_binding")
+
     try:
-        host._restore_preview_context_from_project()
+        if not force_detect_entry:
+            host._restore_preview_context_from_project()
     except Exception as exc:
         logger.debug(f"Nie udało się przywrocic preview projektu: {exc}")
+    _mark_entry_phase("restore_preview_context")
 
     try:
-        host.restore_campaign_step3_mode()
-    except Exception as exc:
-        logger.debug(f"Nie udało się przywrocic stanu kroku 3: {exc}")
-        CAMPAIGN.reset_step3_progress()
-        enter_campaign_step3_mode(host)
-
-    try:
-        host._refresh_extract_workflow_ui()
+        host._campaign_pz2_preview_loaded_this_entry = False
     except Exception:
         pass
+
+    def _can_continue_forced_pz3_without_reextract(refresh_state: dict | None = None) -> bool:
+        if not force_dataset_entry:
+            return False
+        try:
+            if host.can_restore_step3_substep(3):
+                return True
+        except Exception:
+            pass
+        try:
+            contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+            pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+            pz2_ready = bool(pz2_contract.get("fulfilled") or CAMPAIGN.is_step3_stage2_done())
+        except Exception:
+            pz2_ready = False
+        if not pz2_ready:
+            return False
+        preview_dir_raw = ""
+        try:
+            preview_dir_raw = str((refresh_state or {}).get("preview_dir") or "").strip()
+        except Exception:
+            preview_dir_raw = ""
+        if not preview_dir_raw:
+            try:
+                preview_dir_raw = str(host.preview_dir_var.get() or "").strip()
+            except Exception:
+                preview_dir_raw = ""
+        if not preview_dir_raw:
+            try:
+                preview_dir_raw = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
+            except Exception:
+                preview_dir_raw = ""
+        if not preview_dir_raw:
+            return False
+        try:
+            return bool(
+                host._is_usable_step3_preview_dir(
+                    preview_dir_raw,
+                    require_plates=True,
+                    check_campaign_inflated=False,
+                )
+            )
+        except TypeError:
+            try:
+                return bool(host._is_usable_step3_preview_dir(preview_dir_raw, require_plates=True))
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    def _refresh_forced_pz3_dataset_surface() -> None:
+        for method_name in (
+            "_refresh_pz3_cards_ui",
+            "_refresh_pz3_status_panel_ui",
+            "_update_step3_finish_button_state",
+        ):
+            try:
+                method = getattr(host, method_name, None)
+                if callable(method):
+                    method()
+            except Exception as exc:
+                logger.debug(f"Nie udało się odświeżyć PZ3 po wejściu T06: {method_name}: {exc}")
+
+    entry_needs_reextract = False
+    try:
+        entry_refresh_state = get_campaign_step3_source_refresh_state(
+            host,
+            preferred_source_context=source_context,
+        )
+        entry_needs_reextract = bool(entry_refresh_state.get("needs_reextract"))
+        if force_dataset_entry and entry_needs_reextract:
+            try:
+                if _can_continue_forced_pz3_without_reextract(entry_refresh_state):
+                    logger.info(
+                        "[Z3] Pomijam ponowne wycinanie przy wejściu T06->PZ3: reason=%s",
+                        str(entry_refresh_state.get("reason") or ""),
+                    )
+                    try:
+                        CAMPAIGN.set_step3_stage2_done(True)
+                    except Exception:
+                        pass
+                    entry_needs_reextract = False
+                    entry_refresh_state["needs_reextract"] = False
+                    entry_refresh_state["suppressed_for_pz3"] = True
+            except Exception:
+                pass
+    except Exception:
+        entry_needs_reextract = False
+    _mark_entry_phase("entry_refresh_state")
+
+    if entry_needs_reextract:
+        host._step3_linear_mode = True
+    else:
+        direct_dataset_entry = bool(
+            force_dataset_entry and _can_continue_forced_pz3_without_reextract(entry_refresh_state)
+        )
+        if direct_dataset_entry:
+            try:
+                CAMPAIGN.set_step3_stage2_done(True)
+            except Exception:
+                pass
+            try:
+                host.go_to_substep_3()
+                _refresh_forced_pz3_dataset_surface()
+            except Exception as exc:
+                logger.debug(f"Nie udalo sie wymusic wejscia T06 do PZ3: {exc}")
+        else:
+            try:
+                host.restore_campaign_step3_mode()
+            except Exception as exc:
+                logger.debug(f"Nie udało się przywrocic stanu kroku 3: {exc}")
+                CAMPAIGN.reset_step3_progress()
+                enter_campaign_step3_mode(host)
+            if force_detect_entry:
+                try:
+                    host.go_to_substep_2(force=True)
+                except Exception as exc:
+                    logger.debug(f"Nie udalo sie wymusic wejscia T06 do PZ2: {exc}")
+            elif force_dataset_entry:
+                try:
+                    if host.can_restore_step3_substep(3) or _can_continue_forced_pz3_without_reextract(entry_refresh_state):
+                        try:
+                            CAMPAIGN.set_step3_stage2_done(True)
+                        except Exception:
+                            pass
+                        host.go_to_substep_3()
+                        _refresh_forced_pz3_dataset_surface()
+                    elif host.can_restore_step3_substep(2):
+                        host.go_to_substep_2(force=True)
+                except Exception as exc:
+                    logger.debug(f"Nie udalo sie wymusic wejscia T06 do PZ3: {exc}")
+    _mark_entry_phase("restore_step3_mode")
+
+    if not force_detect_entry and not force_dataset_entry and not entry_needs_reextract:
+        try:
+            schedule_refresh = getattr(host, "_schedule_extract_workflow_refresh", None)
+            if callable(schedule_refresh):
+                schedule_refresh(delay_ms=40 if not host.is_startup_ui_ready() else 0)
+            else:
+                host._refresh_extract_workflow_ui()
+        except Exception:
+            pass
+
+    if force_detect_entry:
+        try:
+            host._campaign_force_detect_entry = False
+        except Exception:
+            pass
 
     try:
         refresh_pz3_cards = getattr(host, "_refresh_pz3_cards_ui", None)
-        if callable(refresh_pz3_cards):
+        if callable(refresh_pz3_cards) and not force_detect_entry:
             refresh_pz3_cards()
     except Exception:
         pass
+    _mark_entry_phase("refresh_views")
+
+    if not bool(getattr(host, "_campaign_step3_entry_splash_pinned", False)):
+        try:
+            host._hide_campaign_detect_splash()
+        except Exception:
+            pass
 
     try:
-        host._hide_campaign_detect_splash()
-    except Exception:
-        pass
-
-    try:
-        host._auto_progress_campaign_step3_entry(preferred_source_context=source_context)
+        if (not force_detect_entry and not force_dataset_entry) or entry_needs_reextract:
+            host._auto_progress_campaign_step3_entry(preferred_source_context=source_context)
     except Exception as exc:
         logger.debug(f"Nie udało się automatycznie ustawić wejścia kampanii do Z3: {exc}")
+    _mark_entry_phase("auto_progress")
+
+    elapsed_ms = (time.perf_counter() - entry_started) * 1000.0
+    if elapsed_ms >= 250.0:
+        try:
+            logger.info(
+                "[Z3][PERF] open_campaign_step3_entry: total=%.1fms preferred=%s detect_entry=%s reextract=%s latest_xml=%s images_dir=%s phases=[%s]",
+                elapsed_ms,
+                bool(using_preferred_source),
+                bool(force_detect_entry),
+                bool(entry_needs_reextract),
+                bool(latest_xml),
+                str(folder) if folder.exists() else "",
+                " ".join(entry_phase_marks),
+            )
+        except Exception:
+            pass
 
     return {
         "ok": True,
@@ -396,6 +1279,7 @@ def auto_progress_campaign_step3_entry(
         "mode": str(getattr(plan, "mode", "") or "").strip(),
         "message": str(getattr(plan, "message", "") or "").strip(),
     }
+    mode = str(getattr(plan, "mode", "") or "").strip().lower()
 
     if getattr(plan, "should_hide_splash", False):
         try:
@@ -403,21 +1287,44 @@ def auto_progress_campaign_step3_entry(
         except Exception:
             pass
 
-    if getattr(plan, "should_show_splash", False):
+    if mode == "auto_extract":
+        try:
+            host._campaign_pz2_sync_loading = True
+            host._campaign_detect_splash_force_root_surface = True
+            host._set_subtab_state(host.tab_detect, "normal")
+            host._set_subtab_state(host.tab_dataset, "disabled")
+            host._set_subtab_state(host.tab_extract, "normal")
+        except Exception as exc:
+            logger.debug(f"Nie udało się przygotować ekranu oczekiwania PZ2 dla kampanii: {exc}")
+
+    splash_already_pinned = bool(
+        getattr(host, "_campaign_step3_entry_splash_pinned", False)
+        and getattr(host, "_campaign_detect_splash_visible", False)
+    )
+    if getattr(plan, "should_show_splash", False) and not splash_already_pinned and mode != "auto_extract":
+        splash_progress = None
+        if (
+            bool(getattr(plan, "splash_show_progress", False))
+        ):
+            splash_progress = 0.0
         try:
             host._show_campaign_detect_splash(
                 title=str(getattr(plan, "splash_title", "") or "").strip(),
                 body=str(getattr(plan, "splash_body", "") or "").strip(),
                 tone=str(getattr(plan, "splash_tone", "info") or "info"),
-                progress=(0.0 if getattr(plan, "splash_show_progress", False) else None),
+                progress=splash_progress,
                 show_progress=bool(getattr(plan, "splash_show_progress", False)),
                 show_return=bool(getattr(plan, "splash_show_return", False)),
             )
         except Exception:
             pass
 
-    mode = str(getattr(plan, "mode", "") or "").strip().lower()
     if mode == "source_invalid":
+        try:
+            host._campaign_pz2_sync_loading = False
+            host._campaign_detect_splash_force_root_surface = False
+        except Exception:
+            pass
         return result
 
     if mode == "auto_extract":
@@ -442,14 +1349,15 @@ def auto_progress_campaign_step3_entry(
 
         frame = getattr(host, "frame", None)
         if frame is not None:
-            frame.after(80, _auto_start_extraction)
+            frame.after(0, _auto_start_extraction)
         else:
             _auto_start_extraction()
 
         result["handled"] = True
         return result
 
-    if mode == "open_detect" or int(getattr(plan, "target_substep", 0) or 0) >= 2:
+    target_substep = int(getattr(plan, "target_substep", 0) or 0)
+    if mode == "open_detect" or target_substep == 2:
         try:
             host._set_extraction_status(
                 "Wyodrębnione tablice są już gotowe. Otwieram od razu PZ2 do pracy nad znakami.",
@@ -513,12 +1421,12 @@ def get_campaign_step3_entry_flow_view_model(
         prepare_campaign_step3_reextract_from_current_source(
             host,
             preferred_source_context=preferred_source_context,
+            background_transition=True,
         )
         try:
-            host._set_subtab_state(host.tab_extract, "disabled")
             host._set_subtab_state(host.tab_detect, "normal")
             host._set_subtab_state(host.tab_dataset, "disabled")
-            host._select_subtab(host.tab_detect)
+            host._set_subtab_state(host.tab_extract, "normal")
         except Exception:
             pass
 
@@ -544,15 +1452,7 @@ def get_campaign_step3_entry_flow_view_model(
             mode="auto_extract",
             message="Uruchamiam wyodrębnianie tablic do PZ2.",
             target_substep=2,
-            should_show_splash=True,
-            splash_title="Przygotowuję wycięte tablice dla Z3",
-            splash_body=(
-                "To automatyczny krok pośredni przed pracą nad znakami. "
-                "Gdy wycinanie się zakończy, od razu otworzę PZ2."
-            ),
-            splash_tone="info",
-            splash_show_progress=True,
-            splash_show_return=False,
+            should_show_splash=False,
         )
 
     if saved_substep >= 2 and host.can_restore_step3_substep(saved_substep):
@@ -609,6 +1509,38 @@ def get_campaign_step3_source_refresh_state(
     preview_dir_raw = str(
         host.preview_dir_var.get() if hasattr(host, "preview_dir_var") else ""
     ).strip()
+
+    def _is_ready_preview_dir(raw_value: str) -> bool:
+        raw_value = str(raw_value or "").strip()
+        if not raw_value:
+            return False
+        try:
+            return bool(
+                host._is_usable_step3_preview_dir(
+                    raw_value,
+                    require_plates=True,
+                    check_campaign_inflated=False,
+                )
+            )
+        except TypeError:
+            try:
+                return bool(host._is_usable_step3_preview_dir(raw_value, require_plates=True))
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    if not _is_ready_preview_dir(preview_dir_raw):
+        try:
+            saved_preview_dir = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
+        except Exception:
+            saved_preview_dir = ""
+        if saved_preview_dir and _is_ready_preview_dir(saved_preview_dir):
+            preview_dir_raw = saved_preview_dir
+            try:
+                host.preview_dir_var.set(saved_preview_dir)
+            except Exception:
+                pass
 
     result["source_xml"] = source_xml_raw
     result["source_run_dir"] = source_run_raw
@@ -721,6 +1653,7 @@ def get_campaign_step3_source_refresh_state(
 def prepare_campaign_step3_reextract_from_current_source(
     host: "CharacterAnnotationTab",
     preferred_source_context: dict | None = None,
+    background_transition: bool = False,
 ) -> dict:
     refresh_state = get_campaign_step3_source_refresh_state(host, preferred_source_context=preferred_source_context)
     if not bool(refresh_state.get("needs_reextract")):
@@ -778,6 +1711,7 @@ def prepare_campaign_step3_reextract_from_current_source(
         pass
 
     try:
+        _set_campaign_step3_hold_pz2_after_reextract(host, True)
         CAMPAIGN.set_step3_needs_rework()
         CAMPAIGN.set_step3_stage1_done(False)
         CAMPAIGN.set_step3_stage2_done(False)
@@ -793,24 +1727,30 @@ def prepare_campaign_step3_reextract_from_current_source(
 
     try:
         host._set_subtab_state(host.tab_extract, "normal")
-        host._set_subtab_state(host.tab_detect, "disabled")
         host._set_subtab_state(host.tab_dataset, "disabled")
         host._set_button_state("btn_to_detect", False)
         host._set_button_state("btn_to_dataset", False)
         host._set_button_emphasis("btn_to_detect_frame", False)
         host._set_button_emphasis("btn_to_dataset_frame", False)
+        if background_transition:
+            host._campaign_pz2_sync_loading = True
+            host._campaign_detect_splash_force_root_surface = True
+            host._set_subtab_state(host.tab_detect, "normal")
+        else:
+            host._set_subtab_state(host.tab_detect, "disabled")
+            host._select_subtab(host.tab_extract)
     except Exception:
         pass
 
-    try:
-        host._select_subtab(host.tab_extract)
-    except Exception:
-        pass
-
-    try:
-        host._refresh_extract_workflow_ui()
-    except Exception:
-        pass
+    if not background_transition:
+        try:
+            schedule_refresh = getattr(host, "_schedule_extract_workflow_refresh", None)
+            if callable(schedule_refresh):
+                schedule_refresh(delay_ms=40 if not host.is_startup_ui_ready() else 0)
+            else:
+                host._refresh_extract_workflow_ui()
+        except Exception:
+            pass
 
     try:
         host._persist_step3_progress()
@@ -829,7 +1769,11 @@ def unlock_detection_subtab(host: "CharacterAnnotationTab"):
     host._set_button_state("btn_to_detect", True)
     host._set_button_emphasis("btn_to_detect_frame", False)
     try:
-        host._refresh_extract_workflow_ui()
+        schedule_refresh = getattr(host, "_schedule_extract_workflow_refresh", None)
+        if callable(schedule_refresh):
+            schedule_refresh(delay_ms=0)
+        else:
+            host._refresh_extract_workflow_ui()
     except Exception:
         pass
 
@@ -839,6 +1783,7 @@ def unlock_detection_subtab(host: "CharacterAnnotationTab"):
 
 
 def unlock_dataset_subtab(host: "CharacterAnnotationTab"):
+    _set_campaign_step3_hold_pz2_after_reextract(host, False)
     host._set_button_state("btn_to_dataset", True)
     host._set_button_emphasis("btn_run_detection_frame", False)
     host._set_button_emphasis("btn_to_dataset_frame", True)
@@ -848,9 +1793,124 @@ def unlock_dataset_subtab(host: "CharacterAnnotationTab"):
         host._persist_step3_progress()
 
 
-def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = False):
+def _ensure_campaign_pz2_preview_loaded(
+    host: "CharacterAnnotationTab",
+    *,
+    force_reload: bool = False,
+) -> bool:
+    """
+    Deterministycznie odtwarza liste i canvas PZ2 z preview runu projektu.
+
+    Sam zaplanowany after_idle bywal zbyt kruchy po restarcie: karta PZ2 mogla
+    zbudowac sie z pusta/stara sciezka, mimo ze projekt mial poprawne
+    metadata.json. Ten helper najpierw podstawia zapis projektu, potem buduje PZ2
+    i dopiero wtedy wymusza faktyczne wczytanie danych.
+    """
+    load_start = time.perf_counter()
+    restore_ms = build_ms = preview_ms = 0.0
     try:
-        host._hide_campaign_detect_splash()
+        phase_start = time.perf_counter()
+        saved_preview_dir = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
+        current_var = getattr(host, "preview_dir_var", None)
+        current_preview_dir = str((current_var.get() if current_var is not None else "") or "").strip()
+        saved_ready = bool(
+            saved_preview_dir
+            and host._is_usable_step3_preview_dir(
+                saved_preview_dir,
+                require_plates=True,
+                check_campaign_inflated=False,
+            )
+        )
+        same_preview_dir = False
+        if saved_ready and current_preview_dir:
+            try:
+                same_preview_dir = Path(saved_preview_dir).resolve() == Path(current_preview_dir).resolve()
+            except Exception:
+                same_preview_dir = str(saved_preview_dir).strip() == str(current_preview_dir).strip()
+        if saved_ready:
+            if not same_preview_dir and current_var is not None:
+                current_var.set(saved_preview_dir)
+        else:
+            current_ready = bool(
+                current_preview_dir
+                and host._is_usable_step3_preview_dir(
+                    current_preview_dir,
+                    require_plates=True,
+                    check_campaign_inflated=False,
+                )
+            )
+            if not current_ready:
+                host._restore_preview_context_from_project(require_plates=True)
+        restore_ms = (time.perf_counter() - phase_start) * 1000.0
+    except Exception:
+        pass
+
+    try:
+        phase_start = time.perf_counter()
+        if not host._ensure_detect_tab_built():
+            return False
+        build_ms = (time.perf_counter() - phase_start) * 1000.0
+    except Exception:
+        return False
+
+    loaded = False
+    try:
+        phase_start = time.perf_counter()
+        loaded = bool(host._ensure_detection_preview_loaded(force_reload=force_reload))
+        preview_ms = (time.perf_counter() - phase_start) * 1000.0
+    except Exception as exc:
+        logger.debug(f"Nie udalo sie bezposrednio wczytac PZ2 z projektu: {exc}")
+        loaded = False
+
+    if loaded:
+        try:
+            host._sync_step3_access_from_preview_state(getattr(host, "preview_metadata", None))
+        except Exception:
+            pass
+        _apply_campaign_step3_pz2_hold(host)
+        try:
+            if (
+                not _campaign_step3_hold_pz2_after_reextract(host)
+                and host._preview_dir_has_completed_detection_output()
+            ):
+                CAMPAIGN.set_step3_stage2_done(True)
+                host._set_subtab_state(host.tab_dataset, "normal")
+                host._set_button_state("btn_to_dataset", True)
+        except Exception:
+            pass
+
+    if not loaded:
+        try:
+            host._schedule_detection_preview_autoload()
+        except Exception:
+            pass
+
+    elapsed_ms = (time.perf_counter() - load_start) * 1000.0
+    if elapsed_ms >= 250.0:
+        try:
+            logger.info(
+                "[Z3/PZ2 load] force_reload=%s loaded=%s total=%.1fms restore=%.1fms build=%.1fms preview=%.1fms",
+                bool(force_reload),
+                bool(loaded),
+                elapsed_ms,
+                restore_ms,
+                build_ms,
+                preview_ms,
+            )
+        except Exception:
+            pass
+
+    return loaded
+
+
+def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = False):
+    keep_entry_splash = bool(
+        getattr(host, "_campaign_step3_entry_splash_pinned", False)
+        and getattr(host, "_campaign_detect_splash_visible", False)
+    )
+    try:
+        if not keep_entry_splash:
+            host._hide_campaign_detect_splash()
     except Exception:
         pass
     try:
@@ -868,17 +1928,117 @@ def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = Fa
         except Exception:
             pass
 
-    host._set_subtab_state(host.tab_extract, "disabled")
     host._set_subtab_state(host.tab_detect, "normal")
     host._set_subtab_state(host.tab_dataset, "disabled")
 
     CAMPAIGN.set_step3_substep(2)
+    _mark_t06_z3_work_session(host, state="active", substep=2, reason="enter_pz2")
+    try:
+        after_id = getattr(host, "_detect_preview_autoload_after_id", None)
+        if after_id is not None:
+            host.frame.after_cancel(after_id)
+            host._detect_preview_autoload_after_id = None
+    except Exception:
+        pass
+    try:
+        host._campaign_pz2_sync_loading = True
+    except Exception:
+        pass
     host._select_subtab(host.tab_detect)
+    host._set_subtab_state(host.tab_extract, "disabled")
+    try:
+        notify = getattr(host.app, "notify_free_mode_assistant_context_changed", None)
+        if callable(notify):
+            notify()
+    except Exception:
+        pass
+    already_loaded_this_entry = bool(getattr(host, "_campaign_pz2_preview_loaded_this_entry", False))
+    loaded_this_call = False
+    force_reload_preview = True
+    try:
+        saved_dir = host._get_saved_step3_preview_dir(require_plates=True)
+        current_var = getattr(host, "preview_dir_var", None)
+        current_dir = str((current_var.get() if current_var is not None else "") or "").strip()
+        saved_path = Path(str(saved_dir)).resolve() if saved_dir else None
+        current_path = Path(current_dir).resolve() if current_dir else None
+        same_preview_dir = bool(saved_path and current_path and saved_path == current_path)
+        has_preview_list = bool(getattr(host, "_listbox_pid_by_index", None))
+        has_preview_metadata = bool(getattr(host, "preview_metadata", None))
+        if same_preview_dir and has_preview_list and has_preview_metadata:
+            force_reload_preview = False
+    except Exception:
+        force_reload_preview = True
+    if not already_loaded_this_entry:
+        loaded_this_call = bool(_ensure_campaign_pz2_preview_loaded(host, force_reload=force_reload_preview))
+    _apply_campaign_step3_pz2_hold(host)
+    try:
+        host._sync_step3_access_from_preview_state(getattr(host, "preview_metadata", None))
+    except Exception:
+        pass
+    try:
+        selected_tab = str(host.main_nb.select())
+    except Exception:
+        selected_tab = ""
+    try:
+        logger.info(
+            "[Z3/PZ2 campaign entry] loaded=%s already_loaded=%s built=%s selected_detect=%s preview=%s",
+            bool(loaded_this_call),
+            bool(already_loaded_this_entry),
+            bool(getattr(host, "_detect_tab_built", False)),
+            bool(selected_tab == str(host.tab_detect)),
+            str(host.preview_dir_var.get() or "").strip(),
+        )
+    except Exception:
+        pass
+    try:
+        host._campaign_pz2_preview_loaded_this_entry = bool(already_loaded_this_entry or loaded_this_call)
+    except Exception:
+        pass
     host._persist_step3_progress()
     try:
         host._refresh_campaign_step3_navigation_visibility()
     except Exception:
         pass
+    try:
+        host._campaign_pz2_sync_loading = False
+    except Exception:
+        pass
+    if keep_entry_splash and not _campaign_step3_hold_pz2_after_reextract(host):
+        try:
+            host._hide_campaign_detect_splash()
+        except Exception:
+            pass
+    if _campaign_step3_hold_pz2_after_reextract(host):
+        def _stabilize_campaign_pz2_after_reextract():
+            try:
+                if not (
+                    getattr(host, "_step3_linear_mode", False)
+                    and CAMPAIGN.get_active_project_name()
+                    and _campaign_step3_hold_pz2_after_reextract(host)
+                ):
+                    return
+                host._campaign_pz2_sync_loading = True
+                host._set_subtab_state(host.tab_detect, "normal")
+                host._set_subtab_state(host.tab_dataset, "disabled")
+                host._select_subtab(host.tab_detect)
+                host._set_subtab_state(host.tab_extract, "disabled")
+                _apply_campaign_step3_pz2_hold(host)
+                try:
+                    host._hide_campaign_detect_splash()
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.debug(f"Nie udało się ustabilizować PZ2 po reekstrakcji: {exc}")
+            finally:
+                try:
+                    host._campaign_pz2_sync_loading = False
+                except Exception:
+                    pass
+
+        try:
+            host.frame.after(180, _stabilize_campaign_pz2_after_reextract)
+        except Exception:
+            pass
 
 
 def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
@@ -894,11 +2054,18 @@ def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
     if btn is not None and str(btn.cget("state")) != "normal":
         return
 
+    try:
+        host._restore_preview_context_from_project(require_plates=True)
+    except Exception:
+        pass
+
     host._set_subtab_state(host.tab_extract, "disabled")
     host._set_subtab_state(host.tab_detect, "disabled")
     host._set_subtab_state(host.tab_dataset, "normal")
 
+    _mark_t06_pz2_contract(host, reason="enter_pz3")
     CAMPAIGN.set_step3_substep(3)
+    _mark_t06_z3_work_session(host, state="active", substep=3, reason="enter_pz3")
     host._select_subtab(host.tab_dataset)
     host._persist_step3_progress()
     host._set_button_emphasis("btn_run_detection_frame", False)
@@ -936,7 +2103,14 @@ def back_to_substep_2_campaign(host: "CharacterAnnotationTab"):
     host._set_subtab_state(host.tab_extract, "disabled")
     host._set_subtab_state(host.tab_detect, "normal")
     host._set_subtab_state(host.tab_dataset, "disabled")
-    host._set_button_state("btn_to_dataset", host.can_restore_step3_substep(3))
+    if _campaign_step3_hold_pz2_after_reextract(host):
+        host._set_button_state("btn_to_dataset", False)
+    else:
+        try:
+            host._sync_step3_access_from_preview_state(getattr(host, "preview_metadata", None))
+        except Exception:
+            pass
+        host._set_button_state("btn_to_dataset", host.can_restore_step3_substep(3))
 
     host._set_button_emphasis("btn_to_dataset_frame", False)
 
@@ -971,6 +2145,7 @@ def persist_step3_progress(host: "CharacterAnnotationTab"):
         current_substep = 1
 
     CAMPAIGN.set_step3_substep(current_substep)
+    _mark_t06_z3_work_session(host, state="active", substep=current_substep, reason="persist_progress")
 
     stage1_done = False
     stage2_done = False
@@ -988,6 +2163,8 @@ def persist_step3_progress(host: "CharacterAnnotationTab"):
             stage2_done = str(btn.cget("state")) == "normal"
     except Exception:
         pass
+    if _campaign_step3_hold_pz2_after_reextract(host):
+        stage2_done = False
 
     CAMPAIGN.set_step3_stage1_done(stage1_done)
     CAMPAIGN.set_step3_stage2_done(stage2_done)
@@ -1007,6 +2184,11 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
     saved_substep = CAMPAIGN.get_step3_substep()
     stage1_done = CAMPAIGN.is_step3_stage1_done()
     stage2_done = CAMPAIGN.is_step3_stage2_done()
+    force_detect_entry = bool(getattr(host, "_campaign_force_detect_entry", False))
+    hold_pz2_after_reextract = _campaign_step3_hold_pz2_after_reextract(host)
+    if hold_pz2_after_reextract:
+        force_detect_entry = True
+        stage2_done = False
 
     try:
         current_preview_dir = str(host.preview_dir_var.get() or "").strip()
@@ -1027,33 +2209,65 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
             pass
 
     try:
-        if host.can_restore_step3_substep(2):
-            stage1_done = True
+        can_restore_substep_2 = bool(host.can_restore_step3_substep(2))
     except Exception:
-        pass
+        can_restore_substep_2 = False
+    try:
+        can_restore_substep_3 = bool(host.can_restore_step3_substep(3))
+    except Exception:
+        can_restore_substep_3 = False
+    if can_restore_substep_2:
+        stage1_done = True
 
     try:
-        if host._preview_dir_has_completed_detection_output():
+        if not hold_pz2_after_reextract and host._preview_dir_has_completed_detection_output():
             stage2_done = True
+    except Exception:
+        pass
+    try:
+        if not hold_pz2_after_reextract:
+            stage2_done = stage2_done or bool(host._campaign_step3_pz2_base_ready())
+            if not stage2_done:
+                stage2_done = bool(host._get_campaign_step3_annotation_readiness().get("ok"))
     except Exception:
         pass
 
     try:
         if stage1_done:
             CAMPAIGN.set_step3_stage1_done(True)
-        if stage2_done:
+        if hold_pz2_after_reextract:
+            CAMPAIGN.set_step3_stage2_done(False)
+        elif stage2_done:
             CAMPAIGN.set_step3_stage2_done(True)
     except Exception:
         pass
 
     try:
-        if saved_substep < 2 and host.can_restore_step3_substep(2):
+        if force_detect_entry and saved_substep >= 3 and can_restore_substep_2:
             saved_substep = 2
-        if saved_substep < 3 and host.can_restore_step3_substep(3):
+        if saved_substep < 2 and can_restore_substep_2:
+            saved_substep = 2
+        if hold_pz2_after_reextract and saved_substep >= 3:
+            saved_substep = 2
+        if (
+            not force_detect_entry
+            and not hold_pz2_after_reextract
+            and saved_substep < 3
+            and can_restore_substep_3
+        ):
             saved_substep = 3
     except Exception:
         pass
-    if not host.can_restore_step3_substep(saved_substep):
+    if saved_substep == 2:
+        can_restore_saved_substep = can_restore_substep_2
+    elif saved_substep >= 3:
+        can_restore_saved_substep = can_restore_substep_3
+    else:
+        try:
+            can_restore_saved_substep = bool(host.can_restore_step3_substep(saved_substep))
+        except Exception:
+            can_restore_saved_substep = False
+    if not can_restore_saved_substep:
         saved_substep = 1
         stage1_done = False
         stage2_done = False
@@ -1076,7 +2290,39 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
         host._set_subtab_state(host.tab_detect, "normal")
         host._set_subtab_state(host.tab_dataset, "disabled")
         host._select_subtab(host.tab_detect)
+        try:
+            notify = getattr(host.app, "notify_free_mode_assistant_context_changed", None)
+            if callable(notify):
+                notify()
+        except Exception:
+            pass
+        loaded = _ensure_campaign_pz2_preview_loaded(host, force_reload=False)
+        try:
+            host._campaign_pz2_preview_loaded_this_entry = bool(loaded)
+        except Exception:
+            pass
+        try:
+            if (
+                loaded
+                and not _campaign_step3_hold_pz2_after_reextract(host)
+                and (
+                    host._preview_dir_has_completed_detection_output()
+                    or bool(host._campaign_step3_pz2_base_ready())
+                    or bool(host._get_campaign_step3_annotation_readiness().get("ok"))
+                )
+            ):
+                stage2_done = True
+                CAMPAIGN.set_step3_stage2_done(True)
+                host._set_subtab_state(host.tab_dataset, "normal")
+                host._set_button_state("btn_to_dataset", True)
+        except Exception:
+            pass
+        _apply_campaign_step3_pz2_hold(host)
     else:
+        try:
+            host._restore_preview_context_from_project(require_plates=True)
+        except Exception:
+            pass
         host._set_subtab_state(host.tab_extract, "disabled")
         host._set_subtab_state(host.tab_detect, "disabled")
         host._set_subtab_state(host.tab_dataset, "normal")
@@ -1128,7 +2374,11 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
         pass
 
     try:
-        host._refresh_extract_workflow_ui()
+        schedule_refresh = getattr(host, "_schedule_extract_workflow_refresh", None)
+        if callable(schedule_refresh):
+            schedule_refresh(delay_ms=40 if not host.is_startup_ui_ready() else 0)
+        else:
+            host._refresh_extract_workflow_ui()
     except Exception:
         pass
 
@@ -1164,26 +2414,33 @@ def build_step3_finish_action_view_model(
 
     readiness = host._get_campaign_step3_training_readiness()
     has_outputs = host._has_any_step3_export_outputs()
-    ready_for_approval = bool(has_outputs and bool(readiness.get("ok")))
+    ready_summary = _read_ready_step3_export_summary(host)
+    ready_for_approval = bool((has_outputs and bool(readiness.get("ok"))) or ready_summary)
 
     try:
         current_status = str(CAMPAIGN.get_step3_status() or "").strip().lower() or "pending"
     except Exception:
         current_status = "pending"
 
-    finish_hint = "Powrót nie zamyka etapu. Możesz wrócić do Z3 w dowolnym momencie."
+    finish_label = "Wróć do grafu bez zatwierdzenia"
+    finish_hint = "Powrót nie zatwierdza bramki. Praca w PZ3 pozostaje dostępna do kontynuacji."
     finish_tone = "muted"
     emphasize = False
 
     if ready_for_approval:
-        finish_hint = "Dataset znaków jest gotowy. W wizardzie zatwierdzisz E3 i odblokujesz E4."
+        finish_label = "Przekaż dataset i wróć do grafu"
+        finish_hint = (
+            "Dataset znaków jest już utworzony. Ten przycisk przekazuje wynik do "
+            f"bramki {CHAR_WORK_GATE_DISPLAY_ID} i wraca do grafu, gdzie zatwierdzisz bramkę."
+        )
         finish_tone = "success"
         emphasize = True
     elif current_status == "needs_rework":
         finish_hint = host._get_step3_finish_block_message(readiness)
         finish_tone = "warning"
     elif current_status == "approved":
-        finish_hint = "Etap 3 jest już zatwierdzony. Wizard otworzy się od razu na E4."
+        finish_label = "Wróć do grafu kampanii"
+        finish_hint = f"Bramka {CHAR_WORK_GATE_DISPLAY_ID} jest już zatwierdzona. Graf otworzy się na kolejnym kroku."
         finish_tone = "success"
     elif not has_outputs:
         finish_hint = host._get_step3_finish_block_message(readiness) or finish_hint
@@ -1191,13 +2448,149 @@ def build_step3_finish_action_view_model(
 
     return Step3FinishActionViewModel(
         visible=True,
-        label="Wróć do wizarda",
+        label=finish_label,
         command_id="return_to_wizard_step3",
         enabled=True,
         emphasize=emphasize,
         hint=finish_hint,
         hint_tone=finish_tone,
         back_to_wizard_enabled=True,
+    )
+
+
+def _describe_step3_export_summary_for_status(summary: dict | None) -> tuple[str, str]:
+    data = dict(summary or {})
+    dataset_path = str(data.get("gold_dataset_path") or "").strip()
+    dataset_name = Path(dataset_path).name if dataset_path else ""
+    dataset_exists = False
+    if dataset_path:
+        try:
+            dataset_exists = Path(dataset_path).exists()
+        except Exception:
+            dataset_exists = False
+
+    created = bool(data.get("gold_dataset_created")) and bool(data.get("gold_dataset_valid", True))
+    if created and dataset_path and dataset_exists:
+        plates = int(data.get("exportable_plate_count", 0) or 0)
+        chars = int(data.get("exportable_char_count", 0) or 0)
+        details = []
+        if plates > 0:
+            details.append(f"{plates} tablic")
+        if chars > 0:
+            details.append(f"{chars} znaków")
+        details_text = f" ({', '.join(details)})" if details else ""
+        return f"Dataset znaków gotowy: {dataset_name}{details_text}.", "success"
+
+    if bool(data.get("gold_dataset_created")) and not dataset_exists:
+        return "Poprzedni dataset zapisany w podsumowaniu nie jest już dostępny na dysku.", "warning"
+
+    if bool(data.get("gold_dataset_created")) and not bool(data.get("gold_dataset_valid", True)):
+        message = str(data.get("gold_dataset_validation_message") or "").strip()
+        if message:
+            return f"Dataset wymaga sprawdzenia: {message}", "warning"
+        return "Dataset wymaga sprawdzenia przed powrotem do grafu.", "warning"
+
+    return "Dataset znaków nie został jeszcze utworzony w PZ3.", "warning"
+
+
+def _describe_step3_run_for_status(summary: dict | None, host: "CharacterAnnotationTab") -> tuple[str, str]:
+    data = dict(summary or {})
+    summary_dir = str(data.get("_summary_dir") or "").strip()
+    if summary_dir:
+        run_name = Path(summary_dir).name
+        if run_name:
+            return f"Run: {run_name}. To z niego powstał materiał dla datasetu znaków.", "success"
+
+    try:
+        preview_context = dict(host._get_active_preview_context() or {})
+    except Exception:
+        preview_context = {}
+    preview_dir = preview_context.get("preview_dir")
+    if preview_dir:
+        run_name = Path(str(preview_dir)).name
+        return f"Run: {run_name}. To aktualne źródło materiału dla PZ3.", "success"
+
+    return "Run: brak aktywnego wyniku PZ2/PZ3. Najpierw przygotuj anotacje znaków.", "warning"
+
+
+def _describe_step3_dataset_for_status(
+    summary: dict | None,
+    *,
+    readiness: dict | None,
+) -> tuple[str, str]:
+    data = dict(summary or {})
+    readiness_data = dict(readiness or {})
+    dataset_path = str(data.get("gold_dataset_path") or "").strip()
+    dataset_name = Path(dataset_path).name if dataset_path else ""
+    dataset_exists = False
+    if dataset_path:
+        try:
+            dataset_exists = Path(dataset_path).exists()
+        except Exception:
+            dataset_exists = False
+
+    if bool(data.get("gold_dataset_created")) and bool(data.get("gold_dataset_valid", True)) and dataset_exists:
+        plates = int(data.get("exportable_plate_count", 0) or 0)
+        chars = int(data.get("exportable_char_count", 0) or 0)
+        details = []
+        if plates > 0:
+            details.append(f"{plates} tablic")
+        if chars > 0:
+            details.append(f"{chars} znaków")
+        suffix = f" ({', '.join(details)})" if details else ""
+        return f"Dataset: {dataset_name}{suffix}.", "success"
+
+    if bool(readiness_data.get("ok")):
+        return "Dataset: można go utworzyć z gotowego runu PZ2.", "success"
+
+    return "Dataset: jeszcze nie powstał, bo run nie ma wystarczających anotacji znaków.", "warning"
+
+
+def _describe_step3_export_for_status(
+    summary: dict | None,
+    *,
+    readiness: dict | None,
+) -> tuple[str, str]:
+    data = dict(summary or {})
+    readiness_data = dict(readiness or {})
+    dataset_path = str(data.get("gold_dataset_path") or "").strip()
+    dataset_exists = False
+    if dataset_path:
+        try:
+            dataset_exists = Path(dataset_path).exists()
+        except Exception:
+            dataset_exists = False
+
+    if bool(data.get("gold_dataset_created")) and bool(data.get("gold_dataset_valid", True)) and dataset_exists:
+        return f"Eksport: źródłowy dataset znaków jest zapisany i gotowy do przekazania do {CHAR_WORK_GATE_DISPLAY_ID}.", "success"
+
+    if bool(readiness_data.get("ok")):
+        return "Eksport: uruchom tworzenie źródłowego datasetu znaków.", "warning"
+
+    return "Eksport: zablokowany do czasu poprawy anotacji znaków w PZ2.", "warning"
+
+
+def _describe_step3_readiness_flow_for_status(
+    *,
+    readiness: dict | None,
+    export_summary_tone: str,
+) -> tuple[str, str]:
+    if str(export_summary_tone or "").strip().lower() == "success":
+        return (
+            f"Bramka {CHAR_WORK_GATE_DISPLAY_ID} gotowa do zatwierdzenia.",
+            "success",
+        )
+
+    data = dict(readiness or {})
+    if bool(data.get("ok")):
+        return (
+            "Run jest gotowy; brakuje utworzenia i zapisania datasetu znaków.",
+            "success",
+        )
+
+    return (
+        "Łańcuch niekompletny: popraw anotacje znaków w PZ2, aby run mógł zasilić dataset.",
+        "warning",
     )
 
 
@@ -1216,15 +2609,15 @@ def build_step3_pz3_path_selection_view_model(
         selected_path=selected_path,
         show_dataset_section=True,
         show_cvat_section=(selected_path == "cvat"),
-        show_status_section=False,
+        show_status_section=True,
         dataset_card_selected=True,
         cvat_card_selected=(selected_path == "cvat"),
         dataset_badge_text="DATASET",
         dataset_title_text="Dataset znaków",
-        dataset_desc_text="Główna ścieżka PZ3: źródło pracy, opcjonalne poprawki i eksport datasetu.",
+        dataset_desc_text="Główna ścieżka PZ3: materiał z PZ2, zakres tablic perfect i utworzenie źródłowego datasetu znaków.",
         cvat_badge_text="OPCJA",
-        cvat_title_text="Review pack do CVAT",
-        cvat_desc_text="Eksportuje cropy tablic z boxami znaków. Ten format jest zgodny z importem poprawek CVAT.",
+        cvat_title_text="Korekta w CVAT",
+        cvat_desc_text="Opcjonalny obieg: wyślij cropy tablic do CVAT, popraw boxy znaków i wczytaj XML z powrotem.",
     )
 
 
@@ -1233,24 +2626,68 @@ def build_step3_pz3_status_panel_view_model(
 ) -> Step3Pz3StatusPanelViewModel:
     path_vm = build_step3_pz3_path_selection_view_model(host)
     finish_action = build_step3_finish_action_view_model(host)
+    try:
+        export_summary = dict(host._read_step3_export_summary() or {})
+    except Exception:
+        export_summary = {}
+    summary_export_text, summary_export_tone = _describe_step3_export_summary_for_status(export_summary)
+    try:
+        readiness = dict(host._get_campaign_step3_training_readiness() or {})
+    except Exception:
+        readiness = {}
+    run_text, run_tone = _describe_step3_run_for_status(export_summary, host)
+    dataset_text, dataset_tone = _describe_step3_dataset_for_status(export_summary, readiness=readiness)
+    chain_export_text, chain_export_tone = _describe_step3_export_for_status(export_summary, readiness=readiness)
+    readiness_text, readiness_tone = _describe_step3_readiness_flow_for_status(
+        readiness=readiness,
+        export_summary_tone=summary_export_tone,
+    )
     export_text, export_tone = host._get_inline_status_widget_snapshot(
         getattr(host, "export_console", None),
-        fallback_text="—",
-        fallback_tone="muted",
+        fallback_text=summary_export_text,
+        fallback_tone=summary_export_tone,
     )
+    export_text_key = str(export_text or "").strip().lower()
+    if (
+        summary_export_tone == "success"
+        or export_text_key in {"", "-", "—", "oczekuję na akcję...", "oczekuje na akcje..."}
+    ):
+        export_text = summary_export_text
+        export_tone = summary_export_tone
+    if str(export_tone or "").strip().lower() not in {"danger", "error"} and "błąd" not in str(export_text or "").lower():
+        export_text = chain_export_text
+        export_tone = chain_export_tone
     import_text, import_tone = host._get_inline_status_widget_snapshot(
         getattr(host, "import_console", None),
-        fallback_text="—",
+        fallback_text="Korekta CVAT nie była używana w tej ścieżce.",
         fallback_tone="muted",
     )
+    if str(import_text or "").strip() in {"", "-", "—"}:
+        import_text = "Korekta CVAT nie była używana w tej ścieżce."
+        import_tone = "muted"
 
     return Step3Pz3StatusPanelViewModel(
-        title="Podsumowanie",
+        title="Status PZ3",
         show_section=bool(path_vm.show_status_section),
+        run_row=Step3Pz3StatusRowViewModel(
+            label="Run",
+            text=run_text,
+            tone=run_tone,
+        ),
+        dataset_row=Step3Pz3StatusRowViewModel(
+            label="Dataset",
+            text=dataset_text,
+            tone=dataset_tone,
+        ),
         export_row=Step3Pz3StatusRowViewModel(
             label="Eksport",
             text=export_text,
             tone=export_tone,
+        ),
+        readiness_row=Step3Pz3StatusRowViewModel(
+            label="Gotowość",
+            text=readiness_text,
+            tone=readiness_tone,
         ),
         import_row=Step3Pz3StatusRowViewModel(
             label="Import",
@@ -1299,3 +2736,222 @@ def refresh_campaign_step3_navigation_visibility(host: "CharacterAnnotationTab")
                     back_to_detect.pack(side=tk.BOTTOM)
         except Exception:
             pass
+
+
+def clear_step3_campaign_context(host, nav_button_width: int = 18):
+    self = host
+    NAV_BUTTON_WIDTH = nav_button_width
+    """
+    Czyści projektowy kontekst UI po wyjściu z projektu.
+    Oprócz pól wejściowych czyści też preview, metadata, log testów
+    i local_session powiązany z projektem.
+    """
+    self._project_reset_token += 1
+    self.is_processing = False
+    self._reloading_preview = False
+
+    if hasattr(self, "_campaign_chars_dir"):
+        self._campaign_chars_dir = None
+
+    if hasattr(self, "_campaign_datasets_dir"):
+        self._campaign_datasets_dir = None
+
+    try:
+        self._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+
+    try:
+        self._clear_project_bound_session_values(clear_ui=False)
+    except Exception:
+        pass
+
+    try:
+        self.annotation_run_dir_var.set("")
+    except Exception:
+        pass
+
+    try:
+        self.extract_entry_mode_var.set("")
+    except Exception:
+        pass
+
+    try:
+        self.xml_path_var.set("")
+    except Exception:
+        pass
+
+    try:
+        self.images_dir_var.set("")
+    except Exception:
+        pass
+
+    try:
+        self._set_preview_dir_runtime_value("", persist_registry=False)
+    except Exception:
+        pass
+
+    try:
+        self.yolo_model_path_var.set("")
+    except Exception:
+        pass
+    try:
+        self.pz3_dataset_source_mode_var.set("perfect")
+    except Exception:
+        pass
+    try:
+        self.pz3_existing_dataset_var.set("")
+    except Exception:
+        pass
+
+    self._pending_z2_source = {}
+    self._extract_workflow_step = "entry"
+    self._extract_last_source_binding_result = {"ok": False}
+    try:
+        self._set_source_binding_status("", "warning")
+    except Exception:
+        pass
+
+    self._reset_preview_cache()
+    self.preview_metadata = {}
+    self.preview_plate_ids = []
+    self._preview_base_plate_ids = []
+    self._listbox_pid_by_index = []
+
+    try:
+        self.plates_listbox.delete(0, tk.END)
+    except Exception:
+        pass
+
+    try:
+        self.preview_canvas.delete("all")
+    except Exception:
+        pass
+
+    try:
+        self._set_preview_info("Brak wczytanych danych", "muted")
+        self._set_preview_counts_info(0, 0, 0)
+    except Exception:
+        pass
+
+    try:
+        self._set_preview_box_info("Źródło końcowych ramek: brak wczytanych danych", "muted")
+    except Exception:
+        pass
+
+    try:
+        self.test_log_text.configure(state=tk.NORMAL)
+        self.test_log_text.delete("1.0", tk.END)
+        self.test_log_text.configure(state=tk.DISABLED)
+    except Exception:
+        pass
+
+    try:
+        self._set_detection_process_log_visibility(False)
+    except Exception:
+        pass
+
+    try:
+        self.fast_test_running = False
+        self.fast_test_stop.set()
+    except Exception:
+        pass
+
+    try:
+        self.test_progress.config(value=0)
+        self._set_test_progress_counter()
+    except Exception:
+        pass
+
+    try:
+        self._set_test_status(self._compose_detection_method_status("gotowa do uruchomienia"), "neutral")
+    except Exception:
+        pass
+
+    try:
+        self.ext_log.configure(state=tk.NORMAL)
+        self.ext_log.delete("1.0", tk.END)
+        self.ext_log.configure(state=tk.NORMAL)
+    except Exception:
+        pass
+
+    try:
+        self.ext_progress.config(value=0)
+    except Exception:
+        pass
+
+    try:
+        self._set_extraction_status("Gotowy", "neutral")
+    except Exception:
+        pass
+
+    try:
+        self._refresh_extract_action_state()
+    except Exception:
+        pass
+
+    try:
+        self.btn_ext_stop.config(state=tk.DISABLED)
+    except Exception:
+        pass
+
+    try:
+        self.import_cvat_xml_var.set("")
+    except Exception:
+        pass
+
+    try:
+        self._set_console_text(self.export_console, "Oczekuję na akcję...")
+    except Exception:
+        pass
+
+    try:
+        self._set_console_text(self.import_console, "Oczekuję na plik XML...")
+    except Exception:
+        pass
+
+    try:
+        self._set_winner_name("BRAK DANYCH Z TURNIEJU", "neutral")
+    except Exception:
+        pass
+
+    try:
+        self._set_winner_acc("Skuteczność detekcji OCR: 0.0%", "error")
+    except Exception:
+        pass
+
+    try:
+        if hasattr(self, "btn_finish_step3"):
+            self.btn_finish_step3.config(
+                text="Zakończ etap 3",
+                state=tk.DISABLED,
+                width=NAV_BUTTON_WIDTH,
+            )
+    except Exception:
+        pass
+
+    try:
+        if hasattr(self, "btn_back_to_wizard_step3"):
+            self.btn_back_to_wizard_step3.config(state=tk.DISABLED)
+    except Exception:
+        pass
+
+    try:
+        self._set_button_emphasis("btn_finish_step3_frame", False)
+    except Exception:
+        pass
+
+    try:
+        self.reset_subtab_flow()
+    except Exception as e:
+        logger.debug(f"Nie udało się zresetować liniowego flow kroku 3: {e}")
+
+    try:
+        self._refresh_extract_workflow_ui()
+    except Exception:
+        pass
+
+    try:
+        self._refresh_step3_mode_specific_ui()
+    except Exception:
+        pass

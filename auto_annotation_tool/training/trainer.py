@@ -6,6 +6,7 @@ Trener modeli YOLO Pose.
 
 import gc
 import json
+import math
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from ..config import (
 from ..utils import cleanup_gpu_memory, safe_load_yaml
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
+from .resource_monitor import format_resource_sample_line, sample_system_memory
 
 YOLO = None
 
@@ -138,6 +140,9 @@ class YOLOPoseTrainer:
         self.on_batch_progress: Optional[Callable[[int, int, int, float], None]] = None
         self.on_training_end: Optional[Callable[[bool, str], None]] = None
         self.on_progress: Optional[Callable[[float, str], None]] = None
+        self.on_resource_sample: Optional[Callable[[Dict], None]] = None
+        self.on_resource_report: Optional[Callable[[Dict], None]] = None
+        self._training_batch_state: Optional[Dict] = None
         self._worker_process: Optional[subprocess.Popen] = None
         self._worker_monitor_thread: Optional[threading.Thread] = None
         self._worker_stdout_handle = None
@@ -213,7 +218,7 @@ class YOLOPoseTrainer:
         gc.collect()
         cleanup_gpu_memory()
 
-    def _resolve_runtime_epoch(self, trainer=None) -> int:
+    def _resolve_runtime_epoch(self, trainer=None, *, include_running_epoch: bool = False) -> int:
         run = getattr(self, "current_run", None)
         fallback_epoch = 0
         if run is not None:
@@ -225,6 +230,28 @@ class YOLOPoseTrainer:
                 fallback_epoch = int(getattr(history_run, "current_epoch", 0) or getattr(run, "current_epoch", 0) or 0)
             except Exception:
                 fallback_epoch = 0
+
+        batch_state = getattr(self, "_training_batch_state", None)
+        if isinstance(batch_state, dict):
+            try:
+                fallback_epoch = max(fallback_epoch, int(batch_state.get("completed_epoch", 0) or 0))
+            except Exception:
+                pass
+
+            if include_running_epoch:
+                try:
+                    running_epoch = int(batch_state.get("epoch", -1) or -1)
+                    current_batch = int(batch_state.get("batch", 0) or 0)
+                    total_batches = int(batch_state.get("total_batches", 0) or 0)
+                except Exception:
+                    running_epoch = -1
+                    current_batch = 0
+                    total_batches = 0
+                if running_epoch >= 0 and total_batches > 0 and current_batch >= total_batches:
+                    return max(fallback_epoch, running_epoch + 1)
+
+        if not include_running_epoch:
+            return max(0, fallback_epoch)
 
         trainer_ref = trainer
         if trainer_ref is None:
@@ -242,6 +269,69 @@ class YOLOPoseTrainer:
                 return max(fallback_epoch, trainer_epoch + 1)
 
         return max(0, fallback_epoch)
+
+    def _is_runtime_epoch_complete(self) -> bool:
+        batch_state = getattr(self, "_training_batch_state", None)
+        if not isinstance(batch_state, dict):
+            return False
+        try:
+            running_epoch = int(batch_state.get("epoch", -1) or -1)
+            current_batch = int(batch_state.get("batch", 0) or 0)
+            total_batches = int(batch_state.get("total_batches", 0) or 0)
+        except Exception:
+            return False
+        return bool(running_epoch >= 0 and total_batches > 0 and current_batch >= total_batches)
+
+    def _format_runtime_epoch_state(self) -> str:
+        batch_state = getattr(self, "_training_batch_state", None)
+        if not isinstance(batch_state, dict):
+            return ""
+        try:
+            completed_epoch = int(batch_state.get("completed_epoch", 0) or 0)
+            running_epoch = int(batch_state.get("epoch", -1) or -1)
+            current_batch = int(batch_state.get("batch", 0) or 0)
+            total_batches = int(batch_state.get("total_batches", 0) or 0)
+        except Exception:
+            return ""
+        if running_epoch < 0 or total_batches <= 0:
+            return f"Ukończone epoki: {completed_epoch}."
+        return (
+            f"Ukończone epoki: {completed_epoch}. "
+            f"Przerwano w epoce {running_epoch + 1}, batch {current_batch}/{total_batches}; "
+            "ta epoka nie została zaliczona jako ukończona."
+        )
+
+    def _resolve_completed_epoch_from_checkpoint(self, checkpoint_path: str | Path) -> Optional[int]:
+        path = Path(str(checkpoint_path or "").strip())
+        if not path.exists():
+            return None
+        torch = get_torch_module()
+        if torch is None:
+            return None
+        checkpoint = None
+        try:
+            try:
+                checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+            except TypeError:
+                checkpoint = torch.load(str(path), map_location="cpu")
+            if not isinstance(checkpoint, dict):
+                return None
+            raw_epoch = checkpoint.get("epoch")
+            if raw_epoch is None:
+                return None
+            epoch_index = int(raw_epoch)
+            if epoch_index < 0:
+                return 0
+            return epoch_index + 1
+        except Exception as e:
+            logger.debug(f"Nie udało się odczytać epoki z checkpointu {path}: {e}")
+            return None
+        finally:
+            try:
+                del checkpoint
+            except Exception:
+                pass
+            gc.collect()
 
     @staticmethod
     def _is_training_memory_error(error: Exception) -> bool:
@@ -273,6 +363,37 @@ class YOLOPoseTrainer:
         return any(needle in text for needle in needles)
 
     @staticmethod
+    def _is_nonfinite_training_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        needles = (
+            "nan",
+            "inf",
+            "non-finite",
+            "non finite",
+            "not finite",
+        )
+        return any(needle in text for needle in needles)
+
+    @staticmethod
+    def _assert_finite_training_metrics(epoch: int, metrics: Dict) -> None:
+        bad_fields = []
+        for key, value in (metrics or {}).items():
+            try:
+                numeric = float(value)
+            except Exception:
+                continue
+            if not math.isfinite(numeric):
+                bad_fields.append(str(key))
+        if bad_fields:
+            raise FloatingPointError(
+                "Trening wygenerował NaN/Inf w metrykach epoki "
+                f"{int(epoch)} ({', '.join(bad_fields)}). "
+                "Zatrzymuję run, żeby nie produkować kolejnych uszkodzonych checkpointów."
+            )
+
+    @staticmethod
     def _next_lower_training_imgsz(value: int) -> int:
         steps = [256, 320, 384, 416, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280]
         try:
@@ -281,6 +402,70 @@ class YOLOPoseTrainer:
             current = 640
         lower_steps = [step for step in steps if step < current]
         return int(lower_steps[-1] if lower_steps else steps[0])
+
+    @staticmethod
+    def _format_ram_state(ram_state: Dict) -> str:
+        try:
+            percent = float((ram_state or {}).get("ram_percent") or 0.0)
+        except Exception:
+            percent = 0.0
+        try:
+            available = float((ram_state or {}).get("ram_available_mib") or 0.0)
+            total = float((ram_state or {}).get("ram_total_mib") or 0.0)
+        except Exception:
+            available = 0.0
+            total = 0.0
+        if not total:
+            return "RAM: brak danych"
+        return f"RAM {percent:.1f}% | wolne {available / 1024.0:.2f} GB z {total / 1024.0:.2f} GB"
+
+    @staticmethod
+    def _is_ram_pressure_high(ram_state: Dict, dataset_profile: Dict) -> bool:
+        if not ram_state:
+            return False
+        try:
+            percent = float(ram_state.get("ram_percent") or 0.0)
+            available_mib = float(ram_state.get("ram_available_mib") or 0.0)
+        except Exception:
+            return False
+        train_images = int((dataset_profile or {}).get("train_images", 0) or 0)
+        is_pose = bool((dataset_profile or {}).get("is_pose"))
+        if percent >= 82.0:
+            return True
+        if available_mib and available_mib < 2048.0:
+            return True
+        if train_images >= 1000 and available_mib and available_mib < 4096.0:
+            return True
+        if is_pose and train_images >= 1000 and percent >= 75.0:
+            return True
+        return False
+
+    def _build_ram_safe_training_attempt(
+        self,
+        *,
+        batch_size: int,
+        img_size: int,
+        lr0: float,
+        dataset_profile: Dict,
+        label: str,
+    ) -> Dict:
+        is_pose = bool((dataset_profile or {}).get("is_pose"))
+        safe_batch = 1 if is_pose else max(1, min(int(batch_size or 1), 2))
+        safe_img_size = 512 if int(img_size or 640) >= 640 else self._next_lower_training_imgsz(int(img_size or 640))
+        safe_img_size = max(256, int(safe_img_size))
+        safe_lr0 = round(max(0.0025, float(lr0 or 0.01) * 0.85), 4)
+        return {
+            "batch_size": int(safe_batch),
+            "img_size": int(safe_img_size),
+            "lr0": float(safe_lr0),
+            "amp": False,
+            "mosaic": 0.0,
+            "close_mosaic": 0,
+            "plots": False,
+            "cache": False,
+            "label": str(label),
+            "ram_safe": True,
+        }
 
     def _build_train_args(
         self,
@@ -295,6 +480,8 @@ class YOLOPoseTrainer:
         amp: bool = True,
         mosaic: float | None = None,
         close_mosaic: int | None = None,
+        plots: bool = True,
+        cache: bool = False,
     ) -> Dict:
         train_args = {
             "data": str(Path(dataset_path) / "data.yaml"),
@@ -311,11 +498,10 @@ class YOLOPoseTrainer:
             "save": True,
             "save_period": 10,
             "patience": 50,
-            # W Z4 użytkownik oczekuje pełnych artefaktów analitycznych Ultralytics
-            # (results.png, confusion_matrix.png, krzywe PR/F1 itd.), więc
-            # generowanie wykresów pozostaje domyślnie włączone.
-            "plots": True,
+            "plots": bool(plots),
             "workers": 0,
+            # Jawne cache=False zapobiega niekontrolowanemu trzymaniu obrazów w RAM.
+            "cache": bool(cache),
             "amp": bool(amp),
         }
         if mosaic is not None:
@@ -501,6 +687,44 @@ class YOLOPoseTrainer:
                         float(event.get("percent", 0.0) or 0.0),
                         str(event.get("message", "") or "").strip(),
                     )
+                except Exception:
+                    pass
+            return
+
+        if event_type == "resource_monitor_start":
+            if self.on_progress:
+                try:
+                    self.on_progress(0.0, "Monitoring zasobów treningu uruchomiony.")
+                except Exception:
+                    pass
+            return
+
+        if event_type == "resource_sample":
+            sample = dict(event.get("sample") or {})
+            if self.on_resource_sample:
+                try:
+                    self.on_resource_sample(sample)
+                except Exception:
+                    pass
+            return
+
+        if event_type == "resource_report":
+            report = dict(event.get("report") or {})
+            if self.current_run is not None:
+                try:
+                    self.history.update_run(
+                        self.current_run.id,
+                        resource_report=str(report.get("report_path") or ""),
+                        resource_summary=str(report.get("summary_text") or format_resource_sample_line(report.get("last_sample") or {})),
+                    )
+                    refreshed = self.history.get_run(self.current_run.id)
+                    if refreshed is not None:
+                        self.current_run = refreshed
+                except Exception:
+                    pass
+            if self.on_resource_report:
+                try:
+                    self.on_resource_report(report)
                 except Exception:
                     pass
             return
@@ -815,6 +1039,7 @@ class YOLOPoseTrainer:
             "resume_from": str(resume_from or ""),
             "event_file": ipc_paths["event_file"],
             "control_file": ipc_paths["control_file"],
+            "resource_interval_s": 2.0,
         }
         Path(ipc_paths["job_file"]).write_text(
             json.dumps(job_payload, ensure_ascii=False, indent=2),
@@ -875,6 +1100,11 @@ class YOLOPoseTrainer:
                 and int(batch_size) <= 1
                 and int(img_size) <= 448
             )
+            ram_state = sample_system_memory()
+            start_with_ram_safe_profile = bool(
+                not is_resuming
+                and self._is_ram_pressure_high(ram_state, dataset_profile)
+            )
             if disable_mosaic_from_start:
                 logger.info(
                     "Duży dataset POSE tablic wykryty. Startuję trening bez mosaic, "
@@ -886,6 +1116,16 @@ class YOLOPoseTrainer:
                     "(batch=1 i mały imgsz). Startuję od razu bez mosaic i bez AMP, "
                     "żeby nie czekać na pierwszy OOM."
                 )
+            if start_with_ram_safe_profile:
+                ram_msg = (
+                    "Wykryto presję RAM przed startem treningu. "
+                    f"{self._format_ram_state(ram_state)}. "
+                    "Uruchamiam profil oszczędzania pamięci: cache=off, workers=0, "
+                    "mosaic=0, amp=off, plots=off oraz lżejszy batch/imgsz."
+                )
+                logger.warning(ram_msg)
+                if self.on_progress:
+                    self.on_progress(0.0, ram_msg)
 
             self.history.update_run(
                 run.id,
@@ -893,7 +1133,17 @@ class YOLOPoseTrainer:
                 started_at=datetime.now().isoformat(),
             )
 
-            batch_state = {"epoch": -1, "batch": 0}
+            try:
+                completed_epoch = int(getattr(run, "current_epoch", 0) or 0)
+            except Exception:
+                completed_epoch = 0
+            batch_state = {
+                "epoch": -1,
+                "batch": 0,
+                "total_batches": 0,
+                "completed_epoch": completed_epoch,
+            }
+            self._training_batch_state = batch_state
 
             def on_train_epoch_start(trainer):
                 if self.should_stop:
@@ -904,6 +1154,7 @@ class YOLOPoseTrainer:
                 batch_state["epoch"] = int(getattr(trainer, "epoch", -1))
                 batch_state["batch"] = 0
                 total_batches = max(1, int(len(getattr(trainer, "train_loader", []) or [])))
+                batch_state["total_batches"] = total_batches
                 if self.on_batch_progress:
                     self.on_batch_progress(batch_state["epoch"] + 1, 0, total_batches, 0.0)
 
@@ -913,6 +1164,7 @@ class YOLOPoseTrainer:
                 if batch_state["epoch"] != current_epoch:
                     batch_state["epoch"] = current_epoch
                     batch_state["batch"] = 0
+                batch_state["total_batches"] = total_batches
                 batch_state["batch"] = min(total_batches, int(batch_state["batch"]) + 1)
 
                 if self.on_batch_progress:
@@ -955,7 +1207,11 @@ class YOLOPoseTrainer:
                     "pose_recall": float(raw_metrics.get("metrics/recall(P)", 0) or 0),
                 }
 
+                self._assert_finite_training_metrics(epoch, metrics)
                 self.history.add_metrics(run.id, epoch, metrics)
+                batch_state["completed_epoch"] = int(epoch)
+                batch_state["batch"] = 0
+                batch_state["total_batches"] = 0
 
                 if self.on_epoch_end:
                     self.on_epoch_end(epoch, metrics)
@@ -963,35 +1219,40 @@ class YOLOPoseTrainer:
                 if self.on_progress:
                     self.on_progress((epoch / epochs) * 100, f"Epoka {epoch}/{epochs}")
 
-            training_attempts = [
-                {
-                    "batch_size": int(batch_size),
-                    "img_size": int(img_size),
-                    "lr0": float(lr0),
-                    "amp": (False if start_with_safe_pose_profile else True),
-                    "mosaic": (0.0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
-                    "close_mosaic": (0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
-                    "label": "start",
-                }
-            ]
+            if start_with_ram_safe_profile:
+                training_attempts = [
+                    self._build_ram_safe_training_attempt(
+                        batch_size=int(batch_size),
+                        img_size=int(img_size),
+                        lr0=float(lr0),
+                        dataset_profile=dataset_profile,
+                        label="ram_safe_preflight",
+                    )
+                ]
+            else:
+                training_attempts = [
+                    {
+                        "batch_size": int(batch_size),
+                        "img_size": int(img_size),
+                        "lr0": float(lr0),
+                        "amp": (False if start_with_safe_pose_profile else True),
+                        "mosaic": (0.0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
+                        "close_mosaic": (0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
+                        "plots": True,
+                        "cache": False,
+                        "label": "start",
+                        "ram_safe": False,
+                    }
+                ]
             used_memory_fallback = False
-            if not is_resuming:
-                fallback_batch = 1 if int(batch_size) <= 2 else max(1, int(batch_size) // 2)
-                fallback_img_size = (
-                    512
-                    if int(img_size) >= 640
-                    else self._next_lower_training_imgsz(int(img_size))
+            if not is_resuming and not start_with_ram_safe_profile:
+                fallback_attempt = self._build_ram_safe_training_attempt(
+                    batch_size=int(batch_size),
+                    img_size=int(img_size),
+                    lr0=float(lr0),
+                    dataset_profile=dataset_profile,
+                    label="oom_fallback",
                 )
-                fallback_lr0 = round(max(0.0025, float(lr0) * 0.85), 4)
-                fallback_attempt = {
-                    "batch_size": int(fallback_batch),
-                    "img_size": int(fallback_img_size),
-                    "lr0": float(fallback_lr0),
-                    "amp": False,
-                    "mosaic": 0.0,
-                    "close_mosaic": 0,
-                    "label": "oom_fallback",
-                }
                 if fallback_attempt != training_attempts[0]:
                     training_attempts.append(fallback_attempt)
 
@@ -1025,14 +1286,31 @@ class YOLOPoseTrainer:
                     retry_msg = (
                         "Wykryto problem pamięci. Ponawiam trening na lżejszych ustawieniach: "
                         f"batch={int(attempt['batch_size'])}, imgsz={int(attempt['img_size'])}, "
-                        f"mosaic=0, amp=off."
+                        "mosaic=0, amp=off, cache=off, plots=off."
                     )
                     logger.warning(retry_msg)
                     if self.on_progress:
                         self.on_progress(0.0, retry_msg)
+                elif bool(attempt.get("ram_safe")):
+                    logger.info(
+                        "Start profilu RAM-safe: "
+                        f"batch={int(attempt['batch_size'])}, imgsz={int(attempt['img_size'])}, "
+                        "mosaic=0, amp=off, cache=off, plots=off."
+                    )
 
                 logger.info("Rozpoczynam trening...")
                 try:
+                    if (
+                        not is_resuming
+                        and attempt_index < (len(training_attempts) - 1)
+                        and not bool(attempt.get("ram_safe"))
+                    ):
+                        ram_guard_state = sample_system_memory()
+                        if self._is_ram_pressure_high(ram_guard_state, dataset_profile):
+                            raise RuntimeError(
+                                "not enough memory: RAM guard przed pierwszym batchem. "
+                                f"{self._format_ram_state(ram_guard_state)}"
+                            )
                     if is_resuming:
                         # Ultralytics oczekuje samej flagi resume=True przy wznawianiu treningu.
                         self.model.train(resume=True)
@@ -1048,6 +1326,8 @@ class YOLOPoseTrainer:
                             amp=bool(attempt["amp"]),
                             mosaic=attempt.get("mosaic"),
                             close_mosaic=attempt.get("close_mosaic"),
+                            plots=bool(attempt.get("plots", True)),
+                            cache=bool(attempt.get("cache", False)),
                         )
                         self.model.train(**train_args)
                     last_training_error = None
@@ -1236,11 +1516,21 @@ class YOLOPoseTrainer:
                     "lżejszych ustawień (mniejszy batch, mniejszy imgsz, mosaic=0, amp=off).\n"
                     + error_text
                 )
+            epoch_state_text = self._format_runtime_epoch_state()
+            if epoch_state_text:
+                error_text = f"{error_text}\n\n{epoch_state_text}"
 
+            runtime_epoch = self._resolve_runtime_epoch()
+            train_dir = Path(run.output_dir) / "train"
+            last_weights = train_dir / "weights" / "last.pt"
+            last_weights_value = "" if self._is_nonfinite_training_error(e) else str(last_weights) if last_weights.exists() else ""
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.FAILED.value,
+                current_epoch=runtime_epoch,
                 finished_at=datetime.now().isoformat(),
+                best_weights="",
+                last_weights=last_weights_value,
                 error_message=error_text,
             )
 
@@ -1249,6 +1539,7 @@ class YOLOPoseTrainer:
 
         finally:
             self.is_training = False
+            self._training_batch_state = None
             self._reset_runtime_state()
 
     def _save_checkpoint(self, trainer):
@@ -1258,18 +1549,26 @@ class YOLOPoseTrainer:
 
             try:
                 save_model = getattr(trainer, "save_model", None)
-                if callable(save_model):
+                if callable(save_model) and self._is_runtime_epoch_complete():
                     save_model()
+                elif callable(save_model):
+                    logger.info(
+                        "Pauza/zatrzymanie w trakcie niedomkniętej epoki. "
+                        "Nie wymuszam zapisu checkpointu mid-epoch, aby nie oznaczyć "
+                        "nieukończonej epoki jako ukończonej."
+                    )
             except Exception as save_err:
                 logger.warning(f"Nie udało się wymusić zapisu checkpointu pauzy: {save_err}")
 
+            completed_epoch = self._resolve_runtime_epoch(trainer)
+            last_weights_value = str(checkpoint) if checkpoint.exists() else str(getattr(run, "last_weights", "") or "")
             self.history.update_run(
                 run.id,
-                last_weights=str(checkpoint),
-                current_epoch=trainer.epoch + 1,
+                last_weights=last_weights_value,
+                current_epoch=completed_epoch,
             )
 
-            logger.info(f"Checkpoint: {checkpoint}")
+            logger.info(f"Checkpoint: {last_weights_value or '[brak]'} | ukończone epoki: {completed_epoch}")
 
         except Exception as e:
             logger.error(f"Błąd checkpointu: {e}")
@@ -1348,18 +1647,56 @@ class YOLOPoseTrainer:
             logger.error(f"Nie można wznowić: {run.status}")
             return None
 
-        if not run.last_weights or not Path(run.last_weights).exists():
+        if self._is_nonfinite_training_error(RuntimeError(str(getattr(run, "error_message", "") or ""))):
+            logger.error(
+                "Nie można bezpiecznie wznowić tego runu: poprzedni trening wygenerował NaN/Inf "
+                "albo checkpoint last.pt został oznaczony jako uszkodzony. Uruchom nowy trening "
+                "z ostatniego poprawnego modelu bazowego albo lżejszych ustawień."
+            )
+            return None
+
+        last_weights = str(run.last_weights or "").strip()
+        if not last_weights or not Path(last_weights).exists():
+            try:
+                fallback_last = Path(str(run.output_dir or "")) / "train" / "weights" / "last.pt"
+                if fallback_last.exists():
+                    last_weights = str(fallback_last)
+                    self.history.update_run(run.id, last_weights=last_weights)
+                    run.last_weights = last_weights
+            except Exception:
+                pass
+        if not last_weights or not Path(last_weights).exists():
             logger.error("Brak checkpointu")
             return None
 
-        remaining = run.epochs - run.current_epoch
+        checkpoint_completed_epoch = self._resolve_completed_epoch_from_checkpoint(last_weights)
+        if checkpoint_completed_epoch is not None:
+            try:
+                history_epoch = int(getattr(run, "current_epoch", 0) or 0)
+            except Exception:
+                history_epoch = 0
+            if checkpoint_completed_epoch < history_epoch:
+                logger.warning(
+                    "Historia runu wskazywała epokę późniejszą niż checkpoint. "
+                    f"Koryguję current_epoch: {history_epoch} -> {checkpoint_completed_epoch}."
+                )
+                self.history.update_run(run.id, current_epoch=int(checkpoint_completed_epoch))
+                run.current_epoch = int(checkpoint_completed_epoch)
+
+        target_epochs = max(
+            int(getattr(run, "epochs", 0) or 0),
+            int(getattr(run, "current_epoch", 0) or 0) + 1,
+            1,
+        )
 
         return self.start_training(
             name=run.name + " (wznowiony)",
             dataset_path=run.dataset_path,
-            epochs=remaining,
+            base_model=run.base_model,
+            epochs=target_epochs,
             batch_size=run.batch_size,
             img_size=run.img_size,
             device=run.device,
-            resume_from=run.last_weights,
+            lr0=run.lr0,
+            resume_from=last_weights,
         )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Lekkie modele widoku dla E4/Z4.
+Lekkie modele widoku dla E4T/E4Z/Z4.
 """
 
 from __future__ import annotations
@@ -25,29 +25,18 @@ class Step4DatasetWorkflowViewModel:
     creator_summary: str = ""
     split_intro: str = ""
     split_summary: str = ""
-    split_action_label: str = "Przygotuj dataset treningowy"
+    split_action_label: str = "Przygotuj wariant treningowy"
     show_split_toggle: bool = False
     split_toggle_label: str = "Popraw split"
     show_split_details: bool = True
-    char_ready_dataset: bool = False
-    char_ready_dataset_path: str = ""
-    char_ready_train: int = 0
-    char_ready_val: int = 0
-    char_ready_test: int = 0
 
 
 @dataclass(frozen=True)
 class Step4TrainingInputsViewModel:
     in_campaign: bool = False
-    show_session_name: bool = True
     show_dataset_section: bool = True
-    dataset_caption: str = ""
-    dataset_entry_state: str = "normal"
-    show_dataset_pick_button: bool = True
-    show_dataset_hint: bool = True
     show_scope_hint: bool = True
     show_pose_warning: bool = True
-    base_caption: str = ""
     base_combo_state: str = "readonly"
     show_custom_model: bool = True
     custom_entry_state: str = "disabled"
@@ -66,6 +55,5 @@ class Step4CampaignNavigationViewModel:
     show_train_nav: bool = False
     show_train_back: bool = True
     train_back_label: str = "Wstecz do toru"
-    finish_enabled: bool = False
     show_complete_project: bool = False
     force_dataset_tab_selection: bool = False

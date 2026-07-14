@@ -1,0 +1,42 @@
+{
+  "schema": "auto_annotation_tool.model_metadata.v1",
+  "created_at": "2026-06-04T22:50:17",
+  "model": {
+    "file_name": "yolo26n-pose.pt",
+    "path": "yolo26n-pose.pt",
+    "fingerprint": {
+      "file_name": "yolo26n-pose.pt",
+      "path": "C:\\Users\\48572\\Desktop\\dyplom\\start4\\yolo26n-pose.pt",
+      "size": 7878574,
+      "mtime_ns": 1776605438653167100
+    },
+    "validation_ok": true,
+    "validation_message": "Model POSE OK",
+    "info": {
+      "type": "pose",
+      "task": "pose",
+      "classes": [
+        "person"
+      ],
+      "num_classes": 1,
+      "keypoints": true,
+      "kpt_shape": [
+        17,
+        3
+      ],
+      "file_size_mb": 7.51,
+      "file_name": "yolo26n-pose.pt",
+      "yolo_family": "YOLO26",
+      "yolo_version": "26",
+      "yolo_size": "n",
+      "yolo_variant": "YOLO26n",
+      "model_scale": "n",
+      "yaml_file": "yolo26n-pose.yaml",
+      "architecture_label": "YOLO26n Pose",
+      "source_model": "yolo26n-pose.yaml",
+      "source_model_name": "yolo26n-pose.yaml",
+      "source_architecture_label": "YOLO26n Pose",
+      "ultralytics_version": "8.3.222"
+    }
+  }
+}

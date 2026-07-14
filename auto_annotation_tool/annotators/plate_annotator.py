@@ -39,7 +39,7 @@ class PlateAnnotator(BaseAnnotator):
                  model_path: Path,
                  confidence: float = 0.25,
                  device: str = "auto",
-                 enable_ocr: bool = True,
+                 enable_ocr: bool = False,
                  ocr_confidence_threshold: float = 0.3,
                  enable_rectification: bool = True):
         super().__init__(confidence, device)
@@ -228,14 +228,17 @@ class PlateAnnotator(BaseAnnotator):
                 annotation.status_message = "OpenCV niedostępny"
                 return annotation
             
-            image = cv2.imread(str(image_path))
+            image = self._read_image_for_yolo(image_path)
             if image is None:
+                annotation.width = 0
+                annotation.height = 0
                 annotation.status = AnnotationStatus.ERROR
-                annotation.status_message = "Nie można załadować obrazu"
+                annotation.status_message = self._describe_image_read_error(image_path)
                 return annotation
+            yolo_source = str(image_path) if image is True else image
             
             results = self.model(
-                str(image_path),
+                yolo_source,
                 conf=self.confidence,
                 device=self.device,
                 verbose=False

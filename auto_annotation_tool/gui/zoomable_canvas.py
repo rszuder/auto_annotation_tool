@@ -6,10 +6,13 @@ Zastosowanie: Podgląd w zakładce Prostowania Tablic.
 """
 
 import math
+import logging
 import time
 import tkinter as tk
 from types import SimpleNamespace
 from PIL import Image, ImageTk
+
+logger = logging.getLogger(__name__)
 
 
 class ZoomableCanvas(tk.Canvas):
@@ -17,6 +20,10 @@ class ZoomableCanvas(tk.Canvas):
     
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
+        try:
+            self.configure(takefocus=True)
+        except Exception:
+            pass
         
         # Stan zoom'u
         self.zoom_level = 1.0
@@ -67,10 +74,38 @@ class ZoomableCanvas(tk.Canvas):
         # Bind'y - klawiatura
         self.bind("<Home>", self._on_reset_view)  # Home = reset zoom i pan
         self.bind("<r>", self._on_reset_view)     # r = reset
+        self.bind("<R>", self._on_reset_view)
         self.bind("<i>", self._on_toggle_info)    # i = toggle info
+        self.bind("<I>", self._on_toggle_info)
         
         # Kursor
         self.current_cursor = "arrow"
+
+    def _perf_probe_active(self) -> bool:
+        try:
+            return time.perf_counter() <= float(getattr(self, "_perf_probe_until", 0.0) or 0.0)
+        except Exception:
+            return False
+
+    def _perf_probe_label(self) -> str:
+        return str(getattr(self, "_perf_probe_label_value", "") or "-")
+
+    def _log_perf(self, operation: str, elapsed_ms: float, *, threshold_ms: float = 80.0, **details) -> None:
+        if not self._perf_probe_active() and float(elapsed_ms) < float(threshold_ms):
+            return
+        try:
+            suffix = " ".join(f"{key}={value}" for key, value in details.items())
+            if suffix:
+                suffix = " " + suffix
+            logger.info(
+                "[Z2 CANVAS PERF] %s %.1fms label=%s%s",
+                operation,
+                float(elapsed_ms),
+                self._perf_probe_label(),
+                suffix,
+            )
+        except Exception:
+            pass
 
     def _get_canvas_size(self):
         return (
@@ -306,12 +341,16 @@ class ZoomableCanvas(tk.Canvas):
             event_local_x = None
             event_local_y = None
 
-        try:
-            pointer_local_x = float(self.winfo_pointerx()) - root_x
-            pointer_local_y = float(self.winfo_pointery()) - root_y
-        except Exception:
-            pointer_local_x = None
-            pointer_local_y = None
+        # Querying the global pointer position can be surprisingly expensive on
+        # Windows/Tk and sits directly in the first-corner drag hot path.  Use it
+        # only as a real fallback when the event does not provide root coords.
+        if event_local_x is None or event_local_y is None:
+            try:
+                pointer_local_x = float(self.winfo_pointerx()) - root_x
+                pointer_local_y = float(self.winfo_pointery()) - root_y
+            except Exception:
+                pointer_local_x = None
+                pointer_local_y = None
 
         if event_local_x is not None and event_local_y is not None:
             if abs(event_local_x - raw_x) > 1.5 or abs(event_local_y - raw_y) > 1.5:
@@ -392,10 +431,34 @@ class ZoomableCanvas(tk.Canvas):
             return
 
         self._cancel_final_quality_display()
+        scheduled_at = time.perf_counter()
+        probe_active = self._perf_probe_active()
+        if probe_active:
+            self._log_perf(
+                "final_quality.schedule",
+                0.0,
+                threshold_ms=0.0,
+                delay=max(0, int(delay_ms)),
+            )
 
         def _run():
+            run_started_at = time.perf_counter()
             self._final_quality_after_id = None
+            wait_ms = max(0.0, (run_started_at - scheduled_at) * 1000.0)
+            if probe_active or self._perf_probe_active() or wait_ms >= (max(0, int(delay_ms)) + 80):
+                self._log_perf(
+                    "final_quality.run_wait",
+                    wait_ms,
+                    threshold_ms=0.0 if probe_active else 120.0,
+                    delay=max(0, int(delay_ms)),
+                )
             self._update_display(interaction_fast=False)
+            elapsed_ms = max(0.0, (time.perf_counter() - run_started_at) * 1000.0)
+            self._log_perf(
+                "final_quality.run_total",
+                elapsed_ms,
+                threshold_ms=0.0 if probe_active else 120.0,
+            )
 
         try:
             self._final_quality_after_id = self.after(max(0, int(delay_ms)), _run)
@@ -460,6 +523,10 @@ class ZoomableCanvas(tk.Canvas):
         if self.original_image is None:
             return
 
+        try:
+            self.focus_set()
+        except Exception:
+            pass
         self._cancel_zoom_animation()
         event = self._normalize_pointer_event(event)
         anchor_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
@@ -477,7 +544,7 @@ class ZoomableCanvas(tk.Canvas):
 
         new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
         if abs(new_zoom - float(self.zoom_level)) < 1e-9:
-            return
+            return "break"
 
         self.zoom_level = new_zoom
         self.pan_data['x'] = anchor_x - (float(img_x) * float(self.zoom_level))
@@ -485,6 +552,7 @@ class ZoomableCanvas(tk.Canvas):
         self._apply_clamped_pan()
         self._schedule_deferred_display(delay_ms=16, interaction_fast=True)
         self._delegate_interaction("zoom", event)
+        return "break"
 
     def _get_middle_click_target_zoom(self) -> float:
         zoom = max(0.01, float(self.zoom_level))
@@ -675,10 +743,25 @@ class ZoomableCanvas(tk.Canvas):
     
     def _on_pan_press(self, event):
         """Początek przeciągania (naciśnięcie LPM)."""
+        started_at = time.perf_counter()
         self._cancel_zoom_animation()
+        after_cancel = time.perf_counter()
         event = self._normalize_pointer_event(event)
+        after_normalize = time.perf_counter()
         if self._delegate_interaction("press", event):
+            elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+            self._log_perf(
+                "pan_press.delegate",
+                elapsed_ms,
+                threshold_ms=0.0 if self._perf_probe_active() else 80.0,
+                cancel=f"{(after_cancel - started_at) * 1000.0:.1f}",
+                normalize=f"{(after_normalize - after_cancel) * 1000.0:.1f}",
+            )
             return
+        try:
+            self.focus_set()
+        except Exception:
+            pass
         if self._delegate_blocks_pan(event):
             self.pan_data['press_x'] = None
             self.pan_data['press_y'] = None
@@ -687,6 +770,14 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data['press_x'] = event.x
         self.pan_data['press_y'] = event.y
         self.config(cursor="hand2")
+        elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+        self._log_perf(
+            "pan_press.pan",
+            elapsed_ms,
+            threshold_ms=0.0 if self._perf_probe_active() else 80.0,
+            cancel=f"{(after_cancel - started_at) * 1000.0:.1f}",
+            normalize=f"{(after_normalize - after_cancel) * 1000.0:.1f}",
+        )
     
     def _on_pan_motion(self, event):
         """Przeciąganie widoku (ruch myszy z LPM)."""
@@ -795,9 +886,21 @@ class ZoomableCanvas(tk.Canvas):
         if self.original_image is None:
             return
 
+        started_at = time.perf_counter()
+        phase_at = started_at
+        phase_ms: dict[str, float] = {}
+
+        def mark_phase(name: str) -> None:
+            nonlocal phase_at
+            now = time.perf_counter()
+            phase_ms[name] = max(0.0, (now - phase_at) * 1000.0)
+            phase_at = now
+
         self._apply_clamped_pan()
+        mark_phase("clamp")
 
         visible_region = self._get_visible_image_region(interaction_fast=interaction_fast)
+        mark_phase("region")
         full_width, full_height = self._get_full_image_size()
         origin_x = float(self.pan_data.get('x', 0.0))
         origin_y = float(self.pan_data.get('y', 0.0))
@@ -809,12 +912,19 @@ class ZoomableCanvas(tk.Canvas):
         if visible_region is not None:
             crop_box = visible_region["crop_box"]
             cropped = self.original_image.crop(crop_box)
-            resampling = Image.Resampling.NEAREST if interaction_fast else Image.Resampling.BILINEAR
+            mark_phase("crop")
+            resampling = Image.Resampling.NEAREST if interaction_fast else getattr(
+                self,
+                "resampling_quality",
+                Image.Resampling.BILINEAR,
+            )
             scaled = cropped.resize(
                 (int(visible_region["draw_width"]), int(visible_region["draw_height"])),
                 resampling
             )
+            mark_phase("resize")
             next_photo_image = ImageTk.PhotoImage(scaled)
+            mark_phase("photo")
             next_image_coords = (
                 float(visible_region["draw_x"]),
                 float(visible_region["draw_y"]),
@@ -831,6 +941,7 @@ class ZoomableCanvas(tk.Canvas):
         # Prepare the resized frame before clearing the canvas. The old image
         # stays visible during resize, so Q/E navigation does not flash blank.
         self.delete("all")
+        mark_phase("delete")
         self.photo_image = None
         self.image_id = None
         self._render_region = None
@@ -845,6 +956,7 @@ class ZoomableCanvas(tk.Canvas):
                 anchor="nw"
             )
             self._render_region = next_render_region
+        mark_phase("create")
 
         self.configure(
             scrollregion=(
@@ -854,7 +966,34 @@ class ZoomableCanvas(tk.Canvas):
                 origin_y + full_height,
             )
         )
+        mark_phase("scrollregion")
         self._draw_overlay()
+        mark_phase("overlay")
+        elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+        if self._perf_probe_active() or elapsed_ms >= 90.0:
+            details = {
+                "fast": int(bool(interaction_fast)),
+                "clamp": f"{phase_ms.get('clamp', 0.0):.1f}",
+                "region": f"{phase_ms.get('region', 0.0):.1f}",
+                "crop": f"{phase_ms.get('crop', 0.0):.1f}",
+                "resize": f"{phase_ms.get('resize', 0.0):.1f}",
+                "photo": f"{phase_ms.get('photo', 0.0):.1f}",
+                "delete": f"{phase_ms.get('delete', 0.0):.1f}",
+                "create": f"{phase_ms.get('create', 0.0):.1f}",
+                "scroll": f"{phase_ms.get('scrollregion', 0.0):.1f}",
+                "overlay": f"{phase_ms.get('overlay', 0.0):.1f}",
+            }
+            try:
+                if visible_region is not None:
+                    details["draw"] = f"{int(visible_region.get('draw_width', 0))}x{int(visible_region.get('draw_height', 0))}"
+            except Exception:
+                pass
+            self._log_perf(
+                "display.visible_region",
+                elapsed_ms,
+                threshold_ms=0.0 if self._perf_probe_active() else 90.0,
+                **details,
+            )
 
     def _can_reuse_buffered_pan(self):
         region = self._render_region if isinstance(self._render_region, dict) else None
@@ -921,7 +1060,7 @@ class ZoomableCanvas(tk.Canvas):
             vy = self.canvasy(10)
             
             info_text = f"Zoom: {self.zoom_level:.2f}x"
-            help_text = "[Scroll: Zoom] [MMB: Zoom/Back] [Drag: Pan] [R: Reset] [I: Ukryj]"
+            help_text = "[Rolka: zoom] [LPM+drag: pan] [ŚPM: zoom/powrót] [R/Home: reset] [I: info]"
             vy_help = self.canvasy(30)
 
             offsets = [(-2, -2), (0, -2), (2, -2), (-2, 0), (2, 0), (-2, 2), (0, 2), (2, 2)]

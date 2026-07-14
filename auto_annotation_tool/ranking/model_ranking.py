@@ -5,12 +5,73 @@ Ranking modeli.
 """
 
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 
 from ..config import CONFIG, logger
+
+PLATE_POSE_TASK_LABEL = "Tablice (Pose)"
+
+
+def is_plate_pose_model_path(path_like) -> bool:
+    """Rozpoznaje kandydatów modelu tablic bez opierania się wyłącznie na nazwie ``pose``."""
+    raw = str(path_like or "").strip()
+    if not raw:
+        return False
+    try:
+        path = Path(raw)
+    except Exception:
+        path = Path(str(raw))
+
+    name = path.name.lower()
+    parts = {str(part).lower() for part in path.parts}
+    if name.startswith("char_") or "chars" in parts or "characters" in parts:
+        return False
+    return (
+        name.startswith("plate_")
+        or "pose" in name
+        or "plate" in parts
+        or "plates" in parts
+        or "tablic" in name
+    )
+
+
+def format_ranking_model_label(model_name: str, model_path: str = "", task_type: str = "") -> str:
+    """Zwraca domenową etykietę modelu, żeby UI nie sugerował błędnie toru ``char``."""
+    raw_name = str(model_name or "").strip()
+    try:
+        path_name = Path(str(model_path or "")).name
+    except Exception:
+        path_name = ""
+    name = path_name or raw_name or "model.pt"
+    task = str(task_type or "").strip().lower()
+    is_plate_task = "tablic" in task or "plate" in task or "pose" in task
+    if not is_plate_task and not is_plate_pose_model_path(model_path or name):
+        return raw_name or name
+
+    stem = Path(name).stem
+    lower = stem.lower()
+    if lower.startswith("yolo") and "pose" in lower:
+        return f"YOLO Pose · {name}"
+    if lower.startswith("best_pose"):
+        return f"Model tablic Pose · {name}"
+
+    date_matches = re.findall(r"20\d{6}_\d{6}", stem)
+    map_match = re.search(r"map(\d{2,3})\b", lower)
+    details: list[str] = []
+    if date_matches:
+        details.append(date_matches[-1])
+    if map_match:
+        try:
+            details.append(f"mAP {int(map_match.group(1)) / 100:.2f}")
+        except Exception:
+            details.append(f"mAP {map_match.group(1)}")
+    if not details:
+        details.append(name)
+    return "Model tablic Pose · " + " · ".join(details)
 
 
 @dataclass

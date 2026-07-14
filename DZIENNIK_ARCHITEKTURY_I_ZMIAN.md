@@ -1075,10 +1075,10 @@ Nie mieszamy tych dwoch rzeczy w copy, w szufladzie, w modalach ani w statusach 
 
 W `Z1/E1` dodano preflight toru znakow:
 
-- prog startowy `10 obrazow` dla scenariusza, w ktorym nie ma jeszcze gotowych tablic;
-- prog `10 gotowych tablic` dla scenariusza przejscia na podstawie materialu z poprzednich iteracji albo importu;
+- prog startowy `10 obrazow` dla scenariusza, w ktorym nie ma jeszcze istniejacego zrodla tablic;
+- prog `10 tablic w istniejacym zrodle` dla scenariusza przejscia na podstawie materialu z poprzednich iteracji albo importu;
 - ostrzegawczy modal przy wyborze toru znakow, gdy E1 widzi tylko potencjal obrazowy, ale nie widzi jeszcze materialu tablicowego;
-- blokade automatycznego przeskoku z E1 do E3, jesli projekt ma tylko obrazy, a nie ma realnych gotowych tablic;
+- blokade automatycznego przeskoku z E1 do E3, jesli projekt ma tylko obrazy, a nie ma realnego zrodla tablic;
 - karte toru znakow w E1 opisujaca aktualny stan preflightu prostym jezykiem.
 
 Drugi krok stabilizacji ujednolica znaczenie `ready` dla toru znakow:
@@ -1090,7 +1090,7 @@ Drugi krok stabilizacji ujednolica znaczenie `ready` dla toru znakow:
 Trzeci krok stabilizacji dodaje modal awaryjny dla `E2` w torze znakow:
 
 - jezeli `E2/Z2` ma mniej niz `10` tablic, program nie przechodzi cicho do `E3`;
-- uzytkownik dostaje licznik: obrazy z tablicami, gotowe tablice, minimum i brakujace tablice;
+- uzytkownik dostaje licznik: obrazy z tablicami, tablice w zrodle, minimum i brakujace tablice;
 - dostepne sa trzy decyzje: oznaczaj dalej w `Z2`, wroc do `E1` po wiekszy katalog zdjec albo wroc do `E1` i zmien tor;
 - powrot do `Z2` z tego miejsca nie ustawia juz trybu naprawczego `E3`, bo problem nadal nalezy do domkniecia `E2`.
 
@@ -1289,3 +1289,489 @@ Dwa kolejne kroki domykajace:
 
 - `PZ2(F)` ma teraz jedna brame walidacji aktywnego zrodla treningowego. Stan przycisku treningu i sam start treningu korzystaja z tego samego sprawdzenia `TrainingSource -> data.yaml -> validate_dataset`;
 - dodano cache walidacji aktywnego datasetu PZ2, oparty o sciezke datasetu, tor i czasy modyfikacji `data.yaml` oraz katalogow `images/train`, `images/val`, `images/test`. Dzieki temu odswiezanie UI nie musi za kazdym razem skanowac katalogow splitu.
+
+Backlog po stabilizacji - schemat klas datasetu - 2026-05-24:
+
+Pomysl: dodac mozliwosc swobodnego nadawania etykiet klasom datasetow, ale nie przez reczna edycje `data.yaml`.
+
+Diagnoza:
+
+- w YOLO pliki labeli przechowuja numery klas, a `data.yaml` tlumaczy te numery na nazwy;
+- sama zmiana nazwy w `data.yaml` moze byc bezpieczna dla treningu, ale nie musi byc bezpieczna dla aplikacji, OCR, importu, inferencji i dalszego mapowania wynikow;
+- szczegolnie w torze znakow nazwa klasy nie jest tylko opisem. Program musi wiedziec, ze dana klasa oznacza konkretny znak, np. `A`, a nie dowolna etykiete wyswietlana uzytkownikowi.
+
+Proponowany kierunek:
+
+- wprowadzic obok `data.yaml` dodatkowy plik `dataset_classes.json`;
+- rozdzielic stabilne `id` klasy, techniczne znaczenie `canonical`, nazwe treningowa `train_name` i nazwe wyswietlana `display_name`;
+- dla znakow przechowywac dodatkowo `symbol`, zeby aplikacja zawsze mogla odtworszyc semantyke klasy po inferencji;
+- generowac `data.yaml` z tego schematu, zamiast traktowac YAML jako jedyne zrodlo prawdy.
+
+Przykladowy kontrakt:
+
+- `id`: stabilny numer klasy z labeli YOLO;
+- `canonical`: techniczne znaczenie, np. `plate` albo `char:A`;
+- `train_name`: nazwa zapisywana do `data.yaml`;
+- `display_name`: nazwa widoczna w GUI;
+- `aliases`: opcjonalne zgodne nazwy importowe;
+- `symbol`: opcjonalny znak dla toru znakow.
+
+Etapy wdrozenia po stabilizacji:
+
+- dodac maly modul `dataset_class_schema.py`, ktory czyta, waliduje i zapisuje schemat klas;
+- nauczyc eksport datasetu tablic i znakow tworzyc `dataset_classes.json` razem z `data.yaml`;
+- dodac w UI mala tabele klas z kolumnami `ID`, `znaczenie`, `etykieta treningowa`, `etykieta w programie`;
+- przy treningu i imporcie traktowac `dataset_classes.json` jako preferowane zrodlo semantyki, a `data.yaml` jako format kompatybilnosci z YOLO;
+- zachowac fallback dla starych datasetow, ktore maja tylko `data.yaml`.
+
+Ocena: to jest pomysl stabilizacyjno-architektoniczny, nie kosmetyka. Pozwoli nazwac klasy po ludzku bez utraty jednoznacznosci danych i bez ryzyka, ze zmiana etykiety w GUI rozbije pozniejsza inferencje albo import.
+
+## Stabilizacja finalna: ciecie, testy, zamrozenie - 2026-05-26
+
+Cel: przejsc z etapu szerokiej przebudowy architektury do etapu kontrolowanej stabilizacji. Od tego punktu nowe zmiany maja byc oceniane przede wszystkim pod katem ryzyka regresji w `(C)` i `(F)`.
+
+### Krok 1: odgruzowanie architektury
+
+- `app.py` zostal odciazony przez przeniesienie motywow, stylowania widgetow i dialogow do `app_theme_runtime.py`.
+- `tab_character_annotation.py` zostal odciazony przez przeniesienie delegatow workflow ekstrakcji Z3 do `z3_character_extract_delegates.py`.
+- `z2_main_widgets.py` zostal odciazony przez przeniesienie poznych bindow help/event do `z2_main_widget_bindings.py` oraz prawego panelu Z2 do `z2_right_panel_widgets.py`.
+- Ciecia dotycza fasad i builderow UI. Nie zmieniaja kontraktow `(C)/(F)`, bramek etapow ani manifestow.
+
+### Krok 2: test automatyczny po cieciach
+
+Wykonano:
+
+- pelna kompilacja `python -B -m compileall -q auto_annotation_tool`;
+- import smoke dla `AutoAnnotationApp`, `AnnotationTab`, `CharacterAnnotationTab`, `CampaignManager`;
+- `git diff --check` dla dotknietych modulow.
+
+Wynik: testy techniczne przeszly. Pozostaje standardowe ostrzezenie CRLF/LF dla `campaign_manager.py`, bez bledow whitespace.
+
+### Krok 3: zamrozenie funkcjonalne przed testami GUI
+
+Do czasu przejscia trzech scenariuszy testowych nie dokladamy nowych duzych mechanik:
+
+- tor tablic: od E1 przez Z2, Z4/PZ1, Z4/PZ2 i E4;
+- tor znakow: od E1 przez E2/Z2, Z3/PZ1, Z3/PZ2, Z3/PZ3, Z4 i E4;
+- tryb mieszany: zmiana toru miedzy iteracjami oraz ponowne wejscie do etapow po restarcie projektu.
+
+Dozwolone sa tylko poprawki:
+
+- regresji blokujacych flow;
+- blednych licznikow, bramek i statusow;
+- oczywistych problemow copy/kodowania;
+- bezpiecznych optymalizacji, ktore nie zmieniaja kontraktu danych.
+
+Zasada: jezeli poprawka wymaga nowego kontraktu danych albo przebudowy przeplywu, trafia do backlogu po stabilizacji, chyba ze blokuje przejscie jednego z trzech glownych scenariuszy.
+
+## Kampania jako graf i maszyna stanow - 2026-06-03
+
+Cel: odejsc od rozproszonych decyzji ukrytych w panelach etapow i przejsc do jawnego modelu grafowego. Kampania `(C)` ma byc opisana jako maszyna stanow, w ktorej wezly glowne reprezentuja etapy `E1`, `E2`, `E3`, `E4`, a krawedzie reprezentuja pojedyncze przejscia z wlasnymi wymaganiami, zasobami, akcjami i zatwierdzeniem.
+
+Diagnoza:
+
+- dotychczasowy wizard laczyl stan etapu, decyzje uzytkownika, zasoby i akcje w wielu miejscach UI;
+- przez to copy, statusy bramek i dostepnosc CTA mogly sie rozjezdzac po kolejnych refaktorach;
+- wybor toru `tablice/znaki` nie powinien byc osobnym magicznym stanem, tylko wynikiem wyboru konkretnej krawedzi grafu;
+- badge krawedzi ma byc oknem na pojedyncze przejscie, a nie ogolnym panelem etapu.
+
+Docelowy model:
+
+- graf glowny pokazuje cykl `E1 -> E2 -> E3 -> E4 -> E1`;
+- krawedzie standardowe sa ciagle, a skoki warunkowe, np. `E1 -> E3`, sa przerywane;
+- kazda krawedz ma badge/bramke z czterema polami: `Bramka`, `Zasoby`, `Akcje`, `Zatwierdz`;
+- klikniecie w `Zasoby` pokazuje modal zasobow wymaganych przez dana krawedz;
+- klikniecie w `Akcje` pokazuje tylko akcje przypisane do tej konkretnej krawedzi, bez mieszania akcji z innych przejsc;
+- klikniecie w `Zatwierdz` wykonuje zatwierdzenie przejscia, jezeli bramka jest otwarta;
+- aktywna krawedz definiuje aktualny zestaw wymagan i mozliwych akcji.
+
+Aktualna macierz przejsc kampanii po rozdzieleniu `E4T/E4Z` i scaleniu dawnych `T01/T02`:
+
+| ID | Przejscie | Cel | Minimum | Opcjonalne zasoby | Efekt |
+|---|---|---|---|---|---|
+| `T01` | `E1 -> E2` | Przygotowanie anotacji tablic dla obrazow z zasobow | `O` | `MT`, `MZ`, `AT`, `AZ` | Otwiera E2/Z2; w pracy bramki wybieramy, czy powstale `AT` zasila model tablic, czy tor znakow |
+| `T03` | `E1 -> E3` | Praca nad znakami na istniejacym zbiorze wyodrebnionych tablic | `AT` albo zatwierdzone/wyodrebnione tablice z projektu | `MZ`, `AZ` | Pomija E2 i otwiera E3/Z3 bez ponownego oznaczania tablic |
+| `T04` | `E2 -> E3` | Przekazanie zatwierdzonych tablic do pracy nad znakami | zatwierdzone obrazy z anotacjami tablic | `MT` | Wyodrebnia tablice i otwiera E3/Z3 |
+| `T05` | `E2 -> E4T` | Dataset i trening modelu tablic | zatwierdzone anotacje tablic | `MT` jako baza | Otwiera Z4 dla modelu tablic |
+| `T06` | `E3 -> E4Z` | Przygotowanie datasetu znakow do treningu | dataset YOLO znakow | `MZ` jako baza | Otwiera Z4 dla modelu znakow |
+| `T07` | `E4T/E4Z -> E1` | Zamkniecie iteracji | trening zakonczony albo jawnie pominiety | nowy `MT` albo `MZ` z treningu | Wraca do E1 kolejnej iteracji |
+
+Slownik zasobow wejsciowych:
+
+- `O` - katalog obrazow;
+- `MT` - model tablic;
+- `MZ` - model znakow;
+- `AT` - anotacje tablic;
+- `AZ` - anotacje znakow.
+
+Zasoby `O`, `AT` i `AZ` powinny miec liczniki. Licznik `O` informuje o liczbie obrazow, licznik `AT` o liczbie zgodnych obrazow i tablic, a licznik `AZ` o liczbie zgodnych tablic/znakow. Dzieki temu graf moze pokazac nie tylko, czy zasob istnieje, ale tez czy ma sensowna skale dla dalszego etapu.
+
+Macierz zasobow E1/IT1:
+
+| Zasoby | Sens | Domyslna sciezka |
+|---|---|---|
+| `O` | Tylko obrazy, brak wiedzy o tablicach | `E1 -> E2` |
+| `O + MT` | Obrazy i model tablic | `E1 -> E2`, autoanotacja tablic mozliwa w Z2 |
+| `O + AT` | Obrazy i gotowe anotacje tablic | `E1 -> E3` albo `E1 -> E2` jako korekta |
+| `O + MT + AT` | Anotacje tablic i model tablic | `E1 -> E3`, E2 jako uzupelnienie |
+| `O + MZ` | Model znakow bez tablic | `E1 -> E2`, bo brakuje tablic |
+| `O + AT + MZ` | Gotowe tablice i model znakow | `E1 -> E3` |
+| `O + AT + AZ` | Tablice i anotacje znakow | mozliwy skok blizej `E4` po walidacji |
+| `O + MT + MZ` | Modele sa, ale brak anotacji tablic | `E1 -> E2` |
+| `O + MT + AT + MZ` | Pelny start do znakow | `E1 -> E3` |
+| `O + MT + AT + MZ + AZ` | Najbogatszy import | walidacja i mozliwy skok do `E4` |
+| dataset YOLO bez `O` | Trening bez kampanijnej puli obrazow | `E1 -> E4` jako sciezka specjalna |
+
+Wniosek architektoniczny:
+
+- copy powinno wynikac z zasobow i krawedzi, a nie byc wpisywane recznie w wielu miejscach;
+- import `AT` w E1 i ewentualna adopcja `AT` w Z2 powinny korzystac z tego samego kontraktu walidacji;
+- jezeli model `MT` mozna wskazac jako wsparcie autoanotacji, to `AT` rowniez powinno miec logiczna droge adopcji do biezacej pracy Z2;
+- przyszly AS powinien korzystac z tej samej macierzy, zeby tlumaczyc uzytkownikowi aktualny cel, brakujace zasoby i sens najblizszego przejscia.
+
+Plan wdrozenia:
+
+- wydzielic lekki katalog zasobow kampanii, ktory opisuje `O`, `MT`, `MZ`, `AT`, `AZ`, ich zrodla i liczniki;
+- przypisac do kazdej krawedzi grafu wymagania minimalne, zasoby opcjonalne i akcje;
+- podpiac modal `Zasoby` badge do tego katalogu, zamiast do rozproszonych fragmentow paneli;
+- generowac status bramki i copy z jednej funkcji, ktora zna aktywna krawedz i stan zasobow;
+- dopiero pozniej dodac adopcje `AT` w Z2 jako konsekwencje tego modelu, a nie jako kolejny wyjatek UI.
+
+Ocena: to jest ruch stabilizacyjny. Graf nie powinien byc tylko nowa warstwa wizualna nad starym wizardem. Docelowo ma byc mapa decyzyjna kampanii i jedno zrodlo prawdy dla przejsc, zasobow, bramek i copy.
+
+## Stabilizacja po wdrozeniu grafu i maszyny stanow - 2026-06-12
+
+Cel: doprowadzic graf kampanii z poziomu prototypu wizualnego do realnego systemu sterowania przeplywem oraz ograniczyc liczbe miejsc, w ktorych stary wizard, Z2, Z3 i Z4 wzajemnie dubluja logike.
+
+### 1. Graf kampanii jako aktywna mapa przejsc
+
+Od poprzedniego wpisu graf przestal byc tylko wizualizacja. Zaczal przejmowac role glownego centrum decyzji kampanii:
+
+- dodano osobne moduly opisujace graf, przejscia i zasoby:
+  - `campaign_transition_specs.py`,
+  - `campaign_transition_graph.py`,
+  - `campaign_transition_evaluator.py`,
+  - `campaign_transition_copy.py`,
+  - `campaign_transition_resource_report.py`,
+  - `campaign_resource_catalog.py`,
+  - `campaign_resource_state.py`,
+  - `campaign_stage_state.py`;
+- bramka grafu jest traktowana jako okno na jedno konkretne przejscie, a nie jako ogolny panel etapu;
+- wybor bramki przez elektrode okresla aktywna sciezke, a pozostale bramki sa wygaszane albo ograniczane;
+- akcje bramki sa filtrowane przez aktywne przejscie, zeby modal akcji nie mieszal decyzji z innych krawedzi;
+- zaczeto rozroznienie zachowania bramek w zaleznosci od iteracji, szczegolnie dla pierwszej iteracji, ktora ma inne wymagania niz iteracje kolejne;
+- dodano animacje prowadzenia uwagi po grafie, wezle i bramkach, jako jednorazowy sygnal dla uzytkownika;
+- poprawiano zachowanie zoomu, przesuwania wezlow, przesuwania badge oraz przeliczania lacznikow podczas dragu.
+
+Wniosek: graf staje sie docelowym modelem decyzyjnym kampanii, a stary wizard ma byc stopniowo odcinany, a nie utrzymywany jako rownolegly system prawdy.
+
+### 2. Porzadkowanie UI kampanii
+
+W obrebie kampanii wydzielono i uporzadkowano kolejne warstwy:
+
+- `campaign_shell_ui.py` przejmuje szkielet ekranu kampanii;
+- `campaign_dashboard_ui.py` odpowiada za rysowanie i interakcje grafu;
+- `campaign_graph_actions.py` obsluguje modale zasobow, akcji i zatwierdzen;
+- `campaign_navigation.py` odpowiada za przejscia z grafu do zakladek roboczych;
+- `campaign_project_browser.py` i `campaign_project_history.py` porzadkuja prace z projektami i historia;
+- `campaign_assistant.py` zostal odchudzony, aby AS nie byl kolejnym miejscem z wlasna logika przeplywu;
+- usunieto dawny `campaign_step1_panel_ui.py`, bo byl dinozaurem starego modelu E1 i zaczynal wchodzic w parade maszynie stanow.
+
+Zasada po tych zmianach:
+
+- graf mowi, dokad i po co idziemy;
+- zakladki robocze wykonuja prace;
+- manager kampanii i katalog zasobow sa zrodlem stanu;
+- panele UI nie powinny same zgadywac semantyki przejsc.
+
+### 3. Katalog zasobow i historia projektu
+
+Dodano fundament pod lekkie sledzenie zasobow i historii:
+
+- `campaign_project_history.py` - historia projektu i zdarzen;
+- `campaign_project_registry.py` - rejestr projektow;
+- `campaign_iteration_paths.py` - sciezki iteracji;
+- `campaign_plate_annotation_contract.py` - kontrakt anotacji tablic w kampanii.
+
+Ustalony kierunek:
+
+- historia ma byc lekka, ale uzyteczna;
+- powinna pokazywac, co zostalo wyprodukowane w iteracji;
+- powinna wskazywac, ktore przejscia grafu doprowadzily do obecnego stanu;
+- docelowo poradnik wyboru sciezki powinien korzystac nie tylko z aktualnego stanu zasobow, ale tez z historii projektu.
+
+### 4. Odchudzenie aplikacji glownej
+
+`app.py` zostal rozbity na mniejsze moduly:
+
+- `app_startup.py`,
+- `app_shutdown.py`,
+- `app_delegates.py`,
+- `app_menu_dropdown.py`,
+- `app_global_terminal.py`,
+- `app_project_history.py`,
+- `app_style_setup.py`,
+- `app_theme_definitions.py`,
+- `app_theme_runtime.py`,
+- `app_tooltips.py`,
+- `app_window_recovery.py`.
+
+Cel tej zmiany:
+
+- ograniczyc rozmiar glownej fasady aplikacji;
+- oddzielic startup, shutdown, menu, motywy, terminal i historie;
+- ulatwic dalsze ciecie bez ryzyka, ze poprawka w menu lub motywie dotknie logiki kampanii.
+
+### 5. Z2: stabilizacja wejscia, autoanotacji i duzych projektow
+
+Najwiecej pracy stabilizacyjnej dotyczylo Z2, szczegolnie projektu NEON i wejsc z bramek T04/T06.
+
+Wydzielono kolejne moduly:
+
+- `z2_campaign_flow.py`,
+- `z2_campaign_runtime.py`,
+- `z2_context_runtime.py`,
+- `z2_session_runtime.py`,
+- `z2_restore_workflow.py`,
+- `z2_run_io_runtime.py`,
+- `z2_run_lifecycle.py`,
+- `z2_manifest_runtime.py`,
+- `z2_preview_state.py`,
+- `z2_preview_workflow.py`,
+- `z2_preview_editor.py`,
+- `z2_canvas_interaction.py`,
+- `z2_canvas_overlays.py`,
+- `z2_canvas_metrics_ui.py`,
+- `z2_right_panel_widgets.py`,
+- `z2_layout_ui_runtime.py`,
+- `z2_auto_scope_modal.py`,
+- `z2_model_dialogs.py`,
+- `z2_model_runtime.py`,
+- `z2_model_quality_ui.py`,
+- `z2_panel_workflow.py`,
+- `z2_workflow_methods.py`.
+
+Wykonane stabilizacje:
+
+- wejscie do Z2 z grafu nie powinno juz pokazywac przebitki trybu swobodnego;
+- prawy panel Z2 w kampanii zostal przywrocony po regresji, w ktorej zostawalo samo CTA powrotu do grafu;
+- stan "laduje" prawego panelu zostal oddzielony od docelowego podsumowania;
+- dodano brakujacy delegat `_get_current_preview_plate_count_state`, ktory blokowal finalizacje UI po autoanotacji;
+- podczas autoanotacji powrot do grafu ma byc blokowany, a zamiast tego potrzebna jest jawna akcja zatrzymania procesu;
+- modal autoanotacji zaczal lepiej odrozniac liczbe obrazow od liczby tablic;
+- ograniczono niekontrolowane zaznaczanie listy przy otwartym modalu, gdy uzytkownik nie wlaczyl trybu recznego wyboru;
+- przyspieszono duze runy przez cache i lzejsze odtwarzanie listy;
+- zoptymalizowano przypadek duzego runu z prawie kompletnym XML, aby nie skanowac bez potrzeby tysiacy obrazow przy szukaniu kilku brakow;
+- logi NEON pokazaly zejscie z wejsc rzedu kilkudziesieciu sekund do kilku sekund dla samego otwarcia zakladki, chociaz pelne odtworzenie tysięcy anotacji nadal wymaga dalszej pracy.
+
+### 6. Z2 canvas, fullscreen i superkorekta
+
+W obrebie edytora tablic w Z2 poprawiano glownie responsywnosc:
+
+- ograniczono hit-testy kursora przy aktywnej korekcie narożnikow;
+- usunieto dodatkowy redraw przy przejeciu narożnika do dragu;
+- zmniejszono koszt historii undo podczas ciaglej serii korekt narożnikow;
+- odchudzono wyjscie z fullscreen:
+  - nie wykonujemy wielu kolejnych `fit_to_view` podczas stabilizacji rozmiaru,
+  - overlay, dock i bramka nie sa odswiezane trzykrotnie pod rzad,
+  - toolbar i status edytora odswiezaja sie asynchronicznie,
+  - prawy panel nie jest przywracany podwojnie.
+
+Diagnoza architektoniczna:
+
+- obecne fullscreen/non-fullscreen nadal przepina widgety i PanedWindow;
+- to jest stabilizowane punktowo, ale docelowo lepszy bylby model warstwowy opisany w backlogu.
+
+### 7. Z3/PZ2: rozbicie, pipeline i metadane modeli
+
+Z3 zostalo mocno rozbite na wyspecjalizowane moduly:
+
+- `z3_detection_runtime.py`,
+- `z3_detection_pipeline_ui.py`,
+- `z3_detection_controls_ui.py`,
+- `z3_detection_model_ui.py`,
+- `z3_detection_guard_dialog.py`,
+- `z3_preview_ui.py`,
+- `z3_preview_badges.py`,
+- `z3_preview_events.py`,
+- `z3_preview_overlay_runtime.py`,
+- `z3_preview_typing_runtime.py`,
+- `z3_plate_layout_runtime.py`,
+- `z3_preview_compass_ui.py`,
+- `z3_preview_status_ui.py`,
+- `z3_preview_records.py`,
+- `z3_preview_metadata_runtime.py`,
+- `z3_navigation_runtime.py`,
+- `z3_export_summary.py`.
+
+Zmiany semantyczne i stabilizacyjne:
+
+- kontynuowano rozdzielanie jezyka bramek grafu od dawnego jezyka etapow;
+- porzadkowano rzadowosc tablic, belke podzialu i status 1R/2R/AUTO;
+- wykryto, ze filtr 1R/2R/2R? moze tworzyc wrazenie znikania anotacji;
+- przyjeto kierunek, ze status rzędowości ma wynikac z danych i pracy uzytkownika, a nie byc sztucznym przelacznikiem;
+- rozpoczęto porzadkowanie pipeline OCR/YOLO, w tym rozdzielenie informacji o YB/YS;
+- dodano kierunek podgladu metadanych modelu YOLO przy wyborze modelu w dialogach pipeline, tak aby `best.pt` nie bylo jedyna informacja widoczna dla uzytkownika.
+
+### 8. Z4, dataset i augmentacja
+
+Z4 zostalo rozbite na osobne moduly przygotowania datasetu, walidacji, treningu, historii i augmentacji:
+
+- `z4_dataset_builder.py`,
+- `z4_dataset_sources.py`,
+- `z4_dataset_validation.py`,
+- `z4_dataset_panels.py`,
+- `z4_dataset_preview.py`,
+- `z4_augmentation_modal.py`,
+- `z4_training_runtime.py`,
+- `z4_training_progress.py`,
+- `z4_training_metrics.py`,
+- `z4_train_tab_builder.py`,
+- `z4_train_progress_bar.py`,
+- `z4_history_runtime.py`,
+- `z4_model_export.py`,
+- `z4_device_runtime.py`.
+
+Ustalenia i zmiany:
+
+- augmentacja ma byc osobnym modalem, a nie stalym ciezkim blokiem PZ1;
+- syntetyczne zwiekszanie zbioru ma powiekszac dataset zrodlowy o dodatkowe obrazy, zachowujac nazwy i semantyke wariantow;
+- obrazy augmentowane nie moga nadpisywac istniejacych plikow;
+- parametry ustawione przez uzytkownika stanowia baze, a generator powinien tworzyc rozrzut wokol tej bazy;
+- efekty robocze obejmuja m.in. blot, deszcz, noc, reflektory, relief, zacienienie i polysk mokrego blota;
+- dodano modul `training/dataset_augmentation.py`;
+- dodano metadane modeli YOLO jako lekkie pliki `.metadata.json`, aby UI moglo pokazac informacje bez ciezkiego czytania modelu `.pt`.
+
+### 9. Autoanotacja i annotatory
+
+Porzadkowano rowniez warstwe annotatorow:
+
+- dodano `annotators/runtime_factory.py`;
+- zmieniano `combined_annotator.py`, `plate_annotator.py`, `vehicle_annotator.py` i `base.py`;
+- kierunek: tworzenie annotatorow i wybor runtime ma byc centralizowany, a nie rozrzucony po UI;
+- wrocil temat deduplikacji nakladajacych sie ramek tablic po asyscie pojazdow, bo autoanotacja potrafila oznaczac te sama rejestracje podwojnie.
+
+### 10. Otwarte ryzyka po tej fazie
+
+- Kod jest znacznie bardziej modularny, ale wiele modulow jest nowych i wymaga testow przejsciowych.
+- Czesci starego UI zostaly juz usuniete, ale moga nadal istniec martwe galezie w Z2/Z3/Z4.
+- Najwieksze ryzyka regresji sa obecnie w:
+  - wejsciach z grafu do Z2/Z3/Z4,
+  - autoanotacji i finalizacji runu,
+  - odtwarzaniu duzych projektow po restarcie,
+  - przejsciach fullscreen/non-fullscreen,
+  - modalach wyboru zasobow i akcji.
+- Stabilizacja powinna isc teraz pojedynczymi problemami, nie szerokimi refaktorami naraz.
+
+## Rozdzielenie wezla treningu E4 - 2026-07-10
+
+Decyzja: dawny pojedynczy wezel `E4` byl zbyt ogolny, bo mieszal dwa rozne cele:
+
+- trening modelu tablic;
+- trening modelu znakow.
+
+Wprowadzono rozdzielenie semantyczne:
+
+- `E4T` - trening modelu tablic;
+- `E4Z` - trening modelu znakow.
+
+Zakres zmiany:
+
+- graf kampanii ma teraz osobne wezly `E4T` i `E4Z`;
+- `T05` prowadzi do `E4T`;
+- `T06` prowadzi do `E4Z`;
+- `T07` pozostaje kompatybilnym zamknieciem iteracji, ale wizualnie wychodzi z `E4T` albo `E4Z`;
+- historia projektu i slad sciezki rozroznia produkty `MT` i `MZ` po docelowym wezle treningu;
+- sciezki iteracji maja `edge_sequence` zgodne z realnymi kluczami krawedzi grafu.
+
+Uwaga kompatybilnosci:
+
+- wewnetrzny status kampanii nadal uzywa fizycznego kroku `step4` / `E4`;
+- `E4T` i `E4Z` sa semantycznymi wezlami grafu, mapowanymi na dawny krok techniczny `E4`;
+- alias starej krawedzi `e4_to_e1` pozostaje tylko po to, aby nie zerwac starych wpisow historii i logiki T07.
+
+Wniosek:
+
+Rozdzielenie poprawia czytelnosc decyzji uzytkownika. Uzytkownik nie widzi juz abstrakcyjnego "treningu", tylko konkretnie wie, czy zamyka i trenuje model tablic, czy model znakow.
+
+## Scalenie bramek T01/T02 - 2026-07-10
+
+Decyzja: `T01` i `T02` dublowaly ta sama prace w `E2/Z2`, czyli przygotowanie anotacji tablic na obrazach. Roznica dotyczyla dopiero dalszego uzycia tego produktu.
+
+Nowy model:
+
+- aktywny graf pokazuje jedna bramke `T01` na przejsciu `E1 -> E2`;
+- `T01` oznacza przygotowanie anotacji tablic dla obrazow dostepnych w zasobach;
+- w pracy bramki `T01` uzytkownik wybiera, czy przygotowane `AT` maja zasilic model tablic, czy tor znakow;
+- po `E2` decyzje sa jawne:
+  - `T05` prowadzi do treningu modelu tablic;
+  - `T04` prowadzi do pracy nad znakami;
+- `T03` pozostaje skrotem dla sytuacji, gdy projekt ma juz istniejace zrodlo tablic i mozna pominac ponowne oznaczanie tablic w `Z2`.
+
+Kompatybilnosc:
+
+- stare klucze `e1_to_e2_plate_training` i `e1_to_e2_char_from_images` zostaly aliasami do nowego `e1_to_e2`;
+- stara semantyka `T02` nie jest juz aktywna w UI, ale stare historie i zapisane sciezki projektu moga nadal byc odczytane;
+- `plate_training` i `char_from_images` pozostaja sciezkami iteracji, ale maja wspolny pierwszy krok `e1_to_e2`.
+
+Wniosek:
+
+Graf jest czytelniejszy: na wejsciu `E1` uzytkownik wybiera miedzy praca na obrazach (`T01`) a istniejacym zrodlem tablic (`T03`), zamiast rozrozniac dwa technicznie podobne wejscia do `E2`.
+
+## Headless sanity-check grafu kampanii - 2026-07-10
+
+Dodano lekki test kontraktu grafu:
+
+```powershell
+python -m auto_annotation_tool.campaign_graph_sanity
+```
+
+Zakres testu:
+
+- sprawdza, ze aktywny graf ma jedna bramke `T01` na `E1 -> E2` i nie ma aktywnego `T02`;
+- sprawdza aliasy starych kluczy `e1_to_e2_plate_training` i `e1_to_e2_char_from_images`;
+- sprawdza kompletne sciezki `plate_training`, `char_from_images`, `char_from_ready_plates`;
+- symuluje trzy iteracje kazdej sciezki i wymaga powrotu do `E1`;
+- sprawdza widocznosc akcji zalezne od iteracji, np. `open_z2_first` tylko w iteracji 1 i `open_z2_later` dopiero w kolejnych;
+- sprawdza bazowa gotowosc bramek `T01`, `T03`, `T04`, `T05`, `T06`, `T07`.
+
+Cel:
+
+- przed testami GUI szybko wykrywac regresy kontraktu grafu;
+- nie polegac wylacznie na recznym klikaniu bramek;
+- zamknac warstwe maszyny stanu do takiego poziomu, zeby pozniejsze testy byly glownie stabilizacja UI, licznikow i copy.
+
+## Backlog po stabilizacji - warstwowy model UI - 2026-06-12
+
+Pomysl: po opanowaniu obecnych lagow rozwazyc przejscie na warstwowy model interfejsu, zamiast przepinania widgetow i przebudowywania ekranu przy kazdej zmianie trybu.
+
+Nazwy techniczne kierunku:
+
+- `layered UI`;
+- `layer manager`;
+- `scene graph`;
+- `compositing`;
+- `retained-mode UI`;
+- `overlay stack`.
+
+Proponowany podzial:
+
+- warstwa bazowa: canvas z obrazem albo tablica;
+- warstwa anotacji: ramki, boxy, belki, badge, etykiety;
+- warstwa HUD: kompas, asysta, statusy, ikony fullscreen;
+- warstwa paneli: lewy i prawy panel;
+- warstwa modalna: blokada interakcji i okna decyzji;
+- warstwa interakcji: aktywny tryb, hit-testy, drag, skroty klawiaturowe.
+
+Sens:
+
+- fullscreen/non-fullscreen bylby tylko ukryciem albo pokazaniem warstw, a nie przebudowa PanedWindow;
+- canvas i anotacje moglyby zachowac stan bez kosztownego odtwarzania;
+- HUD i panele boczne bylyby niezalezne;
+- interakcje bylyby kontrolowane przez jeden layer manager, a nie przez wiele rozproszonych wyjatkow.
+
+Decyzja:
+
+- nie wdrazac tego teraz;
+- zapisac jako kierunek docelowy;
+- najpierw doprowadzic obecny system do stabilnosci, a dopiero potem ocenic, czy Z2 powinno dostac pierwszy `LayerController`.

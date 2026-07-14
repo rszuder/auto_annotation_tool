@@ -73,9 +73,9 @@ class Step3Pz3PathSelectionViewModel:
     cvat_card_selected: bool = False
     dataset_badge_text: str = "DATASET"
     dataset_title_text: str = "Dataset znaków"
-    dataset_desc_text: str = "Główna ścieżka PZ3: źródło pracy, opcjonalne poprawki i eksport datasetu."
+    dataset_desc_text: str = "Główna ścieżka PZ3: materiał z PZ2, zakres tablic perfect i utworzenie źródłowego datasetu znaków."
     cvat_badge_text: str = "OPCJA"
-    cvat_title_text: str = "Review pack do CVAT"
+    cvat_title_text: str = "Korekta w CVAT"
     cvat_desc_text: str = "Obieg korekty poza aplikacją: wyślij cropy tablic do CVAT, popraw boxy znaków i wczytaj XML z powrotem w PZ3."
 
 
@@ -94,11 +94,11 @@ class Step3Pz3DatasetModeViewModel:
     show_dataset_source_cards: bool = True
     perfect_selected: bool = True
     existing_selected: bool = False
-    perfect_badge_text: str = "PZ2 | DOMYSLNIE"
-    perfect_title_text: str = "Perfecty z aktywnego runu"
-    perfect_desc_text: str = "Buduj nowy dataset bezposrednio z wyniku PZ2 i aktualnych perfectow."
-    existing_badge_text: str = "DATASET | WZNOWIENIE"
-    existing_title_text: str = "Gotowy dataset YOLO"
+    perfect_badge_text: str = "PZ2"
+    perfect_title_text: str = "Materiał z PZ2"
+    perfect_desc_text: str = "Źródłem są wyodrębnione tablice z PZ2 oznaczone jako perfect."
+    existing_badge_text: str = "Z4"
+    existing_title_text: str = "Warianty w Z4"
     existing_desc_text: str = "Gotowe datasety i ich warianty wybierzesz w Z4."
     show_existing_dataset_panel: bool = False
     cvat_option2_title: str = ""
@@ -130,7 +130,10 @@ class Step3Pz3StatusRowViewModel:
 class Step3Pz3StatusPanelViewModel:
     title: str = "Podsumowanie"
     show_section: bool = False
+    run_row: Step3Pz3StatusRowViewModel = field(default_factory=Step3Pz3StatusRowViewModel)
+    dataset_row: Step3Pz3StatusRowViewModel = field(default_factory=Step3Pz3StatusRowViewModel)
     export_row: Step3Pz3StatusRowViewModel = field(default_factory=Step3Pz3StatusRowViewModel)
+    readiness_row: Step3Pz3StatusRowViewModel = field(default_factory=Step3Pz3StatusRowViewModel)
     import_row: Step3Pz3StatusRowViewModel = field(default_factory=Step3Pz3StatusRowViewModel)
     finish_action: Step3FinishActionViewModel = field(default_factory=Step3FinishActionViewModel)
 

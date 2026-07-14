@@ -365,3 +365,157 @@ Po akceptacji tej architektury:
    - Z2,
    - Z4,
 4. dopiero później dopiąć `Z3` i przypadki naprawcze.
+
+---
+
+# Dziennik Stabilizacji - 2026-06-12
+
+## Kierunek Bieżący
+
+Na tym etapie priorytetem pozostaje stabilizacja istniejącego systemu, bez dokładania nowej dużej architektury. Model warstwowy UI odkładamy do backlogu jako kierunek docelowy, a teraz pracujemy punktowo nad tym, co realnie przeszkadza w pracy:
+
+- czas ładowania dużych projektów,
+- ciężkie przejścia między grafem kampanii i zakładkami roboczymi,
+- lagi w Z2 i Z3/PZ2,
+- regresje po autoanotacji,
+- niespójne copy starego wizarda i nowej maszyny stanów,
+- niepotrzebne przebitki dawnych elementów UI.
+
+## Ostatnie Zmiany Wykonane
+
+### Graf Kampanii I Maszyna Stanów
+
+- Wprowadzono graf przejść kampanii jako równoległy system sterowania względem dawnego wizarda.
+- Bramka grafu reprezentuje konkretne przejście, a nie ogólny etap.
+- Bramka ma domeny: zasoby, akcje i zatwierdzenie.
+- Dodano aktywację bramki przez elektrodę oraz rozróżnienie bramek aktywnych i nieaktywnych.
+- Ograniczono dostępność zasobów i akcji dla bramek nieaktywnych, aby użytkownik najpierw świadomie wybrał ścieżkę.
+- Rozpoczęto usuwanie dawnych elementów wizarda, które dublowały logikę maszyny stanów.
+- Poprawiano lagi grafu przy zoomie, przesuwaniu węzłów, przesuwaniu badge i przeliczaniu łączników.
+- Dopisano animację prowadzącą użytkownika po aktualnych bramkach i etapach, jako jednorazowy znacznik uwagi.
+
+### Z2 W Kampanii
+
+- Stabilizowano wejście do Z2 z bramek grafu, szczególnie T04/T06.
+- Usuwano przebitki trybu swobodnego w wejściu kampanijnym.
+- Redagowano copy Z2 tak, aby mówiło językiem bramek grafu, a nie dawnych etapów E2/E3.
+- Przywrócono prawy panel Z2 w trybie kampanii po regresji, w której zostawało samo CTA powrotu do grafu.
+- Odróżniono stan ładowania prawego panelu od właściwego stanu po załadowaniu danych.
+- Dodano brakujący delegat `_get_current_preview_plate_count_state`, który blokował finalizację UI po zakończeniu autoanotacji.
+- Przyspieszono odtwarzanie dużych runów Z2 przez:
+  - cache dla ukrytych/efektywnych źródeł znakowych,
+  - lżejsze budowanie listy podglądu dla dużych runów,
+  - odroczenie ciężkiego odtwarzania danych,
+  - pomijanie pełnego skanu brakujących obrazów w dużych, prawie kompletnych runach.
+- W logach NEON zejście z wejścia do Z2 poprawiono z czasów rzędu kilkudziesięciu sekund do kilku sekund dla samego otwarcia zakładki, przy czym pełne odtworzenie dużych anotacji nadal jest obszarem do dalszej optymalizacji.
+- Zablokowano niepożądane zaznaczanie pozycji listy podczas otwartego modala autoanotacji, jeśli nie jest aktywny tryb ręcznego wyboru z listy.
+- Przywrócono logikę, że podczas trwania autoanotacji użytkownik nie powinien zwyczajnie wracać do grafu, tylko powinien mieć świadome zatrzymanie procesu.
+
+### Z2 Canvas, Fullscreen I Korekta Narożników
+
+- Przyspieszono start dragu narożnika w fullscreen/superkorekcie przez ograniczenie hit-testów kursora przy każdym ruchu myszy.
+- Usunięto dodatkowy redraw przy przejęciu narożnika do dragu.
+- Ograniczono koszt historii undo podczas jednej serii korekt narożników: w trybie ciągłej korekty zapis historii wykonywany jest raz na obraz, a nie przy każdym kolejnym narożniku.
+- Odchudzono wyjście z fullscreen:
+  - stabilizacja rozmiaru canvasu nie wykonuje już wielu kolejnych `fit_to_view`,
+  - overlay/dock/bramka nie są odświeżane trzykrotnie pod rząd,
+  - toolbar i status edytora są odświeżane asynchronicznie,
+  - prawy panel nie jest przywracany podwójnie.
+
+### Z3/PZ2 I Praca Na Znakach
+
+- Rozdzielano język dawnego modelu etapów od języka bramek grafu.
+- Poprawiano zachowanie badge, etykiet, separatora rzędów i statusu rzędu tablicy.
+- Rozpoznano problem filtrów 1R/2R/2R? jako źródło wrażenia znikania anotacji po restarcie lub zmianie statusu rzędu.
+- Ustalono kierunek: przełącznik 1R/2R/AUTO nie powinien być sztucznym przełącznikiem typu tablicy, tylko statusem wynikającym z położenia belki i ręcznej pracy użytkownika.
+- Ustalono, że belka rzędowości powinna być elementem edycyjnym, a ręczna zmiana powinna nadawać status manualny.
+
+### Z4, Augmentacja I Dataset
+
+- Rozwijano modal syntetycznego zwiększania datasetu jako osobny edytor efektów, a nie stały ciężki element PZ1.
+- Dodawano efekty: błoto, deszcz, noc, reflektory, relief, połysk mokrego błota, zacienienie od góry i uproszczone refleksy.
+- Ustalono, że parametry ustawione przez użytkownika są bazą, a obrazy generowane syntetycznie powinny mieć niewielki rozrzut wokół tej bazy.
+- Rozpoznano problem, że dataset augmentowany musi powiększać zbiór źródłowy, zachowując semantykę nazw plików i nie nadpisując istniejących wariantów.
+- Poprawiano problemy z modalami augmentacji, fullscreenem, sterowaniem reflektorami i przenoszeniem ustawień efektu między losowanymi obrazami.
+
+## Otwarte Problemy Stabilizacyjne
+
+- Pełne odtworzenie dużego runu Z2 nadal potrafi być odczuwalnie długie, szczególnie przy tysiącach anotacji.
+- Należy dalej obserwować prawy panel Z2 po wejściu z grafu i po zakończeniu autoanotacji.
+- Trzeba dopilnować, aby autoanotacja miała jasną akcję zatrzymania i nie pozwalała na przypadkowe opuszczenie procesu.
+- W Z3/PZ2 trzeba dalej porządkować model rzędowości tablic, aby status 1R/2R/AUTO był konsekwencją danych, a nie osobnym mylącym przełącznikiem.
+- Należy kontynuować usuwanie starych elementów UI, które nadal mogą przebijać spod maszyny stanów.
+
+---
+
+# Backlog Architektoniczny
+
+## Warstwowy Model UI Dla Z2/Z3
+
+Pomysł do rozważenia po stabilizacji obecnego systemu: przejście na warstwowy model interfejsu, w którym ekran nie jest przebudowywany przez przepinanie widgetów, tylko składany z warstw.
+
+Robocze nazwy podejścia:
+
+- `layered UI`,
+- `layer manager`,
+- `scene graph`,
+- `compositing`,
+- `retained-mode UI`,
+- `overlay stack`.
+
+Proponowany podział warstw:
+
+- warstwa bazowa: canvas z obrazem/tablicą,
+- warstwa anotacji: ramki, boxy, belki, badge i etykiety,
+- warstwa HUD: kompas, asysta, statusy, ikony FS,
+- warstwa paneli bocznych: lewy i prawy panel,
+- warstwa modalna: blokada interakcji i okna decyzji,
+- warstwa interakcji: aktywny tryb pracy, hit-testy, drag, skróty klawiaturowe.
+
+Docelowa korzyść:
+
+- przejście fullscreen/non-fullscreen nie przebudowuje układu,
+- panele boczne są tylko ukrywane/pokazywane,
+- HUD jest przełączany niezależnie,
+- canvas i anotacje zachowują stan bez kosztownego odtwarzania,
+- interakcje są obsługiwane przez jeden kontroler warstw, zamiast przez wiele rozproszonych wyjątków.
+
+Decyzja na teraz:
+
+- nie wdrażamy tego w bieżącej stabilizacji,
+- traktujemy to jako kierunek docelowy po opanowaniu obecnych lagów i regresji,
+- jeśli wrócimy do tematu, pierwszym kandydatem powinien być Z2, bo tam koszt przepinania fullscreen/non-fullscreen i paneli jest dziś najbardziej widoczny.
+
+## Refiner Boxów Znaków Dla Tablic Perfect
+
+Pomysł do wdrożenia jako osobny moduł po ustabilizowaniu bieżącego pipeline Z3/PZ2: iteracyjny refiner boxów znaków uruchamiany wyłącznie dla tablic ze statusem `perfect`.
+
+Założenie:
+
+- tablica `perfect` daje nam prawdę docelową, czyli wiemy, jaki znak powinien znajdować się w danym slocie,
+- YOLO daje hipotezę pozycji i rozmiaru boxa,
+- OCR/YS/klasyfikator znaku służy jako kontrola, czy po modyfikacji box nadal odpowiada oczekiwanemu znakowi,
+- obraz tablicy służy do oceny realnego pokrycia znaku, czyli tego, ile "tuszu" znaku znajduje się w boxie.
+
+Docelowy przebieg:
+
+- startujemy od aktualnego boxa OCR/YOLO dla znanego znaku, np. `2`,
+- lokalnie przesuwamy, zwężamy, poszerzamy i korygujemy wysokość boxa,
+- po każdym kroku oceniamy, czy box obejmuje większą część realnego znaku,
+- jednocześnie sprawdzamy, czy odczyt/klasyfikacja nadal wskazuje oczekiwany znak,
+- jeśli pokrycie rośnie i znak nadal jest poprawny, kontynuujemy,
+- jeśli znak przestaje pasować albo jakość pokrycia spada, cofamy się do ostatniego dobrego wariantu i zatrzymujemy kaskadę.
+
+Najważniejsza reguła:
+
+- zła poprawka jest gorsza niż brak poprawki, więc refiner nie może na siłę poprawiać boxa, jeśli traci zgodność z oczekiwanym znakiem.
+
+Korzyść:
+
+- przypadki typu `FZI24222`, gdzie prosta geometria YOLO/OCR myli sąsiednie znaki albo obejmuje tylko fragment znaku szerokim boxem, powinny być rozwiązywane lokalnie i kontrolowanie,
+- mechanizm nie powinien obciążać całej detekcji, bo działa tylko na tablicach `perfect` i tylko wtedy, gdy mamy sensowną prawdę docelową.
+
+Decyzja na teraz:
+
+- traktujemy refiner jako osobny moduł, nie jako dalsze rozbudowywanie prostego matchera YOLO-box-backend,
+- bieżący matcher może pozostać lekkim zabezpieczeniem, ale docelowa precyzyjna korekta powinna należeć do refinera.

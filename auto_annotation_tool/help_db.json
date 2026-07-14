@@ -6,7 +6,7 @@
     "full_help": "Pokazuje lub ukrywa globalny terminal aplikacji. Trafiają tu najważniejsze logi procesów z Z2, Z3, Z4, blokad operacji, treningu i eksportów. To miejsce diagnostyczne, nie element workflow."
   },
   "app_help_panel": {
-    "full_help": "Globalny help kontekstowy. Najedź na kartę, przycisk, pole, listę albo panel, aby zobaczyć opis. Kliknięcie odświeża wskazówkę, a Ctrl+Alt rozwija pełniejszy opis w globalnym panelu."
+    "full_help": "Dolny pasek komunikatów aplikacji. Pokazuje bieżący stan pracy, ostrzeżenia i krótkie wskazówki diagnostyczne."
   },
   "btn_export_cvat": {
     "full_help": "Eksportuje z PZ3 zestaw kompatybilny z późniejszym importem CVAT. Dotyczy cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach. Używaj tylko wtedy, gdy chcesz poprawiać znaki poza aplikacją."
@@ -57,7 +57,7 @@
     "full_help": "Karta E3. Prowadzi do Z3, gdzie wycinasz tablice, uruchamiasz OCR, poprawiasz znaki i budujesz materiał gold/manual."
   },
   "camp_step4": {
-    "full_help": "Karta E4. Prowadzi do Z4, gdzie budujesz dataset iteracji, trenujesz model i oceniasz wynik."
+    "full_help": "Karta E4T/E4Z. Prowadzi do Z4, gdzie budujesz wariant datasetu iteracji, trenujesz model tablic albo znaków i oceniasz wynik."
   },
   "lab_angle": {
     "full_help": "Korekta kąta tablicy w Laboratorium OCR. Pomaga, gdy napis jest lekko skręcony."
@@ -219,7 +219,7 @@
     "full_help": "Lista obrazów bieżącego runu albo aktualnego zestawu wejściowego. Tu przełączasz zdjęcie do sprawdzenia i ręcznej korekty."
   },
   "tab1_return_wizard": {
-    "full_help": "Wraca z Z2 do Wizarda kampanii bez domykania samego etapu. Użyj tego, gdy chcesz tylko podejrzeć status E1-E4 albo przejść dalej inną ścieżką."
+    "full_help": "Wraca z Z2 do mapy kampanii bez domykania samego etapu. Użyj tego, gdy chcesz podejrzeć status E1, E2, E3, E4T/E4Z albo przejść dalej inną ścieżką."
   },
   "tab1_stage": {
     "full_help": "Sekcja stage przechowuje odłożoną pulę zdjęć do kolejnej ręcznej rundy. Pozwala powiększać zbiór bez mieszania go z już sprawdzonym materiałem."
@@ -258,58 +258,58 @@
     "full_help": "Wraca z PZ1 do wcześniejszego kontekstu. W kampanii zwykle oznacza powrót do Wizarda, a w trybie swobodnym do wyboru toru."
   },
   "tr_builder_log": {
-    "full_help": "Terminal procesu budowy datasetu w PZ1. Pokazuje szczegóły splitu, konwersji i walidacji wejścia."
+    "full_help": "Terminal procesu budowy datasetu w PZ1. Pokazuje, z jakiego źródła powstaje wariant treningowy, jak dzielone są dane na train/val/test i czy zapis data.yaml zakończył się poprawnie."
   },
   "tr_builder_next": {
     "full_help": "Przechodzi z [Z4]/[PZ1] do [Z4]/[PZ2]. W trybie swobodnym PZ2 powinien korzystać z wariantu utworzonego lub wybranego w PZ1, bez ręcznego podmieniania źródeł."
   },
   "tr_cvat_btn": {
-    "full_help": "Tworzy wariant datasetu tablic YOLO Pose z pary annotations.xml plus zgodny folder obrazów albo przyjmuje gotowy wariant datasetu tablic. Po sukcesie wariant jest dostępny w PZ2."
+    "full_help": "Tworzy wariant treningowy tablic YOLO Pose. Wejściem jest gotowy dataset albo para: XML anotacji + zgodny katalog zdjęć. Po wskazaniu XML system spróbuje automatycznie znaleźć pasujący katalog zdjęć. Po sukcesie wariant wybierasz w PZ2 do treningu."
   },
   "tr_cvat_source_mode": {
-    "full_help": "Wybór źródła dla toru tablic w [Z4]/[PZ1]. Możesz użyć gotowego wariantu datasetu albo utworzyć nowy z obowiązkowej pary: XML + zgodny folder obrazów."
+    "full_help": "Źródło datasetu tablic w [Z4]/[PZ1]. Wybierz gotowy dataset albo utwórz nowy wariant z obowiązkowej pary: XML anotacji + zgodny katalog zdjęć. Po wyborze XML program spróbuje dobrać katalog zdjęć po nazwach plików i poprosi o potwierdzenie."
   },
   "tr_cvat_img": {
-    "full_help": "Folder obrazów odpowiadających temu XML. Musi być zgodny z anotacjami, inaczej dataset nie będzie poprawny."
+    "full_help": "Folder obrazów odpowiadających temu XML. Musi być zgodny z anotacjami, inaczej dataset nie będzie poprawny. Jeśli najpierw wskażesz XML, system spróbuje znaleźć taki katalog automatycznie."
   },
   "tr_cvat_xml": {
     "full_help": "Plik XML CVAT używany do budowy datasetu tablic w torze Pose."
   },
   "tr_rank_btn": {
-    "full_help": "Uruchamia albo anuluje ranking modeli. Ranking porównuje kilka checkpointów na jednym zestawie odniesienia."
+    "full_help": "Uruchamia albo anuluje nowe porównanie modeli z głównej karty rankingu. Ustawienia źródeł zmieniasz osobno w Zaawansowanych."
   },
   "tr_rank_cat": {
     "full_help": "Informacja, jaki typ modeli porównuje ranking. W obecnym workflow ranking dotyczy modeli tablic."
   },
   "tr_rank_conf": {
-    "full_help": "Sekcja konfiguracji rankingu. Tutaj widzisz założenia progu wykrycia i stan przygotowania porównania."
+    "full_help": "Zaawansowane ustawienia źródeł rankingu. Wskazujesz tu modele i materiał odniesienia, ale samo porównanie uruchamiasz z głównej karty."
   },
   "tr_rank_models": {
-    "full_help": "Folder modeli .pt, które mają wejść do rankingu. Najlepiej wskazać katalog z checkpointami jednego toru."
+    "full_help": "Katalog modeli .pt używany wyłącznie do nowego porównania. Zapisane wyniki można czytać bez ponownego wskazywania katalogu."
   },
   "tr_rank_reference": {
-    "full_help": "Folder runu Z2 lub PZ2 po ręcznym sprawdzeniu tablic. To właśnie on dostarcza obrazy i zapisane poprawki jako materiał odniesienia."
+    "full_help": "Materiał odniesienia dla nowego porównania: zapisany run z obrazami i annotations.xml. Każdy model jest oceniany na tym samym zestawie."
   },
   "tr_rank_table": {
-    "full_help": "Tabela wyników rankingu. Pokazuje, który model najlepiej wypada na wybranym zestawie odniesienia."
+    "full_help": "Tabela wyników i kandydatów. Zakres pozwala oglądać modele projektowe, globalne albo oba zestawy bez ponownego liczenia rankingu."
   },
   "tr_route_char": {
     "full_help": "Tor znaków oznacza przygotowanie wariantu i trening modelu YOLO Detect dla pojedynczych znaków tablic. Źródłem powinien być dataset YOLO znaków z images/, labels/ i data.yaml, zwykle z Z3/PZ3."
   },
   "tr_route_panel": {
-    "full_help": "Panel wyboru toru [Z4]/[PZ1]. Najpierw wybierasz, czy przygotowujesz model tablic YOLO Pose, czy model znaków YOLO Detect. Zmiana toru czyści niezgodne źródła, żeby nie mieszać datasetów."
+    "full_help": "Panel wyboru typu datasetu w [Z4]/[PZ1]. Najpierw wybierasz, czy budujesz dane dla modelu tablic YOLO Pose, czy znaków YOLO Detect. Zmiana typu czyści niezgodne źródła, żeby nie mieszać datasetów."
   },
   "tr_route_plate": {
     "full_help": "Tor tablic oznacza przygotowanie wariantu i trening modelu YOLO Pose dla tablic rejestracyjnych. Źródłem może być eksport z Z2 albo alternatywny kreator XML + obrazy."
   },
   "tr_split_btn": {
-    "full_help": "Tworzy wariant datasetu znaków YOLO Detect. Jeśli źródło nie ma data.yaml, program powinien zaproponować jego utworzenie, a po sukcesie udostępnić wariant w PZ2."
+    "full_help": "Tworzy wariant treningowy znaków YOLO Detect ze źródła wyprodukowanego w Z3/PZ2. Źródło bez splitu oznacza katalog images/labels, który PZ1 dopiero dzieli na train/val/test. Jeśli brakuje data.yaml, program powinien zaproponować jego utworzenie, a po sukcesie wariant trafia do PZ2."
   },
   "tr_split_ratios": {
-    "full_help": "Proporcje train/val/test dla przygotowywanego datasetu. Część testowa powstaje z pozostałego ułamka."
+    "full_help": "Proporcje train/val/test dla przygotowywanego wariantu. Train służy do uczenia, val do kontroli w trakcie treningu, a test do końcowej oceny."
   },
   "tr_split_src": {
-    "full_help": "Źródło toru znaków w [Z4]/[PZ1]. Wymagany jest dataset YOLO Detect znaków: folder z images/labels oraz data.yaml. Katalogi OCR/klasyfikacyjne z manifest.json nie pasują do treningu YOLO Detect."
+    "full_help": "Źródło toru znaków w [Z4]/[PZ1]. Wymagany jest dataset YOLO Detect znaków: katalog images/labels bez splitu albo gotowy katalog z data.yaml. Katalogi OCR/klasyfikacyjne z manifest.json nie pasują do treningu YOLO Detect."
   },
   "tr_dataset_variant": {
     "full_help": "Lista wariantów datasetu zgodnych z aktualnym torem treningu. W PZ2 wybierasz wariant przygotowany wcześniej w PZ1, zamiast ręcznie podmieniać bazowe źródło danych."
@@ -348,7 +348,7 @@
     "full_help": "Liczba epok treningu. Więcej epok może poprawić wynik, ale po pewnym czasie grozi przeuczeniem."
   },
   "tr_train_finish": {
-    "full_help": "Akcja kończąca etap E4 w kampanii albo domykająca projekt. Jej dostępność zależy od stanu datasetu, treningu i workflow iteracji."
+    "full_help": "Akcja kończąca bieżący węzeł treningowy E4T/E4Z w kampanii albo domykająca projekt. Jej dostępność zależy od stanu datasetu, treningu i workflow iteracji."
   },
   "tr_train_imgsz": {
     "full_help": "Rozdzielczość treningu YOLO. Większa pomaga małym detalom, ale podnosi czas treningu i zużycie VRAM."
