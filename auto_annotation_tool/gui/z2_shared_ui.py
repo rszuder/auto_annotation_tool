@@ -10,6 +10,98 @@ if TYPE_CHECKING:
     from .tab_annotation import AnnotationTab
 
 
+CAMPAIGN_VISIBLE_GATE_IDS = {
+    "T03": "T02",
+    "T04": "T03",
+    "T05": "T04",
+    "T06": "T05",
+    "T07": "T06",
+}
+
+
+def campaign_visible_gate_id(gate_id: str | None) -> str:
+    normalized = str(gate_id or "").strip().upper()
+    return CAMPAIGN_VISIBLE_GATE_IDS.get(normalized, normalized)
+
+
+def get_campaign_display_gate_id(host: "AnnotationTab") -> str:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    return campaign_visible_gate_id(graph_context.get("graph_gate_id"))
+
+
+def is_campaign_t07_plate_repair_context(host: "AnnotationTab") -> bool:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    repair_origin_gate_id = str(
+        graph_context.get("repair_origin_gate_id")
+        or graph_context.get("source_graph_gate_id")
+        or ""
+    ).strip().upper()
+    return bool(graph_gate_id == "T05" and repair_origin_gate_id == "T07")
+
+
+def is_campaign_t06_char_source_context(host: "AnnotationTab") -> bool:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    return graph_gate_id == "T06"
+
+
+def is_campaign_t04_char_route_context(host: "AnnotationTab") -> bool:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    return graph_gate_id == "T04"
+
+
+def get_campaign_return_to_graph_copy(host: "AnnotationTab") -> dict[str, object]:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    display_gate_id = campaign_visible_gate_id(graph_gate_id)
+    if is_campaign_t07_plate_repair_context(host):
+        return {
+            "section": " Przekazanie do puli YOLO ",
+            "button": "Przekaż [OK] do puli YOLO i wróć do grafu",
+            "width": 32,
+        }
+    if is_campaign_t06_char_source_context(host):
+        return {
+            "section": " Przekazanie do źródła Z3 ",
+            "button": "Przekaż [OK] do Z3 i wróć do grafu",
+            "width": 34,
+        }
+    if is_campaign_t04_char_route_context(host):
+        return {
+            "section": f" Przekazanie [OK] do bramki {display_gate_id or 'T04'} ",
+            "button": f"Przekaż [OK] do bramki {display_gate_id or 'T04'} i wróć do grafu",
+            "width": 42,
+        }
+    if graph_gate_id == "T05":
+        return {
+            "section": f" Przekazanie [OK] do bramki {display_gate_id or 'T04'} ",
+            "button": "Przekaż [OK] do puli YOLO i wróć do grafu",
+            "width": 42,
+        }
+    return {
+        "section": " Powrót do grafu ",
+        "button": "Wróć do grafu",
+        "width": 18,
+    }
+
+
 def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> Z2WorkflowBaseContext:
     actual_route = host._get_workflow_route()
     route = host._get_z2_thematic_route()
@@ -90,12 +182,21 @@ def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> 
     )
 
 
-def refresh_workflow_route_cards(host: "AnnotationTab") -> None:
+def refresh_workflow_route_cards(host: "AnnotationTab", *, refresh_content: bool = True) -> None:
     palette = getattr(host.app, "palette", {})
     route = host._get_workflow_route()
     hover_route = getattr(host, "_workflow_route_hover_mode", None)
-    actions = host._get_z2_primary_actions()
-    ctx = host._build_z2_action_context()
+    cached_state = getattr(host, "_workflow_route_card_render_state", None)
+    if not isinstance(cached_state, dict):
+        cached_state = {}
+
+    actions = {}
+    ctx = None
+    if refresh_content:
+        # Budowanie kontekstu Z2 potrafi sprawdzać runy i XML. Nie robimy tego
+        # podczas zwykłego hovera, bo blokuje główną pętlę Tkintera.
+        actions = host._get_z2_primary_actions()
+        ctx = host._build_z2_action_context()
 
     panel_alt = palette.get("panel_alt", "#2d2d30")
     hover_bg = palette.get("button_hover", panel_alt)
@@ -131,9 +232,20 @@ def refresh_workflow_route_cards(host: "AnnotationTab") -> None:
         if card is None:
             continue
 
-        action = actions.get(key)
-        available = bool(action.is_available(ctx)) if action is not None else True
-        enabled = bool(action.is_enabled(ctx)) if action is not None else True
+        state = cached_state.get(key)
+        if not isinstance(state, dict):
+            state = {}
+        available = bool(state.get("available", True))
+        enabled = bool(state.get("enabled", True))
+
+        action = actions.get(key) if refresh_content else None
+        if refresh_content:
+            available = bool(action.is_available(ctx)) if action is not None else True
+            enabled = bool(action.is_enabled(ctx)) if action is not None else True
+            cached_state[key] = {
+                "available": available,
+                "enabled": enabled,
+            }
         widgets["available"] = available
         if action is not None:
             try:
@@ -184,17 +296,21 @@ def refresh_workflow_route_cards(host: "AnnotationTab") -> None:
             except Exception:
                 pass
 
-    host._set_widget_packed(
-        config["auto"]["card"],
-        bool(config["auto"].get("available")),
-        fill="x",
-        pady=(0, 8),
-    )
-    host._set_widget_packed(
-        config["manual"]["card"],
-        bool(config["manual"].get("available")),
-        fill="x",
-    )
+    if refresh_content:
+        host._workflow_route_card_render_state = cached_state
+
+    if refresh_content:
+        host._set_widget_packed(
+            config["auto"]["card"],
+            bool(config["auto"].get("available")),
+            fill="x",
+            pady=(0, 8),
+        )
+        host._set_widget_packed(
+            config["manual"]["card"],
+            bool(config["manual"].get("available")),
+            fill="x",
+        )
 
 
 def apply_z2_workflow_left_layout(
@@ -210,6 +326,7 @@ def apply_z2_workflow_left_layout(
     vehicle_assist_enabled: bool,
     campaign_stage: int,
     campaign_char_repair_mode: bool,
+    campaign_plate_step4_repair_mode: bool,
     show_route_choice: bool,
     show_workflow_steps: bool,
     show_auto_followup: bool,
@@ -373,6 +490,12 @@ def apply_z2_workflow_left_layout(
         and manual_setup
         and not manual_review_active
     )
+    hide_campaign_repair_header_meta = bool(
+        campaign_context
+        and campaign_plate_step4_repair_mode
+    )
+    if hide_campaign_repair_header_meta:
+        host._set_widget_packed(host.run_title_lbl, False)
     compact_free_mode_auto_header = bool(
         (not campaign_context)
         and route == "auto"
@@ -392,6 +515,7 @@ def apply_z2_workflow_left_layout(
         host.run_intro_lbl,
         (show_workflow_steps or show_campaign_context_header or ((not campaign_context) and show_nav_panel))
         and not (campaign_context and show_manual_review_followup)
+        and not hide_campaign_repair_header_meta
         and not hide_manual_setup_header_meta
         and not compact_free_mode_auto_header
         and not compact_free_mode_manual_header
@@ -404,6 +528,7 @@ def apply_z2_workflow_left_layout(
         host.route_badge_lbl,
         (show_workflow_steps or show_campaign_context_header)
         and not (campaign_context and show_manual_review_followup)
+        and not hide_campaign_repair_header_meta
         and not hide_manual_setup_header_meta
         and not compact_free_mode_auto_header
         and not compact_free_mode_manual_header
@@ -416,6 +541,7 @@ def apply_z2_workflow_left_layout(
         host.route_summary_lbl,
         (show_workflow_steps or show_campaign_context_header)
         and not (campaign_context and show_manual_review_followup)
+        and not hide_campaign_repair_header_meta
         and not hide_manual_setup_header_meta
         and not compact_free_mode_auto_header
         and not compact_free_mode_manual_header,
@@ -427,6 +553,7 @@ def apply_z2_workflow_left_layout(
         host.workflow_action_hint_lbl,
         (show_workflow_steps or show_campaign_context_header)
         and not (campaign_context and show_manual_review_followup)
+        and not hide_campaign_repair_header_meta
         and not hide_manual_setup_header_meta
         and not compact_free_mode_auto_header
         and not compact_free_mode_manual_header
@@ -447,13 +574,11 @@ def apply_z2_workflow_left_layout(
         host._set_widget_packed(host.workflow_action_hint_lbl, False)
     if campaign_context and campaign_stage >= 3:
         try:
-            return_label = (
-                "Wróć do wizarda (E3)"
-                if campaign_char_repair_mode
-                else (f"Wróć do wizarda (E{campaign_stage})" if campaign_stage <= 4 else "Wróć do wizarda")
-            )
-            host.return_to_campaign_btn.configure(text=return_label)
-            host.return_to_campaign_right_btn.configure(text=return_label)
+            return_copy = get_campaign_return_to_graph_copy(host)
+            return_label = str(return_copy.get("button") or "Wróć do grafu")
+            return_width = int(return_copy.get("width", 18) or 18)
+            host.return_to_campaign_btn.configure(text=return_label, width=return_width)
+            host.return_to_campaign_right_btn.configure(text=return_label, width=return_width)
         except Exception:
             pass
     host._set_widget_packed(
@@ -466,6 +591,8 @@ def apply_z2_workflow_left_layout(
     host._set_widget_packed(
         getattr(host, "return_to_campaign_right_btn", None),
         bool(campaign_context and host._should_show_right_panel()),
+        fill=tk.X,
+        pady=(0, 0),
     )
     show_campaign_auto_persistent_cards = bool(
         campaign_context and show_workflow_steps and route == "auto"
@@ -676,7 +803,7 @@ def apply_z2_workflow_left_layout(
             except Exception:
                 cut_ready = False
             host.open_run_dir_btn.configure(
-                text="Wytnij tablice",
+                text="Wyodrębnij tablice",
                 command=host._open_step3_from_z2_annotation_source,
                 state=(tk.NORMAL if cut_ready and not host.is_processing else tk.DISABLED),
             )
@@ -950,11 +1077,20 @@ def apply_z2_workflow_cta_ui(
     )
 
     show_start_controls = bool(cta_state.show_start_controls)
+    compact_campaign_auto_start = bool(
+        campaign_context
+        and show_workflow_steps
+        and str(route or "").strip().lower() == "auto"
+    )
     host._set_widget_packed(
         host.workflow_start_section,
         show_start_controls,
         fill=tk.X,
-        pady=((0, 2) if ((not campaign_context) and route == "auto" and current_step == "auto_start") else (0, 10)),
+        pady=(
+            (4, 10)
+            if compact_campaign_auto_start
+            else ((0, 2) if ((not campaign_context) and route == "auto" and current_step == "auto_start") else (0, 10))
+        ),
     )
     try:
         workflow_start_title_text = str(host.workflow_start_title_lbl.cget("text") or "").strip()
@@ -962,13 +1098,15 @@ def apply_z2_workflow_cta_ui(
         workflow_start_title_text = ""
     host._set_widget_packed(
         host.workflow_start_title_lbl,
-        show_start_controls and bool(workflow_start_title_text),
+        show_start_controls
+        and bool(workflow_start_title_text),
         anchor=tk.W,
         fill=tk.X,
     )
     host._set_widget_packed(
         host.workflow_start_intro_lbl,
-        show_start_controls and bool(str(host.workflow_start_intro_var.get() or "").strip()),
+        show_start_controls
+        and bool(str(host.workflow_start_intro_var.get() or "").strip()),
         anchor=tk.W,
         fill=tk.X,
         pady=(4, 0),
@@ -981,7 +1119,8 @@ def apply_z2_workflow_cta_ui(
     )
     host._set_widget_packed(
         host.workflow_start_action_hint_lbl,
-        show_start_controls and bool(str(host.workflow_action_hint_var.get() or "").strip()),
+        show_start_controls
+        and bool(str(host.workflow_action_hint_var.get() or "").strip()),
         anchor=tk.W,
         fill=tk.X,
         pady=(6, 0),
@@ -1003,7 +1142,6 @@ def apply_z2_workflow_cta_ui(
     start_enabled = bool(cta_state.start_enabled)
     start_command = cta_state.start_command or host._start_annotation
     start_text = str(cta_state.start_text or "Wybierz tor")
-
     try:
         host.start_btn.configure(
             text=start_text,

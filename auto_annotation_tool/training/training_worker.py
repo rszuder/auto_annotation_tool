@@ -15,6 +15,7 @@ from pathlib import Path
 from ..config import logger
 from .trainer import YOLOPoseTrainer
 from .training_history import TrainingHistory
+from .resource_monitor import TrainingResourceMonitor
 
 
 def _append_event(event_path: Path, payload: dict) -> None:
@@ -113,7 +114,28 @@ def run_job(job_path: Path) -> int:
     )
     control_thread.start()
 
+    resource_monitor: TrainingResourceMonitor | None = None
     try:
+        try:
+            resource_monitor = TrainingResourceMonitor(
+                run_dir=Path(str(getattr(trainer.current_run, "output_dir", "") or history_dir / run_id)),
+                event_sink=lambda event: _append_event(event_path, event),
+                interval_s=float(payload.get("resource_interval_s") or 2.0),
+                device=payload.get("device"),
+            )
+            resource_monitor.start()
+            _append_event(
+                event_path,
+                {
+                    "type": "resource_monitor_start",
+                    "samples_file": str(resource_monitor.samples_path),
+                    "report_file": str(resource_monitor.report_path),
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Nie udało się uruchomić monitora zasobów treningu: {e}")
+            resource_monitor = None
+
         trainer._training_loop(
             str(payload.get("model_file") or "").strip(),
             str(payload.get("dataset_path") or "").strip(),
@@ -125,6 +147,11 @@ def run_job(job_path: Path) -> int:
             str(payload.get("resume_from") or "").strip() or None,
         )
     finally:
+        if resource_monitor is not None:
+            try:
+                resource_monitor.stop()
+            except Exception as e:
+                logger.debug(f"Nie udało się domknąć monitora zasobów treningu: {e}")
         stop_event.set()
 
     return 0

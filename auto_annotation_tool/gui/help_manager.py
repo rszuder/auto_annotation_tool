@@ -19,8 +19,7 @@ class HelpSystem:
         self.overlay_presenter = None
         self.overlay_dismisser = None
         self.default_message = (
-            "Gotowy. Najedź na kartę, przycisk, pole albo panel, aby zobaczyć opis kontekstu. "
-            "Kliknięcie przypomina wskazówkę, a Ctrl+Alt rozwija pełniejszy opis w globalnym helpie."
+            "Gotowy. Najważniejsze komunikaty i wskazówki pojawią się tutaj podczas pracy."
         )
         self._hover_widget = None
         self._hover_help_key = ""
@@ -104,60 +103,10 @@ class HelpSystem:
             pass
 
     def bind_help(self, widget, index_key: str):
-        if widget is None:
-            return
-
-        entry = self.db.get(index_key, {})
-        full_text = str(entry.get("full_help", "") or "").strip()
-        if not full_text:
-            full_text = f"Brak opisu dla elementu: {index_key}."
-
-        def on_enter(event=None):
-            self._hover_widget = widget
-            self._hover_help_key = str(index_key or "")
-            self._hover_full_text = full_text
-            self._set_help_cursor(widget, True)
-            self._push_status(full_text, "help")
-
-        def on_focus_in(event=None):
-            self._hover_widget = widget
-            self._hover_help_key = str(index_key or "")
-            self._hover_full_text = full_text
-            self._push_status(full_text, "help")
-
-        def on_leave(event=None):
-            if self._hover_widget is widget:
-                self._hover_widget = None
-                self._hover_help_key = ""
-                self._hover_full_text = ""
-            self._set_help_cursor(widget, False)
-            self._push_status(self.default_message, "info")
-
-        def on_focus_out(event=None):
-            if self._hover_widget is widget:
-                self._hover_widget = None
-                self._hover_help_key = ""
-                self._hover_full_text = ""
-            self._push_status(self.default_message, "info")
-
-        def on_destroy(event=None):
-            if self._hover_widget is widget:
-                self._hover_widget = None
-                self._hover_help_key = ""
-                self._hover_full_text = ""
-
-        def on_primary_help(event=None):
-            self._hover_widget = widget
-            self._hover_help_key = str(index_key or "")
-            self._hover_full_text = full_text
-            self._push_status(full_text, "help")
-
-        widget.bind("<Enter>", on_enter, add="+")
-        widget.bind("<FocusIn>", on_focus_in, add="+")
-        widget.bind("<Leave>", on_leave, add="+")
-        widget.bind("<FocusOut>", on_focus_out, add="+")
-        widget.bind("<ButtonPress-1>", on_primary_help, add="+")
-        widget.bind("<Destroy>", on_destroy, add="+")
+        # Kontekstowy hover-help jest obecnie wyłączony, żeby nie dokładać
+        # globalnych listenerów do ciężkich ekranów edycji. Zostawiamy metodę
+        # jako stabilny no-op dla istniejących wywołań HELP.bind_help(...).
+        return
 
 
 HELP = HelpSystem()

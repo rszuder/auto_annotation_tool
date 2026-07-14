@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Z3 preview metadata, list refresh and undo/redo helpers."""
+
+from __future__ import annotations
+
+import copy
+import tkinter as tk
+
+from ..config import logger
+
+
+def _is_exportable_character_record(self, rec) -> bool:
+    if isinstance(rec, dict):
+        symbol = rec.get("character", "")
+    else:
+        symbol = getattr(rec, "character", "")
+    if not self._sanitize_preview_char_symbol(symbol):
+        return False
+
+    bbox = self._char_record_bbox(rec)
+    if not bbox:
+        return False
+    try:
+        x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+    except Exception:
+        return False
+    return bool(x2 > x1 and y2 > y1)
+
+def _derive_preview_status_from_characters(self, chars) -> str:
+    if not isinstance(chars, list) or not chars:
+        return "needs_fix"
+    valid_count = 0
+    for rec in chars:
+        if self._is_exportable_character_record(rec):
+            valid_count += 1
+    return "perfect" if valid_count == len(chars) and valid_count > 0 else "needs_fix"
+
+def _preview_has_reference_text_source(self, data: dict | None = None) -> bool:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    return any(bool(value) for value in self._get_preview_reference_text_values(source_data))
+
+def _get_preview_reference_text_values(self, data: dict | None = None) -> list[str]:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if not isinstance(source_data, dict):
+        return []
+    values = []
+    for field_name in ("source_image", "source_name", "filename"):
+        prepared = str(source_data.get(field_name, "") or "").strip()
+        if prepared:
+            values.append(prepared)
+    return values
+
+def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if isinstance(source_data, dict):
+        for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
+            prepared = str(source_data.get(field_name, "") or "").strip().upper()
+            if prepared:
+                return [prepared]
+        expected_source = str(source_data.get("source_expected_text_source") or "").strip().lower()
+        if expected_source == "ambiguous_filename_tokens":
+            return []
+    normalized = []
+    seen = set()
+    for candidate in self._get_preview_reference_text_values(source_data):
+        if not candidate:
+            continue
+        for item in self._get_true_texts_from_filename(candidate):
+            prepared = str(item or "").strip().upper()
+            if not prepared or prepared in seen:
+                continue
+            seen.add(prepared)
+            normalized.append(prepared)
+    return normalized
+
+def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
+    base_status = self._derive_preview_status_from_characters(chars)
+    if base_status != "perfect":
+        return base_status
+    try:
+        if self._preview_layout_separator_conflicts_with_chars(data, chars):
+            return "needs_fix"
+    except Exception:
+        pass
+
+    expected_texts = self._get_preview_expected_texts(data)
+    if not expected_texts:
+        if self._preview_has_reference_text_source(data):
+            return "needs_fix"
+        return base_status
+
+    candidate_text = self._characters_to_text(chars, data=data).strip().upper()
+    if candidate_text and candidate_text in expected_texts:
+        return "perfect"
+    return "needs_fix"
+
+def _get_preview_live_status(self, data: dict | None = None, chars=None, plate_id: str | None = None) -> str:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if not isinstance(source_data, dict):
+        return str((data or {}).get("status", "unknown") or "unknown").strip().lower() if isinstance(data, dict) else "unknown"
+
+    probe = dict(source_data)
+    resolved_plate_id = str(plate_id or getattr(self, "_preview_active_pid", "") or probe.get("plate_id", "") or "").strip()
+    if resolved_plate_id:
+        probe["plate_id"] = resolved_plate_id
+
+    source_chars = chars
+    if source_chars is None:
+        source_chars = probe.get("characters", [])
+    return str(self._derive_preview_status_from_data(probe, source_chars) or "unknown").strip().lower()
+
+def _recalculate_preview_statuses_in_metadata(self, metadata: dict | None):
+    if not isinstance(metadata, dict):
+        return metadata
+
+    for plate_id, raw_data in list(metadata.items()):
+        if not isinstance(raw_data, dict):
+            continue
+        self._ensure_plate_source_metadata(raw_data, plate_id=str(plate_id or ""))
+        chars = raw_data.get("characters", None)
+        if not isinstance(chars, list):
+            chars = []
+            raw_data["characters"] = chars
+        self._update_preview_plate_layout_metadata(raw_data, chars)
+        chars = self._annotate_preview_character_reading_positions(
+            self._sort_character_records_by_x(chars, data=raw_data),
+            data=raw_data,
+        )
+        raw_data["characters"] = chars
+        if not chars:
+            raw_data["status"] = "needs_fix"
+            continue
+
+        status_probe = dict(raw_data)
+        status_probe["plate_id"] = str(plate_id)
+        raw_data["status"] = self._derive_preview_status_from_data(status_probe, chars)
+
+    return metadata
+
+def _persist_preview_metadata(self, *, success_message: str | None = None, refresh_list: bool = True):
+    meta_path = self._get_preview_metadata_path()
+    if meta_path is None:
+        raise RuntimeError("Brak aktywnego preview runu do zapisania.")
+
+    self._atomic_write_json(meta_path, self.preview_metadata)
+    self._loaded_meta_path = meta_path
+    try:
+        self._loaded_meta_mtime = meta_path.stat().st_mtime
+    except Exception:
+        self._loaded_meta_mtime = None
+
+    if refresh_list:
+        self._refresh_listbox_rows_from_metadata()
+    self._sync_step3_access_from_preview_state(self.preview_metadata)
+    if success_message:
+        self._set_preview_box_info(success_message, "success")
+
+def _flush_scheduled_preview_metadata_save(self):
+    after_id = getattr(self, "_preview_metadata_save_after_id", None)
+    if after_id:
+        try:
+            self.frame.after_cancel(after_id)
+        except Exception:
+            pass
+        self._preview_metadata_save_after_id = None
+
+    try:
+        if self.preview_metadata:
+            self._persist_preview_metadata(success_message=None, refresh_list=False)
+    except Exception as exc:
+        logger.debug(f"Nie udało się zapisać odłożonych zmian metadata preview: {exc}")
+
+def _cancel_scheduled_preview_metadata_save(self):
+    after_id = getattr(self, "_preview_metadata_save_after_id", None)
+    if after_id:
+        try:
+            self.frame.after_cancel(after_id)
+        except Exception:
+            pass
+    self._preview_metadata_save_after_id = None
+
+def _schedule_preview_metadata_save(self, delay_ms: int = 450):
+    previous_after_id = getattr(self, "_preview_metadata_save_after_id", None)
+    if previous_after_id:
+        try:
+            self.frame.after_cancel(previous_after_id)
+        except Exception:
+            pass
+        self._preview_metadata_save_after_id = None
+
+    def _save_later():
+        self._preview_metadata_save_after_id = None
+        try:
+            self._persist_preview_metadata(success_message=None, refresh_list=False)
+            try:
+                self._update_preview_info_label()
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.debug(f"Nie udało się zapisać odłożonego układu tablicy: {exc}")
+
+    try:
+        self._preview_metadata_save_after_id = self.frame.after(max(1, int(delay_ms)), _save_later)
+    except Exception:
+        _save_later()
+
+def _schedule_preview_info_refresh(self, delay_ms: int = 180):
+    previous_after_id = getattr(self, "_preview_info_refresh_after_id", None)
+    if previous_after_id:
+        try:
+            self.frame.after_cancel(previous_after_id)
+        except Exception:
+            pass
+        self._preview_info_refresh_after_id = None
+
+    def _refresh_later():
+        self._preview_info_refresh_after_id = None
+        try:
+            self._update_preview_info_label()
+            self._sync_step3_access_from_preview_state(self.preview_metadata)
+        except Exception as exc:
+            logger.debug(f"Nie udało się odświeżyć liczników PZ2 po edycji: {exc}")
+
+    try:
+        self._preview_info_refresh_after_id = self.frame.after(max(1, int(delay_ms)), _refresh_later)
+    except Exception:
+        _refresh_later()
+
+def _clone_preview_plate_data(self, plate_id: str | None = None):
+    pid = str(plate_id or getattr(self, "_preview_active_pid", "") or "").strip()
+    if not pid:
+        return None
+    data = self.preview_metadata.get(pid)
+    return copy.deepcopy(data if isinstance(data, dict) else {})
+
+def _get_preview_history_stack(self, kind: str, plate_id: str | None = None, create: bool = False):
+    pid = str(plate_id or getattr(self, "_preview_active_pid", "") or "").strip()
+    if not pid:
+        return None
+    store_attr = "_preview_history_undo" if str(kind).lower() == "undo" else "_preview_history_redo"
+    store = getattr(self, store_attr, None)
+    if not isinstance(store, dict):
+        store = {}
+        setattr(self, store_attr, store)
+    if create:
+        return store.setdefault(pid, [])
+    return store.get(pid)
+
+def _push_preview_history_snapshot(self, plate_id: str | None = None):
+    if bool(getattr(self, "_preview_history_replaying", False)):
+        return
+    pid = str(plate_id or getattr(self, "_preview_active_pid", "") or "").strip()
+    if not pid:
+        return
+    snapshot = self._clone_preview_plate_data(pid)
+    if snapshot is None:
+        return
+
+    undo_stack = self._get_preview_history_stack("undo", pid, create=True)
+    if isinstance(undo_stack, list) and undo_stack and undo_stack[-1] == snapshot:
+        return
+
+    undo_stack.append(snapshot)
+    limit = max(8, int(getattr(self, "_preview_history_limit", 30) or 30))
+    if len(undo_stack) > limit:
+        del undo_stack[:-limit]
+
+    redo_stack = self._get_preview_history_stack("redo", pid, create=True)
+    if isinstance(redo_stack, list):
+        redo_stack.clear()
+
+def _trim_preview_history_stack(self, stack) -> None:
+    if not isinstance(stack, list):
+        return
+    limit = max(8, int(getattr(self, "_preview_history_limit", 30) or 30))
+    if len(stack) > limit:
+        del stack[:-limit]
+
+def _refresh_preview_listbox_row(self, plate_id: str | None = None):
+    pid = str(plate_id or getattr(self, "_preview_active_pid", "") or "").strip()
+    listbox = getattr(self, "plates_listbox", None)
+    if not pid or listbox is None:
+        return
+    pid_map = getattr(self, "_listbox_pid_by_index", [])
+    try:
+        row_index = pid_map.index(pid)
+    except Exception:
+        return
+
+    data = self.preview_metadata.get(pid, {})
+    status = str(data.get("status", "unknown")).strip().lower()
+    label = self._format_plate_listbox_label(pid, data)
+
+    try:
+        selected_rows = {int(idx) for idx in listbox.curselection()}
+    except Exception:
+        selected_rows = set()
+    try:
+        active_row = int(listbox.index(tk.ACTIVE))
+    except Exception:
+        active_row = None
+    row_selected = row_index in selected_rows
+
+    try:
+        listbox.delete(row_index)
+        listbox.insert(row_index, label)
+        self._apply_plate_listbox_row_style(row_index, status)
+        if row_selected:
+            listbox.selection_set(row_index)
+        if active_row == row_index:
+            listbox.activate(row_index)
+        if row_selected or active_row == row_index:
+            listbox.see(row_index)
+    except Exception as exc:
+        logger.debug(f"Nie udało się odświeżyć pojedynczego wiersza listy tablic [{pid}]: {exc}")
+
+def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str):
+    pid = str(getattr(self, "_preview_active_pid", "") or "").strip()
+    if not pid:
+        return False
+
+    self._preview_history_replaying = True
+    try:
+        self.preview_metadata[pid] = copy.deepcopy(snapshot if isinstance(snapshot, dict) else {})
+        self._preview_char_selected_index = None
+        self._preview_char_drag_state = None
+        self._preview_char_add_state = None
+        self._preview_char_add_click_armed = False
+        self._preview_char_hover_index = None
+        self._preview_char_hover_label_index = None
+        self._preview_char_label_active_index = None
+        self._refresh_preview_live_metadata_ui(
+            status_message=action_label,
+            status_tone="info",
+            render_preview=False,
+            refresh_row=True,
+        )
+        if not self._redraw_preview_character_overlays_light():
+            self._on_preview_select(None)
+        self._persist_preview_metadata(success_message=None, refresh_list=False)
+        return True
+    finally:
+        self._preview_history_replaying = False
+
+def _undo_preview_edit(self, event=None):
+    pid = str(getattr(self, "_preview_active_pid", "") or "").strip()
+    undo_stack = self._get_preview_history_stack("undo", pid, create=False)
+    if not pid or not isinstance(undo_stack, list) or not undo_stack:
+        self._update_preview_edit_status("Brak zmian do cofnięcia.", tone="warning")
+        return "break"
+
+    current_snapshot = self._clone_preview_plate_data(pid)
+    redo_stack = self._get_preview_history_stack("redo", pid, create=True)
+    if current_snapshot is not None:
+        redo_stack.append(current_snapshot)
+        self._trim_preview_history_stack(redo_stack)
+
+    target_snapshot = undo_stack.pop()
+    self._restore_preview_plate_history_snapshot(target_snapshot, action_label="Cofnięto ostatnią zmianę boxów znaków.")
+    return "break"
+
+def _redo_preview_edit(self, event=None):
+    pid = str(getattr(self, "_preview_active_pid", "") or "").strip()
+    redo_stack = self._get_preview_history_stack("redo", pid, create=False)
+    if not pid or not isinstance(redo_stack, list) or not redo_stack:
+        self._update_preview_edit_status("Brak zmian do ponowienia.", tone="warning")
+        return "break"
+
+    current_snapshot = self._clone_preview_plate_data(pid)
+    undo_stack = self._get_preview_history_stack("undo", pid, create=True)
+    if current_snapshot is not None:
+        undo_stack.append(current_snapshot)
+        self._trim_preview_history_stack(undo_stack)
+
+    target_snapshot = redo_stack.pop()
+    self._restore_preview_plate_history_snapshot(target_snapshot, action_label="Przywrócono ostatnią cofniętą zmianę boxów znaków.")
+    return "break"
+
+def _event_has_control_modifier(event=None) -> bool:
+    if event is None:
+        return False
+    try:
+        return bool(int(getattr(event, "state", 0) or 0) & 0x4)
+    except Exception:
+        return False
+
+def _event_has_shift_modifier(event=None) -> bool:
+    if event is None:
+        return False
+    try:
+        return bool(int(getattr(event, "state", 0) or 0) & 0x1)
+    except Exception:
+        return False
+
+def _pane_has_child(pane, child) -> bool:
+    if pane is None or child is None:
+        return False
+    try:
+        return str(child) in {str(item) for item in pane.panes()}
+    except Exception:
+        return False
+
+def _get_current_preview_list_index(self):
+    listbox = getattr(self, "plates_listbox", None)
+    if listbox is None:
+        return None
+    try:
+        sel = listbox.curselection()
+        if sel:
+            idx = int(sel[0])
+            if 0 <= idx < len(getattr(self, "_listbox_pid_by_index", [])):
+                return idx
+    except Exception:
+        pass
+    try:
+        idx = int(listbox.index(tk.ACTIVE))
+        if 0 <= idx < len(getattr(self, "_listbox_pid_by_index", [])):
+            return idx
+    except Exception:
+        pass
+    return None
+
+def _clear_listbox_selection_fast(listbox) -> None:
+    if listbox is None:
+        return
+    try:
+        selected_indices = list(listbox.curselection() or ())
+    except Exception:
+        selected_indices = []
+    for selected_index in selected_indices:
+        try:
+            listbox.selection_clear(selected_index)
+        except Exception:
+            pass
+
+def _handle_preview_list_arrow_nav(self, offset: int):
+    try:
+        self.plates_listbox.focus_set()
+    except Exception:
+        pass
+    self._select_preview_relative(int(offset))
+    return "break"
+
+def _select_preview_relative(self, offset: int):
+    listbox = getattr(self, "plates_listbox", None)
+    pid_map = getattr(self, "_listbox_pid_by_index", [])
+    if listbox is None or not pid_map:
+        return False
+
+    current_idx = self._get_current_preview_list_index()
+    if current_idx is None:
+        current_idx = 0
+    target_idx = max(0, min(len(pid_map) - 1, int(current_idx) + int(offset)))
+    if target_idx == current_idx and current_idx is not None:
+        return False
+
+    try:
+        self._suppress_preview_reload_on_list_select = True
+        self._preview_fast_select_render = True
+        self._clear_listbox_selection_fast(listbox)
+        listbox.selection_set(target_idx)
+        listbox.activate(target_idx)
+        listbox.see(target_idx)
+    except Exception:
+        return False
+
+    self._preview_char_label_active_index = None
+    self._preview_char_hover_label_index = None
+    self._preview_char_hover_index = None
+    try:
+        scheduler = getattr(self, "_schedule_preview_select_render", None)
+        if callable(scheduler):
+            scheduler(delay_ms=1)
+        else:
+            self._on_preview_select(None)
+    except Exception:
+        self._on_preview_select(None)
+    return True

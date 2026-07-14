@@ -7,9 +7,7 @@ Zarządza listą projektów, iteracjami i fizycznym czyszczeniem dysku.
 
 import hashlib
 import json
-import uuid
 import re
-import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
@@ -17,6 +15,9 @@ from time import perf_counter
 from typing import Dict, Any, List
 
 from .config import CONFIG, logger
+from .campaign_project_registry import bind_campaign_project_registry_methods
+from .campaign_stage_state import bind_campaign_stage_state_methods
+from .campaign_project_history import bind_campaign_project_history_methods
 
 
 class CampaignManager:
@@ -24,781 +25,23 @@ class CampaignManager:
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
         self.state = self._load_state()
         self._plate_approved_stats_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
+        self._plate_approved_manifest_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        self._plate_approved_stats_runtime_cache: Dict[str, Dict[str, Any]] = {}
         self._artifact_registry_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
+        self._artifact_registry_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        self._ingest_manifest_cache: Dict[tuple[str, int, int, int], Dict[str, Any]] = {}
+        self._latest_ingest_plan_summary_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
+        self._latest_ingest_plan_summary_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        self._iteration_image_count_cache: Dict[tuple[str, int], int] = {}
+        self._iteration_image_source_dir_cache: Dict[tuple[str, int], str] = {}
+        self._step3_char_source_state_cache: Dict[tuple[str, int, str, str, str, str, str], Dict[str, Any]] = {}
+        self._step3_char_source_state_runtime_cache: Dict[tuple[str, int], Dict[str, Any]] = {}
 
-    @staticmethod
-    def _iter_project_workspace_dirs(root: Path) -> list[Path]:
-        auto_ann_root = root / "2_auto_annotations"
-        datasets_root = root / "4_training_datasets"
-        runs_root = root / "5_training_runs"
-        models_root = root / "6_models"
-        rankings_root = root / "7_rankings"
-        staging_root = root / "_staging"
-
-        return [
-            root / "1_raw_images",
-            auto_ann_root,
-            root / "3_cropped_characters",
-            datasets_root,
-            runs_root,
-            models_root,
-            rankings_root,
-            root / "8_ocr_presets",
-            staging_root,
-            staging_root / "auto_annotations",
-            staging_root / "plate_manual_stage",
-            root / "_campaign_state",
-            root / "_campaign_state" / "ingest",
-        ]
-
-    def _ensure_project_workspace_tree(self, root: Path) -> None:
-        for path in self._iter_project_workspace_dirs(root):
-            path.mkdir(parents=True, exist_ok=True)
-
-    def _get_project_default_fields(self) -> Dict[str, Any]:
-        return {
-            "master_pool_dir": "",
-            "ingest_batch_size": 200,
-            "project_start_mode": "",
-            "project_start_scope_plate_run": "",
-            "project_start_scope_plate_model": "",
-            "project_start_scope_char_model": "",
-            "project_start_plate_source_run": "",
-            "project_start_plate_source_xml": "",
-            "project_start_plate_source_input": "",
-            "project_start_plate_source_iteration": 0,
-            "step1_source_manual_clear_iteration": 0,
-            "step1_restored_image_source_dir": "",
-            "step1_status": "pending",
-            "iteration_target": "",
-            "last_iteration_target": "",
-            "last_plate_manual_source_run": "",
-            "last_plate_manual_source_xml": "",
-            "last_plate_manual_source_input": "",
-            "last_plate_training_dataset": "",
-            "last_plate_training_source_run": "",
-            "last_plate_training_source_xml": "",
-            "step4_finish_ready": False,
-            "step4_last_run_id": "",
-            "step4_last_target": "",
-            "step4_last_iteration": 0,
-            "step3_extract_entry_mode": "",
-            "step3_extract_workflow_step": "entry",
-            "step3_extract_annotation_run_dir": "",
-            "step3_extract_xml_path": "",
-            "step3_extract_images_dir": "",
-            "step3_preview_dir": "",
-            "project_status": "active",
-            "project_paused_at": "",
-            "project_completed_at": "",
-        }
-
-    def _ensure_project_defaults(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
-        if "step1_status" not in project_data:
-            try:
-                inferred_step = int(project_data.get("current_step", 1) or 1)
-            except Exception:
-                inferred_step = 1
-            project_data["step1_status"] = "approved" if inferred_step >= 2 else "pending"
-        for key, value in self._get_project_default_fields().items():
-            project_data.setdefault(key, value)
-        return project_data
-
-    def _get_default_project_template(self, name: str) -> Dict[str, Any]:
-        clean_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)
-        proj_id = uuid.uuid4().hex[:6].upper()
-        data = {
-            "folder_name": f"{clean_name}_{proj_id}",
-            "created_at": datetime.now().isoformat(),
-            "current_iteration": 1,
-            "current_step": 1,
-            "project_start_mode": "",
-            "project_start_scope_plate_run": "",
-            "project_start_scope_plate_model": "",
-            "project_start_scope_char_model": "",
-            "project_start_plate_source_run": "",
-            "project_start_plate_source_xml": "",
-            "project_start_plate_source_input": "",
-            "project_start_plate_source_iteration": 0,
-            "step1_status": "pending",
-            "step2_status": "pending",
-            "step2_staging_run": "",
-            "iteration_target": "",
-            "last_iteration_target": "",
-            "last_plate_manual_source_run": "",
-            "last_plate_manual_source_xml": "",
-            "last_plate_manual_source_input": "",
-            "last_plate_training_dataset": "",
-            "last_plate_training_source_run": "",
-            "last_plate_training_source_xml": "",
-            "step4_finish_ready": False,
-            "step4_last_run_id": "",
-            "step4_last_target": "",
-            "step4_last_iteration": 0,
-            "best_vehicle_model": "",
-            "best_plate_model": "",
-            "best_char_model": "",
-            "step3_status": "pending",
-            "step3_substep": 1,
-            "step3_stage1_done": False,
-            "step3_stage2_done": False,
-            "step3_extract_entry_mode": "",
-            "step3_extract_workflow_step": "entry",
-            "step3_extract_annotation_run_dir": "",
-            "step3_extract_xml_path": "",
-            "step3_extract_images_dir": "",
-            "step3_preview_dir": "",
-            "project_status": "active",
-            "project_paused_at": "",
-            "project_completed_at": "",
-        }
-        return self._ensure_project_defaults(data)
-
-
-    def _load_state(self) -> Dict[str, Any]:
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                    if "projects" in data and "active_project" in data:
-                        for project_name, project_data in list(data.get("projects", {}).items()):
-                            if isinstance(project_data, dict):
-                                data["projects"][project_name] = self._ensure_project_defaults(project_data)
-                        data["active_project"] = ""
-                        return data
-            except Exception as e:
-                logger.error(f"Błąd czytania rejestru kampanii: {e}")
-                
-        return {
-            "active_project": "",
-            "projects": {}
-        }
-
-    def save_state(self):
-        try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Błąd zapisu rejestru kampanii: {e}")
-
-    def _resolve_project_name(self, name: str = None) -> str:
-        project_name = str(name or self.get_active_project_name() or "").strip()
-        if not project_name:
-            return ""
-        if project_name not in self.state.get("projects", {}):
-            return ""
-        return project_name
-
-    def _read_json_file(self, path: Path) -> Dict[str, Any]:
-        try:
-            with open(path, "r", encoding="utf-8-sig") as handle:
-                data = json.load(handle)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def _write_json_file(self, path: Path, payload: Dict[str, Any]) -> bool:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=4, ensure_ascii=False)
-            return True
-        except Exception as e:
-            logger.error(f"Nie udało się zapisać pliku {path}: {e}")
-            return False
-
-    # --- ZARZĄDZANIE PROJEKTAMI ---
-
-    def get_all_projects(self) -> List[str]:
-        return list(self.state["projects"].keys())
-
-    def get_active_project_name(self) -> str:
-        # Zwracaj aktywny projekt tylko wtedy, gdy nadal istnieje w rejestrze.
-        act = self.state.get("active_project", "")
-        if not act:
-            return ""
-        if act not in self.state.get("projects", {}):
-            return ""
-        return act
-
-    def set_active_project(self, name: str):
-        if name in self.state["projects"]:
-            self.state["active_project"] = name
-            self.save_state()
-
-    def clear_active_project(self):
-        """Czyści aktywny projekt i przełącza aplikację do trybu swobodnego."""
-        self.state["active_project"] = ""
-        self.save_state()
-
-    def create_project(self, name: str) -> bool:
-        name = name.strip()
-        if not name:
-            return False
-        if name in self.state["projects"]:
-            return False
-
-        self.state["projects"][name] = self._get_default_project_template(name)
-        self.state["active_project"] = name
-        
-        self.save_state()
-
-        # Buduj pełne drzewo katalogów projektu.
-        root = self.get_project_root_dir(name)
-        self._ensure_project_workspace_tree(root)
-
-        return True
-
-    def delete_project(self, name: str) -> bool:
-        if name not in self.state["projects"]:
-            return False
-
-        # Usuń cały katalog projektu z dysku.
-        root = self.get_project_root_dir(name)
-        try:
-            if root.exists():
-                shutil.rmtree(root)
-        except Exception as e:
-            logger.error(f"Nie można usunąć projektu {root}: {e}")
-
-        del self.state["projects"][name]
-
-        if self.state.get("active_project") == name:
-            self.state["active_project"] = ""
-
-        self.save_state()
-        return True
+    # Project registry/default methods are bound after class creation.
 
     # --- GETTERY I SETTERY (dla AKTYWNEGO projektu) ---
 
-    def _get_active_data(self) -> Dict[str, Any]:
-        act = self.state.get("active_project", "")
-        return self.state["projects"].get(act, {})
-
-    def get_safe_project_folder_name(self) -> str:
-        data = self._get_active_data()
-        return data.get("folder_name", "UNNAMED_PROJECT")
-
-    def get_project_created_at(self, name: str = None) -> str:
-        project_name = (name or self.get_active_project_name() or "").strip()
-        if not project_name:
-            return ""
-
-        project_data = self.state.get("projects", {}).get(project_name, {})
-        return str(project_data.get("created_at", "") or "").strip()
-
-    def get_current_iteration_num(self) -> int:
-        return self._get_active_data().get("current_iteration", 1)
-        
-    def get_current_step(self) -> int:
-        return self._get_active_data().get("current_step", 1)
-
-    def set_current_step(self, step: int):
-        act = self.state.get("active_project", "")
-        if not act or act not in self.state.get("projects", {}): return
-        self.state["projects"][act]["current_step"] = step
-        self.save_state()
-
-    def approve_step1(self):
-        """Oznacza krok 1 jako zatwierdzony."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step1_status"] = "approved"
-        self.save_state()
-
-    def reset_step1(self):
-        """Resetuje stan Kroku 1 dla nowej iteracji."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step1_status"] = "pending"
-        self.save_state()
-
-    def get_step1_status(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return "pending"
-        return self.state["projects"][act].get("step1_status", "pending")
-
-    @staticmethod
-    def _normalize_project_start_mode(mode: str | None) -> str:
-        value = str(mode or "").strip().lower()
-        if not value:
-            return ""
-        if value in {"assets", "import", "resource", "resources", "mam_zasoby"}:
-            return "assets"
-        return "fresh"
-
-    def set_project_start_mode(self, mode: str | None, project_name: str = None) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        self.state["projects"][project_name]["project_start_mode"] = self._normalize_project_start_mode(mode)
-        self.save_state()
-        return True
-
-    def get_project_start_mode(self, project_name: str = None) -> str:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return ""
-
-        raw_value = self.state["projects"][project_name].get("project_start_mode", "")
-        return self._normalize_project_start_mode(raw_value)
-
-    @staticmethod
-    def _normalize_project_start_asset_scope(scope: str | None) -> str:
-        value = str(scope or "").strip().lower()
-        if value in {"project", "freemode", "na"}:
-            return value
-        return ""
-
-    @staticmethod
-    def _project_start_asset_scope_state_key(row_key: str | None) -> str:
-        normalized = str(row_key or "").strip().lower()
-        mapping = {
-            "plate_run": "project_start_scope_plate_run",
-            "plate_model": "project_start_scope_plate_model",
-            "char_model": "project_start_scope_char_model",
-        }
-        return str(mapping.get(normalized) or "").strip()
-
-    def set_project_start_asset_scope(self, row_key: str, scope: str | None, project_name: str = None) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        state_key = self._project_start_asset_scope_state_key(row_key)
-        if not state_key:
-            return False
-
-        normalized = self._normalize_project_start_asset_scope(scope)
-        self.state["projects"][project_name][state_key] = normalized
-        self.save_state()
-        return True
-
-    def get_project_start_asset_scope(self, row_key: str, project_name: str = None) -> str:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return ""
-
-        state_key = self._project_start_asset_scope_state_key(row_key)
-        if not state_key:
-            return ""
-
-        raw_value = self.state["projects"][project_name].get(state_key, "")
-        return self._normalize_project_start_asset_scope(raw_value)
-
-    def set_project_start_plate_source(
-        self,
-        source_run_path: str = "",
-        source_xml_path: str = "",
-        source_input_path: str = "",
-        project_name: str = None,
-    ) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        project_data = self.state["projects"][project_name]
-        source_run = str(source_run_path or "").strip()
-        source_xml = str(source_xml_path or "").strip()
-        source_input = str(source_input_path or "").strip()
-        has_source = bool(source_run or source_xml or source_input)
-        try:
-            current_iteration = int(project_data.get("current_iteration", 1) or 1)
-        except Exception:
-            current_iteration = 1
-
-        project_data["project_start_plate_source_run"] = source_run
-        project_data["project_start_plate_source_xml"] = source_xml
-        project_data["project_start_plate_source_input"] = source_input
-        project_data["project_start_plate_source_iteration"] = int(current_iteration if has_source else 0)
-        self.save_state()
-        return True
-
-    def clear_project_start_plate_source(self, project_name: str = None) -> bool:
-        return self.set_project_start_plate_source("", "", "", project_name=project_name)
-
-    def get_project_start_plate_source(self, project_name: str = None) -> Dict[str, str]:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return {
-                "source_run_path": "",
-                "source_xml_path": "",
-                "source_input_path": "",
-                "source_iteration": "",
-            }
-
-        project_data = self.state["projects"].get(project_name, {})
-        try:
-            source_iteration = int(project_data.get("project_start_plate_source_iteration", 0) or 0)
-        except Exception:
-            source_iteration = 0
-        try:
-            current_iteration = int(project_data.get("current_iteration", 1) or 1)
-        except Exception:
-            current_iteration = 1
-
-        if source_iteration and source_iteration != current_iteration:
-            return {
-                "source_run_path": "",
-                "source_xml_path": "",
-                "source_input_path": "",
-                "source_iteration": "",
-            }
-
-        return {
-            "source_run_path": str(project_data.get("project_start_plate_source_run", "") or "").strip(),
-            "source_xml_path": str(project_data.get("project_start_plate_source_xml", "") or "").strip(),
-            "source_input_path": str(project_data.get("project_start_plate_source_input", "") or "").strip(),
-            "source_iteration": str(source_iteration or ""),
-        }
-
-    @staticmethod
-    def _normalize_iteration_target(target: str | None) -> str:
-        value = str(target or "").strip().lower()
-        if value in {"plate", "plates", "tablica", "tablice", "pose"}:
-            return "plate"
-        if value in {"char", "chars", "character", "characters", "znak", "znaki"}:
-            return "char"
-        return ""
-
-    def set_iteration_target(self, target: str | None):
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        self.state["projects"][act]["iteration_target"] = self._normalize_iteration_target(target)
-        self.save_state()
-
-    def get_iteration_target(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return ""
-        return self._normalize_iteration_target(self.state["projects"][act].get("iteration_target", ""))
-
-    def clear_iteration_target(self):
-        self.set_iteration_target("")
-
-    def get_last_iteration_target(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return ""
-        return self._normalize_iteration_target(self.state["projects"][act].get("last_iteration_target", ""))
-
-    def get_project_status(self, project_name: str = None) -> str:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return "active"
-
-        status = str(self.state["projects"][project_name].get("project_status", "active") or "").strip().lower()
-        if status == "completed":
-            return "completed"
-        if status == "paused":
-            return "paused"
-        return "active"
-
-    def is_project_completed(self, project_name: str = None) -> bool:
-        return self.get_project_status(project_name) == "completed"
-
-    def is_project_paused(self, project_name: str = None) -> bool:
-        return self.get_project_status(project_name) == "paused"
-
-    def get_project_paused_at(self, project_name: str = None) -> str:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return ""
-        return str(self.state["projects"][project_name].get("project_paused_at", "") or "").strip()
-
-    def get_project_completed_at(self, project_name: str = None) -> str:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return ""
-        return str(self.state["projects"][project_name].get("project_completed_at", "") or "").strip()
-
-    def pause_project(self, project_name: str = None) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        project_data = self.state["projects"][project_name]
-        project_data["project_status"] = "paused"
-        project_data["project_paused_at"] = datetime.now().isoformat()
-        project_data["project_completed_at"] = ""
-        self.save_state()
-        return True
-
-    def complete_project(self, project_name: str = None) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        project_data = self.state["projects"][project_name]
-        if int(project_data.get("current_step", 1) or 1) < 5:
-            project_data["current_step"] = 5
-        project_data["project_status"] = "completed"
-        project_data["project_paused_at"] = ""
-        project_data["project_completed_at"] = datetime.now().isoformat()
-        self.save_state()
-        return True
-
-    def reopen_project(self, project_name: str = None) -> bool:
-        project_name = self._resolve_project_name(project_name)
-        if not project_name:
-            return False
-
-        project_data = self.state["projects"][project_name]
-        project_data["project_status"] = "active"
-        project_data["project_paused_at"] = ""
-        project_data["project_completed_at"] = ""
-        self.save_state()
-        return True
-
-    def set_step2_generated(self, staging_run_path: str):
-        """Zapisuje informację, że krok 2 został wykonany, ale niezatwierdzony."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step2_status"] = "generated"
-        self.state["projects"][act]["step2_staging_run"] = str(staging_run_path)
-        self.save_state()
-
-    def approve_step2(self):
-        """Oznacza krok 2 jako zatwierdzony."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step2_status"] = "approved"
-        self.save_state()
-
-    def reset_step2(self):
-        """Resetuje stan Kroku 2 (Autoanotacja) do oczekiwania na nowe zatwierdzenie."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step2_status"] = "pending"
-        self.state["projects"][act]["step2_staging_run"] = ""
-        self.save_state()
-
-    def get_step2_status(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return "pending"
-        return self.state["projects"][act].get("step2_status", "pending")
-
-    def get_step2_staging_run(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return ""
-        return self.state["projects"][act].get("step2_staging_run", "")
-    
-    def set_step3_needs_rework(self):
-        """Oznacza krok 3 jako wymagający poprawy."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step3_status"] = "needs_rework"
-        self.save_state()
-
-    def set_step3_ready(self):
-        """Oznacza krok 3 jako gotowy do zatwierdzenia w wizardzie."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step3_status"] = "ready"
-        self.save_state()
-
-    def approve_step3(self):
-        """Oznacza krok 3 jako zakończony powodzeniem."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step3_status"] = "approved"
-        self.save_state()
-
-    def set_step3_pending(self):
-        """Przywraca krok 3 do stanu w toku bez resetu zapisanej pracy."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step3_status"] = "pending"
-        self.save_state()
-
-    def reset_step3(self):
-        """Resetuje stan kroku 3."""
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        self.state["projects"][act]["step3_status"] = "pending"
-        self.state["projects"][act]["step3_substep"] = 1
-        self.state["projects"][act]["step3_stage1_done"] = False
-        self.state["projects"][act]["step3_stage2_done"] = False
-        self.state["projects"][act]["step3_extract_entry_mode"] = ""
-        self.state["projects"][act]["step3_extract_workflow_step"] = "entry"
-        self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
-        self.state["projects"][act]["step3_extract_xml_path"] = ""
-        self.state["projects"][act]["step3_extract_images_dir"] = ""
-        self.state["projects"][act]["step3_preview_dir"] = ""
-        self.save_state()
-
-    def get_step3_status(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return "pending"
-        return self.state["projects"][act].get("step3_status", "pending")
-    
-    def get_step3_substep(self) -> int:
-        act = self.get_active_project_name()
-        if not act:
-            return 1
-        return int(self.state["projects"][act].get("step3_substep", 1))
-
-
-    def set_step3_substep(self, value: int):
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        value = int(value)
-        if value < 1:
-            value = 1
-        if value > 3:
-            value = 3
-
-        self.state["projects"][act]["step3_substep"] = value
-        self.save_state()
-
-
-    def is_step3_stage1_done(self) -> bool:
-        act = self.get_active_project_name()
-        if not act:
-            return False
-        return bool(self.state["projects"][act].get("step3_stage1_done", False))
-
-
-    def set_step3_stage1_done(self, done: bool):
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        self.state["projects"][act]["step3_stage1_done"] = bool(done)
-        self.save_state()
-
-
-    def is_step3_stage2_done(self) -> bool:
-        act = self.get_active_project_name()
-        if not act:
-            return False
-        return bool(self.state["projects"][act].get("step3_stage2_done", False))
-
-
-    def set_step3_stage2_done(self, done: bool):
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        self.state["projects"][act]["step3_stage2_done"] = bool(done)
-        self.save_state()
-
-
-    def reset_step3_progress(self):
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        self.state["projects"][act]["step3_substep"] = 1
-        self.state["projects"][act]["step3_stage1_done"] = False
-        self.state["projects"][act]["step3_stage2_done"] = False
-        self.state["projects"][act]["step3_extract_entry_mode"] = ""
-        self.state["projects"][act]["step3_extract_workflow_step"] = "entry"
-        self.state["projects"][act]["step3_extract_annotation_run_dir"] = ""
-        self.state["projects"][act]["step3_extract_xml_path"] = ""
-        self.state["projects"][act]["step3_extract_images_dir"] = ""
-        self.state["projects"][act]["step3_preview_dir"] = ""
-        self.save_state()
-
-    def get_step3_extract_state(self) -> Dict[str, str]:
-        act = self.get_active_project_name()
-        if not act:
-            return {
-                "entry_mode": "",
-                "workflow_step": "entry",
-                "annotation_run_dir": "",
-                "xml_path": "",
-                "images_dir": "",
-            }
-
-        project_data = self.state["projects"][act]
-        return {
-            "entry_mode": str(project_data.get("step3_extract_entry_mode", "") or "").strip(),
-            "workflow_step": str(project_data.get("step3_extract_workflow_step", "entry") or "entry").strip(),
-            "annotation_run_dir": str(project_data.get("step3_extract_annotation_run_dir", "") or "").strip(),
-            "xml_path": str(project_data.get("step3_extract_xml_path", "") or "").strip(),
-            "images_dir": str(project_data.get("step3_extract_images_dir", "") or "").strip(),
-        }
-
-    def get_step3_preview_dir(self) -> str:
-        act = self.get_active_project_name()
-        if not act:
-            return ""
-        value = str(self.state["projects"][act].get("step3_preview_dir", "") or "").strip()
-        if value:
-            return value
-
-        try:
-            if self.state_file.exists():
-                loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
-                project_data = dict((loaded.get("projects") or {}).get(act) or {})
-                fallback_value = str(project_data.get("step3_preview_dir", "") or "").strip()
-                if fallback_value:
-                    try:
-                        self.state["projects"][act]["step3_preview_dir"] = fallback_value
-                    except Exception:
-                        pass
-                    return fallback_value
-        except Exception:
-            pass
-
-        return ""
-
-    def set_step3_preview_dir(self, preview_dir: str | None) -> None:
-        act = self.get_active_project_name()
-        if not act:
-            return
-        self.state["projects"][act]["step3_preview_dir"] = str(preview_dir or "").strip()
-        self.save_state()
-
-    def set_step3_extract_state(
-        self,
-        *,
-        entry_mode: str | None = None,
-        workflow_step: str | None = None,
-        annotation_run_dir: str | None = None,
-        xml_path: str | None = None,
-        images_dir: str | None = None,
-    ) -> None:
-        act = self.get_active_project_name()
-        if not act:
-            return
-
-        project_data = self.state["projects"][act]
-
-        if entry_mode is not None:
-            project_data["step3_extract_entry_mode"] = str(entry_mode or "").strip()
-        if workflow_step is not None:
-            project_data["step3_extract_workflow_step"] = str(workflow_step or "entry").strip() or "entry"
-        if annotation_run_dir is not None:
-            project_data["step3_extract_annotation_run_dir"] = str(annotation_run_dir or "").strip()
-        if xml_path is not None:
-            project_data["step3_extract_xml_path"] = str(xml_path or "").strip()
-        if images_dir is not None:
-            project_data["step3_extract_images_dir"] = str(images_dir or "").strip()
-
-        self.save_state()
+    # Campaign step/status state methods are bound after class creation.
 
     def _clone_iteration_ingest_manifest(
         self,
@@ -1073,6 +316,47 @@ class CampaignManager:
             return raw_source
         return ""
 
+    def _resolve_current_iteration_image_source_for_e1(
+        self,
+        *,
+        project_name: str,
+        current_iteration: int,
+    ) -> str:
+        candidates: list[Any] = []
+
+        try:
+            latest_plan = self.load_latest_ingest_plan(project_name)
+        except Exception:
+            latest_plan = {}
+        if isinstance(latest_plan, dict):
+            try:
+                plan_iteration = int(latest_plan.get("iteration", 0) or 0)
+            except Exception:
+                plan_iteration = 0
+            plan_project = str(latest_plan.get("project", "") or "").strip()
+            if plan_iteration == int(current_iteration or 0) and (
+                not plan_project or plan_project == str(project_name or "").strip()
+            ):
+                for key in ("master_pool_dir", "source_dir", "target_dir"):
+                    candidates.append(latest_plan.get(key, ""))
+
+        try:
+            manifest = self.load_ingest_manifest(current_iteration, project_name)
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            for key in ("master_pool_dir", "source_dir", "target_dir"):
+                candidates.append(manifest.get(key, ""))
+
+        for candidate in candidates:
+            valid_source = self._resolve_valid_image_source_dir(
+                candidate,
+                project_name=project_name,
+            )
+            if valid_source:
+                return valid_source
+        return ""
+
     def get_manual_plate_stage_images_state(
         self,
         source_iteration: int = None,
@@ -1149,7 +433,7 @@ class CampaignManager:
             current_iteration = int(project_data.get("current_iteration", 1) or 1)
         except Exception:
             return ""
-        if current_step != 1 or current_iteration <= 1:
+        if current_step != 1:
             return ""
         current_source = str(project_data.get("master_pool_dir", "") or "").strip()
         if current_source:
@@ -1169,6 +453,20 @@ class CampaignManager:
         except Exception:
             manual_clear_iteration = 0
         if manual_clear_iteration == current_iteration:
+            return ""
+
+        current_iteration_source = self._resolve_current_iteration_image_source_for_e1(
+            project_name=project_name,
+            current_iteration=current_iteration,
+        )
+        if current_iteration_source:
+            project_data["master_pool_dir"] = current_iteration_source
+            project_data["step1_restored_image_source_dir"] = current_iteration_source
+            project_data["step1_source_manual_clear_iteration"] = 0
+            self.save_state()
+            return current_iteration_source
+
+        if current_iteration <= 1:
             return ""
 
         previous_source = self._resolve_previous_iteration_image_source_for_e1(
@@ -1598,6 +896,7 @@ class CampaignManager:
         project_data["project_start_plate_source_run"] = ""
         project_data["project_start_plate_source_xml"] = ""
         project_data["project_start_plate_source_input"] = ""
+        project_data["project_start_plate_source_mode"] = ""
         project_data["project_start_plate_source_iteration"] = 0
         project_data["project_start_scope_plate_run"] = ""
 
@@ -1607,6 +906,10 @@ class CampaignManager:
         project_data["step4_finish_ready"] = False
         project_data["step4_last_run_id"] = ""
         project_data["step4_last_target"] = ""
+        project_data["step4_last_iteration"] = 0
+        project_data["step4_without_training_ready"] = False
+        project_data["step4_without_training_target"] = ""
+        project_data["step4_without_training_iteration"] = 0
 
         if start_mode == "reuse_input":
             result.update(reuse_result or {})
@@ -1699,6 +1002,8 @@ class CampaignManager:
         run_id: str = "",
         target: str = "",
         iteration_num: int | None = None,
+        selection_confirmed: bool = False,
+        model_path: str = "",
     ) -> None:
         act = self.get_active_project_name()
         if not act:
@@ -1715,6 +1020,12 @@ class CampaignManager:
         project_data["step4_last_run_id"] = str(run_id or "").strip() if is_ready else ""
         project_data["step4_last_target"] = self._normalize_iteration_target(target) if is_ready else ""
         project_data["step4_last_iteration"] = int(iteration_num or 0) if is_ready else 0
+        project_data["step4_model_choice_confirmed"] = bool(selection_confirmed) if is_ready else False
+        project_data["step4_selected_model_path"] = str(model_path or "").strip() if is_ready and selection_confirmed else ""
+        if is_ready:
+            project_data["step4_without_training_ready"] = False
+            project_data["step4_without_training_target"] = ""
+            project_data["step4_without_training_iteration"] = 0
         self.save_state()
 
     def get_step4_finish_state(self) -> Dict[str, Any]:
@@ -1725,14 +1036,110 @@ class CampaignManager:
                 "run_id": "",
                 "target": "",
                 "iteration": 0,
+                "selection_confirmed": False,
+                "model_path": "",
             }
 
         project_data = self.state["projects"].get(act, {})
-        return {
+        state = {
             "ready": bool(project_data.get("step4_finish_ready", False)),
             "run_id": str(project_data.get("step4_last_run_id", "") or "").strip(),
             "target": self._normalize_iteration_target(project_data.get("step4_last_target", "")),
             "iteration": int(project_data.get("step4_last_iteration", 0) or 0),
+            "selection_confirmed": bool(project_data.get("step4_model_choice_confirmed", False)),
+            "model_path": str(project_data.get("step4_selected_model_path", "") or "").strip(),
+        }
+        if not bool(state.get("ready")):
+            return state
+        run_id = str(state.get("run_id", "") or "").strip()
+        iteration_num = int(state.get("iteration", 0) or 0)
+        if not bool(state.get("selection_confirmed")):
+            return {
+                "ready": False,
+                "run_id": run_id,
+                "target": state.get("target", ""),
+                "iteration": iteration_num,
+                "selection_confirmed": False,
+                "model_path": "",
+            }
+        if not run_id or iteration_num <= 0:
+            return {"ready": False, "run_id": "", "target": "", "iteration": 0, "selection_confirmed": False, "model_path": ""}
+
+        def _record_matches(record: Dict[str, Any] | None, *, allow_legacy: bool = False) -> bool:
+            if not isinstance(record, dict):
+                return False
+            if str(record.get("run_id", "") or "").strip() != run_id:
+                return False
+            declared_iteration = 0
+            for field in ("trained_iteration", "source_iteration", "iteration"):
+                try:
+                    declared_iteration = int(record.get(field, 0) or 0)
+                except Exception:
+                    declared_iteration = 0
+                if declared_iteration > 0:
+                    break
+            if declared_iteration > 0:
+                return declared_iteration == iteration_num
+            return bool(allow_legacy)
+
+        try:
+            iteration_state = self.get_iteration_state(iteration_num=iteration_num, project_name=act)
+            if _record_matches(iteration_state.get("step4_training"), allow_legacy=True):
+                return state
+        except Exception:
+            pass
+        try:
+            bundle = self.get_iteration_artifact_bundle(iteration_num=iteration_num, project_name=act)
+            if _record_matches(bundle.get("step4_training"), allow_legacy=False):
+                return state
+        except Exception:
+            pass
+        return {
+            "ready": False,
+            "run_id": "",
+            "target": state.get("target", ""),
+            "iteration": iteration_num,
+            "selection_confirmed": False,
+            "model_path": "",
+        }
+
+    def set_step4_without_training_decision(
+        self,
+        ready: bool,
+        *,
+        target: str = "",
+        iteration_num: int | None = None,
+    ) -> None:
+        act = self.get_active_project_name()
+        if not act:
+            return
+
+        project_data = self.state["projects"][act]
+        is_ready = bool(ready)
+        if iteration_num is None:
+            try:
+                iteration_num = int(project_data.get("current_iteration", 1) or 1)
+            except Exception:
+                iteration_num = 1
+        project_data["step4_without_training_ready"] = is_ready
+        project_data["step4_without_training_target"] = self._normalize_iteration_target(target) if is_ready else ""
+        project_data["step4_without_training_iteration"] = int(iteration_num or 0) if is_ready else 0
+        self.save_state()
+
+    def get_step4_without_training_decision(self) -> Dict[str, Any]:
+        act = self.get_active_project_name()
+        if not act:
+            return {
+                "ready": False,
+                "target": "",
+                "iteration": 0,
+            }
+
+        project_data = self.state["projects"].get(act, {})
+        return {
+            "ready": bool(project_data.get("step4_without_training_ready", False)),
+            "target": self._normalize_iteration_target(project_data.get("step4_without_training_target", "")),
+            "iteration": int(project_data.get("step4_without_training_iteration", 0) or 0),
         }
 
     def set_last_plate_manual_source(
@@ -1966,6 +1373,10 @@ class CampaignManager:
                 "iteration_state": {},
             }
 
+        runtime_cached = self._artifact_registry_runtime_cache.get(project_name)
+        if isinstance(runtime_cached, dict):
+            return dict(runtime_cached)
+
         registry_path = self.get_artifact_registry_path(project_name)
         if registry_path is None or not registry_path.exists():
             return {
@@ -2005,6 +1416,7 @@ class CampaignManager:
 
         if cache_key is not None:
             self._artifact_registry_cache[cache_key] = dict(payload)
+        self._artifact_registry_runtime_cache[project_name] = dict(payload)
         return payload
 
     def save_artifact_registry(self, payload: Dict[str, Any], project_name: str = None) -> bool:
@@ -2026,6 +1438,8 @@ class CampaignManager:
         ok = self._write_json_file(registry_path, safe_payload)
         if ok:
             self._artifact_registry_cache.clear()
+            self._artifact_registry_runtime_cache.pop(project_name, None)
+            self.invalidate_step3_char_source_state_cache()
         return ok
 
     def upsert_iteration_state(
@@ -2232,6 +1646,298 @@ class CampaignManager:
         package = packages.get(package_id)
         return dict(package) if isinstance(package, dict) else {}
 
+    @staticmethod
+    def _normalize_project_model_target(model_type: str | None) -> str:
+        value = str(model_type or "").strip().lower()
+        if value in {"plate", "plates", "mt", "pose", "yolo_pose"}:
+            return "plate"
+        if value in {"char", "chars", "character", "characters", "mz", "detect", "yolo_detect"}:
+            return "char"
+        return value
+
+    @staticmethod
+    def _resolve_existing_model_artifact_path(payload: Dict[str, Any] | None) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("best_weights", "path", "model_path", "weights_path", "last_weights"):
+            candidate = str(payload.get(key, "") or "").strip()
+            if not candidate:
+                continue
+            try:
+                path = Path(candidate)
+            except Exception:
+                continue
+            if path.exists() and path.is_file():
+                try:
+                    return str(path.resolve())
+                except Exception:
+                    return str(path)
+        return ""
+
+    def _load_training_history_run(
+        self,
+        run_id: str,
+        *,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        run_key = str(run_id or "").strip()
+        if not project_name or not run_key:
+            return {}
+        try:
+            history_path = self.get_project_root_dir(project_name) / "5_training_runs" / "training_history.json"
+        except Exception:
+            return {}
+        if not history_path.exists():
+            return {}
+        history = self._read_json_file(history_path)
+        runs = history.get("runs") if isinstance(history, dict) else {}
+        run = runs.get(run_key) if isinstance(runs, dict) else {}
+        return dict(run) if isinstance(run, dict) else {}
+
+    def _coerce_project_training_model_artifact(
+        self,
+        payload: Dict[str, Any] | None,
+        *,
+        target: str,
+        iteration_num: int,
+        project_name: str,
+        source: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        payload_target = self._normalize_project_model_target(payload.get("target"))
+        if payload_target != target:
+            return {}
+        model_path = self._resolve_existing_model_artifact_path(payload)
+        if not model_path:
+            return {}
+        status = str(payload.get("status", "") or "").strip().lower()
+        if status and status not in {"completed", "success", "finished", "done", "ready"}:
+            return {}
+
+        run_id = str(payload.get("run_id", "") or "").strip()
+        history_run = self._load_training_history_run(run_id, project_name=project_name)
+        artifact_iteration = 0
+        for field in ("trained_iteration", "source_iteration", "iteration"):
+            try:
+                artifact_iteration = int(payload.get(field, 0) or 0)
+            except Exception:
+                artifact_iteration = 0
+            if artifact_iteration > 0:
+                break
+        if artifact_iteration <= 0:
+            try:
+                artifact_iteration = int(iteration_num or 0)
+            except Exception:
+                artifact_iteration = 0
+        result = dict(payload)
+        result.update(
+            {
+                "path": model_path,
+                "target": target,
+                "iteration": int(artifact_iteration or 0),
+                "trained_iteration": int(artifact_iteration or 0),
+                "source": source,
+                "scope": "trained_previous_iteration",
+            }
+        )
+        if history_run:
+            for key in (
+                "name",
+                "base_model",
+                "best_map50",
+                "best_map50_95",
+                "precision",
+                "recall",
+                "finished_at",
+                "created_at",
+            ):
+                if key in history_run and key not in result:
+                    result[key] = history_run.get(key)
+            if not result.get("name"):
+                result["name"] = str(history_run.get("name", "") or "").strip()
+        return result
+
+    def get_latest_trained_project_model(
+        self,
+        model_type: str = "plate",
+        *,
+        before_iteration: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        """Return the latest completed project-trained model for the requested target."""
+
+        project_name = self._resolve_project_name(project_name)
+        target = self._normalize_project_model_target(model_type)
+        if not project_name or target not in {"plate", "char"}:
+            return {}
+        try:
+            before_value = int(before_iteration or 0)
+        except Exception:
+            before_value = 0
+
+        registry = self.load_artifact_registry(project_name)
+        candidates: list[Dict[str, Any]] = []
+
+        iteration_state = registry.get("iteration_state", {})
+        if isinstance(iteration_state, dict):
+            for key, entry in iteration_state.items():
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    iter_value = int(entry.get("iteration", key) or key or 0)
+                except Exception:
+                    continue
+                if before_value and iter_value >= before_value:
+                    continue
+                candidate = self._coerce_project_training_model_artifact(
+                    entry.get("step4_training"),
+                    target=target,
+                    iteration_num=iter_value,
+                    project_name=project_name,
+                    source="iteration_state",
+                )
+                if candidate:
+                    candidates.append(candidate)
+
+        packages = registry.get("packages", {})
+        if isinstance(packages, dict):
+            for package in packages.values():
+                if not isinstance(package, dict):
+                    continue
+                iterations = []
+                for raw_iter in package.get("iterations", []) or []:
+                    try:
+                        iterations.append(int(raw_iter))
+                    except Exception:
+                        pass
+                if iterations:
+                    iter_value = max(iterations)
+                else:
+                    try:
+                        iter_value = int(package.get("iteration_last_seen", 0) or 0)
+                    except Exception:
+                        iter_value = 0
+                if before_value:
+                    previous_iters = [value for value in iterations if value < before_value]
+                    if iterations and not previous_iters:
+                        continue
+                    if previous_iters:
+                        iter_value = max(previous_iters)
+                    elif iter_value >= before_value:
+                        continue
+                candidate = self._coerce_project_training_model_artifact(
+                    package.get("step4_training"),
+                    target=target,
+                    iteration_num=iter_value,
+                    project_name=project_name,
+                    source="artifact_package",
+                )
+                if candidate:
+                    candidates.append(candidate)
+
+        if not candidates:
+            return {}
+
+        deduped: Dict[str, Dict[str, Any]] = {}
+
+        def _candidate_identity(item: Dict[str, Any]) -> str:
+            run_id = str(item.get("run_id", "") or "").strip()
+            if run_id:
+                return f"run:{run_id}"
+            path = str(item.get("path", "") or item.get("best_weights", "") or item.get("output_dir", "") or "").strip()
+            if path:
+                try:
+                    path = str(Path(path).resolve())
+                except Exception:
+                    pass
+                return f"path:{path.lower()}"
+            return f"item:{id(item)}"
+
+        def _candidate_iteration(item: Dict[str, Any]) -> int:
+            try:
+                return int(item.get("iteration", 0) or 0)
+            except Exception:
+                return 0
+
+        def _prefer_candidate(candidate: Dict[str, Any], existing: Dict[str, Any]) -> bool:
+            candidate_source = str(candidate.get("source", "") or "").strip()
+            existing_source = str(existing.get("source", "") or "").strip()
+            if candidate_source == "iteration_state" and existing_source != "iteration_state":
+                return True
+            if existing_source == "iteration_state" and candidate_source != "iteration_state":
+                return False
+            candidate_iter = _candidate_iteration(candidate)
+            existing_iter = _candidate_iteration(existing)
+            if candidate_iter > 0 and existing_iter > 0:
+                return candidate_iter < existing_iter
+            if candidate_iter > 0:
+                return True
+            return False
+
+        for candidate in candidates:
+            identity = _candidate_identity(candidate)
+            existing = deduped.get(identity)
+            if existing is None or _prefer_candidate(candidate, existing):
+                deduped[identity] = candidate
+        candidates = list(deduped.values())
+
+        def _candidate_sort_key(item: Dict[str, Any]) -> tuple[int, str, str]:
+            try:
+                iter_value = int(item.get("iteration", 0) or 0)
+            except Exception:
+                iter_value = 0
+            timestamp = str(item.get("finished_at") or item.get("updated_at") or item.get("created_at") or "")
+            run_id = str(item.get("run_id", "") or "")
+            return iter_value, timestamp, run_id
+
+        return dict(max(candidates, key=_candidate_sort_key))
+
+    def get_effective_project_model(
+        self,
+        model_type: str = "plate",
+        *,
+        before_iteration: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        """Prefer a model trained in earlier project iterations, then fall back to an explicit project model."""
+
+        project_name = self._resolve_project_name(project_name)
+        target = self._normalize_project_model_target(model_type)
+        if not project_name or target not in {"plate", "char"}:
+            return {}
+
+        trained = self.get_latest_trained_project_model(
+            target,
+            before_iteration=before_iteration,
+            project_name=project_name,
+        )
+        if trained:
+            return trained
+
+        explicit_path = str(self.get_global_model(target) or "").strip()
+        if explicit_path:
+            try:
+                explicit = Path(explicit_path)
+            except Exception:
+                explicit = None
+            if explicit is not None and explicit.exists() and explicit.is_file():
+                try:
+                    normalized_path = str(explicit.resolve())
+                except Exception:
+                    normalized_path = explicit_path
+                return {
+                    "path": normalized_path,
+                    "target": target,
+                    "iteration": 0,
+                    "trained_iteration": 0,
+                    "source_iteration": 0,
+                    "source": "project_global_model",
+                    "scope": "project",
+                }
+        return {}
+
     def get_active_project_root_dir(self) -> Path | None:
         act = self.get_active_project_name()
         if not act:
@@ -2272,7 +1978,34 @@ class CampaignManager:
         if not project_name:
             return 0
         try:
-            manifest = self.load_ingest_manifest(iteration_num, project_name)
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+        cache_key = (project_name, int(iter_value))
+        cached_count = self._iteration_image_count_cache.get(cache_key)
+        if isinstance(cached_count, int):
+            return int(cached_count)
+        try:
+            summary = self.load_latest_ingest_plan_summary(project_name)
+        except Exception:
+            summary = {}
+        if isinstance(summary, dict) and summary:
+            try:
+                summary_iter = int(summary.get("iteration", 0) or 0)
+            except Exception:
+                summary_iter = 0
+            summary_project = str(summary.get("project", "") or "").strip()
+            if summary_iter == iter_value and (not summary_project or summary_project == project_name):
+                for key in ("selected_total", "raw_total", "source_new_to_project_total"):
+                    try:
+                        count = int(summary.get(key, 0) or 0)
+                    except Exception:
+                        count = 0
+                    if count > 0:
+                        self._iteration_image_count_cache[cache_key] = int(count)
+                        return int(count)
+        try:
+            manifest = self.load_ingest_manifest(iter_value, project_name)
         except Exception:
             manifest = {}
         if not isinstance(manifest, dict):
@@ -2378,21 +2111,51 @@ class CampaignManager:
         if not project_name:
             return 0
         try:
-            manifest = self.load_ingest_manifest(iteration_num, project_name)
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+        cache_key = (project_name, int(iter_value))
+        cached_count = self._iteration_image_count_cache.get(cache_key)
+        if isinstance(cached_count, int):
+            return int(cached_count)
+        try:
+            summary = self.load_latest_ingest_plan_summary(project_name)
+        except Exception:
+            summary = {}
+        if isinstance(summary, dict) and summary:
+            try:
+                summary_iter = int(summary.get("iteration", 0) or 0)
+            except Exception:
+                summary_iter = 0
+            summary_project = str(summary.get("project", "") or "").strip()
+            if summary_iter == iter_value and (not summary_project or summary_project == project_name):
+                for key in ("selected_total", "raw_total", "source_new_to_project_total"):
+                    try:
+                        count = int(summary.get(key, 0) or 0)
+                    except Exception:
+                        count = 0
+                    if count > 0:
+                        self._iteration_image_count_cache[cache_key] = int(count)
+                        return int(count)
+        try:
+            manifest = self.load_ingest_manifest(iter_value, project_name)
         except Exception:
             manifest = {}
         manifest_mode = str((manifest or {}).get("selection_mode", "") or "").strip().lower() if isinstance(manifest, dict) else ""
-        manifest_count = int(self.get_iteration_manifest_image_count(iteration_num, project_name) or 0)
+        manifest_count = int(self.get_iteration_manifest_image_count(iter_value, project_name) or 0)
         if manifest_count > 0 and (
             bool((manifest or {}).get("manifest_only", False))
             or manifest_mode in {"planned", "planned_manifest", "source_reuse", "pool_reuse", "stage_reuse", "iteration_reuse"}
         ):
+            self._iteration_image_count_cache[cache_key] = int(manifest_count)
             return int(manifest_count)
 
-        raw_dir = self.get_iteration_raw_dir(iteration_num, project_name)
+        raw_dir = self.get_iteration_raw_dir(iter_value, project_name)
         physical_count = self.count_images_in_dir(raw_dir, recursive=False)
         if physical_count > 0:
+            self._iteration_image_count_cache[cache_key] = int(physical_count)
             return int(physical_count)
+        self._iteration_image_count_cache[cache_key] = int(manifest_count)
         return int(manifest_count)
 
     def get_iteration_image_source_dir(
@@ -2404,8 +2167,40 @@ class CampaignManager:
         if not project_name:
             return None
         iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1))
+        cache_key = (project_name, int(iter_value))
+        cached_source = self._iteration_image_source_dir_cache.get(cache_key)
+        if isinstance(cached_source, str) and cached_source:
+            try:
+                return Path(cached_source)
+            except Exception:
+                pass
 
         raw_dir = self.get_iteration_raw_dir(iter_value, project_name)
+        try:
+            summary = self.load_latest_ingest_plan_summary(project_name)
+        except Exception:
+            summary = {}
+        if isinstance(summary, dict) and summary:
+            try:
+                summary_iter = int(summary.get("iteration", 0) or 0)
+            except Exception:
+                summary_iter = 0
+            summary_project = str(summary.get("project", "") or "").strip()
+            if summary_iter == iter_value and (not summary_project or summary_project == project_name):
+                source_text = str(
+                    summary.get("master_pool_dir")
+                    or summary.get("source_dir")
+                    or summary.get("target_dir")
+                    or ""
+                ).strip()
+                if source_text:
+                    try:
+                        source_path = Path(source_text)
+                        if source_path.exists() and source_path.is_dir():
+                            self._iteration_image_source_dir_cache[cache_key] = str(source_path)
+                            return source_path
+                    except Exception:
+                        pass
         try:
             manifest = self.load_ingest_manifest(iter_value, project_name)
         except Exception:
@@ -2420,9 +2215,11 @@ class CampaignManager:
                     reject_broad=(key != "target_dir"),
                 )
                 if source:
+                    self._iteration_image_source_dir_cache[cache_key] = str(Path(source))
                     return Path(source)
 
         if self.count_images_in_dir(raw_dir, recursive=False) > 0:
+            self._iteration_image_source_dir_cache[cache_key] = str(raw_dir)
             return raw_dir
 
         if isinstance(manifest, dict):
@@ -2434,6 +2231,7 @@ class CampaignManager:
                     reject_broad=(key != "target_dir"),
                 )
                 if source:
+                    self._iteration_image_source_dir_cache[cache_key] = str(Path(source))
                     return Path(source)
 
         master_pool = self._resolve_valid_image_source_dir(
@@ -2441,7 +2239,9 @@ class CampaignManager:
             project_name=project_name,
         )
         if master_pool:
+            self._iteration_image_source_dir_cache[cache_key] = str(Path(master_pool))
             return Path(master_pool)
+        self._iteration_image_source_dir_cache[cache_key] = str(raw_dir)
         return raw_dir
 
     def get_dir(self, key: str) -> Path | None:
@@ -2566,6 +2366,98 @@ class CampaignManager:
             return None
         return ingest_dir / "latest_plan.json"
 
+    def get_latest_ingest_plan_summary_path(self, project_name: str = None) -> Path | None:
+        ingest_dir = self.get_project_ingest_state_dir(project_name)
+        if ingest_dir is None:
+            return None
+        return ingest_dir / "latest_plan_summary.json"
+
+    def _build_latest_ingest_plan_summary(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(plan, dict):
+            return {}
+
+        count_keys = (
+            "ok",
+            "planner_version",
+            "generated_at",
+            "project",
+            "iteration",
+            "master_pool_dir",
+            "source_dir",
+            "target_dir",
+            "batch_size",
+            "raw_total",
+            "candidates_total",
+            "selected_total",
+            "new_to_project_total",
+            "source_new_to_project_total",
+            "skipped_used",
+            "skipped_duplicate_filenames",
+            "skipped_duplicate_approved_filenames",
+            "project_overlap_filenames",
+            "pending_iteration_overlap_filenames",
+            "project_pool_total_before_iteration",
+            "project_pool_total_after_iteration",
+            "skipped_invalid_ground_truth",
+            "source_reuse",
+            "selection_mode",
+        )
+        summary: Dict[str, Any] = {
+            key: plan.get(key)
+            for key in count_keys
+            if key in plan
+        }
+        for key in ("current_balance", "selected_balance", "predicted_balance_after"):
+            value = plan.get(key)
+            if isinstance(value, dict):
+                summary[key] = dict(value)
+        selected = plan.get("selected")
+        if isinstance(selected, list):
+            summary["selected_total"] = int(plan.get("selected_total", len(selected)) or len(selected))
+            summary["selected_sample"] = [
+                {
+                    "name": str(item.get("name", "") or ""),
+                    "source_key": str(item.get("source_key", "") or ""),
+                }
+                for item in selected[:5]
+                if isinstance(item, dict)
+            ]
+        summary["summary_only"] = True
+        return summary
+
+    def load_latest_ingest_plan_summary(self, project_name: str = None) -> Dict[str, Any]:
+        resolved_project = str(self._resolve_project_name(project_name) or "").strip()
+        if resolved_project:
+            runtime_cached = self._latest_ingest_plan_summary_runtime_cache.get(resolved_project)
+            if isinstance(runtime_cached, dict):
+                return dict(runtime_cached)
+        summary_path = self.get_latest_ingest_plan_summary_path(resolved_project or project_name)
+        if summary_path is None or not summary_path.exists():
+            return {}
+        cache_key = None
+        try:
+            stat = summary_path.stat()
+            cache_key = (
+                resolved_project,
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(getattr(stat, "st_size", 0) or 0),
+            )
+        except Exception:
+            cache_key = None
+        if cache_key is not None:
+            cached = self._latest_ingest_plan_summary_cache.get(cache_key)
+            if isinstance(cached, dict):
+                return dict(cached)
+        summary = self._read_json_file(summary_path)
+        result = summary if isinstance(summary, dict) else {}
+        if cache_key is not None:
+            if len(self._latest_ingest_plan_summary_cache) > 32:
+                self._latest_ingest_plan_summary_cache.clear()
+            self._latest_ingest_plan_summary_cache[cache_key] = dict(result)
+        if resolved_project:
+            self._latest_ingest_plan_summary_runtime_cache[resolved_project] = dict(result)
+        return result
+
     def load_latest_ingest_plan(self, project_name: str = None) -> Dict[str, Any]:
         plan_path = self.get_latest_ingest_plan_path(project_name)
         if plan_path is None or not plan_path.exists():
@@ -2577,6 +2469,19 @@ class CampaignManager:
         if plan_path is None:
             return None
         if self._write_json_file(plan_path, plan):
+            try:
+                self._latest_ingest_plan_summary_cache.clear()
+                self._latest_ingest_plan_summary_runtime_cache.clear()
+                self._iteration_image_count_cache.clear()
+                self._iteration_image_source_dir_cache.clear()
+            except Exception:
+                pass
+            summary_path = self.get_latest_ingest_plan_summary_path(project_name)
+            if summary_path is not None:
+                try:
+                    self._write_json_file(summary_path, self._build_latest_ingest_plan_summary(plan))
+                except Exception:
+                    pass
             return plan_path
         return None
 
@@ -2587,6 +2492,16 @@ class CampaignManager:
         try:
             if plan_path.exists():
                 plan_path.unlink()
+            summary_path = self.get_latest_ingest_plan_summary_path(project_name)
+            if summary_path is not None and summary_path.exists():
+                summary_path.unlink()
+            try:
+                self._latest_ingest_plan_summary_cache.clear()
+                self._latest_ingest_plan_summary_runtime_cache.clear()
+                self._iteration_image_count_cache.clear()
+                self._iteration_image_source_dir_cache.clear()
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -2601,6 +2516,15 @@ class CampaignManager:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
             return {}
+
+        runtime_cached = self._plate_approved_manifest_runtime_cache.get(project_name)
+        if isinstance(runtime_cached, dict):
+            entries = runtime_cached.get("entries", {})
+            return {
+                "project": str(runtime_cached.get("project", "") or project_name).strip(),
+                "updated_at": str(runtime_cached.get("updated_at", "") or "").strip(),
+                "entries": dict(entries) if isinstance(entries, dict) else {},
+            }
 
         manifest_path = self.get_plate_approved_set_path(project_name)
         if manifest_path is None or not manifest_path.exists():
@@ -2618,11 +2542,17 @@ class CampaignManager:
         if not isinstance(entries, dict):
             entries = {}
 
-        return {
+        result = {
             "project": project_name,
             "updated_at": str(payload.get("updated_at", "") or "").strip(),
             "entries": entries,
         }
+        self._plate_approved_manifest_runtime_cache[project_name] = {
+            "project": result["project"],
+            "updated_at": result["updated_at"],
+            "entries": dict(entries),
+        }
+        return result
 
     def list_plate_approved_entries(self, project_name: str = None) -> List[Dict[str, Any]]:
         manifest = self.load_plate_approved_set(project_name)
@@ -2778,6 +2708,12 @@ class CampaignManager:
             return {}
 
         iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+
+        runtime_key = (project_name, int(iter_value))
+        runtime_cached = self._step3_char_source_state_runtime_cache.get(runtime_key)
+        if isinstance(runtime_cached, dict):
+            return dict(runtime_cached)
+
         try:
             bundle = dict(self.get_iteration_artifact_bundle(iteration_num=iter_value, project_name=project_name) or {})
         except Exception:
@@ -2790,11 +2726,49 @@ class CampaignManager:
                 preview_dir_raw = str(self.state["projects"][project_name].get("step3_preview_dir", "") or "").strip()
             except Exception:
                 preview_dir_raw = ""
-        preview_state = self._load_preview_metadata_source_state(Path(preview_dir_raw) if preview_dir_raw else None)
 
         step2_entry = dict(bundle.get("step2_active_run") or bundle.get("plate_source") or {})
         step2_run_raw = str(step2_entry.get("run_dir") or "").strip()
         step2_run_dir = Path(step2_run_raw) if step2_run_raw else None
+
+        def _fast_path_token(path_like) -> str:
+            raw_value = str(path_like or "").strip()
+            if not raw_value:
+                return ""
+            try:
+                path = Path(raw_value)
+                stat = path.stat()
+                return (
+                    f"{raw_value}|"
+                    f"{int(getattr(stat, 'st_mtime_ns', 0) or 0)}|"
+                    f"{int(getattr(stat, 'st_size', 0) or 0)}"
+                )
+            except Exception:
+                return raw_value
+
+        try:
+            preview_meta_path = Path(preview_dir_raw) / "metadata.json" if preview_dir_raw else None
+        except Exception:
+            preview_meta_path = None
+        step2_manifest_path = step2_run_dir / "run_manifest.json" if step2_run_dir is not None else None
+        step2_xml_path = step2_run_dir / "annotations.xml" if step2_run_dir is not None else None
+        approved_path = self.get_plate_approved_set_path(project_name)
+        registry_path = self.get_artifact_registry_path(project_name)
+        cache_key = (
+            project_name,
+            int(iter_value),
+            _fast_path_token(registry_path),
+            _fast_path_token(approved_path),
+            _fast_path_token(preview_meta_path),
+            _fast_path_token(step2_manifest_path),
+            _fast_path_token(step2_xml_path),
+        )
+        cached_state = self._step3_char_source_state_cache.get(cache_key)
+        if isinstance(cached_state, dict):
+            self._step3_char_source_state_runtime_cache[runtime_key] = dict(cached_state)
+            return dict(cached_state)
+
+        preview_state = self._load_preview_metadata_source_state(Path(preview_dir_raw) if preview_dir_raw else None)
         step2_manifest = self._load_annotation_run_manifest_file(step2_run_dir)
         approved_names = {
             self._normalize_image_set_name(name)
@@ -2871,6 +2845,10 @@ class CampaignManager:
             pending_added_plates_by_source[safe_name] = int(plate_count)
 
         if not union_source_names and not union_plates_by_source:
+            if len(self._step3_char_source_state_cache) > 32:
+                self._step3_char_source_state_cache.clear()
+            self._step3_char_source_state_cache[cache_key] = {}
+            self._step3_char_source_state_runtime_cache[runtime_key] = {}
             return {}
 
         union_project_names = set(union_source_names) & set(project_approved_names)
@@ -2884,7 +2862,7 @@ class CampaignManager:
         current_plates = max(0, int(union_total_plates) - int(union_project_plates))
 
         min_char_route_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
-        return {
+        result = {
             "source_scope": (
                 "step3_pending_union"
                 if pending_images > 0
@@ -2916,6 +2894,18 @@ class CampaignManager:
                 and int(union_total_plates) < int(min_char_route_plates)
             ),
         }
+        if len(self._step3_char_source_state_cache) > 32:
+            self._step3_char_source_state_cache.clear()
+        self._step3_char_source_state_cache[cache_key] = dict(result)
+        self._step3_char_source_state_runtime_cache[runtime_key] = dict(result)
+        return result
+
+    def invalidate_step3_char_source_state_cache(self) -> None:
+        try:
+            self._step3_char_source_state_cache.clear()
+            self._step3_char_source_state_runtime_cache.clear()
+        except Exception:
+            pass
 
     def get_plate_approved_set_stats(self, project_name: str = None) -> Dict[str, Any]:
         project_name = self._resolve_project_name(project_name)
@@ -2930,6 +2920,10 @@ class CampaignManager:
                 "auto_accepted_images": 0,
                 "auto_accepted_plates": 0,
             }
+
+        runtime_cached = self._plate_approved_stats_runtime_cache.get(project_name)
+        if isinstance(runtime_cached, dict):
+            return dict(runtime_cached)
 
         cache_key = None
         manifest_path = self.get_plate_approved_set_path(project_name)
@@ -2990,6 +2984,7 @@ class CampaignManager:
 
         if cache_key is not None:
             self._plate_approved_stats_cache[cache_key] = dict(stats)
+        self._plate_approved_stats_runtime_cache[project_name] = dict(stats)
 
         return stats
 
@@ -3134,6 +3129,14 @@ class CampaignManager:
         if not self._write_json_file(manifest_path, manifest):
             return {"ok": False, "reason": "save_failed"}
 
+        try:
+            self._plate_approved_stats_cache.clear()
+            self._plate_approved_manifest_runtime_cache.pop(project_name, None)
+            self._plate_approved_stats_runtime_cache.pop(project_name, None)
+            self.invalidate_step3_char_source_state_cache()
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "added": int(added),
@@ -3142,11 +3145,115 @@ class CampaignManager:
             "manifest_path": str(manifest_path),
         }
 
+    def remove_plate_approved_entries(
+        self,
+        image_names: List[str],
+        project_name: str = None,
+        *,
+        approved_from_run: str | None = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {"ok": False, "reason": "missing_project", "removed": 0}
+
+        manifest_path = self.get_plate_approved_set_path(project_name)
+        if manifest_path is None:
+            return {"ok": False, "reason": "missing_manifest_path", "removed": 0}
+
+        wanted_names = {
+            self._normalize_image_set_name(name)
+            for name in list(image_names or [])
+            if self._normalize_image_set_name(name)
+        }
+        if not wanted_names:
+            return {"ok": True, "removed": 0, "total": 0}
+
+        run_token = ""
+        if approved_from_run:
+            try:
+                run_token = str(Path(approved_from_run).resolve()).strip().lower()
+            except Exception:
+                run_token = str(approved_from_run or "").strip().lower()
+
+        manifest = self.load_plate_approved_set(project_name)
+        stored_entries = manifest.get("entries", {})
+        if not isinstance(stored_entries, dict):
+            stored_entries = {}
+
+        removed = 0
+        for entry_key, entry in list(stored_entries.items()):
+            if not isinstance(entry, dict):
+                continue
+
+            entry_name = self._normalize_image_set_name(entry.get("image_name", ""))
+            key_name = self._normalize_image_set_name(entry_key)
+            if entry_name not in wanted_names and key_name not in wanted_names:
+                continue
+
+            if run_token:
+                entry_run = str(entry.get("approved_from_run", "") or "").strip()
+                try:
+                    entry_run = str(Path(entry_run).resolve()).strip().lower() if entry_run else ""
+                except Exception:
+                    entry_run = entry_run.lower()
+                if entry_run != run_token:
+                    continue
+
+            stored_entries.pop(entry_key, None)
+            removed += 1
+
+        if removed <= 0:
+            return {"ok": True, "removed": 0, "total": int(len(stored_entries))}
+
+        manifest["project"] = project_name
+        manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        manifest["entries"] = stored_entries
+
+        if not self._write_json_file(manifest_path, manifest):
+            return {"ok": False, "reason": "save_failed", "removed": 0}
+
+        try:
+            self._plate_approved_stats_cache.clear()
+            self._plate_approved_manifest_runtime_cache.pop(project_name, None)
+            self._plate_approved_stats_runtime_cache.pop(project_name, None)
+            self.invalidate_step3_char_source_state_cache()
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "removed": int(removed),
+            "total": int(len(stored_entries)),
+            "manifest_path": str(manifest_path),
+        }
+
     def load_ingest_manifest(self, iteration_num: int = None, project_name: str = None) -> Dict[str, Any]:
         manifest_path = self.get_ingest_manifest_path(iteration_num, project_name)
         if manifest_path is None or not manifest_path.exists():
             return {}
-        return self._read_json_file(manifest_path)
+        cache_key = None
+        try:
+            stat = manifest_path.stat()
+            cache_key = (
+                str(self._resolve_project_name(project_name) or ""),
+                int(getattr(stat, "st_mtime_ns", 0) or 0),
+                int(getattr(stat, "st_size", 0) or 0),
+                int(iteration_num or 0),
+            )
+        except Exception:
+            cache_key = None
+        if cache_key is not None:
+            cached = self._ingest_manifest_cache.get(cache_key)
+            if isinstance(cached, dict):
+                return dict(cached)
+
+        payload = self._read_json_file(manifest_path)
+        result = payload if isinstance(payload, dict) else {}
+        if cache_key is not None:
+            if len(self._ingest_manifest_cache) > 16:
+                self._ingest_manifest_cache.clear()
+            self._ingest_manifest_cache[cache_key] = dict(result)
+        return result
 
     def save_ingest_manifest(
         self,
@@ -3158,6 +3265,12 @@ class CampaignManager:
         if manifest_path is None:
             return None
         if self._write_json_file(manifest_path, manifest):
+            try:
+                self._ingest_manifest_cache.clear()
+                self._iteration_image_count_cache.clear()
+                self._iteration_image_source_dir_cache.clear()
+            except Exception:
+                pass
             return manifest_path
         return None
 
@@ -3451,4 +3564,7 @@ class CampaignManager:
         return self.save_ingest_manifest(manifest, iteration, project_name)
 
 # Singleton Menadżera
+bind_campaign_project_registry_methods(CampaignManager)
+bind_campaign_stage_state_methods(CampaignManager)
+bind_campaign_project_history_methods(CampaignManager)
 CAMPAIGN = CampaignManager()

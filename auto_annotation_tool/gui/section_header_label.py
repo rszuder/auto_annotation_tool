@@ -134,8 +134,16 @@ class SectionHeaderLabel(tk.Canvas):
 
     def _render(self):
         self._render_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
 
-        width = max(1, int(self.winfo_width() or self.winfo_reqwidth() or 1))
+        try:
+            width = max(1, int(self.winfo_width() or self.winfo_reqwidth() or 1))
+        except tk.TclError:
+            return
         base_height = self._get_target_height()
         height = base_height
         panel, gradient_start, text_color = self._get_colors()

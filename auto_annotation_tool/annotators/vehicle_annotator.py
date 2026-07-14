@@ -71,8 +71,17 @@ class VehicleAnnotator(BaseAnnotator):
         )
         
         try:
+            image_source = self._read_image_for_yolo(image_path)
+            if image_source is None:
+                return self._make_image_error_annotation(
+                    image_path,
+                    self._describe_image_read_error(image_path),
+                )
+            if image_source is True:
+                image_source = str(image_path)
+
             results = self.model(
-                str(image_path),
+                image_source,
                 conf=self.confidence,
                 device=self.device,
                 verbose=False

@@ -135,9 +135,10 @@ class CVATExporter:
         image_el.set("height", str(ann.height))
         
         for det in ann.detections:
-            if det.label.lower() == "vehicle":
+            normalized_label = str(det.label or "").strip().lower()
+            if normalized_label == "vehicle":
                 self._add_box(image_el, det, include_confidence)
-            elif det.label.lower() == "plate":
+            elif normalized_label in CONFIG.PLATE_LABELS:
                 self._add_polygon(image_el, det, include_confidence)
     
     def _add_box(self, parent: ET.Element, det: Detection, include_confidence: bool):

@@ -31,6 +31,8 @@ class CombinedAnnotator(BaseAnnotator):
     COCO_VEHICLE_CLASSES = {2, 3, 5, 7}
     VEHICLE_CROP_PADDING_RATIO = 0.06
     VEHICLE_CROP_MIN_PADDING_PX = 8
+    PLATE_PAIR_OVERLAP_THRESHOLD = 0.82
+    PLATE_PAIR_IOU_THRESHOLD = 0.58
 
     def __init__(
         self,
@@ -98,14 +100,23 @@ class CombinedAnnotator(BaseAnnotator):
         )
 
         try:
-            vehicles = self._detect_vehicles(image_path)
+            image_source = self._read_image_for_yolo(image_path)
+            if image_source is None:
+                return self._make_image_error_annotation(
+                    image_path,
+                    self._describe_image_read_error(image_path),
+                )
+
+            yolo_source = str(image_path) if image_source is True else image_source
+            image = None if image_source is True else image_source
+
+            vehicles = self._detect_vehicles(yolo_source)
             if not vehicles:
                 annotation.status = AnnotationStatus.NO_VEHICLE
                 annotation.status_message = "Nie wykryto zadnego pojazdu"
                 return annotation
 
-            image = None
-            if CV2_AVAILABLE:
+            if image is None and CV2_AVAILABLE:
                 try:
                     image = cv2.imread(str(image_path))
                 except Exception:
@@ -157,12 +168,18 @@ class CombinedAnnotator(BaseAnnotator):
                     )
                     return annotation
 
+            original_pair_count = len(matched_pairs)
+            matched_pairs = self._deduplicate_matched_plate_pairs(matched_pairs)
+            suppressed_pair_count = max(0, original_pair_count - len(matched_pairs))
+
             for vehicle, plate in matched_pairs:
                 annotation.detections.append(vehicle)
                 annotation.detections.append(plate)
 
             annotation.status = AnnotationStatus.SUCCESS
             annotation.status_message = f"Znaleziono {len(matched_pairs)} par pojazd-tablica"
+            if suppressed_pair_count:
+                annotation.status_message += f" (odrzucono {suppressed_pair_count} duplikatow tablic)"
             return annotation
         except Exception as e:
             annotation.status = AnnotationStatus.ERROR
@@ -170,11 +187,11 @@ class CombinedAnnotator(BaseAnnotator):
             logger.error(f"Blad: {image_path.name}: {e}")
             return annotation
 
-    def _detect_vehicles(self, image_path: Path) -> List[Detection]:
+    def _detect_vehicles(self, image_source) -> List[Detection]:
         vehicles: List[Detection] = []
 
         results = self.vehicle_model(
-            str(image_path),
+            image_source,
             conf=self.vehicle_confidence,
             device=self.device,
             verbose=False,
@@ -377,6 +394,44 @@ class CombinedAnnotator(BaseAnnotator):
                 best_conf = plate_conf
                 best_plate = plate
         return best_plate
+
+    def _deduplicate_matched_plate_pairs(
+        self,
+        matched_pairs: List[Tuple[Detection, Detection]],
+    ) -> List[Tuple[Detection, Detection]]:
+        if len(matched_pairs or []) <= 1:
+            return list(matched_pairs or [])
+
+        ordered = sorted(
+            list(enumerate(matched_pairs or [])),
+            key=lambda item: (
+                -float(getattr(item[1][1], "confidence", 0.0) or 0.0),
+                -float(getattr(item[1][0], "confidence", 0.0) or 0.0),
+                -float(getattr(item[1][1], "get_area", lambda: 0.0)() or 0.0),
+            ),
+        )
+
+        kept: List[Tuple[int, Detection, Detection]] = []
+        for original_index, (candidate_vehicle, candidate_plate) in ordered:
+            duplicate = False
+            for _existing_index, _existing_vehicle, existing_plate in kept:
+                overlap = self._bbox_overlap_over_smaller(candidate_plate.bbox, existing_plate.bbox)
+                iou = self._bbox_iou(candidate_plate.bbox, existing_plate.bbox)
+                if (
+                    overlap >= float(self.PLATE_PAIR_OVERLAP_THRESHOLD)
+                    or iou >= float(self.PLATE_PAIR_IOU_THRESHOLD)
+                ):
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append((original_index, candidate_vehicle, candidate_plate))
+
+        if len(kept) != len(matched_pairs):
+            logger.debug(
+                "[CombinedAnnotator] Odrzucono %s duplikatow par pojazd-tablica po detekcji w cropach.",
+                len(matched_pairs) - len(kept),
+            )
+        return [(vehicle, plate) for _index, vehicle, plate in sorted(kept, key=lambda item: item[0])]
 
     def _match_plates_to_vehicles(
         self,

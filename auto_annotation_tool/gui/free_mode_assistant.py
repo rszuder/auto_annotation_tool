@@ -8,6 +8,14 @@ from .web_slim_scrollbar import blend_hex_colors
 
 
 FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
+    "akcje": "pole bramki grafu kampanii; otwiera operacje prowadz\u0105ce do kart roboczych, np. Z2, Z3 albo Z4.",
+    "bramka": "interaktywny panel przy kraw\u0119dzi grafu kampanii; pokazuje status przej\u015bcia, zasoby, akcje i zatwierdzenie.",
+    "elektroda": "prze\u0142\u0105cznik wyboru bramki na grafie; po jej w\u0142\u0105czeniu dana \u015bcie\u017cka staje si\u0119 aktywna.",
+    "graf": "mapa przej\u015b\u0107 kampanii pokazuj\u0105ca etapy jako w\u0119z\u0142y oraz decyzje jako kraw\u0119dzie z bramkami.",
+    "kraw\u0119d\u017a": "po\u0142\u0105czenie mi\u0119dzy etapami grafu kampanii; reprezentuje jedno mo\u017cliwe przej\u015bcie.",
+    "w\u0119ze\u0142": "g\u0142\u00f3wny punkt grafu, np. etap E1, E2, E3, E4T albo E4Z.",
+    "zasoby": "dane wymagane przez wybran\u0105 bramk\u0119, np. katalog zdj\u0119\u0107, model albo anotacje.",
+    "zatwierd\u017a": "pole bramki zamykaj\u0105ce wybrane przej\u015bcie po spe\u0142nieniu jego warunk\u00f3w.",
     "anotacja": "opis obiektów na obrazie, np. położenie tablicy, znaku, boxu albo poligonu.",
     "artefakt": "plik lub katalog wytworzony przez krok aplikacji, np. XML, cropy, dataset albo model.",
     "autoanotacja": "automatyczne tworzenie wstępnych ramek przez model; użytkownik później sprawdza i poprawia wynik.",
@@ -67,10 +75,30 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
     "PZ2": "druga podzakładka bieżącego etapu; zwykle kolejny krok pracy po PZ1.",
     "PZ3": "trzecia podzakładka bieżącego etapu, najczęściej związana z eksportem albo pracą dodatkową.",
     "źródło": "dane wejściowe potrzebne do danego kroku, np. XML z pasującym katalogiem obrazów albo gotowy dataset.",
+    "źródło bez splitu": "dataset YOLO zapisany jako katalog images/labels, jeszcze bez podziału train/val/test. PZ1 tworzy z niego wariant treningowy.",
     "źródło Z2": "zgodna para danych z Z2: XML anotacji tablic oraz katalog obrazów, z których ten XML powstał.",
 }
 
 FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
+    "akcja": "akcje",
+    "akcji": "akcje",
+    "bramki": "bramka",
+    "bramek": "bramka",
+    "elektrody": "elektroda",
+    "grafu": "graf",
+    "krawedz": "kraw\u0119d\u017a",
+    "krawedzi": "kraw\u0119d\u017a",
+    "kraw\u0119dzi": "kraw\u0119d\u017a",
+    "mapa przejsc": "graf",
+    "mapa przej\u015b\u0107": "graf",
+    "wezel": "w\u0119ze\u0142",
+    "wezly": "w\u0119ze\u0142",
+    "w\u0119z\u0142y": "w\u0119ze\u0142",
+    "zasob": "zasoby",
+    "zasobow": "zasoby",
+    "zasob\u00f3w": "zasoby",
+    "zatwierdz": "zatwierd\u017a",
+    "zatwierdzenie": "zatwierd\u017a",
     "adnotacje": "anotacja",
     "anotacje": "anotacja",
     "anotacji": "anotacja",
@@ -130,6 +158,9 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
     "znaki": "znak",
     "znaków": "znak",
     "źródła": "źródło",
+    "źródło images labels": "źródło bez splitu",
+    "źródło images/labels": "źródło bez splitu",
+    "źródło niesplitowane": "źródło bez splitu",
     "źródłowy": "źródło",
     "źródłowych": "źródło",
 }
@@ -155,6 +186,91 @@ def _contains_keyword(text: str, keyword: str) -> bool:
         return False
     pattern = r"(?<!\w)" + re.escape(keyword) + r"(?!\w)"
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def get_step3_free_mode_assistant_context(host) -> dict:
+    try:
+        selected_tab = str(host.main_nb.select())
+    except Exception:
+        selected_tab = ""
+
+    if selected_tab == str(getattr(host, "tab_extract", "")):
+        return {
+            "location": "[Z3] Autoanotacja znaków tablic / [PZ1] Wyodrębnianie zaanotowanych tablic",
+            "goal": "Ta podzakładka bierze źródło z Z2, czyli XML i zgodny katalog obrazów, a następnie wyodrębnia tablice do dalszej pracy nad znakami.",
+            "workflow": (
+                "Wskaż albo potwierdź źródło Z2: annotations.xml oraz zgodny folder obrazów.",
+                "Jeśli program znajdzie pasujący folder obrazów, świadomie potwierdź podpięcie w modalu.",
+                "Uruchom wyodrębnianie tablic, aby utworzyć preview run z cropami tablic.",
+                "Po sukcesie przejdź do PZ2, gdzie będziesz analizować znaki na wyodrębnionych tablicach.",
+            ),
+            "glossary": (
+                "crop = wycięty obraz samej tablicy",
+                "preview run = roboczy zestaw cropów",
+                "źródło Z2 = XML + zgodne obrazy",
+            ),
+            "caution": "XML i katalog obrazów muszą pochodzić z tego samego zestawu; inaczej cropy będą niespójne.",
+        }
+    if selected_tab == str(getattr(host, "tab_detect", "")):
+        return {
+            "location": "[Z3] Autoanotacja znaków tablic / [PZ2] Wykrywanie znaków i analiza",
+            "goal": (
+                "PZ2 jest pierwszym krokiem pracy T05: tutaj przygotowujesz anotacje znaków na wyodrębnionych tablicach. "
+                "Poprawiasz ramki, wpisujesz znaki i doprowadzasz tablice do statusu perfect. "
+                "Sam zbiór przygotowany w PZ2 nie otwiera jeszcze T05; po zbudowaniu sensownego materiału trzeba przejść do PZ3 i wyeksportować źródłowy dataset znaków."
+            ),
+            "workflow": (
+                "W PZ2 popraw ramki znaków i doprowadź możliwie dużo tablic do statusu perfect.",
+                "Szuflada PZ2 pokazuje lokalny stan pracy: ile jest tablic i znaków, poziom jakości zbioru oraz braki do kolejnego poziomu.",
+                "Gdy zbiór jest sensowny, użyj przycisku „Krok 2: dataset PZ3”.",
+                "W PZ3 utwórz źródłowy dataset znaków AZ. Dopiero ten eksport domyka warunek bramki T05.",
+            ),
+            "glossary": (
+                "perfect = tablica gotowa do datasetu",
+                "YOLO znaków = boxy znaków",
+                "OCR = odczyt znaków z boxów",
+                "1R = tablica jednorzędowa",
+                "2R = tablica dwurzędowa",
+                "2R? = program podejrzewa układ dwurzędowy, ale nie ma pewności",
+                "2R* / 1R* = układ ręcznie wymuszony przez użytkownika",
+                "1.2 przy boxie = rząd 1, znak 2 w kolejności czytania",
+            ),
+            "caution": "Nie myl poziomu jakości w PZ2 z otwarciem T06. PZ2 przygotowuje materiał, PZ3 tworzy artefakt datasetu.",
+        }
+    if selected_tab == str(getattr(host, "tab_dataset", "")):
+        return {
+            "location": "[Z3] Autoanotacja znaków tablic / [PZ3] Integracje i dataset (YOLO)",
+            "goal": "Ta podzakładka domyka pracę nad znakami: zbiera sprawdzone tablice perfect, opcjonalne poprawki CVAT i eksportuje źródłowy dataset znaków do dalszej pracy w Z4.",
+            "workflow": (
+                "Sprawdź, że pracujesz na perfectach z aktywnego runu PZ2.",
+                "Jeśli poprawki zewnętrzne nie są potrzebne, wybierz strategie i źródła gold packa.",
+                "Jeśli potrzebujesz CVAT, wyeksportuj review pack, popraw boxy znaków w CVAT i zaimportuj XML z powrotem do PZ3.",
+                "Wyeksportuj źródłowy dataset YOLO znaków i przeczytaj modal z wynikiem operacji.",
+                "Przejdź do Z4/PZ1, aby utworzyć wariant treningowy i split; trening uruchamiasz dopiero w Z4/PZ2.",
+            ),
+            "glossary": (
+                "gold pack = wybrane tablice perfect używane jako zaufane źródło datasetu znaków",
+                "review pack = zestaw cropów tablic wysyłany do ręcznego sprawdzenia w CVAT",
+                "Poprawki CVAT = ręczne korekty boxów znaków wracające z CVAT do PZ3 i włączane do datasetu",
+            ),
+            "caution": "CVAT w PZ3 używa cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach.",
+        }
+    return {
+        "location": "[Z3] Autoanotacja znaków tablic",
+        "goal": "Ta zakładka prowadzi od tablic przygotowanych w Z2 do cropów, korekty znaków i źródłowego datasetu znaków.",
+        "workflow": (
+            "PZ1 wyodrębnia tablice z obrazów i XML z Z2.",
+            "PZ2 rozpoznaje i poprawia znaki na cropach tablic.",
+            "PZ3 zbiera perfecty, opcjonalne poprawki CVAT i eksportuje źródłowy dataset znaków.",
+            "Z4 przejmuje dopiero wariant treningowy, split i trening modelu.",
+        ),
+        "glossary": (
+            "PZ1 = wyodrębnianie zaanotowanych tablic",
+            "PZ2 = wykrywanie znaków i analiza",
+            "PZ3 = integracje i dataset YOLO",
+        ),
+        "caution": "Wariant treningowy i split końcowo przygotujesz w Z4.",
+    }
 
 
 @dataclass(frozen=True)

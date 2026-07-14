@@ -1,90 +1,207 @@
 from __future__ import annotations
 
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..campaign_manager import CAMPAIGN
 from .z4_campaign_flow import return_to_campaign_from_step4
-from .z4_flow_models import TrainingInputContext
+from .web_slim_scrollbar import blend_hex_colors
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
 
 
-def _build_plate_ready_dataset_summary(host: "TrainingTab") -> str:
+def _set_pack_visible(widget, visible: bool, **pack_kwargs):
+    if widget is None:
+        return
     try:
-        dataset_value = str(host.dataset_var.get() or "").strip()
+        manager = str(widget.winfo_manager())
     except Exception:
-        dataset_value = ""
-    if not dataset_value:
-        return ""
-
+        manager = ""
     try:
-        dataset_path = Path(dataset_value)
-        yaml_path = dataset_path / "data.yaml" if dataset_path.is_dir() else dataset_path
-        if not yaml_path.exists() or yaml_path.name.lower() != "data.yaml":
-            return ""
-        dataset_root = yaml_path.parent
-    except Exception:
-        return ""
-
-    try:
-        inferred_target = str(host._infer_dataset_target(str(dataset_root)) or "").strip().lower()
-        if inferred_target and inferred_target != "plate":
-            return ""
+        if visible:
+            if manager != "pack":
+                widget.pack(**pack_kwargs)
+            elif pack_kwargs:
+                widget.pack_configure(**pack_kwargs)
+        elif manager == "pack":
+            widget.pack_forget()
     except Exception:
         pass
 
+
+def _configure_step4_next_button(host: "TrainingTab", label: str, *, state=None):
+    button = getattr(host, "btn_step4_next", None)
+    if button is None:
+        return
+    text = str(label or "Dalej do treningu")
     try:
-        display_path = host._format_workspace_relative_path(dataset_root)
+        # ttk width is measured in text units; long campaign labels need more
+        # room than the default compact navigation buttons.
+        width = max(18, min(52, len(text) + 2))
+        kwargs = {"text": text, "width": width}
+        if state is not None:
+            kwargs["state"] = state
+        button.configure(**kwargs)
     except Exception:
-        display_path = str(dataset_root)
-
-    try:
-        counts = host._get_dataset_split_image_counts(dataset_root)
-    except Exception:
-        counts = {}
-
-    total = int(counts.get("total", 0) or 0)
-    if total > 0:
-        split_text = (
-            f"Split: train={int(counts.get('train', 0) or 0)}, "
-            f"val={int(counts.get('val', 0) or 0)}, "
-            f"test={int(counts.get('test', 0) or 0)}."
-        )
-    else:
-        split_text = "Split: data.yaml wykryty, licznik obrazów nie został jeszcze obliczony."
-
-    return (
-        "Wariant datasetu tablic jest ustawiony jako wejście treningowe.\n"
-        f"Dataset: {display_path}\n"
-        f"{split_text}\n"
-        "W PZ2 wybierasz aktywny wariant i uruchamiasz trening."
-    )
+        try:
+            kwargs = {"text": text}
+            if state is not None:
+                kwargs["state"] = state
+            button.configure(**kwargs)
+        except Exception:
+            pass
 
 
 def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
     vm = host._get_step4_dataset_workflow_view_model()
 
-    def _set_pack_visible(widget, visible: bool, **pack_kwargs):
-        if widget is None:
+    def _refresh_creator_campaign_summary_table() -> None:
+        frame = getattr(host, "creator_campaign_summary_frame", None)
+        rows = getattr(host, "_creator_campaign_summary_rows", None)
+        if frame is None or not rows:
             return
+        if not bool(getattr(vm, "in_campaign", False)) or str(getattr(vm, "mode", "") or "") != "plate":
+            _set_pack_visible(frame, False)
+            _set_pack_visible(getattr(host, "creator_campaign_summary_title", None), False)
+            _set_pack_visible(getattr(host, "creator_flow_strip", None), False)
+            return
+
+        palette = getattr(host.app, "palette", {})
+        panel = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        field = palette.get("field", panel_alt)
+        border_base = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#4ec9b0")
+        warning = palette.get("warning", "#d7ba7d")
+        border = blend_hex_colors(success, border_base, 0.62)
+        header_bg = blend_hex_colors(success, panel_alt, 0.84)
+        row_alt = blend_hex_colors(panel_alt, panel, 0.45)
+
+        readiness = {}
         try:
-            manager = str(widget.winfo_manager())
+            readiness = dict(host.get_campaign_step4_readiness(iteration_target="plate") or {})
         except Exception:
-            manager = ""
+            readiness = {}
+        stats = {}
         try:
-            if visible:
-                if manager != "pack":
-                    widget.pack(**pack_kwargs)
-                elif pack_kwargs:
-                    widget.pack_configure(**pack_kwargs)
-            elif manager == "pack":
-                widget.pack_forget()
+            stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+        except Exception:
+            stats = {}
+
+        approved_images = int(readiness.get("project_approved_images", stats.get("images", 0)) or 0)
+        approved_plates = int(readiness.get("project_approved_plates", stats.get("plates", 0)) or 0)
+        ready_dataset = str(readiness.get("ready_dataset") or "").strip()
+        train_count = int(readiness.get("train_images", 0) or 0)
+        val_count = int(readiness.get("val_images", 0) or 0)
+        test_count = int(readiness.get("test_images", 0) or 0)
+
+        xml_text = ""
+        images_text = ""
+        try:
+            xml_text = host._shorten_training_text(
+                host._format_workspace_relative_path(host.cvat_xml_var.get()),
+                92,
+            )
         except Exception:
             pass
+        try:
+            images_text = host._shorten_training_text(
+                host._format_workspace_relative_path(host.cvat_images_var.get()),
+                92,
+            )
+        except Exception:
+            pass
+
+        if ready_dataset and (train_count > 0 or val_count > 0 or test_count > 0):
+            variant_text = f"Gotowy wariant: train={train_count}, val={val_count}, test={test_count}"
+        else:
+            variant_text = "Jeszcze nie utworzono wariantu"
+
+        values = {
+            "target": "Otworzy\u0107 trening modelu tablic YOLO Pose",
+            "source": "Zatwierdzone tablice z projektu",
+            "material": (
+                f"{approved_images} obrazów, {approved_plates} tablic"
+                + (f" | XML: {xml_text}" if xml_text else "")
+                + (f" | obrazy: {images_text}" if images_text else "")
+            ),
+            "variant": variant_text,
+        }
+
+        try:
+            frame.configure(bg=border, highlightbackground=border, highlightcolor=border)
+            getattr(host, "creator_campaign_summary_grid", frame).configure(bg=border)
+            title = getattr(host, "creator_campaign_summary_title", None)
+            if title is not None:
+                title.configure(bg=panel, fg=fg)
+        except Exception:
+            pass
+        for widget in getattr(host, "_creator_campaign_summary_header_widgets", ()) or ():
+            try:
+                widget.configure(bg=header_bg, fg=success, highlightbackground=border, highlightcolor=border)
+            except Exception:
+                pass
+        for index, (key, widgets) in enumerate(rows.items()):
+            label_widget, value_widget = widgets
+            bg = field if index % 2 == 0 else row_alt
+            value_fg = success if key == "variant" and ready_dataset else fg
+            if key == "variant" and not ready_dataset:
+                value_fg = warning
+            try:
+                label_widget.configure(bg=bg, fg=muted, highlightbackground=border, highlightcolor=border)
+                if key == "material" and isinstance(value_widget, tk.Frame):
+                    value_widget.configure(bg=bg, highlightbackground=border, highlightcolor=border)
+                    for child in value_widget.winfo_children():
+                        child.destroy()
+
+                    line = tk.Frame(value_widget, bd=0, highlightthickness=0, bg=bg)
+                    line.pack(anchor=tk.W, fill=tk.X)
+
+                    def _add_material_segment(text, font, color):
+                        tk.Label(
+                            line,
+                            text=str(text),
+                            font=font,
+                            bg=bg,
+                            fg=color,
+                            bd=0,
+                            highlightthickness=0,
+                            padx=0,
+                            pady=0,
+                            anchor="w",
+                        ).pack(side=tk.LEFT)
+
+                    base_font = ("Segoe UI", 8)
+                    counter_font = ("Segoe UI Semibold", 10)
+                    _add_material_segment(approved_images, counter_font, success)
+                    _add_material_segment(" obraz\u00f3w, ", base_font, fg)
+                    _add_material_segment(approved_plates, counter_font, success)
+                    _add_material_segment(" tablic", base_font, fg)
+
+                    extra = []
+                    if xml_text:
+                        extra.append(f"XML: {xml_text}")
+                    if images_text:
+                        extra.append(f"obrazy: {images_text}")
+                    if extra:
+                        _add_material_segment(" | " + " | ".join(extra), base_font, fg)
+                    continue
+                value_widget.configure(
+                    text=str(values.get(key, "-") or "-"),
+                    bg=bg,
+                    fg=value_fg,
+                    highlightbackground=border,
+                    highlightcolor=border,
+                    wraplength=680,
+                )
+            except Exception:
+                pass
 
     try:
         route_manager = str(host.step4_route_panel_frame.winfo_manager())
@@ -106,15 +223,15 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
 
     try:
         if vm.mode == "plate":
-            context = getattr(host, "_last_training_input_context", None)
-            source = str(getattr(context, "source", "") or "").strip().lower()
             if bool(vm.in_campaign):
                 creator_intro = (
-                    "Dataset tablic powstaje z zatwierdzonych anotacji projektu. "
-                    "PZ1 tworzy wariant treningowy z podziałem train / val / test."
+                    "Praca nad bramką T06: utwórz wariant datasetu tablic z materiału projektu. "
+                    "Flow: 1. sprawdź materiał, 2. ustaw split, 3. opcjonalnie powiększ train, 4. utwórz wariant."
                 )
             else:
-                creator_intro = "Utwórz wariant splitu wybranego datasetu tablic, który został wyprodukowany w Z2."
+                creator_intro = (
+                    "Wskaż XML anotacji i zgodny katalog zdjęć. PZ1 przygotuje wariant train / val / test dla YOLO Pose."
+                )
             host._set_training_widget_text(host.creator_intro_lbl, creator_intro)
             host._set_training_widget_text(
                 host.btn_step4_create,
@@ -135,10 +252,12 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             ready_radio = getattr(host, "creator_source_ready_radio", None)
             xml_radio = getattr(host, "creator_source_xml_radio", None)
             xml_row = getattr(host, "creator_xml_row", None)
+            auto_match_hint = getattr(host, "creator_auto_match_hint_lbl", None)
             images_row = getattr(host, "creator_images_row", None)
             source_summary = getattr(host, "creator_source_summary_lbl", None)
             output_row = getattr(host, "creator_output_row", None)
             ratios_frame = getattr(host, "creator_ratios_frame", None)
+            augmentation_frame = getattr(host, "creator_augmentation_frame", None)
             create_frame = getattr(host, "btn_step4_create_frame", None)
             progress = getattr(host, "ds_progress", None)
             status = getattr(host, "ds_status", None)
@@ -153,15 +272,49 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                     _set_pack_visible(ready_label, False)
                 _set_pack_visible(xml_row, False)
                 _set_pack_visible(images_row, False)
+                _refresh_creator_campaign_summary_table()
+                _set_pack_visible(
+                    getattr(host, "creator_flow_strip", None),
+                    True,
+                    fill=tk.X,
+                    pady=(0, 12),
+                    after=host.creator_intro_lbl,
+                )
+                _set_pack_visible(
+                    getattr(host, "creator_campaign_summary_title", None),
+                    True,
+                    fill=tk.X,
+                    pady=(0, 4),
+                    after=getattr(host, "creator_flow_strip", None),
+                )
+                _set_pack_visible(
+                    getattr(host, "creator_campaign_summary_frame", None),
+                    True,
+                    fill=tk.X,
+                    pady=(0, 10),
+                    after=getattr(host, "creator_campaign_summary_title", None),
+                )
                 if source_summary is not None:
-                    host._set_training_widget_text(source_summary, str(vm.creator_summary or ""))
-                    _set_pack_visible(source_summary, True, anchor=tk.W, fill=tk.X, pady=(0, 8), after=host.creator_intro_lbl)
+                    _set_pack_visible(source_summary, False)
+                _set_pack_visible(auto_match_hint, False)
                 _set_pack_visible(output_row, False)
-                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=10, after=source_summary)
-                _set_pack_visible(create_frame, True, anchor=tk.W, pady=(10, 5))
-                _set_pack_visible(progress, True, fill=tk.X, pady=2)
-                _set_pack_visible(status, True, anchor=tk.W)
+                _set_pack_visible(
+                    ratios_frame,
+                    True,
+                    fill=tk.X,
+                    pady=(8, 6),
+                    after=getattr(host, "creator_campaign_summary_frame", None),
+                )
+                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(0, 10), after=ratios_frame)
+                _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
+                if getattr(progress, "master", None) is not getattr(host, "step4_creator_action_inner", None):
+                    _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
+                if getattr(status, "master", None) is not getattr(host, "step4_creator_action_inner", None):
+                    _set_pack_visible(status, True, anchor=tk.W)
             else:
+                _set_pack_visible(getattr(host, "creator_campaign_summary_frame", None), False)
+                _set_pack_visible(getattr(host, "creator_campaign_summary_title", None), False)
+                _set_pack_visible(getattr(host, "creator_flow_strip", None), False)
                 try:
                     host._set_creator_source_mode("xml")
                 except Exception:
@@ -173,12 +326,16 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 if source_summary is not None:
                     _set_pack_visible(source_summary, False)
                 _set_pack_visible(xml_row, True, fill=tk.X, pady=2, after=host.creator_intro_lbl)
-                _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=xml_row)
+                _set_pack_visible(auto_match_hint, True, anchor=tk.W, fill=tk.X, pady=(2, 6), after=xml_row)
+                _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=auto_match_hint)
                 _set_pack_visible(output_row, False)
-                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=10, after=images_row)
-                _set_pack_visible(create_frame, True, anchor=tk.W, pady=(10, 5), after=ratios_frame)
-                _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
-                _set_pack_visible(status, True, anchor=tk.W, after=progress)
+                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=(8, 6), after=images_row)
+                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(0, 10), after=ratios_frame)
+                _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
+                if getattr(progress, "master", None) is not getattr(host, "step4_creator_action_inner", None):
+                    _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
+                if getattr(status, "master", None) is not getattr(host, "step4_creator_action_inner", None):
+                    _set_pack_visible(status, True, anchor=tk.W, after=progress)
 
             try:
                 host._refresh_dataset_creator_cta_state()
@@ -186,6 +343,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 pass
         else:
             _set_pack_visible(getattr(host, "creator_source_mode_frame", None), False)
+            _set_pack_visible(getattr(host, "creator_auto_match_hint_lbl", None), False)
     except Exception:
         pass
 
@@ -211,18 +369,18 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             host._set_training_widget_text(host.split_source_summary_lbl, str(vm.split_summary or ""))
             if str(host.split_source_summary_lbl.winfo_manager()) != "pack":
                 host.split_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
-            for widget, kwargs in (
-                (host.split_ratios_frame, {"fill": tk.X, "pady": 10}),
-                (host.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
-            ):
-                try:
-                    if bool(vm.show_split_details):
-                        if str(widget.winfo_manager()) != "pack":
-                            widget.pack(**kwargs)
-                    elif str(widget.winfo_manager()) == "pack":
-                        widget.pack_forget()
-                except Exception:
-                    pass
+            split_aug_frame = getattr(host, "split_augmentation_frame", None)
+            try:
+                if bool(vm.show_split_details):
+                    _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=host.split_source_summary_lbl)
+                    _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(0, 10), after=host.split_ratios_frame)
+                    _set_pack_visible(host.btn_step4_split_frame, True, fill=tk.X, pady=(12, 10), after=(split_aug_frame or host.split_ratios_frame))
+                else:
+                    _set_pack_visible(host.split_ratios_frame, False)
+                    _set_pack_visible(split_aug_frame, False)
+                    _set_pack_visible(host.btn_step4_split_frame, False)
+            except Exception:
+                pass
             try:
                 split_busy = bool(getattr(host, "dataset_split_is_running", False))
                 split_progress = float(getattr(host, "split_progress_var", tk.DoubleVar(value=0.0)).get() or 0.0)
@@ -235,7 +393,9 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
         else:
             host._set_training_widget_text(
                 host.split_intro_lbl,
-                "Utwórz wariant splitu wybranego datasetu znaków, który został wyprodukowany w Z3/PZ2.",
+                (
+                    "Wskaż dataset znaków. PZ1 przygotuje wariant train / val / test dla YOLO Detect."
+                ),
             )
             host._set_training_widget_text(host.btn_step4_split, "Utwórz split treningowy")
             try:
@@ -264,15 +424,13 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 host.split_output_row.pack_forget()
             except Exception:
                 pass
-            for widget, kwargs in (
-                (host.split_ratios_frame, {"fill": tk.X, "pady": 10}),
-                (host.btn_step4_split_frame, {"anchor": tk.W, "pady": 10}),
-            ):
-                try:
-                    if str(widget.winfo_manager()) != "pack":
-                        widget.pack(**kwargs)
-                except Exception:
-                    pass
+            split_aug_frame = getattr(host, "split_augmentation_frame", None)
+            try:
+                _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=host.split_source_row)
+                _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(0, 10), after=host.split_ratios_frame)
+                _set_pack_visible(host.btn_step4_split_frame, True, fill=tk.X, pady=(12, 10), after=(split_aug_frame or host.split_ratios_frame))
+            except Exception:
+                pass
             try:
                 split_busy = bool(getattr(host, "dataset_split_is_running", False))
                 split_progress = float(getattr(host, "split_progress_var", tk.DoubleVar(value=0.0)).get() or 0.0)
@@ -287,36 +445,12 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
 def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     vm = host._get_step4_training_inputs_view_model()
 
-    def _set_pack_visible(widget, visible: bool, **pack_kwargs):
-        if widget is None:
-            return
-        try:
-            manager = str(widget.winfo_manager())
-        except Exception:
-            manager = ""
-        try:
-            if visible:
-                if manager != "pack":
-                    widget.pack(**pack_kwargs)
-            elif manager == "pack":
-                widget.pack_forget()
-        except Exception:
-            pass
-
-    session_row = getattr(host, "train_session_name_row", None)
     dataset_section = getattr(host, "train_dataset_section_frame", None)
     dataset_title = getattr(host, "train_dataset_title_lbl", None)
-    dataset_required = getattr(host, "train_dataset_required_lbl", None)
-    dataset_caption = getattr(host, "train_dataset_caption_lbl", None)
-    dataset_path_label = getattr(host, "train_dataset_path_lbl", None)
-    dataset_entry = getattr(host, "train_dataset_entry", None)
-    dataset_btn = getattr(host, "train_dataset_pick_btn", None)
-    dataset_yaml_btn = getattr(host, "train_dataset_yaml_btn", None)
-    dataset_refresh_btn = getattr(host, "dataset_variant_refresh_btn", None)
-    dataset_row = getattr(host, "train_dataset_row", None)
+    dataset_intro = getattr(host, "train_dataset_intro_lbl", None)
     dataset_variant_row = getattr(host, "dataset_variant_row", None)
     dataset_variant_title = getattr(host, "dataset_variant_title_lbl", None)
-    dataset_variant_caption = getattr(host, "dataset_variant_caption_lbl", None)
+    dataset_selected_path = getattr(host, "train_dataset_selected_path_lbl", None)
     dataset_hint = getattr(host, "train_dataset_hint_lbl", None)
     scope_hint = getattr(host, "train_scope_hint_lbl", None)
     pose_warning = getattr(host, "train_pose_warning_lbl", None)
@@ -326,7 +460,6 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
     custom_entry = getattr(host, "base_custom_entry", None)
     custom_btn = getattr(host, "base_custom_btn", None)
 
-    _set_pack_visible(session_row, bool(vm.show_session_name), fill=tk.X, pady=(0, host._train_left_section_gap))
     _set_pack_visible(
         dataset_section,
         bool(vm.show_dataset_section),
@@ -343,16 +476,18 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
         except Exception:
             pass
     show_dataset_section = bool(vm.show_dataset_section)
-    # PZ2 consumes prepared variants only. Manual source selection belongs to PZ1.
-    show_manual_dataset_path = False
 
-    _set_pack_visible(dataset_required, False, anchor=tk.W, fill=tk.X, pady=(0, 4))
-    _set_pack_visible(dataset_caption, show_dataset_section, anchor=tk.W, fill=tk.X, pady=(2, 4))
-    _set_pack_visible(dataset_path_label, show_manual_dataset_path, anchor=tk.W, fill=tk.X, pady=(2, 2))
-    _set_pack_visible(dataset_row, show_manual_dataset_path, fill=tk.X, pady=2)
-    _set_pack_visible(dataset_variant_row, bool(vm.show_dataset_section), fill=tk.X, pady=(4, 2))
+    _set_pack_visible(dataset_intro, bool(vm.show_dataset_section), anchor=tk.W, fill=tk.X, pady=(0, 8), after=dataset_title)
+    _set_pack_visible(dataset_variant_row, bool(vm.show_dataset_section), fill=tk.X, pady=(4, 8), after=dataset_intro)
+    _set_pack_visible(dataset_selected_path, bool(vm.show_dataset_section), anchor=tk.W, fill=tk.X)
     _set_pack_visible(dataset_hint, False, anchor=tk.W, fill=tk.X, pady=(4, 4))
-    _set_pack_visible(scope_hint, bool(vm.show_scope_hint), anchor=tk.W, fill=tk.X, pady=(0, host._train_left_section_gap))
+    _set_pack_visible(
+        scope_hint,
+        bool(vm.show_scope_hint and vm.in_campaign),
+        anchor=tk.W,
+        fill=tk.X,
+        pady=(0, host._train_left_section_gap),
+    )
     _set_pack_visible(
         pose_warning,
         (bool(vm.show_pose_warning) and bool(str(getattr(pose_warning, "cget", lambda _x: "")("text") or "").strip())),
@@ -361,63 +496,11 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
         pady=(0, host._train_left_section_gap),
     )
 
-    try:
-        selected_target = host._get_selected_training_target()
-    except Exception:
-        selected_target = getattr(host, "_step4_dataset_mode", "char")
-    selected_target = str(selected_target or "char").strip().lower()
-
     if dataset_title is not None:
-        host._set_training_widget_text(dataset_title, "Wybór splitu")
-
-    if bool(vm.in_campaign):
-        dataset_caption_text = "Wybierz split zgodny z aktualnym torem projektu. Nowy split przygotujesz w PZ1."
-        dataset_required_text = ""
-    elif selected_target == "plate":
-        dataset_required_text = ""
-        dataset_caption_text = "Wybierz split tablic do treningu YOLO Pose. Nowy split przygotujesz w PZ1."
-    else:
-        dataset_required_text = ""
-        dataset_caption_text = "Wybierz split znaków do treningu YOLO Detect. Nowy split przygotujesz w PZ1."
-    host._set_training_widget_text(dataset_required, dataset_required_text)
-    host._set_training_widget_text(dataset_caption, dataset_caption_text)
-    host._set_training_widget_text(
-        dataset_path_label,
-        "Ścieżka gotowego datasetu YOLO Pose:" if selected_target == "plate" else "Ścieżka gotowego datasetu YOLO Detect:",
-    )
+        host._set_training_widget_text(dataset_title, "Wybierz wariant splitu")
 
     if dataset_variant_title is not None:
-        host._set_training_widget_text(dataset_variant_title, "Dostępne splity:")
-    if dataset_variant_caption is not None:
-        host._set_training_widget_text(dataset_variant_caption, "")
-        try:
-            dataset_variant_caption.pack_forget()
-        except Exception:
-            pass
-
-    if dataset_entry is not None:
-        try:
-            dataset_entry.configure(state=str(vm.dataset_entry_state or "normal"))
-        except Exception:
-            pass
-
-    if dataset_btn is not None:
-        try:
-            dataset_btn.pack_forget()
-        except Exception:
-            pass
-
-    if dataset_yaml_btn is not None:
-        try:
-            dataset_yaml_btn.pack_forget()
-        except Exception:
-            pass
-
-    if dataset_refresh_btn is not None:
-        try:
-            dataset_refresh_btn.pack_forget()
-        except Exception:
-            pass
+        host._set_training_widget_text(dataset_variant_title, "Aktywny wariant")
 
     try:
         host._refresh_dataset_variant_choices()
@@ -425,9 +508,9 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
         pass
 
     base_caption_text = (
-        "Projekt może podstawić model z poprzedniej iteracji. Możesz go zmienić przed startem."
+        "Od tego modelu zacznie się trening na wybranym datasecie. Możesz użyć modelu projektu, presetu albo własnego .pt."
         if bool(vm.in_campaign)
-        else "Wybierz model zgodny z torem: tablice = Pose, znaki = Detect."
+        else "Od tego modelu zacznie się trening na wybranym datasecie."
     )
     host._set_training_widget_text(base_caption, base_caption_text)
 
@@ -459,7 +542,11 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
             elif not str(custom_btn.winfo_manager()):
                 custom_btn.pack(side=tk.LEFT, padx=(8, 0))
             if bool(vm.show_custom_pick_button):
-                custom_btn.configure(state=tk.NORMAL if host.base_model_var.get() == "Custom" else tk.DISABLED)
+                custom_btn.configure(
+                    state=tk.NORMAL
+                    if host._is_custom_base_model_key(host.base_model_var.get())
+                    else tk.DISABLED
+                )
         except Exception:
             pass
 
@@ -485,6 +572,29 @@ def _contrast_text_for_badge(bg_color: str, fallback: str = "#ffffff") -> str:
     return "#111827" if luminance > 0.58 else "#ffffff"
 
 
+def _step4_route_panel_copy(campaign_active: bool) -> dict[str, str]:
+    if campaign_active:
+        return {
+            "panel_title": " Wybór toru treningowego ",
+            "header_title": " Aktywny tor ",
+            "intro": "Wybierz tor pracy tej iteracji. PZ1 przygotuje split, a PZ2 uruchomi trening.",
+            "plate_title": "Tor tablic",
+            "plate_desc": "YOLO Pose. PZ1 tworzy split dla modelu detekcji tablic.",
+            "char_title": "Tor znaków",
+            "char_desc": "YOLO Detect. PZ1 tworzy split dla modelu detekcji znaków.",
+        }
+
+    return {
+        "panel_title": " Typ datasetu ",
+        "header_title": " Aktywny typ datasetu ",
+        "intro": "Wybierz typ datasetu. PZ1 buduje wariant treningowy YOLO, a PZ2 uruchamia trening na wybranym wariancie.",
+        "plate_title": "Dataset tablic",
+        "plate_desc": "YOLO Pose. Źródłem jest XML + zgodny katalog zdjęć albo gotowy dataset; po wyborze XML system spróbuje dobrać katalog zdjęć.",
+        "char_title": "Dataset znaków",
+        "char_desc": "YOLO Detect. Źródłem jest gotowy dataset znaków, z którego PZ1 utworzy wariant splitu.",
+    }
+
+
 def refresh_step4_route_choice_cards(host: "TrainingTab"):
     cards = getattr(host, "_step4_route_choice_cards", {})
     if not cards:
@@ -501,6 +611,27 @@ def refresh_step4_route_choice_cards(host: "TrainingTab"):
     accent_text = palette.get("accent_text", "#ffffff")
     surface_info = palette.get("surface_info", panel_alt)
     surface_success = palette.get("surface_success", panel_alt)
+
+    campaign_active = bool(CAMPAIGN.get_active_project_name())
+    copy = _step4_route_panel_copy(campaign_active)
+    try:
+        frame = getattr(host, "step4_route_choice_frame", None)
+        if frame is not None:
+            frame.configure(text=copy["panel_title"])
+    except Exception:
+        pass
+    try:
+        intro = getattr(host, "step4_route_intro_lbl", None)
+        if intro is not None:
+            intro.configure(text=copy["intro"])
+    except Exception:
+        pass
+    try:
+        header = getattr(host, "ds_mode_header_frame", None)
+        if header is not None:
+            header.configure(text=copy["header_title"])
+    except Exception:
+        pass
 
     mode = str(getattr(host, "_step4_dataset_mode", "char") or "char").strip().lower()
     route_selected = bool(getattr(host, "_step4_route_selected", False))
@@ -522,6 +653,8 @@ def refresh_step4_route_choice_cards(host: "TrainingTab"):
         title = widgets.get("title")
         badge = widgets.get("badge")
         desc = widgets.get("desc")
+        title_text = copy["plate_title"] if card_mode == "plate" else copy["char_title"]
+        desc_text = copy["plate_desc"] if card_mode == "plate" else copy["char_desc"]
 
         for widget in (frame, title_row):
             try:
@@ -536,12 +669,12 @@ def refresh_step4_route_choice_cards(host: "TrainingTab"):
             pass
         try:
             if title is not None:
-                title.configure(bg=card_bg, fg=title_fg)
+                title.configure(text=title_text, bg=card_bg, fg=title_fg)
         except Exception:
             pass
         try:
             if desc is not None:
-                desc.configure(bg=card_bg, fg=desc_fg)
+                desc.configure(text=desc_text, bg=card_bg, fg=desc_fg)
         except Exception:
             pass
         try:
@@ -559,11 +692,60 @@ def refresh_step4_route_choice_cards(host: "TrainingTab"):
             pass
 
 
-def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
+def _schedule_step4_mode_deferred_refresh(host: "TrainingTab"):
+    frame = getattr(host, "frame", None)
+    if frame is None:
+        return
+
+    pending_job = getattr(host, "_step4_mode_switch_refresh_job", None)
+    if pending_job is not None:
+        try:
+            frame.after_cancel(pending_job)
+        except Exception:
+            pass
+
+    def run_refresh():
+        host._step4_mode_switch_refresh_job = None
+        try:
+            current_mode = str(getattr(host, "_step4_dataset_mode", "char") or "char").strip().lower()
+            host._rebind_free_mode_training_storage(target=current_mode, reload_history=True)
+        except Exception:
+            pass
+        try:
+            host._schedule_step4_deferred_model_refresh()
+        except Exception:
+            try:
+                host._refresh_base_model_choices()
+                host._apply_training_recommended_start_params()
+            except Exception:
+                pass
+        for callback_name in (
+            "_refresh_step4_dataset_summary_table",
+            "_refresh_step4_training_inputs_mode_ui",
+            "_refresh_step4_campaign_navigation_ui",
+            "_refresh_free_training_route_ui",
+            "_update_training_dataset_hint",
+            "_refresh_training_start_state",
+        ):
+            try:
+                callback = getattr(host, callback_name, None)
+                if callable(callback):
+                    callback()
+            except Exception:
+                pass
+
     try:
-        host._refresh_free_training_route_ui()
+        host._step4_mode_switch_refresh_job = frame.after(90, run_refresh)
     except Exception:
-        pass
+        host._step4_mode_switch_refresh_job = None
+
+
+def refresh_step4_dataset_mode_ui(host: "TrainingTab", *, lightweight: bool = False):
+    if not lightweight:
+        try:
+            host._refresh_free_training_route_ui()
+        except Exception:
+            pass
 
     try:
         host._refresh_step4_analysis_tab_visibility()
@@ -575,10 +757,11 @@ def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
     except Exception:
         pass
 
-    try:
-        host._refresh_step4_dataset_summary_table()
-    except Exception:
-        pass
+    if not lightweight:
+        try:
+            host._refresh_step4_dataset_summary_table()
+        except Exception:
+            pass
 
     if not hasattr(host, "ds_mode_host"):
         return
@@ -589,6 +772,31 @@ def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
     route_selected = bool(getattr(host, "_step4_route_selected", False))
     locked_target = host._get_locked_campaign_training_target()
     route_locked = campaign_active and locked_target in ("char", "plate")
+    mode_header = getattr(host, "ds_mode_header_frame", None)
+    hide_mode_header = bool(campaign_active and route_locked and str(mode).lower() == "plate")
+    if hide_mode_header:
+        try:
+            mode_header.pack_forget()
+        except Exception:
+            pass
+    else:
+        try:
+            if mode_header is not None and str(mode_header.winfo_manager()) != "pack":
+                summary_frame = getattr(host, "step4_dataset_summary_frame", None)
+                if summary_frame is not None:
+                    mode_header.pack(fill=tk.X, before=summary_frame)
+                else:
+                    mode_header.pack(fill=tk.X)
+        except Exception:
+            try:
+                if mode_header is not None and str(mode_header.winfo_manager()) != "pack":
+                    mode_header.pack(fill=tk.X)
+            except Exception:
+                pass
+    waiting_title = "Wybierz tor po lewej stronie" if campaign_active else "Wybierz typ datasetu po lewej stronie"
+    waiting_next = "Wybierz tor" if campaign_active else "Wybierz typ datasetu"
+    plate_title = "Tor tablic (YOLO Pose)" if campaign_active else "Dataset tablic (YOLO Pose)"
+    char_title = "Tor znaków (YOLO Detect)" if campaign_active else "Dataset znaków (YOLO Detect)"
 
     try:
         host.ds_creator_frame.pack_forget()
@@ -604,34 +812,31 @@ def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
         pass
 
     if bool(vm.show_waiting_panel):
-        host.ds_mode_title_var.set(str(vm.title or "Wybierz tor po lewej stronie"))
+        host.ds_mode_title_var.set(str(vm.title or waiting_title))
         host.ds_mode_desc_var.set(str(vm.description or ""))
         host.btn_choose_plate.configure(state=tk.NORMAL)
         host.btn_choose_char.configure(state=tk.NORMAL)
         refresh_step4_route_choice_cards(host)
         host.ds_mode_waiting_frame.pack(fill=tk.X, expand=False)
-        host.btn_step4_next.configure(
-            text=str(vm.next_label or "Wybierz tor"),
-            state=tk.DISABLED
-        )
+        _configure_step4_next_button(host, str(vm.next_label or waiting_next), state=tk.DISABLED)
         return
 
     if mode == "plate":
-        host.ds_mode_title_var.set(str(vm.title or "Tor tablic (YOLO Pose)"))
+        host.ds_mode_title_var.set(str(vm.title or plate_title))
         host.ds_mode_desc_var.set(str(vm.description or ""))
         host.btn_choose_plate.configure(state=tk.DISABLED)
         host.btn_choose_char.configure(state=(tk.DISABLED if route_locked else tk.NORMAL))
         if bool(vm.show_creator_section):
             host.ds_creator_frame.pack(fill=tk.X, expand=False)
-        host.btn_step4_next.configure(text=str(vm.next_label or "Dalej do treningu"))
+        _configure_step4_next_button(host, str(vm.next_label or "Dalej do treningu"))
     else:
-        host.ds_mode_title_var.set(str(vm.title or "Tor znaków (YOLO Detect)"))
+        host.ds_mode_title_var.set(str(vm.title or char_title))
         host.ds_mode_desc_var.set(str(vm.description or ""))
         host.btn_choose_plate.configure(state=(tk.DISABLED if route_locked else tk.NORMAL))
         host.btn_choose_char.configure(state=tk.DISABLED)
         if bool(vm.show_split_section):
             host.ds_split_frame.pack(fill=tk.X, expand=False)
-        host.btn_step4_next.configure(text=str(vm.next_label or "Dalej do treningu"))
+        _configure_step4_next_button(host, str(vm.next_label or "Dalej do treningu"))
 
     if route_locked:
         host.btn_choose_plate.configure(state=tk.DISABLED)
@@ -644,10 +849,11 @@ def refresh_step4_dataset_mode_ui(host: "TrainingTab"):
     except Exception:
         pass
 
-    try:
-        refresh_step4_training_inputs_mode_ui(host)
-    except Exception:
-        pass
+    if not lightweight:
+        try:
+            refresh_step4_training_inputs_mode_ui(host)
+        except Exception:
+            pass
 
     try:
         host._sync_dataset_mode_canvas_width()
@@ -680,8 +886,9 @@ def refresh_step4_campaign_navigation_ui(host: "TrainingTab"):
         pass
 
     try:
-        host.btn_step4_next.configure(
-            text=str(vm.next_label or "Dalej do treningu"),
+        _configure_step4_next_button(
+            host,
+            str(vm.next_label or "Dalej do treningu"),
             state=(tk.NORMAL if bool(vm.next_enabled) else tk.DISABLED),
         )
     except Exception:
@@ -719,7 +926,9 @@ def refresh_step4_campaign_navigation_ui(host: "TrainingTab"):
         pass
 
     try:
-        host.btn_step4_train_back.configure(text=str(vm.train_back_label or "Wstecz do toru"))
+        train_back_label = str(vm.train_back_label or "Wstecz do toru")
+        train_back_width = max(18, min(34, len(train_back_label) + 2))
+        host.btn_step4_train_back.configure(text=train_back_label, width=train_back_width)
         if not bool(vm.show_train_back):
             host.btn_step4_train_back.pack_forget()
         elif not str(host.btn_step4_train_back.winfo_manager()):
@@ -782,18 +991,12 @@ def _normalize_training_context_target(target: str | None) -> str:
 
 def accept_training_input_context(
     host: "TrainingTab",
-    context: TrainingInputContext | None = None,
     *,
     source: str = "",
     target: str = "",
     dataset_path: str | Path | None = None,
     select_training: bool = False,
 ) -> bool:
-    if context is not None:
-        source = context.source or source
-        target = context.target or target
-        dataset_path = context.dataset_path or dataset_path
-
     mode = _normalize_training_context_target(target or getattr(host, "_step4_dataset_mode", "char"))
     campaign_active = bool(CAMPAIGN.get_active_project_name())
     locked_target = host._get_locked_campaign_training_target()
@@ -821,15 +1024,6 @@ def accept_training_input_context(
         pass
     try:
         host._step4_train_unlocked = True
-    except Exception:
-        pass
-    try:
-        host._last_training_input_context = TrainingInputContext(
-            source=str(source or "pz1"),
-            target=mode,
-            dataset_path=dataset_text,
-            ready=bool(dataset_text),
-        )
     except Exception:
         pass
     try:
@@ -905,15 +1099,6 @@ def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | Non
 
     target = _normalize_training_context_target(getattr(host, "_step4_dataset_mode", "char"))
     try:
-        host._last_training_input_context = TrainingInputContext(
-            source="pz1",
-            target=target,
-            dataset_path=dataset_text,
-            ready=bool(dataset_text),
-        )
-    except Exception:
-        pass
-    try:
         builder = getattr(host, "_build_step4_dataset_training_source", None)
         if callable(builder):
             host._last_training_source = builder(
@@ -923,6 +1108,82 @@ def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | Non
             )
     except Exception:
         pass
+
+    if dataset_text and CAMPAIGN.get_active_project_name():
+        try:
+            root = Path(dataset_text)
+            if root.is_file() and root.name.lower() == "data.yaml":
+                yaml_path = root
+                root = root.parent
+            else:
+                yaml_path = root / "data.yaml"
+            try:
+                dataset_dir = str(root.resolve())
+            except Exception:
+                dataset_dir = str(root)
+            try:
+                yaml_text = str(yaml_path.resolve()) if yaml_path.exists() else str(yaml_path)
+            except Exception:
+                yaml_text = str(yaml_path)
+            counts_getter = getattr(host, "_get_dataset_split_image_counts", None)
+            counts = dict(counts_getter(root) or {}) if callable(counts_getter) else {}
+            payload = {
+                "target": target,
+                "dataset_path": dataset_dir,
+                "yaml_path": yaml_text,
+                "train_images": int(counts.get("train", 0) or 0),
+                "val_images": int(counts.get("val", 0) or 0),
+                "test_images": int(counts.get("test", 0) or 0),
+                "total_images": int(counts.get("total", 0) or 0),
+                "source_stage": "Z4/PZ1",
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            if target == "plate":
+                try:
+                    manifest_loader = getattr(host, "_load_plate_dataset_source_manifest", None)
+                    manifest = dict(manifest_loader(root) or {}) if callable(manifest_loader) else {}
+                except Exception:
+                    manifest = {}
+                if manifest:
+                    payload["source_manifest"] = {
+                        "project": str(manifest.get("project", "") or ""),
+                        "iteration": int(manifest.get("iteration", 0) or 0),
+                        "approved_set_images": int(manifest.get("approved_set_images", 0) or 0),
+                        "approved_set_plates": int(manifest.get("approved_set_plates", 0) or 0),
+                        "source_kind": str(manifest.get("source_kind", "") or ""),
+                    }
+            try:
+                iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+            except Exception:
+                iteration_num = 1
+            CAMPAIGN.upsert_iteration_state(
+                iteration_num=iteration_num,
+                updates={"step4_dataset": payload},
+            )
+            CAMPAIGN.upsert_iteration_artifact_bundle(
+                iteration_num=iteration_num,
+                updates={"step4_dataset": payload},
+            )
+        except Exception:
+            pass
+
+    if target == "plate" and dataset_text and CAMPAIGN.get_active_project_name():
+        try:
+            remember_source = getattr(host, "_remember_campaign_plate_training_source", None)
+            if callable(remember_source):
+                remember_source(dataset_text)
+        except Exception:
+            pass
+        try:
+            resolver = getattr(host, "_resolve_plate_training_source_from_dataset", None)
+            source_info = resolver(dataset_text) if callable(resolver) else {"dataset_path": dataset_text}
+            CAMPAIGN.set_last_plate_training_source(
+                dataset_path=str(source_info.get("dataset_path", dataset_text) or dataset_text),
+                source_run_path=str(source_info.get("source_run_path", "") or ""),
+                source_xml_path=str(source_info.get("source_xml_path", "") or ""),
+            )
+        except Exception:
+            pass
 
     if target == "plate" and dataset_text:
         try:
@@ -976,18 +1237,19 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
         previous_mode = "char"
     route_changed = mode != previous_mode
     clear_dataset_for_route_change = False
+    campaign_active = bool(CAMPAIGN.get_active_project_name())
+    mode_name = "tor treningu" if campaign_active else "typ datasetu"
 
     if route_changed:
         active_label = host._get_active_step4_operation_label()
         if active_label:
             messagebox.showinfo(
                 "Proces w toku",
-                "Nie można teraz zmienic toru treningu.\n\n"
-                f"Najpierw poczekaj na zakonczenie: {active_label}.",
+                f"Nie można teraz zmienić ustawienia: {mode_name}.\n\n"
+                f"Najpierw poczekaj na zakończenie: {active_label}.",
             )
             return
 
-    campaign_active = bool(CAMPAIGN.get_active_project_name())
     locked_target = host._get_locked_campaign_training_target()
     if campaign_active and locked_target in ("char", "plate"):
         if mode != locked_target:
@@ -1019,15 +1281,15 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
                 except Exception:
                     display_path = current_dataset
                 confirm_switch = messagebox.askyesno(
-                    "Zmiana toru treningu",
-                    "Wybrany dataset należy do innego toru niż ten, który chcesz teraz uruchomić.\n\n"
-                    f"Obecny tor: {previous_label}\n"
-                    f"Nowy tor: {new_label}\n"
+                    "Zmiana typu datasetu",
+                    "Wybrany dataset wygląda na inny typ danych niż ten, który chcesz teraz przygotować.\n\n"
+                    f"Obecny typ: {previous_label}\n"
+                    f"Nowy typ: {new_label}\n"
                     f"Dataset: {display_path}\n"
                     f"Rozpoznany jako: {dataset_label}\n\n"
-                    "Po zmianie toru odłączymy ten dataset, wyczyścimy wariant splitu i kontekst PZ2. "
+                    "Po zmianie typu odłączymy ten dataset, wyczyścimy wariant splitu i kontekst PZ2. "
                     "Eksporty oraz pliki na dysku pozostaną bez zmian.\n\n"
-                    "Kontynuować zmianę toru?",
+                    "Kontynuować zmianę typu datasetu?",
                     parent=getattr(host, "frame", None),
                 )
                 if not confirm_switch:
@@ -1040,6 +1302,15 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
         host._step4_route_selected = True
         host._step4_train_unlocked = False
     else:
+        if route_changed:
+            try:
+                host._pending_step4_input_training_source = None
+            except Exception:
+                pass
+            try:
+                host._step4_dataset_summary_split_counts = {}
+            except Exception:
+                pass
         if clear_dataset_for_route_change:
             try:
                 host.dataset_var.set("")
@@ -1047,15 +1318,6 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
                 pass
             try:
                 host.dataset_variant_var.set("")
-            except Exception:
-                pass
-            try:
-                host._last_training_input_context = TrainingInputContext(
-                    source="pz1",
-                    target=mode,
-                    dataset_path="",
-                    ready=False,
-                )
             except Exception:
                 pass
             try:
@@ -1084,54 +1346,56 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
                 current_dataset = ""
             if not current_dataset:
                 try:
-                    host._last_training_input_context = TrainingInputContext(
-                        source="pz1",
-                        target=mode,
-                        dataset_path="",
-                        ready=False,
-                    )
-                except Exception:
-                    pass
-                try:
                     host._last_training_source = None
                 except Exception:
                     pass
 
-        host._rebind_free_mode_training_storage(target=mode)
+        host._rebind_free_mode_training_storage(target=mode, reload_history=False)
         try:
             host.rank_models_dir.set(str(host._get_ranking_models_default_dir()))
         except Exception:
             pass
-    try:
-        host._refresh_base_model_choices()
-    except Exception:
-        pass
-    try:
-        host._apply_training_recommended_start_params()
-    except Exception:
-        pass
-    try:
-        host._refresh_training_recommendation_table()
-    except Exception:
-        pass
-    try:
-        host._refresh_dataset_variant_choices()
-    except Exception:
-        pass
-    host._refresh_step4_dataset_mode_ui()
-    host._refresh_step4_campaign_navigation_ui()
-    try:
-        host._refresh_free_training_route_ui()
-    except Exception:
-        pass
-    try:
-        host._update_training_dataset_hint()
-    except Exception:
-        pass
+    if campaign_active:
+        try:
+            host._refresh_base_model_choices()
+        except Exception:
+            pass
+        try:
+            host._apply_training_recommended_start_params()
+        except Exception:
+            pass
+        try:
+            host._refresh_training_recommendation_table()
+        except Exception:
+            pass
+        try:
+            host._refresh_dataset_variant_choices()
+        except Exception:
+            pass
+        host._refresh_step4_dataset_mode_ui()
+        host._refresh_step4_campaign_navigation_ui()
+        try:
+            host._refresh_free_training_route_ui()
+        except Exception:
+            pass
+        try:
+            host._update_training_dataset_hint()
+        except Exception:
+            pass
+    else:
+        refresh_step4_dataset_mode_ui(host, lightweight=True)
+        try:
+            host._refresh_step4_dataset_summary_table()
+        except Exception:
+            pass
+        _schedule_step4_mode_deferred_refresh(host)
 
     try:
         label = "tablic (YOLO Pose)" if mode == "plate" else "znaków (YOLO Detect)"
-        host._append_step4_builder_log(f"[TRYB] Wybrano tor budowy datasetu dla modelu {label}.")
+        if campaign_active:
+            host._append_step4_builder_log(f"[TRYB] Wybrano tor budowy datasetu dla modelu {label}.")
+        else:
+            host._append_step4_builder_log(f"[TYP] Wybrano typ datasetu dla modelu {label}.")
     except Exception:
         pass
 
@@ -1149,6 +1413,11 @@ def step4_dataset_go_next(host: "TrainingTab"):
     try:
         mode = getattr(host, "_step4_dataset_mode", "char")
         host.set_campaign_training_target(mode)
+    except Exception:
+        pass
+
+    try:
+        host._ensure_step4_train_tab_built()
     except Exception:
         pass
 

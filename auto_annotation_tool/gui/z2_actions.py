@@ -42,42 +42,6 @@ class Z2Action:
     def get_description(self, ctx: Z2ActionContext) -> str:
         return ""
 
-    label = "Praca ręczna na runie Z2"
-
-    def get_description(self, ctx: Z2ActionContext) -> str:
-        if ctx.mode == "campaign":
-            if ctx.campaign_repair_mode:
-                return (
-                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
-                )
-            return (
-                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
-                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
-            )
-        return (
-            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
-            "albo wskaż dowolny run Z2 do korekty."
-        )
-
-    label = "Praca ręczna na runie Z2"
-
-    def get_description(self, ctx: Z2ActionContext) -> str:
-        if ctx.mode == "campaign":
-            if ctx.campaign_repair_mode:
-                return (
-                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
-                )
-            return (
-                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
-                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
-            )
-        return (
-            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
-            "albo wskaż dowolny run Z2 do korekty."
-        )
-
     def activate(self, host, ctx: Z2ActionContext) -> None:
         raise NotImplementedError
 
@@ -107,39 +71,21 @@ class PlateManualAction(Z2Action):
                     return True
         return True
 
-    label = "Praca ręczna na runie Z2"
+    label = "Ręczna anotacja tablic"
 
     def get_description(self, ctx: Z2ActionContext) -> str:
         if ctx.mode == "campaign":
             if ctx.campaign_repair_mode:
                 return (
-                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
+                    "Otwiera Z2 w trybie ręcznej naprawy: możesz poprawić albo dopisać ramki tablic "
+                    "dla obrazów przypisanych do aktywnej bramki."
                 )
             return (
-                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
-                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
+                "Ręczna praca jest dostępna od razu. Jeśli roboczy XML jeszcze nie istnieje, "
+                "program przygotuje go automatycznie w tle, bez osobnego kroku użytkownika."
             )
         return (
-            "Utwórz nowy run ręczny, otwórz lokalny run z historii "
-            "albo wskaż dowolny run Z2 do korekty."
-        )
-    label = "Anotacja ręczna tablic"
-
-    def get_description(self, ctx: Z2ActionContext) -> str:
-        if ctx.mode == "campaign":
-            if ctx.campaign_repair_mode:
-                return (
-                    "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                    "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
-                )
-            return (
-                "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
-                "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
-            )
-        return (
-            "Kontynuuj istniejący XML albo utwórz nowy run anotacji do ręcznych poprawek "
-            "i kolejnych iteracji."
+            "Kontynuuj istniejący XML albo utwórz nowy run anotacji do ręcznego oznaczania tablic."
         )
 
     def activate(self, host, ctx: Z2ActionContext) -> None:
@@ -231,19 +177,19 @@ class PlateManualAction(Z2Action):
                 iteration_target=ctx.iteration_target or "plate",
                 manual_template=True,
             )
+            input_dir_value = str(ctx.input_dir or "").strip()
             try:
-                input_dir_value = str(ctx.input_dir or "").strip()
                 if input_dir_value and not getattr(host, "current_annotation_xml_path", None):
                     host._prime_campaign_source_preview(Path(input_dir_value))
             except Exception:
                 pass
 
             try:
-                reused_manual_count = int(host._get_campaign_reused_manual_annotation_count() or 0)
+                input_dir_ready = bool(input_dir_value and Path(input_dir_value).exists())
             except Exception:
-                reused_manual_count = 0
+                input_dir_ready = False
 
-            if reused_manual_count > 0 and not bool(getattr(host, "_campaign_manual_prepare_pending", False)):
+            if input_dir_ready and not bool(getattr(host, "_campaign_manual_prepare_pending", False)):
                 try:
                     host._campaign_manual_prepare_pending = True
 
@@ -269,27 +215,6 @@ class PlateManualAction(Z2Action):
             return
 
         host._select_free_mode_route("manual")
-
-
-def _plate_manual_action_description_override(self, ctx: Z2ActionContext) -> str:
-    if ctx.mode == "campaign":
-        if ctx.campaign_repair_mode:
-            return (
-                "To jest tryb naprawczy. Wracasz tutaj po to, aby ręcznie poprawić albo uzupełnić tablice "
-                "dla tego samego zestawu zdjęć, zanim znów przejdziesz dalej w wizardzie."
-            )
-        return (
-            "Dostępna zawsze. Otwiera ręczną pracę na obrazach widocznych na liście wyników anotacji "
-            "i, jeśli trzeba, automatycznie przygotowuje XML tej iteracji bez osobnego startu."
-        )
-    return (
-        "Utwórz nowy run ręczny, otwórz lokalny run z historii "
-        "albo wskaż dowolny run Z2 do korekty."
-    )
-
-
-PlateManualAction.label = "Praca ręczna na runie Z2"
-PlateManualAction.get_description = _plate_manual_action_description_override
 
 
 class PlateAutoAction(Z2Action):
@@ -336,98 +261,38 @@ class PlateAutoAction(Z2Action):
             return
 
         if ctx.mode == "campaign":
-            preferred_run_dir = None
-            try:
-                preferred_run_dir = host._get_preferred_annotation_run_dir(require_xml=True)
-            except Exception:
-                preferred_run_dir = None
-            if preferred_run_dir is not None:
-                try:
-                    manifest = host._load_annotation_run_manifest(preferred_run_dir)
-                except Exception:
-                    manifest = {}
-                if not _is_manual_template_run_manifest(manifest):
-                    same_active_run = False
-                    try:
-                        current_run_dir = getattr(host, "current_annotation_run_dir", None)
-                        same_active_run = (
-                            current_run_dir is not None
-                            and host._paths_equivalent(current_run_dir, preferred_run_dir)
-                            and bool(getattr(host, "current_annotations", []) or [])
-                        )
-                    except Exception:
-                        same_active_run = False
-                    if same_active_run:
-                        try:
-                            if not host._ensure_preview_edits_saved("powrót do autoanotacji"):
-                                return
-                        except Exception:
-                            pass
-                        try:
-                            host.workflow_route_var.set("auto")
-                            host.manual_xml_template_var.set(False)
-                            host.workflow_step_var.set("auto_start")
-                            host._manual_review_active = False
-                            host._manual_review_from_auto = False
-                            host._manual_review_export_ready = False
-                            host._dataset_export_completed = False
-                            host._last_completed_workflow_route = "auto"
-                            if getattr(host, "current_input_dir", None) is not None:
-                                host.input_dir_var.set(str(host.current_input_dir))
-                            host._refresh_preview_list(preserve_selection=True, render_current=True)
-                            host._refresh_preview_list_summary()
-                            host._refresh_left_panel_route_copy()
-                            host._refresh_detection_configuration_ui()
-                            host._refresh_run_output_info()
-                            host._refresh_step2_action_states()
-                            host._refresh_free_mode_workflow_ui()
-                        except Exception:
-                            pass
-                        try:
-                            host.app.update_status(
-                                "W kampanii przywrócono widok istniejącego runu autoanotacji w Z2.",
-                                "info",
-                            )
-                        except Exception:
-                            pass
-                        return
-                    try:
-                        if not host._ensure_preview_edits_saved("powrót do autoanotacji"):
-                            return
-                    except Exception:
-                        pass
-                    try:
-                        host.workflow_route_var.set("auto")
-                        host.manual_xml_template_var.set(False)
-                        host.workflow_step_var.set("auto_start")
-                        host._manual_review_active = False
-                        host._manual_review_from_auto = False
-                        host._manual_review_export_ready = False
-                        host._dataset_export_completed = False
-                        host._last_completed_workflow_route = "auto"
-                        if getattr(host, "current_input_dir", None) is not None:
-                            host.input_dir_var.set(str(host.current_input_dir))
-                        host._refresh_left_panel_route_copy()
-                        host._refresh_detection_configuration_ui()
-                        host._refresh_run_output_info()
-                        host._refresh_step2_action_states()
-                        host._refresh_free_mode_workflow_ui()
-                    except Exception:
-                        pass
-                    try:
-                        host.app.update_status(
-                            "W kampanii przywrócono widok istniejącego runu autoanotacji w Z2.",
-                            "info",
-                        )
-                    except Exception:
-                        pass
-                    return
             manual_overlay_bundle = {}
+            plate_model_meta = {}
             try:
-                if not host._prompt_campaign_plate_auto_model_choice():
-                    return
+                plate_model_meta = dict(host._get_effective_plate_model_runtime_meta() or {})
+                selected_plate_model_path = str(plate_model_meta.get("path") or "").strip()
             except Exception:
-                return
+                selected_plate_model_path = ""
+            if not selected_plate_model_path:
+                try:
+                    selected_plate_model_path = str(host.plate_custom_var.get() or "").strip()
+                except Exception:
+                    selected_plate_model_path = ""
+
+            def _restore_selected_plate_model() -> None:
+                if not selected_plate_model_path:
+                    return
+                try:
+                    if not Path(selected_plate_model_path).exists():
+                        return
+                except Exception:
+                    return
+                try:
+                    host.plate_custom_var.set(selected_plate_model_path)
+                    host._remember_plate_model_runtime_meta(
+                        model_path=Path(selected_plate_model_path),
+                        source=str(plate_model_meta.get("source") or "external"),
+                        scope=str(plate_model_meta.get("scope") or "run"),
+                    )
+                    host._refresh_plate_model_runtime_info_ui()
+                except Exception:
+                    pass
+
             try:
                 manual_overlay_bundle = dict(host._get_current_campaign_manual_preview_bundle() or {})
             except Exception:
@@ -438,6 +303,7 @@ class PlateAutoAction(Z2Action):
                 iteration_target=ctx.iteration_target or "plate",
                 manual_template=False,
             )
+            _restore_selected_plate_model()
             try:
                 input_dir_value = str(ctx.input_dir or "").strip()
                 if input_dir_value:
@@ -462,6 +328,7 @@ class PlateAutoAction(Z2Action):
                 host._enforce_campaign_plate_only_auto_default()
             except Exception:
                 pass
+            _restore_selected_plate_model()
             try:
                 host.app.update_status(
                     "W kampanii wybrano autoanotację obrazów widocznych na liście wyników anotacji w Z2.",
@@ -469,6 +336,40 @@ class PlateAutoAction(Z2Action):
                 )
             except Exception:
                 pass
+            def _start_campaign_auto_annotation():
+                try:
+                    if getattr(host, "is_processing", False):
+                        return
+                    try:
+                        host.frame.update_idletasks()
+                    except Exception:
+                        pass
+                    try:
+                        host._set_workflow_route_state("auto", campaign_context=True)
+                        host.manual_xml_template_var.set(False)
+                        host._set_workflow_step_state("auto_start", campaign_context=True)
+                        host._set_auto_vehicle_choice_state(host._get_auto_vehicle_choice(), campaign_context=True)
+                    except Exception:
+                        pass
+                    _restore_selected_plate_model()
+                    try:
+                        host.app.update_status(
+                            "Otwieram modal autoanotacji Z2 dla aktywnej bramki.",
+                            "info",
+                        )
+                    except Exception:
+                        pass
+                    host._start_annotation()
+                except Exception as exc:
+                    try:
+                        host.app.update_status(
+                            f"Nie udało się uruchomić autoanotacji Z2: {exc}",
+                            "error",
+                        )
+                    except Exception:
+                        pass
+
+            _start_campaign_auto_annotation()
             return
 
         host._select_free_mode_route("auto")

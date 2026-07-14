@@ -66,6 +66,8 @@ class TrainingRun:
     # Raporty
     report_html: str = ""
     plots_dir: str = ""
+    resource_report: str = ""
+    resource_summary: str = ""
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -218,6 +220,49 @@ class TrainingHistory:
 
         return changed
 
+    def _reconcile_checkpoint_paths(self) -> bool:
+        """Recover checkpoint paths that exist on disk but are missing in history.
+
+        A failed/paused run may still have ``last.pt`` and can be resumed, but it
+        must not expose ``best.pt`` as a finished project model.
+        """
+        changed = False
+
+        for run in self.runs.values():
+            status_value = str(getattr(run, "status", "") or "").strip().lower()
+            if status_value not in {
+                TrainingStatus.COMPLETED.value,
+                TrainingStatus.FAILED.value,
+                TrainingStatus.PAUSED.value,
+                TrainingStatus.CANCELLED.value,
+            }:
+                continue
+
+            output_dir = str(getattr(run, "output_dir", "") or "").strip()
+            if not output_dir:
+                continue
+            weights_dir = Path(output_dir) / "train" / "weights"
+            best_weights = weights_dir / "best.pt"
+            last_weights = weights_dir / "last.pt"
+
+            if status_value == TrainingStatus.COMPLETED.value:
+                if best_weights.exists() and str(getattr(run, "best_weights", "") or "").strip() != str(best_weights):
+                    run.best_weights = str(best_weights)
+                    changed = True
+                if last_weights.exists() and str(getattr(run, "last_weights", "") or "").strip() != str(last_weights):
+                    run.last_weights = str(last_weights)
+                    changed = True
+                continue
+
+            if str(getattr(run, "best_weights", "") or "").strip():
+                run.best_weights = ""
+                changed = True
+            if last_weights.exists() and str(getattr(run, "last_weights", "") or "").strip() != str(last_weights):
+                run.last_weights = str(last_weights)
+                changed = True
+
+        return changed
+
     def _get_legacy_history_files(self) -> List[Path]:
         target_scope = self._get_target_scope()
         if not target_scope:
@@ -315,7 +360,12 @@ class TrainingHistory:
                 )
                 self._save()
 
+            changed = False
             if self._reconcile_stale_running_runs():
+                changed = True
+            if self._reconcile_checkpoint_paths():
+                changed = True
+            if changed:
                 self._save()
 
             logger.info(f"Zaladowano {len(self.runs)} treningow z: {self.history_dir}")
@@ -398,12 +448,28 @@ class TrainingHistory:
     
     def get_all_runs(self) -> List[TrainingRun]:
         return sorted(self.runs.values(), key=lambda r: r.created_at, reverse=True)
+
+    @staticmethod
+    def _has_nonfinite_checkpoint_error(run: TrainingRun) -> bool:
+        text = str(getattr(run, "error_message", "") or "").strip().lower()
+        if not text:
+            return False
+        needles = (
+            "nan",
+            "nan/inf",
+            "inf weights",
+            "non-finite",
+            "non finite",
+            "not finite",
+        )
+        return any(needle in text for needle in needles)
     
     def get_resumable_runs(self) -> List[TrainingRun]:
         return [
             run for run in self.runs.values()
             if run.status in [TrainingStatus.PAUSED.value, TrainingStatus.FAILED.value]
             and run.last_weights and Path(run.last_weights).exists()
+            and not self._has_nonfinite_checkpoint_error(run)
         ]
     
     def delete_run(self, run_id: str, delete_files: bool = False):

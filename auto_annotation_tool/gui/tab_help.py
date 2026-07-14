@@ -234,7 +234,7 @@ class HelpTab:
             widget,
             [
                 "Tryb swobodny (F): sam wybierasz źródła, runy, datasety i modele. To tryb eksperymentów, napraw, testów i pracy poza kampanią.",
-                "Tryb kampanii (C): projekt ma iterację, tor, bramki E1-E4 i własne katalogi. Wizard pilnuje kolejności oraz spójności artefaktów.",
+                "Tryb kampanii (C): projekt ma iterację, tor, bramki E1, E2, E3, E4T/E4Z i własne katalogi. Wizard pilnuje kolejności oraz spójności artefaktów.",
                 "Nie mieszaj założeń tych trybów. W trybie F elastyczność jest zaletą, a w trybie C ważniejsza jest przewidywalność i powtarzalność.",
             ],
         )
@@ -243,7 +243,7 @@ class HelpTab:
         self._bullet_list(
             widget,
             [
-                "[Z1] Wizard kampanii: wybór projektu, iteracja, E1-E4, tor tablic albo tor znaków, powroty do zakładek roboczych.",
+                "[Z1] Wizard kampanii: wybór projektu, iteracja, E1, E2, E3, E4T/E4Z, tor tablic albo tor znaków, powroty do zakładek roboczych.",
                 "[Z2] Tablice: ręczny run XML, autoanotacja z modalem modeli, korekta, status [OK], eksport anotacji i eksport YOLO tablic.",
                 "[Z3/PZ1] Wycinanie tablic: wybór zgodnego XML i folderu obrazów albo kontynuacja na runie, a potem produkcja cropów tablic.",
                 "[Z3/PZ2] Przegląd znaków: OCR, YOLO, hybryda, ręczna poprawa boxów znaków, kompas skrótów i lista przypadków.",
@@ -393,12 +393,12 @@ class HelpTab:
             ],
         )
 
-        self._section(widget, "E4. Dataset, trening i model")
+        self._section(widget, "E4T/E4Z. Dataset, trening i model")
         self._bullet_list(
             widget,
             [
-                "W torze tablic E4 pracuje na zatwierdzonym materiale tablic z projektu.",
-                "W torze znaków E4 pracuje na datasecie znaków z Z3/PZ3.",
+                "W torze tablic E4T pracuje na zatwierdzonym materiale tablic z projektu.",
+                "W torze znaków E4Z pracuje na datasecie znaków z Z3/PZ3.",
                 "Z4/PZ1 przygotowuje lub wybiera wariant datasetu. Z4/PZ2 uruchamia trening i analizuje wyniki.",
                 "Promocja modelu do projektu jest osobną decyzją. Dobry wynik treningu nie powinien automatycznie zamykać iteracji.",
                 "Po przejściu z Z2 do Z4 po eksporcie kontekst Z2 powinien być wyczyszczony, a Z4 powinno dostać gotowy, konkretny dataset.",
@@ -549,7 +549,7 @@ class HelpTab:
                 "Z2 nie powinno zostawiać załadowanego kontekstu po przejściu do treningu.",
                 "Z3/PZ2 nie powinno automatycznie zmieniać źródła PZ1 bez jawnego wyboru użytkownika.",
                 "Z4/PZ2 nie powinno ręcznie podmieniać źródła datasetu, jeżeli PZ1 jest miejscem tworzenia wariantów.",
-                "Tryb kampanii nie powinien korzystać z elastyczności trybu swobodnego tam, gdzie bramki E1-E4 wymagają spójności.",
+                "Tryb kampanii nie powinien korzystać z elastyczności trybu swobodnego tam, gdzie bramki E1, E2, E3 i E4T/E4Z wymagają spójności.",
                 "Teksty UI powinny mówić, co użytkownik ma zrobić teraz, a nie opisywać wewnętrzną historię procesu.",
             ],
         )

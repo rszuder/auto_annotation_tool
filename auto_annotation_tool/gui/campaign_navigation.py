@@ -1,0 +1,1172 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Campaign cross-tab navigation helpers extracted from tab_campaign.py."""
+
+import json
+import os
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from pathlib import Path
+from textwrap import shorten
+from collections import Counter
+from datetime import datetime
+from time import perf_counter
+import xml.etree.ElementTree as ET
+import shutil
+import threading
+
+from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
+from ..campaign_manager import CAMPAIGN
+from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
+from ..validators import validate_model_file, format_yolo_model_identity
+from ..icons import IconManager
+from ..project_cache import PROJECT_CACHE
+from . import campaign_dashboard_cache
+from . import campaign_ui_helpers
+from . import campaign_project_browser
+from . import campaign_model_status
+from . import campaign_step1_assets
+from . import campaign_step1_ingest
+from . import campaign_stage_ui
+from . import campaign_stage_logic
+from .help_manager import HELP
+from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .z2_view_models import Step2CtaViewModel, Step2ViewModel
+from .z3_view_models import Step3ViewModel
+from .campaign_models import WizardStageStatus
+
+
+def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int) -> None:
+    for raw_delay in delays_ms or (350,):
+        try:
+            delay = max(1, int(raw_delay or 1))
+        except Exception:
+            delay = 350
+
+        def _refresh(tab=tab_ann) -> None:
+            try:
+                tab._refresh_step2_action_states(lightweight=False)
+            except Exception:
+                pass
+            try:
+                tab._sync_right_panel_scrollregion()
+            except Exception:
+                pass
+
+        try:
+            tab_ann.frame.after(delay, _refresh)
+        except Exception:
+            pass
+
+
+def _step_open_z2_from_step2_review(self, preferred_source_context: dict | None = None):
+    self._step_return_to_annotation_review(
+        mark_step3_rework=False,
+        preferred_source_context=preferred_source_context,
+    )
+
+
+def _step_open_z2_repair_from_later_stage(self, preferred_source_context: dict | None = None):
+    self._step_return_to_annotation_review(
+        mark_step3_rework=True,
+        preferred_source_context=preferred_source_context,
+    )
+
+
+def _step_return_to_annotation_review(
+    self,
+    mark_step3_rework: bool = True,
+    preferred_source_context: dict | None = None,
+):
+    try:
+        self.app.update_status(
+            "Otwieram sprawdzanie tablic (Z2).",
+            "info",
+        )
+    except Exception:
+        pass
+
+    iteration_target = self._get_iteration_target()
+    if iteration_target in {"plate", "char"}:
+        try:
+            if iteration_target == "char" and bool(mark_step3_rework) and CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_current_step(3)
+                CAMPAIGN.set_step3_needs_rework()
+        except Exception as e:
+            logger.debug(f"Nie udało się ustawić trybu naprawczego E3 przed powrotem do Z2: {e}")
+        if iteration_target == "char":
+            def _open_char_annotation_return():
+                try:
+                    self._step_goto_auto_annotation(
+                        force_annotation_tab=True,
+                        open_existing_run=True,
+                        preferred_source_context=preferred_source_context,
+                    )
+                except Exception as e:
+                    logger.error(f"Nie udało się otworzyc kampanijnego Z2 z odroczonym startem: {e}")
+
+            try:
+                self.app.update_status(
+                    "Przygotowuję kontekst naprawczy Z2 dla tego katalogu zdjęć.",
+                    "info",
+                )
+            except Exception:
+                pass
+            try:
+                self.frame.after_idle(_open_char_annotation_return)
+            except Exception:
+                _open_char_annotation_return()
+            return
+        try:
+            self._step_goto_auto_annotation(
+                force_annotation_tab=True,
+                open_existing_run=True,
+                preferred_source_context=preferred_source_context,
+            )
+            return
+        except Exception as e:
+            logger.error(f"Nie udało się otworzyc kampanijnego Z2 z kontekstem: {e}")
+
+    def _open_annotation_tab():
+        try:
+            annotation_tab = self.app.tabs.get("annotation")
+            if annotation_tab is None:
+                return
+            tab_widget = str(annotation_tab.frame)
+            self.app.notebook.tab(tab_widget, state="normal")
+            self.app.notebook.select(tab_widget)
+        except Exception as e:
+            logger.error(f"Nie udało się przelaczyc na Z2: {e}")
+
+    try:
+        self.frame.after_idle(_open_annotation_tab)
+    except Exception:
+        _open_annotation_tab()
+
+
+def _step_goto_auto_annotation(
+    self,
+    force_annotation_tab: bool = False,
+    entry_strategy: str | None = None,
+    open_existing_run: bool = True,
+    preferred_source_context=None,
+):
+    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 2:
+        return
+    if str(CAMPAIGN.get_step1_status() or "").strip().lower() != "approved":
+        try:
+            self.step1_panel_expanded = True
+            self.request_wizard_stage_focus(step_num=1)
+            self._refresh_active_project_wizard_only()
+        except Exception:
+            pass
+        try:
+            self.app.update_status(
+                "Najpierw zatwierdź E1: wskaż katalog zdjęć i wybierz tor iteracji. Dopiero wtedy STEP2-P1 będzie aktywne.",
+                "warning",
+            )
+        except Exception:
+            pass
+        return
+
+    iteration_target = self._get_iteration_target()
+    if iteration_target not in {"plate", "char"}:
+        try:
+            self.app.update_status(
+                "Najpierw wybierz w E1 tor iteracji: tablice albo znaki.",
+                "warning"
+            )
+        except Exception:
+            pass
+        return
+
+    raw_dir = CAMPAIGN.get_dir("raw")
+    auto_out = CAMPAIGN.get_staging_dir("auto_ann")
+    if auto_out is not None:
+        Path(auto_out).mkdir(parents=True, exist_ok=True)
+
+    if raw_dir is None or auto_out is None:
+        return
+
+    iter_num = CAMPAIGN.get_current_iteration_num()
+    try:
+        input_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or Path(raw_dir)
+    except Exception:
+        folder = Path(raw_dir) / f"Iteracja_{iter_num:03d}"
+        input_dir = folder if folder.exists() else raw_dir
+    v_mod = CAMPAIGN.get_global_model("vehicle")
+    p_mod = CAMPAIGN.get_global_model("plate")
+    plate_source_state = self._get_annotation_step2_source_state("plate")
+    plate_model_ready = bool(plate_source_state.get("plate_model_ready"))
+    if plate_model_ready and (not p_mod or not Path(p_mod).exists()):
+        try:
+            p_mod = str((plate_source_state.get("bootstrap") or {}).get("plate_model_path") or p_mod or "").strip()
+        except Exception:
+            p_mod = str(p_mod or "").strip()
+    char_source_state = {}
+    char_has_existing_source = False
+    if iteration_target == "char" and not force_annotation_tab:
+        char_source_state = self._get_char_route_source_state()
+        char_has_existing_source = bool(char_source_state.get("has_source"))
+
+    if iteration_target == "char" and not force_annotation_tab:
+        # STEP2-P1 is an entry into Z2, not an implicit approval of E2.
+        # A ready plate source only enables the wizard badge; the user can still
+        # enter Z2 to add more plate annotations before closing the stage.
+        try:
+            ready_source = self._get_char_route_ready_source()
+        except Exception:
+            ready_source = {}
+        if ready_source:
+            try:
+                self.app.update_status(
+                    "E2 ma już źródło tablic dla toru znaków. Otwieram Z2, jeśli chcesz dopisać kolejne anotacje; przejście do E3 wymaga jawnego zatwierdzenia etapu.",
+                    "info",
+                )
+            except Exception:
+                pass
+
+    tab_ann = self.app.tabs.get("annotation")
+    if not tab_ann:
+        return
+
+    defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")
+    splash_token = 0
+
+    try:
+        self.app.campaign_free_mode = False
+        self.app.set_campaign_mode(True)
+    except Exception:
+        pass
+
+    def _finish_open() -> None:
+        finish_started = perf_counter()
+        entry_elapsed_ms = 0.0
+        switch_elapsed_ms = 0.0
+        try:
+            entry_started = perf_counter()
+            result = tab_ann.open_campaign_step2_entry(
+                iteration_target=iteration_target,
+                entry_strategy=entry_strategy,
+                restore_preview=bool(not force_annotation_tab and not char_has_existing_source),
+                open_existing_run=open_existing_run,
+                defer_preview_load=defer_preview_load,
+                source_context=dict(preferred_source_context or {}),
+            )
+            entry_elapsed_ms = (perf_counter() - entry_started) * 1000.0
+        except Exception as e:
+            logger.error(f"Nie udało się otworzyc punktu startowego Z2: {e}")
+            try:
+                tab_ann._hide_campaign_step2_splash(token=splash_token)
+            except Exception:
+                pass
+            return
+
+        if not result.get("ok"):
+            try:
+                tab_ann._hide_campaign_step2_splash(token=splash_token)
+            except Exception:
+                pass
+            try:
+                reason = str(result.get("reason") or "nieznany powód").strip()
+                self.app.update_status(
+                    f"Nie udało się otworzyć Z2 z STEP2-P1: {reason}.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            tab_ann.frame.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            switch_started = perf_counter()
+            self.app.open_controlled_tab("annotation")
+            try:
+                self.app.root.update_idletasks()
+            except Exception:
+                pass
+            switch_elapsed_ms = (perf_counter() - switch_started) * 1000.0
+        except Exception as e:
+            logger.error(f"Nie udało się przelaczyc na Z2 po przygotowaniu wejscia: {e}")
+            return
+
+        try:
+            input_dir_local = Path(result.get("input_dir") or ".")
+            auto_out_local = Path(result.get("auto_out") or ".")
+        except Exception:
+            input_dir_local = Path(".")
+            auto_out_local = Path(".")
+        manual_template = bool(result.get("manual_template"))
+        plate_bootstrap_model = str(result.get("plate_model_path") or "").strip()
+        input_source = str(result.get("input_source") or "raw").strip()
+        opened_existing_run = bool(result.get("opened_existing_run"))
+
+        try:
+            if iteration_target == "plate":
+                if opened_existing_run:
+                    run_name = ""
+                    try:
+                        run_name = Path(result.get("restore_run_dir") or "").name
+                    except Exception:
+                        run_name = ""
+                    self.app.update_status(
+                        (
+                            f"Otworzono Z2 bezposrednio w korekcie runu {run_name}."
+                            if run_name
+                            else "Otworzono Z2 bezposrednio w aktywnej korekcie wykrytego runu."
+                        ),
+                        "info"
+                    )
+                    try:
+                        if bool(result.get("deferred_existing_run_restore")):
+                            scheduled = tab_ann._schedule_deferred_campaign_run_restore(
+                                Path(str(result.get("restore_run_dir") or "").strip()),
+                                status_message="Otworzono Z2. Wczytuję aktywny run i listę obrazów tego katalogu...",
+                                splash_token=splash_token,
+                            )
+                            if not scheduled:
+                                tab_ann._campaign_deferred_run_restore_in_progress = False
+                                tab_ann._campaign_deferred_run_restore_payload_applied = False
+                                tab_ann._refresh_step2_action_states()
+                                tab_ann._hide_campaign_step2_splash(token=splash_token)
+                            else:
+                                _schedule_z2_right_panel_refresh(tab_ann, 600, 1600, 3200)
+                        else:
+                            tab_ann._hide_campaign_step2_splash(token=splash_token)
+                    except Exception:
+                        try:
+                            tab_ann._campaign_deferred_run_restore_in_progress = False
+                            tab_ann._campaign_deferred_run_restore_payload_applied = False
+                            tab_ann._refresh_step2_action_states()
+                        except Exception:
+                            pass
+                        try:
+                            tab_ann._hide_campaign_step2_splash(token=splash_token)
+                        except Exception:
+                            pass
+                    return
+                extra_hint = ""
+                if not manual_template and plate_bootstrap_model:
+                    extra_hint += " Aktywny model tablic projektu został podstawiony automatycznie."
+                if input_source == "stage_previous_iteration":
+                    extra_hint += " Jako wejście ustawiono stage z poprzedniej iteracji."
+                elif input_source == "manual_source_run":
+                    extra_hint += " Przywrócono ostatnie ręczne anotacje tablic dla tego zestawu zdjęć."
+                elif input_source == "reused_manual_source_run":
+                    extra_hint += " Przywrócono ręczne anotacje z poprzedniej iteracji dla tego samego katalogu zdjęć."
+                elif input_source == "latest_approved_run":
+                    extra_hint += " Przywrócono też ostatni zatwierdzony run anotacji tablic projektu."
+                elif input_source == "reused_training_source_run":
+                    extra_hint += " Przywrócono ręczne anotacje z runu anotacji Z2, który zasilił trening w poprzedniej iteracji."
+                elif input_source == "reused_iteration_run":
+                    extra_hint += " Przywrócono zatwierdzony run anotacji Z2 z poprzedniej iteracji dla tego samego katalogu zdjęć."
+                if input_source == "project_imported_manual_source":
+                    extra_hint += " Wykorzystano run tablic podpiety na starcie projektu."
+                elif input_source == "project_imported_images":
+                    extra_hint += " Jako wejście ustawiono obrazy wskazane przy starcie projektu."
+                self.app.update_status(
+                    f"Auto-ustawiono Z2 dla toru tablic: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                    + (
+                        "Tryb ręczny utworzy annotations.xml, a nowe polygony zapisza się z etykieta 'plate'."
+                        if manual_template
+                        else "Możesz uruchomic autoanotacje tablic aktywnym modelem projektu i ręcznie poprawiać wynik."
+                    )
+                    + extra_hint,
+                    "info"
+                )
+            else:
+                if opened_existing_run:
+                    run_name = ""
+                    try:
+                        run_name = Path(result.get("restore_run_dir") or "").name
+                    except Exception:
+                        run_name = ""
+                    self.app.update_status(
+                        (
+                            f"Otworzono Z2 bezposrednio w korekcie runu {run_name} dla toru znaków."
+                            if run_name
+                            else "Otworzono Z2 bezposrednio w korekcie istniejących tablic dla toru znaków."
+                        ),
+                        "info"
+                    )
+                else:
+                    if manual_template:
+                        message = (
+                            f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                            "Projekt nie ma jeszcze modelu tablic, więc startujesz ręcznie: utwórz XML, oznacz tablice i zatwierdź poprawne zdjęcia."
+                        )
+                    elif plate_bootstrap_model:
+                        message = (
+                            f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                            "Model tablic aktywnego projektu został podstawiony automatycznie. Przygotuj tablice w Z2, a po zatwierdzeniu przejdziesz do Z3."
+                        )
+                    else:
+                        message = (
+                            f"Auto-ustawiono Z2 dla toru znaków: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                            "Przygotuj źródło tablic w Z2 ręcznie albo wskaż model dopiero przy starcie autoanotacji."
+                        )
+                    self.app.update_status(message, "info")
+        except Exception:
+            pass
+        if bool(result.get("deferred_existing_run_restore")):
+            try:
+                scheduled = tab_ann._schedule_deferred_campaign_run_restore(
+                    Path(str(result.get("restore_run_dir") or "").strip()),
+                    status_message="Otworzono Z2. Wczytuję aktywny run i listę obrazów tego katalogu...",
+                    splash_token=splash_token,
+                )
+                if not scheduled:
+                    tab_ann._campaign_deferred_run_restore_in_progress = False
+                    tab_ann._campaign_deferred_run_restore_payload_applied = False
+                    tab_ann._refresh_step2_action_states()
+                    tab_ann._hide_campaign_step2_splash(token=splash_token)
+                else:
+                    _schedule_z2_right_panel_refresh(tab_ann, 600, 1600, 3200)
+            except Exception as e:
+                logger.debug(f"Nie udało się odroczyć przywrócenia runu Z2 po otwarciu zakładki: {e}")
+                try:
+                    tab_ann._campaign_deferred_run_restore_in_progress = False
+                    tab_ann._campaign_deferred_run_restore_payload_applied = False
+                    tab_ann._refresh_step2_action_states()
+                except Exception:
+                    pass
+                try:
+                    tab_ann._hide_campaign_step2_splash(token=splash_token)
+                except Exception:
+                    pass
+        if bool(result.get("deferred_preview_load")):
+            try:
+                deferred_input_dir = Path(str(result.get("deferred_preview_input_dir") or "").strip())
+            except Exception:
+                deferred_input_dir = None
+            if deferred_input_dir is not None:
+                try:
+                    tab_ann._schedule_deferred_campaign_source_preview_load(
+                        deferred_input_dir,
+                        status_message="Otworzono Z2. Wczytuje liste obrazow tego katalogu...",
+                        splash_token=splash_token,
+                    )
+                except Exception as e:
+                    logger.debug(f"Nie udało się odroczyć wczytania obrazów Z2 po otwarciu zakładki: {e}")
+                    try:
+                        tab_ann._hide_campaign_step2_splash(token=splash_token)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    if not bool(result.get("deferred_existing_run_restore")):
+                        pass
+                except Exception:
+                    pass
+        elif not bool(result.get("deferred_existing_run_restore")):
+            try:
+                pass
+            except Exception:
+                pass
+        total_elapsed_ms = (perf_counter() - finish_started) * 1000.0
+        if total_elapsed_ms >= 500.0:
+            try:
+                logger.info(
+                    "[Z2 PERF] graph_to_z2 total="
+                    f"{total_elapsed_ms:.0f}ms entry={entry_elapsed_ms:.0f}ms "
+                    f"tab_switch={switch_elapsed_ms:.0f}ms target={iteration_target} "
+                    f"force={int(bool(force_annotation_tab))} "
+                    f"deferred_preview={int(bool(result.get('deferred_preview_load')))} "
+                    f"deferred_run={int(bool(result.get('deferred_existing_run_restore')))}"
+                )
+            except Exception:
+                pass
+
+    try:
+        self.frame.after(25, _finish_open)
+    except Exception:
+        _finish_open()
+
+
+def _return_to_step1_for_char_source_rework(self, *, clear_target: bool = False) -> None:
+    try:
+        CAMPAIGN.reset_step3()
+        CAMPAIGN.reset_step2()
+        CAMPAIGN.reset_step1()
+        CAMPAIGN.set_current_step(1)
+        if clear_target:
+            CAMPAIGN.set_iteration_target("")
+    except Exception as e:
+        logger.debug(f"Nie udało się cofnąć kampanii do E1 po braku minimum tablic: {e}")
+
+    self.current_ingest_plan = {}
+    self.step1_panel_expanded = True
+    try:
+        self.request_wizard_stage_focus(step_num=1)
+    except Exception:
+        pass
+    try:
+        self._refresh_dashboard()
+    except Exception:
+        pass
+    try:
+        self.app.open_controlled_tab("campaign")
+    except Exception:
+        pass
+    try:
+        if clear_target:
+            self.app.update_status(
+                "Wrócono do E1. Wybierz tor iteracji i katalog zdjęć przed ponownym zatwierdzeniem.",
+                "warning",
+            )
+        else:
+            self.app.update_status(
+                "Wrócono do E1. Wybierz większy katalog zdjęć albo ponownie zatwierdź E1 po uzupełnieniu źródła.",
+                "warning",
+            )
+    except Exception:
+        pass
+
+
+def _show_step2_char_minimum_not_met_dialog(
+    self,
+    *,
+    source_images: int,
+    source_plates: int,
+    min_plates: int,
+    run_name: str = "",
+) -> str:
+    source_images = max(0, int(source_images or 0))
+    source_plates = max(0, int(source_plates or 0))
+    min_plates = max(1, int(min_plates or self.STEP3_CHAR_MIN_PLATES))
+    missing_plates = max(0, min_plates - source_plates)
+    run_line = f"Źródło: {run_name}\n" if str(run_name or "").strip() else ""
+    message = (
+        f"{run_line}"
+        "E2 nie ma jeszcze minimum do przejścia w tor znaków.\n\n"
+        f"Zatwierdzone obrazy z tablicami: {source_images}\n"
+        f"Gotowe tablice: {source_plates}\n"
+        f"Minimum dla E3: {min_plates} tablic\n"
+        f"Brakuje: {missing_plates} tablic\n\n"
+        "Możesz dalej oznaczać tablice w Z2, wrócić do E1 po większy katalog zdjęć "
+        "albo wrócić do E1 i zmienić tor iteracji."
+    )
+    buttons = ["Zmień tor", "Wróć do E1", "Oznacz dalej w Z2"]
+    try:
+        choice = self.app.themed_message_dialog(
+            "Za mało tablic dla toru znaków",
+            message,
+            parent=self.frame,
+            buttons=buttons,
+            default_button="Oznacz dalej w Z2",
+            tone="warning",
+            wraplength=560,
+        )
+    except Exception:
+        try:
+            messagebox.showwarning("Za mało tablic dla toru znaków", message, parent=self.frame)
+        except Exception:
+            pass
+        choice = "Oznacz dalej w Z2"
+    return str(choice or "Oznacz dalej w Z2").strip()
+
+
+def _finish_step2_char_and_focus_step3(
+    self,
+    preferred_source_context: dict | None = None,
+    *,
+    approve_step2: bool = False,
+) -> bool:
+    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 2:
+        return False
+
+    source_state = self._get_char_route_source_state()
+    if source_state.get("needs_more_tables"):
+        source_images = int(source_state.get("images_with_plates", 0) or 0)
+        source_plates = int(source_state.get("total_plates", 0) or 0)
+        min_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
+        missing_plates = max(0, min_plates - source_plates)
+        run_name = str(source_state.get("run_name", "") or "").strip()
+        try:
+            self.app.update_status(
+                (
+                    f"Run {run_name}: zatwierdzonych obrazów {source_images}, zapisanych tablic {source_plates}. "
+                    f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
+                    "Najpierw przygotuj więcej tablic w Z2, a dopiero potem przejdź do znaków."
+                )
+                if run_name
+                else (
+                    f"Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
+                    f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
+                    "Najpierw przygotuj więcej tablic w Z2, a dopiero potem przejdź do znaków."
+                ),
+                "warning",
+            )
+        except Exception:
+            pass
+        choice = self._show_step2_char_minimum_not_met_dialog(
+            source_images=source_images,
+            source_plates=source_plates,
+            min_plates=min_plates,
+            run_name=run_name,
+        )
+        if choice == "Wróć do E1":
+            self._return_to_step1_for_char_source_rework(clear_target=False)
+        elif choice == "Zmień tor":
+            self._return_to_step1_for_char_source_rework(clear_target=True)
+        else:
+            self._step_return_to_annotation_review(mark_step3_rework=False)
+        return False
+
+    source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
+    if not source_context:
+        source_context = self._get_char_route_ready_source()
+    if not source_context:
+        try:
+            self.app.update_status(
+                "Nie znaleziono gotowych tablic dla tego katalogu zdjęć. Najpierw przygotuj tablice, potem przejdź do pracy nad znakami.",
+                "warning",
+            )
+        except Exception:
+            pass
+        return False
+
+    ready_run_dir = source_context.get("restore_run_dir")
+    ready_run_name = str(
+        source_context.get("display_name")
+        or source_context.get("run_name")
+        or ""
+    ).strip()
+    try:
+        if not ready_run_name and ready_run_dir is not None:
+            ready_run_name = Path(ready_run_dir).name
+    except Exception:
+        ready_run_name = ""
+
+    try:
+        self._suppress_stale_char_iteration_reset_until = perf_counter() + 2.5
+    except Exception:
+        pass
+
+    try:
+        step2_status = str(CAMPAIGN.get_step2_status() or "").strip().lower()
+    except Exception:
+        step2_status = ""
+    if step2_status != "approved":
+        if not approve_step2:
+            try:
+                self.app.update_status(
+                    "E2 nie zostało jeszcze zatwierdzone. Wejście do E3 wymaga użycia badge'a „Zatwierdź etap”.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return False
+        CAMPAIGN.approve_step2()
+    if CAMPAIGN.get_current_step() < 3:
+        CAMPAIGN.set_current_step(3)
+
+    try:
+        self.request_wizard_stage_focus(step_num=3)
+    except Exception:
+        pass
+    self._refresh_dashboard()
+    try:
+        self.app.open_controlled_tab("campaign")
+    except Exception:
+        pass
+    self.app.update_campaign_tab_access()
+
+    try:
+        run_hint = f" Korzystam z runu anotacji {ready_run_name}." if ready_run_name else ""
+        self.app.update_status(
+            "Znaleziono gotowe ręczne tablice dla tego katalogu zdjęć. "
+            "E2 zostało zatwierdzone. Przechodzę do E3 w wizardzie."
+            + run_hint,
+            "info"
+        )
+    except Exception:
+        pass
+
+    return True
+
+
+def _step_continue_characters_from_ready_source(self, preferred_source_context: dict | None = None):
+    source_context = dict(preferred_source_context) if isinstance(preferred_source_context, dict) else {}
+    try:
+        current_step = int(CAMPAIGN.get_current_step() or 0)
+    except Exception:
+        current_step = 0
+    if current_step < 3:
+        if not self._finish_step2_char_and_focus_step3(preferred_source_context):
+            return
+        source_context = dict(preferred_source_context) if isinstance(preferred_source_context, dict) else {}
+        if not source_context:
+            source_context = self._get_char_route_ready_source()
+    elif not source_context:
+        source_context = self._get_char_route_ready_source()
+        if not source_context:
+            try:
+                self.app.update_status(
+                    "T06 nie ma gotowego źródła tablic dla Z3. Wróć do Z2 albo sprawdź zasoby bramki.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+    self._step_goto_characters(preferred_source_context=source_context)
+
+
+def _step_goto_characters_detect(self, preferred_source_context: dict | None = None):
+    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 3:
+        return
+
+    source_context = dict(preferred_source_context or {})
+    source_context["target_substep"] = "detect"
+    source_context["force_pz2"] = "1"
+    self._step_goto_characters(preferred_source_context=source_context)
+
+
+def _step_goto_characters(self, preferred_source_context: dict | None = None):
+    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 3:
+        return
+
+    source_context = dict(preferred_source_context) if isinstance(preferred_source_context, dict) else {}
+    if not source_context and self._get_iteration_target() == "char":
+        source_context = self._get_char_route_ready_source()
+
+    def _t06_should_start_from_pz3() -> bool:
+        try:
+            iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
+            contracts = dict(iteration_state.get("t06_contracts") or {})
+            pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+            if bool(pz2_contract.get("fulfilled")):
+                return True
+            session = dict(iteration_state.get("t06_work_session") or {})
+            session_substep = str(session.get("substep") or "").strip().lower()
+            session_area = str(session.get("work_area") or "").strip().lower()
+            if session_area == "z3" and session_substep in {"3", "pz3", "dataset"}:
+                return True
+        except Exception:
+            pass
+        try:
+            return bool(CAMPAIGN.is_step3_stage2_done())
+        except Exception:
+            return False
+
+    should_prime_z3_surface = False
+    should_prime_dataset_surface = False
+    try:
+        gate_hint = str(source_context.get("graph_gate_id") or source_context.get("gate_id") or "").strip().upper()
+        target_hint = str(
+            source_context.get("target_substep")
+            or source_context.get("graph_target_substep")
+            or source_context.get("preferred_substep")
+            or ""
+        ).strip().lower()
+        explicit_pz2 = bool(source_context.get("force_pz2")) or target_hint in {"2", "detect", "pz2", "z3_pz2"}
+        explicit_pz3 = bool(source_context.get("force_pz3")) or target_hint in {"3", "dataset", "pz3", "z3_pz3"}
+        if gate_hint == "T06":
+            # T06 ma dwa kroki robocze: PZ2 przygotowuje ramki znaków, a PZ3 eksportuje AZ.
+            # Jeśli kontrakt PZ2 jest już spełniony, kontynuacja powinna wracać od razu do PZ3.
+            if explicit_pz3:
+                source_context["target_substep"] = "pz3"
+                source_context.pop("force_pz2", None)
+            elif explicit_pz2:
+                source_context["target_substep"] = "detect"
+                source_context["force_pz2"] = "1"
+            elif _t06_should_start_from_pz3():
+                source_context["target_substep"] = "pz3"
+                source_context.pop("force_pz2", None)
+            else:
+                source_context["target_substep"] = "detect"
+                source_context["force_pz2"] = "1"
+        target_hint = str(
+            source_context.get("target_substep")
+            or source_context.get("graph_target_substep")
+            or source_context.get("preferred_substep")
+            or ""
+        ).strip().lower()
+        should_prime_z3_surface = (
+            bool(source_context.get("force_pz2"))
+            or target_hint in {"2", "detect", "pz2", "z3_pz2"}
+        )
+        should_prime_dataset_surface = (
+            not should_prime_z3_surface
+            and target_hint in {"3", "dataset", "pz3", "z3_pz3"}
+        )
+    except Exception:
+        should_prime_z3_surface = False
+        should_prime_dataset_surface = False
+
+    tab_char = None
+    try:
+        if should_prime_z3_surface or should_prime_dataset_surface:
+            previous_target = str(getattr(self.app, "_controlled_tab_target_key", "") or "").strip()
+            self.app._controlled_tab_target_key = "characters"
+            try:
+                setattr(self.app, "_suppress_characters_lazy_first_paint_overlay_once", True)
+                current_tab = self.app.tabs.get("characters")
+                frame = getattr(current_tab, "frame", None)
+                if frame is not None:
+                    try:
+                        self.app.notebook.tab(str(frame), state="normal")
+                    except Exception:
+                        pass
+                tab_char = self.app._ensure_tab_loaded("characters", select=False)
+            finally:
+                try:
+                    setattr(self.app, "_suppress_characters_lazy_first_paint_overlay_once", False)
+                except Exception:
+                    pass
+                self.app._controlled_tab_target_key = previous_target
+        else:
+            self.app.open_controlled_tab("characters")
+            tab_char = self.app.tabs.get("characters")
+    except Exception as e:
+        try:
+            setattr(self.app, "_suppress_characters_lazy_first_paint_overlay_once", False)
+        except Exception:
+            pass
+        logger.error(f"Nie udało się przejść do Z3: {e}")
+        return
+
+    if tab_char is None:
+        tab_char = self.app.tabs.get("characters")
+    if not tab_char or not hasattr(tab_char, "open_campaign_step3_entry"):
+        logger.error("Nie udało się otworzyć Z3: zakładka znaków nie jest gotowa.")
+        return
+
+    try:
+        tab_char._step3_linear_mode = True
+        if should_prime_dataset_surface:
+            tab_char._campaign_pz2_sync_loading = False
+            tab_char._campaign_step3_entry_splash_pinned = False
+            tab_char._campaign_detect_splash_force_root_surface = False
+            tab_char._set_subtab_state(tab_char.tab_extract, "disabled")
+            tab_char._set_subtab_state(tab_char.tab_detect, "disabled")
+            tab_char._set_subtab_state(tab_char.tab_dataset, "normal")
+            tab_char._select_subtab(tab_char.tab_dataset)
+            try:
+                tab_widget = str(tab_char.frame)
+                self.app.notebook.tab(tab_widget, state="normal")
+                self.app.notebook.select(tab_widget)
+                self.app.update_campaign_tab_access()
+            except Exception:
+                pass
+        if should_prime_z3_surface:
+            tab_char._campaign_pz2_sync_loading = True
+            tab_char._campaign_step3_entry_splash_pinned = True
+            tab_char._campaign_detect_splash_force_root_surface = True
+            tab_char._set_subtab_state(tab_char.tab_detect, "normal")
+            tab_char._set_subtab_state(tab_char.tab_dataset, "disabled")
+        if should_prime_z3_surface:
+            tab_char._set_subtab_state(tab_char.tab_extract, "normal")
+            tab_char._show_campaign_detect_splash(
+                title="Wyodrębniam tablice dla Z3",
+                body="Startuję wyodrębnianie tablic z aktualnego źródła T06.",
+                tone="info",
+                progress=0.0,
+                show_progress=True,
+                show_return=False,
+            )
+            try:
+                tab_char.frame.update_idletasks()
+            except Exception:
+                pass
+            try:
+                tab_widget = str(tab_char.frame)
+                self.app.notebook.tab(tab_widget, state="normal")
+                self.app.notebook.select(tab_widget)
+                self.app.update_campaign_tab_access()
+            except Exception:
+                pass
+            try:
+                overlay = getattr(tab_char, "campaign_detect_splash_overlay", None)
+                if overlay is not None and overlay.winfo_exists():
+                    overlay.lift()
+                    tab_char.frame.after_idle(overlay.lift)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug(f"Nie udało się przygotować wczesnego ekranu Z3/PZ2: {exc}")
+
+    try:
+        result = tab_char.open_campaign_step3_entry(preferred_source_context=source_context)
+    except Exception as e:
+        try:
+            tab_char._campaign_pz2_sync_loading = False
+            tab_char._campaign_step3_entry_splash_pinned = False
+            tab_char._hide_campaign_detect_splash()
+        except Exception:
+            pass
+        logger.error(f"Nie udało się otworzyc punktu startowego Z3: {e}")
+        return
+
+    if not result.get("ok"):
+        try:
+            tab_char._campaign_pz2_sync_loading = False
+            tab_char._campaign_step3_entry_splash_pinned = False
+            tab_char._hide_campaign_detect_splash()
+        except Exception:
+            pass
+        return
+
+    latest_xml = str(result.get("latest_xml") or "").strip()
+    images_dir = str(result.get("images_dir") or "").strip()
+    using_preferred_source = bool(result.get("using_preferred_source"))
+    preferred_run_dir_raw = str(result.get("preferred_run_dir") or "").strip()
+    preferred_run_dir = Path(preferred_run_dir_raw) if preferred_run_dir_raw else None
+    preferred_source_name = str(
+        source_context.get("display_name")
+        or source_context.get("run_name")
+        or ""
+    ).strip()
+
+    try:
+        folder_name = Path(images_dir).name if images_dir else ""
+    except Exception:
+        folder_name = ""
+
+    try:
+        if latest_xml:
+            if using_preferred_source and preferred_run_dir is not None:
+                source_label = preferred_source_name or preferred_run_dir.name
+                self.app.update_status(
+                    f"Ustawiono Z3 na gotowe źródło tablic: {source_label}. XML={preferred_run_dir.name}/annotations.xml | IMG={folder_name}.",
+                    "info"
+                )
+            else:
+                self.app.update_status(
+                    f"Ustawiono świeże źródła dla Zakładki Znaków: XML={Path(latest_xml).parent.name}/annotations.xml | IMG={folder_name}.",
+                    "info"
+                )
+        else:
+            self.app.update_status(
+                "Nie znaleziono nowego pliku annotations.xml. Upewnij się, ze Autoanotacja zakończyła się sukcesem i etap został zatwierdzony.",
+                "warning"
+            )
+    except Exception:
+        pass
+
+    try:
+        tab_char._campaign_step3_entry_splash_pinned = False
+        if (
+            not bool(getattr(tab_char, "_campaign_detect_splash_visible", False))
+            and not bool(getattr(tab_char, "is_processing", False))
+        ):
+            tab_char._campaign_pz2_sync_loading = False
+    except Exception:
+        pass
+
+
+def _step_goto_training(self):
+    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 4:
+        return
+
+    try:
+        iteration_target = self._get_iteration_target()
+        if iteration_target not in {"plate", "char"}:
+            iteration_target = "char"
+
+        tab_train = self.app.tabs.get("training")
+        if not tab_train:
+            logger.error("Nie znaleziono zakładki TrainingTab w app.tabs.")
+            return
+
+        preferred_subtab = None
+        readiness = None
+        try:
+            if hasattr(tab_train, "get_campaign_step4_readiness"):
+                readiness = tab_train.get_campaign_step4_readiness(iteration_target=iteration_target)
+        except Exception as e:
+            logger.debug(f"Nie udało się sprawdzic gotowosci wejscia do Z4: {e}")
+            readiness = None
+
+        if isinstance(readiness, dict) and not readiness.get("ok", False):
+            reason = str(readiness.get("reason") or "").strip().lower()
+            if reason == "stale_plate_dataset":
+                preferred_subtab = "dataset"
+                warn_msg = str(readiness.get("message") or "").strip()
+                try:
+                    if warn_msg:
+                        self.app.update_status(warn_msg, "warning")
+                except Exception:
+                    pass
+            else:
+                can_open_char_dataset_stage = False
+                if iteration_target == "char" and reason in {"invalid_char_dataset", "missing_char_dataset"}:
+                    try:
+                        datasets_dir = CAMPAIGN.get_dir("datasets")
+                        if datasets_dir is not None and hasattr(tab_train, "_find_dataset_source_candidates"):
+                            for path in tab_train._find_dataset_source_candidates(Path(datasets_dir)):
+                                try:
+                                    inferred = tab_train._infer_dataset_target(str(path))
+                                except Exception:
+                                    inferred = "char"
+                                if inferred == "char":
+                                    can_open_char_dataset_stage = True
+                                    break
+                    except Exception:
+                        can_open_char_dataset_stage = False
+
+                if can_open_char_dataset_stage:
+                    preferred_subtab = "dataset"
+                else:
+                    warn_msg = str(readiness.get("message") or "").strip() or "Z4 nie jest jeszcze gotowe do otwarcia."
+                    try:
+                        self.app.update_status(warn_msg, "warning")
+                    except Exception:
+                        pass
+                    try:
+                        messagebox.showwarning("Z4 jeszcze zablokowane", warn_msg, parent=self.frame)
+                    except Exception:
+                        pass
+                    return
+
+            if not readiness.get("ok", False) and preferred_subtab != "dataset":
+                warn_msg = str(readiness.get("message") or "").strip() or "Z4 nie jest jeszcze gotowe do otwarcia."
+                try:
+                    self.app.update_status(warn_msg, "warning")
+                except Exception:
+                    pass
+                try:
+                    messagebox.showwarning("Z4 jeszcze zablokowane", warn_msg, parent=self.frame)
+                except Exception:
+                    pass
+                return
+        elif isinstance(readiness, dict):
+            reason = str(readiness.get("reason") or "").strip().lower()
+            if iteration_target == "char" and reason == "source_dataset_ready_for_split":
+                preferred_subtab = "dataset"
+            elif readiness.get("ok", False):
+                ready_dataset = str(readiness.get("ready_dataset") or "").strip()
+                ready_train = int(readiness.get("train_images", 0) or 0)
+                ready_val = int(readiness.get("val_images", 0) or 0)
+                if ready_dataset and ready_train > 0 and ready_val > 0:
+                    preferred_subtab = "train"
+                elif iteration_target == "plate":
+                    preferred_subtab = "dataset"
+                    try:
+                        self.app.themed_message_dialog(
+                            "Najpierw utwórz wariant datasetu",
+                            (
+                                "Bramka T07 ma już materiał projektu, ale nie ma jeszcze gotowego wariantu "
+                                "datasetu tablic z podziałem train / val / test.\n\n"
+                                "Otwieram Z4/PZ1. Utworzenie wariantu nie zamyka T07; dopiero trening "
+                                "albo świadome zakończenie bez treningu pozwoli wrócić do grafu i zatwierdzić bramkę."
+                            ),
+                            parent=self.frame,
+                            buttons=["OK"],
+                            default_button="OK",
+                            tone="info",
+                            wraplength=560,
+                        )
+                    except Exception:
+                        try:
+                            messagebox.showinfo(
+                                "Najpierw utwórz wariant datasetu",
+                                (
+                                    "Bramka T07 ma już materiał projektu, ale nie ma jeszcze gotowego wariantu "
+                                    "datasetu tablic z podziałem train / val / test.\n\n"
+                                    "Otwieram Z4/PZ1. Utworzenie wariantu nie zamyka T07."
+                                ),
+                                parent=self.frame,
+                            )
+                        except Exception:
+                            pass
+
+        target_label = "tablic" if iteration_target == "plate" else "znaków"
+        stage_label = "E4T" if iteration_target == "plate" else "E4Z"
+        try:
+            self._show_project_loading_overlay(
+                title="Przygotowuję Z4",
+                body=(
+                    f"Odtwarzam kontekst {stage_label} dla toru {target_label}, sprawdzam dataset "
+                    "i przygotowuję zakładkę treningu."
+                ),
+                tone="info",
+                progress=18.0,
+            )
+        except Exception:
+            pass
+        try:
+            self.app.update_status("Przygotowuję Z4 i odtwarzam kontekst treningu.", "info")
+        except Exception:
+            pass
+
+        try:
+            result = tab_train.open_campaign_step4_entry(
+                iteration_target=iteration_target,
+                preferred_subtab=preferred_subtab,
+            )
+        except Exception as e:
+            try:
+                self._hide_project_loading_overlay()
+            except Exception:
+                pass
+            logger.error(f"Błąd otwierania punktu startowego Z4: {e}")
+            return
+
+        if not result.get("ok"):
+            try:
+                self._hide_project_loading_overlay()
+            except Exception:
+                pass
+            warn_msg = str(result.get("message") or "").strip()
+            if warn_msg:
+                try:
+                    self.app.update_status(warn_msg, "warning")
+                except Exception:
+                    pass
+            return
+
+        latest_source_raw = str(result.get("latest_source") or "").strip()
+        latest_source = Path(latest_source_raw) if latest_source_raw else None
+        dataset_hint = str(result.get("dataset_hint") or "").strip()
+
+        try:
+            if iteration_target == "plate":
+                if dataset_hint:
+                    self.app.update_status(
+                        f"Ustawiono tor treningu tablic: gotowy dataset = {Path(dataset_hint).name}, źródła XML z Z2 i model Pose.",
+                        "info"
+                    )
+                else:
+                    self.app.update_status(
+                        "Przelaczono do Treningu w torze tablic. Zbuduj dataset z XML CVAT i uruchom trening modelu Pose.",
+                        "info"
+                    )
+            elif latest_source is not None:
+                self.app.update_status(
+                    f"Ustawiono automatycznie Trening: źródło splittera = {latest_source.name}, wynik splitu w katalogu projektu oraz model DETECT dla znaków.",
+                    "info"
+                )
+            else:
+                self.app.update_status(
+                    "Przelaczono do Treningu w kontekscie projektu, ale nie znaleziono jeszcze datasetu źródłowego w 4_training_datasets.",
+                    "warning"
+                )
+        except Exception:
+            pass
+
+        try:
+            self._show_project_loading_overlay(
+                title="Przygotowuję Z4",
+                body=f"Kontekst {stage_label} jest gotowy. Przełączam widok na zakładkę treningu.",
+                tone="success",
+                progress=86.0,
+            )
+        except Exception:
+            pass
+        self.app.open_controlled_tab("training")
+        try:
+            self.frame.after(180, self._hide_project_loading_overlay)
+        except Exception:
+            pass
+        return
+    except Exception as e:
+        try:
+            self._hide_project_loading_overlay()
+        except Exception:
+            pass
+        logger.error(f"Błąd nawigacji (Krok 4): {e}")
