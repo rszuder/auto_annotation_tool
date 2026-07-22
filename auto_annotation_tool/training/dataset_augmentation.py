@@ -716,6 +716,91 @@ def _dump_dataset_config(dataset_dir: Path, config: dict) -> None:
     yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def ensure_yolo_dataset_yaml_points_to_root(dataset_dir: Path) -> tuple[bool, str, bool]:
+    """Ensure data.yaml resolves relative splits from the dataset directory itself."""
+
+    dataset_dir = Path(dataset_dir)
+    yaml_path = dataset_dir / "data.yaml"
+    if not yaml_path.exists():
+        return False, "Brak data.yaml.", False
+
+    try:
+        dataset_root = dataset_dir.resolve()
+    except Exception:
+        dataset_root = dataset_dir
+
+    try:
+        config = _load_dataset_config(dataset_dir)
+    except Exception as exc:
+        return False, f"Nie udało się odczytać data.yaml: {exc}", False
+    if not isinstance(config, dict):
+        config = {}
+
+    def _safe_resolve(path: Path) -> Path:
+        try:
+            return path.resolve()
+        except Exception:
+            return path
+
+    def _is_inside_dataset(path: Path) -> bool:
+        try:
+            _safe_resolve(path).relative_to(dataset_root)
+            return True
+        except Exception:
+            return False
+
+    raw_path = str(config.get("path") or "").strip()
+    current_path = None
+    if raw_path:
+        try:
+            raw_candidate = Path(raw_path)
+            if not raw_candidate.is_absolute():
+                raw_candidate = dataset_dir / raw_candidate
+            current_path = _safe_resolve(raw_candidate)
+        except Exception:
+            current_path = Path(raw_path)
+
+    needs_rewrite = current_path is not None and current_path != dataset_root
+    split_root = current_path or dataset_root
+    for split_name in ("train", "val", "test"):
+        raw_split = str(config.get(split_name) or "").strip()
+        if not raw_split:
+            if split_name in {"train", "val"}:
+                needs_rewrite = True
+            continue
+        split_path = Path(raw_split)
+        if not split_path.is_absolute():
+            split_path = split_root / split_path
+        if not _is_inside_dataset(split_path):
+            needs_rewrite = True
+            break
+
+    if not needs_rewrite:
+        return True, "data.yaml wskazuje właściwy katalog datasetu.", False
+
+    def _default_split_path(split_name: str) -> str:
+        canonical = dataset_root / "images" / split_name
+        nested = dataset_root / split_name / "images"
+        if canonical.exists() or not nested.exists():
+            return f"images/{split_name}"
+        return f"{split_name}/images"
+
+    config["path"] = str(dataset_root)
+    config["train"] = _default_split_path("train")
+    config["val"] = _default_split_path("val")
+    if (dataset_dir / "images" / "test").exists() or "test" in config:
+        config["test"] = _default_split_path("test")
+    if "nc" not in config:
+        names = _coerce_names(config)
+        config["nc"] = max(1, len(names) or 1)
+
+    try:
+        _dump_dataset_config(dataset_dir, config)
+    except Exception as exc:
+        return False, f"Nie udało się zapisać poprawionego data.yaml: {exc}", False
+    return True, "Poprawiono data.yaml tak, aby wskazywał bieżący wariant datasetu.", True
+
+
 def update_yolo_dataset_class_names(dataset_dir: Path, names_by_index: dict[int, str]) -> tuple[bool, str]:
     """Update data.yaml class labels without touching images or labels."""
     dataset_dir = Path(dataset_dir)

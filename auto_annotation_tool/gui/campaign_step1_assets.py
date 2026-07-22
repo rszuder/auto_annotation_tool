@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
 import xml.etree.ElementTree as ET
-import shutil
 import threading
 
 from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
@@ -25,7 +24,6 @@ from ..campaign_iteration_paths import (
     iteration_path_target,
     normalize_iteration_path,
 )
-from ..campaign_plate_annotation_contract import build_plate_annotation_import_contract
 from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
 from ..validators import validate_model_file, format_yolo_model_identity
 from ..icons import IconManager
@@ -2746,138 +2744,6 @@ def _scan_project_start_normalized_image_names(self, images_dir: Path | None) ->
         return set()
     return image_names
 
-def _collect_project_start_image_paths_by_normalized_name(self, images_dir: Path | None) -> dict[str, Path]:
-    if images_dir is None:
-        return {}
-
-    try:
-        safe_dir = Path(images_dir)
-    except Exception:
-        return {}
-
-    try:
-        if not safe_dir.exists() or not safe_dir.is_dir():
-            return {}
-    except Exception:
-        return {}
-
-    image_paths: dict[str, Path] = {}
-    try:
-        for image_path in safe_dir.rglob("*"):
-            if not image_path.is_file() or image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
-                continue
-            normalized = CAMPAIGN._normalize_image_set_name(image_path.name)
-            if normalized and normalized not in image_paths:
-                image_paths[normalized] = image_path
-    except Exception:
-        return dict(image_paths)
-    return image_paths
-
-def _maybe_extend_project_start_images_from_annotation_package(
-    self,
-    *,
-    current_images_dir: Path | None,
-    package_images_dir: Path | None,
-    compatibility: dict,
-) -> Path | None:
-    if current_images_dir is None or package_images_dir is None:
-        return None
-
-    missing_normalized = {
-        str(name or "").strip().lower()
-        for name in list((compatibility or {}).get("missing_normalized_names") or [])
-        if str(name or "").strip()
-    }
-    if not missing_normalized:
-        return None
-
-    current_paths = self._collect_project_start_image_paths_by_normalized_name(current_images_dir)
-    package_paths = self._collect_project_start_image_paths_by_normalized_name(package_images_dir)
-    addable_names = sorted(name for name in missing_normalized if name in package_paths and name not in current_paths)
-    if not addable_names:
-        return None
-
-    preview_names = "\n".join(Path(package_paths[name]).name for name in addable_names[:6])
-    extra_count = max(0, len(addable_names) - 6)
-    suffix = f"\n... i jeszcze {extra_count} zdjęć." if extra_count else ""
-    should_extend = self.app.themed_confirm(
-        "Import anotacji tablic",
-        (
-            "Wybrany pakiet anotacji zawiera zdjęcia, których nie ma w aktualnym katalogu zdjęć E1.\n\n"
-            f"Możliwe do dołączenia z pakietu: {len(addable_names)}\n"
-            f"Przykłady:\n{preview_names}{suffix}\n\n"
-            "Program nie zmieni oryginalnego katalogu zdjęć. Utworzy roboczy katalog scalony w projekcie: "
-            "obecne zdjęcia + brakujące zdjęcia z pakietu, bez kopiowania duplikatów nazw.\n\n"
-            "Czy dołączyć brakujące zdjęcia i ponowić walidację importu?"
-        ),
-        parent=self.frame,
-        confirm_label="Dołącz zdjęcia",
-        cancel_label="Importuj tylko zgodne",
-        tone="info",
-    )
-    if not should_extend:
-        return None
-
-    raw_root = CAMPAIGN.get_dir("raw")
-    if raw_root is None:
-        self.app.themed_error(
-            "Import anotacji tablic",
-            "Nie udało się ustalić katalogu projektu dla scalonego źródła zdjęć.",
-            parent=self.frame,
-        )
-        return None
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    merged_dir = Path(raw_root) / "_imported_annotation_images" / f"import_anotacji_tablic_{timestamp}"
-    try:
-        merged_dir.mkdir(parents=True, exist_ok=False)
-        copied_names: set[str] = set()
-        for normalized, source_path in sorted(current_paths.items()):
-            if normalized in copied_names:
-                continue
-            target_path = merged_dir / Path(source_path).name
-            shutil.copy2(source_path, target_path)
-            copied_names.add(normalized)
-        for normalized in addable_names:
-            if normalized in copied_names:
-                continue
-            source_path = package_paths.get(normalized)
-            if source_path is None:
-                continue
-            target_path = merged_dir / Path(source_path).name
-            shutil.copy2(source_path, target_path)
-            copied_names.add(normalized)
-    except Exception as e:
-        try:
-            shutil.rmtree(merged_dir)
-        except Exception:
-            pass
-        self.app.themed_error(
-            "Import anotacji tablic",
-            f"Nie udało się utworzyć roboczego katalogu scalonego:\n{e}",
-            parent=self.frame,
-        )
-        return None
-
-    if not CAMPAIGN.set_master_pool_dir(merged_dir):
-        self.app.themed_error(
-            "Import anotacji tablic",
-            "Roboczy katalog scalony został utworzony, ale nie udało się ustawić go jako katalogu zdjęć E1.",
-            parent=self.frame,
-        )
-        return None
-
-    self.current_ingest_plan = {}
-    self._existing_iteration_ingest_plan_signature = None
-    try:
-        self.app.update_status(
-            f"Dołączono {len(addable_names)} zdjęć z pakietu anotacji do roboczego katalogu E1.",
-            "info",
-        )
-    except Exception:
-        pass
-    return merged_dir
-
 def _get_project_start_approved_normalized_image_names(self) -> set[str]:
     approved_names: set[str] = set()
 
@@ -2945,9 +2811,9 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
         plate_source_mode = str(plate_source_info.get("source_mode") or "").strip().lower()
         body_lines.append(f"Źródło: {self._format_project_start_asset_source(plate_xml_path or plate_run_path)}")
         if plate_source_mode == "draft":
-            body_lines.append("Tryb: robocze AT do sprawdzenia w Z2. Nie otwiera T03.")
+            body_lines.append("Status: AT do ręcznej kontroli w Z2. Nie spełnia jeszcze warunku T03.")
         elif plate_source_mode == "approved":
-            body_lines.append("Tryb: adopcja [OK]. Może spełniać warunek T03, jeśli liczba tablic osiąga minimum.")
+            body_lines.append("Status: AT zatwierdzone po kontroli. Może spełniać warunek T03, jeśli liczba tablic osiąga minimum.")
         if plate_run_path:
             try:
                 plate_run_dir = Path(plate_run_path)
@@ -2965,7 +2831,7 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
                 incomplete_count = int(compatibility.get("incomplete", 0) or 0)
                 body_lines.extend(
                     [
-                        f"Porównuję z roboczą pulą zdjęć E1: {self._format_project_start_asset_source(effective_images_dir)}",
+                        f"Porównuję z aktualnym zbiorem obrazów E1: {self._format_project_start_asset_source(effective_images_dir)}",
                         self._format_project_start_annotation_adoption_summary(compatibility),
                     ]
                 )
@@ -2988,12 +2854,12 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
         body_lines.append(
             "Ten zasób ma sens wtedy, gdy dla części albo całości wybranego katalogu zdjęć E1 istnieją już dobre, "
             "ręczne anotacje tablic. Program porównuje nazwy obrazów z pliku annotations.xml z obrazami "
-            "w roboczej puli E1 i pozwala przyjąć tylko zgodne anotacje dla zdjęć, które nie są jeszcze zatwierdzone."
+            "w aktualnym zbiorze E1: zgodne po nazwie można przyjąć, pozostałe są pomijane."
         )
         body_lines.append("")
         body_lines.append(
-            "Po adopcji E2 może otworzyć Z2 na gotowych tablicach zamiast startować od zera. "
-            "Jeśli zgodnych anotacji jest wystarczająco dużo, tor znaków może szybciej przejść do Z3."
+            "Po imporcie AT trafia do kontroli w Z2. Dopiero zatwierdzenie w Z2 nadaje status [OK] "
+            "i może odblokować dalszy tor pracy."
         )
     elif row_key == "char_run":
         title = "AZ - anotacje znaków"
@@ -3088,6 +2954,14 @@ def _get_project_start_filename_plate_texts(filename: str) -> list[str]:
     except Exception:
         return []
 
+def _get_project_start_filename_plate_signature(filename: str) -> tuple[str, ...]:
+    texts = [
+        str(text or "").strip().upper()
+        for text in _get_project_start_filename_plate_texts(filename)
+        if str(text or "").strip()
+    ]
+    return tuple(texts)
+
 def _project_start_annotation_covers_filename_plates(self, filename: str, plate_count: int) -> tuple[bool, int]:
     expected_texts = self._get_project_start_filename_plate_texts(filename)
     expected_count = int(len(expected_texts) or 0)
@@ -3097,12 +2971,13 @@ def _project_start_annotation_covers_filename_plates(self, filename: str, plate_
 
 def _format_project_start_annotation_adoption_summary(compatibility: dict | None) -> str:
     payload = dict(compatibility or {})
-    matched = int(payload.get("matched", 0) or 0)
-    plates = int(payload.get("matched_plate_count", 0) or 0)
+    matched = int(payload.get("package_matched", payload.get("matched", 0)) or 0)
+    plates = int(payload.get("package_matched_plate_count", payload.get("matched_plate_count", 0)) or 0)
+    total_plates = int(payload.get("plate_count", 0) or 0)
+    rejected_plates = max(0, total_plates - plates)
     return (
-        f"Zamierzasz importować {matched} kompatybilnych anotacji dla niezatwierdzonych obrazów. "
-        f"Zostaną one zastosowane do {matched} zgodnych po nazwie niezatwierdzonych obrazów, "
-        f"co obejmie {plates} tablic."
+        f"Do kontroli: {plates} AT z {matched} obrazów. "
+        f"Odrzucamy: {rejected_plates} AT."
     )
 
 def _is_project_start_manual_plate_detection(det) -> bool:
@@ -3269,6 +3144,7 @@ def _show_project_start_annotation_import_modal(
     accent = palette.get("accent", "#22c55e")
     success = palette.get("success", accent)
     warning = palette.get("warning", "#f59e0b")
+    error = palette.get("error", "#ef4444")
 
     parent = getattr(self, "frame", None)
     dialog = tk.Toplevel(parent or getattr(self.app, "root", None))
@@ -3276,7 +3152,7 @@ def _show_project_start_annotation_import_modal(
         self.app.style_dialog_window(
             dialog,
             title="Import anotacji tablic",
-            geometry="760x620",
+            geometry="900x760",
             parent=parent,
         )
         body = self.app._build_themed_dialog_surface(dialog, tone="info")
@@ -3310,10 +3186,29 @@ def _show_project_start_annotation_import_modal(
             return "tor znaków"
         return "tor nie jest jeszcze wybrany"
 
+    def _blend(color_a: str, color_b: str, factor: float) -> str:
+        try:
+            return blend_hex_colors(color_a, color_b, factor)
+        except Exception:
+            return color_b
+
+    def _tone_color(tone: str) -> str:
+        normalized = str(tone or "").strip().lower()
+        if normalized == "success":
+            return success
+        if normalized == "warning":
+            return warning
+        if normalized == "error":
+            return error
+        if normalized == "accent":
+            return accent
+        return muted
+
     def _make_card(parent_widget, title: str, *, tone: str = "neutral"):
         tone_color = {
             "success": success,
             "warning": warning,
+            "error": error,
             "accent": accent,
         }.get(tone, border)
         shell = tk.Frame(
@@ -3378,6 +3273,78 @@ def _show_project_start_annotation_import_modal(
             ).grid(row=index, column=1, sticky="nsew")
         return table
 
+    def _add_color_summary(parent_widget, rows: list[dict]):
+        table = tk.Frame(parent_widget, bg=card, bd=0, highlightthickness=1, highlightbackground=border)
+        table.pack(fill=tk.X, padx=12, pady=(2, 12))
+        table.grid_columnconfigure(0, weight=0, minsize=92)
+        table.grid_columnconfigure(1, weight=0, minsize=180)
+        table.grid_columnconfigure(2, weight=0, minsize=180)
+        table.grid_columnconfigure(3, weight=1, minsize=280)
+        header_bg = _blend(card, accent, 0.13)
+        for column, text in enumerate(("Stan", "Co sprawdzam", "Wynik", "Znaczenie")):
+            tk.Label(
+                table,
+                text=text,
+                bg=header_bg,
+                fg=fg,
+                font=("Segoe UI", 8, "bold"),
+                anchor="w",
+                padx=9,
+                pady=6,
+            ).grid(row=0, column=column, sticky="nsew")
+        for index, row in enumerate(list(rows or []), start=1):
+            tone = str(row.get("tone", "neutral") or "neutral").strip().lower()
+            tone_color = _tone_color(tone)
+            base_bg = panel_alt if index % 2 else card
+            row_bg = _blend(base_bg, tone_color, 0.07 if tone != "neutral" else 0.0)
+            badge_bg = _blend(row_bg, tone_color, 0.20 if tone != "neutral" else 0.08)
+            tk.Label(
+                table,
+                text=str(row.get("status", "") or "-"),
+                bg=badge_bg,
+                fg=tone_color if tone != "neutral" else muted,
+                font=("Segoe UI", 8, "bold"),
+                anchor="center",
+                padx=8,
+                pady=6,
+            ).grid(row=index, column=0, sticky="nsew")
+            tk.Label(
+                table,
+                text=str(row.get("label", "") or "-"),
+                bg=row_bg,
+                fg=fg,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                padx=9,
+                pady=6,
+            ).grid(row=index, column=1, sticky="nsew")
+            tk.Label(
+                table,
+                text=str(row.get("value", "") or "-"),
+                bg=row_bg,
+                fg=tone_color if tone != "neutral" else fg,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=170,
+                padx=9,
+                pady=6,
+            ).grid(row=index, column=2, sticky="nsew")
+            tk.Label(
+                table,
+                text=str(row.get("note", "") or "-"),
+                bg=row_bg,
+                fg=muted if tone != "error" else error,
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=340,
+                padx=9,
+                pady=6,
+            ).grid(row=index, column=3, sticky="nsew")
+        return table
+
     def _close_with(value):
         result["value"] = value
         try:
@@ -3390,7 +3357,7 @@ def _show_project_start_annotation_import_modal(
 
     tk.Label(
         content,
-        text="Import anotacji tablic do E1",
+        text="Import anotacji tablic AT do kontroli",
         bg=panel,
         fg=fg,
         font=("Segoe UI", 15, "bold"),
@@ -3399,13 +3366,13 @@ def _show_project_start_annotation_import_modal(
     tk.Label(
         content,
         text=(
-            "Program znalazł anotacje zgodne z wybranym katalogiem zdjęć. "
-            "Poniżej widać, co zostanie przyjęte do projektu i co pozostanie do pracy w E2/Z2."
+            "Porównuję wybrane AT z aktualnym zbiorem obrazów. "
+            "Importujemy tylko to, co ma obraz i nie było jeszcze zatwierdzone."
         ),
         bg=panel,
         fg=muted,
         font=("Segoe UI", 9),
-        wraplength=700,
+        wraplength=840,
         justify=tk.LEFT,
         anchor="w",
     ).pack(fill=tk.X, pady=(4, 12))
@@ -3415,199 +3382,130 @@ def _show_project_start_annotation_import_modal(
         source_card,
         [
             ("Plik anotacji", _short_path(xml_label)),
-            ("Katalog zdjęć E1", _short_path(images_label)),
+            ("Zbiór obrazów", _short_path(images_label)),
         ],
     )
 
     payload = dict(origin_summary or {})
-    matched = int(dict(compatibility or {}).get("matched", 0) or 0)
-    matched_plates = int(dict(compatibility or {}).get("matched_plate_count", 0) or 0)
-    if matched_plates <= 0:
-        matched_plates = int(payload.get("scope_plates", 0) or 0)
-    adoptable = int(dict(compatibility or {}).get("adoptable_image_count", 0) or 0)
-    remaining_after_adoption = max(0, adoptable - matched)
-    approved_overlap = int(dict(compatibility or {}).get("approved_overlap", 0) or 0)
-    incomplete = int(dict(compatibility or {}).get("incomplete", 0) or 0)
-    missing = int(dict(compatibility or {}).get("missing", 0) or 0)
-    try:
-        current_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
-    except Exception:
-        current_target = ""
-    try:
-        current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
-    except Exception:
-        current_iteration_path = ""
-    ready_plates_shortcut = bool(current_iteration_path == "char_from_ready_plates")
-    import_contract = build_plate_annotation_import_contract(
-        compatibility,
-        payload,
-        target=current_target,
+    compatibility_payload = dict(compatibility or {})
+
+    package_count = int(compatibility_payload.get("package_image_count", 0) or 0)
+    xml_total = int(compatibility_payload.get("total", 0) or 0)
+    xml_plate_count = int(compatibility_payload.get("plate_count", payload.get("scope_plates", 0)) or 0)
+    package_matched = int(compatibility_payload.get("package_matched", compatibility_payload.get("matched", 0)) or 0)
+    package_matched_plates = int(
+        compatibility_payload.get("package_matched_plate_count", compatibility_payload.get("matched_plate_count", 0)) or 0
     )
-    matched = int(import_contract.matched_images or 0)
-    matched_plates = int(import_contract.matched_plates or 0)
-    remaining_after_adoption = int(import_contract.remaining_for_z2 or 0)
-    approved_overlap = int(import_contract.approved_overlap or 0)
-    missing = int(import_contract.skipped_entries or 0)
-    incomplete = 0
-
-    summary_card = _make_card(content, "Co znaleziono", tone="accent")
-    _add_table(
-        summary_card,
-        [
-            ("Kompatybilne zdjęcia do importu", f"{matched}"),
-            ("Tablice w kompatybilnych anotacjach", f"{matched_plates}"),
-            ("Po adopcji zostanie w E2/Z2", f"{remaining_after_adoption} zdjęć do dopracowania"),
-            ("Już wcześniej zatwierdzone [OK]", f"{approved_overlap}"),
-            ("Pominięte / niepełne wpisy", f"{missing + incomplete}"),
-        ],
-        value_color=fg,
+    to_control_images = int(compatibility_payload.get("adoptable_matched", package_matched) or 0)
+    to_control_plates = int(compatibility_payload.get("adoptable_matched_plate_count", package_matched_plates) or 0)
+    already_ok_images = int(compatibility_payload.get("approved_overlap", 0) or 0)
+    already_ok_plates = int(compatibility_payload.get("approved_overlap_plates", 0) or 0)
+    true_missing = int(compatibility_payload.get("missing", 0) or 0)
+    true_incomplete = int(compatibility_payload.get("incomplete", 0) or 0)
+    rejected_images = max(0, int(xml_total or 0) - int(package_matched or 0))
+    rejected_plates = max(0, int(xml_plate_count or 0) - int(package_matched_plates or 0))
+    can_import = bool(to_control_plates > 0)
+    conclusion_tone = (
+        "success"
+        if can_import and true_missing <= 0 and true_incomplete <= 0
+        else "warning"
+        if can_import or package_matched > 0
+        else "error"
     )
-
-    origin_card = _make_card(content, "Pochodzenie anotacji")
-    _add_table(
-        origin_card,
-        [
-            ("Run źródłowy", _run_type_label(str(payload.get("run_type") or ""))),
-            ("Model tablic", str(payload.get("model_used_label") or "Nie ustalono")),
-            ("Tablice ręczne", str(int(payload.get("manual_plates", 0) or 0))),
-            ("Tablice z autoanotacji", str(int(payload.get("auto_plates", 0) or 0))),
-        ],
+    conclusion_text = (
+        "Pasujące AT, które nie były [OK], trafią do kontroli w Z2."
+        if can_import
+        else "Pasujące AT są już zatwierdzone [OK], więc niczego nie importujemy."
+        if package_matched > 0
+        else "Brak AT pasujących do aktualnego zbioru obrazów."
     )
-
-    route_card = _make_card(content, f"Wpływ na wybór toru: {_route_label(current_target)}", tone="warning")
-    if current_target == "plate":
-        route_rows = [
-            (
-                "Adopcja [OK]",
-                f"{matched} zdjęć / {matched_plates} tablic zasili materiał dla toru tablic. "
-                f"W Z2 zostanie {remaining_after_adoption} zdjęć do ewentualnego uzupełnienia.",
-            ),
-            (
-                "Import roboczy",
-                "Anotacje będą widoczne w Z2, ale przed eksportem datasetu YOLO Pose trzeba je sprawdzić i nadać zdjęciom status [OK].",
-            ),
-        ]
-    elif current_target == "char":
-        route_rows = [
-            (
-                "Adopcja [OK]",
-                f"{matched} zdjęć / {matched_plates} tablic stanie się źródłem do wyodrębniania tablic dla E3/Z3. "
-                "E2 nadal zamykasz jawnie badge'em; Z2 pokaże tylko brakujące zdjęcia.",
-            ),
-            (
-                "Import roboczy",
-                "Tor znaków nie dostaje gotowego źródła, dopóki w Z2 nie zatwierdzisz zdjęć statusem [OK].",
-            ),
-        ]
-    else:
-        route_rows = [
-            (
-                "Jeśli wybierzesz tor tablic",
-                "Adopcja [OK] zasili materiał do treningu/eksportu tablic. Import roboczy wymaga ręcznej weryfikacji w Z2.",
-            ),
-            (
-                "Jeśli wybierzesz tor znaków",
-                "Adopcja [OK] może od razu dać źródło do wyodrębniania tablic dla E3. Import roboczy najpierw wymaga zatwierdzenia [OK] w Z2.",
-            ),
-        ]
-    route_rows = import_contract.route_rows()
-    _add_table(route_card, route_rows)
-
-    decision_frame = tk.Frame(content, bg=panel, bd=0, highlightthickness=0)
-    decision_frame.pack(fill=tk.BOTH, expand=True)
-    decision_frame.grid_columnconfigure(0, weight=1, uniform="decision")
-    decision_frame.grid_columnconfigure(1, weight=1, uniform="decision")
-
-    approved_card = tk.Frame(
-        decision_frame,
-        bg=card,
-        bd=0,
-        highlightthickness=1,
-        highlightbackground=success,
-        highlightcolor=success,
-    )
-    approved_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 2))
-    tk.Label(
-        approved_card,
-        text="Adoptuj jako zatwierdzone [OK]",
-        bg=card,
-        fg=success,
-        font=("Segoe UI", 10, "bold"),
-        anchor="w",
-    ).pack(fill=tk.X, padx=12, pady=(10, 4))
+    match_card = _make_card(content, "Podsumowanie importu AT", tone=conclusion_tone)
     _add_note(
-        approved_card,
-        (
-            "Zgodne zdjęcia trafią od razu do puli [OK]. Nie będą ponownie pokazywane w E2/Z2; "
-            "tam zostaną tylko zdjęcia bez zaadoptowanych anotacji. To jest tryb do szybkiego "
-            "wyodrębniania tablic i pracy nad znakami."
-        ),
+        match_card,
+        "Obrazy służą wyłącznie do dopasowania nazw. Importujemy anotacje tablic AT, nie obrazy.",
         color=fg,
     )
-
-    draft_card = tk.Frame(
-        decision_frame,
-        bg=card,
-        bd=0,
-        highlightthickness=1,
-        highlightbackground=border,
-        highlightcolor=border,
-    )
-    draft_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 2))
-    tk.Label(
-        draft_card,
-        text="Importuj roboczo do Z2" if ready_plates_shortcut else "Importuj jako robocze",
-        bg=card,
-        fg=fg,
-        font=("Segoe UI", 10, "bold"),
-        anchor="w",
-    ).pack(fill=tk.X, padx=12, pady=(10, 4))
-    _add_note(
-        draft_card,
-        (
-            "Anotacje zostaną podpięte do E1/E2, ale nie dostaną automatycznie statusu [OK]. "
-            "Użytkownik musi wejść do Z2, sprawdzić je i zatwierdzić ręcznie. "
-            "To nie otwiera bramki T03; T03 wymaga adopcji [OK] albo wcześniej zatwierdzonego źródła tablic."
-        ),
-        color=warning if ready_plates_shortcut else muted,
+    _add_color_summary(
+        match_card,
+        [
+            {
+                "status": "ZBIÓR",
+                "tone": "neutral",
+                "label": "Obrazy w zasobach",
+                "value": f"{package_count} obrazów",
+                "note": "Zbiór użyty do sprawdzenia zgodności nazw.",
+            },
+            {
+                "status": "XML",
+                "tone": "neutral",
+                "label": "Wybrane anotacje tablic",
+                "value": f"{xml_plate_count} AT",
+                "note": f"Anotacje zapisane w annotations.xml dla {xml_total} obrazów.",
+            },
+            {
+                "status": "PASUJE" if package_matched > 0 else "BRAK",
+                "tone": "success" if package_matched > 0 else "error",
+                "label": "Pasujące",
+                "value": f"{package_matched_plates} AT",
+                "note": (
+                    f"Do kontroli: {to_control_plates} AT z {to_control_images} obrazów. "
+                    f"Pomijamy już [OK]: {already_ok_plates} AT z {already_ok_images} obrazów."
+                ),
+            },
+            {
+                "status": "NIE" if rejected_plates > 0 else "OK",
+                "tone": "error" if rejected_plates > 0 else "success",
+                "label": "Niepasujące",
+                "value": f"{rejected_plates} AT",
+                "note": f"Brakuje obrazu w aktualnym zbiorze: {rejected_images} obrazów z XML.",
+            },
+            {
+                "status": "WNIOSEK",
+                "tone": conclusion_tone,
+                "label": "Decyzja",
+                "value": conclusion_text,
+                "note": "Import zawsze trafia do kontroli. Status [OK] nadajesz dopiero po sprawdzeniu w Z2.",
+            },
+        ],
     )
 
     if str(partial_line or "").strip():
-        tk.Label(
-            content,
-            text=str(partial_line).strip(),
-            bg=panel,
-            fg=warning,
-            font=("Segoe UI", 8),
-            wraplength=700,
-            justify=tk.LEFT,
-            anchor="w",
-        ).pack(fill=tk.X, pady=(8, 0))
+        partial_card = _make_card(content, "Podsumowanie decyzji", tone="warning")
+        _add_color_summary(
+            partial_card,
+            [
+                {
+                    "status": "INFO",
+                    "tone": "warning",
+                    "label": "Zakres importu",
+                    "value": "Częściowy wynik",
+                    "note": str(partial_line).strip(),
+                }
+            ],
+        )
 
     btn_row = tk.Frame(body, bg=panel, bd=0, highlightthickness=0)
     btn_row.pack(fill=tk.X, padx=18, pady=(4, 16))
-    for label, value, style_name in (
-        ("Adoptuj jako zatwierdzone", "approved", "Accent.TButton"),
-        (
-            "Importuj roboczo do Z2" if ready_plates_shortcut else "Importuj jako robocze",
-            "draft",
-            "TButton",
-        ),
-        ("Anuluj", None, "TButton"),
-    ):
-        ttk.Button(
-            btn_row,
-            text=label,
-            command=lambda selected=value: _close_with(selected),
-            style=style_name,
-        ).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(
+        btn_row,
+        text="Anuluj",
+        command=lambda: _close_with(None),
+        style="TButton",
+    ).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(
+        btn_row,
+        text="Importuj pasujące AT do kontroli w Z2",
+        command=lambda: _close_with("draft"),
+        style="Accent.TButton",
+        state=(tk.NORMAL if can_import else tk.DISABLED),
+    ).pack(side=tk.RIGHT, padx=(8, 0))
 
     try:
-        self.app._fit_dialog_to_content(dialog, parent=parent, min_width=760, min_height=620)
+        self.app._fit_dialog_to_content(dialog, parent=parent, min_width=900, min_height=720)
     except Exception:
         pass
     dialog.bind("<Escape>", lambda _event: _close_with(None))
-    dialog.bind("<Return>", lambda _event: _close_with("approved"))
+    dialog.bind("<Return>", lambda _event: _close_with("draft") if can_import else None)
     try:
         dialog.focus_set()
         dialog.grab_set()
@@ -3627,11 +3525,6 @@ def _choose_project_start_annotation_import_mode(
     partial_line: str,
 ) -> str | None:
     try:
-        current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
-    except Exception:
-        current_iteration_path = ""
-    ready_plates_shortcut = bool(current_iteration_path == "char_from_ready_plates")
-    try:
         choice = self._show_project_start_annotation_import_modal(
             xml_label=xml_label,
             images_label=images_label,
@@ -3647,16 +3540,14 @@ def _choose_project_start_annotation_import_mode(
         logger.debug(f"Nie udało się zbudować graficznego modala importu E1: {exc}")
 
     message = (
-        "Program znalazł anotacje zgodne ze zdjęciami roboczymi w E1.\n\n"
+        "Program znalazł AT pasujące do aktualnego zbioru obrazów.\n\n"
         f"Plik anotacji: {xml_label}\n"
-        f"Katalog zdjęć E1: {images_label}\n"
+        f"Zbiór obrazów: {images_label}\n"
         f"{self._format_project_start_annotation_adoption_summary(compatibility)}\n\n"
         f"{origin_table}\n\n"
         f"{partial_line}\n\n"
-        "Wybierz, jak potraktować import:\n"
-        "- Adoptuj jako zatwierdzone: zgodne zdjęcia i ich tablice wejdą do puli [OK] używanej później do wyodrębniania tablic i pracy nad znakami.\n"
-        "- Importuj jako robocze: anotacje zostaną podpięte do E1/E2, ale użytkownik musi je jeszcze sprawdzić i zatwierdzić w Z2. "
-        "Ten tryb nie otwiera T03."
+        "Pasujące AT, które nie były [OK], trafią do kontroli w Z2. Status [OK] nadajesz dopiero po sprawdzeniu.\n"
+        "AT bez obrazu o tej samej nazwie w aktualnym zbiorze zostaną odrzucone."
     )
     dialog = getattr(self.app, "themed_message_dialog", None)
     if callable(dialog):
@@ -3666,86 +3557,26 @@ def _choose_project_start_annotation_import_mode(
             parent=self.frame,
             buttons=[
                 "Anuluj",
-                "Importuj roboczo do Z2" if ready_plates_shortcut else "Importuj jako robocze",
-                "Adoptuj jako zatwierdzone",
+                "Importuj AT do kontroli w Z2",
             ],
-            default_button="Adoptuj jako zatwierdzone",
+            default_button="Importuj AT do kontroli w Z2",
             tone="info",
             wraplength=680,
         )
     else:
-        choice = messagebox.askyesnocancel(
+        choice = messagebox.askokcancel(
             "Import anotacji tablic",
             message,
             parent=self.frame,
         )
         if choice is True:
-            choice = "Adoptuj jako zatwierdzone"
-        elif choice is False:
-            choice = "Importuj roboczo do Z2" if ready_plates_shortcut else "Importuj jako robocze"
+            choice = "Importuj AT do kontroli w Z2"
         else:
             choice = None
 
-    if choice == "Adoptuj jako zatwierdzone":
-        return "approved"
-    if choice in {"Importuj jako robocze", "Importuj roboczo do Z2"}:
+    if choice in {"Importuj do kontroli", "Sprawdź roboczo w Z2", "Importuj AT do kontroli w Z2"}:
         return "draft"
     return None
-
-def _promote_project_start_annotation_import_to_approved_set(
-    self,
-    annotation_tab,
-    run_dir: Path,
-    compatibility: dict | None,
-) -> dict:
-    matched_names = {
-        str(name or "").strip().lower()
-        for name in list(dict(compatibility or {}).get("matched_names") or [])
-        if str(name or "").strip()
-    }
-    matched_normalized_names = {
-        str(name or "").strip()
-        for name in list(dict(compatibility or {}).get("matched_normalized_names") or [])
-        if str(name or "").strip()
-    }
-
-    builder = getattr(annotation_tab, "_build_campaign_plate_approved_entries_from_run", None)
-    if not callable(builder):
-        return {"ok": False, "reason": "missing_builder"}
-
-    try:
-        entries = builder(Path(run_dir), extra_included_filenames=matched_names)
-    except TypeError:
-        entries = builder(Path(run_dir))
-    except Exception as exc:
-        logger.debug(f"Nie udało się zbudować wpisów puli [OK] z importu E1: {exc}")
-        return {"ok": False, "reason": "build_failed"}
-
-    if matched_normalized_names:
-        filtered_entries = []
-        for entry in list(entries or []):
-            image_name = str(entry.get("image_name", "") or "").strip()
-            normalized = CAMPAIGN._normalize_image_set_name(image_name)
-            if normalized in matched_normalized_names:
-                filtered_entries.append(entry)
-        entries = filtered_entries
-
-    if not entries:
-        return {"ok": False, "reason": "missing_entries"}
-
-    try:
-        result = CAMPAIGN.upsert_plate_approved_entries(entries)
-    except Exception as exc:
-        logger.debug(f"Nie udało się zapisać puli [OK] po imporcie E1: {exc}")
-        return {"ok": False, "reason": "save_failed"}
-
-    if not isinstance(result, dict) or not result.get("ok"):
-        return result if isinstance(result, dict) else {"ok": False, "reason": "save_failed"}
-
-    result = dict(result)
-    result["images"] = int(len(entries))
-    result["plates"] = int(sum(int(entry.get("plate_count", 0) or 0) for entry in entries))
-    return result
 
 def _check_project_start_run_compatibility(
     self,
@@ -3762,8 +3593,17 @@ def _check_project_start_run_compatibility(
         "missing": 0,
         "missing_names": [],
         "approved_overlap": 0,
+        "approved_overlap_plates": 0,
         "approved_overlap_names": [],
         "adoptable_image_count": 0,
+        "adoptable_matched": 0,
+        "adoptable_matched_plate_count": 0,
+        "adoptable_matched_names": [],
+        "adoptable_matched_normalized_names": [],
+        "package_matched": 0,
+        "package_matched_plate_count": 0,
+        "package_matched_names": [],
+        "package_matched_normalized_names": [],
         "matched_plate_count": 0,
         "incomplete": 0,
         "incomplete_names": [],
@@ -3913,10 +3753,27 @@ def _check_project_start_run_compatibility(
         if adoptable_only
         else set()
     )
-    adoption_candidate_names = set(package_normalized_names) - set(approved_normalized_names)
-    matched_normalized_names = complete_xml_normalized_names & adoption_candidate_names
-    missing_normalized_names = sorted(xml_normalized_names - matched_normalized_names)
-    approved_overlap_names = sorted(xml_normalized_names & set(approved_normalized_names) & set(package_normalized_names))
+    package_normalized_names = set(package_normalized_names)
+    approved_normalized_names = set(approved_normalized_names)
+    adoption_candidate_names = package_normalized_names - approved_normalized_names
+    package_matched_normalized_names = complete_xml_normalized_names & package_normalized_names
+    adoptable_matched_normalized_names = package_matched_normalized_names & adoption_candidate_names
+    matched_normalized_names = package_matched_normalized_names
+    missing_normalized_names = sorted(xml_normalized_names - package_matched_normalized_names)
+    approved_overlap_names = sorted(package_matched_normalized_names & approved_normalized_names)
+    package_plate_signatures = {
+        _get_project_start_filename_plate_signature(name)
+        for name in package_normalized_names
+        if _get_project_start_filename_plate_signature(name)
+    }
+    same_plate_text_normalized_names = set()
+    if package_plate_signatures:
+        for name in xml_normalized_names:
+            if name in package_normalized_names:
+                continue
+            signature = _get_project_start_filename_plate_signature(name)
+            if signature and signature in package_plate_signatures:
+                same_plate_text_normalized_names.add(name)
     missing_names = [
         xml_name_by_normalized.get(name, name)
         for name in missing_normalized_names
@@ -3935,6 +3792,18 @@ def _check_project_start_run_compatibility(
         int(plate_count_by_normalized.get(name, 0) or 0)
         for name in set(matched_normalized_names)
     )
+    adoptable_matched_plate_count = sum(
+        int(plate_count_by_normalized.get(name, 0) or 0)
+        for name in set(adoptable_matched_normalized_names)
+    )
+    approved_overlap_plate_count = sum(
+        int(plate_count_by_normalized.get(name, 0) or 0)
+        for name in set(approved_overlap_names)
+    )
+    same_plate_text_plate_count = sum(
+        int(plate_count_by_normalized.get(name, 0) or 0)
+        for name in set(same_plate_text_normalized_names)
+    )
 
     result.update(
         checked=True,
@@ -3943,8 +3812,30 @@ def _check_project_start_run_compatibility(
         missing=len(missing_names),
         missing_names=list(missing_names[:5]),
         approved_overlap=len(approved_overlap_names),
+        approved_overlap_plates=int(approved_overlap_plate_count or 0),
         approved_overlap_names=list(approved_overlap_preview[:5]),
         adoptable_image_count=len(adoption_candidate_names),
+        adoptable_matched=len(adoptable_matched_normalized_names),
+        adoptable_matched_plate_count=int(adoptable_matched_plate_count or 0),
+        adoptable_matched_names=[
+            xml_name_by_normalized.get(name, name)
+            for name in sorted(adoptable_matched_normalized_names)
+        ],
+        adoptable_matched_normalized_names=sorted(adoptable_matched_normalized_names),
+        package_matched=len(package_matched_normalized_names),
+        package_matched_plate_count=int(matched_plate_count or 0),
+        package_matched_names=[
+            xml_name_by_normalized.get(name, name)
+            for name in sorted(package_matched_normalized_names)
+        ],
+        package_matched_normalized_names=sorted(package_matched_normalized_names),
+        same_plate_text_images=len(same_plate_text_normalized_names),
+        same_plate_text_plate_count=int(same_plate_text_plate_count or 0),
+        same_plate_text_names=[
+            xml_name_by_normalized.get(name, name)
+            for name in sorted(same_plate_text_normalized_names)
+        ],
+        same_plate_text_normalized_names=sorted(same_plate_text_normalized_names),
         matched_plate_count=int(matched_plate_count or 0),
         incomplete=len(incomplete_names),
         incomplete_names=list(incomplete_names[:5]),
@@ -4080,6 +3971,32 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             pass
         return
 
+    try:
+        image_source = dict(self._get_project_start_effective_images_source() or {})
+    except Exception:
+        image_source = {}
+    images_dir = image_source.get("effective_dir")
+    try:
+        images_ready = bool(images_dir is not None and Path(images_dir).exists() and Path(images_dir).is_dir())
+    except Exception:
+        images_ready = False
+    if not images_ready:
+        message = (
+            "Najpierw wskaż katalog obrazów O dla tej iteracji.\n\n"
+            "AT jest zasobem zależnym od obrazów: program musi porównać nazwy zdjęć z annotations.xml "
+            "z aktualną pulą O, żeby nie przyjąć anotacji z innej bazy."
+        )
+        try:
+            self.app.themed_info(
+                "Najpierw wskaż obrazy",
+                message,
+                parent=self.frame,
+                tone="warning",
+            )
+        except Exception:
+            messagebox.showwarning("Najpierw wskaż obrazy", message, parent=self.frame)
+        return
+
     annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
     if annotation_tab is None:
         self.app.themed_error(
@@ -4146,7 +4063,6 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
     except Exception:
         package_images_dir = None
 
-    image_source = self._get_project_start_effective_images_source()
     project_images_dir = (
         image_source.get("effective_dir")
         or CAMPAIGN.get_master_pool_dir()
@@ -4171,30 +4087,23 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         selected_images_dir = package_images_dir
     selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
     original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
+    pre_import_compatibility = {}
 
-    if selected_images_dir is not None and package_images_dir is not None:
+    if selected_images_dir is not None:
         pre_import_compatibility = self._check_project_start_run_compatibility(
             selected_run_dir,
             selected_images_dir,
             adoptable_only=True,
         )
-        if pre_import_compatibility.get("checked") and not pre_import_compatibility.get("ok"):
-            extended_images_dir = self._maybe_extend_project_start_images_from_annotation_package(
-                current_images_dir=selected_images_dir,
-                package_images_dir=package_images_dir,
-                compatibility=pre_import_compatibility,
-            )
-            if extended_images_dir is not None:
-                selected_images_dir = extended_images_dir
-                selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
-                original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
-
-    if selected_images_dir is not None and not selected_image_names:
+    package_matched_count = int(
+        pre_import_compatibility.get("package_matched", pre_import_compatibility.get("matched", 0)) or 0
+    )
+    if selected_images_dir is not None and not selected_image_names and package_matched_count <= 0:
         self.app.themed_error(
             "Import anotacji tablic",
             (
-                "W wybranym katalogu nie ma zdjęć roboczych do adopcji anotacji.\n\n"
-                "Wszystkie rozpoznane zdjęcia z tej puli są już zatwierdzone w projekcie albo katalog nie zawiera "
+                "W wybranym katalogu nie ma obrazów pasujących do annotations.xml.\n\n"
+                "Wszystkie rozpoznane obrazy z tego zbioru są już zatwierdzone w projekcie albo katalog nie zawiera "
                 "obrazów możliwych do powiązania z annotations.xml."
             ),
             parent=self.frame,
@@ -4202,10 +4111,15 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         return
 
     if final_run_dir is None:
+        allowed_import_names = selected_image_names or {
+            str(name or "").strip()
+            for name in list(pre_import_compatibility.get("matched_normalized_names") or [])
+            if str(name or "").strip()
+        }
         imported_run_dir, error_message, needs_image_dir = annotation_tab._import_external_annotation_run_to_workspace(
             selected_run_dir,
             compatible_images_dir=selected_images_dir,
-            allowed_normalized_names=(selected_image_names or None),
+            allowed_normalized_names=(allowed_import_names or None),
             copy_images=False,
         )
         if imported_run_dir is None and needs_image_dir:
@@ -4219,20 +4133,33 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             selected_images_dir = Path(compatible_dir)
             selected_image_names = self._get_project_start_adoptable_normalized_image_names(selected_images_dir)
             original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, selected_images_dir)
-            if not selected_image_names:
+            prompt_compatibility = self._check_project_start_run_compatibility(
+                selected_run_dir,
+                selected_images_dir,
+                adoptable_only=True,
+            )
+            prompt_matched_count = int(
+                prompt_compatibility.get("package_matched", prompt_compatibility.get("matched", 0)) or 0
+            )
+            if not selected_image_names and prompt_matched_count <= 0:
                 self.app.themed_error(
                     "Import anotacji tablic",
                     (
-                        "W wybranym katalogu nie ma zdjęć roboczych do adopcji anotacji.\n\n"
-                        "Import E1 pomija zdjęcia już zatwierdzone w projekcie."
+                        "W wybranym katalogu nie ma obrazów pasujących do annotations.xml.\n\n"
+                        "Import E1 pomija obrazy już zatwierdzone w projekcie."
                     ),
                     parent=self.frame,
                 )
                 return
+            allowed_import_names = selected_image_names or {
+                str(name or "").strip()
+                for name in list(prompt_compatibility.get("matched_normalized_names") or [])
+                if str(name or "").strip()
+            }
             imported_run_dir, error_message, _needs_image_dir = annotation_tab._import_external_annotation_run_to_workspace(
                 selected_run_dir,
                 compatible_images_dir=selected_images_dir,
-                allowed_normalized_names=(selected_image_names or None),
+                allowed_normalized_names=(allowed_import_names or None),
                 copy_images=False,
             )
         if imported_run_dir is None:
@@ -4258,8 +4185,8 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self.app.themed_error(
             "Import anotacji tablic",
             (
-                "Nie udało się ustalić katalogu zdjęć zgodnych z annotations.xml.\n\n"
-                "Wskaż najpierw katalog zdjęć w E1 albo wybierz run anotacji, który zawiera obrazy lub manifest z input_dir."
+                "Nie udało się ustalić zbioru obrazów zgodnego z annotations.xml.\n\n"
+                "Wskaż najpierw zbiór obrazów w E1 albo wybierz run anotacji, który zawiera obrazy lub manifest z input_dir."
             ),
             parent=self.frame,
         )
@@ -4269,22 +4196,25 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         selected_image_names = self._get_project_start_adoptable_normalized_image_names(resolved_images_dir)
         original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, resolved_images_dir)
 
-    if not selected_image_names:
+    compatibility = self._check_project_start_run_compatibility(final_run_dir, resolved_images_dir, adoptable_only=True)
+    final_package_matched_count = int(
+        compatibility.get("package_matched", compatibility.get("matched", 0)) or 0
+    )
+    if not selected_image_names and final_package_matched_count <= 0:
         self.app.themed_error(
             "Import anotacji tablic",
             (
-                "W wybranej puli projektu nie ma zdjęć, do których można adoptować anotacje.\n\n"
+                "W wybranym zbiorze projektu nie ma obrazów, do których można dopasować AT.\n\n"
                 "Import E1 pomija obrazy, które są już zatwierdzone w projekcie. "
-                "Wskaż katalog zawierający zdjęcia jeszcze robocze albo usuń błędnie wybrane źródło."
+                "Wskaż zbiór obrazów zgodny z annotations.xml albo usuń błędnie wybrane źródło."
             ),
             parent=self.frame,
         )
         return
 
-    compatibility = self._check_project_start_run_compatibility(final_run_dir, resolved_images_dir, adoptable_only=True)
     if compatibility.get("checked") and not compatibility.get("ok"):
         matched_count = int(compatibility.get("matched", 0) or 0)
-        if matched_count > 0 and selected_image_names:
+        if matched_count > 0:
             matched_names = {
                 str(name or "").strip()
                 for name in list(compatibility.get("matched_normalized_names") or [])
@@ -4320,7 +4250,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 if approved_overlap > 0
                 else ""
             )
-            missing_line = f"\nBrakujące anotowane obrazy w roboczej puli: {missing_count}" if missing_count > 0 else ""
+            missing_line = f"\nAnotacje bez dopasowania w aktualnym zbiorze: {missing_count}" if missing_count > 0 else ""
             incomplete_line = (
                 f"\nPominięte, bo anotacje nie obejmują wszystkich tablic zapisanych w nazwie pliku: {incomplete_count}"
                 if incomplete_count > 0
@@ -4329,11 +4259,11 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             self.app.themed_error(
                 "Import anotacji tablic",
                 (
-                    "Wybrane anotacje tablic nie pasują do roboczych zdjęć projektu.\n\n"
-                    f"Pula zdjęć E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
+                    "Wybrane anotacje tablic nie pasują do aktualnego zbioru obrazów projektu.\n\n"
+                    f"Zbiór obrazów E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
                     f"{self._format_project_start_annotation_adoption_summary(compatibility)}"
                     f"{missing_line}{approved_line}{incomplete_line}\n\n"
-                    "Nie znaleziono żadnego zgodnego wpisu do adopcji."
+                    "Nie znaleziono żadnego zgodnego wpisu do importu."
                     + (f"\n\nPrzykłady brakujących plików:\n{missing_preview}{missing_suffix}" if missing_preview else "")
                 ),
                 parent=self.frame,
@@ -4355,7 +4285,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             if approved_overlap > 0
             else ""
         )
-        missing_line = f"\nBrakujące anotowane obrazy w roboczej puli: {missing_count}" if missing_count > 0 else ""
+        missing_line = f"\nAnotacje bez dopasowania w aktualnym zbiorze: {missing_count}" if missing_count > 0 else ""
         incomplete_line = (
             f"\nPominięte, bo anotacje nie obejmują wszystkich tablic zapisanych w nazwie pliku: {incomplete_count}"
             if incomplete_count > 0
@@ -4364,11 +4294,11 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self.app.themed_error(
             "Import anotacji tablic",
             (
-                "Wybrane anotacje tablic nie pasują do roboczych zdjęć projektu.\n\n"
-                f"Pula zdjęć E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
+                "Wybrane anotacje tablic nie pasują do aktualnego zbioru obrazów projektu.\n\n"
+                f"Zbiór obrazów E1: {Path(images_dir).name if images_dir is not None else 'brak'}\n"
                 f"{self._format_project_start_annotation_adoption_summary(compatibility)}"
                 f"{missing_line}{approved_line}{incomplete_line}\n\n"
-                "Najpierw wskaż katalog zdjęć zawierający niezatwierdzone obrazy zgodne z annotations.xml."
+                "Najpierw wskaż zbiór obrazów zgodny z annotations.xml."
                 + (f"\n\nPrzyklady brakujacych plikow:\n{missing_preview}{missing_suffix}" if missing_preview else "")
             ),
             parent=self.frame,
@@ -4378,6 +4308,10 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         images_dir = compatibility.get("images_dir")
         matched_count = int(compatibility.get("matched", 0) or 0)
         total_count = int(compatibility.get("total", 0) or 0)
+        adoptable_matched = int(compatibility.get("adoptable_matched", matched_count) or 0)
+        adoptable_matched_plates = int(compatibility.get("adoptable_matched_plate_count", 0) or 0)
+        approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+        approved_overlap_plates = int(compatibility.get("approved_overlap_plates", 0) or 0)
         original_total_count = int(original_xml_match.get("total", 0) or total_count)
         original_missing_count = max(0, original_total_count - matched_count)
         xml_label = self._format_project_start_asset_source(selected_xml_path)
@@ -4386,11 +4320,25 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             if images_dir is not None
             else "brak"
         )
+        if adoptable_matched_plates <= 0:
+            message = (
+                "Nie ma nowych AT do kontroli.\n\n"
+                f"Pasujące anotacje dotyczą obrazów, które są już zatwierdzone [OK]: "
+                f"{approved_overlap} obrazów / {approved_overlap_plates} AT.\n\n"
+                "Nie tworzymy duplikatów i nie nadpisujemy zatwierdzonych anotacji."
+            )
+            try:
+                self.app.themed_info("Import anotacji tablic", message, parent=self.frame, tone="info")
+            except Exception:
+                messagebox.showinfo("Import anotacji tablic", message, parent=self.frame)
+            return
         partial_line = (
-            f"XML zawiera też {original_missing_count} anotowanych obrazów spoza roboczej puli do adopcji. "
-            "Program zaadoptuje tylko zgodny podzbiór zdjęć jeszcze niezatwierdzonych."
+            f"{original_missing_count} anotowanych obrazów z XML nie ma dopasowania w aktualnym zbiorze. "
+            "Powiązane z nimi AT zostaną odrzucone."
             if original_missing_count > 0
-            else "Wszystkie anotowane obrazy z XML pasują do zdjęć roboczych możliwych do adopcji."
+            else (
+                "Wszystkie anotowane obrazy z XML pasują po nazwie do aktualnego zbioru."
+            )
         )
         origin_summary = self._summarize_project_start_annotation_import_origin(final_run_dir, compatibility)
         origin_table = self._format_project_start_annotation_import_origin_table(origin_summary)
@@ -4404,6 +4352,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         )
         if import_mode is None:
             return
+        import_mode = "draft"
     else:
         import_mode = "draft"
 
@@ -4420,30 +4369,6 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         )
     except Exception as e:
         logger.debug(f"Nie udało się zapamietac importowanego runu tablic dla kampanii: {e}")
-
-    approved_result = {}
-    if import_mode == "approved":
-        approved_result = self._promote_project_start_annotation_import_to_approved_set(
-            annotation_tab,
-            final_run_dir,
-            compatibility,
-        )
-        if not bool(dict(approved_result or {}).get("ok")):
-            reason = str(dict(approved_result or {}).get("reason") or "").strip()
-            self.app.themed_error(
-                "Import anotacji tablic",
-                (
-                    "Nie udało się przenieść importowanych anotacji do puli zdjęć zatwierdzonych [OK].\n\n"
-                    "Import nie zostanie zakończony jako zatwierdzony, żeby nie stworzyć niespójnego stanu E2/E3."
-                    + (f"\n\nPowód techniczny: {reason}" if reason else "")
-                ),
-                parent=self.frame,
-            )
-            return
-        try:
-            self._clear_dashboard_perf_cache()
-        except Exception:
-            pass
 
     try:
         CAMPAIGN.set_project_start_plate_source(
@@ -4473,18 +4398,10 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         run_name = final_run_dir.name
     except Exception:
         run_name = "anotacje tablic"
-    if import_mode == "approved":
-        imported_images = int(dict(approved_result or {}).get("images", 0) or 0)
-        imported_plates = int(dict(approved_result or {}).get("plates", 0) or 0)
-        status_text = (
-            f"Zaimportowano anotacje tablic z {run_name}/annotations.xml i dodano je do puli [OK]: "
-            f"{imported_images} obrazów / {imported_plates} tablic. E3 może użyć ich do wyodrębniania tablic."
-        )
-    else:
-        status_text = (
-            f"Zaimportowano robocze anotacje tablic z pliku {run_name}/annotations.xml. "
-            "E2 może użyć ich jako źródła, ale przed pracą nad znakami trzeba zatwierdzić zdjęcia statusem [OK]."
-        )
+    status_text = (
+        f"Zaimportowano AT do kontroli z pliku {run_name}/annotations.xml. "
+        "Sprawdź je w Z2 i dopiero tam nadaj status [OK] właściwym obrazom."
+    )
     try:
         self.app.update_status(status_text, "info")
     except Exception:
@@ -4537,6 +4454,10 @@ def _refresh_project_start_panel(self) -> None:
     effective_images_dir = image_source.get("effective_dir")
     effective_images_count = int(image_source.get("effective_count", 0) or 0)
     effective_images_exists = bool(image_source.get("effective_exists"))
+    effective_images_ready_for_annotations = bool(
+        effective_images_dir is not None
+        and effective_images_exists
+    )
     plate_model_path = str(CAMPAIGN.get_global_model("plate") or "").strip()
     char_model_path = str(CAMPAIGN.get_global_model("char") or "").strip()
     plate_model_ready = bool(plate_model_path and Path(plate_model_path).exists())
@@ -4698,7 +4619,15 @@ def _refresh_project_start_panel(self) -> None:
         pass
 
     for widget, enabled in (
-        (self.btn_ingest_import_plate_run, bool(mode_selected and show_assets_operational and route_selected)),
+        (
+            self.btn_ingest_import_plate_run,
+            bool(
+                mode_selected
+                and show_assets_operational
+                and route_selected
+                and effective_images_ready_for_annotations
+            ),
+        ),
         (self.btn_ingest_pick_plate_model, bool(mode_selected and show_assets_operational and route_selected)),
         (self.btn_ingest_pick_char_model, bool(mode_selected and show_assets_operational and current_route_target == "char")),
     ):
@@ -4770,7 +4699,7 @@ def _refresh_project_start_panel(self) -> None:
             else:
                 images_validation_text = (
                     f"Warunek toru znaków | za mało obrazów: {effective_images_count}/{char_min_images}. "
-                    f"Alternatywnie importuj/adoptuj {char_min_plates} gotowych tablic."
+                    f"Alternatywnie importuj AT do kontroli i zatwierdź {char_min_plates} tablic w Z2."
                 )
                 images_validation_tone = "warning"
         elif effective_images_exists and effective_images_count <= 0:
@@ -4779,13 +4708,13 @@ def _refresh_project_start_panel(self) -> None:
         elif char_material_ready:
             images_validation_text = (
                 f"Uzupełniające | istniejące źródło tablic spełnia warunek: {char_plate_material_count}/{char_min_plates}. "
-                "Katalog zdjęć wybierz tylko wtedy, gdy chcesz dodać nowe obrazy."
+                "Zbiór obrazów wybierz tylko wtedy, gdy chcesz dodać nowe obrazy."
             )
             images_validation_tone = "muted"
         else:
             images_validation_text = (
                 f"Warunek toru znaków | wybierz katalog min. {char_min_images} obrazów "
-                f"albo importuj/adoptuj {char_min_plates} gotowych tablic."
+                f"albo importuj AT do kontroli i zatwierdź {char_min_plates} tablic w Z2."
             )
             images_validation_tone = "warning"
     elif current_iteration_path == "plate_training" and effective_images_count > 0 and effective_images_dir is not None:
@@ -4828,7 +4757,7 @@ def _refresh_project_start_panel(self) -> None:
             plate_run_validation_tone = "success"
         else:
             plate_run_validation_text = (
-                f"Warunek tej ścieżki | importuj/adoptuj minimum {char_min_plates} gotowych tablic."
+                f"Warunek tej ścieżki | importuj AT do kontroli i zatwierdź minimum {char_min_plates} tablic w Z2."
             )
             plate_run_validation_tone = "warning"
     elif current_iteration_path == "char_from_images":
@@ -4842,12 +4771,12 @@ def _refresh_project_start_panel(self) -> None:
             plate_run_validation_tone = "success"
         elif char_image_potential:
             plate_run_validation_text = (
-                f"Alternatywa | import/adopcja {char_min_plates} gotowych tablic pozwoli pominąć część pracy w E2/Z2."
+                f"Alternatywa | import AT do kontroli może przygotować {char_min_plates} gotowych tablic po zatwierdzeniu w Z2."
             )
             plate_run_validation_tone = "muted"
         else:
             plate_run_validation_text = (
-                f"Alternatywa | możesz importować źródło tablic, ale ta ścieżka startuje z katalogu zdjęć."
+                f"Alternatywa | możesz importować AT do kontroli, ale ta ścieżka startuje ze zbioru obrazów."
             )
             plate_run_validation_tone = "muted"
     elif current_iteration_path == "plate_training":
@@ -4882,7 +4811,7 @@ def _refresh_project_start_panel(self) -> None:
                     plate_run_counter_plates = max(plate_run_counter_plates, int(xml_plates or 0))
             except Exception:
                 pass
-            if effective_images_count <= 0:
+            if effective_images_dir is None or not effective_images_exists:
                 plate_run_validation_text = "Najpierw wskaż obrazy tej iteracji."
                 plate_run_validation_tone = "warning"
             else:
@@ -4893,10 +4822,14 @@ def _refresh_project_start_panel(self) -> None:
                 elif compatibility.get("checked") and compatibility.get("ok"):
                     plate_run_counter_images = int(compatibility.get("matched", 0) or 0)
                     plate_run_counter_plates = int(compatibility.get("matched_plate_count", 0) or 0)
+                    approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    adoptable_matched = int(compatibility.get("adoptable_matched", plate_run_counter_images) or 0)
+                    adoption_note = f" | do kontroli: {adoptable_matched} | już [OK]: {approved_overlap}"
                     plate_run_validation_text = (
                         f"OK | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
                         f"{int(compatibility.get('matched', 0) or 0)} obrazów / "
                         f"{int(compatibility.get('matched_plate_count', 0) or 0)} tablic"
+                        f"{adoption_note}"
                     )
                     plate_run_validation_tone = "success"
                 elif compatibility.get("checked") and int(compatibility.get("matched", 0) or 0) > 0:
@@ -4907,7 +4840,7 @@ def _refresh_project_start_panel(self) -> None:
                     overlap_text = f" | pominięte zatwierdzone: {approved_overlap}" if approved_overlap > 0 else ""
                     incomplete_text = f" | niepełne wg nazwy: {incomplete_count}" if incomplete_count > 0 else ""
                     plate_run_validation_text = (
-                        f"Do adopcji | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
+                        f"Do kontroli | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
                         f"{int(compatibility.get('matched', 0) or 0)} obrazów / "
                         f"{int(compatibility.get('matched_plate_count', 0) or 0)} tablic"
                         f"{overlap_text}{incomplete_text}"
@@ -4920,41 +4853,41 @@ def _refresh_project_start_panel(self) -> None:
                     if approved_overlap > 0 and missing_count <= 0 and incomplete_count <= 0:
                         plate_run_counter_images = int(approved_overlap or 0)
                         plate_run_validation_text = (
-                            f"Zgodne | import przyjęty do puli [OK]: {approved_overlap} obrazów."
+                            f"Zgodne | pasujące obrazy są już zatwierdzone [OK]: {approved_overlap}."
                         )
                         plate_run_validation_tone = "success"
                     elif approved_overlap > 0:
                         plate_run_counter_images = int(approved_overlap or 0)
                         plate_run_validation_text = (
-                            f"Częściowo zgodne | w puli [OK]: {approved_overlap} obrazów | "
+                            f"Częściowo zgodne | już zatwierdzone [OK]: {approved_overlap} obrazów | "
                             f"do sprawdzenia: {missing_count + incomplete_count}"
                         )
                         plate_run_validation_tone = "warning"
                     elif incomplete_count > 0:
                         plate_run_validation_text = (
-                            f"Brak adopcji | {incomplete_count} anotacji nie obejmuje wszystkich tablic z nazwy pliku."
+                            f"Brak importu | {incomplete_count} anotacji nie obejmuje wszystkich tablic z nazwy pliku."
                         )
                         plate_run_validation_tone = "error"
                     else:
                         plate_run_validation_text = (
-                            f"Niezgodne z roboczą pulą E1 | brak {missing_count} "
+                            f"Niezgodne z aktualnym zbiorem E1 | brak {missing_count} "
                             f"z {int(compatibility.get('total', 0) or 0)} anotowanych obrazów."
                         )
                         plate_run_validation_tone = "error"
                 else:
-                    plate_run_validation_text = "Run zapisany. Sprawdź zgodność po wskazaniu roboczej puli E1."
+                    plate_run_validation_text = "Run zapisany. Sprawdź zgodność po wskazaniu aktualnego zbioru E1."
                     plate_run_validation_tone = "warning"
     if plate_source_mode == "draft" and plate_run_path:
         if current_iteration_path == "char_from_ready_plates":
             plate_run_validation_text = (
-                f"Robocze AT | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
-                "To nie spełnia T03. Adoptuj AT jako [OK] albo sprawdź je w Z2 i zatwierdź zdjęcia."
+                f"AT do kontroli | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
+                "To jeszcze nie spełnia T03. Sprawdź AT w Z2 i zatwierdź właściwe obrazy."
             )
             plate_run_validation_tone = "warning"
         elif current_iteration_path in {"plate_training", "char_from_images"}:
             plate_run_validation_text = (
-                f"Robocze AT | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
-                "Materiał jest dostępny do pracy w Z2, ale nie jest jeszcze pulą [OK]."
+                f"AT do kontroli | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
+                "Sprawdź je w Z2; status [OK] nadajesz dopiero po kontroli."
             )
             plate_run_validation_tone = "muted"
     self._set_project_start_asset_row_state(

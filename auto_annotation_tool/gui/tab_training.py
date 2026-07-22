@@ -228,6 +228,145 @@ class TrainingTab:
     def is_startup_ui_ready(self) -> bool:
         return bool(getattr(self, "_startup_ui_ready", False))
 
+    def _on_app_close(self, event=None):
+        """Persist an interrupted campaign Z4 session when the app is closed from this card."""
+        if not CAMPAIGN.get_active_project_name():
+            return
+        try:
+            selected_tab = str(self.parent.select() or "")
+            if selected_tab and selected_tab != str(self.frame):
+                return
+        except Exception:
+            return
+        try:
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+        except Exception:
+            current_step = 0
+        if current_step != 4:
+            return
+        try:
+            target = str(CAMPAIGN.get_iteration_target() or self.get_campaign_training_target() or "").strip().lower()
+        except Exception:
+            target = str(getattr(self, "_campaign_training_target", "") or "").strip().lower()
+        if target not in {"char", "plate"}:
+            target = "char"
+
+        try:
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+        except Exception:
+            current_iteration = 0
+        if current_iteration <= 0:
+            return
+
+        try:
+            self._reload_history_snapshot_from_disk()
+        except Exception:
+            pass
+        try:
+            run_id = str(getattr(self, "current_run_id", "") or "").strip()
+            if run_id:
+                CAMPAIGN.sync_step4_training_record_from_history(iteration_num=current_iteration)
+                run = self.history.get_run(run_id) if getattr(self, "history", None) is not None else None
+                run_status = str(getattr(run, "status", "") or "").strip().lower() if run is not None else ""
+                if run_status in {
+                    TrainingStatus.COMPLETED.value,
+                    TrainingStatus.FAILED.value,
+                    TrainingStatus.PAUSED.value,
+                    TrainingStatus.CANCELLED.value,
+                }:
+                    return
+        except Exception:
+            pass
+
+        finish_state = {}
+        try:
+            finish_state = dict(self.get_campaign_step4_finish_state(iteration_target=target) or {})
+        except Exception:
+            finish_state = {}
+        if bool(finish_state.get("ready")):
+            return
+        try:
+            no_training = dict(CAMPAIGN.get_step4_without_training_decision() or {})
+            no_training_iteration = int(no_training.get("iteration", 0) or 0)
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+            no_training_target = str(no_training.get("target", "") or "").strip().lower()
+            if (
+                bool(no_training.get("ready"))
+                and no_training_iteration == current_iteration
+                and (not no_training_target or no_training_target == target)
+            ):
+                return
+        except Exception:
+            try:
+                current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+            except Exception:
+                current_iteration = 0
+
+        try:
+            has_visible_work = bool(
+                getattr(self, "_step4_route_selected", False)
+                or getattr(self, "_step4_train_unlocked", False)
+                or str(getattr(self, "current_run_id", "") or "").strip()
+            )
+        except Exception:
+            has_visible_work = False
+        try:
+            if str(self.dataset_var.get() or "").strip():
+                has_visible_work = True
+        except Exception:
+            pass
+        try:
+            if str(self.split_src_var.get() or "").strip():
+                has_visible_work = True
+        except Exception:
+            pass
+        if not has_visible_work:
+            return
+
+        substep = "pz1"
+        try:
+            selected_subtab = str(self.main_nb.select() or "")
+            if selected_subtab == str(getattr(self, "tab_train", "")):
+                substep = "pz2"
+            elif selected_subtab == str(getattr(self, "tab_dataset", "")):
+                substep = "pz1"
+        except Exception:
+            pass
+
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        session = {
+            "active": True,
+            "state": "interrupted",
+            "work_area": "z4",
+            "substep": substep,
+            "working_gate_id": "T06",
+            "target": target,
+            "iteration": current_iteration,
+            "reason": "app_close_without_graph_return",
+            "interrupted_at": now,
+            "updated_at": now,
+        }
+        try:
+            run_id = str(getattr(self, "current_run_id", "") or "").strip()
+            if run_id:
+                session["run_id"] = run_id
+        except Exception:
+            pass
+        try:
+            dataset_path = str(self.dataset_var.get() or "").strip()
+            if dataset_path:
+                session["dataset_path"] = dataset_path
+        except Exception:
+            pass
+
+        try:
+            CAMPAIGN.upsert_iteration_state(
+                iteration_num=current_iteration,
+                updates={"step4_work_session": session},
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udało się zapisać przerwanej sesji Z4: {exc}")
+
     def _ensure_step4_training_state_vars(self) -> None:
         """Keep Z4 campaign state available before the lazy PZ2 tab is built."""
         if not hasattr(self, "dataset_var"):
@@ -572,6 +711,12 @@ class TrainingTab:
         return z4_training_metrics._validate_training_base_model_target_compatibility(self, *args, **kwargs)
     def _refresh_training_start_state(self, *args, **kwargs):
         return z4_training_metrics._refresh_training_start_state(self, *args, **kwargs)
+    def _get_pinned_step4_result_state(self, *args, **kwargs):
+        return z4_training_metrics._get_pinned_step4_result_state(self, *args, **kwargs)
+    def _refresh_step4_pinned_result_ui(self, *args, **kwargs):
+        return z4_training_metrics._refresh_step4_pinned_result_ui(self, *args, **kwargs)
+    def _clear_pinned_step4_result(self, *args, **kwargs):
+        return z4_training_metrics._clear_pinned_step4_result(self, *args, **kwargs)
     def _refresh_training_base_model_identity_ui(self, *args, **kwargs):
         return z4_training_metrics._refresh_training_base_model_identity_ui(self, *args, **kwargs)
     def _resolve_selected_training_base_model_display(self, *args, **kwargs):
@@ -832,6 +977,7 @@ class TrainingTab:
         test_images = int(profile.get("test_images", 0) or 0)
         total_images = int(profile.get("total_images", 0) or 0)
         total_objects = int(profile.get("total_objects", 0) or 0)
+        created_at = str(profile.get("created_at") or "").strip()
 
         min_ready = (
             total_images >= int(thresholds["min_images"])
@@ -877,6 +1023,7 @@ class TrainingTab:
         rows = [
             ("Próbka", f"{sample_text} | {object_row[1]}"),
             ("Split", f"train {train_images} | val {val_images} | test {test_images}"),
+            ("Utworzono", created_at or "-"),
             ("Ocena", status),
             ("Sugestia", next_step),
         ]
@@ -1252,6 +1399,10 @@ class TrainingTab:
 
         try:
             self._refresh_training_base_model_identity_ui()
+        except Exception:
+            pass
+        try:
+            self._refresh_step4_pinned_result_ui()
         except Exception:
             pass
 
@@ -2662,8 +2813,13 @@ class TrainingTab:
     def _open_step4_dataset_stage(self):
         open_step4_dataset_stage(self)
 
-    def _mark_step4_dataset_ready(self, dataset_path: str | Path | None = None):
-        mark_step4_dataset_ready(self, dataset_path=dataset_path)
+    def _mark_step4_dataset_ready(
+        self,
+        dataset_path: str | Path | None = None,
+        *,
+        target: str | None = None,
+    ):
+        mark_step4_dataset_ready(self, dataset_path=dataset_path, target=target)
 
     def _accept_training_input_context(
         self,
@@ -3153,6 +3309,16 @@ class TrainingTab:
         return z4_training_runtime._use_campaign_training_result_choice(self, *args, **kwargs)
     def _show_history_context_menu(self, *args, **kwargs):
         return z4_training_runtime._show_history_context_menu(self, *args, **kwargs)
+    def _show_ranking_context_menu(self, *args, **kwargs):
+        return z4_training_runtime._show_ranking_context_menu(self, *args, **kwargs)
+    def _use_selected_ranking_model_as_campaign_result(self, *args, **kwargs):
+        return z4_training_runtime._use_selected_ranking_model_as_campaign_result(self, *args, **kwargs)
+    def _open_selected_ranking_run_details(self, *args, **kwargs):
+        return z4_training_runtime._open_selected_ranking_run_details(self, *args, **kwargs)
+    def _open_selected_ranking_model_folder(self, *args, **kwargs):
+        return z4_training_runtime._open_selected_ranking_model_folder(self, *args, **kwargs)
+    def _copy_selected_ranking_choice_label(self, *args, **kwargs):
+        return z4_training_runtime._copy_selected_ranking_choice_label(self, *args, **kwargs)
     def _autofill_validation_inputs_from_run(self, *args, **kwargs):
         return z4_training_runtime._autofill_validation_inputs_from_run(self, *args, **kwargs)
     def _close_run_details_dialog(self, *args, **kwargs):

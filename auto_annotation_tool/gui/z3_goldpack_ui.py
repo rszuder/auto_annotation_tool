@@ -147,6 +147,23 @@ def build_gold_export_plate_unique_key(data: dict) -> str:
     return f"{source_image}_{bbox_bucket}"
 
 
+def _resolve_gold_export_meta_path(raw_path) -> Path | None:
+    if not raw_path:
+        return None
+    try:
+        path = Path(raw_path)
+    except Exception:
+        return None
+    if path.is_dir():
+        path = path / "metadata.json"
+    if path.name != "metadata.json":
+        return None
+    images_dir = path.parent / "images"
+    if path.exists() and images_dir.exists():
+        return path
+    return None
+
+
 def collect_gold_export_plate_candidates(host, selected_buckets, selected_sources=None) -> tuple[list[dict], dict, dict, dict, dict]:
     selected = set(selected_buckets or [])
     selected_source_buckets = set(selected_sources or [])
@@ -520,20 +537,40 @@ def get_gold_export_meta_candidates(host) -> list[Path]:
             return [meta_path]
         return []
 
-    base_chars_dir = host._get_step3_chars_root_dir()
     meta_candidates: list[Path] = []
-    try:
-        for meta in base_chars_dir.rglob("metadata.json"):
-            run_dir = meta.parent
-            if (run_dir / "images").exists():
-                meta_candidates.append(meta)
-    except Exception:
-        meta_candidates = []
+
+    def add_candidate(raw_path) -> bool:
+        meta_path = _resolve_gold_export_meta_path(raw_path)
+        if meta_path is None:
+            return False
+        if meta_path not in meta_candidates:
+            meta_candidates.append(meta_path)
+        return True
 
     try:
-        meta_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        current_preview_dir = str(host.preview_dir_var.get() or "").strip()
     except Exception:
-        pass
+        current_preview_dir = ""
+    if add_candidate(current_preview_dir):
+        return meta_candidates
+
+    if add_candidate(getattr(host, "_loaded_meta_path", None)):
+        return meta_candidates
+
+    try:
+        saved_preview_dir = host._get_saved_step3_preview_dir(require_plates=True)
+    except Exception:
+        saved_preview_dir = ""
+    if add_candidate(saved_preview_dir):
+        return meta_candidates
+
+    try:
+        preferred_preview_dir = host._get_preferred_step3_preview_dir(require_plates=True, allow_fallback=False)
+    except Exception:
+        preferred_preview_dir = ""
+    if add_candidate(preferred_preview_dir):
+        return meta_candidates
+
     return meta_candidates
 
 

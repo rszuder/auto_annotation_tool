@@ -8,6 +8,15 @@ class _CompatModel:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
+    def keys(self):
+        return tuple(getattr(self, "__dataclass_fields__", {}).keys())
+
+    def values(self):
+        return tuple(getattr(self, key) for key in self.keys())
+
+    def items(self):
+        return tuple((key, getattr(self, key)) for key in self.keys())
+
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 

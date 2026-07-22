@@ -45,6 +45,7 @@ from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
 from .z4_train_progress_bar import TrainProgressBar
+from .z2_shared_ui import campaign_visible_gate_id
 from .z4_campaign_flow import (
     build_step4_campaign_navigation_view_model,
     build_step4_dataset_workflow_view_model,
@@ -264,7 +265,7 @@ def _build_train_tab(self):
 
     self.train_cockpit_subtitle_lbl = tk.Label(
         self.train_cockpit_shell,
-        text="Wybierz wariant splitu i model bazowy, aby rozpocząć trening.",
+        text="Wybierz wariant splitu i model startowy treningu, aby rozpocząć nowy run.",
         font=("Segoe UI", 9),
         anchor=tk.W,
         justify=tk.LEFT,
@@ -567,7 +568,7 @@ def _build_train_tab(self):
 
     self.train_base_title_lbl = tk.Label(
         self.train_base_shell,
-        text="Model bazowy (.pt)",
+        text="Model startowy",
         font=("Segoe UI", 12),
         anchor="w",
         bd=0,
@@ -578,7 +579,7 @@ def _build_train_tab(self):
     self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(9, 2))
     self.train_base_status_lbl = tk.Label(
         self.train_base_shell,
-        text="STATUS MODELU",
+        text="PUNKT STARTU",
         font=("Segoe UI Semibold", 8),
         anchor=tk.CENTER,
         justify=tk.CENTER,
@@ -595,8 +596,8 @@ def _build_train_tab(self):
     self.train_base_caption_lbl = ttk.Label(
         self.train_base_shell,
         text=(
-            "Z4 zacznie od tego modelu i dostroi go na wybranym datasecie. "
-            "Wybierz gotowy preset albo własny plik .pt."
+            "Wagi startowe określają, od czego zacznie się trening tej iteracji. "
+            "Wynik bramki wybierzesz dopiero po zakończeniu runu."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -612,7 +613,7 @@ def _build_train_tab(self):
         self.base_model_var.set("yolo11n.pt")
     self.base_combo.bind("<<ComboboxSelected>>", lambda e: self._on_base_model_change())
 
-    # Pozwól wskazać własny model do fine-tuningu z katalogu modeli.
+    # Pozwól wskazać własne wagi startowe do fine-tuningu z katalogu modeli.
     self.base_custom_var = getattr(self, "base_custom_var", tk.StringVar())
     self.custom_row = ttk.Frame(self.train_base_shell, style="Panel.TFrame")
     self.custom_row.pack(fill=tk.X, padx=10, pady=(0, 9))
@@ -644,6 +645,62 @@ def _build_train_tab(self):
         wraplength=360,
     )
     self._register_train_left_wrap_target(self.train_base_identity_lbl, padding=16, min_wrap=220)
+
+    pinned_bg = blend_hex_colors(
+        palette.get("success", "#2ecc71"),
+        palette.get("panel_alt", palette.get("panel", "#252526")),
+        0.88,
+    )
+    pinned_border = blend_hex_colors(
+        palette.get("success", "#2ecc71"),
+        palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        0.42,
+    )
+    self.step4_pinned_result_shell = tk.Frame(
+        self.train_base_shell,
+        bg=pinned_bg,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=pinned_border,
+        highlightcolor=pinned_border,
+    )
+    pinned_title_row = tk.Frame(self.step4_pinned_result_shell, bg=pinned_bg, bd=0, highlightthickness=0)
+    pinned_title_row.pack(fill=tk.X, padx=9, pady=(8, 4))
+    pinned_title_row.grid_columnconfigure(0, weight=1)
+    self.step4_pinned_result_title_lbl = tk.Label(
+        pinned_title_row,
+        text="Konfiguracja zablokowana",
+        font=("Segoe UI Semibold", 9),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        bg=pinned_bg,
+        fg=palette.get("success", "#2ecc71"),
+        bd=0,
+        padx=0,
+        pady=0,
+    )
+    self.step4_pinned_result_title_lbl.grid(row=0, column=0, sticky="w")
+    self.step4_pinned_result_detail_lbl = tk.Label(
+        self.step4_pinned_result_shell,
+        text="",
+        font=("Segoe UI", 8),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        wraplength=340,
+        bg=pinned_bg,
+        fg=palette.get("muted", "#c7c7c7"),
+        bd=0,
+        padx=9,
+        pady=0,
+    )
+    self.step4_pinned_result_detail_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+    self._register_train_left_wrap_target(
+        self.step4_pinned_result_detail_lbl,
+        container=self.step4_pinned_result_shell,
+        padding=24,
+        min_wrap=220,
+    )
+    self.step4_pinned_result_shell.pack_forget()
 
     def auto_name(*args):
         ds_name = Path(self.dataset_var.get()).name if self.dataset_var.get() else "UnknownDS"
@@ -944,7 +1001,7 @@ def _build_train_tab(self):
     self.train_start_gate_status_lbl.grid(row=0, column=1, sticky="e", padx=(8, 0))
     self.train_start_gate_hint_lbl = tk.Label(
         self.train_start_gate_shell,
-        text="Po kliknięciu uruchomimy trening na wybranym wariancie datasetu i modelu bazowym.",
+        text="Po kliknięciu uruchomimy nowy run na wybranym wariancie datasetu i modelu startowym.",
         font=("Segoe UI", 8),
         anchor=tk.W,
         justify=tk.LEFT,
@@ -1307,6 +1364,7 @@ def _build_train_tab(self):
     )
     self.campaign_training_result_var = getattr(self, "campaign_training_result_var", tk.StringVar())
     self._campaign_training_result_choices = {}
+    finish_gate_id = campaign_visible_gate_id("T07") or "T06"
     self.campaign_training_result_shell = tk.Frame(
         hist_top,
         bg=result_bg,
@@ -1321,7 +1379,7 @@ def _build_train_tab(self):
     result_title_row.grid_columnconfigure(0, weight=1)
     self.campaign_training_result_title_lbl = tk.Label(
         result_title_row,
-        text="Wybór wyniku bramki T06",
+        text=f"Wybór wyniku bramki {finish_gate_id}",
         font=("Segoe UI", 12),
         anchor=tk.W,
         justify=tk.LEFT,
@@ -1351,7 +1409,7 @@ def _build_train_tab(self):
     self.campaign_training_result_copy_lbl = ttk.Label(
         self.campaign_training_result_shell,
         text=(
-            "Wybierz ukończony run jako wynik bramki T06. To wybór artefaktu, "
+            f"Wybierz ukończony run jako wynik bramki {finish_gate_id}. To wybór artefaktu, "
             "nie zamknięcie bramki; formalne zatwierdzenie wykonasz w grafie."
         ),
         style="PanelMuted.TLabel",
@@ -1476,7 +1534,7 @@ def _build_train_tab(self):
     self.campaign_training_result_entry.bind("<FocusIn>", _show_campaign_result_start, add="+")
     self.btn_use_campaign_training_result = ttk.Button(
         result_pick_row,
-        text="Wybierz ten model jako wynik T06",
+        text=f"Wybierz ten model jako wynik {finish_gate_id}",
         command=self._use_campaign_training_result_choice,
         width=34,
     )
@@ -1491,8 +1549,18 @@ def _build_train_tab(self):
     )
     self.campaign_training_result_detail_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 9))
 
-    ttk.Label(
+    history_area = tk.Frame(
         hist_top,
+        bg=palette.get("panel", "#252526"),
+        bd=0,
+        highlightthickness=0,
+    )
+    history_area.pack(fill=tk.BOTH, expand=True)
+    history_area.grid_columnconfigure(0, weight=1)
+    history_area.grid_rowconfigure(1, weight=1)
+
+    ttk.Label(
+        history_area,
         text=(
             "Wybierz trening z listy, aby zobaczyć konfigurację i metryki."
         ),
@@ -1500,12 +1568,12 @@ def _build_train_tab(self):
         anchor=tk.W,
         justify=tk.LEFT,
         wraplength=760,
-    ).pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-    hist_tree_shell = ttk.LabelFrame(hist_top, text=" Historia treningów ", padding=6)
-    hist_tree_shell.pack(fill=tk.BOTH, expand=True)
+    hist_tree_shell = ttk.LabelFrame(history_area, text=" Historia treningów ", padding=6)
+    hist_tree_shell.grid(row=1, column=0, sticky="nsew")
     columns = ("Tor", "Start", "Run", "Status", "Epoki", "Best mAP50-95", "Czas")
-    self.tree = ttk.Treeview(hist_tree_shell, columns=columns, show="headings", height=10, selectmode="extended")
+    self.tree = ttk.Treeview(hist_tree_shell, columns=columns, show="headings", height=5, selectmode="extended")
     for c in columns:
         self.tree.heading(c, text=c)
     self.tree.column("Tor", width=84, stretch=False, anchor=tk.CENTER)
@@ -1539,12 +1607,12 @@ def _build_train_tab(self):
     self.history_context_menu.add_command(label="Usun", command=self._delete_selected)
 
     hist_actions = tk.Frame(
-        hist_top,
+        history_area,
         bg=palette.get("panel", "#252526"),
         bd=0,
         highlightthickness=0,
     )
-    hist_actions.pack(fill=tk.X, pady=(10, 0))
+    hist_actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     tk.Label(
         hist_actions,
         text="Zaznacz jeden run albo kilka runów z Ctrl/Shift, a potem wybierz akcję.",
@@ -1565,6 +1633,8 @@ def _build_train_tab(self):
         highlightthickness=0,
     )
     hist_buttons_row.pack(fill=tk.X, padx=(2, 0))
+    hist_buttons_row.grid_columnconfigure(0, weight=1, uniform="history_actions")
+    hist_buttons_row.grid_columnconfigure(1, weight=1, uniform="history_actions")
 
     def _history_action_button(text: str, command):
         base_bg = palette.get("panel_alt", "#2d2d30")
@@ -1620,11 +1690,11 @@ def _build_train_tab(self):
     _history_action_button(
         "Szczegóły runu",
         self._open_selected_run_details,
-    ).pack(side=tk.LEFT, padx=(0, 10), pady=(0, 2))
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 2))
     _history_action_button(
         "Porównaj wybrane",
         self._open_selected_runs_compare,
-    ).pack(side=tk.LEFT, pady=(0, 2))
+    ).grid(row=0, column=1, sticky="ew", pady=(0, 2))
 
     self._build_validation_panel_v2(self.val_tab)
     self._build_ranking_panel_v2(self.ranking_tab)

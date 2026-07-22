@@ -163,7 +163,44 @@ def main() -> None:
         image_count=12,
         resource_snapshots={"images": _snapshot("images", counter=12)},
     )
-    _require(is_transition_ready(merged_spec, image_path_ctx), "T01 should be ready with images and an explicit work-path choice")
+    _require(is_transition_ready(merged_spec, image_path_ctx), "T01 plate path should be ready with images and an explicit work-path choice")
+
+    plate_path_without_images_ctx = CampaignTransitionEvalContext(
+        selected_path="plate_training",
+        explicit_selected_path="plate_training",
+        image_count=0,
+        plate_material_count=20,
+        material_ready=True,
+        resource_snapshots={"plate_run": _snapshot("plate_run", counter=20, tone="success")},
+    )
+    _require(
+        not is_transition_ready(merged_spec, plate_path_without_images_ctx),
+        "T01 plate path must require a new image pool even when plate material exists",
+    )
+
+    char_image_path_ctx = CampaignTransitionEvalContext(
+        selected_path="char_from_images",
+        explicit_selected_path="char_from_images",
+        image_count=12,
+        resource_snapshots={"images": _snapshot("images", counter=12)},
+    )
+    _require(
+        is_transition_ready(merged_spec, char_image_path_ctx),
+        "T01 char path should be ready with images for preparing plate annotations",
+    )
+
+    char_existing_plate_ctx = CampaignTransitionEvalContext(
+        selected_path="char_from_images",
+        explicit_selected_path="char_from_images",
+        image_count=0,
+        plate_material_count=20,
+        material_ready=True,
+        resource_snapshots={"plate_run": _snapshot("plate_run", counter=20, tone="success")},
+    )
+    _require(
+        is_transition_ready(merged_spec, char_existing_plate_ctx),
+        "T01 char path should be ready with existing plate material even when images are exhausted",
+    )
 
     t03_specs = get_transition_specs_for_edge("e1_to_e3")
     _require(len(t03_specs) == 1 and t03_specs[0].badge_id == "T03", "E1->E3 must resolve to T03")

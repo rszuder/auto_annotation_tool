@@ -14,9 +14,9 @@ from .campaign_transition_specs import CampaignTransitionSpec
 
 TRANSITION_SUMMARY_OVERRIDES = {
     "e1_to_e2_prepare_plate_annotations": (
-        "Wspólna bramka wejścia do E2/Z2. Wybierz ją, gdy obrazy z zasobów wymagają "
-        "przygotowania albo uzupełnienia anotacji tablic. W pracy bramki zdecydujesz, "
-        "czy powstające AT mają zasilić model tablic, czy tor znaków."
+        "Wspólna bramka wejścia do E2/Z2. W torze tablic potrzebuje nowej puli obrazów, "
+        "a w torze znaków może pracować także na istniejącym źródle tablic, jeśli obrazy "
+        "zostały już wykorzystane, ale materiał tablic nadal pozwala budować anotacje znaków."
     ),
     "e1_to_e3_char_from_ready_plates": (
         "Skrót dla sytuacji, w której masz już zgodne i zatwierdzone anotacje "

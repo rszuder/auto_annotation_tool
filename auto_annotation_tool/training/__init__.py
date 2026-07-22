@@ -13,6 +13,7 @@ from .dataset_augmentation import (
     get_albumentations_status,
     install_albumentations,
     is_albumentations_available,
+    ensure_yolo_dataset_yaml_points_to_root,
     preview_augmentation_image,
     update_yolo_dataset_class_names,
 )
@@ -29,6 +30,7 @@ __all__ = [
     'get_albumentations_status',
     'install_albumentations',
     'is_albumentations_available',
+    'ensure_yolo_dataset_yaml_points_to_root',
     'preview_augmentation_image',
     'update_yolo_dataset_class_names',
     'YOLOPoseTrainer',

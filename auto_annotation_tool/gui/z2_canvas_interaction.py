@@ -1228,7 +1228,26 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
         self._update_preview_edit_status("Nie udało się ustalić bieżącego zdjęcia.")
         return "break"
 
-    currently_approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+    filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
+    approved_lookup = {
+        str(name or "").strip().lower()
+        for name in set(getattr(self, "_preview_approved_filenames", set()) or set())
+        if str(name or "").strip()
+    }
+    if not self._is_free_mode_session_context():
+        approved_lookup.update(
+            str(name or "").strip().lower()
+            for name in set(getattr(self, "_campaign_pending_approved_filenames", set()) or set())
+            if str(name or "").strip()
+        )
+    currently_approved = bool(
+        filename_key
+        and (
+            bool(getattr(ann, "_approved_for_training", False))
+            or filename_key in approved_lookup
+        )
+        and self._preview_annotation_can_be_approved_for_export(ann)
+    )
     next_approved = not currently_approved
     if next_approved and not self._preview_annotation_can_be_approved_for_export(ann):
         self._update_preview_edit_status(
@@ -1832,6 +1851,37 @@ def _set_preview_fullscreen(self, active: bool):
             self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
         except Exception:
             pass
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            try:
+                self._refresh_preview_list_row_for_actual_index(
+                    getattr(self, "current_preview_index", None),
+                    refresh_summary=False,
+                    lightweight=True,
+                )
+            except Exception:
+                pass
+            try:
+                self._refresh_preview_list_summary(lightweight=True)
+            except Exception:
+                pass
+            pending_counter_refresh = bool(
+                getattr(self, "_preview_campaign_counter_refresh_pending_after_fullscreen", False)
+            )
+            pending_char_refresh = bool(
+                getattr(self, "_campaign_char_effective_source_refresh_pending_after_fullscreen", False)
+            )
+            self._preview_campaign_counter_refresh_pending_after_fullscreen = False
+            self._campaign_char_effective_source_refresh_pending_after_fullscreen = False
+            if pending_counter_refresh:
+                try:
+                    self._refresh_step2_action_states()
+                except Exception:
+                    pass
+            if pending_char_refresh:
+                try:
+                    self._schedule_campaign_char_effective_source_refresh(delay_ms=350)
+                except Exception:
+                    pass
         try:
             setattr(self, "_preview_controls_legend_current_width", 0.0)
             setattr(self, "_preview_controls_legend_current_height", 0.0)
@@ -1878,6 +1928,11 @@ def _toggle_preview_draw_mode(self):
         self._preview_drag_state = None
         self._preview_draw_mode = True
         self._preview_draw_points = []
+        try:
+            if getattr(self, "_preview_autosave_after_id", None) and getattr(self, "_preview_dirty_images", None):
+                self._defer_preview_autosave_for_navigation(delay_ms=12000)
+        except Exception:
+            pass
 
     self._refresh_preview_canvas(refresh_chrome=False)
     self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
@@ -1930,9 +1985,11 @@ def _toggle_preview_delete_mode(self):
         if hovered_idx is None:
             self._preview_delete_mode = False
             self._preview_delete_candidate_idx = None
-            self._refresh_preview_canvas()
+            self._refresh_preview_canvas_light()
             self._update_preview_edit_status(
-                "Najedz kursorem na wnetrze polygonu i nacisnij S, aby od razu uzbroic usuwanie tej tablicy."
+                "Najedz kursorem na wnetrze polygonu i nacisnij S, aby od razu uzbroic usuwanie tej tablicy.",
+                refresh_toolbar=False,
+                refresh_debug=False,
             )
             self._push_preview_debug_event("delete-mode", "off no-hover-target")
             try:
@@ -1945,9 +2002,9 @@ def _toggle_preview_delete_mode(self):
         self._preview_delete_candidate_idx = int(hovered_idx)
         self._set_selected_plate_index_for_ann(ann, int(hovered_idx))
 
-    self._refresh_preview_canvas()
-    self._update_preview_edit_status()
-    self._update_preview_toolbar_state()
+    self._refresh_preview_canvas_light()
+    self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
+    self._update_preview_toolbar_state(refresh_summary=False)
     if self._preview_delete_mode and self._preview_delete_candidate_idx is not None:
         self._push_preview_debug_event("delete-mode", f"on p{int(self._preview_delete_candidate_idx) + 1}")
     else:
@@ -1977,11 +2034,7 @@ def _set_preview_corner_drag_modifier(self, active: bool):
     if next_state:
         self._preview_last_modifier_press_at = time.monotonic()
         try:
-            if (
-                bool(getattr(self, "_preview_super_correction_active", False))
-                and getattr(self, "_preview_autosave_after_id", None)
-                and getattr(self, "_preview_dirty_images", None)
-            ):
+            if getattr(self, "_preview_autosave_after_id", None) and getattr(self, "_preview_dirty_images", None):
                 self._defer_preview_autosave_for_navigation(delay_ms=12000)
         except Exception:
             pass
@@ -2044,7 +2097,7 @@ def _set_preview_corner_drag_modifier(self, active: bool):
             self._invalidate_preview_runtime_caches()
         except Exception:
             pass
-        self._schedule_preview_autosave(delay_ms=3500)
+        self._schedule_preview_autosave(delay_ms=6500)
         self._refresh_preview_canvas_interactive(delay_ms=140)
         self._update_preview_edit_status(refresh_toolbar=False, refresh_debug=False)
         needs_canvas_refresh = False

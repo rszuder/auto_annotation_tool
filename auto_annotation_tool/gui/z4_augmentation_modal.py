@@ -1525,8 +1525,11 @@ class Step4AugmentationModal:
 
     def _schedule_preview_refresh(self, delay_ms: int = 180):
         if bool(getattr(self, "_preview_refresh_suspended", False)):
-            self._preview_refresh_dirty = True
-            return
+            if self._preview_live_edit_active():
+                self._preview_refresh_dirty = True
+                return
+            self._preview_refresh_suspended = False
+            self._preview_refresh_dirty = False
         if self._preview_after_id is not None:
             try:
                 self.window.after_cancel(self._preview_after_id)
@@ -1537,6 +1540,12 @@ class Step4AugmentationModal:
             self._preview_after_id = self.window.after(max(40, int(delay_ms)), self._run_scheduled_preview_refresh)
         except Exception:
             self._preview_after_id = None
+
+    def _preview_live_edit_active(self) -> bool:
+        return bool(
+            getattr(self, "_canvas_slider_drag", None) is not None
+            or getattr(self, "_headlight_drag", None) is not None
+        )
 
     def _run_scheduled_preview_refresh(self):
         self._preview_after_id = None
@@ -1551,6 +1560,22 @@ class Step4AugmentationModal:
         self._preview_refresh_suspended = False
         self._preview_refresh_dirty = False
         self._schedule_preview_refresh(delay_ms=delay_ms)
+
+    def _grab_augmented_canvas_for_live_edit(self):
+        try:
+            canvas = getattr(self, "augmented_canvas", None)
+            if canvas is not None:
+                canvas.grab_set()
+        except Exception:
+            pass
+
+    def _release_augmented_canvas_live_grab(self):
+        try:
+            canvas = getattr(self, "augmented_canvas", None)
+            if canvas is not None:
+                canvas.grab_release()
+        except Exception:
+            pass
 
     def _refresh_dependency_status(self):
         status = get_albumentations_status()
@@ -3629,6 +3654,7 @@ class Step4AugmentationModal:
         if kind == "slider":
             self._begin_canvas_live_edit()
             self._canvas_slider_drag = region
+            self._grab_augmented_canvas_for_live_edit()
             self._set_canvas_slider_value(region, getattr(event, "x", 0))
             self._draw_vector_overlay()
             return True
@@ -3636,6 +3662,7 @@ class Step4AugmentationModal:
             self._begin_canvas_live_edit()
             region["handle"] = None
             self._canvas_slider_drag = region
+            self._grab_augmented_canvas_for_live_edit()
             self._set_canvas_range_slider_value(region, getattr(event, "x", 0))
             self._draw_vector_overlay()
             return True
@@ -3860,6 +3887,7 @@ class Step4AugmentationModal:
             else:
                 self._set_canvas_slider_value(self._canvas_slider_drag, getattr(event, "x", 0))
             self._canvas_slider_drag = None
+            self._release_augmented_canvas_live_grab()
             self._end_canvas_live_edit(delay_ms=40)
             self._draw_vector_overlay()
             return "break"
@@ -3975,6 +4003,11 @@ class Step4AugmentationModal:
         )
 
     def _accept(self):
+        self._release_augmented_canvas_live_grab()
+        self._canvas_slider_drag = None
+        self._headlight_drag = None
+        self._preview_refresh_suspended = False
+        self._preview_refresh_dirty = False
         self._cancel_pending_preview()
         profile = self._profile_from_vars()
         # Dataset production values live in PZ1; this modal only stores effect settings.
@@ -3990,6 +4023,11 @@ class Step4AugmentationModal:
         self.window.destroy()
 
     def _cancel(self):
+        self._release_augmented_canvas_live_grab()
+        self._canvas_slider_drag = None
+        self._headlight_drag = None
+        self._preview_refresh_suspended = False
+        self._preview_refresh_dirty = False
         self._cancel_pending_preview()
         self.result = None
         self.window.destroy()

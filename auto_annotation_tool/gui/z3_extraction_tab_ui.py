@@ -2373,7 +2373,31 @@ def run_extraction(host) -> None:
                         self._campaign_step3_hold_pz2_after_reextract = False
                     except Exception:
                         pass
-                    self.frame.after(0, lambda: self.go_to_substep_2(force=True))
+                    def _commit_preview_and_open_pz2(path=run_dir):
+                        preview_dir_raw = str(path or "").strip()
+                        if preview_dir_raw:
+                            try:
+                                if str(self.preview_dir_var.get() or "").strip() != preview_dir_raw:
+                                    self.preview_dir_var.set(preview_dir_raw)
+                            except Exception:
+                                pass
+                            try:
+                                CAMPAIGN.set_step3_preview_dir(preview_dir_raw)
+                            except Exception:
+                                pass
+                            try:
+                                sync_registry = getattr(self, "_sync_campaign_step3_preview_artifact_registry", None)
+                                if callable(sync_registry):
+                                    sync_registry(preview_dir_raw)
+                            except Exception:
+                                pass
+                            try:
+                                self._force_save_all()
+                            except Exception:
+                                pass
+                        self.go_to_substep_2(force=True)
+
+                    self.frame.after(0, _commit_preview_and_open_pz2)
                 else:
                     self.frame.after(0, self.unlock_detection_subtab)
                 if generated_count > 0 and not campaign_below_minimum and not campaign_step3_active:

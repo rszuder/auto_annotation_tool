@@ -301,6 +301,12 @@ def _import_external_annotation_run_to_workspace(
                 else str(source_manifest.get("input_dir") or "").strip()
             )
         )
+        input_scope_count = len(allowed_names) if allowed_names else len(annotations)
+        input_scope_filenames = sorted(
+            str(name or "").strip().lower()
+            for name in set(allowed_names or [])
+            if str(name or "").strip()
+        )
         imported_manifest = {
             "input_dir": manifest_input_dir,
             "run_dir": str(imported_run_dir.resolve()),
@@ -318,6 +324,12 @@ def _import_external_annotation_run_to_workspace(
             "result_total_images": len(annotations),
             "result_successful_images": successful_images,
             "result_total_plates": total_plates,
+            "input_scope_count": int(input_scope_count),
+            "selected_count": int(input_scope_count),
+            "source_plan_total_count": int(input_scope_count),
+            "source_manifest_count": int(input_scope_count),
+            "input_scope_filenames": input_scope_filenames,
+            "imported_annotation_images": len(annotations),
             "resume_preview_index": -1,
             "resume_preview_filename": "",
             "resume_preview_saved_at": "",

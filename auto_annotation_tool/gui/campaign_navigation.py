@@ -227,7 +227,35 @@ def _step_goto_auto_annotation(
                 pass
 
     tab_ann = self.app.tabs.get("annotation")
-    if not tab_ann:
+    if tab_ann is None or not callable(getattr(tab_ann, "open_campaign_step2_entry", None)):
+        try:
+            loader = getattr(self.app, "_ensure_tab_loaded", None)
+            if callable(loader):
+                tab_ann = loader("annotation", select=False)
+        except Exception as exc:
+            logger.error(f"Nie udało się dociągnąć zakładki Z2 przed wejściem z grafu: {exc}")
+            tab_ann = None
+    if tab_ann is None or not callable(getattr(tab_ann, "open_campaign_step2_entry", None)):
+        if bool(getattr(self.app, "_lazy_tab_load_in_progress", False)):
+            try:
+                self.frame.after(
+                    250,
+                    lambda: _step_goto_auto_annotation(
+                        self,
+                        force_annotation_tab=force_annotation_tab,
+                        entry_strategy=entry_strategy,
+                        open_existing_run=open_existing_run,
+                        preferred_source_context=preferred_source_context,
+                    ),
+                )
+                self.app.update_status("Kończę ładowanie Z2 i ponowię wejście do pracy bramki.", "info")
+            except Exception:
+                pass
+            return
+        try:
+            self.app.update_status("Nie udało się przygotować karty Z2 dla pracy tej bramki.", "warning")
+        except Exception:
+            pass
         return
 
     defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")

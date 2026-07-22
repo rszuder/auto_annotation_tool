@@ -823,7 +823,7 @@ def build_detection_tab(
         "label": assistant_label,
         "status": assistant_status,
     }
-    layout_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+    layout_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="hand2")
     layout_icon = tk.Label(
         layout_row,
         text="RZ",
@@ -833,7 +833,7 @@ def build_detection_tab(
         font=("Segoe UI", 8, "bold"),
         bd=0,
         highlightthickness=0,
-        cursor="arrow",
+        cursor="hand2",
     )
     layout_label = tk.Label(
         layout_row,
@@ -843,7 +843,7 @@ def build_detection_tab(
         font=("Segoe UI", 8, "bold"),
         bd=0,
         highlightthickness=0,
-        cursor="arrow",
+        cursor="hand2",
     )
     layout_status = tk.Label(
         layout_row,
@@ -855,7 +855,7 @@ def build_detection_tab(
         highlightthickness=0,
         padx=5,
         pady=1,
-        cursor="arrow",
+        cursor="hand2",
     )
     layout_icon.pack(side=tk.LEFT, padx=(4, 5), pady=4)
     layout_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
@@ -1123,6 +1123,8 @@ def build_detection_tab(
         widget.bind("<Button-1>", lambda _event: self._toggle_preview_overlay_dock_tool("legend"), add="+")
     for widget in (assistant_row, assistant_icon, assistant_label, assistant_status):
         widget.bind("<Button-1>", lambda _event: self._toggle_preview_overlay_dock_tool("assistant"), add="+")
+    for widget in (layout_row, layout_icon, layout_label, layout_status):
+        widget.bind("<Button-1>", lambda event: self._cycle_preview_plate_layout_override(event), add="+")
     self.preview_overlay_dock.place_forget()
     self.frame.after_idle(
         lambda: (
@@ -1594,7 +1596,7 @@ def build_detection_tab(
 
     self.det_yolo_model_browse_btn = ttk.Button(
         self.yolo_model_row,
-        text="Wybierz model YOLO",
+        text="Wybierz model detekcji",
         command=self._pick_yolo_model,
         style="WorkflowCard.TButton"
     )

@@ -417,6 +417,12 @@ def _current_iteration_step4_training_record() -> dict:
     if current_iteration <= 0:
         return {}
     try:
+        synced = dict(CAMPAIGN.sync_step4_training_record_from_history(iteration_num=current_iteration) or {})
+        if synced:
+            return synced
+    except Exception:
+        pass
+    try:
         iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=current_iteration) or {})
         record = dict(iteration_state.get("step4_training") or {})
     except Exception:

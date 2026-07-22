@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
 
@@ -58,6 +59,25 @@ def _is_preview_two_row_layout_active(self, data=None) -> bool:
     if override == "single_row":
         return False
     return str(data.get("plate_layout", "") or "").strip().lower() == "two_row"
+
+
+def _is_preview_layout_separator_interactive(self, data=None, *, ignore_active_char: bool = False) -> bool:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if not self._is_preview_two_row_layout_active(source_data):
+        return False
+    if ignore_active_char:
+        return True
+    if (
+        getattr(self, "_preview_char_drag_state", None) is not None
+        or getattr(self, "_preview_char_add_state", None) is not None
+        or bool(getattr(self, "_preview_char_add_click_armed", False))
+        or bool(getattr(self, "_preview_char_label_mode", False))
+        or getattr(self, "_preview_char_label_active_index", None) is not None
+    ):
+        return False
+    if bool(getattr(self, "_preview_char_edit_mode", False)) and getattr(self, "_preview_char_selected_index", None) is not None:
+        return False
+    return True
 
 def _should_preview_use_two_row_layers(self, data=None) -> bool:
     if not isinstance(data, dict):
@@ -248,6 +268,8 @@ def _constrain_preview_char_bbox_to_layout_separator(self, bbox, data=None, *, r
 def _find_preview_layout_separator_handle_hit(self, canvas_x: float, canvas_y: float):
     canvas = getattr(self, "preview_canvas", None)
     if canvas is None:
+        return None
+    if not self._is_preview_layout_separator_interactive():
         return None
 
     try:
@@ -607,15 +629,12 @@ def _get_preview_plate_layout_dock_text(self, data) -> tuple[str, str]:
 def _get_preview_character_reading_position_label(self, rec, data=None) -> str:
     if not isinstance(rec, dict):
         return ""
-    layout = str((data or {}).get("plate_layout", "") or "").strip().lower() if isinstance(data, dict) else ""
     try:
         row = int(rec.get("reading_row", 0) or 0)
         col = int(rec.get("reading_col", 0) or 0)
     except Exception:
         return ""
     if row <= 0 or col <= 0:
-        return ""
-    if layout not in {"two_row", "two_row_candidate"} and row <= 1:
         return ""
     return f"{row}.{col}"
 
@@ -630,22 +649,125 @@ def _format_preview_layout_semantics(self, *, short: bool = False) -> str:
         "Małe indeksy przy boxach, np. 1.2, oznaczają kolejność czytania: rząd 1, znak 2."
     )
 
+def _apply_preview_plate_layout_override(self, override: str | None, *, source: str = "manual"):
+    data = self._get_preview_active_data(create=False)
+    if not isinstance(data, dict):
+        return "break"
+
+    next_override = str(override or "").strip().lower()
+    if next_override not in {"single_row", "two_row"}:
+        next_override = ""
+
+    try:
+        self._push_preview_history_snapshot()
+    except Exception:
+        pass
+
+    chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
+    if next_override:
+        data["plate_layout_override"] = next_override
+        if next_override == "single_row":
+            data.pop("layout_separator", None)
+        elif next_override == "two_row":
+            try:
+                self._ensure_preview_layout_separator(data, chars)
+            except Exception:
+                pass
+    else:
+        data.pop("plate_layout_override", None)
+
+    self._update_preview_plate_layout_metadata(data, chars)
+    ordered_chars = self._sort_character_records_by_x(chars, data=data)
+    ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
+    data["characters"] = ordered_chars
+    data["status"] = self._derive_preview_status_from_data(data, ordered_chars)
+
+    try:
+        self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        try:
+            self._schedule_preview_info_refresh(delay_ms=900)
+        except Exception:
+            pass
+    except Exception:
+        try:
+            self._schedule_preview_metadata_save(delay_ms=450)
+        except Exception:
+            pass
+
+    layout_text, tone = self._get_preview_plate_layout_dock_text(data)
+    if next_override == "single_row":
+        message = f"Wymuszono układ 1R. Status: {layout_text}."
+    elif next_override == "two_row":
+        message = f"Wymuszono układ 2R. Status: {layout_text}."
+    else:
+        message = f"Wrócono do automatycznej oceny układu. Status: {layout_text}."
+    self._refresh_preview_layout_override_ui_light(
+        message=message,
+        tone=tone if tone in {"success", "warning", "error", "info", "muted"} else "info",
+    )
+    return "break"
+
+
+def _open_preview_plate_layout_override_menu(self, event=None):
+    data = self._get_preview_active_data(create=False)
+    if not isinstance(data, dict):
+        return "break"
+
+    canvas = getattr(self, "preview_canvas", None)
+    if canvas is None:
+        return "break"
+
+    current = str(data.get("plate_layout_override", "") or "").strip().lower()
+
+    def _label(text: str, key: str) -> str:
+        return f"✓ {text}" if current == key else f"  {text}"
+
+    menu = tk.Menu(canvas, tearoff=0)
+    menu.add_command(
+        label=_label("Wymuś układ 1R", "single_row"),
+        command=lambda: _apply_preview_plate_layout_override(self, "single_row", source="menu"),
+    )
+    menu.add_command(
+        label=_label("Wymuś układ 2R", "two_row"),
+        command=lambda: _apply_preview_plate_layout_override(self, "two_row", source="menu"),
+    )
+    menu.add_separator()
+    menu.add_command(
+        label=_label("AUTO - zdejmij wymuszenie", ""),
+        command=lambda: _apply_preview_plate_layout_override(self, "", source="menu"),
+    )
+    self._preview_plate_layout_menu = menu
+    try:
+        x_root = int(getattr(event, "x_root", 0) or 0)
+        y_root = int(getattr(event, "y_root", 0) or 0)
+        if x_root <= 0 or y_root <= 0:
+            x_root = int(canvas.winfo_rootx() + 24)
+            y_root = int(canvas.winfo_rooty() + 24)
+        menu.tk_popup(x_root, y_root)
+    finally:
+        try:
+            menu.grab_release()
+        except Exception:
+            pass
+    return "break"
+
+
 def _cycle_preview_plate_layout_override(self, event=None):
     data = self._get_preview_active_data(create=False)
     if not isinstance(data, dict):
         return "break"
 
-    layout_text, _tone = self._get_preview_plate_layout_dock_text(data)
-    self._refresh_preview_layout_override_ui_light(
-        message=(
-            f"Status układu: {layout_text}. To informacja, nie przełącznik. "
-            "Ręczny układ powstaje przez pracę na belce rzędów i boxach znaków; "
-            "manualna decyzja ma pierwszeństwo przed automatem. "
-            f"{self._format_preview_layout_semantics(short=True)}"
-        ),
-        tone="info",
-    )
-    return "break"
+    if event is not None and getattr(event, "x_root", None) is not None:
+        return _open_preview_plate_layout_override_menu(self, event)
+
+    current_override = str(data.get("plate_layout_override", "") or "").strip().lower()
+    if current_override == "single_row":
+        next_override = "two_row"
+    elif current_override == "two_row":
+        next_override = "single_row"
+    else:
+        next_override = "single_row"
+    return _apply_preview_plate_layout_override(self, next_override, source="cycle")
 
 def _normalize_character_source_tag(self, raw_tag=None, method=None) -> str:
     tag = str(raw_tag or "").strip().lower().replace("-", "_")

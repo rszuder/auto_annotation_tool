@@ -379,7 +379,7 @@ def _build_training_failure_message(self, run) -> str:
                 "Co możesz zrobić:",
                 "1. Ustaw batch = 1.",
                 "2. Zmniejsz rozdzielczość wejściową do 384 albo nawet 256 dla YOLO Pose tablic na 4 GB VRAM.",
-                "3. Jeśli to nadal za dużo, użyj lżejszego modelu bazowego n/s zamiast m/l/x.",
+                "3. Jeśli to nadal za dużo, użyj lżejszego modelu startowego n/s zamiast m/l/x.",
                 "4. Zamknij inne procesy używające GPU i spróbuj ponownie.",
             ]
         )

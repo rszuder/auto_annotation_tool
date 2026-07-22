@@ -260,28 +260,58 @@ def character_record_collides_with_manual(host, rec, manual_records) -> bool:
     if not bbox:
         return False
 
-    cx = (float(bbox[0]) + float(bbox[2])) / 2.0
-    cy = (float(bbox[1]) + float(bbox[3])) / 2.0
-    width = max(1.0, float(bbox[2]) - float(bbox[0]))
-    height = max(1.0, float(bbox[3]) - float(bbox[1]))
+    try:
+        x1, y1, x2, y2 = (float(value) for value in bbox[:4])
+    except Exception:
+        return False
+
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    area = width * height
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
 
     for manual_rec in list(manual_records or []):
         manual_bbox = host._char_record_bbox(manual_rec)
         if not manual_bbox:
             continue
+        try:
+            mx1, my1, mx2, my2 = (float(value) for value in manual_bbox[:4])
+        except Exception:
+            continue
 
-        iou = character_record_overlap_score(host, rec, manual_rec)
-        if iou >= 0.15:
+        inter_x1 = max(x1, mx1)
+        inter_y1 = max(y1, my1)
+        inter_x2 = min(x2, mx2)
+        inter_y2 = min(y2, my2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        if inter_area <= 0.0:
+            continue
+
+        mw = max(1.0, mx2 - mx1)
+        mh = max(1.0, my2 - my1)
+        manual_area = mw * mh
+        union_area = max(1.0, area + manual_area - inter_area)
+        iou = inter_area / union_area
+        min_coverage = inter_area / max(1.0, min(area, manual_area))
+        center_dx = abs(cx - ((mx1 + mx2) / 2.0)) / max(width, mw)
+        center_dy = abs(cy - ((my1 + my2) / 2.0)) / max(height, mh)
+
+        try:
+            auto_symbol = host._sanitize_preview_char_symbol((rec or {}).get("character", ""))
+            manual_symbol = host._sanitize_preview_char_symbol((manual_rec or {}).get("character", ""))
+        except Exception:
+            auto_symbol = manual_symbol = ""
+        if auto_symbol and manual_symbol and auto_symbol != manual_symbol:
+            continue
+
+        if iou >= 0.55:
             return True
-
-        mx = (float(manual_bbox[0]) + float(manual_bbox[2])) / 2.0
-        my = (float(manual_bbox[1]) + float(manual_bbox[3])) / 2.0
-        mw = max(1.0, float(manual_bbox[2]) - float(manual_bbox[0]))
-        mh = max(1.0, float(manual_bbox[3]) - float(manual_bbox[1]))
-
-        center_dx = abs(cx - mx)
-        center_dy = abs(cy - my)
-        if center_dx <= max(width, mw) * 0.45 and center_dy <= max(height, mh) * 0.45:
+        if min_coverage >= 0.82 and center_dx <= 0.22 and center_dy <= 0.35:
+            return True
+        if auto_symbol and manual_symbol and min_coverage >= 0.68 and center_dx <= 0.30 and center_dy <= 0.42:
             return True
 
     return False

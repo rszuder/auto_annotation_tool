@@ -519,3 +519,60 @@ Decyzja na teraz:
 
 - traktujemy refiner jako osobny moduł, nie jako dalsze rozbudowywanie prostego matchera YOLO-box-backend,
 - bieżący matcher może pozostać lekkim zabezpieczeniem, ale docelowa precyzyjna korekta powinna należeć do refinera.
+
+## Promocja I Import/Eksport AZ
+
+Temat do wdrożenia jako element stabilizacji toru znaków: `AZ`, czyli anotacje znaków na wyodrębnionych tablicach, powinny stać się pełnoprawnym artefaktem projektu podobnie jak `AT`, `MT` i `MZ`.
+
+Problem:
+
+- obecnie użytkownik może wykonać realną pracę w Z3/PZ2, ale kolejna iteracja nie zawsze traktuje te anotacje jako zasób projektu,
+- `AZ` jest zależne od konkretnego wyodrębnienia tablic, więc nie może być przenoszone tak swobodnie jak model,
+- zewnętrzny import samych boxów znaków jest ryzykowny, jeśli nie wiemy, z jakiego `AT` i jakiego manifestu cropów powstał.
+
+Decyzja architektoniczna:
+
+- `AZ` nie walidujemy bezpośrednio względem surowych obrazów,
+- `AZ` walidujemy względem manifestu wyodrębnionych tablic,
+- zewnętrzny import `AZ` musi być hermetycznym pakietem powiązanym z tablicami, a nie luźnym folderem boxów,
+- ryzykowne dopasowania odrzucamy zamiast wystawiać użytkownikowi skomplikowane opcje ratunkowe.
+
+Docelowy kontrakt pakietu:
+
+- `AZ`,
+- kotwica `AT`,
+- manifest wyodrębnienia tablic,
+- metadane projektu i iteracji,
+- wersja prostowania/cropowania,
+- liczniki tablic, znaków, manuali, auto i perfect,
+- daty utworzenia oraz źródło pakietu.
+
+Przepływ wewnętrzny:
+
+- wykrywać istniejące `AZ` w projekcie,
+- przypisywać `AZ` do iteracji i źródłowego manifestu tablic,
+- promować zgodne `AZ` do kolejnej iteracji jako kandydat zasobu,
+- pokazywać w zasobach bramek prosty status: `jest`, `brak`, `częściowe`, `niezgodne`,
+- nie nadpisywać manuali/perfect bez jawnej decyzji użytkownika.
+
+Przepływ importu zewnętrznego:
+
+- użytkownik wskazuje pakiet anotacji znaków,
+- program sam sprawdza kompletność i zgodność pakietu,
+- UI pokazuje prostą tabelę: pakiet, pasuje do tablic, znaki, manual, auto, perfect, pominięte, status,
+- import przyjmuje tylko część bezpiecznie dopasowaną,
+- import trafia domyślnie do kontroli, nie bezpośrednio jako wynik zamknięty/perfect.
+
+Szacunek czasowy:
+
+- promocja wewnętrzna `AZ`: 1-2 dni,
+- manifest/pakiet `AZ` jako kontrakt: około 1 dzień,
+- eksport pakietu `AZ`: 0.5-1 dnia,
+- import pakietu `AZ`: 1.5-2 dni,
+- spięcie z zasobami bramek, historią projektu i copy: około 1 dzień.
+
+Kolejność wdrażania:
+
+- najpierw promocja wewnętrzna `AZ`,
+- potem format hermetycznego pakietu,
+- dopiero na końcu import/eksport zewnętrzny i UI wyboru pakietu.

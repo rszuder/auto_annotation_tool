@@ -125,6 +125,63 @@ def _annotation_run_uses_scoped_input(manifest: dict | None) -> bool:
         return input_dir.rstrip("\\/").lower() != source_dir.rstrip("\\/").lower()
 
 
+def _annotation_run_input_scope_filenames(manifest: dict | None) -> set[str]:
+    """Return the intended input-scope filenames when the campaign knows them."""
+    names: set[str] = set()
+    expected_count = 0
+    if isinstance(manifest, dict):
+        for count_key in (
+            "input_scope_count",
+            "source_plan_total_count",
+            "selected_count",
+            "image_count",
+        ):
+            try:
+                expected_count = int(manifest.get(count_key, 0) or 0)
+            except Exception:
+                expected_count = 0
+            if expected_count > 0:
+                break
+        for key in (
+            "input_scope_filenames",
+            "source_manifest_filenames",
+            "selected_filenames",
+        ):
+            raw_items = manifest.get(key)
+            if not isinstance(raw_items, (list, tuple, set)):
+                continue
+            for item in raw_items:
+                safe_name = str(item or "").strip()
+                if safe_name:
+                    names.add(Path(safe_name).name.strip().lower())
+            if names:
+                return {name for name in names if name}
+
+    try:
+        ingest_manifest = CAMPAIGN.load_ingest_manifest() or {}
+    except Exception:
+        ingest_manifest = {}
+    try:
+        ingest_count = int((ingest_manifest or {}).get("selected_count", 0) or 0)
+    except Exception:
+        ingest_count = 0
+    if expected_count > 0 and ingest_count > 0 and ingest_count != expected_count:
+        return set()
+    for item in list((ingest_manifest or {}).get("selected_images") or []):
+        if not isinstance(item, dict):
+            continue
+        safe_name = str(item.get("name", "") or "").strip()
+        if not safe_name:
+            for key in ("target_path", "source_path", "iteration_target_path"):
+                candidate = str(item.get(key, "") or "").strip()
+                if candidate:
+                    safe_name = Path(candidate).name.strip()
+                    break
+        if safe_name:
+            names.add(Path(safe_name).name.strip().lower())
+    return {name for name in names if name}
+
+
 def _sync_t06_approved_run_before_restore_filter(self, run_dir: Path | None, approved_filenames: set[str]) -> None:
     if self._is_free_mode_session_context() or not approved_filenames:
         return
@@ -521,10 +578,11 @@ def _restore_preview_from_annotation_run(
 
         expected_run_image_count = 0
         for count_key in (
-            "result_total_images",
             "input_scope_count",
+            "source_plan_total_count",
             "selected_count",
             "image_count",
+            "result_total_images",
         ):
             try:
                 expected_run_image_count = int(manifest.get(count_key, 0) or 0)
@@ -546,11 +604,13 @@ def _restore_preview_from_annotation_run(
             )
             if missing_source_dir is None:
                 missing_source_dir = image_dir
+            scope_filenames = _annotation_run_input_scope_filenames(manifest)
             try:
                 missing_bundle = self._build_missing_preview_annotations_bundle(
                     missing_source_dir,
                     existing_annotations=annotations,
                     extra_hidden_filenames=hidden_char_effective_filenames,
+                    scope_filenames=scope_filenames,
                 )
             except Exception:
                 missing_bundle = {}
@@ -1772,10 +1832,11 @@ def _restore_preview_from_session_run(self):
         successful_run_image_count = 0
     expected_run_image_count = 0
     for count_key in (
-        "result_total_images",
         "input_scope_count",
+        "source_plan_total_count",
         "selected_count",
         "image_count",
+        "result_total_images",
     ):
         try:
             expected_run_image_count = int(manifest.get(count_key, 0) or 0)
@@ -1820,11 +1881,13 @@ def _restore_preview_from_session_run(self):
         )
         if missing_source_dir is None:
             missing_source_dir = image_dir
+        scope_filenames = _annotation_run_input_scope_filenames(manifest)
         try:
             missing_bundle = self._build_missing_preview_annotations_bundle(
                 missing_source_dir,
                 existing_annotations=annotations,
                 extra_hidden_filenames=hidden_char_effective_filenames,
+                scope_filenames=scope_filenames,
             )
         except Exception:
             missing_bundle = {}
@@ -2400,10 +2463,11 @@ def _prepare_annotation_run_restore_payload(
         successful_run_image_count = 0
     expected_run_image_count = 0
     for count_key in (
-        "result_total_images",
         "input_scope_count",
+        "source_plan_total_count",
         "selected_count",
         "image_count",
+        "result_total_images",
     ):
         try:
             expected_run_image_count = int(manifest.get(count_key, 0) or 0)
@@ -2450,11 +2514,13 @@ def _prepare_annotation_run_restore_payload(
             missing_source_dir = image_dir
         if callable(is_cancelled) and is_cancelled():
             return None
+        scope_filenames = _annotation_run_input_scope_filenames(manifest)
         try:
             missing_bundle = self._build_missing_preview_annotations_bundle(
                 missing_source_dir,
                 existing_annotations=annotations,
                 extra_hidden_filenames=hidden_char_effective_filenames,
+                scope_filenames=scope_filenames,
             )
         except Exception:
             missing_bundle = {}

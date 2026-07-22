@@ -249,7 +249,7 @@ class HelpTab:
                 "[Z3/PZ2] Przegląd znaków: OCR, YOLO, hybryda, ręczna poprawa boxów znaków, kompas skrótów i lista przypadków.",
                 "[Z3/PZ3] Dataset znaków i CVAT: review pack, import poprawek, gold pack, perfecty i budowa datasetu znaków.",
                 "[Z4/PZ1] Źródło treningu: wybór toru, wskazanie źródła i tworzenie wariantów datasetu lub splitu.",
-                "[Z4/PZ2] Trening i wyniki: wybór gotowego wariantu, model bazowy, parametry treningu, walidacja, historia i ranking.",
+                "[Z4/PZ2] Trening i wyniki: wybór gotowego wariantu, model startowy treningu, parametry, walidacja, historia i ranking.",
             ],
         )
 
@@ -514,7 +514,7 @@ class HelpTab:
                 "Review pack CVAT: zestaw eksportowany z Z3/PZ3 do ręcznej korekty poza aplikacją.",
                 "Dataset YOLO: folder images/labels z data.yaml, gotowy do Z4.",
                 "training_history.json: historia runów treningowych dla danego obszaru treningu.",
-                "Checkpoint .pt: wynik treningu albo model bazowy używany do dalszej pracy.",
+                "Checkpoint .pt: wynik treningu albo model startowy używany do dalszej pracy.",
             ],
         )
 

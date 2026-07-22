@@ -1695,6 +1695,230 @@ class CampaignManager:
         run = runs.get(run_key) if isinstance(runs, dict) else {}
         return dict(run) if isinstance(run, dict) else {}
 
+    def sync_step4_training_record_from_history(
+        self,
+        *,
+        iteration_num: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        """Reconcile the campaign Step 4 record with the authoritative training history.
+
+        The GUI may be closed from Z4 before returning to the graph. If the worker
+        already wrote terminal training results, the gate must show a model
+        candidate/failure, not a generic interrupted-work warning.
+        """
+
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {}
+        try:
+            iter_value = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1) or 1)
+        except Exception:
+            iter_value = 1
+
+        try:
+            iteration_state = self.get_iteration_state(iteration_num=iter_value, project_name=project_name)
+            record = dict(iteration_state.get("step4_training") or {})
+        except Exception:
+            record = {}
+        if not record:
+            try:
+                bundle = self.get_iteration_artifact_bundle(iteration_num=iter_value, project_name=project_name)
+                record = dict(bundle.get("step4_training") or {})
+            except Exception:
+                record = {}
+        run_id = str(record.get("run_id", "") or "").strip()
+        if not run_id:
+            return record
+
+        terminal_statuses = {
+            "completed",
+            "failed",
+            "paused",
+            "cancelled",
+        }
+
+        recoverable_statuses = {
+            "failed",
+            "paused",
+            "pending",
+            "running",
+            "cancelled",
+        }
+
+        def _step4_record_target(source: Dict[str, Any] | None = None) -> str:
+            payload = dict(source or {})
+            target = self._normalize_project_model_target(
+                payload.get("target") or record.get("target")
+            )
+            if target:
+                return target
+            try:
+                return self._normalize_project_model_target(
+                    self.state["projects"][project_name].get("iteration_target", "")
+                )
+            except Exception:
+                return ""
+
+        def _set_recoverable_step4_training_session(
+            status_value: str,
+            source: Dict[str, Any] | None = None,
+            *,
+            reason: str,
+        ) -> None:
+            try:
+                state = self.get_iteration_state(iteration_num=iter_value, project_name=project_name)
+                session = dict(state.get("step4_work_session") or {})
+                session_run = str(session.get("run_id", "") or "").strip()
+                session_area = str(session.get("work_area", "") or "").strip().lower()
+                session_substep = str(session.get("substep", "") or "").strip().lower()
+                session_state = str(session.get("state", "") or "").strip().lower()
+                is_step4_session = bool(
+                    session_area == "z4"
+                    and (
+                        session_run == run_id
+                        or session_substep in {"pz2", "train", "training"}
+                        or session_state in {"active", "started", "interrupted", "paused", "dirty"}
+                    )
+                )
+                if session and not is_step4_session:
+                    return
+                now = datetime.now().isoformat(timespec="seconds")
+                session.update(
+                    {
+                        "active": True,
+                        "state": "interrupted",
+                        "work_area": "z4",
+                        "substep": "train",
+                        "target": _step4_record_target(source),
+                        "iteration": iter_value,
+                        "run_id": run_id,
+                        "training_status": status_value,
+                        "reason": reason,
+                        "updated_at": now,
+                    }
+                )
+                session.setdefault("interrupted_at", now)
+                session.setdefault("working_gate_id", "T06")
+                self.upsert_iteration_state(
+                    iteration_num=iter_value,
+                    updates={"step4_work_session": session},
+                    project_name=project_name,
+                )
+            except Exception as exc:
+                logger.debug(f"Nie udalo sie oznaczyc przerwanej sesji Z4: {exc}")
+
+        def _close_terminal_step4_session(status_value: str) -> None:
+            try:
+                state = self.get_iteration_state(iteration_num=iter_value, project_name=project_name)
+                session = dict(state.get("step4_work_session") or {})
+                session_run = str(session.get("run_id", "") or "").strip()
+                session_area = str(session.get("work_area", "") or "").strip().lower()
+                session_substep = str(session.get("substep", "") or "").strip().lower()
+                session_state = str(session.get("state", "") or "").strip().lower()
+                should_close_session = bool(
+                    session_area == "z4"
+                    and session_state in {"active", "started", "interrupted", "paused", "dirty"}
+                    and (session_run == run_id or session_substep in {"pz2", "train", "training"})
+                )
+                if should_close_session:
+                    now = datetime.now().isoformat(timespec="seconds")
+                    session.update(
+                        {
+                            "active": False,
+                            "state": f"training_{status_value}",
+                            "closed_by": "training_history_reconcile",
+                            "closed_at": now,
+                            "updated_at": now,
+                        }
+                    )
+                    self.upsert_iteration_state(
+                        iteration_num=iter_value,
+                        updates={"step4_work_session": session},
+                        project_name=project_name,
+                    )
+            except Exception as exc:
+                logger.debug(f"Nie udało się domknąć osieroconej sesji Z4: {exc}")
+
+        record_status = str(record.get("status", "") or "").strip().lower()
+        if record_status in terminal_statuses:
+            if record_status != "completed":
+                _set_recoverable_step4_training_session(
+                    record_status,
+                    record,
+                    reason="training_terminal_status_after_restart",
+                )
+                return record
+            best_weights = str(record.get("best_weights", "") or "").strip()
+            if best_weights:
+                try:
+                    if Path(best_weights).exists():
+                        _close_terminal_step4_session(record_status)
+                        return record
+                except Exception:
+                    _close_terminal_step4_session(record_status)
+                    return record
+
+        try:
+            from .training import TrainingHistory, TrainingStatus
+
+            history = TrainingHistory(history_dir=self.get_project_root_dir(project_name) / "5_training_runs")
+            run = history.get_run(run_id)
+        except Exception as exc:
+            logger.debug(f"Nie udało się zsynchronizować historii treningu Z4: {exc}")
+            return record
+        if run is None:
+            return record
+
+        status_value = str(getattr(run, "status", "") or "").strip().lower()
+        payload = dict(record)
+        for key, value in {
+            "run_id": run_id,
+            "status": status_value,
+            "dataset_path": str(getattr(run, "dataset_path", "") or "").strip(),
+            "output_dir": str(getattr(run, "output_dir", "") or "").strip(),
+            "best_weights": str(getattr(run, "best_weights", "") or "").strip(),
+            "last_weights": str(getattr(run, "last_weights", "") or "").strip(),
+            "current_epoch": int(getattr(run, "current_epoch", 0) or 0),
+            "epochs": int(getattr(run, "epochs", 0) or 0),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }.items():
+            if key in {"best_weights"} and status_value != TrainingStatus.COMPLETED.value:
+                value = ""
+            payload[key] = value
+        payload.setdefault("iteration", iter_value)
+        payload.setdefault("trained_iteration", iter_value)
+
+        changed = payload != record
+        if changed:
+            try:
+                self.upsert_iteration_state(
+                    iteration_num=iter_value,
+                    updates={"step4_training": payload},
+                    project_name=project_name,
+                )
+            except Exception as exc:
+                logger.debug(f"Nie udało się zapisać zsynchronizowanego runu Z4 w iteracji: {exc}")
+            try:
+                self.upsert_iteration_artifact_bundle(
+                    iteration_num=iter_value,
+                    updates={"step4_training": payload},
+                    project_name=project_name,
+                )
+            except Exception as exc:
+                logger.debug(f"Nie udało się zapisać zsynchronizowanego runu Z4 w paczce artefaktów: {exc}")
+
+        if status_value == TrainingStatus.COMPLETED.value:
+            _close_terminal_step4_session(status_value)
+        elif status_value in recoverable_statuses:
+            _set_recoverable_step4_training_session(
+                status_value,
+                payload,
+                reason="training_requires_attention_after_history_sync",
+            )
+
+        return payload
+
     def _coerce_project_training_model_artifact(
         self,
         payload: Dict[str, Any] | None,
@@ -1780,6 +2004,18 @@ class CampaignManager:
         registry = self.load_artifact_registry(project_name)
         candidates: list[Dict[str, Any]] = []
 
+        def _candidate_allowed_before_iteration(candidate: Dict[str, Any]) -> bool:
+            if not before_value:
+                return True
+            for field in ("trained_iteration", "source_iteration", "iteration"):
+                try:
+                    value = int(candidate.get(field, 0) or 0)
+                except Exception:
+                    value = 0
+                if value > 0:
+                    return value < before_value
+            return True
+
         iteration_state = registry.get("iteration_state", {})
         if isinstance(iteration_state, dict):
             for key, entry in iteration_state.items():
@@ -1799,7 +2035,8 @@ class CampaignManager:
                     source="iteration_state",
                 )
                 if candidate:
-                    candidates.append(candidate)
+                    if _candidate_allowed_before_iteration(candidate):
+                        candidates.append(candidate)
 
         packages = registry.get("packages", {})
         if isinstance(packages, dict):
@@ -1835,7 +2072,8 @@ class CampaignManager:
                     source="artifact_package",
                 )
                 if candidate:
-                    candidates.append(candidate)
+                    if _candidate_allowed_before_iteration(candidate):
+                        candidates.append(candidate)
 
         if not candidates:
             return {}

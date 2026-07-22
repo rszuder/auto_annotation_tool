@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import time
 import tkinter as tk
 
 from ..config import logger
@@ -51,6 +53,37 @@ def _get_preview_reference_text_values(self, data: dict | None = None) -> list[s
             values.append(prepared)
     return values
 
+def _normalize_preview_expected_text_values(value) -> list[str]:
+    if value is None:
+        return []
+    source_values = value
+    if isinstance(value, str):
+        prepared = value.strip()
+        if not prepared:
+            return []
+        if prepared[:1] in ("[", "{"):
+            try:
+                decoded = json.loads(prepared)
+                source_values = decoded
+            except Exception:
+                source_values = prepared
+        else:
+            source_values = prepared
+    if isinstance(source_values, dict):
+        source_values = list(source_values.values())
+    elif not isinstance(source_values, (list, tuple, set)):
+        source_values = [source_values]
+
+    normalized = []
+    seen = set()
+    for item in source_values:
+        prepared = str(item or "").strip().upper()
+        if not prepared or prepared in seen:
+            continue
+        seen.add(prepared)
+        normalized.append(prepared)
+    return normalized
+
 def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
     if isinstance(source_data, dict):
@@ -58,6 +91,20 @@ def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
             prepared = str(source_data.get(field_name, "") or "").strip().upper()
             if prepared:
                 return [prepared]
+        for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
+            prepared_values = _normalize_preview_expected_text_values(source_data.get(field_name))
+            if prepared_values:
+                return prepared_values
+        attrs = source_data.get("plate_attributes")
+        if isinstance(attrs, dict):
+            for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
+                prepared = str(attrs.get(field_name, "") or "").strip().upper()
+                if prepared:
+                    return [prepared]
+            for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
+                prepared_values = _normalize_preview_expected_text_values(attrs.get(field_name))
+                if prepared_values:
+                    return prepared_values
         expected_source = str(source_data.get("source_expected_text_source") or "").strip().lower()
         if expected_source == "ambiguous_filename_tokens":
             return []
@@ -138,12 +185,22 @@ def _recalculate_preview_statuses_in_metadata(self, metadata: dict | None):
 
     return metadata
 
-def _persist_preview_metadata(self, *, success_message: str | None = None, refresh_list: bool = True):
+def _persist_preview_metadata(
+    self,
+    *,
+    success_message: str | None = None,
+    refresh_list: bool = True,
+    sync_access: bool = True,
+):
+    perf_start = time.perf_counter()
+    write_ms = refresh_ms = sync_ms = info_ms = 0.0
     meta_path = self._get_preview_metadata_path()
     if meta_path is None:
         raise RuntimeError("Brak aktywnego preview runu do zapisania.")
 
+    phase_start = time.perf_counter()
     self._atomic_write_json(meta_path, self.preview_metadata)
+    write_ms = (time.perf_counter() - phase_start) * 1000.0
     self._loaded_meta_path = meta_path
     try:
         self._loaded_meta_mtime = meta_path.stat().st_mtime
@@ -151,10 +208,39 @@ def _persist_preview_metadata(self, *, success_message: str | None = None, refre
         self._loaded_meta_mtime = None
 
     if refresh_list:
+        phase_start = time.perf_counter()
         self._refresh_listbox_rows_from_metadata()
-    self._sync_step3_access_from_preview_state(self.preview_metadata)
+        refresh_ms = (time.perf_counter() - phase_start) * 1000.0
+    if bool(sync_access):
+        phase_start = time.perf_counter()
+        self._sync_step3_access_from_preview_state(self.preview_metadata)
+        sync_ms = (time.perf_counter() - phase_start) * 1000.0
     if success_message:
+        phase_start = time.perf_counter()
         self._set_preview_box_info(success_message, "success")
+        info_ms = (time.perf_counter() - phase_start) * 1000.0
+    total_ms = (time.perf_counter() - perf_start) * 1000.0
+    if total_ms >= 120.0:
+        logger.info(
+            "[Z3/PZ2 PERF] persist_preview_metadata total=%.1fms refresh_list=%s sync_access=%s phases=[write=%.1fms, refresh=%.1fms, sync=%.1fms, info=%.1fms]",
+            total_ms,
+            bool(refresh_list),
+            bool(sync_access),
+            write_ms,
+            refresh_ms,
+            sync_ms,
+            info_ms,
+        )
+    try:
+        self._log_preview_edit_flow(
+            "metadata_saved",
+            refresh_list=int(bool(refresh_list)),
+            sync_access=int(bool(sync_access)),
+            write_ms=round(write_ms, 1),
+            sync_ms=round(sync_ms, 1),
+        )
+    except Exception:
+        pass
 
 def _flush_scheduled_preview_metadata_save(self):
     after_id = getattr(self, "_preview_metadata_save_after_id", None)
@@ -167,7 +253,11 @@ def _flush_scheduled_preview_metadata_save(self):
 
     try:
         if self.preview_metadata:
-            self._persist_preview_metadata(success_message=None, refresh_list=False)
+            self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+            try:
+                self._schedule_preview_info_refresh(delay_ms=900)
+            except Exception:
+                pass
     except Exception as exc:
         logger.debug(f"Nie udało się zapisać odłożonych zmian metadata preview: {exc}")
 
@@ -188,13 +278,53 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
         except Exception:
             pass
         self._preview_metadata_save_after_id = None
+    self._preview_metadata_save_defer_logged = False
+    try:
+        self._log_preview_edit_flow("metadata_save_scheduled", delay_ms=max(1, int(delay_ms)))
+    except Exception:
+        pass
 
     def _save_later():
-        self._preview_metadata_save_after_id = None
+        now = time.monotonic()
         try:
-            self._persist_preview_metadata(success_message=None, refresh_list=False)
+            last_edit_interaction = float(getattr(self, "_preview_last_char_edit_interaction_ts", 0.0) or 0.0)
+        except Exception:
+            last_edit_interaction = 0.0
+        recent_char_edit = bool(last_edit_interaction > 0.0 and (now - last_edit_interaction) < 2.2)
+        hot_char_target = bool(
+            getattr(self, "_preview_char_hover_grip", None) is not None
+            or getattr(self, "_preview_char_hover_index", None) is not None
+        )
+        if (
+            getattr(self, "_preview_char_drag_state", None) is not None
+            or getattr(self, "_preview_char_add_state", None) is not None
+            or getattr(self, "_preview_layout_separator_drag_state", None) is not None
+            or getattr(self, "_preview_badge_drag_state", None) is not None
+            or recent_char_edit
+            or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
+        ):
+            if not bool(getattr(self, "_preview_metadata_save_defer_logged", False)):
+                self._preview_metadata_save_defer_logged = True
+                try:
+                    self._log_preview_edit_flow(
+                        "metadata_save_deferred",
+                        recent_edit=int(bool(recent_char_edit)),
+                        hot_target=int(bool(hot_char_target)),
+                        edit_mode=int(bool(getattr(self, "_preview_char_edit_mode", False))),
+                    )
+                except Exception:
+                    pass
             try:
-                self._update_preview_info_label()
+                self._preview_metadata_save_after_id = self.frame.after(650, _save_later)
+                return
+            except Exception:
+                pass
+        self._preview_metadata_save_after_id = None
+        self._preview_metadata_save_defer_logged = False
+        try:
+            self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+            try:
+                self._schedule_preview_info_refresh(delay_ms=900)
             except Exception:
                 pass
         except Exception as exc:
@@ -215,12 +345,59 @@ def _schedule_preview_info_refresh(self, delay_ms: int = 180):
         self._preview_info_refresh_after_id = None
 
     def _refresh_later():
-        self._preview_info_refresh_after_id = None
+        now = time.monotonic()
         try:
+            last_edit_interaction = float(getattr(self, "_preview_last_char_edit_interaction_ts", 0.0) or 0.0)
+        except Exception:
+            last_edit_interaction = 0.0
+        recent_char_edit = bool(last_edit_interaction > 0.0 and (now - last_edit_interaction) < 2.2)
+        hot_char_target = bool(
+            getattr(self, "_preview_char_hover_grip", None) is not None
+            or getattr(self, "_preview_char_hover_index", None) is not None
+        )
+        if (
+            getattr(self, "_preview_char_drag_state", None) is not None
+            or getattr(self, "_preview_char_add_state", None) is not None
+            or getattr(self, "_preview_layout_separator_drag_state", None) is not None
+            or getattr(self, "_preview_badge_drag_state", None) is not None
+            or recent_char_edit
+            or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
+        ):
+            try:
+                self._log_preview_edit_flow(
+                    "preview_info_refresh_deferred",
+                    recent_edit=int(bool(recent_char_edit)),
+                    hot_target=int(bool(hot_char_target)),
+                    edit_mode=int(bool(getattr(self, "_preview_char_edit_mode", False))),
+                )
+            except Exception:
+                pass
+            try:
+                self._preview_info_refresh_after_id = self.frame.after(750, _refresh_later)
+                return
+            except Exception:
+                pass
+
+        self._preview_info_refresh_after_id = None
+        perf_start = time.perf_counter()
+        update_ms = sync_ms = 0.0
+        try:
+            phase_start = time.perf_counter()
             self._update_preview_info_label()
+            update_ms = (time.perf_counter() - phase_start) * 1000.0
+            phase_start = time.perf_counter()
             self._sync_step3_access_from_preview_state(self.preview_metadata)
+            sync_ms = (time.perf_counter() - phase_start) * 1000.0
+            total_ms = (time.perf_counter() - perf_start) * 1000.0
+            if total_ms >= 120.0:
+                logger.info(
+                    "[Z3/PZ2 PERF] preview_info_refresh total=%.1fms phases=[update=%.1fms, sync=%.1fms]",
+                    total_ms,
+                    update_ms,
+                    sync_ms,
+                )
         except Exception as exc:
-            logger.debug(f"Nie udało się odświeżyć liczników PZ2 po edycji: {exc}")
+            logger.debug(f"Nie udalo sie odswiezyc licznikow PZ2 po edycji: {exc}")
 
     try:
         self._preview_info_refresh_after_id = self.frame.after(max(1, int(delay_ms)), _refresh_later)
@@ -338,7 +515,11 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
         )
         if not self._redraw_preview_character_overlays_light():
             self._on_preview_select(None)
-        self._persist_preview_metadata(success_message=None, refresh_list=False)
+        self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        try:
+            self._schedule_preview_info_refresh(delay_ms=900)
+        except Exception:
+            pass
         return True
     finally:
         self._preview_history_replaying = False

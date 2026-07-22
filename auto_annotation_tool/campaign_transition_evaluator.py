@@ -80,10 +80,22 @@ def is_transition_ready(spec: CampaignTransitionSpec | None, ctx: CampaignTransi
         return True
 
     if spec.key == "e1_to_e2_prepare_plate_annotations":
-        if str(ctx.explicit_selected_path or "").strip() not in {"plate_training", "char_from_images"}:
+        explicit_path = str(ctx.explicit_selected_path or "").strip()
+        if explicit_path not in {"plate_training", "char_from_images"}:
             return False
         image_count = max(int(ctx.image_count or 0), ctx.resource_counter("images"))
-        return image_count > 0
+        if explicit_path == "plate_training":
+            return image_count > 0
+
+        plate_snapshot = ctx.resource_snapshot("plate_run") or ctx.resource_snapshot("approved_plates")
+        plate_snapshot_count = 0
+        plate_snapshot_ready = False
+        if plate_snapshot is not None:
+            plate_snapshot_count = int(plate_snapshot.counter_value or 0)
+            plate_snapshot_ready = str(plate_snapshot.tone or "").strip().lower() == "success"
+        plate_count = max(int(ctx.plate_material_count or 0), plate_snapshot_count)
+        plate_ready = bool(ctx.material_ready or plate_snapshot_ready or plate_count >= int(ctx.min_plates or 10))
+        return bool(image_count > 0 or plate_ready)
     if spec.key == "e1_to_e3_char_from_ready_plates":
         plate_snapshot = ctx.resource_snapshot("plate_run")
         plate_snapshot_count = 0
@@ -119,6 +131,10 @@ def is_transition_ready(spec: CampaignTransitionSpec | None, ctx: CampaignTransi
                     return False
                 continue
             if normalize_campaign_resource_key(resource_key) == "training_result":
+                if str(snapshot.tone or "").strip().lower() != "success":
+                    return False
+                continue
+            if normalize_campaign_resource_key(resource_key) in {"plate_run", "char_run"}:
                 if str(snapshot.tone or "").strip().lower() != "success":
                     return False
                 continue

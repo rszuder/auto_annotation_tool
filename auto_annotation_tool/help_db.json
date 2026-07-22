@@ -162,7 +162,7 @@
     "full_help": "Określa, czy finalne boxy znaków w trybie hybrydowym mają pochodzić z geometrii YOLO, czy zostać przy wariancie OCR albo rescue."
   },
   "t2_yolo_model": {
-    "full_help": "Checkpoint .pt modelu znaków używany w Z3/PZ2. To realny model inferencyjny, nie wybór architektury bazowej."
+    "full_help": "Checkpoint .pt modelu detekcji znaków używany w Z3/PZ2 tylko do inferencji: wykrywania/proponowania ramek i klas znaków. To nie jest wybór modelu startowego ani modelu do treningu."
   },
   "t2_yolo_tuning": {
     "full_help": "Parametry inferencji YOLO dla znaków: confidence, IoU, NMS i filtry pomocnicze. Służą do wyważenia czułości i czystości boxów."

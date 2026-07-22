@@ -888,6 +888,7 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         or gate_state.get("gate_label")
         or gate_id
     ).strip()
+    display_gate_id = campaign_visible_gate_id(gate_id) or gate_id
     if repair_from_t07:
         display_gate_title = "Naprawa T07"
         display_row_label = "Status naprawy"
@@ -896,10 +897,10 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
             "Dodajesz albo poprawiasz ramki tablic; po powrocie decyzję podejmujesz na T07."
         )
     else:
-        display_gate_title = f"Bramka {gate_id}"
+        display_gate_title = f"Bramka {display_gate_id}"
         display_row_label = "Status bramki"
         intro = (
-            f"Pracujesz w Z2 dla bramki {gate_id}: {gate_label}. "
+            f"Pracujesz w Z2 dla bramki {display_gate_id}: {gate_label}. "
             "Prawy panel pokazuje stan aktywnego pliku anotacji i pozycji oznaczonych jako [OK]."
         )
     if gate_id == "T06":
@@ -980,8 +981,11 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         self._set_widget_packed(getattr(self, "approve_btn_frame", None), True, fill=tk.X)
         self._set_widget_packed(getattr(self, "approve_btn", None), False)
         try:
+            return_copy = dispatch_get_campaign_return_to_graph_copy(self)
             getattr(self, "return_to_campaign_right_btn", None).configure(
-                state=(tk.DISABLED if processing else tk.NORMAL)
+                text=str(return_copy.get("button") or "Wróć do grafu"),
+                state=(tk.DISABLED if processing else tk.NORMAL),
+                width=int(return_copy.get("width", 18) or 18),
             )
         except Exception:
             pass
@@ -1529,7 +1533,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             if approval_marked_images > 0 or approval_marked_plates > 0:
                 hint_lines.append(
                     (
-                        f"Bramkę T05 możesz już zamknąć. Po T05 projekt będzie miał {future_project_images} zatwierdzonych obrazów i {future_project_plates} tablic do treningu modelu tablic."
+                        f"Bramkę {graph_display_gate_id} możesz już zamknąć. Po {graph_display_gate_id} projekt będzie miał {future_project_images} zatwierdzonych obrazów i {future_project_plates} tablic do treningu modelu tablic."
                         if graph_gate_is_t05
                         else f"Po zamknięciu tej bramki projekt będzie miał {future_project_images} zatwierdzonych obrazów i {future_project_plates} tablic."
                     )
@@ -1540,7 +1544,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             else:
                 hint_lines.append(
                     (
-                        f"Bramkę T05 możesz już zamknąć. Projekt ma już {project_approved_images} zatwierdzonych obrazów i {project_approved_plates} tablic, więc T05 nie wymaga nowych [OK] w tej iteracji."
+                        f"Bramkę {graph_display_gate_id} możesz już zamknąć. Projekt ma już {project_approved_images} zatwierdzonych obrazów i {project_approved_plates} tablic, więc {graph_display_gate_id} nie wymaga nowych [OK] w tej iteracji."
                         if graph_gate_is_t05
                         else f"Bramkę można zamknąć. Projekt ma już {project_approved_images} zatwierdzonych obrazów i {project_approved_plates} tablic z poprzednich iteracji."
                     )
@@ -1553,12 +1557,12 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             missing_plates = max(0, int(min_plate_approval_plates) - int(effective_project_plate_plates or 0))
             hint_lines.append(
                 (
-                    f"Do otwarcia bramki T05 potrzebujesz jeszcze {missing_plates} zatwierdzonych tablic."
+                    f"Do otwarcia bramki {graph_display_gate_id} potrzebujesz jeszcze {missing_plates} zatwierdzonych tablic."
                     if graph_gate_is_t05 and missing_plates > 0
                     else f"Do otwarcia tej bramki potrzebujesz jeszcze {missing_plates} zatwierdzonych tablic."
                     if missing_plates > 0
                     else (
-                        "Dodaj jeszcze poprawne oznaczenia i zatwierdź obrazy jako [OK], aby otworzyć bramkę T05."
+                        f"Dodaj jeszcze poprawne oznaczenia i zatwierdź obrazy jako [OK], aby otworzyć bramkę {graph_display_gate_id}."
                         if graph_gate_is_t05
                         else "Dodaj jeszcze poprawne oznaczenia i zatwierdź obrazy jako [OK], aby otworzyć bramkę."
                     )
@@ -1568,7 +1572,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         else:
             hint_lines.append(
                 (
-                    "Najpierw przygotuj poprawne tablice w Z2 i oznacz je jako [OK]. Dopiero po zamknięciu bramki T05 zasilą materiał do treningu modelu tablic."
+                    f"Najpierw przygotuj poprawne tablice w Z2 i oznacz je jako [OK]. Dopiero po zamknięciu bramki {graph_display_gate_id} zasilą materiał do treningu modelu tablic."
                     if graph_gate_is_t05
                     else "Najpierw przygotuj pierwsze poprawne tablice w Z2 i oznacz je jako [OK]. Po zamknięciu bramki dołączą do zbioru projektu."
                 )
@@ -1685,12 +1689,12 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             if int(effective_project_plate_plates or 0) >= int(min_plate_approval_plates):
                 approve_hint_text = (
                     (
-                        f"Bramka T05 jest gotowa do zamknięcia. Zatwierdzonych tablic: {effective_project_plate_plates}. "
+                        f"Bramka {graph_display_gate_id} jest gotowa do zamknięcia. Zatwierdzonych tablic: {effective_project_plate_plates}. "
                         if graph_gate_is_t05
                         else f"Gotowe do zamknięcia E2. Zatwierdzonych tablic: {effective_project_plate_plates}. "
                     )
                     + (
-                        "Możesz teraz wrócić do mapy kampanii i zamknąć T05."
+                        f"Możesz teraz wrócić do mapy kampanii i zamknąć {graph_display_gate_id}."
                         if graph_gate_is_t05
                         else "Możesz teraz od razu domknąć ten etap."
                         if campaign_context
@@ -1702,7 +1706,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 missing_plates = max(0, int(min_plate_approval_plates) - int(effective_project_plate_plates or 0))
                 approve_hint_text = (
                     (
-                        f"Aby otworzyć bramkę T05, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
+                        f"Aby otworzyć bramkę {graph_display_gate_id}, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
                         if graph_gate_is_t05
                         else f"Aby odblokować domknięcie E2 w torze tablic, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
                     )
@@ -1718,7 +1722,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             else:
                 approve_hint_text = (
                     (
-                        f"Aby otworzyć bramkę T05, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
+                        f"Aby otworzyć bramkę {graph_display_gate_id}, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic. "
                         if graph_gate_is_t05
                         else f"Aby odblokować domknięcie E2, potrzebujesz co najmniej {min_plate_approval_plates} zatwierdzonych tablic 'plate'. "
                     )
@@ -1731,7 +1735,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                         "Ten sam warunek odblokowuje też eksport datasetu YOLO Pose."
                         if not campaign_context
                         else (
-                            "To warunek konieczny do otwarcia bramki T05."
+                            f"To warunek konieczny do otwarcia bramki {graph_display_gate_id}."
                             if graph_gate_is_t05
                             else "To warunek konieczny do domknięcia E2."
                         )
@@ -1761,7 +1765,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         else:
             quality_next_text = "Osiągnięto najwyższy próg jakości"
             quality_next_tone = "success"
-        approve_hint_title_text = f"Bramka {graph_gate_id}" if graph_gate_known else "Bramka grafu"
+        approve_hint_title_text = f"Bramka {graph_display_gate_id}" if graph_gate_known else "Bramka grafu"
         approve_hint_text = ""
         approve_hint_table_rows = [
             (
@@ -1775,7 +1779,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 ("success" if approval_xml_exists else "warning"),
             ),
             (
-                f"Po zamknięciu bramki {graph_gate_id}" if graph_gate_known else "Po zamknięciu bramki",
+                f"Po zamknięciu bramki {graph_display_gate_id}" if graph_gate_known else "Po zamknięciu bramki",
                 f"{gate_current_images} obrazów [OK] / {gate_current_plates} tablic",
                 ("success" if plate_gate_ready else "warning"),
             ),
@@ -1957,6 +1961,19 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             )
             for label, value, tone in approve_hint_table_rows
         ]
+    elif approval_iteration_target == "plate" and graph_gate_known and graph_display_gate_id and graph_display_gate_id != "T05":
+        approve_context_text = approve_context_text.replace("T05", graph_display_gate_id)
+        approve_hint_text = approve_hint_text.replace("T05", graph_display_gate_id)
+        approve_hint_title_text = approve_hint_title_text.replace("T05", graph_display_gate_id)
+        approve_breakdown_title_text = approve_breakdown_title_text.replace("T05", graph_display_gate_id)
+        approve_hint_table_rows = [
+            (
+                str(label).replace("T05", graph_display_gate_id),
+                str(value).replace("T05", graph_display_gate_id),
+                tone,
+            )
+            for label, value, tone in approve_hint_table_rows
+        ]
 
     if not lightweight:
         try:
@@ -2056,9 +2073,16 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 pass
         if gate_state or graph_gate_known:
             fallback_gate_id = str(gate_state.get("gate_id") or graph_gate_id or "").strip().upper()
+            fallback_display_gate_id = campaign_visible_gate_id(fallback_gate_id) if fallback_gate_id == "T05" else fallback_gate_id
+            if fallback_gate_id and fallback_display_gate_id and fallback_display_gate_id != fallback_gate_id:
+                for key in ("title", "message", "detail", "instruction"):
+                    try:
+                        gate_state[key] = str(gate_state.get(key) or "").replace(fallback_gate_id, fallback_display_gate_id)
+                    except Exception:
+                        pass
             fallback_title = str(gate_state.get("title") or "").strip()
             if not fallback_title:
-                fallback_title = f"Bramka {fallback_gate_id}" if fallback_gate_id else "Bramka grafu"
+                fallback_title = f"Bramka {fallback_display_gate_id or fallback_gate_id}" if fallback_gate_id else "Bramka grafu"
             fallback_tone = str(gate_state.get("tone") or "info").strip().lower()
             fallback_message = str(gate_state.get("message") or "").strip()
             fallback_detail = str(gate_state.get("detail") or "").strip()
@@ -2904,21 +2928,101 @@ def _start_annotation(self):
         logger.error(f"Nie można wystartować: {e}")
         messagebox.showerror("Błąd Startu", str(e))
 
-def _approve_annotation_stage(self):
+def _approve_annotation_stage(self, *, _run_deferred: bool = False):
     """
     Domyka etap E2 i przenosi staging runu anotacji do katalogu docelowego projektu.
     """
+    if not _run_deferred:
+        if bool(getattr(self, "_z2_approval_in_progress", False)):
+            try:
+                self.app.update_status("Zatwierdzanie bramki jest juz w toku.", "warning")
+            except Exception:
+                pass
+            return
+        self._z2_approval_in_progress = True
+        approval_owner = "z2.approve.stage"
+        try:
+            begin_exclusive = getattr(self.app, "try_begin_exclusive_operation", None)
+            if callable(begin_exclusive):
+                ok, busy_message = begin_exclusive(approval_owner, "Z2: zatwierdzanie bramki grafu")
+                if not ok:
+                    self._z2_approval_in_progress = False
+                    return messagebox.showwarning("Aplikacja jest zajeta", busy_message)
+                self._z2_approval_operation_owner = approval_owner
+        except Exception:
+            pass
+        try:
+            self.app.update_status("Zatwierdzam bramke grafu i zapisuje pule YOLO...", "info")
+        except Exception:
+            pass
+        try:
+            self.approve_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        try:
+            self.frame.winfo_toplevel().config(cursor="watch")
+        except Exception:
+            pass
+        try:
+            self.frame.update_idletasks()
+        except Exception:
+            pass
+
+        def _run_approval():
+            return _approve_annotation_stage(self, _run_deferred=True)
+
+        try:
+            self.frame.after(40, _run_approval)
+        except Exception:
+            _run_approval()
+        return
+
+    approval_perf_started = time.perf_counter()
+    approval_perf_last = approval_perf_started
+    approval_perf_phases: list[str] = []
+
+    def _approval_mark(label: str) -> None:
+        nonlocal approval_perf_last
+        try:
+            now = time.perf_counter()
+            elapsed_ms = int((now - approval_perf_last) * 1000)
+            total_ms = int((now - approval_perf_started) * 1000)
+            approval_perf_phases.append(f"{label}={elapsed_ms}ms/{total_ms}ms")
+            approval_perf_last = now
+        except Exception:
+            pass
+
+    approval_perf_logged = False
+
+    def _approval_log(result: str = "done") -> None:
+        nonlocal approval_perf_logged
+        if approval_perf_logged:
+            return
+        approval_perf_logged = True
+        try:
+            total_ms = int((time.perf_counter() - approval_perf_started) * 1000)
+            logger.info(
+                "[Z2 PERF] approve_annotation_stage total=%sms result=%s phases=[%s]",
+                total_ms,
+                str(result or "done"),
+                ", ".join(approval_perf_phases) if approval_perf_phases else "no_slow_phase",
+            )
+        except Exception:
+            pass
+
     try:
         from ..campaign_manager import CAMPAIGN
         import shutil
 
         if not self._ensure_preview_edits_saved("domkniecie etapu E2"):
             return
+        _approval_mark("save_edits")
 
         if not CAMPAIGN.get_active_project_name():
             return messagebox.showwarning("Brak projektu", "Nie ma aktywnego projektu.")
 
         approval_context = self._get_campaign_step2_approval_context()
+        _approval_mark("approval_context")
         staging_run = approval_context.get("run_dir")
         approval_source_kind = str(approval_context.get("source_kind") or "").strip().lower()
         approval_iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
@@ -2961,6 +3065,7 @@ def _approve_annotation_stage(self):
                 )
 
         _approval_images_with_plates, approval_total_plates = self._get_run_plate_annotation_counts(staging_run)
+        _approval_mark("run_annotation_counts")
         project_approved_images = 0
         project_approved_plates = 0
         run_approved_images = 0
@@ -2995,6 +3100,7 @@ def _approve_annotation_stage(self):
                 approval_iteration_target == "char"
                 and int(cumulative_char_approved_plates or 0) >= int(min_char_approval_plates)
             )
+        _approval_mark("approved_counts")
 
         if approval_total_plates <= 0 and not (
             (approval_iteration_target == "plate" and cumulative_plate_gate_ready)
@@ -3072,6 +3178,7 @@ def _approve_annotation_stage(self):
                 return
         except Exception:
             pass
+        _approval_mark("confirm_current_iteration")
 
         final_auto_dir = CAMPAIGN.get_dir("auto_ann")
         if final_auto_dir is None:
@@ -3102,6 +3209,7 @@ def _approve_annotation_stage(self):
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             shutil.move(str(staging_run), str(target_dir))
+        _approval_mark("resolve_target_run")
         self.current_annotation_run_dir = target_dir
         self.current_annotation_xml_path = target_dir / "annotations.xml"
         self.last_staging_run_dir = target_dir
@@ -3129,6 +3237,8 @@ def _approve_annotation_stage(self):
             logger.debug(f"Nie udało się zaktualizować ApprovedSet tablic po domknięciu E2: {e}")
             approved_set_result = {"ok": False, "reason": "promotion_failed"}
 
+        _approval_mark("promote_approved_set")
+
         if (
             approval_iteration_target == "plate"
             and graph_gate_is_t05
@@ -3139,7 +3249,7 @@ def _approve_annotation_stage(self):
             self._refresh_step2_action_states()
             try:
                 self.app.update_status(
-                    "Zatwierdzenie T05 zatrzymane: nie udało się dopisać zatwierdzonych [OK] do puli YOLO projektu.",
+                    f"Zatwierdzenie {graph_display_gate_id} zatrzymane: nie udało się dopisać zatwierdzonych [OK] do puli YOLO projektu.",
                     "error",
                 )
             except Exception:
@@ -3147,16 +3257,17 @@ def _approve_annotation_stage(self):
             return messagebox.showerror(
                 "Nie zapisano puli YOLO",
                 (
-                    "Bramka T05 nie została zamknięta.\n\n"
+                    f"Bramka {graph_display_gate_id} nie została zamknięta.\n\n"
                     "W aktywnej pracy Z2 są zatwierdzone obrazy [OK], ale nie udało się przenieść ich do puli YOLO projektu. "
                     "Zamknięcie bramki bez tego kroku groziłoby utratą wkładu tej iteracji.\n\n"
-                    "Pozostań w Z2, zapisz anotacje i spróbuj ponownie wrócić do grafu albo zatwierdzić T05."
+                    f"Pozostań w Z2, zapisz anotacje i spróbuj ponownie wrócić do grafu albo zatwierdzić {graph_display_gate_id}."
                 ),
             )
 
         if approval_iteration_target == "plate" and graph_gate_is_t05 and bool(dict(approved_set_result or {}).get("ok")):
             try:
                 now = datetime.datetime.now().isoformat(timespec="seconds")
+                resolved_run_dir = Path(str(dict(approved_set_result or {}).get("run_dir") or target_dir))
                 CAMPAIGN.upsert_iteration_state(
                     updates={
                         "t05_work_session": {
@@ -3164,6 +3275,7 @@ def _approve_annotation_stage(self):
                             "state": "resolved",
                             "resolved_at": now,
                             "updated_at": now,
+                            "run_dir": str(resolved_run_dir.resolve()),
                             "last_return_result": dict(approved_set_result or {}),
                         }
                     }
@@ -3199,22 +3311,35 @@ def _approve_annotation_stage(self):
             )
         except Exception:
             pass
+        _approval_mark("artifact_registry")
 
         self._queue_free_mode_session_save()
 
         CAMPAIGN.approve_step2()
         next_step = 4 if CAMPAIGN.get_iteration_target() == "plate" else 3
         CAMPAIGN.set_current_step(next_step)
+        _approval_mark("campaign_state")
 
         self.approve_btn.config(state=tk.DISABLED)
         self._refresh_step2_action_states()
+        _approval_mark("z2_action_states")
 
         if 'campaign' in self.app.tabs:
+            campaign_tab = self.app.tabs.get("campaign")
             try:
-                self.app.tabs['campaign'].request_wizard_stage_focus(step_num=next_step)
+                campaign_tab.request_wizard_stage_focus(step_num=next_step)
             except Exception:
                 pass
-            self.app.tabs['campaign']._refresh_dashboard()
+            previous_lightweight_refresh = bool(getattr(campaign_tab, "_project_open_lightweight_refresh", False))
+            try:
+                campaign_tab._project_open_lightweight_refresh = True
+                campaign_tab._refresh_dashboard()
+            finally:
+                try:
+                    campaign_tab._project_open_lightweight_refresh = previous_lightweight_refresh
+                except Exception:
+                    pass
+            _approval_mark("campaign_refresh_initial")
             if next_step == 3:
                 if repair_mode:
                     try:
@@ -3297,9 +3422,12 @@ def _approve_annotation_stage(self):
                     pass
             self.app.open_controlled_tab("campaign")
             self.app.update_campaign_tab_access()
+            _approval_mark("open_campaign")
         except Exception as e:
             logger.debug(f"Nie udaĹ‚o siÄ™ wrĂłciÄ‡ do zakĹ‚adki Wizarda: {e}")
 
+        _approval_mark("before_success_dialog")
+        _approval_log("success")
         if graph_gate_is_t05 and next_step == 4:
             messagebox.showinfo(
                 f"Bramka {graph_display_gate_id} zatwierdzona",
@@ -3325,7 +3453,28 @@ def _approve_annotation_stage(self):
             )
 
     except Exception as e:
+        _approval_log("error")
         messagebox.showerror("Błąd domknięcia E2", str(e))
+    finally:
+        try:
+            _approval_log("finished")
+        except Exception:
+            pass
+        try:
+            self._z2_approval_in_progress = False
+        except Exception:
+            pass
+        try:
+            approval_owner = str(getattr(self, "_z2_approval_operation_owner", "") or "").strip()
+            if approval_owner and hasattr(self.app, "end_exclusive_operation"):
+                self.app.end_exclusive_operation(approval_owner)
+            self._z2_approval_operation_owner = ""
+        except Exception:
+            pass
+        try:
+            self.frame.winfo_toplevel().config(cursor="")
+        except Exception:
+            pass
 
 def _process_thread(
     self,

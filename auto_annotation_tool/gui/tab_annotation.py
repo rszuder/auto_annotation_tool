@@ -2186,6 +2186,18 @@ class AnnotationTab:
         return z2_preview_state._preview_list_item_color(self, *args, **kwargs)
 
 
+    def _preview_list_color_for_bucket(self, *args, **kwargs):
+        return z2_preview_state._preview_list_color_for_bucket(self, *args, **kwargs)
+
+
+    def _preview_list_effective_color_bucket(self, *args, **kwargs):
+        return z2_preview_state._preview_list_effective_color_bucket(self, *args, **kwargs)
+
+
+    def _preview_list_color_plan(self, *args, **kwargs):
+        return z2_preview_state._preview_list_color_plan(self, *args, **kwargs)
+
+
     def _preview_annotation_sort_bucket(self, *args, **kwargs):
         return z2_preview_state._preview_annotation_sort_bucket(self, *args, **kwargs)
 

@@ -632,8 +632,14 @@ def update_preview_edit_status(
         except Exception:
             pass
 
+    next_overlay_text = str(overlay_only_message or "")
     try:
-        host._preview_typing_overlay_text = str(overlay_only_message or "")
+        previous_overlay_text = str(getattr(host, "_preview_typing_overlay_text", "") or "")
+    except Exception:
+        previous_overlay_text = ""
+    overlay_text_changed = next_overlay_text != previous_overlay_text
+    try:
+        host._preview_typing_overlay_text = next_overlay_text
     except Exception:
         pass
 
@@ -647,6 +653,8 @@ def update_preview_edit_status(
             host._set_inline_status_label_state(label, text=message, tone=tone, emphasis=bool(emphasis))
 
     host._sync_preview_edit_status_visibility()
+    if use_canvas_overlay and not overlay_text_changed:
+        return
     host._refresh_preview_typing_overlay_visibility()
 
 
@@ -670,19 +678,45 @@ def refresh_preview_typing_overlay_visibility(host) -> None:
         return
 
     wraplength = max(130, min(185, int(canvas_w * 0.18)))
+    layout_key = (str(overlay_text), int(wraplength))
     host._configure_preview_typing_overlay_text(overlay_text, wraplength)
 
-    try:
-        overlay.update_idletasks()
-    except Exception:
-        pass
+    layout_cache = getattr(host, "_preview_typing_overlay_layout_cache", None)
+    if not isinstance(layout_cache, dict):
+        layout_cache = {}
+        try:
+            host._preview_typing_overlay_layout_cache = layout_cache
+        except Exception:
+            pass
+    cached_size = layout_cache.get(layout_key)
+    if isinstance(cached_size, tuple) and len(cached_size) == 2:
+        try:
+            overlay_w = float(cached_size[0])
+            overlay_h = float(cached_size[1])
+        except Exception:
+            overlay_w = overlay_h = 0.0
+    else:
+        overlay_w = overlay_h = 0.0
 
     try:
-        overlay_w = float(max(0, int(overlay.winfo_reqwidth() or overlay.winfo_width() or 0)))
-        overlay_h = float(max(0, int(overlay.winfo_reqheight() or overlay.winfo_height() or 0)))
+        if overlay_w <= 0.0:
+            overlay_w = float(max(0, int(overlay.winfo_reqwidth() or overlay.winfo_width() or 0)))
+        if overlay_h <= 0.0:
+            overlay_h = float(max(0, int(overlay.winfo_reqheight() or overlay.winfo_height() or 0)))
     except Exception:
         overlay_w = 0.0
         overlay_h = 0.0
+
+    if overlay_w <= 0.0 or overlay_h <= 0.0:
+        overlay_w = float(max(160, int(wraplength) + 22))
+        overlay_h = 64.0
+    if layout_key not in layout_cache:
+        if len(layout_cache) > 18:
+            try:
+                layout_cache.pop(next(iter(layout_cache)))
+            except Exception:
+                layout_cache.clear()
+        layout_cache[layout_key] = (float(overlay_w), float(overlay_h))
 
     anchor = host._resolve_preview_typing_overlay_anchor(overlay_w, overlay_h)
     if anchor is None:

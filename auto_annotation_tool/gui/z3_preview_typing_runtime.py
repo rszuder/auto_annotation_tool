@@ -22,7 +22,29 @@ def _append_preview_status_sentence(base: str, sentence: str) -> str:
         return f"{base_text} {addition}"
     return f"{base_text}. {addition}"
 
-def _cancel_preview_char_label_interaction(self, *, reset_mode: bool = True, clear_hover: bool = True) -> bool:
+def _clear_preview_char_label_canvas_fields(self) -> bool:
+    canvas = getattr(self, "preview_canvas", None)
+    if canvas is None:
+        return False
+    try:
+        items = canvas.find_withtag("preview_char_label_field")
+    except Exception:
+        items = ()
+    if not items:
+        return False
+    try:
+        canvas.delete("preview_char_label_field")
+        return True
+    except Exception:
+        return False
+
+def _cancel_preview_char_label_interaction(
+    self,
+    *,
+    reset_mode: bool = True,
+    clear_hover: bool = True,
+    redraw_canvas: bool = True,
+) -> bool:
     had_state = bool(getattr(self, "_preview_char_label_mode", False))
     had_state = had_state or getattr(self, "_preview_char_label_active_index", None) is not None
     had_state = had_state or getattr(self, "_preview_char_hover_label_index", None) is not None
@@ -49,6 +71,11 @@ def _cancel_preview_char_label_interaction(self, *, reset_mode: bool = True, cle
             self._refresh_preview_typing_overlay_visibility()
         except Exception:
             pass
+        if redraw_canvas:
+            try:
+                self._clear_preview_char_label_canvas_fields()
+            except Exception:
+                pass
 
     return had_state
 
@@ -179,9 +206,13 @@ def _configure_preview_typing_overlay_text(self, text: str, wraplength: int) -> 
         return
 
     content = str(text or "")
+    config_key = (content, int(wraplength))
+    if getattr(self, "_preview_typing_overlay_config_key", None) == config_key:
+        return
     if not isinstance(widget, tk.Text):
         try:
             widget.configure(text=content, wraplength=wraplength, font=("Segoe UI", 8, "normal"))
+            self._preview_typing_overlay_config_key = config_key
         except Exception:
             pass
         return
@@ -205,12 +236,14 @@ def _configure_preview_typing_overlay_text(self, text: str, wraplength: int) -> 
         if cursor < len(content):
             widget.insert(tk.END, content[cursor:], ("body",))
         widget.configure(state=tk.DISABLED)
+        self._preview_typing_overlay_config_key = config_key
     except Exception:
         try:
             widget.configure(state=tk.NORMAL)
             widget.delete("1.0", tk.END)
             widget.insert(tk.END, content)
             widget.configure(state=tk.DISABLED)
+            self._preview_typing_overlay_config_key = config_key
         except Exception:
             pass
 
@@ -346,7 +379,7 @@ def _assign_character_to_active_preview_label(self, symbol: str):
         render_preview=False,
         save_immediately=False,
         save_delay_ms=900,
-        refresh_row=False,
+        refresh_row=True,
         light_redraw_indices="selected",
     )
     if bool(getattr(self, "_preview_char_label_mode", False)):

@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox
 
 
@@ -209,7 +209,12 @@ def _cycle_preview_character_row(self, direction: int, *, activate_label: bool =
 def _get_preview_char_handle_radius(self) -> float:
     state = getattr(self, "_preview_render_state", None) or {}
     scale = float(state.get("scale", 1.0) or 1.0)
-    return max(5.0, min(9.0, 4.0 + (scale * 0.12)))
+    return max(7.0, min(13.0, 5.5 + (scale * 0.16)))
+
+def _get_preview_char_move_handle_radius(self) -> float:
+    state = getattr(self, "_preview_render_state", None) or {}
+    scale = float(state.get("scale", 1.0) or 1.0)
+    return max(11.0, min(20.0, 9.0 + (scale * 0.24)))
 
 def _find_preview_character_box_hit(self, canvas_x: float, canvas_y: float):
     chars = self._get_preview_active_character_records(create=False)
@@ -246,9 +251,58 @@ def _find_preview_character_handle_hit(self, canvas_x: float, canvas_y: float):
         "sw": (cx1, cy2),
         "se": (cx2, cy2),
     }
+    best_hit = None
     for handle_name, (hx, hy) in handles.items():
-        if abs(float(canvas_x) - float(hx)) <= radius and abs(float(canvas_y) - float(hy)) <= radius:
-            return idx, handle_name
+        dx = float(canvas_x) - float(hx)
+        dy = float(canvas_y) - float(hy)
+        dist_sq = (dx * dx) + (dy * dy)
+        if dist_sq <= (radius * radius):
+            candidate = (dist_sq, idx, handle_name)
+            if best_hit is None or candidate[0] < best_hit[0]:
+                best_hit = candidate
+    if best_hit is None:
+        return None
+    return best_hit[1], best_hit[2]
+
+def _find_preview_character_move_handle_hit(self, canvas_x: float, canvas_y: float):
+    idx, rec = self._get_preview_selected_char_record()
+    if rec is None:
+        return None
+
+    bbox = self._char_record_bbox(rec)
+    if not bbox:
+        return None
+
+    cx1, cy1 = self._preview_image_to_canvas_point(bbox[0], bbox[1])
+    cx2, cy2 = self._preview_image_to_canvas_point(bbox[2], bbox[3])
+    center_x = (float(cx1) + float(cx2)) / 2.0
+    center_y = (float(cy1) + float(cy2)) / 2.0
+    radius = self._get_preview_char_move_handle_radius()
+    dx = float(canvas_x) - center_x
+    dy = float(canvas_y) - center_y
+    if ((dx * dx) + (dy * dy)) <= (radius * radius):
+        return idx
+    return None
+
+def _find_preview_character_grip_hit(self, canvas_x: float, canvas_y: float):
+    corner_hit = self._find_preview_character_handle_hit(canvas_x, canvas_y)
+    if corner_hit is not None:
+        char_idx, handle_name = corner_hit
+        return {
+            "index": int(char_idx),
+            "kind": "corner",
+            "handle": str(handle_name),
+            "key": f"corner:{handle_name}",
+        }
+
+    move_hit = self._find_preview_character_move_handle_hit(canvas_x, canvas_y)
+    if move_hit is not None:
+        return {
+            "index": int(move_hit),
+            "kind": "move",
+            "handle": "center",
+            "key": "move:center",
+        }
     return None
 
 def _get_preview_character_canvas_tag(box_source: str, box_idx: int) -> str:
@@ -299,6 +353,32 @@ def _refresh_preview_character_selection_visual(self, indices=None) -> bool:
     if not normalized_indices:
         return True
 
+    runtime_map = getattr(self, "_preview_char_runtime", None)
+    if isinstance(runtime_map, dict):
+        runtime_mismatch = False
+        for idx in normalized_indices:
+            payload = runtime_map.get(f"FINAL:{int(idx)}")
+            if not isinstance(payload, dict):
+                continue
+            record_id = payload.get("record_id")
+            if record_id is not None and int(record_id) != id(chars[int(idx)]):
+                runtime_mismatch = True
+                break
+        if runtime_mismatch:
+            try:
+                return bool(self._redraw_preview_character_overlays_light())
+            except Exception:
+                return False
+
+    if not bool(getattr(self, "_preview_char_label_mode", False)) and getattr(self, "_preview_char_label_active_index", None) is None:
+        fast_update = getattr(self, "_update_preview_character_selection_items_fast", None)
+        if callable(fast_update):
+            try:
+                if fast_update(normalized_indices):
+                    return True
+            except Exception:
+                pass
+
     redrawn = False
     for idx in sorted(set(normalized_indices)):
         redrawn = self._redraw_preview_character_overlay_only(int(idx)) or redrawn
@@ -327,6 +407,24 @@ def _refresh_preview_editor_toolbar(self):
     has_plate = isinstance(active_data, dict)
     selected_idx, _selected_rec = self._get_preview_selected_char_record()
     has_selection = selected_idx is not None
+    try:
+        total = len(getattr(self, "_listbox_pid_by_index", []) or [])
+        current_idx = self._get_current_preview_list_index()
+    except Exception:
+        total = 0
+        current_idx = None
+    toolbar_signature = (
+        bool(has_plate),
+        bool(has_selection),
+        bool(getattr(self, "_preview_char_edit_mode", False)),
+        bool(getattr(self, "_preview_char_add_mode", False)),
+        bool(getattr(self, "_preview_fullscreen_active", False)),
+        int(total),
+        int(current_idx) if current_idx is not None else -1,
+    )
+    if getattr(self, "_preview_editor_toolbar_signature", None) == toolbar_signature:
+        return
+    self._preview_editor_toolbar_signature = toolbar_signature
 
     button_specs = (
         ("preview_edit_toggle_btn", has_plate, "Edytuj boxy", "Edytowanie boxów"),
@@ -447,7 +545,14 @@ def _toggle_preview_char_label_mode(self, event=None):
         self._update_preview_edit_status("Wylaczono tryb wpisywania znaków.", tone="muted")
 
     self._apply_preview_canvas_cursor()
-    if not self._refresh_preview_character_selection_visual(None):
+    if not next_state:
+        self._refresh_preview_editor_toolbar()
+        self._focus_preview_canvas()
+        try:
+            self._clear_preview_char_label_canvas_fields()
+        except Exception:
+            pass
+    elif not self._refresh_preview_character_selection_visual(None):
         self._refresh_preview_editor_toolbar()
         self._focus_preview_canvas()
         if not self._redraw_preview_character_overlays_light():

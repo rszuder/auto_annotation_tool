@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+from .campaign_iteration_paths import normalize_iteration_path
 from .campaign_resource_catalog import campaign_resource_label, normalize_campaign_resource_key
 from .campaign_resource_state import CampaignResourceSnapshot
 from .campaign_transition_specs import CampaignTransitionSpec, TransitionResourceSpec
@@ -116,23 +117,69 @@ def _best_resource_specs(specs: Iterable[CampaignTransitionSpec]) -> dict[str, T
     return result
 
 
+def _snapshot_ready(snapshot: CampaignResourceSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    return str(snapshot.tone or "").strip().lower() == "success"
+
+
+def _effective_requirement(
+    resource: TransitionResourceSpec,
+    *,
+    specs: Sequence[CampaignTransitionSpec],
+    snapshots: Mapping[str, CampaignResourceSnapshot],
+    selected_path: str = "",
+) -> str:
+    requirement = str(resource.requirement or "optional").strip().lower() or "optional"
+    if not any(str(getattr(spec, "key", "") or "") == "e1_to_e2_prepare_plate_annotations" for spec in specs):
+        return requirement
+
+    path = normalize_iteration_path(selected_path)
+    canonical = normalize_campaign_resource_key(resource.key)
+    image_snapshot = snapshots.get("images")
+    plate_snapshot = snapshots.get("plate_run") or snapshots.get("approved_plates")
+    images_ready = _snapshot_ready(image_snapshot) or int(getattr(image_snapshot, "counter_value", 0) or 0) > 0
+    plates_ready = _snapshot_ready(plate_snapshot)
+
+    if canonical == "images":
+        if path == "plate_training":
+            return "route_required_plate"
+        if path == "char_from_images":
+            return "alternative" if plates_ready else "route_required_char"
+        return "optional"
+    if canonical == "plate_run":
+        if path == "char_from_images":
+            return "route_required_char" if plates_ready and not images_ready else "alternative"
+        return "optional"
+    return requirement
+
+
 def build_transition_resource_report(
     specs: Sequence[CampaignTransitionSpec] | Iterable[CampaignTransitionSpec],
     snapshots: Mapping[str, CampaignResourceSnapshot] | None,
+    *,
+    selected_path: str = "",
 ) -> TransitionResourceReport:
     snapshot_map = snapshots or {}
+    spec_list = tuple(specs or ())
     rows: list[TransitionResourceReportRow] = []
-    for canonical, resource in _best_resource_specs(specs).items():
+    for canonical, resource in _best_resource_specs(spec_list).items():
         if str(resource.key or "").strip() == "approved_plates":
             snapshot = snapshot_map.get(resource.key)
         else:
             snapshot = snapshot_map.get(resource.key) or snapshot_map.get(canonical)
+        requirement = _effective_requirement(
+            resource,
+            specs=spec_list,
+            snapshots=snapshot_map,
+            selected_path=selected_path,
+        )
         rows.append(
             TransitionResourceReportRow(
                 key=resource.key,
                 canonical_key=canonical,
                 label=campaign_resource_label(resource.key, resource.label),
-                requirement=str(resource.requirement or "optional").strip().lower() or "optional",
+                requirement=requirement,
                 snapshot=snapshot,
             )
         )

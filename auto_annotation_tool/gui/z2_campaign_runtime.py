@@ -2640,6 +2640,7 @@ def _promote_campaign_char_repair_ok_to_approved_pool_before_return(self) -> dic
     except Exception:
         graph_context = {}
     graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
@@ -2861,6 +2862,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
     except Exception:
         graph_context = {}
     graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
@@ -2970,7 +2972,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
             or {}
         )
     except Exception as exc:
-        logger.debug(f"Nie udało się przenieść [OK] z T05 do puli YOLO przed powrotem do grafu: {exc}")
+        logger.debug(f"Nie udało się przenieść [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do puli YOLO przed powrotem do grafu: {exc}")
         result = {"ok": False, "reason": "promotion_exception"}
 
     if not bool(result.get("ok")):
@@ -2978,7 +2980,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
             messagebox.showwarning(
                 "Nie zapisano puli YOLO",
                 (
-                    "Nie udało się dopisać zatwierdzonych obrazów [OK] z T05 do projektowej puli YOLO.\n\n"
+                    f"Nie udało się dopisać zatwierdzonych obrazów [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do projektowej puli YOLO.\n\n"
                     "Pozostań w Z2 i spróbuj ponownie wrócić do grafu, żeby nie zgubić wkładu tej pracy."
                 ),
                 parent=self.frame.winfo_toplevel(),
@@ -2998,6 +3000,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
 
     try:
         now = datetime.datetime.now().isoformat(timespec="seconds")
+        resolved_run_dir = Path(str(result.get("run_dir") or run_dir))
         CAMPAIGN.upsert_iteration_state(
             updates={
                 "t05_work_session": {
@@ -3005,7 +3008,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
                     "state": "resolved",
                     "resolved_at": now,
                     "updated_at": now,
-                    "run_dir": str(run_dir.resolve()),
+                    "run_dir": str(resolved_run_dir.resolve()),
                     "approved_images": int(approved_images),
                     "approved_plates": int(approved_plates),
                     "last_return_result": dict(result or {}),
@@ -3033,7 +3036,7 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
 
     try:
         self.app.update_status(
-            f"Przeniesiono {approved_images} zdjęć [OK] z T05 do projektowej puli YOLO.",
+            f"Przeniesiono {approved_images} zdjęć [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do projektowej puli YOLO.",
             "success",
         )
     except Exception:
@@ -3141,6 +3144,29 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
             now = datetime.datetime.now().isoformat(timespec="seconds")
             iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
             session = dict(iteration_state.get("t05_work_session") or {})
+            last_result = dict(session.get("last_return_result") or {})
+            session_run = str(session.get("run_dir", "") or "").strip()
+            already_resolved = bool(last_result.get("ok"))
+            if already_resolved and session_run:
+                try:
+                    already_resolved = self._paths_equivalent(session_run, safe_run_dir)
+                except Exception:
+                    already_resolved = str(session_run).strip().lower() == str(safe_run_dir).strip().lower()
+            if already_resolved:
+                session.update(
+                    {
+                        "active": False,
+                        "state": "resolved",
+                        "resolved_at": str(session.get("resolved_at") or now),
+                        "updated_at": now,
+                        "run_dir": str(safe_run_dir.resolve()),
+                        "approved_images": int(session.get("approved_images", approved_images) or approved_images or 0),
+                        "approved_plates": int(session.get("approved_plates", approved_plates) or approved_plates or 0),
+                        "last_return_result": last_result,
+                    }
+                )
+                CAMPAIGN.upsert_iteration_state(updates={"t05_work_session": session})
+                return {**last_result, "ok": True, "reason": "already_resolved", "run_dir": str(safe_run_dir.resolve())}
             for stale_key in ("resolved_at", "closed_at", "completed_at", "last_return_result"):
                 session.pop(stale_key, None)
             session.update(
@@ -3551,6 +3577,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     graph_gate_is_t06 = graph_gate_id == "T06"
     graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T07")
     graph_gate_known = bool(graph_gate_is_t04 or graph_gate_is_t05 or graph_gate_is_t06)
+    graph_gate_copy_id = graph_display_gate_id or graph_gate_id
 
     min_images = 0
     min_plate_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
@@ -3667,7 +3694,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
             message = "Materiał tablic jest gotowy; wróć do bramki T07."
             detail = "To tryb naprawczy. Decyzję końcową podejmujesz na bramce T07."
         elif graph_gate_known:
-            message = f"Bramka {graph_gate_id} jest otwarta."
+            message = f"Bramka {graph_gate_copy_id} jest otwarta."
             detail = f"Wróć do mapy kampanii i użyj pola Zatwierdź na bramce {graph_gate_id}."
         else:
             message = (
@@ -3679,7 +3706,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         tone = "success"
     elif xml_missing and missing_to_open <= 0:
         message = (
-            f"Do otwarcia bramki {graph_gate_id} brakuje pliku anotacji XML."
+            f"Do otwarcia bramki {graph_gate_copy_id} brakuje pliku anotacji XML."
             if graph_gate_known
             else "Do otwarcia bramki brakuje pliku anotacji XML."
         )
@@ -3688,7 +3715,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     elif iteration_target == "char":
         noun = "tablicy" if missing_to_open == 1 else "tablic"
         message = (
-            f"Do otwarcia bramki {graph_gate_id} brakuje {missing_to_open} {noun}."
+            f"Do otwarcia bramki {graph_gate_copy_id} brakuje {missing_to_open} {noun}."
             if graph_gate_known
             else f"Do otwarcia bramki brakuje {missing_to_open} {noun}."
         )
@@ -3697,23 +3724,29 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     else:
         noun = "tablicy" if missing_to_open == 1 else "tablic"
         message = (
-            f"Do otwarcia bramki {graph_gate_id} brakuje {missing_to_open} {noun}."
+            f"Do otwarcia bramki {graph_gate_copy_id} brakuje {missing_to_open} {noun}."
             if graph_gate_known
             else f"Do otwarcia bramki brakuje {missing_to_open} {noun}."
         )
         detail = "Zatwierdź zdjęcia z ramkami tablic jako OK."
         tone = "warning"
 
-    gate_title = "NAPRAWA T07" if graph_gate_is_t05_repair_from_t07 else (f"BRAMKA {graph_gate_id}" if graph_gate_known else "BRAMKA GRAFU")
+    gate_title = "NAPRAWA T07" if graph_gate_is_t05_repair_from_t07 else (f"BRAMKA {graph_gate_copy_id}" if graph_gate_known else "BRAMKA GRAFU")
     instruction = ""
     if graph_gate_is_t05_repair_from_t07:
         instruction = "Wyjście z Z2 prowadzi do bramki T07."
     elif graph_gate_known:
         instruction = (
-            f"Praca nad otwarciem bramki {graph_gate_id}."
+            f"Praca nad otwarciem bramki {graph_gate_copy_id}."
             if not ready
             else f"Bramka {graph_gate_id} gotowa do zamknięcia."
         )
+
+    if graph_gate_id and graph_gate_copy_id and graph_gate_copy_id != graph_gate_id:
+        message = str(message or "").replace(graph_gate_id, graph_gate_copy_id)
+        detail = str(detail or "").replace(graph_gate_id, graph_gate_copy_id)
+        instruction = str(instruction or "").replace(graph_gate_id, graph_gate_copy_id)
+        gate_title = str(gate_title or "").replace(graph_gate_id, graph_gate_copy_id)
 
     return {
         "visible": True,

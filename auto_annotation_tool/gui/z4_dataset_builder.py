@@ -50,6 +50,7 @@ from ..training import (
     TrainingStatus,
     YOLOPoseTrainer,
     augment_yolo_dataset_train_split,
+    ensure_yolo_dataset_yaml_points_to_root,
     get_albumentations_status,
     install_albumentations,
     is_albumentations_available,
@@ -2500,6 +2501,11 @@ def _create_step4_augmented_dataset_variant(
             )
         )
         shutil.copytree(source_dir, augmented_dir)
+        ok_yaml, yaml_msg, yaml_changed = ensure_yolo_dataset_yaml_points_to_root(augmented_dir)
+        if not ok_yaml:
+            raise RuntimeError(yaml_msg)
+        if yaml_changed:
+            logger.info(f"Poprawiono data.yaml wariantu augmentowanego: {augmented_dir}")
     except Exception as exc:
         logger.exception("Nie udało się utworzyć katalogu powiększonego wariantu datasetu")
         try:
@@ -2810,7 +2816,7 @@ def _handle_step4_dataset_success_result(
         except Exception:
             pass
 
-    self._mark_step4_dataset_ready(dataset_path)
+    self._mark_step4_dataset_ready(dataset_path, target=target)
     try:
         self._pending_step4_input_training_source = None
     except Exception:

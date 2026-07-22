@@ -131,6 +131,157 @@ _PREVIEW_SOURCE_IMAGE_CACHE_LIMIT = 64
 _PREVIEW_RESIZED_PHOTO_CACHE_LIMIT = 96
 
 
+def _log_preview_perf(label: str, start_time: float, *, threshold_ms: float = 80.0, **phases) -> float:
+    total_ms = (time.perf_counter() - float(start_time)) * 1000.0
+    if total_ms < float(threshold_ms):
+        return total_ms
+    phase_parts = []
+    for key, value in phases.items():
+        try:
+            phase_parts.append(f"{key}={float(value):.1f}ms")
+        except Exception:
+            phase_parts.append(f"{key}={value}")
+    logger.info(
+        "[Z3/PZ2 PERF] %s total=%.1fms phases=[%s]",
+        str(label),
+        total_ms,
+        ", ".join(phase_parts) if phase_parts else "no_slow_phase",
+    )
+    return total_ms
+
+
+def _preview_flow_value(value) -> str:
+    text = str(value if value is not None else "").replace("\n", " ").replace("\r", " ").strip()
+    if len(text) > 96:
+        text = text[:93] + "..."
+    if not text:
+        return "-"
+    if any(ch.isspace() for ch in text):
+        return '"' + text.replace('"', "'") + '"'
+    return text
+
+
+def _preview_char_bbox_text(host: "CharacterAnnotationTab", rec) -> str:
+    try:
+        bbox = host._char_record_bbox(rec)
+        if not bbox:
+            return "-"
+        return ",".join(str(round(float(v), 1)) for v in bbox[:4])
+    except Exception:
+        return "-"
+
+
+def _preview_char_record_trace_fields(host: "CharacterAnnotationTab", rec, *, data=None, fallback_index=None) -> dict:
+    if not isinstance(rec, dict):
+        return {}
+    try:
+        source_tag = host._get_character_source_tag(rec, data=data, fallback_index=fallback_index)
+    except Exception:
+        source_tag = str(rec.get("source_tag", "") or rec.get("method", "") or "")
+    try:
+        row = int(rec.get("reading_row", 0) or 0)
+    except Exception:
+        row = 0
+    try:
+        col = int(rec.get("reading_col", 0) or 0)
+    except Exception:
+        col = 0
+    return {
+        "char": str(rec.get("character", "") or ""),
+        "src": str(source_tag or "-"),
+        "method": str(rec.get("method", "") or "-"),
+        "kind": str(rec.get("source_kind", "") or "-"),
+        "rowcol": f"{row}.{col}" if row or col else "-",
+        "bbox": _preview_char_bbox_text(host, rec),
+    }
+
+
+def log_preview_edit_flow(host: "CharacterAnnotationTab", event: str, **fields) -> None:
+    try:
+        pid = str(getattr(host, "_preview_active_pid", "") or "")
+        data = host._get_preview_active_data(create=False)
+        status = str((data or {}).get("status", "") or "") if isinstance(data, dict) else ""
+    except Exception:
+        pid = ""
+        status = ""
+    payload = {
+        "event": str(event),
+        "pid": pid or "-",
+        "status": status or "-",
+    }
+    payload.update(fields)
+    parts = [f"{key}={_preview_flow_value(value)}" for key, value in payload.items()]
+    logger.info("[Z3/PZ2 FLOW] %s", " ".join(parts))
+
+
+def start_preview_latency_probe(host: "CharacterAnnotationTab", intent: str, **fields) -> dict:
+    try:
+        trace = int(getattr(host, "_preview_latency_trace_seq", 0) or 0) + 1
+    except Exception:
+        trace = 1
+    try:
+        host._preview_latency_trace_seq = trace
+    except Exception:
+        pass
+    return {
+        "trace": int(trace),
+        "intent": str(intent),
+        "start": time.perf_counter(),
+        "fields": dict(fields or {}),
+    }
+
+
+def log_preview_latency(host: "CharacterAnnotationTab", probe, stage: str, **fields) -> None:
+    if not isinstance(probe, dict):
+        return
+    try:
+        elapsed_ms = (time.perf_counter() - float(probe.get("start", time.perf_counter()))) * 1000.0
+    except Exception:
+        elapsed_ms = 0.0
+    payload = dict(probe.get("fields", {}) or {})
+    payload.update(fields)
+    payload.update(
+        {
+            "trace": probe.get("trace", "-"),
+            "intent": probe.get("intent", "-"),
+            "elapsed_ms": round(elapsed_ms, 1),
+        }
+    )
+    log_preview_edit_flow(host, f"latency_{stage}", **payload)
+
+
+def schedule_preview_latency_paint(host: "CharacterAnnotationTab", probe, stage: str, **fields) -> None:
+    if not isinstance(probe, dict):
+        return
+    event_done_at = time.perf_counter()
+    try:
+        event_done_ms = (event_done_at - float(probe.get("start", event_done_at))) * 1000.0
+    except Exception:
+        event_done_ms = 0.0
+
+    def _log_after_idle():
+        try:
+            paint_ms = (time.perf_counter() - float(probe.get("start", event_done_at))) * 1000.0
+        except Exception:
+            paint_ms = event_done_ms
+        payload = dict(probe.get("fields", {}) or {})
+        payload.update(fields)
+        payload.update(
+            {
+                "trace": probe.get("trace", "-"),
+                "intent": probe.get("intent", "-"),
+                "event_done_ms": round(event_done_ms, 1),
+                "paint_ms": round(paint_ms, 1),
+            }
+        )
+        log_preview_edit_flow(host, f"latency_{stage}_paint", **payload)
+
+    try:
+        host.frame.after_idle(_log_after_idle)
+    except Exception:
+        _log_after_idle()
+
+
 def _get_preview_source_cache_lock(host: "CharacterAnnotationTab"):
     lock = getattr(host, "_preview_source_image_cache_lock", None)
     if lock is None or not hasattr(lock, "acquire"):
@@ -390,6 +541,8 @@ def select_preview_character_box(
     activate_label: bool = False,
     status_message: str | None = None,
 ):
+    perf_start = time.perf_counter()
+    ensure_ms = toolbar_ms = status_ms = visual_ms = 0.0
     chars = host._get_preview_active_character_records(create=False)
     if not isinstance(chars, list) or not chars:
         host._preview_char_selected_index = None
@@ -406,11 +559,19 @@ def select_preview_character_box(
         host._update_preview_edit_status("Nie udało się zaznaczyć boxu znaku.", tone="warning")
         return "break"
 
+    try:
+        host._preview_last_char_edit_interaction_ts = time.monotonic()
+    except Exception:
+        pass
+
+    phase_start = time.perf_counter()
     host._ensure_preview_final_box_mode()
+    ensure_ms = (time.perf_counter() - phase_start) * 1000.0
     previous_selected_idx = getattr(host, "_preview_char_selected_index", None)
     previous_hover_idx = getattr(host, "_preview_char_hover_index", None)
     previous_hover_label_idx = getattr(host, "_preview_char_hover_label_index", None)
     previous_active_label_idx = getattr(host, "_preview_char_label_active_index", None)
+    host._preview_char_hover_grip = None
     label_mode_active = bool(getattr(host, "_preview_char_label_mode", False))
     host._preview_char_edit_mode = False if label_mode_active else True
     host._preview_char_add_mode = False
@@ -422,15 +583,19 @@ def select_preview_character_box(
     label_target_active = bool(activate_label or label_mode_active)
     host._preview_char_hover_label_index = safe_idx if label_target_active else None
     host._preview_char_label_active_index = safe_idx if label_target_active else None
+    phase_start = time.perf_counter()
     host._refresh_preview_editor_toolbar()
+    toolbar_ms = (time.perf_counter() - phase_start) * 1000.0
+    phase_start = time.perf_counter()
     host._update_preview_edit_status(
         status_message or (
             "Tryb wpisywania znaków jest aktywny. Kliknij kolejny box LPM albo użyj strzałek lewo/prawo, a potem wpisz znak."
             if label_mode_active else
-            "Box znaku jest aktywny. LPM+drag przesuwa, uchwyty zmieniają rozmiar, PPM usuwa aktywny box, a Alt+W włącza wpisywanie znaków."
+            "Box znaku jest aktywny. Środkowy okrąg przesuwa ramkę, narożniki zmieniają rozmiar, PPM usuwa box, a Alt+W włącza wpisywanie znaków."
         ),
         tone="info",
     )
+    status_ms = (time.perf_counter() - phase_start) * 1000.0
     host._focus_preview_canvas()
     affected_indices = {
         idx for idx in (
@@ -442,8 +607,47 @@ def select_preview_character_box(
         )
         if idx is not None
     }
+    phase_start = time.perf_counter()
     if not host._refresh_preview_character_selection_visual(affected_indices):
         host._on_preview_select(None)
+    visual_ms = (time.perf_counter() - phase_start) * 1000.0
+    _log_preview_perf(
+        "char_select",
+        perf_start,
+        threshold_ms=55.0,
+        ensure=ensure_ms,
+        toolbar=toolbar_ms,
+        status=status_ms,
+        visual=visual_ms,
+        affected=len(affected_indices),
+    )
+    selected_rec = chars[safe_idx] if 0 <= int(safe_idx) < len(chars) else None
+    trace_fields = _preview_char_record_trace_fields(host, selected_rec, data=host._get_preview_active_data(create=False), fallback_index=safe_idx)
+    log_preview_edit_flow(
+        host,
+        "char_select",
+        idx=safe_idx,
+        activate_label=int(bool(label_target_active)),
+        chars=len(chars),
+        **trace_fields,
+    )
+    probe = getattr(host, "_preview_pending_select_latency_probe", None)
+    if isinstance(probe, dict):
+        host._preview_pending_select_latency_probe = None
+        log_preview_latency(
+            host,
+            probe,
+            "select_event_done",
+            idx=safe_idx,
+            visual_ms=round(visual_ms, 1),
+            status_ms=round(status_ms, 1),
+        )
+        schedule_preview_latency_paint(
+            host,
+            probe,
+            "select_ready",
+            idx=safe_idx,
+        )
     return "break"
 
 
@@ -763,6 +967,184 @@ def get_preview_status_presentation(
     }
 
 
+def _build_preview_canvas_status_badge_specs(
+    host: "CharacterAnnotationTab",
+    canvas_width: int,
+    *,
+    data: dict | None = None,
+    box_chars=None,
+) -> dict:
+    palette = getattr(host.app, "palette", {})
+    panel_bg = palette.get("panel", "#252526")
+    success_fg = palette.get("success", "#2ecc71")
+    error_fg = palette.get("error", "#e74c3c")
+
+    source_data = data if isinstance(data, dict) else {}
+    source_chars = box_chars if isinstance(box_chars, list) else source_data.get("characters", [])
+    if not isinstance(source_chars, list):
+        source_chars = []
+
+    status_meta = host._get_preview_status_presentation(
+        data=source_data,
+        chars=source_chars,
+        plate_id=str(source_data.get("plate_id", "") or getattr(host, "_preview_active_pid", "") or ""),
+    )
+    live_status = str(status_meta.get("status", "") or "").strip().lower()
+    expected_texts = [
+        str(text or "").strip().upper()
+        for text in status_meta.get("expected_texts", [])
+        if str(text or "").strip()
+    ]
+    candidate_text = str(status_meta.get("candidate_text", "") or "").strip().upper()
+
+    try:
+        display_rows = host._characters_to_display_rows(source_chars, data=source_data)
+    except Exception:
+        display_rows = []
+    display_rows = [str(row or "").strip().upper() for row in display_rows if str(row or "").strip()]
+    if not display_rows:
+        display_rows = [candidate_text] if candidate_text else []
+    reading_text = " / ".join(display_rows) if display_rows else "brak"
+    two_row_display = len(display_rows) >= 2
+
+    def _valid_frame_count(records) -> int:
+        count = 0
+        for rec in records if isinstance(records, list) else []:
+            bbox = rec.get("bbox") if isinstance(rec, dict) else getattr(rec, "bbox", None)
+            if not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
+                continue
+            try:
+                x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+            except Exception:
+                continue
+            if x2 > x1 and y2 > y1:
+                count += 1
+        return int(count)
+
+    frame_count = _valid_frame_count(source_chars)
+    expected_lengths = sorted({
+        len(text)
+        for text in expected_texts
+        if text
+    })
+    target_frame_count = 0
+    if expected_lengths:
+        anchor_count = frame_count if frame_count > 0 else int(status_meta.get("total_boxes", 0) or 0)
+        target_frame_count = min(expected_lengths, key=lambda value: abs(int(value) - int(anchor_count)))
+    elif frame_count > 0:
+        target_frame_count = frame_count
+
+    reading_ok = bool(live_status == "perfect" or (candidate_text and expected_texts and candidate_text in expected_texts))
+    frames_ok = bool(target_frame_count > 0 and int(frame_count) == int(target_frame_count))
+    status_ok = bool(live_status == "perfect")
+
+    try:
+        layout_text, layout_tone = host._get_preview_plate_layout_dock_text(source_data)
+    except Exception:
+        layout_text, layout_tone = "AUTO ?", "muted"
+    normalized_layout = str(layout_text or "").strip().upper()
+    try:
+        layout_conflict = bool(host._preview_layout_separator_conflicts_with_chars(source_data, source_chars))
+    except Exception:
+        layout_conflict = False
+    layout_uncertain = (
+        not normalized_layout
+        or "?" in normalized_layout
+        or str(layout_tone or "").strip().lower() in {"error", "muted"}
+    )
+    layout_ok = bool(status_ok or (not layout_uncertain and not layout_conflict))
+
+    status_text = "kompletne" if status_ok else "do korekty"
+    frame_target_text = str(int(target_frame_count)) if int(target_frame_count) > 0 else "?"
+
+    states = [
+        {
+            "text": f"Odczyt: [{reading_text}]",
+            "ok": reading_ok,
+            "width": max(128.0, min(196.0, float(canvas_width) * 0.24)),
+            "tags": ("preview_overlay",),
+        },
+        {
+            "text": f"Układ: {layout_text}",
+            "ok": layout_ok,
+            "width": max(104.0, min(142.0, float(canvas_width) * 0.16)),
+            "tags": ("preview_overlay", "preview_overlay_action", "preview_action::toggle_plate_layout"),
+        },
+        {
+            "text": f"Status tablicy: {status_text}",
+            "ok": status_ok,
+            "width": max(156.0, min(214.0, float(canvas_width) * 0.25)),
+            "tags": ("preview_overlay",),
+        },
+        {
+            "text": f"Ramki: {int(frame_count)}/{frame_target_text}",
+            "ok": frames_ok,
+            "width": max(96.0, min(126.0, float(canvas_width) * 0.14)),
+            "tags": ("preview_overlay",),
+        },
+    ]
+    pulse_red = bool(any(bool(item["ok"]) for item in states) and not all(bool(item["ok"]) for item in states))
+    pulse_on = bool(int(time.time() * 2.0) % 2 == 0)
+
+    badges = []
+    for item in states:
+        is_ok = bool(item["ok"])
+        base_color = success_fg if is_ok else error_fg
+        if is_ok:
+            fill = blend_hex_colors(base_color, panel_bg, 0.26)
+        elif pulse_red:
+            fill = blend_hex_colors(base_color, panel_bg, 0.10 if pulse_on else 0.34)
+        else:
+            fill = blend_hex_colors(base_color, panel_bg, 0.24)
+        badges.append({
+            "text": str(item["text"]),
+            "fill": fill,
+            "outline": base_color,
+            "width": float(item["width"]),
+            "tags": item.get("tags", ("preview_overlay",)),
+            "pulse": bool((not is_ok) and pulse_red),
+        })
+
+    return {
+        "badges": badges,
+        "pulse": any(bool(item.get("pulse")) for item in badges),
+        "two_row_display": bool(two_row_display),
+    }
+
+
+def _sync_preview_canvas_status_pulse(
+    host: "CharacterAnnotationTab",
+    canvas,
+    pulse_needed: bool,
+) -> None:
+    after_id = getattr(host, "_preview_status_pulse_after_id", None)
+    if not pulse_needed:
+        if after_id:
+            try:
+                canvas.after_cancel(after_id)
+            except Exception:
+                pass
+            setattr(host, "_preview_status_pulse_after_id", None)
+        return
+    if after_id:
+        return
+
+    def _tick():
+        setattr(host, "_preview_status_pulse_after_id", None)
+        try:
+            if canvas is not None and bool(canvas.winfo_exists()) and getattr(host, "_preview_render_state", None):
+                refresh_preview_canvas_info_overlay_only(host)
+        except tk.TclError:
+            return
+        except Exception:
+            return
+
+    try:
+        setattr(host, "_preview_status_pulse_after_id", canvas.after(500, _tick))
+    except Exception:
+        setattr(host, "_preview_status_pulse_after_id", None)
+
+
 def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict:
     try:
         in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
@@ -918,33 +1300,27 @@ def _estimate_preview_canvas_info_badges_bottom(
     row_right_limit = max(row_start_x + 80.0, canvas_w - 10.0)
     row_y = 32.0
 
-    try:
-        display_rows = host._characters_to_display_rows((data or {}).get("characters", []), data=data)
-    except Exception:
-        display_rows = []
-    display_rows = [str(row or "").strip() for row in display_rows if str(row or "").strip()]
-    if not display_rows:
-        try:
-            final_text = host._characters_to_text((data or {}).get("characters", []), data=data)
-        except Exception:
-            final_text = ""
-        display_rows = [final_text] if final_text else []
-    two_row_display = len(display_rows) >= 2
-
     widths = [
         72.0,
         max(120.0, min(180.0, canvas_w * 0.23)),
     ]
-    if two_row_display:
-        widths.extend([max(116.0, min(170.0, canvas_w * 0.20)) for _ in range(2)])
-    else:
-        widths.append(max(112.0, min(170.0, canvas_w * 0.22)))
-    widths.extend(
-        [
-            max(126.0, min(178.0, canvas_w * 0.22)),
-            max(104.0, min(142.0, canvas_w * 0.17)),
-        ]
-    )
+    try:
+        status_layout = _build_preview_canvas_status_badge_specs(
+            host,
+            canvas_width,
+            data=data,
+            box_chars=box_chars,
+        )
+        widths.extend(float(item.get("width", 100.0)) for item in status_layout.get("badges", []))
+    except Exception:
+        widths.extend(
+            [
+                max(128.0, min(196.0, canvas_w * 0.24)),
+                max(104.0, min(142.0, canvas_w * 0.16)),
+                max(156.0, min(214.0, canvas_w * 0.25)),
+                max(96.0, min(126.0, canvas_w * 0.14)),
+            ]
+        )
 
     badge_x = row_start_x
     badge_y = row_y
@@ -1145,6 +1521,22 @@ def _clear_preview_character_overlay_items(
             old_tag = str(payload.get("tag", "") or "").strip()
             if old_tag:
                 tags_to_delete.add(old_tag)
+
+    badge_runtime_map = getattr(host, "_preview_badge_runtime", None)
+    if isinstance(badge_runtime_map, dict):
+        badge_payload = badge_runtime_map.pop(runtime_key, None)
+        if isinstance(badge_payload, dict):
+            old_badge_tag = str(badge_payload.get("tag", "") or "").strip()
+            if old_badge_tag:
+                tags_to_delete.add(old_badge_tag)
+            line_id = badge_payload.get("line_id")
+            if line_id is not None:
+                try:
+                    canvas.delete(line_id)
+                except Exception:
+                    pass
+        tags_to_delete.add(f"preview_badge::{runtime_key}")
+        tags_to_delete.add(f"preview_badge_line::{runtime_key}")
 
     record_tags = getattr(host, "_preview_char_record_render_tags", None)
     if isinstance(record_tags, dict):
@@ -1365,142 +1757,299 @@ def _draw_preview_compact_character_signature(
         pass
 
 
-def _draw_preview_light_character_signature(
+def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> dict:
+    palette = getattr(host.app, "palette", {})
+    canvas_bg = str(palette.get("panel", "#101010"))
+    group_mode = bool(getattr(host, "_preview_char_geometry_inherit_down", False))
+    if group_mode:
+        active_outline = str(palette.get("success", palette.get("accent", "#22c55e")))
+        grip_fill_base = str(palette.get("accent_alt", "#14b8a6"))
+        idle_fill_alpha = 0.42
+        active_fill_alpha = 0.72
+    else:
+        active_outline = str(palette.get("warning", "#ff9f1a"))
+        grip_fill_base = str(palette.get("info", palette.get("accent_alt", "#38bdf8")))
+        idle_fill_alpha = 0.36
+        active_fill_alpha = 0.68
+    return {
+        "active_outline": active_outline,
+        "idle_outline": blend_hex_colors(active_outline, canvas_bg, 0.38),
+        "idle_fill": blend_hex_colors(canvas_bg, grip_fill_base, idle_fill_alpha),
+        "active_fill": blend_hex_colors(canvas_bg, grip_fill_base, active_fill_alpha),
+    }
+
+
+def _get_preview_selected_character_box_color(host: "CharacterAnnotationTab") -> str:
+    palette = getattr(host.app, "palette", {})
+    return str(palette.get("warning") or palette.get("accent") or "#ff9f1a")
+
+
+def _draw_preview_character_edit_grips(
     host: "CharacterAnnotationTab",
     canvas,
     *,
-    center_x: float,
-    box_anchor_y: float,
-    image_top: float,
-    image_bottom: float,
-    canvas_height: float,
-    top_limit: float,
-    side: str,
-    char_text: str,
-    char_color: str,
-    guide_color: str,
-    meta_text: str,
     tags,
-    stagger_index: int = 0,
-) -> None:
-    normalized_side = str(side or "top").strip().lower()
-    char_font = ("Segoe UI", 15, "bold")
-    meta_font = ("Segoe UI", 7)
-    if normalized_side == "bottom":
-        char_y = max(float(image_bottom) + 16.0, min(float(canvas_height) - 30.0, float(image_bottom) + 22.0))
-        min_char_y = float(image_bottom) + 22.0
-        max_char_y = float(canvas_height) - 30.0
-        if max_char_y >= min_char_y:
-            char_y = max(min_char_y, min(max_char_y, char_y + _get_preview_signature_stagger_offset(stagger_index)))
-        else:
-            char_y = max(min_char_y, float(char_y))
-        line_end_y = char_y - 11.0
-        rule_y = char_y + 12.0
-        meta_y = min(float(canvas_height) - 11.0, rule_y + 13.0)
-    else:
-        safe_char_y = float(top_limit) + 36.0
-        char_y = min(float(image_top) - 16.0, max(safe_char_y, float(image_top) - 22.0))
-        min_char_y = float(top_limit) + 36.0
-        max_char_y = float(image_top) - 30.0
-        if max_char_y >= min_char_y:
-            char_y = max(min_char_y, min(max_char_y, char_y + _get_preview_signature_stagger_offset(stagger_index)))
-        else:
-            char_y = min(float(char_y), max_char_y)
-        line_end_y = char_y + 11.0
-        rule_y = char_y - 12.0
-        meta_y = max(float(top_limit) + 11.0, rule_y - 13.0)
+    cx1: float,
+    cy1: float,
+    cx2: float,
+    cy2: float,
+    selection_color: str,
+) -> tuple[list[int], int | None]:
+    grip_style = _get_preview_character_edit_grip_style(host)
+    active_outline = str(grip_style["active_outline"])
+    idle_outline = str(grip_style["idle_outline"])
+    idle_fill = str(grip_style["idle_fill"])
+    active_fill = str(grip_style["active_fill"])
+    hover_key = str(getattr(host, "_preview_char_hover_grip", "") or "")
 
-    try:
-        line_width = max(16.0, min(34.0, 12.0 + (len(str(char_text or "")) * 7.0) + (len(str(meta_text or "")) * 1.5)))
-        canvas.create_line(
-            float(center_x),
-            float(box_anchor_y),
-            float(center_x),
-            float(line_end_y),
-            fill=guide_color,
-            width=1,
-            tags=tags,
-        )
-        canvas.create_line(
-            float(center_x) - (line_width / 2.0),
-            float(rule_y),
-            float(center_x) + (line_width / 2.0),
-            float(rule_y),
-            fill=guide_color,
-            width=1,
-            tags=tags,
-        )
-        canvas.create_text(
-            float(center_x),
-            float(char_y),
-            text=str(char_text or ""),
-            fill=char_color,
-            font=char_font,
-            anchor=tk.CENTER,
-            tags=tags,
-        )
-        clean_meta = str(meta_text or "").strip()
-        if clean_meta:
-            canvas.create_text(
-                float(center_x),
-                float(meta_y),
-                text=clean_meta,
-                fill=guide_color,
-                font=meta_font,
-                anchor=tk.CENTER,
+    handle_radius = float(host._get_preview_char_handle_radius())
+    move_radius = float(host._get_preview_char_move_handle_radius())
+    handle_ids: list[int] = []
+    for handle_name, handle_x, handle_y in (
+        ("nw", float(cx1), float(cy1)),
+        ("ne", float(cx2), float(cy1)),
+        ("sw", float(cx1), float(cy2)),
+        ("se", float(cx2), float(cy2)),
+    ):
+        active = hover_key == f"corner:{handle_name}"
+        handle_ids.append(
+            canvas.create_oval(
+                handle_x - handle_radius,
+                handle_y - handle_radius,
+                handle_x + handle_radius,
+                handle_y + handle_radius,
+                fill=active_fill if active else idle_fill,
+                outline=active_outline if active else idle_outline,
+                width=2 if active else 1,
                 tags=tags,
             )
-    except Exception:
-        pass
+        )
+
+    center_x = (float(cx1) + float(cx2)) / 2.0
+    center_y = (float(cy1) + float(cy2)) / 2.0
+    move_active = hover_key == "move:center"
+    move_handle_id = canvas.create_oval(
+        center_x - move_radius,
+        center_y - move_radius,
+        center_x + move_radius,
+        center_y + move_radius,
+        fill=active_fill if move_active else idle_fill,
+        outline=active_outline if move_active else idle_outline,
+        width=2 if move_active else 1,
+        tags=tags,
+    )
+    return handle_ids, move_handle_id
 
 
-def _build_preview_fast_char_meta_text(host: "CharacterAnnotationTab", rec: dict, source_tag: str, data: dict | None = None) -> str:
-    tokens: list[str] = []
-    try:
-        normalized = host._normalize_character_source_tag(raw_tag=source_tag)
-    except Exception:
-        normalized = str(source_tag or "").strip().lower()
-    try:
-        uses_yolo_box = bool(host._character_record_uses_yolo_box_backend(rec))
-    except Exception:
-        uses_yolo_box = False
-    try:
-        has_symbol = bool(host._preview_record_has_symbol(rec))
-    except Exception:
-        has_symbol = bool(str((rec or {}).get("character", "") or "").strip())
+def _preview_char_label_canvas_tags(tags) -> tuple:
+    return tuple(tags or ()) + ("preview_char_label_field",)
 
-    if uses_yolo_box and "YB" not in tokens:
-        tokens.append("YB")
-    if normalized == "manual":
-        tokens.append("M")
-    elif normalized == "yolo_box_ocr":
-        if "YB" not in tokens:
-            tokens.append("YB")
-        if has_symbol:
-            tokens.append("O")
-    elif normalized == "yolo_rescue":
-        tokens.extend(["O", "YS"])
-    elif normalized == "yolo":
-        if "YB" not in tokens:
-            tokens.append("YB")
-        tokens.append("YS")
+
+def _style_preview_character_edit_grips_fast(
+    host: "CharacterAnnotationTab",
+    canvas,
+    runtime: dict,
+    *,
+    selection_color: str,
+) -> bool:
+    handle_ids = list(runtime.get("handle_ids", []) or [])
+    move_handle_id = runtime.get("move_handle_id")
+    if len(handle_ids) < 4 or move_handle_id is None:
+        return False
+
+    grip_style = _get_preview_character_edit_grip_style(host)
+    active_outline = str(grip_style["active_outline"])
+    idle_outline = str(grip_style["idle_outline"])
+    idle_fill = str(grip_style["idle_fill"])
+    active_fill = str(grip_style["active_fill"])
+    hover_key = str(getattr(host, "_preview_char_hover_grip", "") or "")
+
+    try:
+        for handle_name, item_id in zip(("nw", "ne", "sw", "se"), handle_ids):
+            active = hover_key == f"corner:{handle_name}"
+            canvas.itemconfigure(
+                item_id,
+                fill=active_fill if active else idle_fill,
+                stipple="",
+                outline=active_outline if active else idle_outline,
+                width=2 if active else 1,
+            )
+        move_active = hover_key == "move:center"
+        canvas.itemconfigure(
+            move_handle_id,
+            fill=active_fill if move_active else idle_fill,
+            stipple="",
+            outline=active_outline if move_active else idle_outline,
+            width=2 if move_active else 1,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def update_preview_character_selection_items_fast(host: "CharacterAnnotationTab", indices=None) -> bool:
+    perf_start = time.perf_counter()
+    canvas = getattr(host, "preview_canvas", None)
+    state = getattr(host, "_preview_render_state", None) or {}
+    runtime_map = getattr(host, "_preview_char_runtime", None)
+    if canvas is None or not state or not isinstance(runtime_map, dict):
+        return False
+    if bool(getattr(host, "_preview_char_label_mode", False)):
+        return False
+    if getattr(host, "_preview_char_label_active_index", None) is not None:
+        return False
+
+    data = host._get_preview_active_data(create=False)
+    if not isinstance(data, dict):
+        return False
+    chars = host._get_preview_active_character_records(create=False)
+    if not isinstance(chars, list):
+        return False
+
+    if indices is None:
+        target_indices = range(len(chars))
     else:
-        tokens.append("O")
+        normalized = []
+        for raw_idx in set(indices or []):
+            try:
+                idx = int(raw_idx)
+            except Exception:
+                continue
+            if 0 <= idx < len(chars):
+                normalized.append(idx)
+        target_indices = sorted(normalized)
 
     try:
-        row = int((rec or {}).get("reading_row", 0) or 0)
-        col = int((rec or {}).get("reading_col", 0) or 0)
+        render_scale = max(0.001, float(state.get("scale", 1.0) or 1.0))
+        x_off = float(state.get("image_left", 0.0) or 0.0)
+        y_off = float(state.get("image_top", 0.0) or 0.0)
     except Exception:
-        row = col = 0
-    if row > 0 and col > 0:
-        tokens.append(f"{row}.{col}")
+        return False
 
-    compact: list[str] = []
-    for token in tokens:
-        clean = str(token or "").strip()
-        if clean and clean not in compact:
-            compact.append(clean)
-    return " | ".join(compact)
+    try:
+        selected_idx = getattr(host, "_preview_char_selected_index", None)
+        selected_idx = int(selected_idx) if selected_idx is not None else None
+    except Exception:
+        selected_idx = None
+
+    selection_color = getattr(host.app, "palette", {}).get("accent", "#ffd166")
+    selected_box_color = _get_preview_selected_character_box_color(host)
+    edit_mode = bool(getattr(host, "_preview_char_edit_mode", False))
+    touched = False
+    for idx in target_indices:
+        rec = chars[idx] if 0 <= int(idx) < len(chars) else None
+        if not isinstance(rec, dict):
+            continue
+        runtime_key = f"FINAL:{int(idx)}"
+        runtime = runtime_map.get(runtime_key)
+        if not isinstance(runtime, dict) or runtime.get("box_id") is None:
+            return False
+
+        is_selected = bool(selected_idx is not None and int(idx) == int(selected_idx))
+        if (
+            is_selected
+            and edit_mode
+            and runtime.get("selection_id") is not None
+            and _style_preview_character_edit_grips_fast(
+                host,
+                canvas,
+                runtime,
+                selection_color=selection_color,
+            )
+        ):
+            try:
+                canvas.itemconfigure(runtime.get("box_id"), outline=selected_box_color, width=3)
+            except Exception:
+                pass
+            touched = True
+            continue
+
+        for item_id in list(runtime.get("handle_ids", []) or []):
+            try:
+                canvas.delete(item_id)
+            except Exception:
+                pass
+        for item_id in (runtime.get("selection_id"), runtime.get("move_handle_id")):
+            if item_id is None:
+                continue
+            try:
+                canvas.delete(item_id)
+            except Exception:
+                pass
+        runtime["selection_id"] = None
+        runtime["handle_ids"] = []
+        runtime["move_handle_id"] = None
+
+        bbox = host._char_record_bbox(rec)
+        if not bbox:
+            continue
+        try:
+            x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+            cx1 = (x1 * render_scale) + x_off
+            cy1 = (y1 * render_scale) + y_off
+            cx2 = (x2 * render_scale) + x_off
+            cy2 = (y2 * render_scale) + y_off
+        except Exception:
+            continue
+
+        try:
+            source_tag = host._get_character_source_tag(rec, data=data, fallback_index=idx)
+            box_color = host._get_preview_source_visual_style(source_tag)["outline"]
+            canvas.itemconfigure(
+                runtime.get("box_id"),
+                outline=(selected_box_color if is_selected else box_color),
+                width=(3 if is_selected else 2),
+            )
+        except Exception:
+            pass
+
+        if is_selected:
+            tag = host._get_preview_character_canvas_tag("FINAL", int(idx))
+            record_tag = host._get_preview_character_record_canvas_tag(rec)
+            tags = ("preview_char", tag, record_tag)
+            try:
+                runtime["selection_id"] = canvas.create_rectangle(
+                    cx1 - 2,
+                    cy1 - 2,
+                    cx2 + 2,
+                    cy2 + 2,
+                    outline=selection_color,
+                    width=1,
+                    dash=(4, 2),
+                    tags=tags,
+                )
+                if edit_mode:
+                    handle_ids, move_handle_id = _draw_preview_character_edit_grips(
+                        host,
+                        canvas,
+                        tags=tags,
+                        cx1=cx1,
+                        cy1=cy1,
+                        cx2=cx2,
+                        cy2=cy2,
+                        selection_color=selection_color,
+                    )
+                    runtime["handle_ids"] = handle_ids
+                    runtime["move_handle_id"] = move_handle_id
+                canvas.tag_raise(record_tag)
+            except Exception:
+                return False
+        touched = True
+
+    if touched:
+        try:
+            canvas.tag_raise("preview_char_add_preview")
+            canvas.tag_raise("preview_overlay")
+            canvas.tag_raise("preview_overlay_action")
+        except Exception:
+            pass
+        _log_preview_perf(
+            "char_selection_visual_fast",
+            perf_start,
+            threshold_ms=35.0,
+            items=len(list(target_indices)) if not isinstance(target_indices, range) else len(target_indices),
+        )
+    return bool(touched)
 
 
 def redraw_preview_character_overlay_only(
@@ -1569,6 +2118,7 @@ def redraw_preview_character_overlay_only(
     guide_color = source_style["guide"]
     char_fill = box_color
     selection_color = getattr(host.app, "palette", {}).get("accent", "#ffd166")
+    selected_box_color = _get_preview_selected_character_box_color(host)
     label_focus_color = getattr(host.app, "palette", {}).get("warning", "#f59e0b")
     is_selected_box = host._is_preview_char_record_selected(char_record, fallback_index=char_idx)
     drag_preview = bool(drag_preview)
@@ -1597,18 +2147,21 @@ def redraw_preview_character_overlay_only(
         row_no = host._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
     badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
 
+    selection_id = None
+    handle_ids = []
+    move_handle_id = None
     try:
         box_id = canvas.create_rectangle(
             cx1,
             cy1,
             cx2,
             cy2,
-            outline=box_color,
+            outline=(selected_box_color if is_selected_box else box_color),
             width=(3 if is_selected_box else 2),
             tags=tags,
         )
         if is_selected_box:
-            canvas.create_rectangle(
+            selection_id = canvas.create_rectangle(
                 cx1 - 2,
                 cy1 - 2,
                 cx2 + 2,
@@ -1649,18 +2202,16 @@ def redraw_preview_character_overlay_only(
             )
 
         if is_selected_box and bool(getattr(host, "_preview_char_edit_mode", False)):
-            handle_radius = host._get_preview_char_handle_radius()
-            for handle_x, handle_y in ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2)):
-                canvas.create_rectangle(
-                    handle_x - handle_radius,
-                    handle_y - handle_radius,
-                    handle_x + handle_radius,
-                    handle_y + handle_radius,
-                    fill=selection_color,
-                    outline="#111111",
-                    width=1,
-                    tags=tags,
-                )
+            handle_ids, move_handle_id = _draw_preview_character_edit_grips(
+                host,
+                canvas,
+                tags=tags,
+                cx1=cx1,
+                cy1=cy1,
+                cx2=cx2,
+                cy2=cy2,
+                selection_color=selection_color,
+            )
 
         label_mode_active = bool(getattr(host, "_preview_char_label_mode", False))
         active_label_idx = getattr(host, "_preview_char_label_active_index", None)
@@ -1695,6 +2246,7 @@ def redraw_preview_character_overlay_only(
                     label_outline = label_accent if label_highlight else box_color
                     label_text_fill = "#111111"
                     label_width = 1
+                label_tags = _preview_char_label_canvas_tags(tags)
                 if label_active:
                     canvas.create_rectangle(
                         lx1 - 2,
@@ -1703,7 +2255,7 @@ def redraw_preview_character_overlay_only(
                         ly2 + 2,
                         outline=label_focus_color,
                         width=2,
-                        tags=tags,
+                        tags=label_tags,
                     )
                 canvas.create_rectangle(
                     lx1,
@@ -1713,7 +2265,7 @@ def redraw_preview_character_overlay_only(
                     fill=label_fill,
                     outline=label_outline,
                     width=label_width,
-                    tags=tags,
+                    tags=label_tags,
                 )
                 valid_char = host._sanitize_preview_char_symbol(char_text)
                 if valid_char:
@@ -1724,7 +2276,7 @@ def redraw_preview_character_overlay_only(
                         fill=label_text_fill,
                         font=("Segoe UI", 8, "bold"),
                         anchor=tk.CENTER,
-                        tags=tags,
+                        tags=label_tags,
                     )
                 elif label_active:
                     canvas.create_line(
@@ -1734,7 +2286,7 @@ def redraw_preview_character_overlay_only(
                         ly2 - 4,
                         fill=label_text_fill,
                         width=2,
-                        tags=tags,
+                        tags=label_tags,
                     )
     except Exception:
         return False
@@ -1743,7 +2295,14 @@ def redraw_preview_character_overlay_only(
     if not isinstance(runtime_map, dict):
         runtime_map = {}
         host._preview_char_runtime = runtime_map
-    runtime_map[f"{box_source}:{int(display_idx)}"] = {"tag": tag, "box_id": box_id}
+    runtime_map[f"{box_source}:{int(display_idx)}"] = {
+        "tag": tag,
+        "box_id": box_id,
+        "selection_id": selection_id,
+        "handle_ids": handle_ids,
+        "move_handle_id": move_handle_id,
+        "record_id": id(char_record),
+    }
     record_tags = getattr(host, "_preview_char_record_render_tags", None)
     if not isinstance(record_tags, dict):
         record_tags = {}
@@ -2018,31 +2577,17 @@ def draw_preview_canvas_info_overlay(
     muted_fg = palette.get("muted", "#b0b0b0")
     success_fg = palette.get("success", "#2ecc71")
     error_fg = palette.get("error", "#e74c3c")
-    warning_fg = palette.get("warning", "#f4c27a")
-
-    status_meta = host._get_preview_status_presentation(
-        data=data,
-        chars=(data or {}).get("characters", []),
-        plate_id=str((data or {}).get("plate_id", "") or getattr(host, "_preview_active_pid", "") or ""),
-    )
-    status_text = str(status_meta.get("canvas_text", "Nieocenione") or "Nieocenione")
-    severity = str(status_meta.get("severity", "muted") or "muted").strip().lower()
-    status_color = {
-        "success": success_fg,
-        "warning": warning_fg,
-        "error": error_fg,
-    }.get(severity, muted_fg)
     try:
-        display_rows = host._characters_to_display_rows((data or {}).get("characters", []), data=data)
+        status_layout = _build_preview_canvas_status_badge_specs(
+            host,
+            canvas_width,
+            data=data,
+            box_chars=box_chars,
+        )
     except Exception:
-        display_rows = []
-    display_rows = [str(row or "").strip() for row in display_rows if str(row or "").strip()]
-    if not display_rows:
-        final_text = host._characters_to_text((data or {}).get("characters", []), data=data)
-        display_rows = [final_text] if final_text else []
-    final_text = " / ".join(display_rows) if display_rows else "brak"
-    two_row_display = len(display_rows) >= 2
-    source_counts = host._count_character_sources(box_chars, data=data)
+        status_layout = {"badges": [], "pulse": False, "two_row_display": False}
+    status_badges = list(status_layout.get("badges", []) or [])
+    two_row_display = bool(status_layout.get("two_row_display", False))
     source_image = str((data or {}).get("source_image", "") or "").strip()
     source_name = host._truncate_preview_filename(Path(source_image).name if source_image else "Brak pliku", max_chars=24)
     current_idx = host._get_current_preview_list_index()
@@ -2141,34 +2686,6 @@ def draw_preview_canvas_info_overlay(
         canvas.create_line(inner_x2, inner_y2 - corner_len, inner_x2, inner_y2, inner_x2 - corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
 
     row2_y = 32.0
-    if two_row_display:
-        reading_badges = [
-            {
-                "text": f"Góra: [{display_rows[0]}]",
-                "fill": blend_hex_colors(success_fg, panel_bg, 0.82),
-                "outline": success_fg,
-                "width": max(116.0, min(170.0, float(canvas_width) * 0.20)),
-                "tags": ("preview_overlay",),
-            },
-            {
-                "text": f"Dół: [{display_rows[1]}]",
-                "fill": blend_hex_colors(success_fg, panel_bg, 0.86),
-                "outline": success_fg,
-                "width": max(116.0, min(170.0, float(canvas_width) * 0.20)),
-                "tags": ("preview_overlay",),
-            },
-        ]
-    else:
-        reading_badges = [
-            {
-                "text": f"Odczyt: [{final_text}]",
-                "fill": blend_hex_colors(success_fg, panel_bg, 0.82),
-                "outline": success_fg,
-                "width": max(112.0, min(170.0, float(canvas_width) * 0.22)),
-                "tags": ("preview_overlay",),
-            },
-        ]
-
     row2_badges = [
         {
             "text": f"LP: {current_no}/{total}",
@@ -2184,21 +2701,7 @@ def draw_preview_canvas_info_overlay(
             "width": max(120.0, min(180.0, float(canvas_width) * 0.23)),
             "tags": ("preview_overlay", "preview_overlay_action", "preview_action::edit_source_filename"),
         },
-        *reading_badges,
-        {
-            "text": f"Kompletność: {status_text}",
-            "fill": blend_hex_colors(status_color, panel_bg, 0.84),
-            "outline": status_color,
-            "width": max(126.0, min(178.0, float(canvas_width) * 0.22)),
-            "tags": ("preview_overlay",),
-        },
-        {
-            "text": f"Ramki znaków: {int(len(box_chars or []))}",
-            "fill": blend_hex_colors(warning_fg, panel_bg, 0.84),
-            "outline": warning_fg,
-            "width": max(104.0, min(142.0, float(canvas_width) * 0.17)),
-            "tags": ("preview_overlay",),
-        },
+        *status_badges,
     ]
     row_start_x = 10.0
     row_gap_x = 6.0
@@ -2226,6 +2729,8 @@ def draw_preview_canvas_info_overlay(
             tags=badge_spec.get("tags"),
         )
         badge_x += badge_width + row_gap_x
+
+    _sync_preview_canvas_status_pulse(host, canvas, bool(status_layout.get("pulse", False)))
 
     legend_width = float(host._estimate_preview_source_legend_width())
     legend_height = float(host._estimate_preview_source_legend_height())
@@ -2268,6 +2773,7 @@ def refresh_preview_canvas_info_overlay_only(
     try:
         canvas.delete("preview_overlay")
         canvas.delete("preview_overlay_action")
+        canvas.delete("preview_plate_status_frame")
         host._draw_preview_plate_status_frame(source_data)
         host._draw_preview_canvas_info_overlay(
             canvas,
@@ -2550,6 +3056,7 @@ def reset_preview_cache(host):
     host._preview_alt_modifier_down = False
     host._preview_char_label_mode = False
     host._preview_char_hover_index = None
+    host._preview_char_hover_grip = None
     host._preview_char_hover_label_index = None
     host._preview_char_label_active_index = None
     host._preview_char_record_render_tags = {}
@@ -2600,6 +3107,7 @@ def reset_preview_view_state(host):
     host._preview_char_add_click_armed = False
     host._preview_alt_modifier_down = False
     host._preview_char_hover_index = None
+    host._preview_char_hover_grip = None
     host._preview_char_hover_label_index = None
     host._preview_char_label_active_index = None
     host._preview_char_record_render_tags = {}
@@ -2837,6 +3345,9 @@ def persist_active_preview_characters(
     refresh_row: bool = True,
     light_redraw_indices=None,
 ):
+    perf_start = time.perf_counter()
+    phase_start = perf_start
+    prepare_ms = live_ui_ms = redraw_ms = save_ms = 0.0
     data = host._get_preview_active_data(create=True)
     if isinstance(data, dict):
         data.pop("_layout_override_chars_backup", None)
@@ -2885,6 +3396,7 @@ def persist_active_preview_characters(
         default_origin="preview_editor",
         modified_by="human",
     )
+    prepare_ms = (time.perf_counter() - phase_start) * 1000.0
 
     if selected_record is not None:
         host._preview_char_selected_index = None
@@ -2906,15 +3418,28 @@ def persist_active_preview_characters(
     status_suffix = "Status tablicy: OK." if status_now == "perfect" else "Status tablicy: wymaga korekty."
     live_message = f"{success_message} {status_suffix}".strip()
     live_tone = "success" if status_now == "perfect" else "info"
+    row_refresh_needed = bool(refresh_row) or (status_now != previous_status)
+    phase_start = time.perf_counter()
     host._refresh_preview_live_metadata_ui(
         status_message=live_message,
         status_tone=live_tone,
         render_preview=bool(render_preview),
-        refresh_row=bool(refresh_row),
+        refresh_row=row_refresh_needed,
     )
+    live_ui_ms = (time.perf_counter() - phase_start) * 1000.0
     if not bool(render_preview):
+        phase_start = time.perf_counter()
         redraw_indices = None
-        if light_redraw_indices is not None:
+        partial_redraw_allowed = True
+        if light_redraw_indices == "selected":
+            try:
+                partial_redraw_allowed = (
+                    previous_selected_index == resolved_selected_index
+                    and len(previous_chars) == len(sorted_chars)
+                )
+            except Exception:
+                partial_redraw_allowed = False
+        if light_redraw_indices is not None and partial_redraw_allowed:
             raw_indices = (
                 [resolved_selected_index, previous_selected_index]
                 if light_redraw_indices == "selected"
@@ -2956,15 +3481,45 @@ def persist_active_preview_characters(
             pass
         if not redrawn:
             host._on_preview_select(None)
+        redraw_ms = (time.perf_counter() - phase_start) * 1000.0
     if bool(render_preview):
+        phase_start = time.perf_counter()
         try:
             host.frame.update_idletasks()
         except Exception:
             pass
+        redraw_ms += (time.perf_counter() - phase_start) * 1000.0
+    phase_start = time.perf_counter()
     if bool(save_immediately):
-        host._persist_preview_metadata(success_message=None, refresh_list=False)
+        host._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        try:
+            host._schedule_preview_info_refresh(delay_ms=900)
+        except Exception:
+            pass
     else:
         host._schedule_preview_metadata_save(delay_ms=save_delay_ms)
+    save_ms = (time.perf_counter() - phase_start) * 1000.0
+    _log_preview_perf(
+        "persist_active_preview_chars",
+        perf_start,
+        threshold_ms=90.0,
+        prepare=prepare_ms,
+        live_ui=live_ui_ms,
+        redraw=redraw_ms,
+        save=save_ms,
+        chars=len(sorted_chars),
+    )
+    log_preview_edit_flow(
+        host,
+        "metadata_update",
+        selected=resolved_selected_index if resolved_selected_index is not None else "-",
+        chars=len(sorted_chars),
+        status_from=previous_status,
+        status_to=status_now,
+        render=int(bool(render_preview)),
+        save_now=int(bool(save_immediately)),
+        save_delay_ms=save_delay_ms if not bool(save_immediately) else 0,
+    )
 
 
 def load_preview_data(host, quiet=False):
@@ -3123,9 +3678,19 @@ def load_preview_data(host, quiet=False):
                             d["characters"] = sorted_chars
                             changed = True
                 current_status = str(d.get("status", "") or "").strip().lower()
-                if current_status in {"", "unknown"}:
-                    d["status"] = self._derive_preview_status_from_data(d, d.get("characters", []))
-                    changed = True
+                should_recalculate_status = current_status in {"", "unknown"}
+                if not should_recalculate_status and current_status == "needs_fix":
+                    try:
+                        should_recalculate_status = bool(self._get_preview_expected_texts(d)) and (
+                            self._derive_preview_status_from_characters(d.get("characters", [])) == "perfect"
+                        )
+                    except Exception:
+                        should_recalculate_status = False
+                if should_recalculate_status:
+                    next_status = self._derive_preview_status_from_data(d, d.get("characters", []))
+                    if next_status != current_status:
+                        d["status"] = next_status
+                        changed = True
                 for yolo_key in ("yolo_detections", "yolo_nms_detections", "yolo_raw_detections"):
                     if yolo_key not in d:
                         continue
@@ -3287,6 +3852,7 @@ def on_preview_select(host, event=None):
             self._cancel_preview_char_label_interaction()
             self._preview_char_selected_index = None
             self._preview_char_hover_index = None
+            self._preview_char_hover_grip = None
             self._apply_preview_canvas_cursor("arrow")
             self._refresh_preview_editor_toolbar()
             self._update_preview_box_info_label()
@@ -3299,6 +3865,7 @@ def on_preview_select(host, event=None):
         self._cancel_preview_char_label_interaction()
         self._preview_char_selected_index = None
         self._preview_char_hover_index = None
+        self._preview_char_hover_grip = None
         self._apply_preview_canvas_cursor("arrow")
         self._refresh_preview_editor_toolbar()
         self._update_preview_record_source_label(None)
@@ -3308,6 +3875,7 @@ def on_preview_select(host, event=None):
         self._cancel_preview_char_label_interaction()
         self._preview_char_selected_index = None
         self._preview_char_hover_index = None
+        self._preview_char_hover_grip = None
         self._apply_preview_canvas_cursor("arrow")
         self._refresh_preview_editor_toolbar()
         self._update_preview_record_source_label(None)
@@ -3334,6 +3902,7 @@ def on_preview_select(host, event=None):
         self._reset_preview_view_state()
         self._preview_active_pid = pid
         self._preview_char_selected_index = None
+        self._preview_char_hover_grip = None
         self._unbind_preview_char_drag_session()
         self._preview_char_drag_state = None
         self._preview_char_add_state = None
@@ -3660,6 +4229,7 @@ def on_preview_select(host, event=None):
                 has_boxes=bool(box_chars),
             )
         selection_color = getattr(self.app, "palette", {}).get("accent", "#ffd166")
+        selected_box_color = _get_preview_selected_character_box_color(self)
         label_focus_color = getattr(self.app, "palette", {}).get("warning", "#f59e0b")
         label_mode_active = bool(getattr(self, "_preview_char_label_mode", False))
         active_label_idx = getattr(self, "_preview_char_label_active_index", None)
@@ -3685,6 +4255,14 @@ def on_preview_select(host, event=None):
             except Exception:
                 hover_label_record = None
 
+        canonical_index_by_id = {}
+        if box_source == "FINAL" and isinstance(canonical_chars, list):
+            canonical_index_by_id = {
+                id(rec): int(idx)
+                for idx, rec in enumerate(canonical_chars)
+                if isinstance(rec, dict)
+            }
+
         # rysowanie bboxów + znaków
         for box_idx, c in enumerate(box_chars):
             if not isinstance(c, dict):
@@ -3693,7 +4271,8 @@ def on_preview_select(host, event=None):
             bbox = c.get("bbox", [0, 0, 0, 0])
             if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
                 continue
-            char_canvas_tag = self._get_preview_character_canvas_tag(box_source, box_idx)
+            runtime_idx = int(canonical_index_by_id.get(id(c), int(box_idx))) if box_source == "FINAL" else int(box_idx)
+            char_canvas_tag = self._get_preview_character_canvas_tag(box_source, runtime_idx)
             char_record_tag = self._get_preview_character_record_canvas_tag(c)
             char_canvas_tags = ("preview_char", char_canvas_tag, char_record_tag)
 
@@ -3709,7 +4288,7 @@ def on_preview_select(host, event=None):
             if row_no not in (1, 2):
                 row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
             badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
-            source_tag = self._get_character_source_tag(c, data=data, fallback_index=box_idx)
+            source_tag = self._get_character_source_tag(c, data=data, fallback_index=runtime_idx)
             source_style = self._get_preview_source_visual_style(source_tag)
             uses_yolo_box_backend = self._character_record_uses_yolo_box_backend(c)
             is_yolo_box = (
@@ -3729,7 +4308,7 @@ def on_preview_select(host, event=None):
                 draw_badge = False
                 draw_box_details = False
             box_kwargs = {
-                "outline": box_color,
+                "outline": (selected_box_color if is_selected_box else box_color),
                 "width": (3 if is_selected_box else 2),
             }
             if mute_existing_boxes_during_add:
@@ -3741,15 +4320,19 @@ def on_preview_select(host, event=None):
                 draw_box_details = False
                 is_selected_box = False
 
+            selection_id = None
+            handle_ids = []
+            move_handle_id = None
             box_id = self.preview_canvas.create_rectangle(cx1, cy1, cx2, cy2, tags=char_canvas_tags, **box_kwargs)
-            self._preview_char_runtime[f"{box_source}:{box_idx}"] = {
+            self._preview_char_runtime[f"{box_source}:{runtime_idx}"] = {
                 "tag": char_canvas_tag,
                 "box_id": box_id,
+                "record_id": id(c),
             }
             self._preview_char_record_render_tags[id(c)] = char_record_tag
 
             if is_selected_box:
-                self.preview_canvas.create_rectangle(
+                selection_id = self.preview_canvas.create_rectangle(
                     cx1 - 2, cy1 - 2, cx2 + 2, cy2 + 2,
                     outline=selection_color,
                     width=1,
@@ -3791,22 +4374,28 @@ def on_preview_select(host, event=None):
                     badge_layers=badge_layers,
                     reading_label=reading_label,
                     tags=char_canvas_tags,
-                    stagger_index=_get_preview_signature_stagger_index(c, box_idx),
+                    stagger_index=_get_preview_signature_stagger_index(c, runtime_idx),
                 )
 
             if is_selected_box and bool(getattr(self, "_preview_char_edit_mode", False)):
-                handle_radius = self._get_preview_char_handle_radius()
-                for handle_x, handle_y in ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2)):
-                    self.preview_canvas.create_rectangle(
-                        handle_x - handle_radius,
-                        handle_y - handle_radius,
-                        handle_x + handle_radius,
-                        handle_y + handle_radius,
-                        fill=selection_color,
-                        outline="#111111",
-                        width=1,
-                        tags=char_canvas_tags,
-                    )
+                handle_ids, move_handle_id = _draw_preview_character_edit_grips(
+                    self,
+                    self.preview_canvas,
+                    tags=char_canvas_tags,
+                    cx1=cx1,
+                    cy1=cy1,
+                    cx2=cx2,
+                    cy2=cy2,
+                    selection_color=selection_color,
+                )
+
+            self._preview_char_runtime[f"{box_source}:{runtime_idx}"].update(
+                {
+                    "selection_id": selection_id,
+                    "handle_ids": handle_ids,
+                    "move_handle_id": move_handle_id,
+                }
+            )
 
             # Mini-pola etykiety mają być widoczne tylko wtedy, gdy użytkownik
             # rzeczywiście pracuje w trybie wpisywania albo ma aktywne pole znaku.
@@ -3842,6 +4431,7 @@ def on_preview_select(host, event=None):
                         label_outline = label_accent if label_highlight else box_color
                         label_text_fill = "#111111"
                         label_width = 1
+                    label_tags = _preview_char_label_canvas_tags(char_canvas_tags)
                     if label_active:
                         self.preview_canvas.create_rectangle(
                             lx1 - 2,
@@ -3850,7 +4440,7 @@ def on_preview_select(host, event=None):
                             ly2 + 2,
                             outline=label_focus_color,
                             width=2,
-                            tags=char_canvas_tags,
+                            tags=label_tags,
                         )
                     self.preview_canvas.create_rectangle(
                         lx1,
@@ -3860,7 +4450,7 @@ def on_preview_select(host, event=None):
                         fill=label_fill,
                         outline=label_outline,
                         width=label_width,
-                        tags=char_canvas_tags,
+                        tags=label_tags,
                     )
                     valid_char = self._sanitize_preview_char_symbol(char_text)
                     if valid_char:
@@ -3871,7 +4461,7 @@ def on_preview_select(host, event=None):
                             fill=label_text_fill,
                             font=("Segoe UI", 8, "bold"),
                             anchor=tk.CENTER,
-                            tags=char_canvas_tags,
+                            tags=label_tags,
                         )
                     elif label_active:
                         self.preview_canvas.create_line(
@@ -3881,7 +4471,7 @@ def on_preview_select(host, event=None):
                             ly2 - 4,
                             fill=label_text_fill,
                             width=2,
-                            tags=char_canvas_tags,
+                            tags=label_tags,
                         )
 
         self._draw_preview_layout_separator(data)
@@ -4021,10 +4611,13 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
     if not isinstance(chars, list):
         chars = []
 
-    try:
-        canvas.delete("preview_fast_detail")
-    except Exception:
-        pass
+    for stale_tag in ("preview_fast_detail", "preview_badge"):
+        try:
+            canvas.delete(stale_tag)
+        except Exception:
+            pass
+    self._preview_badge_runtime = {}
+    self._preview_badge_drag_state = None
 
     try:
         render_scale = max(0.001, float(state.get("scale", 1.0) or 1.0))
@@ -4187,8 +4780,14 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
         badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
         source_tag = self._get_character_source_tag(c, data=data, fallback_index=box_idx)
         source_style = self._get_preview_source_visual_style(source_tag)
-        tags = ("preview_fast_detail",)
-        _draw_preview_light_character_signature(
+        # Fast detail signatures are part of the same visual object as the box.
+        # Keep the record/index tags so drag/redraw cleanup does not leave stale
+        # badges and leader lines behind after a manual correction.
+        char_canvas_tag = self._get_preview_character_canvas_tag("FINAL", int(box_idx))
+        char_record_tag = self._get_preview_character_record_canvas_tag(c)
+        tags = ("preview_fast_detail", char_canvas_tag, char_record_tag)
+        reading_label = self._get_preview_character_reading_position_label(display_rec, data=data)
+        _draw_preview_compact_character_signature(
             self,
             canvas,
             center_x=center_x,
@@ -4201,25 +4800,31 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             char_text=str(c.get("character", "")),
             char_color=source_style["outline"],
             guide_color=source_style["guide"],
-            meta_text=_build_preview_fast_char_meta_text(self, display_rec, source_tag, data),
+            badge_layers=self._get_preview_source_badge_layers(
+                source_tag,
+                confidence=None,
+                box_backend_confidence=self._character_record_yolo_box_backend_confidence(c),
+                include_confidence=False,
+                has_symbol=self._preview_record_has_symbol(c),
+                uses_yolo_box_backend=self._character_record_uses_yolo_box_backend(c),
+            ),
+            reading_label=reading_label,
             tags=tags,
             stagger_index=_get_preview_signature_stagger_index(display_rec, box_idx),
         )
 
         is_selected_box = bool(selected_record is c or (selected_idx is not None and int(selected_idx) == int(box_idx)))
         if is_selected_box and bool(getattr(self, "_preview_char_edit_mode", False)):
-            handle_radius = self._get_preview_char_handle_radius()
-            for handle_x, handle_y in ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2)):
-                canvas.create_rectangle(
-                    handle_x - handle_radius,
-                    handle_y - handle_radius,
-                    handle_x + handle_radius,
-                    handle_y + handle_radius,
-                    fill=selection_color,
-                    outline="#111111",
-                    width=1,
-                    tags=tags,
-                )
+            _draw_preview_character_edit_grips(
+                self,
+                canvas,
+                tags=tags,
+                cx1=cx1,
+                cy1=cy1,
+                cx2=cx2,
+                cy2=cy2,
+                selection_color=selection_color,
+            )
 
         show_label_box = bool(
             label_mode_active
@@ -4248,6 +4853,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                     label_outline = label_accent
                     label_text_fill = label_accent
                     label_width = 2 if label_hovered else 1
+                label_tags = _preview_char_label_canvas_tags(tags)
                 canvas.create_rectangle(
                     lx1,
                     ly1,
@@ -4256,7 +4862,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                     fill=label_fill,
                     outline=label_outline,
                     width=label_width,
-                    tags=tags,
+                    tags=label_tags,
                 )
                 canvas.create_text(
                     (lx1 + lx2) / 2.0,
@@ -4265,7 +4871,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                     fill=label_text_fill,
                     font=("Segoe UI", 9, "bold"),
                     anchor=tk.CENTER,
-                    tags=tags,
+                    tags=label_tags,
                 )
 
     try:
@@ -4366,84 +4972,111 @@ def update_preview_character_drag_visual(host, char_idx: int, rec: dict, bbox) -
     cx2 = (x2 * render_scale) + x_off
     cy2 = (y2 * render_scale) + y_off
     center_x = cx1 + ((cx2 - cx1) / 2.0)
-    selection_color = getattr(self.app, "palette", {}).get("accent", "#ffd166")
-    source_tag = self._get_character_source_tag(rec, data=self._get_preview_active_data(create=False), fallback_index=char_idx)
-    box_color = self._get_preview_source_visual_style(source_tag)["outline"]
-    handle_radius = self._get_preview_char_handle_radius()
+    try:
+        handle_radius = float(drag_state.get("handle_radius", 0.0) or 0.0)
+    except Exception:
+        handle_radius = 0.0
+    if handle_radius <= 0.0:
+        handle_radius = float(self._get_preview_char_handle_radius())
+        drag_state["handle_radius"] = handle_radius
 
     visual_ids = drag_state.get("visual_ids")
-    visual_created = False
+    using_live_visual = bool(drag_state.get("using_live_visual"))
     if not isinstance(visual_ids, dict):
         record_tag = self._get_preview_character_record_canvas_tag(rec)
-        canvas_tag = self._get_preview_character_canvas_tag("FINAL", int(char_idx))
-        try:
-            canvas.delete("preview_char_drag_preview")
-        except Exception:
-            pass
-        try:
-            canvas.itemconfigure(record_tag, state="hidden")
-        except Exception:
-            pass
-        try:
-            canvas.itemconfigure(canvas_tag, state="hidden")
-        except Exception:
-            pass
-        try:
-            box_id = canvas.create_rectangle(
-                cx1,
-                cy1,
-                cx2,
-                cy2,
-                outline=box_color,
-                width=3,
-                tags=("preview_char_drag_preview",),
-            )
-            selection_id = canvas.create_rectangle(
-                cx1 - 2,
-                cy1 - 2,
-                cx2 + 2,
-                cy2 + 2,
-                outline=selection_color,
-                width=1,
-                dash=(4, 2),
-                tags=("preview_char_drag_preview",),
-            )
-            handle_ids = []
-            for handle_x, handle_y in ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2)):
-                handle_ids.append(
-                    canvas.create_rectangle(
-                        handle_x - handle_radius,
-                        handle_y - handle_radius,
-                        handle_x + handle_radius,
-                        handle_y + handle_radius,
-                        fill=selection_color,
-                        outline="#111111",
-                        width=1,
-                        tags=("preview_char_drag_preview",),
-                    )
-                )
-            visual_ids = {"box": box_id, "selection": selection_id, "handles": handle_ids}
+        runtime_key = f"FINAL:{int(char_idx)}"
+        runtime_payload = (getattr(self, "_preview_char_runtime", None) or {}).get(runtime_key)
+        if isinstance(runtime_payload, dict) and runtime_payload.get("box_id") is not None:
+            visual_ids = {
+                "box": runtime_payload.get("box_id"),
+                "selection": runtime_payload.get("selection_id"),
+                "handles": list(runtime_payload.get("handle_ids", []) or []),
+                "move_handle": runtime_payload.get("move_handle_id"),
+            }
             drag_state["visual_ids"] = visual_ids
             drag_state["visual_record_tag"] = record_tag
-            visual_created = True
-        except Exception:
-            return False
-    else:
-        try:
-            canvas.coords(visual_ids.get("box"), cx1, cy1, cx2, cy2)
-            canvas.coords(visual_ids.get("selection"), cx1 - 2, cy1 - 2, cx2 + 2, cy2 + 2)
-            handle_ids = list(visual_ids.get("handles", []) or [])
-            handle_points = ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2))
-            for item_id, (handle_x, handle_y) in zip(handle_ids, handle_points):
-                canvas.coords(
-                    item_id,
-                    handle_x - handle_radius,
-                    handle_y - handle_radius,
-                    handle_x + handle_radius,
-                    handle_y + handle_radius,
+            drag_state["using_live_visual"] = True
+            using_live_visual = True
+        else:
+            try:
+                canvas.delete("preview_char_drag_preview")
+            except Exception:
+                pass
+            try:
+                selection_color = getattr(self.app, "palette", {}).get("accent", "#ffd166")
+                selected_box_color = _get_preview_selected_character_box_color(self)
+                box_id = canvas.create_rectangle(
+                    cx1,
+                    cy1,
+                    cx2,
+                    cy2,
+                    outline=selected_box_color,
+                    width=3,
+                    tags=("preview_char_drag_preview",),
                 )
-        except Exception:
-            return False
+                selection_id = canvas.create_rectangle(
+                    cx1 - 2,
+                    cy1 - 2,
+                    cx2 + 2,
+                    cy2 + 2,
+                    outline=selection_color,
+                    width=1,
+                    dash=(4, 2),
+                    tags=("preview_char_drag_preview",),
+                )
+                handle_ids, move_handle_id = _draw_preview_character_edit_grips(
+                    self,
+                    canvas,
+                    tags=("preview_char_drag_preview",),
+                    cx1=cx1,
+                    cy1=cy1,
+                    cx2=cx2,
+                    cy2=cy2,
+                    selection_color=selection_color,
+                )
+                visual_ids = {
+                    "box": box_id,
+                    "selection": selection_id,
+                    "handles": handle_ids,
+                    "move_handle": move_handle_id,
+                }
+                drag_state["visual_ids"] = visual_ids
+                drag_state["visual_record_tag"] = record_tag
+            except Exception:
+                return False
+
+    try:
+        box_item = visual_ids.get("box")
+        if box_item is not None:
+            canvas.coords(box_item, cx1, cy1, cx2, cy2)
+        selection_item = visual_ids.get("selection")
+        if selection_item is not None:
+            canvas.coords(selection_item, cx1 - 2, cy1 - 2, cx2 + 2, cy2 + 2)
+        handle_ids = list(visual_ids.get("handles", []) or [])
+        handle_points = ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2))
+        for item_id, (handle_x, handle_y) in zip(handle_ids, handle_points):
+            if item_id is None:
+                continue
+            canvas.coords(
+                item_id,
+                handle_x - handle_radius,
+                handle_y - handle_radius,
+                handle_x + handle_radius,
+                handle_y + handle_radius,
+            )
+        move_handle_item = visual_ids.get("move_handle")
+        if move_handle_item is not None:
+            move_radius = float(self._get_preview_char_move_handle_radius())
+            center_y = cy1 + ((cy2 - cy1) / 2.0)
+            canvas.coords(
+                move_handle_item,
+                center_x - move_radius,
+                center_y - move_radius,
+                center_x + move_radius,
+                center_y + move_radius,
+            )
+    except Exception:
+        return False
 
     badge_key = f"FINAL:{int(char_idx)}"
     badge_runtime = getattr(self, "_preview_badge_runtime", {}).get(badge_key)
@@ -4460,14 +5093,16 @@ def update_preview_character_drag_visual(host, char_idx: int, rec: dict, bbox) -
             except Exception:
                 pass
 
-    if visual_created:
-        try:
+    try:
+        if using_live_visual:
+            canvas.tag_raise(self._get_preview_character_record_canvas_tag(rec))
+        else:
             canvas.tag_raise("preview_char_drag_preview")
-            canvas.tag_raise("preview_char_add_preview")
-            canvas.tag_raise("preview_overlay")
-            canvas.tag_raise("preview_overlay_action")
-        except Exception:
-            pass
+        canvas.tag_raise("preview_char_add_preview")
+        canvas.tag_raise("preview_overlay")
+        canvas.tag_raise("preview_overlay_action")
+    except Exception:
+        pass
     return True
 
 
@@ -4486,29 +5121,22 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
     if not isinstance(source_data, dict):
         return False
-    try:
-        if self._should_preview_use_two_row_layers(source_data):
-            image_w = max(1.0, float(state.get("orig_w", source_data.get("plate_image_width", 1.0)) or 1.0))
-            image_h = max(1.0, float(state.get("orig_h", source_data.get("plate_image_height", 1.0)) or 1.0))
-            self._ensure_preview_layout_separator(
-                source_data,
-                source_data.get("characters", []),
-                image_w=image_w,
-                image_h=image_h,
-            )
-    except Exception:
-        pass
-
-    try:
-        status_info = self._get_preview_status_presentation(
-            data=source_data,
-            chars=source_data.get("characters", []),
-            plate_id=str(source_data.get("plate_id", "") or getattr(self, "_preview_active_pid", "") or ""),
-        )
-        status = str(status_info.get("status", "") or "").strip().lower()
-    except Exception:
-        status = str(source_data.get("status", "") or "").strip().lower()
-    if status != "perfect":
+    status = str(source_data.get("status", "") or "").strip().lower()
+    severity = str(source_data.get("severity", "") or "").strip().lower()
+    if status not in {"perfect", "bad", "needs_fix"}:
+        try:
+            status = str(
+                self._derive_preview_status_from_data(source_data, source_data.get("characters", []))
+                or status
+                or ""
+            ).strip().lower()
+        except Exception:
+            pass
+    if status == "perfect":
+        frame_tone = "success"
+    elif status in {"bad", "needs_fix"} or severity == "error":
+        frame_tone = "error"
+    else:
         return False
 
     try:
@@ -4522,31 +5150,42 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
         return False
 
     palette = getattr(self.app, "palette", {})
-    success = palette.get("success", "#2ecc71")
-    panel = palette.get("panel", "#101010")
-    glow = blend_hex_colors(success, panel, 0.36)
+    frame_color = (
+        palette.get("success", "#2ecc71")
+        if frame_tone == "success"
+        else palette.get("error", palette.get("danger", "#ef4444"))
+    )
     tags = ("preview_plate_status_frame",)
     try:
+        handle_radius = float(self._get_preview_char_handle_radius())
+    except Exception:
+        handle_radius = 9.0
+    frame_pad = max(20.0, min(30.0, handle_radius + 12.0))
+    try:
         canvas.create_rectangle(
-            left - 7,
-            top - 7,
-            right + 7,
-            bottom + 7,
-            outline=glow,
-            width=5,
-            tags=tags,
-        )
-        canvas.create_rectangle(
-            left - 3,
-            top - 3,
-            right + 3,
-            bottom + 3,
-            outline=success,
+            left - frame_pad,
+            top - frame_pad,
+            right + frame_pad,
+            bottom + frame_pad,
+            outline=frame_color,
             width=3,
             tags=tags,
         )
         try:
+            canvas.tag_raise("preview_plate_status_frame", "preview_plate_image")
+        except Exception:
+            pass
+        try:
+            canvas.tag_raise("preview_char")
+        except Exception:
+            pass
+        try:
             canvas.tag_raise("preview_badge")
+        except Exception:
+            pass
+        try:
+            canvas.tag_raise("preview_char_drag_preview")
+            canvas.tag_raise("preview_char_add_preview")
         except Exception:
             pass
         return True
@@ -4579,6 +5218,8 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
 
     source_data["plate_image_width"] = float(image_w)
     source_data["plate_image_height"] = float(image_h)
+    if not self._should_preview_use_two_row_layers(source_data):
+        return False
     separator = self._ensure_preview_layout_separator(
         source_data,
         source_data.get("characters", []),
@@ -4603,11 +5244,15 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
     accent = palette.get("accent", "#ffd166")
     muted = palette.get("muted", "#8a8f98")
     border = palette.get("border", "#4b5563")
-    separator_color = accent if str(separator.get("source", "")).startswith("manual") else blend_hex_colors(muted, border, 0.42)
+    interactive = bool(self._is_preview_layout_separator_interactive(source_data, ignore_active_char=True))
+    separator_color = accent if interactive and str(separator.get("source", "")).startswith("manual") else blend_hex_colors(muted, border, 0.42)
     shadow = blend_hex_colors(separator_color, panel, 0.16)
     handle_fill = blend_hex_colors(panel, separator_color, 0.12)
-    handle_radius = 5.5
+    handle_radius = 5.5 if interactive else 3.5
     tags = ("preview_layout_separator",)
+    line_tags = tags + ("preview_layout_separator_line",) if interactive else tags
+    left_handle_tags = tags + ("preview_layout_separator_handle", "preview_layout_separator_handle::left") if interactive else tags
+    right_handle_tags = tags + ("preview_layout_separator_handle", "preview_layout_separator_handle::right") if interactive else tags
 
     try:
         shadow_id = canvas.create_line(
@@ -4629,7 +5274,7 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             width=1.25,
             dash=(7, 6),
             capstyle="round",
-            tags=tags + ("preview_layout_separator_line",),
+            tags=line_tags,
         )
         left_handle_id = canvas.create_oval(
             cx1 - handle_radius,
@@ -4639,7 +5284,7 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             fill=handle_fill,
             outline=separator_color,
             width=1,
-            tags=tags + ("preview_layout_separator_handle", "preview_layout_separator_handle::left"),
+            tags=left_handle_tags,
         )
         right_handle_id = canvas.create_oval(
             cx2 - handle_radius,
@@ -4649,7 +5294,7 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             fill=handle_fill,
             outline=separator_color,
             width=1,
-            tags=tags + ("preview_layout_separator_handle", "preview_layout_separator_handle::right"),
+            tags=right_handle_tags,
         )
         self._preview_layout_separator_runtime = {
             "separator": dict(separator),
@@ -4661,6 +5306,7 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             "right_point": (float(cx2), float(cy2)),
             "handle_radius": float(handle_radius),
             "line_hit_radius": 11.0,
+            "interactive": bool(interactive),
         }
         canvas.tag_raise("preview_layout_separator")
         return True
@@ -4678,10 +5324,13 @@ def redraw_preview_character_overlays_light(host) -> bool:
     try:
         canvas.delete("preview_char")
         canvas.delete("preview_fast_detail")
+        canvas.delete("preview_badge")
     except Exception:
         pass
     self._preview_char_runtime = {}
     self._preview_char_record_render_tags = {}
+    self._preview_badge_runtime = {}
+    self._preview_badge_drag_state = None
 
     self._draw_preview_plate_status_frame()
     self._draw_preview_layout_separator()

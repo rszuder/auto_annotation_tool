@@ -233,8 +233,8 @@ def set_iteration_target(self, target: str | None):
     current_path = normalize_iteration_path(project_data.get("iteration_path", ""))
     if not normalized_target:
         project_data["iteration_path"] = ""
-    elif iteration_path_target(current_path) != normalized_target:
-        project_data["iteration_path"] = default_iteration_path_for_target(normalized_target)
+    elif current_path and iteration_path_target(current_path) != normalized_target:
+        project_data["iteration_path"] = ""
     self.save_state()
 
 def get_iteration_target(self) -> str:
@@ -274,6 +274,17 @@ def get_iteration_path(self) -> str:
     if normalized_path and (not target or iteration_path_target(normalized_path) == target):
         return normalized_path
     return default_iteration_path_for_target(target)
+
+def get_explicit_iteration_path(self) -> str:
+    act = self.get_active_project_name()
+    if not act:
+        return ""
+    project_data = self.state["projects"][act]
+    normalized_path = normalize_iteration_path(project_data.get("iteration_path", ""))
+    target = self._normalize_iteration_target(project_data.get("iteration_target", ""))
+    if normalized_path and (not target or iteration_path_target(normalized_path) == target):
+        return normalized_path
+    return ""
 
 def clear_iteration_path(self):
     self.set_iteration_path("")
@@ -612,7 +623,7 @@ def set_step3_extract_state(
     self.save_state()
 
 
-_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'set_step3_extract_state')
+_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'get_explicit_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'set_step3_extract_state')
 
 
 _STATIC_METHODS = ('_normalize_project_start_mode', '_normalize_project_start_asset_scope', '_project_start_asset_scope_state_key', '_normalize_iteration_target', '_normalize_iteration_path')

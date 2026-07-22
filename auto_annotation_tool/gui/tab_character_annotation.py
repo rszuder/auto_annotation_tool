@@ -126,7 +126,6 @@ from .z3_preview_ui import (
     draw_preview_fixed_text_badge,
     draw_preview_source_legend,
     draw_preview_text_badge,
-    draw_preview_top_badges,
     estimate_preview_badge_layout,
     estimate_preview_source_legend_height,
     estimate_preview_source_legend_width,
@@ -189,7 +188,12 @@ from .z3_preview_ui import (
     rebuild_preview_listbox,
     reset_preview_cache,
     reset_preview_view_state,
+    log_preview_edit_flow,
+    log_preview_latency,
+    schedule_preview_latency_paint,
+    start_preview_latency_probe,
     draw_preview_fast_render_details,
+    update_preview_character_selection_items_fast,
     redraw_preview_character_overlay_only,
     redraw_preview_character_overlays_light,
     draw_preview_plate_status_frame,
@@ -677,11 +681,11 @@ DETECTION_METHOD_CARD_META = {
     },
     "YOLO": {
         "title": "YOLO",
-        "desc": "YOLO sam wykrywa znaki i czyta je z klas modelu.",
+        "desc": "Model detekcji YOLO wykrywa ramki znaków i proponuje klasy. Nie jest to wybór modelu do treningu.",
     },
     "BOTH": {
         "title": "OCR + YOLO",
-        "desc": "OCR pilnuje tekstu, a YOLO dopasowuje pozycje i może przejąć końcowe ramki.",
+        "desc": "OCR pilnuje tekstu, a model detekcji YOLO dopasowuje pozycje i może przejąć końcowe ramki.",
     },
     "YOLO_OCR": {
         "title": "YOLO boxy + OCR",
@@ -718,7 +722,7 @@ DETECTION_PIPELINE_PRESET_META = {
     },
     "YOLO": {
         "label": "YOLO",
-        "desc": "YOLO daje box i znak z klas modelu.",
+        "desc": "Model detekcji YOLO daje box i znak z klas modelu.",
     },
     "BOTH": {
         "label": "OCR + YOLO",
@@ -1233,6 +1237,7 @@ class CharacterAnnotationTab:
     _handle_preview_list_arrow_nav = z3_preview_metadata_runtime._handle_preview_list_arrow_nav
     _select_preview_relative = z3_preview_metadata_runtime._select_preview_relative
     _append_preview_status_sentence = staticmethod(z3_preview_typing_runtime._append_preview_status_sentence)
+    _clear_preview_char_label_canvas_fields = z3_preview_typing_runtime._clear_preview_char_label_canvas_fields
     _cancel_preview_char_label_interaction = z3_preview_typing_runtime._cancel_preview_char_label_interaction
     _get_preview_typing_state = z3_preview_typing_runtime._get_preview_typing_state
     _format_preview_typing_status = z3_preview_typing_runtime._format_preview_typing_status
@@ -1527,8 +1532,11 @@ class CharacterAnnotationTab:
     _cycle_preview_character_selection = z3_preview_editor_runtime._cycle_preview_character_selection
     _cycle_preview_character_row = z3_preview_editor_runtime._cycle_preview_character_row
     _get_preview_char_handle_radius = z3_preview_editor_runtime._get_preview_char_handle_radius
+    _get_preview_char_move_handle_radius = z3_preview_editor_runtime._get_preview_char_move_handle_radius
     _find_preview_character_box_hit = z3_preview_editor_runtime._find_preview_character_box_hit
     _find_preview_character_handle_hit = z3_preview_editor_runtime._find_preview_character_handle_hit
+    _find_preview_character_move_handle_hit = z3_preview_editor_runtime._find_preview_character_move_handle_hit
+    _find_preview_character_grip_hit = z3_preview_editor_runtime._find_preview_character_grip_hit
     _get_preview_character_canvas_tag = staticmethod(z3_preview_editor_runtime._get_preview_character_canvas_tag)
     _get_preview_character_record_canvas_tag = staticmethod(z3_preview_editor_runtime._get_preview_character_record_canvas_tag)
 
@@ -1537,6 +1545,11 @@ class CharacterAnnotationTab:
 
     _clear_preview_character_drag_visual = z3_preview_editor_runtime._clear_preview_character_drag_visual
 
+    _log_preview_edit_flow = log_preview_edit_flow
+    _log_preview_latency = log_preview_latency
+    _schedule_preview_latency_paint = schedule_preview_latency_paint
+    _start_preview_latency_probe = start_preview_latency_probe
+    _update_preview_character_selection_items_fast = update_preview_character_selection_items_fast
     _update_preview_character_drag_visual = update_preview_character_drag_visual
     _draw_preview_plate_status_frame = draw_preview_plate_status_frame
     _draw_preview_layout_separator = draw_preview_layout_separator
@@ -1963,6 +1976,7 @@ class CharacterAnnotationTab:
     _sort_character_records_by_x = z3_plate_layout_runtime._sort_character_records_by_x
     _get_preview_forced_layout_key = z3_plate_layout_runtime._get_preview_forced_layout_key
     _is_preview_two_row_layout_active = z3_plate_layout_runtime._is_preview_two_row_layout_active
+    _is_preview_layout_separator_interactive = z3_plate_layout_runtime._is_preview_layout_separator_interactive
     _should_preview_use_two_row_layers = z3_plate_layout_runtime._should_preview_use_two_row_layers
     _normalize_preview_layout_separator = z3_plate_layout_runtime._normalize_preview_layout_separator
     _build_auto_preview_layout_separator = z3_plate_layout_runtime._build_auto_preview_layout_separator
@@ -2035,7 +2049,7 @@ class CharacterAnnotationTab:
                     render_preview=True,
                 )
 
-        self._persist_preview_metadata(success_message=None, refresh_list=False)
+        self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
         try:
             self._refresh_preview_listbox_row(active_pid)
         except Exception:
@@ -2627,7 +2641,6 @@ class CharacterAnnotationTab:
         return layout
 
     _place_preview_record_overlay = place_preview_record_overlay
-    _draw_preview_top_badges = draw_preview_top_badges
     _draw_preview_canvas_info_overlay = draw_preview_canvas_info_overlay
     _get_yolo_runtime_settings = get_yolo_runtime_settings
     _characters_to_text = characters_to_text

@@ -1136,13 +1136,14 @@ def _build_ranking_panel_v2(self, parent):
     table_frame.rowconfigure(0, weight=1)
     table_frame.columnconfigure(0, weight=1)
 
-    cols = ("Lp.", "Zakres", "Model", "F1", "Precyzja", "Czułość", "Próbka", "Zestaw", "Decyzja")
+    cols = ("Wynik", "Zakres", "Run / wybór wyniku", "Wagi", "F1", "Precyzja", "Czułość", "Próbka", "Zestaw", "Decyzja")
     self.rank_tree = ttk.Treeview(table_frame, columns=cols, show="headings")
     for c in cols:
         self.rank_tree.heading(c, text=c)
-    self.rank_tree.column("Lp.", width=42, anchor=tk.CENTER, stretch=False)
+    self.rank_tree.column("Wynik", width=84, anchor=tk.CENTER, stretch=False)
     self.rank_tree.column("Zakres", width=58, minwidth=50, anchor=tk.CENTER, stretch=False)
-    self.rank_tree.column("Model", width=340, minwidth=260, anchor=tk.W, stretch=False)
+    self.rank_tree.column("Run / wybór wyniku", width=360, minwidth=280, anchor=tk.W, stretch=False)
+    self.rank_tree.column("Wagi", width=140, minwidth=110, anchor=tk.W, stretch=False)
     self.rank_tree.column("F1", width=56, minwidth=48, anchor=tk.CENTER, stretch=False)
     self.rank_tree.column("Precyzja", width=74, minwidth=66, anchor=tk.CENTER, stretch=False)
     self.rank_tree.column("Czułość", width=74, minwidth=66, anchor=tk.CENTER, stretch=False)
@@ -1177,6 +1178,8 @@ def _build_ranking_panel_v2(self, parent):
     self.rank_tree.grid(row=0, column=0, sticky="nsew")
     yscroll.grid(row=0, column=1, sticky="ns")
     xscroll.grid(row=1, column=0, sticky="ew")
+    self.rank_tree.bind("<Button-3>", self._show_ranking_context_menu, add="+")
+    self.rank_tree.bind("<Button-2>", self._show_ranking_context_menu, add="+")
     _bind_results_scroll_children(results_content)
     try:
         self.frame.after_idle(_sync_results_canvas_width)
