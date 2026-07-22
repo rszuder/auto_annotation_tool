@@ -901,27 +901,12 @@ def _get_current_preview_plate_count_state(self) -> dict:
     annotations = list(getattr(self, "current_annotations", []) or [])
     approved_set = getattr(self, "_preview_approved_filenames", None)
     campaign_approved_set = getattr(self, "_campaign_pending_approved_filenames", None)
-    approved_flag_count = 0
-    approved_flag_stamp = 0
-    for idx, ann in enumerate(annotations):
-        try:
-            if not bool(getattr(ann, "_approved_for_training", False)):
-                continue
-        except Exception:
-            continue
-        image_name = str(getattr(ann, "filename", "") or "").strip().lower()
-        if not image_name:
-            continue
-        approved_flag_count += 1
-        approved_flag_stamp += (idx + 1) * (len(image_name) * 257 + sum(ord(ch) for ch in image_name[:96]))
     approval_cache_token = (
         int(id(approved_set)) if approved_set is not None else 0,
         int(len(approved_set or set())),
         int(id(campaign_approved_set)) if campaign_approved_set is not None else 0,
         int(len(campaign_approved_set or set())),
         int(getattr(self, "_preview_approval_version", 0) or 0),
-        int(approved_flag_count),
-        int(approved_flag_stamp),
     )
     cache = getattr(self, "_current_preview_plate_count_cache", None)
     if (

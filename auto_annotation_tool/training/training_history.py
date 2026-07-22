@@ -4,6 +4,7 @@
 Historia treningĂłw.
 """
 
+import csv
 import json
 from pathlib import Path
 from datetime import datetime
@@ -176,16 +177,133 @@ class TrainingHistory:
 
         return max(candidates) if candidates else None
 
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            text = str(value if value is not None else "").strip()
+            if not text:
+                return default
+            return float(text)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(float(str(value if value is not None else "").strip()))
+        except Exception:
+            return default
+
+    def _read_results_metrics(self, train_dir: Path) -> List[Dict]:
+        results_path = train_dir / "results.csv"
+        if not results_path.exists():
+            return []
+
+        rows: List[Dict] = []
+        try:
+            with results_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for idx, raw_row in enumerate(reader, start=1):
+                    row = {str(k or "").strip(): v for k, v in dict(raw_row or {}).items()}
+                    epoch = self._safe_int(row.get("epoch") or row.get("Epoch"), idx)
+                    loss = sum(
+                        self._safe_float(row.get(key), 0.0)
+                        for key in (
+                            "train/box_loss",
+                            "train/pose_loss",
+                            "train/kobj_loss",
+                            "train/cls_loss",
+                            "train/dfl_loss",
+                            "train/rle_loss",
+                        )
+                    )
+                    rows.append(
+                        {
+                            "epoch": epoch,
+                            "timestamp": "",
+                            "loss": loss,
+                            "map50": self._safe_float(row.get("metrics/mAP50(B)") or row.get("metrics/mAP50")),
+                            "map50_95": self._safe_float(row.get("metrics/mAP50-95(B)") or row.get("metrics/mAP50-95")),
+                            "precision": self._safe_float(row.get("metrics/precision(B)") or row.get("metrics/precision")),
+                            "recall": self._safe_float(row.get("metrics/recall(B)") or row.get("metrics/recall")),
+                            "box_map50": self._safe_float(row.get("metrics/mAP50(B)") or row.get("metrics/mAP50")),
+                            "box_map50_95": self._safe_float(row.get("metrics/mAP50-95(B)") or row.get("metrics/mAP50-95")),
+                            "box_precision": self._safe_float(row.get("metrics/precision(B)") or row.get("metrics/precision")),
+                            "box_recall": self._safe_float(row.get("metrics/recall(B)") or row.get("metrics/recall")),
+                            "pose_map50": self._safe_float(row.get("metrics/mAP50(P)") or row.get("metrics/mAP50")),
+                            "pose_map50_95": self._safe_float(row.get("metrics/mAP50-95(P)") or row.get("metrics/mAP50-95")),
+                            "pose_precision": self._safe_float(row.get("metrics/precision(P)") or row.get("metrics/precision")),
+                            "pose_recall": self._safe_float(row.get("metrics/recall(P)") or row.get("metrics/recall")),
+                        }
+                    )
+        except Exception as e:
+            logger.debug(f"Nie udalo sie odczytac results.csv runu treningu: {e}")
+            return []
+        return rows
+
+    def _apply_results_metrics_to_run(self, run: TrainingRun, train_dir: Path) -> bool:
+        metrics = self._read_results_metrics(train_dir)
+        if not metrics:
+            return False
+
+        changed = False
+        last_epoch = max(self._safe_int(item.get("epoch"), 0) for item in metrics)
+        if last_epoch and int(getattr(run, "current_epoch", 0) or 0) != last_epoch:
+            run.current_epoch = last_epoch
+            changed = True
+
+        best_map50 = max((self._safe_float(item.get("map50"), 0.0) for item in metrics), default=0.0)
+        best_map50_95 = max((self._safe_float(item.get("map50_95"), 0.0) for item in metrics), default=0.0)
+        if best_map50 and float(getattr(run, "best_map50", 0.0) or 0.0) != best_map50:
+            run.best_map50 = best_map50
+            changed = True
+        if best_map50_95 and float(getattr(run, "best_map50_95", 0.0) or 0.0) != best_map50_95:
+            run.best_map50_95 = best_map50_95
+            changed = True
+
+        if not getattr(run, "metrics_history", None):
+            run.metrics_history = metrics
+            changed = True
+
+        return changed
+
+    def _read_worker_training_end_success(self, run: TrainingRun) -> Optional[bool]:
+        output_dir = str(getattr(run, "output_dir", "") or "").strip()
+        if not output_dir:
+            return None
+        events_path = Path(output_dir) / "_ipc" / "events.jsonl"
+        if not events_path.exists():
+            return None
+
+        result: Optional[bool] = None
+        try:
+            with events_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    raw = str(line or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except Exception:
+                        continue
+                    if str((event or {}).get("type") or "").strip().lower() == "training_end":
+                        result = bool(event.get("success", False))
+        except Exception:
+            return None
+        return result
+
     def _reconcile_stale_running_runs(self) -> bool:
         changed = False
         now = datetime.now()
 
         for run in self.runs.values():
-            if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.RUNNING.value:
+            status_value = str(getattr(run, "status", "") or "").strip().lower()
+            if status_value not in {TrainingStatus.RUNNING.value, TrainingStatus.PENDING.value}:
                 continue
 
+            terminal_success = self._read_worker_training_end_success(run)
             last_activity = self._get_run_activity_timestamp(run)
-            if last_activity is not None:
+            if terminal_success is None and last_activity is not None:
                 age_seconds = max(0.0, (now - last_activity).total_seconds())
                 if age_seconds < 180.0:
                     continue
@@ -195,27 +313,48 @@ class TrainingHistory:
             best_weights = weights_dir / "best.pt"
             last_weights = weights_dir / "last.pt"
 
-            run.status = TrainingStatus.FAILED.value
-            run.finished_at = (last_activity or now).isoformat()
-            run.best_weights = str(best_weights) if best_weights.exists() else str(getattr(run, "best_weights", "") or "")
-            run.last_weights = str(last_weights) if last_weights.exists() else str(getattr(run, "last_weights", "") or "")
+            if self._apply_results_metrics_to_run(run, train_dir):
+                changed = True
 
-            if not str(getattr(run, "error_message", "") or "").strip():
+            completed_on_disk = bool(
+                terminal_success is True
+                or (
+                    best_weights.exists()
+                    and last_weights.exists()
+                    and int(getattr(run, "epochs", 0) or 0) > 0
+                    and int(getattr(run, "current_epoch", 0) or 0) >= int(getattr(run, "epochs", 0) or 0)
+                )
+            )
+
+            run.status = TrainingStatus.COMPLETED.value if completed_on_disk else TrainingStatus.FAILED.value
+            run.finished_at = (last_activity or now).isoformat()
+            run.best_weights = str(best_weights) if completed_on_disk and best_weights.exists() else ""
+            run.last_weights = str(last_weights) if last_weights.exists() else str(getattr(run, "last_weights", "") or "")
+            report_html = Path(str(getattr(run, "output_dir", "") or "").strip()) / "training_report.html"
+            plots_dir = Path(str(getattr(run, "output_dir", "") or "").strip()) / "plots"
+            if report_html.exists():
+                run.report_html = str(report_html)
+            if plots_dir.exists():
+                run.plots_dir = str(plots_dir)
+
+            if completed_on_disk:
+                run.error_message = ""
+            elif not str(getattr(run, "error_message", "") or "").strip():
                 if last_weights.exists():
                     run.error_message = (
-                        "Osierocony wpis historii: run miaĹ‚ status 'running', "
-                        "ale aktywny trening juĹĽ nie istniaĹ‚. Zachowano checkpoint do wznowienia."
+                        "Osierocony wpis historii: aktywny trening juz nie istnieje. "
+                        "Zachowano checkpoint do wznowienia."
                     )
                 else:
                     run.error_message = (
-                        "Osierocony wpis historii: run miaĹ‚ status 'running', "
-                        "ale aktywny trening juĹĽ nie istniaĹ‚ i nie pozostawiĹ‚ checkpointu."
+                        "Osierocony wpis historii: aktywny trening juz nie istnieje "
+                        "i nie pozostawil checkpointu."
                     )
 
             changed = True
             logger.warning(
-                "DomkniÄ™to osierocony run treningu jako FAILED: "
-                f"{run.id} | output={getattr(run, 'output_dir', '')}"
+                "Domknieto osierocony run treningu: "
+                f"{run.id} | status={run.status} | output={getattr(run, 'output_dir', '')}"
             )
 
         return changed

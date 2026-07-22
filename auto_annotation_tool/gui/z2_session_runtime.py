@@ -2381,7 +2381,7 @@ def _cancel_preview_approved_persist(self) -> None:
     self._preview_approved_persist_after_id = None
 
 
-def _schedule_preview_approved_persist(self, *, delay_ms: int = 320) -> None:
+def _schedule_preview_approved_persist(self, *, delay_ms: int = 6500) -> None:
     self._cancel_preview_approved_persist()
 
     def _run() -> None:
@@ -2543,6 +2543,7 @@ def _invalidate_preview_runtime_caches(self) -> None:
     self._preview_any_auto_in_run_cache = None
     self._preview_list_summary_cache = None
     self._preview_list_render_state_cache = None
+    self._preview_annotation_quality_summary_cache = None
     self._current_preview_plate_count_cache = None
     self._preview_render_image_cache = {}
 

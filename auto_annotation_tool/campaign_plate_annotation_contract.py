@@ -83,9 +83,9 @@ def build_plate_annotation_import_contract(
 ) -> PlateAnnotationImportContract:
     data = dict(compatibility or {})
     origin = dict(origin_summary or {})
-    matched_images = int(data.get("matched", 0) or 0)
-    matched_plates = int(data.get("matched_plate_count", 0) or 0)
-    if matched_plates <= 0:
+    matched_images = int(data.get("adoptable_matched", data.get("matched", 0)) or 0)
+    matched_plates = int(data.get("adoptable_matched_plate_count", data.get("matched_plate_count", 0)) or 0)
+    if matched_plates <= 0 and matched_images > 0:
         matched_plates = int(origin.get("scope_plates", 0) or 0)
     skipped_entries = int(data.get("missing", 0) or 0) + int(data.get("incomplete", 0) or 0)
     return PlateAnnotationImportContract(

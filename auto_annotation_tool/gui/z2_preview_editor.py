@@ -740,6 +740,7 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     light_overlay = drag_active or bool(getattr(self, "_preview_light_overlay_refresh", False))
     vehicle_color = "#2ecc71"
     plate_color = "#e74c3c"
+    approved_plate_color = "#2fbf71"
     active_color = "#f1c40f"
     delete_color = "#ff4d4d"
     handle_fill = "#ffffff"
@@ -751,6 +752,10 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
     plate_detections = self._get_plate_detections(ann)
     selected_plate_idx = self._get_selected_plate_index_for_ann(ann)
+    try:
+        image_approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+    except Exception:
+        image_approved = False
     delete_candidate_idx = (
         int(self._preview_delete_candidate_idx)
         if self._preview_delete_mode and self._preview_delete_candidate_idx is not None
@@ -966,7 +971,12 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
                 width=0,
                 tags=("preview_overlay",)
             )
-        outline = delete_color if is_delete_candidate else (active_color if is_selected else plate_color)
+        if is_delete_candidate:
+            outline = delete_color
+        elif image_approved:
+            outline = approved_plate_color
+        else:
+            outline = active_color if is_selected else plate_color
         width = 2 if (is_selected or is_delete_candidate) else 1
         dash = None if (is_selected or is_delete_candidate) else (5, 3)
         canvas.create_polygon(
@@ -975,7 +985,7 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
             fill="",
             width=width,
             dash=dash,
-            tags=("preview_overlay",)
+            tags=("preview_overlay", "preview_plate_outline")
         )
 
         if not light_overlay:
@@ -1079,8 +1089,140 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
                 tags=("preview_overlay",)
             )
 
+    _draw_preview_plate_combo_overlay(
+        self,
+        canvas,
+        plate_detections,
+        selected_plate_idx,
+        image_approved=bool(image_approved),
+    )
+
     if not light_overlay:
         self._draw_preview_bottom_hint(canvas)
+
+
+def _draw_preview_plate_combo_overlay(
+    self,
+    canvas: ZoomableCanvas,
+    plate_detections: list,
+    selected_plate_idx: int | None,
+    *,
+    image_approved: bool = False,
+) -> None:
+    try:
+        canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
+        canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
+        if canvas_width < 180.0 or canvas_height < 90.0:
+            return
+
+        total = max(0, int(len(plate_detections or [])))
+        if total > 0:
+            try:
+                current = int(selected_plate_idx if selected_plate_idx is not None else 0) + 1
+            except Exception:
+                current = 1
+            current = max(1, min(int(current), int(total)))
+            title_text = "TABLICA"
+            value_text = f"{current} / {total}"
+        else:
+            title_text = "BRAK RAMKI"
+            value_text = "0 / 0"
+
+        theme = self._get_preview_legend_theme()
+        panel_fill = str(theme.get("panel_fill", "#101820"))
+        entry_fill = str(theme.get("entry_fill", "#172432"))
+        muted = str(theme.get("section_muted", "#9fb0bd"))
+        accent = str(theme.get("shell_outline", "#2fbf71"))
+        warning = "#f1c40f"
+        error = "#ff5b5b"
+        value_fill = accent if bool(image_approved) and total > 0 else (warning if total > 0 else error)
+        outline = value_fill
+        font_cache = getattr(self, "_preview_plate_combo_font_cache", None)
+        if not isinstance(font_cache, dict):
+            font_cache = {}
+            self._preview_plate_combo_font_cache = font_cache
+
+        def _combo_font(size: int, weight: str, family: str):
+            key = (str(family), int(size), str(weight))
+            font_obj = font_cache.get(key)
+            if font_obj is None:
+                font_obj = tkfont.Font(self.frame, family=str(family), size=int(size), weight=str(weight))
+                font_cache[key] = font_obj
+            return font_obj
+
+        label_font = _combo_font(8, "bold", "Segoe UI")
+        value_font = _combo_font(24, "bold", "Bahnschrift SemiBold")
+        title_w = float(label_font.measure(title_text))
+        value_w = float(value_font.measure(value_text))
+        title_h = max(12.0, float(label_font.metrics("linespace") or 12))
+        value_h = max(28.0, float(value_font.metrics("linespace") or 28))
+        pad_x = 10.0
+        pad_y = 5.0
+        gap = 8.0
+        title_box_w = max(72.0, title_w + (pad_x * 2.0))
+        value_box_w = max(88.0, value_w + (pad_x * 2.0))
+        combo_w = title_box_w + gap + value_box_w
+        combo_h = max(34.0, value_h + (pad_y * 2.0))
+        x1 = (canvas_width - combo_w) / 2.0
+        y1 = 12.0
+        x1 = max(12.0, min(x1, canvas_width - combo_w - 12.0))
+        y1 = max(10.0, min(y1, canvas_height - combo_h - 10.0))
+        x2 = x1 + combo_w
+        y2 = y1 + combo_h
+        title_x2 = x1 + title_box_w
+        value_x1 = title_x2 + gap
+
+        shadow_offset = 2.0
+        canvas.create_rectangle(
+            x1 + shadow_offset,
+            y1 + shadow_offset,
+            x2 + shadow_offset,
+            y2 + shadow_offset,
+            outline="",
+            fill="#050708",
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_rectangle(
+            x1,
+            y1,
+            title_x2,
+            y2,
+            outline=outline,
+            fill=entry_fill,
+            width=1,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_rectangle(
+            value_x1,
+            y1,
+            x2,
+            y2,
+            outline=outline,
+            fill=panel_fill,
+            width=2,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_text(
+            x1 + (title_box_w / 2.0),
+            y1 + (combo_h / 2.0),
+            text=title_text,
+            fill=muted,
+            anchor="center",
+            font=label_font,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_text(
+            value_x1 + (value_box_w / 2.0),
+            y1 + (combo_h / 2.0) - 1.0,
+            text=value_text,
+            fill=value_fill,
+            anchor="center",
+            font=value_font,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.tag_raise("preview_plate_combo_overlay")
+    except Exception:
+        pass
 
 
 def _build_preview_canvas_metrics_rows(self, *args, **kwargs):
@@ -1610,7 +1752,7 @@ def _finish_preview_vertex_drag(self, mark_dirty: bool = True):
         # Nie zapisujemy wtedy po kazdym puszczeniu myszy, bo to wcinalo
         # sie w chwyt kolejnego punktu. Zapis wraca po puszczeniu W.
         if not sequence_active:
-            self._schedule_preview_autosave(delay_ms=3500)
+            self._schedule_preview_autosave(delay_ms=6500)
     if not sequence_active:
         try:
             self.preview_canvas.focus_set()
@@ -1663,6 +1805,7 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
     if plate_idx < 0 or plate_idx >= len(plate_detections):
         return False
 
+    had_plate_before = bool(self._get_plate_detections(ann))
     self._push_preview_history_snapshot(ann, lightweight_plate_edit=True)
     target_detection = plate_detections[int(plate_idx)]
     try:
@@ -1688,6 +1831,7 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
         self._refresh_preview_list_row_for_actual_index(
             self.current_preview_index,
             refresh_summary=False,
+            lightweight=True,
         )
     except Exception:
         pass
@@ -1696,7 +1840,7 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
 
     if autosave:
         self._schedule_preview_autosave(
-            delay_ms=900,
+            delay_ms=4500,
             status_message="Zapisano usuniecie polygonu tablicy do annotations.xml.",
         )
         self._update_preview_edit_status("Usunieto polygon tablicy. Zapis nastapi za chwile.")
@@ -1730,6 +1874,21 @@ def _commit_new_preview_polygon(self):
     new_det.attributes["manually_edited"] = "true"
     new_det.attributes["manual_source"] = "preview"
     ann.detections.append(new_det)
+    try:
+        count_cache = getattr(self, "_current_preview_plate_count_cache", None)
+        if isinstance(count_cache, dict):
+            if not had_plate_before:
+                count_cache["images_with_plates"] = max(
+                    0,
+                    int(count_cache.get("images_with_plates", 0) or 0) + 1,
+                )
+            count_cache["total_plates"] = max(
+                0,
+                int(count_cache.get("total_plates", 0) or 0) + 1,
+            )
+            self._current_preview_plate_count_cache = count_cache
+    except Exception:
+        pass
     ann.status = AnnotationStatus.SUCCESS
     ann.status_message = "Dodano recznie polygon tablicy."
 
@@ -1782,7 +1941,7 @@ def _commit_new_preview_polygon(self):
         except Exception:
             pass
     self._schedule_preview_autosave(
-        delay_ms=3500,
+        delay_ms=6500,
         status_message="Zapisano nowy polygon tablicy do annotations.xml.",
     )
 
@@ -1955,17 +2114,23 @@ def _schedule_preview_autosave(
         self._preview_autosave_after_id = None
 
 
-def _defer_preview_autosave_for_navigation(self, delay_ms: int = 700):
+def _defer_preview_autosave_for_navigation(self, delay_ms: int = 4500):
     if not getattr(self, "_preview_autosave_after_id", None):
         return
     if not self._preview_dirty_images:
         return
     if bool(getattr(self, "_preview_super_correction_active", False)):
         delay_ms = max(int(delay_ms), SUPER_CORRECTION_AUTOSAVE_DELAY_MS)
-    self._schedule_preview_autosave(delay_ms=delay_ms)
+    self._schedule_preview_autosave(delay_ms=max(2500, int(delay_ms)))
 
 
-def _refresh_preview_list_row_for_actual_index(self, actual_index: int | None, *, refresh_summary: bool = True) -> None:
+def _refresh_preview_list_row_for_actual_index(
+    self,
+    actual_index: int | None,
+    *,
+    refresh_summary: bool = True,
+    lightweight: bool = False,
+) -> None:
     if actual_index is None or not self.current_annotations:
         return
     try:
@@ -1993,6 +2158,7 @@ def _refresh_preview_list_row_for_actual_index(self, actual_index: int | None, *
         ann,
         display_index=int(display_index),
         total_count=len(getattr(self, "_preview_list_display_indices", []) or self.current_annotations or []),
+        lightweight=bool(lightweight),
     )
     try:
         self.preview_listbox.delete(display_index)
@@ -3003,7 +3169,7 @@ def _on_preview_select(self, event, *, defer_render: bool = True):
     if getattr(self, "_plate_auto_scope_selection_mode_active", False):
         self._refresh_plate_auto_scope_modal_selection_state()
         return
-    self._defer_preview_autosave_for_navigation(delay_ms=700)
+    self._defer_preview_autosave_for_navigation(delay_ms=4500)
     sel = self.preview_listbox.curselection()
     _refresh_preview_group_selection_anchor_style(self)
     if not sel or not self.current_annotations:

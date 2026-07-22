@@ -69,6 +69,24 @@ def _pointer_inside_widget(widget) -> bool:
         return False
 
 
+def _get_preview_dock_readable_text(host: "CharacterAnnotationTab", background: str, *, preferred: str | None = None) -> str:
+    try:
+        return str(host._get_readable_text_color(str(background), preferred=preferred))
+    except Exception:
+        pass
+    bg = str(background or "#000000").strip().lstrip("#")
+    if len(bg) == 3:
+        bg = "".join(ch * 2 for ch in bg)
+    try:
+        r = int(bg[0:2], 16)
+        g = int(bg[2:4], 16)
+        b = int(bg[4:6], 16)
+        luminance = (0.299 * r) + (0.587 * g) + (0.114 * b)
+        return "#111827" if luminance >= 150 else "#f8fafc"
+    except Exception:
+        return str(preferred or "#f8fafc")
+
+
 def _set_preview_dock_row_hover(host: "CharacterAnnotationTab", row_key: str, active: bool, row=None) -> None:
     key = str(row_key or "").strip()
     if not key:
@@ -120,7 +138,7 @@ def _get_preview_dock_row_runtime_state(host: "CharacterAnnotationTab", row_key:
             "status_text": layout_text,
             "label_text": None,
             "icon_text": None,
-            "interactive": False,
+            "interactive": True,
         }
     if key == "plate_status":
         data = host._get_preview_active_data(create=False)
@@ -230,14 +248,15 @@ def _apply_preview_dock_row_hover_style(host: "CharacterAnnotationTab", row_key:
         "error": theme["error"],
     }.get(tone, theme["outline"])
     row_bg = theme["hover_fill"] if hovered else blend_hex_colors(theme["accent"], fill, 0.18)
-    row_fg = theme["text"] if visible else theme["muted"]
+    row_fg = _get_preview_dock_readable_text(host, row_bg, preferred=theme["text"] if visible else theme["muted"])
     icon_bg = blend_hex_colors(theme["accent"], fill, 0.68 if hovered else 0.52)
     status_bg = blend_hex_colors(tone_color, fill, 0.52 if hovered else 0.40) if visible else theme["status_off_fill"]
-    status_fg = theme["text"] if visible else theme["muted"]
+    icon_fg = _get_preview_dock_readable_text(host, icon_bg, preferred=theme["text"])
+    status_fg = _get_preview_dock_readable_text(host, status_bg, preferred=theme["text"] if visible else theme["muted"])
     outline = theme["hover_outline"] if hovered else tone_color
     try:
         row.configure(bg=row_bg, highlightbackground=outline, highlightcolor=outline)
-        widgets["icon"].configure(bg=icon_bg, fg=theme["text"], font=("Segoe UI", 8, "bold"))
+        widgets["icon"].configure(bg=icon_bg, fg=icon_fg, font=("Segoe UI", 8, "bold"))
         widgets["label"].configure(bg=row_bg, fg=row_fg)
         widgets["status"].configure(bg=status_bg, fg=status_fg, text=str(state.get("status_text", "") or ""))
     except Exception:
@@ -341,6 +360,8 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
     if bool(force_render) or render_key != getattr(host, "_preview_overlay_dock_render_key", None):
         fill = theme["fill"]
         outline = theme["active"]
+        header_fg = _get_preview_dock_readable_text(host, fill, preferred=theme["text"])
+        toggle_fg = _get_preview_dock_readable_text(host, fill, preferred=theme["accent"])
         try:
             dock.configure(bg=fill, highlightbackground=outline, highlightcolor=outline)
             if header is not None:
@@ -349,11 +370,11 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
                 title.configure(
                     text=("NARZĘDZIA | ENTER" if compact else "NARZĘDZIA"),
                     bg=fill,
-                    fg=theme["text"],
+                    fg=header_fg,
                     anchor="w",
                 )
             if toggle is not None:
-                toggle.configure(text="", bg=fill, fg=theme["accent"])
+                toggle.configure(text="", bg=fill, fg=toggle_fg)
                 try:
                     toggle.pack_forget()
                 except Exception:
@@ -392,10 +413,11 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
                 row_bg = theme["hover_fill"]
             else:
                 row_bg = blend_hex_colors(theme["accent"], fill, 0.18) if interactive else fill
-            row_fg = theme["text"] if visible else theme["muted"]
+            row_fg = _get_preview_dock_readable_text(host, row_bg, preferred=theme["text"] if visible else theme["muted"])
             icon_bg = blend_hex_colors(theme["accent"], fill, 0.68 if hovered else 0.52) if interactive else fill
             status_bg = blend_hex_colors(tone_color, fill, 0.52 if hovered else 0.40) if visible else theme["status_off_fill"]
-            status_fg = theme["text"] if visible else theme["muted"]
+            icon_fg = _get_preview_dock_readable_text(host, icon_bg, preferred=theme["text"] if interactive else theme["muted"])
+            status_fg = _get_preview_dock_readable_text(host, status_bg, preferred=theme["text"] if visible else theme["muted"])
             row = widgets.get("row")
             try:
                 if interactive:
@@ -409,7 +431,7 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
                 )
                 widgets["icon"].configure(
                     bg=icon_bg,
-                    fg=theme["text"] if interactive else theme["muted"],
+                    fg=icon_fg,
                     text=icon_text if row_key == "gate" else widgets["icon"].cget("text"),
                     font=("Segoe UI", 8, "bold"),
                 )

@@ -23,14 +23,27 @@ def get_detection_active_model_status(host) -> tuple[str, str]:
 
         source_suffix = " z projektu" if path_locked else ""
         if uses_yolo:
-            return f"Aktywny model YOLO: {model_name}{source_suffix}", "neutral"
-        return f"Model YOLO gotowy: {model_name}{source_suffix} | w tym trybie nie jest używany", "muted"
+            return (
+                f"Model detekcji znaków w PZ2: {model_name}{source_suffix}. "
+                "Służy tylko do inferencji: wykrywa/proponuje ramki i klasy znaków. "
+                "Nie jest wyborem modelu do treningu.",
+                "neutral",
+            )
+        return (
+            f"Model detekcji znaków gotowy: {model_name}{source_suffix}. "
+            "Aktualny pipeline OCR go nie używa; wybór nie zmienia modelu treningowego.",
+            "muted",
+        )
 
     if uses_yolo:
-        return "Aktywny model YOLO: brak wybranego modelu", "warning"
+        return (
+            "Brak modelu detekcji znaków dla PZ2. Wybierz wytrenowany .pt tylko wtedy, "
+            "gdy pipeline ma korzystać z YOLO; trening wybierasz w karcie treningu.",
+            "warning",
+        )
     if path_locked:
-        return "Aktywny model YOLO: sterowany przez projekt i nieużywany w trybie OCR", "muted"
-    return "Aktywny model YOLO: nieużywany w trybie OCR", "muted"
+        return "Model detekcji znaków jest sterowany przez projekt i nieużywany w trybie OCR.", "muted"
+    return "Model detekcji znaków nie jest używany w trybie OCR.", "muted"
 
 
 def has_configured_yolo_detection_model(host) -> bool:
@@ -289,7 +302,7 @@ def pick_yolo_model(host) -> str:
         initial_dir = CONFIG.DIR_6_MODELS
     p = filedialog.askopenfilename(
         initialdir=str(Path(initial_dir).absolute()),
-        title="Wybierz model YOLO (.pt)",
+        title="Wybierz model detekcji YOLO znaków (.pt)",
         filetypes=[("PyTorch", "*.pt")]
     )
     if not p:
@@ -471,16 +484,28 @@ def refresh_yolo_model_picker_state(host):
 
     if status_lbl is not None:
         if yolo_ready and project_mode:
-            text = f"Aktywny model YOLO z projektu: {model_name}. Możesz go zmienić przyciskiem obok."
+            text = (
+                f"Model detekcji znaków z projektu: {model_name}. "
+                "Używany tylko do wykrywania/proponowania ramek w PZ2, nie do treningu."
+            )
             tone = "neutral"
         elif yolo_ready:
-            text = f"Aktywny model YOLO: {model_name}. Możesz go zmienić przyciskiem obok."
+            text = (
+                f"Model detekcji znaków: {model_name}. "
+                "Używany tylko w pipeline OCR/YOLO PZ2; model treningowy wybierasz osobno."
+            )
             tone = "neutral"
         elif project_mode:
-            text = "Projekt nie ma przypiętego modelu znaków. Wskaż model YOLO .pt dla PZ2."
+            text = (
+                "Projekt nie ma przypiętego modelu detekcji znaków dla PZ2. "
+                "Wskaż wytrenowany .pt, jeśli chcesz użyć pipeline z YOLO."
+            )
             tone = "warning"
         else:
-            text = "Model YOLO nie jest jeszcze wybrany. Wskaż jeden model dla całego pipeline."
+            text = (
+                "Model detekcji YOLO nie jest jeszcze wybrany. "
+                "To model do analizy znaków w PZ2, nie model startowy treningu."
+            )
             tone = "muted"
         self._set_themed_label_state(status_lbl, text=text, tone=tone)
     try:
@@ -490,7 +515,7 @@ def refresh_yolo_model_picker_state(host):
 
     if browse_btn is not None:
         try:
-            browse_btn.configure(text=("Zmień model YOLO" if yolo_ready else "Wybierz model YOLO"))
+            browse_btn.configure(text=("Zmień model detekcji" if yolo_ready else "Wybierz model detekcji"))
         except Exception:
             pass
         try:

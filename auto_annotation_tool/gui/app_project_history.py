@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from ..campaign_manager import CAMPAIGN
-from ..campaign_iteration_paths import iteration_path_target
+from ..campaign_iteration_paths import STEP1_ITERATION_PATHS, iteration_path_target
 from ..campaign_transition_graph import campaign_stage_step
 from ..campaign_transition_specs import EDGE_KEY_ALIASES, TRANSITION_SPECS
+from .z2_shared_ui import campaign_visible_gate_id
 from .web_slim_scrollbar import blend_hex_colors
 
 
@@ -79,7 +80,15 @@ def _event_title(entry: dict) -> str:
 
 
 def _event_gate(entry: dict) -> str:
-    return str(entry.get("transition_id") or entry.get("gate_id") or "").strip() or "-"
+    gate = str(entry.get("gate_id") or "").strip().upper()
+    if gate.startswith("T"):
+        return campaign_visible_gate_id(gate) or gate
+    spec = _event_transition_spec(entry)
+    if spec is not None:
+        badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+        if badge:
+            return campaign_visible_gate_id(badge) or badge
+    return str(entry.get("transition_id") or "").strip() or "-"
 
 
 def _event_status(entry: dict) -> str:
@@ -203,10 +212,11 @@ def _load_project_training_runs(project_name: str, *, limit: int = 3) -> list[di
 def _event_badge_id(entry: dict) -> str:
     gate = str(entry.get("gate_id") or "").strip().upper()
     if gate.startswith("T"):
-        return gate
+        return campaign_visible_gate_id(gate) or gate
     spec = _event_transition_spec(entry)
     if spec is not None:
-        return str(getattr(spec, "badge_id", "") or "").strip().upper()
+        badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+        return campaign_visible_gate_id(badge) or badge
     return gate
 
 
@@ -254,6 +264,24 @@ def _iteration_path_map(entries: list[dict]) -> dict[int, str]:
         if iteration > 0 and path:
             paths[iteration] = path
     return paths
+
+
+def _iteration_path_label(path: str | None) -> str:
+    normalized = str(path or "").strip()
+    if not normalized:
+        return ""
+    path_def = STEP1_ITERATION_PATHS.get(normalized) or {}
+    target = str(path_def.get("target") or iteration_path_target(normalized) or "").strip().lower()
+    if target == "plate":
+        return "tor tablic"
+    if normalized == "char_from_ready_plates":
+        return "tor znaków | istniejące tablice"
+    if normalized == "char_from_images":
+        return "tor znaków | obrazy"
+    if target == "char":
+        return "tor znaków"
+    title = str(path_def.get("short_title") or path_def.get("title") or "").strip()
+    return title
 
 
 def _entry_text_blob(entry: dict) -> str:
@@ -637,6 +665,7 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
     seen: set[tuple[str, int, str]] = set()
     path_by_iteration = _iteration_path_map(entries)
     target_by_iteration = _iteration_target_map(entries)
+    step4_gate_id = campaign_visible_gate_id("T07") or "T06"
 
     def _add_row(
         *,
@@ -748,15 +777,15 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
             name="Model tablic" if target == "plate" else "Model znaków",
             iteration=iteration,
             stage=stage_key,
-            gate="T07",
+            gate=step4_gate_id,
             status=status_label,
             increment=f"utworzono model {code}",
             artifact=f"{weights_name} | {metrics}",
             matches={
                 (stage_key, str(iteration)),
                 ("E4", str(iteration)),
-                ("T07", str(iteration)),
-            } if iteration > 0 else {(stage_key, ""), ("E4", ""), ("T07", "")},
+                (step4_gate_id, str(iteration)),
+            } if iteration > 0 else {(stage_key, ""), ("E4", ""), (step4_gate_id, "")},
             created_at=str(run.get("finished_at") or run.get("created_at") or ""),
         )
 
@@ -785,7 +814,7 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
             name="Model tablic" if target == "plate" else "Model znaków",
             iteration=iteration,
             stage=stage_key,
-            gate="T07",
+            gate=step4_gate_id,
             status=f"zamknięto {stage_key}",
             increment="bez nowego modelu",
             artifact=_compact_artifact_text(
@@ -796,8 +825,8 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
             matches={
                 (stage_key, str(iteration)),
                 ("E4", str(iteration)),
-                ("T07", str(iteration)),
-            } if iteration > 0 else {(stage_key, ""), ("E4", ""), ("T07", "")},
+                (step4_gate_id, str(iteration)),
+            } if iteration > 0 else {(stage_key, ""), ("E4", ""), (step4_gate_id, "")},
             created_at=str(entry.get("created_at") or ""),
         )
 
@@ -856,7 +885,8 @@ def _append_transition_tokens(
     current_stage: str | None = None,
 ) -> str:
     source = str(getattr(spec, "source", "") or "").strip().upper()
-    badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+    raw_badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+    badge = campaign_visible_gate_id(raw_badge) or raw_badge
     target = str(getattr(spec, "target", "") or "").strip().upper()
     current_stage_normalized = str(current_stage or "").strip().upper()
     if source == "E4" and current_stage_normalized.startswith("E4"):
@@ -969,7 +999,8 @@ def _append_transition_segments(
     current_stage: str | None = None,
 ) -> str:
     source = str(getattr(spec, "source", "") or "").strip().upper()
-    badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+    raw_badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
+    badge = campaign_visible_gate_id(raw_badge) or raw_badge
     target = str(getattr(spec, "target", "") or "").strip().upper()
     current_stage_normalized = str(current_stage or "").strip().upper()
     if source == "E4" and current_stage_normalized.startswith("E4"):
@@ -1400,6 +1431,7 @@ def show_project_history_dialog(
     product_rows_cache: list[dict] = []
     product_sort_state = {"column": "product", "descending": False}
     history_target_by_iteration: dict[int, str] = {}
+    history_path_by_iteration: dict[int, str] = {}
     product_names = {
         "AT": "Anotacje tablic",
         "AZ": "Anotacje znakĂłw",
@@ -1616,6 +1648,13 @@ def show_project_history_dialog(
                     if group_index:
                         path_text.insert(tk.END, "\n", ("plain",))
                     iteration_caption = f"Iteracja {iteration_label}" if iteration_label != "?" else "Iteracja ?"
+                    try:
+                        iteration_number = int(iteration_label or 0)
+                    except Exception:
+                        iteration_number = 0
+                    path_label = _iteration_path_label(history_path_by_iteration.get(iteration_number, ""))
+                    if path_label:
+                        iteration_caption = f"{iteration_caption} | {path_label}"
                     line_start = path_text.index(tk.END)
                     path_text.insert(tk.END, f"{iteration_caption}\t", ("iteration_header",))
                     for segment_index, (kind, token, segment_iteration_label) in enumerate(group_segments):
@@ -1772,13 +1811,14 @@ def show_project_history_dialog(
         _render_product_rows(product_rows_cache)
 
     def _load_rows(select_first: bool = True) -> None:
-        nonlocal history_target_by_iteration
+        nonlocal history_path_by_iteration, history_target_by_iteration
         row_entries.clear()
         try:
             tree.delete(*tree.get_children())
         except Exception:
             pass
         all_entries = [dict(entry or {}) for entry in CAMPAIGN.load_project_history(project_name, limit=800)]
+        history_path_by_iteration = _iteration_path_map(all_entries)
         history_target_by_iteration = _iteration_target_map(all_entries)
         path_entries, path_label = _choose_path_entries(all_entries)
         _set_path_trace(path_entries, label=path_label)

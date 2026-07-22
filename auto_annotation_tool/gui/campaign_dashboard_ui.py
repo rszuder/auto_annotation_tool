@@ -14,7 +14,6 @@ from datetime import datetime
 from math import hypot
 from time import perf_counter
 import xml.etree.ElementTree as ET
-import shutil
 import threading
 
 from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
@@ -41,6 +40,7 @@ from ..campaign_resource_catalog import (
     campaign_resource_description,
     campaign_resource_label,
     campaign_resource_short_label,
+    normalize_campaign_resource_key,
     ordered_campaign_resource_keys,
 )
 from ..campaign_resource_state import CampaignResourceSnapshot, build_campaign_resource_snapshot
@@ -74,6 +74,23 @@ from .campaign_models import WizardStageStatus
 
 T07_GRAPH_EDGE_KEYS = {"e4_to_e1", "e4t_to_e1", "e4z_to_e1"}
 CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+GATE_WORK_INFOGRAPHIC_INK = "#111827"
+
+
+def _format_gate_work_suggestion_text(value) -> str:
+    text = campaign_ui_helpers._repair_polish_text(str(value or "").strip())
+    if not text:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        for idx, char in enumerate(line):
+            if char.isspace():
+                continue
+            if char.isalpha():
+                line = f"{line[:idx]}{char.upper()}{line[idx + 1:]}"
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _is_t07_graph_edge(edge_key: str | None) -> bool:
@@ -1124,6 +1141,7 @@ def _render_step1_route_actions(self, frame):
     error = palette.get("error", "#c0392b")
     accent = palette.get("accent", "#4fc1ff")
     edge_route_color = palette.get("campaign_edge", "#0F9F9A")
+    active_edge_color = palette.get("campaign_active_edge", "#8B5CF6")
     border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
     field_bg = palette.get("field", "#1a1a1a")
 
@@ -1213,13 +1231,25 @@ def _render_step1_route_actions(self, frame):
     except Exception:
         current_target = ""
     try:
-        explicit_selected_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+        explicit_getter = getattr(CAMPAIGN, "get_explicit_iteration_path", None)
+        if callable(explicit_getter):
+            explicit_selected_path = normalize_iteration_path(explicit_getter())
+        else:
+            explicit_selected_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
     except Exception:
         explicit_selected_path = ""
     if explicit_selected_path and iteration_path_target(explicit_selected_path) != current_target:
         explicit_selected_path = ""
     selected_path = explicit_selected_path
-    if not selected_path and current_target in {"plate", "char"}:
+    try:
+        step1_status_for_selection = str(CAMPAIGN.get_step1_status() or "").strip().lower()
+    except Exception:
+        step1_status_for_selection = ""
+    infer_path_from_target = bool(
+        int(current_step or 1) > 1
+        or step1_status_for_selection == "approved"
+    )
+    if not selected_path and infer_path_from_target and current_target in {"plate", "char"}:
         selected_path = (
             "char_from_ready_plates"
             if current_target == "char" and material_ready
@@ -1231,11 +1261,21 @@ def _render_step1_route_actions(self, frame):
         if normalized_path:
             return _t07_graph_edge_for_path(normalized_path)
         target = str(current_target or "").strip().lower()
+        if not target:
+            try:
+                target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+            except Exception:
+                target = ""
+        if not target:
+            try:
+                target = str(CAMPAIGN.get_last_iteration_target() or "").strip().lower()
+            except Exception:
+                target = ""
         if target == "plate":
             return "e4t_to_e1"
         if target == "char":
             return "e4z_to_e1"
-        return ""
+        return "e4z_to_e1"
 
     def _t07_edge_visible(edge_key: str | None) -> bool:
         normalized = str(edge_key or "").strip()
@@ -1344,6 +1384,12 @@ def _render_step1_route_actions(self, frame):
             return False
         if current_step != _selection_stage_num(getattr(edge, "source", "")):
             return False
+        if (
+            int(current_step or 0) == 1
+            and str(getattr(edge, "source", "") or "").strip().upper() == "E1"
+            and step1_status_for_selection != "approved"
+        ):
+            return True
         path_key = str(getattr(spec, "path_key", "") or "").strip() if spec is not None else ""
         if path_key and selected_path and path_key != selected_path:
             return False
@@ -1400,6 +1446,15 @@ def _render_step1_route_actions(self, frame):
         selected_edge_key = _t07_graph_edge_for_path(selected_path)
     if _is_t07_graph_edge(selected_edge_key) and not _t07_edge_visible(selected_edge_key):
         selected_edge_key = _current_t07_graph_edge_key()
+    if selected_edge_key:
+        selected_edge_for_state = CAMPAIGN_TRANSITION_GRAPH.get_edge(selected_edge_key)
+        selected_spec_for_state = _selection_edge_spec(selected_edge_for_state) if selected_edge_for_state is not None else None
+        selected_spec_path = str(getattr(selected_spec_for_state, "path_key", "") or "").strip()
+        selected_edge_paths = tuple(getattr(selected_edge_for_state, "paths", ()) or ()) if selected_edge_for_state is not None else ()
+        if selected_spec_path and selected_spec_path != explicit_selected_path:
+            selected_edge_key = ""
+        elif selected_edge_paths and explicit_selected_path and explicit_selected_path not in selected_edge_paths:
+            selected_edge_key = ""
     if selected_edge_key not in active_gate_keys:
         selected_edge_key = ""
         try:
@@ -1740,6 +1795,46 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             _stop_gate_approve_blink()
 
+    def _raise_graph_interactive_layers() -> None:
+        """Keep graph controls clickable after overlays and timer animations repaint."""
+
+        try:
+            canvas.tag_lower("edge_line")
+        except Exception:
+            pass
+        for tag_spec in (
+            ("graph_return_trunk",),
+            ("graph_edge_arrow", "edge_line"),
+            ("graph_node_junction",),
+            ("graph_node_output_connector",),
+            ("gate_connector",),
+        ):
+            try:
+                canvas.tag_raise(*tag_spec)
+            except Exception:
+                pass
+        try:
+            for graph_edge in CAMPAIGN_TRANSITION_GRAPH.edges:
+                edge_key = str(getattr(graph_edge, "key", "") or "").strip()
+                if edge_key:
+                    canvas.tag_raise(f"gate-group:{edge_key}")
+        except Exception:
+            pass
+        for tag in (
+            "gate_button",
+            "gate_selector_arc_anim",
+            "gate_approve_blink_rect",
+            "gate_approve_blink_text",
+            "gate_field_hover",
+            "gate_selector_tooltip",
+            "graph_attention_flow",
+            "graph_overlay_fixed",
+        ):
+            try:
+                canvas.tag_raise(tag)
+            except Exception:
+                pass
+
     def _stop_gate_selector_arc_animation(*, clear_items: bool = True) -> None:
         try:
             after_id = getattr(self, "_campaign_graph_selector_arc_after_id", None)
@@ -1787,72 +1882,63 @@ def _render_step1_route_actions(self, frame):
                 e_top = _screen_y(float(geom.get("e_top", 0.0)), height)
                 e_bottom = _screen_y(float(geom.get("e_bottom", 0.0)), height)
                 local_zoom = max(0.55, float(geom.get("local_zoom", 1.0) or 1.0) * zoom)
-                arc_shift = (1.7 if phase else -1.2) * local_zoom
                 gap = max(2.8 * local_zoom, abs(e2_x - e1_x))
-                direction = 1.0 if e2_x >= e1_x else -1.0
-                arc_points = (
-                    e1_x,
-                    mid_y,
-                    e1_x + direction * gap * 0.26,
-                    mid_y - 5.4 * local_zoom + arc_shift,
-                    e1_x + direction * gap * 0.56,
-                    mid_y + 3.8 * local_zoom - arc_shift,
-                    e2_x - direction * gap * 0.24,
-                    mid_y - 4.2 * local_zoom - arc_shift,
-                    e2_x,
-                    mid_y,
+                box_size = max(
+                    4.0 * local_zoom,
+                    min(gap * 0.86, abs(e_bottom - e_top) * 0.58, 7.4 * local_zoom),
                 )
-                glow_width = max(3, int(round(4.2 * local_zoom)))
-                core_width = max(1, int(round(1.25 * local_zoom)))
-                canvas.create_line(
-                    *arc_points,
-                    fill="#5ecbff",
-                    width=glow_width,
-                    smooth=False,
+                box_cx = (e1_x + e2_x) / 2.0
+                box_x0 = box_cx - box_size / 2.0
+                box_x1 = box_cx + box_size / 2.0
+                box_y0 = mid_y - box_size / 2.0
+                box_y1 = mid_y + box_size / 2.0
+                split_x = box_cx
+                off_fill = blend_hex_colors("#0b1215", card_bg, 0.18)
+                left_fill = "#35d878" if phase == 0 else off_fill
+                right_fill = off_fill if phase == 0 else "#ff4b42"
+                border = blend_hex_colors("#9fb6bc", card_bg, 0.34)
+                canvas.create_rectangle(
+                    box_x0,
+                    box_y0,
+                    box_x1,
+                    box_y1,
+                    fill=blend_hex_colors(off_fill, "#ffffff", 0.04),
+                    outline=border,
+                    width=max(1, int(round(0.8 * local_zoom))),
+                    state=tk.DISABLED,
+                    tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
+                )
+                canvas.create_rectangle(
+                    box_x0 + 1,
+                    box_y0 + 1,
+                    split_x,
+                    box_y1 - 1,
+                    fill=left_fill,
+                    outline="",
+                    state=tk.DISABLED,
+                    tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
+                )
+                canvas.create_rectangle(
+                    split_x,
+                    box_y0 + 1,
+                    box_x1 - 1,
+                    box_y1 - 1,
+                    fill=right_fill,
+                    outline="",
                     state=tk.DISABLED,
                     tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
                 )
                 canvas.create_line(
-                    *arc_points,
-                    fill="#f7fdff",
-                    width=core_width,
-                    smooth=False,
+                    split_x,
+                    box_y0 + 0.8 * local_zoom,
+                    split_x,
+                    box_y1 - 0.8 * local_zoom,
+                    fill=blend_hex_colors(border, card_bg, 0.18),
+                    width=max(1, int(round(0.7 * local_zoom))),
                     state=tk.DISABLED,
                     tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
                 )
-
-                heat_y = mid_y
-                heat_radius = max(0.9, 1.25 * local_zoom)
-                glow_radius = heat_radius * 1.95
-                hot_fill = "#ff9f1c" if phase else "#ffd166"
-                for cap_x in (e1_x, e2_x):
-                    canvas.create_oval(
-                        cap_x - glow_radius,
-                        heat_y - glow_radius,
-                        cap_x + glow_radius,
-                        heat_y + glow_radius,
-                        fill=blend_hex_colors(hot_fill, "#ffffff", 0.22),
-                        outline="",
-                        state=tk.DISABLED,
-                        tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
-                    )
-                    canvas.create_oval(
-                        cap_x - heat_radius,
-                        heat_y - heat_radius,
-                        cap_x + heat_radius,
-                        heat_y + heat_radius,
-                        fill=hot_fill,
-                        outline=blend_hex_colors(hot_fill, "#ffffff", 0.42),
-                        width=max(1, int(round(0.7 * local_zoom))),
-                        state=tk.DISABLED,
-                        tags=("gate_selector_arc_anim", f"gate_selector_arc_anim:{edge_key}", f"gate-group:{edge_key}"),
-                    )
-            try:
-                canvas.tag_raise("gate_selector_arc_anim")
-                canvas.tag_raise("gate_selector_tooltip")
-                canvas.tag_raise("graph_overlay_fixed")
-            except Exception:
-                pass
+            _raise_graph_interactive_layers()
             self._campaign_graph_selector_arc_after_id = canvas.after(500, _draw_gate_selector_arc_animation)
         except tk.TclError:
             self._campaign_graph_selector_arc_after_id = None
@@ -2097,6 +2183,15 @@ def _render_step1_route_actions(self, frame):
         if iteration_num <= 0:
             return {}
 
+        try:
+            synced = dict(CAMPAIGN.sync_step4_training_record_from_history(iteration_num=iteration_num) or {})
+            if synced:
+                synced.setdefault("iteration", iteration_num)
+                synced.setdefault("trained_iteration", iteration_num)
+                return synced
+        except Exception:
+            pass
+
         def _declared_training_iteration(record: dict) -> int:
             if not isinstance(record, dict):
                 return 0
@@ -2251,6 +2346,8 @@ def _render_step1_route_actions(self, frame):
         result.setdefault("iteration", record_iteration or active_iteration)
         return result
 
+    step4_work_interruption_cache: dict | None = None
+
     def _current_t07_training_failure_state() -> dict:
         training_record = _current_iteration_step4_training_record()
         if not training_record:
@@ -2266,6 +2363,82 @@ def _render_step1_route_actions(self, frame):
         if record_target and target and record_target != target:
             return {}
         return dict(training_record)
+
+    def _current_step4_work_interruption_state() -> dict:
+        nonlocal step4_work_interruption_cache
+        if step4_work_interruption_cache is not None:
+            return dict(step4_work_interruption_cache)
+        step4_work_interruption_cache = {}
+        if (
+            _current_t07_training_finish_state()
+            or _current_t07_training_candidate_state()
+            or _current_step4_without_training_decision_ready()
+        ):
+            return {}
+        training_failure = _current_t07_training_failure_state()
+        try:
+            current_iteration_value = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 0)
+        except Exception:
+            current_iteration_value = 0
+        if current_iteration_value <= 0:
+            return {}
+        try:
+            state = dict(CAMPAIGN.get_iteration_state(iteration_num=current_iteration_value) or {})
+            session = dict(state.get("step4_work_session") or {})
+        except Exception:
+            session = {}
+        if not session:
+            if training_failure:
+                result = dict(training_failure)
+                fallback_target = str(current_target or "").strip().lower()
+                if not fallback_target:
+                    try:
+                        fallback_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+                    except Exception:
+                        fallback_target = ""
+                result.update(
+                    {
+                        "active": True,
+                        "state": "interrupted",
+                        "work_area": "z4",
+                        "substep": "train",
+                    }
+                )
+                result.setdefault("iteration", current_iteration_value)
+                result.setdefault("target", fallback_target)
+                step4_work_interruption_cache = dict(result)
+                return result
+            return {}
+        session_state = str(session.get("state", "") or "").strip().lower()
+        if not bool(session.get("active")) and session_state != "interrupted":
+            return {}
+        if session_state not in {
+            "interrupted",
+            "active",
+            "paused",
+            "training_failed",
+            "training_paused",
+            "training_cancelled",
+            "training_pending",
+            "training_running",
+        }:
+            return {}
+        session_target = str(session.get("target", "") or "").strip().lower()
+        active_target = str(current_target or CAMPAIGN.get_iteration_target() or "").strip().lower()
+        if session_target and active_target and session_target != active_target:
+            return {}
+        try:
+            session_iteration = int(session.get("iteration", 0) or 0)
+        except Exception:
+            session_iteration = 0
+        if session_iteration and session_iteration != current_iteration_value:
+            return {}
+        result = dict(session)
+        result.setdefault("state", session_state or "interrupted")
+        result.setdefault("iteration", current_iteration_value)
+        result.setdefault("target", session_target or active_target)
+        step4_work_interruption_cache = dict(result)
+        return result
 
     def _training_artifact_label(target: str) -> str:
         normalized = str(target or "").strip().lower()
@@ -2329,6 +2502,12 @@ def _render_step1_route_actions(self, frame):
         snapshot = _transition_resource_snapshot(resource_key)
         if snapshot is None:
             return False
+        normalized_key = normalize_campaign_resource_key(resource_key)
+        if normalized_key in {"plate_run", "char_run"}:
+            try:
+                return str(snapshot.tone or "").strip().lower() == "success"
+            except Exception:
+                return False
         if str(resource_key or "").strip() == "char_dataset":
             try:
                 return str(snapshot.tone or "").strip().lower() == "success"
@@ -2424,6 +2603,12 @@ def _render_step1_route_actions(self, frame):
             if str(current.get("working_gate_id") or "").strip().upper() != "T06":
                 return
             if str(current.get("work_area") or "").strip().lower() != "z3":
+                return
+            current_state = str(current.get("state") or "").strip().lower()
+            if (
+                not bool(current.get("active"))
+                and current_state in {"resolved", "closed", "complete", "completed"}
+            ):
                 return
             now = datetime.now().isoformat(timespec="seconds")
             current.update(
@@ -2607,6 +2792,7 @@ def _render_step1_route_actions(self, frame):
                 dataset_hint=dataset_raw,
             )
             return invalid
+        _close_t06_z3_session_from_graph("pz3_dataset_ready")
         return {
             "ok": True,
             "reason": "source_dataset_ready_for_split",
@@ -2616,7 +2802,11 @@ def _render_step1_route_actions(self, frame):
             "exportable_plate_count": int(pz3_contract.get("exportable_plate_count", 0) or 0),
             "exportable_char_count": int(pz3_contract.get("exportable_char_count", 0) or 0),
             "perfect_count": int(
-                pz3_contract.get("perfect_count", pz3_contract.get("exportable_plate_count", 0)) or 0
+                pz2_contract.get(
+                    "perfect_count",
+                    pz3_contract.get("perfect_count", pz3_contract.get("exportable_plate_count", 0)),
+                )
+                or 0
             ),
             "validation_message": f"Kontrakt PZ3 {CHAR_WORK_GATE_DISPLAY_ID} potwierdza wyeksportowany dataset znaków.",
         }
@@ -2893,7 +3083,34 @@ def _render_step1_route_actions(self, frame):
             iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
             session = dict(iteration_state.get("t05_work_session") or {})
             session_state = str(session.get("state") or "").strip().lower()
-            session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
+            session_result = dict(session.get("last_return_result") or {})
+            session_resolved = bool(session_result.get("ok")) or session_state in {
+                "resolved",
+                "closed",
+                "complete",
+                "completed",
+            }
+            if session_resolved:
+                try:
+                    now = datetime.now().isoformat(timespec="seconds")
+                    CAMPAIGN.upsert_iteration_state(
+                        updates={
+                            "t05_work_session": {
+                                **session,
+                                "active": False,
+                                "state": "resolved",
+                                "resolved_at": str(session.get("resolved_at") or now),
+                                "updated_at": now,
+                                "last_return_result": session_result,
+                            }
+                        }
+                    )
+                except Exception:
+                    pass
+                session_active = False
+                session = {}
+            else:
+                session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
             session_run = str(session.get("run_dir", "") or "").strip()
             if session_active and session_run and session_state not in {"resolved", "closed", "complete", "completed"}:
                 extra_run_dirs.append(session_run)
@@ -3533,7 +3750,7 @@ def _render_step1_route_actions(self, frame):
         training_ready = bool(_current_t07_training_finish_ready())
         training_candidate = _current_t07_training_candidate_state()
         no_training_ready = bool(_current_step4_without_training_decision_ready())
-        step4_display_gate_id = "T06"
+        step4_display_gate_id = campaign_visible_gate_id("T07") or "T06"
         if training_ready:
             training_source = "Wynik treningu"
             training_validation = (
@@ -4015,7 +4232,20 @@ def _render_step1_route_actions(self, frame):
         return bool(_edge_gate_active(edge))
 
     def _edge_dimmed_by_selection(edge) -> bool:
-        if not _edge_gate_active(edge) or not selected_path:
+        if not _edge_gate_active(edge):
+            return False
+        current_key = str(getattr(edge, "key", "") or "").strip()
+        selected_key = str(selected_edge_key or "").strip()
+        if selected_key and selected_key != current_key:
+            try:
+                selected_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge(selected_key)
+            except Exception:
+                selected_edge = None
+            selected_source = str(getattr(selected_edge, "source", "") or "").strip().upper() if selected_edge is not None else ""
+            current_source = str(getattr(edge, "source", "") or "").strip().upper()
+            if selected_source == "E1" and current_source == "E1":
+                return True
+        if not selected_path:
             return False
         spec = _edge_spec(edge)
         path_key = str(getattr(spec, "path_key", "") or "").strip()
@@ -4065,6 +4295,11 @@ def _render_step1_route_actions(self, frame):
                 and _get_t07_pending_repair_approved_state()
             ):
                 return False
+            if (
+                str(getattr(spec, "key", "") or "").strip() == "e4_to_e1_next_iteration"
+                and _current_step4_work_interruption_state()
+            ):
+                return False
             transition_ready = is_transition_ready(spec, transition_eval_ctx)
             if (
                 str(getattr(spec, "key", "") or "").strip() == "e4_to_e1_next_iteration"
@@ -4096,11 +4331,21 @@ def _render_step1_route_actions(self, frame):
         return False
 
     def _edge_status(edge) -> tuple[str, str]:
-        if not _edge_operable(edge):
+        if not _edge_gate_active(edge):
             return "", muted_dim
-        if str(getattr(edge, "key", "") or "").strip() == "e2_to_e4" and _step2_unpromoted_t05_state():
+        if _edge_dimmed_by_selection(edge):
+            return "WYBIERZ", muted_dim
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key == "e2_to_e4" and _step2_unpromoted_t05_state():
             return "PRZERWANE", warning
-        if str(getattr(edge, "key", "") or "").strip() == "e3_to_e4" and _t06_interrupted_work_state():
+        if edge_key == "e3_to_e4":
+            if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
+                return "WYBIERZ", muted_dim
+            if _edge_ready(edge):
+                return "OTWARTA", success
+            if _t06_interrupted_work_state():
+                return "PRZERWANE", warning
+        if _is_t07_graph_edge(getattr(edge, "key", "")) and _current_step4_work_interruption_state():
             return "PRZERWANE", warning
         if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
             return "WYBIERZ", muted_dim
@@ -4114,6 +4359,8 @@ def _render_step1_route_actions(self, frame):
         if str(getattr(edge, "key", "") or "").strip() == "e1_to_e2" and normalize_iteration_path(explicit_selected_path) not in {"plate_training", "char_from_images"}:
             return ""
         if _is_t07_graph_edge(getattr(edge, "key", "")):
+            if _current_step4_work_interruption_state():
+                return "PRZERWANE"
             pending_t07 = _get_t07_pending_repair_approved_state()
             if pending_t07:
                 try:
@@ -4136,6 +4383,7 @@ def _render_step1_route_actions(self, frame):
             report = build_transition_resource_report(
                 specs,
                 getattr(transition_eval_ctx, "resource_snapshots", None),
+                selected_path=selected_path,
             )
             return report.compact_status()
         except Exception:
@@ -4541,7 +4789,7 @@ def _render_step1_route_actions(self, frame):
         modal_title = f"Praca {visible_gate_id}"
         dialog = tk.Toplevel(self.frame)
         try:
-            self.app.style_dialog_window(dialog, title=modal_title, geometry="620x390", parent=self.frame)
+            self.app.style_dialog_window(dialog, title=modal_title, geometry="740x500", parent=self.frame)
         except Exception:
             dialog.title(modal_title)
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -4572,6 +4820,359 @@ def _render_step1_route_actions(self, frame):
             t05_pool_plates = int(t05_pool_stats.get("plates", 0) or 0)
         except Exception:
             t05_pool_images, t05_pool_plates = 0, 0
+        try:
+            t05_project_pool_stats = dict(CAMPAIGN.get_plate_approved_set_stats(active_project_name or None) or {})
+            t05_project_pool_images = int(t05_project_pool_stats.get("images", 0) or 0)
+            t05_project_pool_plates = int(t05_project_pool_stats.get("plates", 0) or 0)
+        except Exception:
+            t05_project_pool_images, t05_project_pool_plates = t05_pool_images, t05_pool_plates
+
+        def _t05_count_pair(images: int, plates: int) -> str:
+            return f"{max(0, int(images or 0))} zdj\u0119\u0107 / {max(0, int(plates or 0))} tablic"
+
+        def _t05_normalized_image_name(raw_name) -> str:
+            raw_text = str(raw_name or "").strip()
+            if not raw_text:
+                return ""
+            try:
+                normalized = CAMPAIGN._normalize_image_set_name(raw_text)
+            except Exception:
+                try:
+                    normalized = Path(raw_text.replace("\\", "/")).name
+                except Exception:
+                    normalized = raw_text.replace("\\", "/").rsplit("/", 1)[-1]
+            return str(normalized or "").strip().lower()
+
+        def _t05_load_plate_xml_image_names(xml_path) -> set[str]:
+            try:
+                path = Path(xml_path)
+            except Exception:
+                return set()
+            try:
+                if not path.exists() or not path.is_file():
+                    return set()
+            except Exception:
+                return set()
+            try:
+                root = ET.parse(path).getroot()
+            except Exception:
+                return set()
+            names: set[str] = set()
+            for image_el in root.findall(".//image"):
+                image_name = _t05_normalized_image_name(image_el.get("name", ""))
+                if not image_name:
+                    continue
+                has_plate = False
+                for poly_el in image_el.findall("polygon"):
+                    label = str(poly_el.get("label", "") or "").strip().lower()
+                    if label in CONFIG.PLATE_LABELS:
+                        has_plate = True
+                        break
+                if not has_plate:
+                    for box_el in image_el.findall("box"):
+                        label = str(box_el.get("label", "") or "").strip().lower()
+                        if label in CONFIG.PLATE_LABELS:
+                            has_plate = True
+                            break
+                if has_plate:
+                    names.add(image_name)
+            return names
+
+        def _t05_char_effective_source_image_names() -> set[str]:
+            candidates: list[Path] = []
+            try:
+                extract_state = dict(CAMPAIGN.get_step3_extract_state() or {})
+            except Exception:
+                extract_state = {}
+            try:
+                project_state_dir = CAMPAIGN.get_project_state_dir()
+            except Exception:
+                project_state_dir = None
+
+            def add_candidate(raw_path) -> None:
+                if not raw_path:
+                    return
+                try:
+                    candidate = Path(raw_path)
+                except Exception:
+                    return
+                if candidate not in candidates:
+                    candidates.append(candidate)
+
+            add_candidate(str(extract_state.get("xml_path") or "").strip())
+            run_dir_raw = str(extract_state.get("annotation_run_dir") or "").strip()
+            if run_dir_raw:
+                add_candidate(Path(run_dir_raw) / "annotations.xml")
+            if project_state_dir:
+                add_candidate(Path(project_state_dir) / "char_effective_source" / "annotations.xml")
+
+            hidden_names: set[str] = set()
+            for xml_path in candidates:
+                hidden_names |= _t05_load_plate_xml_image_names(xml_path)
+            return hidden_names
+
+        def _t05_paths_equivalent(left, right) -> bool:
+            if not left or not right:
+                return False
+            try:
+                return Path(left).resolve() == Path(right).resolve()
+            except Exception:
+                return str(left or "").strip().lower() == str(right or "").strip().lower()
+
+        def _t05_count_xml_images(xml_path) -> int:
+            try:
+                path = Path(xml_path)
+            except Exception:
+                return 0
+            try:
+                if not path.exists() or not path.is_file():
+                    return 0
+            except Exception:
+                return 0
+            try:
+                root = ET.parse(path).getroot()
+            except Exception:
+                return 0
+            try:
+                return int(len(root.findall(".//image")))
+            except Exception:
+                return 0
+
+        def _t05_active_z2_run_scope_count(source_path) -> int:
+            try:
+                project_data = dict(CAMPAIGN.state.get("projects", {}).get(active_project_name or "", {}) or {})
+            except Exception:
+                project_data = {}
+            candidates = []
+            for run_key, input_key, xml_key in (
+                ("step2_staging_run", "last_plate_manual_source_input", ""),
+                ("last_plate_manual_source_run", "last_plate_manual_source_input", "last_plate_manual_source_xml"),
+                ("project_start_plate_source_run", "project_start_plate_source_input", "project_start_plate_source_xml"),
+            ):
+                run_dir = str(project_data.get(run_key) or "").strip()
+                xml_path = str(project_data.get(xml_key) or "").strip() if xml_key else ""
+                source_input = str(project_data.get(input_key) or "").strip()
+                if not run_dir and not xml_path:
+                    continue
+                if source_path is not None and source_input and not _t05_paths_equivalent(source_input, source_path):
+                    continue
+                candidates.append((run_dir, xml_path))
+            seen: set[str] = set()
+            for run_dir, xml_path in candidates:
+                if run_dir:
+                    try:
+                        manifest = CAMPAIGN._load_annotation_run_manifest_file(Path(run_dir))
+                    except Exception:
+                        manifest = {}
+                    if isinstance(manifest, dict):
+                        for count_key in (
+                            "input_scope_count",
+                            "source_plan_total_count",
+                            "selected_count",
+                            "image_count",
+                        ):
+                            try:
+                                scoped_count = int(manifest.get(count_key, 0) or 0)
+                            except Exception:
+                                scoped_count = 0
+                            if scoped_count > 0:
+                                return int(scoped_count)
+                xml_candidate = xml_path
+                if not xml_candidate and run_dir:
+                    xml_candidate = str(Path(run_dir) / "annotations.xml")
+                key = str(xml_candidate or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                image_count = _t05_count_xml_images(key)
+                if image_count > 0:
+                    return int(image_count)
+            return 0
+
+        def _t05_remaining_source_images_without_augmentation() -> dict:
+            try:
+                iteration_num = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+            except Exception:
+                iteration_num = 1
+            source_path = None
+            try:
+                source_path = CAMPAIGN.get_iteration_image_source_dir(iteration_num, active_project_name or None)
+            except Exception:
+                source_path = None
+            if source_path is None:
+                try:
+                    source_path = CAMPAIGN.get_iteration_raw_dir(iteration_num, active_project_name or None)
+                except Exception:
+                    source_path = None
+            active_run_images = _t05_active_z2_run_scope_count(source_path)
+            if active_run_images > 0:
+                return {
+                    "source_images": int(active_run_images),
+                    "already_in_yolo_images": 0,
+                    "already_in_char_source_images": 0,
+                    "remaining_images": int(active_run_images),
+                    "basis": "active_run",
+                }
+            try:
+                annotation_tab = None
+                app_tabs = getattr(getattr(self, "app", None), "tabs", None)
+                if isinstance(app_tabs, dict):
+                    annotation_tab = app_tabs.get("annotation")
+                collector = getattr(annotation_tab, "_collect_campaign_auto_annotation_sources", None)
+                if callable(collector) and source_path is not None:
+                    source_plan = dict(
+                        collector(
+                            Path(source_path),
+                            include_previous=None,
+                            exclude_manual_touched=True,
+                        )
+                        or {}
+                    )
+                    plan_total = int(
+                        source_plan.get("total_count", 0)
+                        or len(source_plan.get("image_paths") or [])
+                        or 0
+                    )
+                    approved_skip = int(source_plan.get("approved_skip_count", 0) or 0)
+                    char_skip = int(source_plan.get("char_effective_skip_count", 0) or 0)
+                    manifest_scope = int(source_plan.get("manifest_scope_count", 0) or 0)
+                    source_total = max(manifest_scope, plan_total + approved_skip + char_skip)
+                    if source_total > 0 or bool(source_plan.get("manifest_scoped")):
+                        return {
+                            "source_images": int(source_total),
+                            "already_in_yolo_images": int(approved_skip),
+                            "already_in_char_source_images": int(char_skip),
+                            "remaining_images": int(plan_total),
+                            "basis": "source_plan",
+                        }
+            except Exception:
+                pass
+            source_names: set[str] = set()
+            source_keys: set[str] = set()
+            source_key_to_names: dict[str, set[str]] = {}
+            source_image_paths: list[Path] = []
+            if source_path is not None:
+                try:
+                    manifest_paths = list(
+                        CAMPAIGN.get_iteration_manifest_image_paths(
+                            iteration_num,
+                            active_project_name or None,
+                            base_dir=Path(source_path),
+                        )
+                        or []
+                    )
+                except Exception:
+                    manifest_paths = []
+                for image_path in manifest_paths:
+                    try:
+                        safe_path = Path(image_path)
+                    except Exception:
+                        continue
+                    normalized = _t05_normalized_image_name(getattr(safe_path, "name", safe_path))
+                    if normalized:
+                        source_image_paths.append(safe_path)
+                if not source_image_paths:
+                    try:
+                        for image_path in Path(source_path).rglob("*"):
+                            if not image_path.is_file() or image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                                continue
+                            source_image_paths.append(image_path)
+                    except Exception:
+                        source_image_paths = []
+            for image_path in source_image_paths:
+                normalized = _t05_normalized_image_name(getattr(image_path, "name", image_path))
+                if normalized:
+                    source_names.add(normalized)
+                try:
+                    source_key = os.path.normcase(os.path.abspath(os.fsdecode(os.fspath(image_path)))).strip().lower()
+                    if source_key:
+                        source_keys.add(source_key)
+                        if normalized:
+                            source_key_to_names.setdefault(source_key, set()).add(normalized)
+                except Exception:
+                    pass
+            approved_names: set[str] = set()
+            approved_source_keys: set[str] = set()
+            try:
+                for entry in list(CAMPAIGN.list_plate_approved_entries(active_project_name or None) or []):
+                    if not isinstance(entry, dict):
+                        continue
+                    for raw_name in (entry.get("image_name", ""), entry.get("entry_key", "")):
+                        normalized = _t05_normalized_image_name(raw_name)
+                        if normalized:
+                            approved_names.add(normalized)
+                    source_image_path = str(entry.get("source_image_path", "") or "").strip()
+                    if source_image_path:
+                        try:
+                            source_key = os.path.normcase(
+                                os.path.abspath(os.fsdecode(os.fspath(source_image_path)))
+                            ).strip().lower()
+                        except Exception:
+                            source_key = str(source_image_path or "").strip().lower()
+                        if source_key:
+                            approved_source_keys.add(source_key)
+            except Exception:
+                approved_names = set()
+                approved_source_keys = set()
+            char_effective_names = _t05_char_effective_source_image_names()
+            approved_in_source: set[str] = set()
+            char_effective_in_source: set[str] = set()
+            remaining_in_source: set[str] = set()
+            for image_path in source_image_paths:
+                normalized = _t05_normalized_image_name(getattr(image_path, "name", image_path))
+                if not normalized:
+                    continue
+                source_key = ""
+                try:
+                    source_key = os.path.normcase(
+                        os.path.abspath(os.fsdecode(os.fspath(image_path)))
+                    ).strip().lower()
+                except Exception:
+                    source_key = ""
+                if normalized in approved_names or (source_key and source_key in approved_source_keys):
+                    approved_in_source.add(normalized)
+                    continue
+                if normalized in char_effective_names:
+                    char_effective_in_source.add(normalized)
+                    continue
+                remaining_in_source.add(normalized)
+            return {
+                "source_images": int(len(source_names)),
+                "already_in_yolo_images": int(len(approved_in_source)),
+                "already_in_char_source_images": int(len(char_effective_in_source)),
+                "remaining_images": int(len(remaining_in_source)),
+                "basis": "source_fallback",
+            }
+
+        t05_remaining_state = _t05_remaining_source_images_without_augmentation()
+        t05_source_images = int(t05_remaining_state.get("source_images", 0) or 0)
+        t05_remaining_images = int(t05_remaining_state.get("remaining_images", 0) or 0)
+        t05_already_in_yolo_from_source = int(t05_remaining_state.get("already_in_yolo_images", 0) or 0)
+        t05_already_in_char_source = int(t05_remaining_state.get("already_in_char_source_images", 0) or 0)
+        t05_potential_basis = str(t05_remaining_state.get("basis") or "").strip()
+        t05_pool_summary_text = (
+            f"Pula YOLO: projekt {_t05_count_pair(t05_project_pool_images, t05_project_pool_plates)}; "
+            f"ta iteracja: {_t05_count_pair(t05_pool_images, t05_pool_plates)}."
+        )
+        if t05_source_images > 0 and t05_potential_basis == "active_run":
+            t05_potential_summary_text = (
+                f"Bez augmentacji: aktywna lista Z2 ma {t05_remaining_images} zdjęć do sprawdzenia i oznaczenia [OK]."
+            )
+        elif t05_source_images > 0:
+            t05_potential_summary_text = (
+                f"Bez augmentacji: jeszcze do {t05_remaining_images} zdj\u0119\u0107 [OK]; "
+                f"{t05_already_in_yolo_from_source} z tego \u017ar\u00f3d\u0142a ju\u017c jest w puli."
+            )
+            if t05_already_in_char_source > 0:
+                t05_potential_summary_text += (
+                    f" {t05_already_in_char_source} ju\u017c zasila prac\u0119 nad znakami i nie wraca na list\u0119 Z2."
+                )
+        else:
+            t05_potential_summary_text = "Nie ustalono bie\u017c\u0105cego \u017ar\u00f3d\u0142a obraz\u00f3w, wi\u0119c potencja\u0142 bez augmentacji jest nieznany."
+        if pending_t05_work:
+            t05_potential_summary_text += (
+                f" W tym ju\u017c czeka do przekazania: {_t05_count_pair(pending_t05_images, pending_t05_plates)}."
+            )
         t05_material_already_transferred = bool(
             approve_available
             and not pending_t05_work
@@ -4626,7 +5227,7 @@ def _render_step1_route_actions(self, frame):
             tk.Label(
                 notice,
                 text="!",
-                fg="#ffffff",
+                fg=GATE_WORK_INFOGRAPHIC_INK,
                 bg=mark_bg,
                 font=("Segoe UI Semibold", 10),
                 width=2,
@@ -4694,7 +5295,8 @@ def _render_step1_route_actions(self, frame):
                 text=campaign_ui_helpers._repair_polish_text(
                     f"W tej iteracji w puli YOLO jest już {t05_pool_images} zdjęć [OK] / "
                     f"{t05_pool_plates} tablic. Lista Z2 nie ma już materiału do rozliczenia; "
-                    f"zamknij ten modal i użyj pola Zatwierdź na bramce {visible_gate_id}."
+                    f"zamknij ten modal i użyj pola Zatwierdź na bramce {visible_gate_id}.\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                 ),
                 fg=fg,
                 bg=done_bg,
@@ -4704,6 +5306,10 @@ def _render_step1_route_actions(self, frame):
                 wraplength=540,
             ).pack(fill=tk.X, padx=12, pady=(0, 10))
 
+        suggestion_frame_width = 330
+        suggestion_detail_wrap = 286
+        action_name_wrap = 245
+
         for index, (label, command, _tone) in enumerate(buttons, start=1):
             if t05_material_already_transferred:
                 continue
@@ -4712,55 +5318,131 @@ def _render_step1_route_actions(self, frame):
                 if approve_available:
                     action_status = (
                         f"Opcjonalny powrót: {pending_t05_images} zdjęć [OK] / "
-                        f"{pending_t05_plates} tablic czeka w Z2"
+                        f"{pending_t05_plates} tablic czeka w Z2\n"
+                        f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                     )
                 else:
                     action_status = (
                         f"Przerwane: wróć do Z2 i rozlicz {pending_t05_images} zdjęć [OK] / "
-                        f"{pending_t05_plates} tablic"
+                        f"{pending_t05_plates} tablic\n"
+                        f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                     )
                 action_status_color = warning
             elif t05_pool_images > 0 or t05_pool_plates > 0:
-                action_status = f"WYKONANE: {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic w puli YOLO"
+                action_status = (
+                    f"WYKONANE: {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic w puli YOLO\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
                 action_status_color = success
             else:
-                action_status = "Do wykonania: przygotuj anotacje tablic"
+                action_status = (
+                    "Do wykonania: przygotuj anotacje tablic\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
                 action_status_color = muted
-            row_bg = blend_hex_colors(field_bg, tone_color, 0.055)
+            if pending_t05_work:
+                if approve_available:
+                    action_title = "OPCJONALNY POWR\u00d3T"
+                    action_detail = (
+                        f"Czeka: {pending_t05_images} zdj\u0119\u0107 [OK] / {pending_t05_plates} tablic.\n"
+                        f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                    )
+                else:
+                    action_title = "PRZERWANE"
+                    action_detail = (
+                        f"Wr\u00f3\u0107 do Z2: {pending_t05_images} zdj\u0119\u0107 [OK] / {pending_t05_plates} tablic.\n"
+                        f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                    )
+            elif t05_pool_images > 0 or t05_pool_plates > 0:
+                action_title = "WYKONANE"
+                action_detail = (
+                    f"W tej iteracji: {t05_pool_images} zdj\u0119\u0107 [OK] / {t05_pool_plates} tablic.\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
+            else:
+                action_title = "DO WYKONANIA"
+                action_detail = (
+                    "Przygotuj anotacje tablic.\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
+            row_bg = blend_hex_colors(field_bg, tone_color, 0.045)
             row = tk.Frame(
                 list_host,
                 bg=row_bg,
                 highlightthickness=1,
-                highlightbackground=blend_hex_colors(tone_color, field_bg, 0.28),
+                highlightbackground=blend_hex_colors(tone_color, field_bg, 0.20),
+                highlightcolor=blend_hex_colors(tone_color, field_bg, 0.20),
             )
             row.pack(fill=tk.X, pady=(0, 9))
-            row.columnconfigure(1, weight=1)
+            row.columnconfigure(0, weight=1)
+            row.columnconfigure(1, weight=0, minsize=suggestion_frame_width)
+            row.columnconfigure(2, weight=0)
             tk.Label(
                 row,
-                text=str(index),
-                fg=fg,
-                bg=blend_hex_colors(tone_color, row_bg, 0.20),
-                font=("Segoe UI", 10, "bold"),
-                width=3,
-                padx=5,
-                pady=7,
-            ).grid(row=0, column=0, sticky="nsw", padx=(8, 8), pady=8)
-            tk.Label(
-                row,
-                text=campaign_ui_helpers._repair_polish_text(str(label or "")),
+                text=campaign_ui_helpers._repair_polish_text(f"{index}. {str(label or '').strip()}"),
                 fg=fg,
                 bg=row_bg,
                 font=("Segoe UI", 10, "bold"),
                 anchor="w",
-            ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(7, 1))
-            tk.Label(
+                justify=tk.LEFT,
+                wraplength=action_name_wrap,
+            ).grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=9)
+
+            status_bg = blend_hex_colors(row_bg, action_status_color, 0.10 if action_status_color != muted else 0.055)
+            status_border = blend_hex_colors(action_status_color, row_bg, 0.34 if action_status_color != muted else 0.20)
+            status_shell = tk.Frame(
                 row,
-                text=campaign_ui_helpers._repair_polish_text(action_status),
+                width=suggestion_frame_width,
+                bg=status_bg,
+                highlightthickness=1,
+                highlightbackground=status_border,
+                highlightcolor=status_border,
+                padx=6,
+                pady=4,
+            )
+            status_shell.grid(row=0, column=1, sticky="ew", padx=(6, 4), pady=8)
+            status_shell.columnconfigure(1, weight=1)
+            mark_text = "!"
+            if action_status_color == success:
+                mark_text = "OK"
+            elif action_status_color == muted:
+                mark_text = "-"
+            mark_bg = blend_hex_colors(action_status_color, status_bg, 0.34 if action_status_color != muted else 0.16)
+            mark_shell = tk.Frame(status_shell, width=18, height=18, bg=mark_bg)
+            mark_shell.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 6), pady=(1, 0))
+            mark_shell.grid_propagate(False)
+            mark_shell.columnconfigure(0, weight=1)
+            mark_shell.rowconfigure(0, weight=1)
+            tk.Label(
+                mark_shell,
+                text=mark_text,
+                fg=GATE_WORK_INFOGRAPHIC_INK,
+                bg=mark_bg,
+                font=("Segoe UI Semibold", 7),
+                anchor="center",
+                padx=0,
+                pady=0,
+            ).grid(row=0, column=0, sticky="nsew")
+            tk.Label(
+                status_shell,
+                text=campaign_ui_helpers._repair_polish_text(action_title),
                 fg=action_status_color,
-                bg=row_bg,
-                font=("Segoe UI", 8, "bold" if action_status_color != muted else "normal"),
+                bg=status_bg,
+                font=("Segoe UI Semibold", 7),
                 anchor="w",
-            ).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 7))
+                justify=tk.LEFT,
+                wraplength=suggestion_detail_wrap,
+            ).grid(row=0, column=1, sticky="ew")
+            tk.Label(
+                status_shell,
+                text=_format_gate_work_suggestion_text(action_detail),
+                fg=fg if action_status_color != muted else muted,
+                bg=status_bg,
+                font=("Segoe UI", 7),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=suggestion_detail_wrap,
+            ).grid(row=1, column=1, sticky="ew", pady=(1, 0))
             tk.Button(
                 row,
                 text="Wybierz",
@@ -4771,7 +5453,7 @@ def _render_step1_route_actions(self, frame):
                 relief=tk.FLAT,
                 padx=10,
                 pady=6,
-            ).grid(row=0, column=2, rowspan=2, sticky="e", padx=(6, 10), pady=8)
+            ).grid(row=0, column=2, sticky="e", padx=(6, 10), pady=9)
 
         footer = tk.Frame(body, bg=body_bg)
         footer.pack(fill=tk.X, padx=16, pady=(0, 14), side=tk.BOTTOM)
@@ -5048,11 +5730,11 @@ def _render_step1_route_actions(self, frame):
         display_gate_id = _visible_badge_id("T07") or "T06"
         dialog = tk.Toplevel(self.frame)
         try:
-            self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="680x580", parent=self.frame)
+            self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="700x680", parent=self.frame)
         except Exception:
             dialog.title(f"Praca {display_gate_id}")
         try:
-            dialog.minsize(660, 540)
+            dialog.minsize(680, 640)
         except Exception:
             pass
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -5120,6 +5802,7 @@ def _render_step1_route_actions(self, frame):
             pending_repair_images, pending_repair_plates = 0, 0
         training_finish_state = _current_t07_training_finish_state()
         training_finish_pending = bool(training_finish_state)
+        training_work_interruption = _current_step4_work_interruption_state()
         pending_z2_repair = bool(pending_repair_images > 0 or pending_repair_plates > 0)
 
         def _t07_repair_material_state() -> dict:
@@ -5153,6 +5836,7 @@ def _render_step1_route_actions(self, frame):
         show_work_interruption_notice = bool(
             pending_z2_repair
             or training_finish_pending
+            or training_work_interruption
             or repair_interruption
         )
         if pending_repair_images > 0:
@@ -5201,6 +5885,27 @@ def _render_step1_route_actions(self, frame):
                 return f"{target_label}: {run_id}"
             return f"{target_label} gotowy"
 
+        def _step4_interrupted_work_kind() -> str:
+            if not training_work_interruption:
+                return ""
+            substep = str(training_work_interruption.get("substep", "") or "").strip().lower()
+            if substep in {"pz1", "dataset", "builder", "split"}:
+                return "dataset"
+            if substep in {"pz2", "train", "training"}:
+                return "training"
+            if _t07_has_current_iteration_dataset() or _t07_has_ready_dataset():
+                return "training"
+            return "dataset"
+
+        interrupted_work_kind = _step4_interrupted_work_kind()
+        if training_work_interruption and not pending_z2_repair and not training_finish_pending:
+            if interrupted_work_kind == "dataset":
+                recommendation_text = "Przerwano krok 1: przygotowanie wariantu datasetu. Wróć do PZ1 albo wybierz dalszą decyzję pracy bramki."
+                recommended_label = "Utwórz wariant datasetu"
+            elif interrupted_work_kind == "training":
+                recommendation_text = "Przerwano krok 2: trening modelu. Wróć do PZ2 albo wybierz dalszą decyzję pracy bramki."
+                recommended_label = "Trenuj model"
+
         def _t07_action_status(normalized_label: str, *, disabled_reason: str, is_recommended: bool, is_repair_resume: bool, is_repair_settlement: bool) -> dict:
             label_lower = str(normalized_label or "").strip().lower()
             if disabled_reason:
@@ -5235,6 +5940,15 @@ def _render_step1_route_actions(self, frame):
                 or "split" in label_lower
             )
             if is_dataset_variant_action:
+                if interrupted_work_kind == "dataset":
+                    return {
+                        "mark": "!",
+                        "title": "PRZERWANE: KROK 1",
+                        "detail": "wróć do PZ1 i domknij wariant",
+                        "tone": warning,
+                        "mark_tone": error,
+                        "fill": 0.13,
+                    }
                 if _t07_has_current_iteration_dataset():
                     detail = _t07_dataset_status_text() or "wariant tej iteracji jest gotowy"
                     return {
@@ -5260,6 +5974,15 @@ def _render_step1_route_actions(self, frame):
                     "fill": 0.045,
                 }
             if "trenuj" in label_lower or "model" in label_lower:
+                if interrupted_work_kind == "training":
+                    return {
+                        "mark": "!",
+                        "title": "PRZERWANE: KROK 2",
+                        "detail": "wróć do PZ2 i domknij trening",
+                        "tone": warning,
+                        "mark_tone": error,
+                        "fill": 0.13,
+                    }
                 finish_state = _current_t07_training_finish_state()
                 if finish_state:
                     return {
@@ -5406,6 +6129,14 @@ def _render_step1_route_actions(self, frame):
                     f"Wynik treningu ({finish_label}) jest już zapisany, ale nie został jeszcze utrwalony na bramce {display_gate_id}."
                     f"{run_suffix} Wróć do grafu i użyj pola Zatwierdź, aby zapisać finał tej iteracji."
                 )
+            elif training_work_interruption:
+                warning_title = "Przerwana praca Z4"
+                interrupted_substep = str(training_work_interruption.get("substep", "") or "").strip().upper()
+                interrupted_suffix = f" ({interrupted_substep})" if interrupted_substep else ""
+                warning_text = (
+                    f"Poprzednia praca treningowa{interrupted_suffix} została przerwana przed formalnym powrotem do grafu. "
+                    "Wróć do właściwego kroku Z4 albo wybierz dalszą decyzję pracy bramki."
+                )
             else:
                 warning_title = f"Przerwana praca bramki {display_gate_id}"
                 warning_text = (
@@ -5451,9 +6182,8 @@ def _render_step1_route_actions(self, frame):
                 *list(buttons or []),
             ]
 
-        suggestion_frame_width = 252
-        suggestion_frame_height = 66
-        suggestion_detail_wrap = 192
+        suggestion_frame_width = 286
+        suggestion_detail_wrap = 226
 
         for index, (label, command, tone) in enumerate(buttons, start=1):
             normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
@@ -5522,7 +6252,9 @@ def _render_step1_route_actions(self, frame):
                 bg=row_bg,
                 font=("Segoe UI", 10, "bold"),
                 anchor="w",
-            ).grid(row=0, column=0, sticky="w", padx=(12, 8), pady=7)
+                justify=tk.LEFT,
+                wraplength=245,
+            ).grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=7)
             status = _t07_action_status(
                 normalized_label,
                 disabled_reason=disabled_reason,
@@ -5536,7 +6268,6 @@ def _render_step1_route_actions(self, frame):
             status_shell = tk.Frame(
                 row,
                 width=suggestion_frame_width,
-                height=suggestion_frame_height,
                 bg=status_bg,
                 highlightthickness=1,
                 highlightbackground=status_border,
@@ -5544,12 +6275,11 @@ def _render_step1_route_actions(self, frame):
                 padx=6,
                 pady=4,
             )
-            status_shell.grid(row=0, column=1, sticky="e", padx=(6, 2), pady=7)
-            status_shell.grid_propagate(False)
+            status_shell.grid(row=0, column=1, sticky="ew", padx=(6, 2), pady=7)
             status_shell.columnconfigure(1, weight=1)
             mark_tone = str(status.get("mark_tone") or status_tone)
             mark_bg = blend_hex_colors(mark_tone, status_bg, 0.36 if mark_tone == error else 0.18)
-            mark_fg = "#ffffff" if mark_tone == error else (field_bg if mark_tone == success else fg)
+            mark_fg = GATE_WORK_INFOGRAPHIC_INK
             mark_shell = tk.Frame(status_shell, width=18, height=18, bg=mark_bg)
             mark_shell.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 6), pady=(1, 0))
             mark_shell.grid_propagate(False)
@@ -5572,10 +6302,12 @@ def _render_step1_route_actions(self, frame):
                 bg=status_bg,
                 font=("Segoe UI Semibold", 7),
                 anchor="w",
+                justify=tk.LEFT,
+                wraplength=suggestion_detail_wrap,
             ).grid(row=0, column=1, sticky="ew")
             tk.Label(
                 status_shell,
-                text=campaign_ui_helpers._repair_polish_text(str(status.get("detail") or "")),
+                text=_format_gate_work_suggestion_text(status.get("detail")),
                 fg=fg if is_enabled else muted,
                 bg=status_bg,
                 font=("Segoe UI", 7),
@@ -5636,11 +6368,23 @@ def _render_step1_route_actions(self, frame):
 
         pending_t06 = _t06_interrupted_work_state()
         try:
+            pending_t06_session = dict((pending_t06 or {}).get("t06_work_session") or {})
+        except Exception:
+            pending_t06_session = {}
+        try:
             pending_images = int(pending_t06.get("unpromoted_approved_images", 0) or 0)
             pending_plates = int(pending_t06.get("unpromoted_approved_plates", 0) or 0)
         except Exception:
             pending_images, pending_plates = 0, 0
         pending_kind = str(pending_t06.get("interrupted_kind") or pending_t06.get("work_area") or "").strip().lower()
+        pending_substep = str(
+            pending_t06.get("substep")
+            or pending_t06_session.get("substep")
+            or pending_t06.get("target_substep")
+            or ""
+        ).strip().lower()
+        t06_pz2_substep_hints = {"2", "detect", "pz2", "z3_pz2"}
+        t06_pz3_substep_hints = {"3", "dataset", "pz3", "z3_pz3"}
         pending_z3_work = bool(pending_kind == "z3")
         pending_ok_work = bool((pending_images > 0 or pending_plates > 0) and not pending_z3_work)
         pending_work = bool(pending_ok_work or pending_z3_work)
@@ -5684,6 +6428,22 @@ def _render_step1_route_actions(self, frame):
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             return bool(gate.get("ok") and ready_dataset)
 
+        def _t06_pending_z3_targets_pz3() -> bool:
+            if not pending_z3_work:
+                return False
+            if pending_substep in t06_pz2_substep_hints:
+                return False
+            if pending_substep in t06_pz3_substep_hints:
+                return True
+            return _t06_pz2_contract_ready()
+
+        def _t06_pending_z3_targets_pz2() -> bool:
+            if not pending_z3_work:
+                return False
+            if pending_substep in t06_pz2_substep_hints:
+                return True
+            return not _t06_pending_z3_targets_pz3()
+
         def _t06_plate_pool_summary() -> tuple[int, int]:
             nonlocal t06_pool_stats_cache
             if not isinstance(t06_pool_stats_cache, dict):
@@ -5726,9 +6486,24 @@ def _render_step1_route_actions(self, frame):
             }
 
         t06_repair_material_state = _t06_repair_material_state()
+        buttons = list(buttons or [])
+
+        def _t06_label_is_char_pz2(label: str) -> bool:
+            normalized = str(label or "").strip().lower()
+            return bool(
+                "pz2" in normalized
+                and (
+                    "znak" in normalized
+                    or "ramki" in normalized
+                    or "etykiet" in normalized
+                    or "boks" in normalized
+                )
+            )
 
         def _t06_label_is_resume(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if _t06_label_is_char_pz2(normalized):
+                return False
             if "z2" in normalized:
                 return True
             if "rozlicz" in normalized or "przerwan" in normalized:
@@ -5751,14 +6526,21 @@ def _render_step1_route_actions(self, frame):
 
         def _t06_label_is_z3(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if _t06_label_is_char_pz2(normalized):
+                return False
             if "z2" in normalized:
                 return False
             return bool(
                 "z3" in normalized
+                or "pz3" in normalized
                 or "dataset znak" in normalized
                 or "znaków" in normalized
                 or "znakow" in normalized
+                or "znakach" in normalized
             )
+
+        def _t06_label_is_pz3_work(label: str) -> bool:
+            return bool(_t06_label_is_z3(label) and not _t06_label_is_char_pz2(label))
 
         def _t06_first_action_label(predicate) -> str:
             for raw_label, _command, _tone in buttons or ():
@@ -5770,21 +6552,83 @@ def _render_step1_route_actions(self, frame):
                     continue
             return ""
 
+        def _run_t06_pz2_repair_action() -> bool:
+            payload = {"context": {}}
+            try:
+                pending_session = dict((pending_t06 or {}).get("t06_work_session") or {})
+            except Exception:
+                pending_session = {}
+            pending_run = str(
+                (pending_session.get("run_dir") if isinstance(pending_session, dict) else "")
+                or (pending_t06 or {}).get("run_dir")
+                or ""
+            ).strip()
+            if pending_run:
+                payload["context"].update(
+                    {
+                        "restore_run_dir": pending_run,
+                        "input_source": "t06_interrupted_work",
+                        "resume_interrupted_t06": "1",
+                    }
+                )
+            try:
+                payload_to_run = _payload_with_graph_gate_context(payload, "e3_to_e4", "open_z2_step3_repair")
+            except Exception:
+                payload_to_run = payload
+            result = campaign_graph_actions.execute_campaign_graph_action(
+                self,
+                "open_z2_step3_repair",
+                payload=payload_to_run,
+            )
+            ok = bool(getattr(result, "ok", False))
+            message = str(getattr(result, "message", "") or "").strip()
+            if message:
+                try:
+                    self.app.update_status(message, "info" if ok else "warning")
+                except Exception:
+                    pass
+            return ok
+
+        if pending_work and not _t06_first_action_label(_t06_label_is_resume):
+            buttons.insert(
+                0,
+                (
+                    "Wróć do Z2 i uzupełnij anotacje tablic",
+                    _run_t06_pz2_repair_action,
+                    "warning",
+                ),
+            )
+
+        def _t06_recommendation_for(label: str) -> tuple[str, str]:
+            normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
+            if normalized_label:
+                return (f"Zalecane: wybierz „{normalized_label}”.", normalized_label)
+            return (f"Wybierz pracę {CHAR_WORK_GATE_DISPLAY_ID}.", "")
+
         def _t06_recommendation() -> tuple[str, str]:
-            z3_label = _t06_first_action_label(_t06_label_is_z3)
+            z3_label = _t06_first_action_label(_t06_label_is_pz3_work)
+            pz2_label = _t06_first_action_label(_t06_label_is_char_pz2)
             resume_label = _t06_first_action_label(_t06_label_is_resume)
+            if pending_z3_work and _t06_pending_z3_targets_pz3() and z3_label:
+                return _t06_recommendation_for(z3_label)
+            if pending_z3_work and _t06_pending_z3_targets_pz2() and pz2_label:
+                return _t06_recommendation_for(pz2_label)
             if pending_z3_work and z3_label:
-                return ("Zalecane: wróć do Z3 i dokończ dataset znaków", z3_label)
-            if pending_ok_work and z3_label:
-                return (f"Zalecane: przygotuj dataset w Z3 i rozlicz +{pending_images} [OK]", z3_label)
+                return _t06_recommendation_for(z3_label)
+            if pending_ok_work and resume_label:
+                return _t06_recommendation_for(resume_label)
+            if pending_ok_work and pz2_label:
+                return _t06_recommendation_for(pz2_label)
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             if bool(gate.get("ok")) and ready_dataset:
                 return ("Bramka gotowa. Użyj Zatwierdź na grafie.", "")
+            if not _t06_pz2_contract_ready() and pz2_label:
+                return _t06_recommendation_for(pz2_label)
             if z3_label:
-                return ("Zalecane: przygotuj dataset znaków w Z3", z3_label)
+                return _t06_recommendation_for(z3_label)
             if resume_label:
-                return ("Zalecane: uzupełnij anotacje tablic", resume_label)
+                return _t06_recommendation_for(resume_label)
             return (f"Wybierz pracę {CHAR_WORK_GATE_DISPLAY_ID}.", "")
 
         recommendation_text, recommended_label = _t06_recommendation()
@@ -5812,16 +6656,26 @@ def _render_step1_route_actions(self, frame):
         intro = (
             f"Praca {CHAR_WORK_GATE_DISPLAY_ID} została przerwana. Możesz wrócić do Z2 albo przygotować AZ w Z3. Przy wejściu do Z3 zdecydujesz, czy użyć zaległych [OK], czy pominąć tę pulę."
             if pending_work
-            else f"Wybierz pracę {CHAR_WORK_GATE_DISPLAY_ID}. Z2 służy do uzupełnienia anotacji tablic, a Z3 przygotowuje AZ wymagane do otwarcia bramki."
+            else f"Wybierz pracę {CHAR_WORK_GATE_DISPLAY_ID}. PZ2 służy do przygotowania anotacji znaków na tablicach, a PZ3 tworzy i eksportuje AZ wymagane do otwarcia bramki."
         )
-        if pending_z3_work:
+        if pending_z3_work and _t06_pending_z3_targets_pz2():
+            intro = (
+                f"Praca {CHAR_WORK_GATE_DISPLAY_ID} została przerwana w PZ2. "
+                "Wybierz krok 1, aby dokończyć anotacje znaków na tablicach."
+            )
+        elif pending_z3_work and _t06_pending_z3_targets_pz3():
             interrupted_detail = str(pending_t06.get("interrupted_detail") or "").strip()
             intro = (
                 interrupted_detail
                 or (
-                    f"Praca {CHAR_WORK_GATE_DISPLAY_ID} w Z3 została przerwana. Wróć do przygotowania datasetu znaków, "
-                    "aby dokończyć krok PZ2/PZ3 albo formalnie wrócić do grafu."
+                    f"Praca {CHAR_WORK_GATE_DISPLAY_ID} została przerwana w PZ3. "
+                    "Wybierz krok 2, aby dokończyć i wyeksportować dataset znaków."
                 )
+            )
+        elif pending_ok_work:
+            intro = (
+                f"Przerwano uzupełnianie anotacji tablic dla {CHAR_WORK_GATE_DISPLAY_ID}. "
+                "Możesz wrócić do tej pracy albo przejść do znaków i zdecydować, czy użyć zaległych [OK]."
             )
         tk.Label(
             body,
@@ -5855,23 +6709,49 @@ def _render_step1_route_actions(self, frame):
 
         def _t06_action_status(normalized_label: str, *, disabled_reason: str, is_resume: bool, is_z3_action: bool, is_recommended: bool) -> dict:
             label_lower = str(normalized_label or "").strip().lower()
+            is_char_pz2 = _t06_label_is_char_pz2(normalized_label)
             if disabled_reason:
                 return {
                     "mark": "!",
-                    "title": "CEL: NAJPIERW",
+                    "title": "NIEDOSTĘPNE TERAZ",
                     "detail": campaign_ui_helpers._repair_polish_text(disabled_reason),
                     "tone": muted,
                     "fill": 0.055,
                 }
-            if pending_z3_work and is_z3_action:
-                interrupted_detail = str(pending_t06.get("interrupted_detail") or "").strip()
+            if pending_z3_work and _t06_pending_z3_targets_pz2() and is_char_pz2:
                 return {
                     "mark": "!",
-                    "title": "CEL: WZNÓW Z3",
-                    "detail": "brak eksportu AZ z PZ3" if interrupted_detail else "dokończ bazę PZ2/PZ3 i dataset AZ",
+                    "title": "CEL: WZNÓW PZ2",
+                    "detail": "dokończ ramki i etykiety znaków",
                     "tone": warning,
                     "mark_tone": error,
                     "fill": 0.16,
+                }
+            if pending_z3_work and _t06_pending_z3_targets_pz3() and is_char_pz2:
+                return {
+                    "mark": "+",
+                    "title": "OPCJONALNIE: PZ2",
+                    "detail": "wróć tylko jeśli chcesz poprawić anotacje znaków",
+                    "tone": muted,
+                    "fill": 0.08,
+                }
+            if pending_z3_work and _t06_pending_z3_targets_pz3() and is_z3_action:
+                interrupted_detail = str(pending_t06.get("interrupted_detail") or "").strip()
+                return {
+                    "mark": "!",
+                    "title": "CEL: WZNÓW PZ3",
+                    "detail": "brak eksportu AZ z PZ3" if interrupted_detail else "dokończ i wyeksportuj dataset AZ",
+                    "tone": warning,
+                    "mark_tone": error,
+                    "fill": 0.16,
+                }
+            if pending_z3_work and _t06_pending_z3_targets_pz2() and is_z3_action:
+                return {
+                    "mark": "2",
+                    "title": "NAJPIERW PZ2",
+                    "detail": "PZ3 ruszy po gotowych anotacjach znaków",
+                    "tone": muted,
+                    "fill": 0.08,
                 }
             if pending_z3_work and is_resume:
                 return {
@@ -5890,11 +6770,11 @@ def _render_step1_route_actions(self, frame):
                     "mark_tone": error,
                     "fill": 0.16,
                 }
-            if pending_ok_work and is_z3_action:
+            if pending_ok_work and (is_z3_action or is_char_pz2):
                 return {
                     "mark": "+",
                     "title": "CEL: UŻYJ [OK]",
-                    "detail": f"+{pending_images} [OK] zasili Z3 przed AZ",
+                    "detail": f"+{pending_images} [OK] zasili źródło Z3",
                     "tone": success,
                     "fill": 0.12,
                 }
@@ -5909,6 +6789,22 @@ def _render_step1_route_actions(self, frame):
             pz2_ready = _t06_pz2_contract_ready()
             pz3_ready = _t06_pz3_contract_ready()
             pool_images, pool_plates = _t06_plate_pool_summary()
+            if is_char_pz2 and pz2_ready:
+                return {
+                    "mark": "✓",
+                    "title": "WYKONANE: PZ2",
+                    "detail": "anotacje znaków są przygotowane",
+                    "tone": success,
+                    "fill": 0.14,
+                }
+            if is_char_pz2:
+                return {
+                    "mark": "1",
+                    "title": "KROK 1: ANOTACJE ZNAKÓW",
+                    "detail": "uzupełnij ramki i etykiety znaków",
+                    "tone": success,
+                    "fill": 0.12,
+                }
             if is_z3_action and pz3_ready:
                 return {
                     "mark": "✓",
@@ -5919,11 +6815,19 @@ def _render_step1_route_actions(self, frame):
                 }
             if is_z3_action and pz2_ready:
                 return {
-                    "mark": "✓",
-                    "title": "WYKONANE: PZ2",
-                    "detail": "ramki znaków gotowe; został eksport AZ",
+                    "mark": "2",
+                    "title": "KROK 2: DATASET ZNAKÓW",
+                    "detail": "utwórz i wyeksportuj AZ w PZ3",
                     "tone": success,
                     "fill": 0.12,
+                }
+            if is_z3_action:
+                return {
+                    "mark": "2",
+                    "title": "NAJPIERW KROK 1",
+                    "detail": "PZ2 musi mieć anotacje znaków",
+                    "tone": muted,
+                    "fill": 0.08,
                 }
             if is_resume and (pool_images > 0 or pool_plates > 0):
                 return {
@@ -5976,7 +6880,6 @@ def _render_step1_route_actions(self, frame):
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 12))
         suggestion_frame_width = 276
-        suggestion_frame_height = 72
         suggestion_detail_wrap = 214
 
         def _abandon_interrupted_t06_ok() -> None:
@@ -6203,8 +7106,8 @@ def _render_step1_route_actions(self, frame):
                 return "skip"
             return "cancel"
 
-        def _run_t06_action(command, *, is_resume: bool, is_z3_action: bool):
-            if pending_ok_work and is_z3_action:
+        def _run_t06_action(command, *, is_resume: bool, is_z3_action: bool, is_char_pz2: bool = False):
+            if pending_ok_work and (is_z3_action or is_char_pz2):
                 policy = _choose_t06_pending_z3_policy()
                 if policy == "cancel":
                     return False
@@ -6225,6 +7128,7 @@ def _render_step1_route_actions(self, frame):
             normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
             is_resume = _is_t06_resume_action(normalized_label)
             is_z3_action = _is_t06_z3_action(normalized_label)
+            is_char_pz2 = _t06_label_is_char_pz2(normalized_label)
             disabled_reason = ""
             if (
                 is_resume
@@ -6232,6 +7136,13 @@ def _render_step1_route_actions(self, frame):
                 and not bool(t06_repair_material_state.get("available"))
             ):
                 disabled_reason = str(t06_repair_material_state.get("reason") or "Brak materiału do uzupełnienia anotacji tablic")
+            if (
+                is_z3_action
+                and not is_char_pz2
+                and not _t06_pz2_contract_ready()
+                and not _t06_pending_z3_targets_pz3()
+            ):
+                disabled_reason = "Najpierw przygotuj anotacje znaków w PZ2."
             is_enabled = not disabled_reason
             is_recommended = bool(recommended_label and normalized_label == recommended_label)
             tone_color = success if (is_recommended or (pending_ok_work and is_z3_action)) else (warning if pending_work else (success if str(tone or "").strip() != "warning" else warning))
@@ -6276,7 +7187,6 @@ def _render_step1_route_actions(self, frame):
             status_shell = tk.Frame(
                 row,
                 width=suggestion_frame_width,
-                height=suggestion_frame_height,
                 bg=status_bg,
                 highlightthickness=1,
                 highlightbackground=status_border,
@@ -6284,12 +7194,11 @@ def _render_step1_route_actions(self, frame):
                 padx=6,
                 pady=4,
             )
-            status_shell.grid(row=0, column=1, sticky="e", padx=(6, 2), pady=7)
-            status_shell.grid_propagate(False)
+            status_shell.grid(row=0, column=1, sticky="ew", padx=(6, 2), pady=7)
             status_shell.columnconfigure(1, weight=1)
             mark_tone = str(status.get("mark_tone") or status_tone)
             mark_bg = blend_hex_colors(mark_tone, status_bg, 0.36 if mark_tone == error else 0.18)
-            mark_fg = "#ffffff" if mark_tone == error else (field_bg if mark_tone == success else fg)
+            mark_fg = GATE_WORK_INFOGRAPHIC_INK
             mark_shell = tk.Frame(status_shell, width=18, height=18, bg=mark_bg)
             mark_shell.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 6), pady=(1, 0))
             mark_shell.grid_propagate(False)
@@ -6315,7 +7224,7 @@ def _render_step1_route_actions(self, frame):
             ).grid(row=0, column=1, sticky="ew")
             tk.Label(
                 status_shell,
-                text=campaign_ui_helpers._repair_polish_text(str(status.get("detail") or "")),
+                text=_format_gate_work_suggestion_text(status.get("detail")),
                 fg=fg if is_enabled else muted,
                 bg=status_bg,
                 font=("Segoe UI", 7),
@@ -6326,7 +7235,14 @@ def _render_step1_route_actions(self, frame):
             tk.Button(
                 row,
                 text="Wybierz",
-                command=(lambda cmd=command, resume=is_resume, z3_action=is_z3_action: _run_t06_action(cmd, is_resume=resume, is_z3_action=z3_action)) if is_enabled else (lambda: None),
+                command=(
+                    lambda cmd=command, resume=is_resume, z3_action=is_z3_action, char_pz2=is_char_pz2: _run_t06_action(
+                        cmd,
+                        is_resume=resume,
+                        is_z3_action=z3_action,
+                        is_char_pz2=char_pz2,
+                    )
+                ) if is_enabled else (lambda: None),
                 cursor="hand2" if is_enabled else "",
                 bg=btn_bg,
                 fg=fg if is_enabled else muted,
@@ -6454,7 +7370,7 @@ def _render_step1_route_actions(self, frame):
                     _source, state_text, state_tone, _counter = _format_char_dataset_resource_status(gate)
                     return (state_text, state_tone)
                 if key == "training_result":
-                    step4_display_gate_id = "T06"
+                    step4_display_gate_id = campaign_visible_gate_id("T07") or "T06"
                     try:
                         training_tab = self.app.tabs.get("training") if getattr(self.app, "tabs", None) else None
                         getter = getattr(training_tab, "get_campaign_step4_finish_state", None)
@@ -6503,6 +7419,7 @@ def _render_step1_route_actions(self, frame):
             resource_report = build_transition_resource_report(
                 active_specs,
                 getattr(transition_eval_ctx, "resource_snapshots", None),
+                selected_path=selected_path,
             )
 
             def _resource_state_display_text(report_row, state_text: str) -> str:
@@ -6533,18 +7450,20 @@ def _render_step1_route_actions(self, frame):
                     and str(getattr(snapshot, "tone", "") or "").strip().lower() == "warning"
                     and getattr(snapshot, "has_source", False)
                 )
-                status_badge = _status_badge_text(
-                    enabled=bool(report_row.enabled),
-                    required=bool(report_row.required),
-                    present=bool(present or pending_training_result),
-                )
-                status_tone = _status_badge_tone(
-                    enabled=bool(report_row.enabled),
-                    required=bool(report_row.required),
-                    present=bool(present or pending_training_result),
-                )
                 if pending_training_result:
+                    status_badge = "wybierz"
                     status_tone = "warning"
+                else:
+                    status_badge = _status_badge_text(
+                        enabled=bool(report_row.enabled),
+                        required=bool(report_row.required),
+                        present=bool(present),
+                    )
+                    status_tone = _status_badge_tone(
+                        enabled=bool(report_row.enabled),
+                        required=bool(report_row.required),
+                        present=bool(present),
+                    )
                 resource_rows.append((
                     report_row.label,
                     _requirement_text(report_row.requirement),
@@ -7029,6 +7948,22 @@ def _render_step1_route_actions(self, frame):
             )
 
         def _resource_requirement(row_key: str, fallback: str = "") -> str:
+            if any(str(getattr(spec, "key", "") or "") == "e1_to_e2_prepare_plate_annotations" for spec in active_specs):
+                try:
+                    current_path_for_resources = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+                except Exception:
+                    current_path_for_resources = normalize_iteration_path(selected_path)
+                normalized_row_key = str(row_key or "").strip()
+                if normalized_row_key == "images":
+                    if current_path_for_resources == "plate_training":
+                        return "route_required_plate"
+                    if current_path_for_resources == "char_from_images":
+                        return "alternative" if material_ready else "route_required_char"
+                    return "optional"
+                if normalized_row_key == "plate_run":
+                    if current_path_for_resources == "char_from_images":
+                        return "route_required_char" if material_ready and not image_potential else "alternative"
+                    return "optional"
             resource = resource_specs_by_key.get(row_key)
             if resource is not None:
                 return str(getattr(resource, "requirement", "") or "optional")
@@ -7274,7 +8209,7 @@ def _render_step1_route_actions(self, frame):
             resource_tree.configure(style="CampaignResourceAssets.Treeview")
         except Exception:
             pass
-        resource_widths = (44, 172, 126, 98, 176, 62, 66, 66)
+        resource_widths = (44, 132, 92, 116, 212, 62, 66, 66)
         for col_id, label, width in zip(resource_tree_columns, header_labels, resource_widths):
             resource_tree.heading(col_id, text=label)
             resource_tree.column(
@@ -7282,7 +8217,7 @@ def _render_step1_route_actions(self, frame):
                 width=width,
                 minwidth=38,
                 anchor=("center" if col_id in {"status", "primary", "more", "clear"} else "w"),
-                stretch=(col_id in {"resource", "requirement", "validation"}),
+                stretch=(col_id in {"source", "validation"}),
             )
         try:
             resource_tree.tag_configure("disabled", foreground=muted_dim)
@@ -7682,6 +8617,14 @@ def _render_step1_route_actions(self, frame):
                         description=campaign_resource_description(row_key),
                     )
             if row_key == "plate_run":
+                explicit_snapshot = build_campaign_resource_snapshot(
+                    row_key,
+                    row if isinstance(row, dict) else None,
+                    fallback_label=fallback_label,
+                    fallback_requirement="",
+                )
+                if explicit_snapshot.has_source:
+                    return explicit_snapshot
                 try:
                     graph_snapshot = transition_eval_ctx.resource_snapshot("plate_run")
                 except Exception:
@@ -7957,7 +8900,7 @@ def _render_step1_route_actions(self, frame):
                 roots.append(resolved)
             return roots
 
-        def _current_annotation_expected_names() -> tuple[set[str], str]:
+        def _current_annotation_image_sets() -> tuple[set[str], set[str], set[str], str]:
             try:
                 image_source = self._get_project_start_effective_images_source()
             except Exception:
@@ -7972,22 +8915,56 @@ def _render_step1_route_actions(self, frame):
                 images_path = Path(images_dir) if images_dir is not None else None
             except Exception:
                 images_path = None
-            expected_names: set[str] = set()
+            package_names: set[str] = set()
+            adoptable_names: set[str] = set()
+            approved_names: set[str] = set()
             if images_path is not None:
                 try:
-                    expected_names = set(self._get_project_start_adoptable_normalized_image_names(images_path) or set())
+                    package_names = set(self._scan_project_start_normalized_image_names(images_path) or set())
                 except Exception:
-                    expected_names = set()
-                if not expected_names:
+                    package_names = set()
+                if not package_names:
                     try:
-                        expected_names = set(self._scan_project_start_normalized_image_names(images_path) or set())
+                        package_names = set(self._get_project_start_normalized_image_names(images_path) or set())
                     except Exception:
-                        expected_names = set()
+                        package_names = set()
+                try:
+                    adoptable_names = set(self._get_project_start_adoptable_normalized_image_names(images_path) or set())
+                except Exception:
+                    adoptable_names = set()
+                try:
+                    approved_names = set(self._get_project_start_approved_normalized_image_names() or set())
+                except Exception:
+                    approved_names = set()
+                if package_names and not adoptable_names:
+                    adoptable_names = set(package_names) - set(approved_names)
             try:
                 source_label = self._format_project_start_asset_source(images_path) if images_path is not None else "Nie wskazano"
             except Exception:
                 source_label = str(images_path or "Nie wskazano")
-            return {str(name or "").strip().lower() for name in expected_names if str(name or "").strip()}, source_label
+            def _clean(values: set[str]) -> set[str]:
+                return {str(name or "").strip().lower() for name in values if str(name or "").strip()}
+
+            return _clean(package_names), _clean(adoptable_names), _clean(approved_names), source_label
+
+        def _current_annotation_expected_names() -> tuple[set[str], str]:
+            package_names, _adoptable_names, _approved_names, source_label = _current_annotation_image_sets()
+            return package_names, source_label
+
+        def _annotation_base_ready_for_import() -> tuple[bool, str, int]:
+            try:
+                expected_names, source_label = _current_annotation_expected_names()
+            except Exception:
+                expected_names, source_label = set(), "Nie wskazano"
+            count = len(expected_names or set())
+            return bool(count > 0), str(source_label or "Nie wskazano"), int(count)
+
+        def _annotation_dependency_message(row_key: str) -> str:
+            resource_code = "AZ" if str(row_key or "").strip() == "char_run" else "AT"
+            return (
+                f"Najpierw wskaż obrazy O. {resource_code} jest zależne od aktualnej puli obrazów "
+                "i musi zostać zweryfikowane względem tej bazy."
+            )
 
         def _annotation_xml_element_attrs(element) -> dict[str, str]:
             attrs: dict[str, str] = {}
@@ -8015,7 +8992,12 @@ def _render_step1_route_actions(self, frame):
                 str(attrs.get("manual_source", "") or "").strip()
             )
 
-        def _summarize_annotation_candidate(xml_path: Path, expected_names: set[str]) -> dict:
+        def _summarize_annotation_candidate(
+            xml_path: Path,
+            expected_names: set[str],
+            adoptable_names: set[str],
+            approved_names: set[str],
+        ) -> dict:
             run_dir = Path(xml_path).parent
             summary = {
                 "xml_path": Path(xml_path),
@@ -8025,12 +9007,22 @@ def _render_step1_route_actions(self, frame):
                 "plates": 0,
                 "compatible_images": 0,
                 "compatible_plates": 0,
+                "compatible_manual": 0,
+                "compatible_auto": 0,
+                "adoptable_images": 0,
+                "adoptable_plates": 0,
+                "approved_overlap": 0,
+                "approved_overlap_plates": 0,
+                "outside_images": 0,
+                "same_plate_text_images": 0,
+                "same_plate_text_plates": 0,
                 "manual": 0,
                 "auto": 0,
                 "run_type": "",
                 "model": "",
                 "mtime": 0.0,
                 "error": "",
+                "is_import_shadow": False,
             }
             try:
                 stat = Path(xml_path).stat()
@@ -8040,6 +9032,8 @@ def _render_step1_route_actions(self, frame):
 
             plate_labels = {str(label or "").strip().lower() for label in CONFIG.PLATE_LABELS}
             image_plate_counts: Counter[str] = Counter()
+            image_manual_counts: Counter[str] = Counter()
+            image_auto_counts: Counter[str] = Counter()
             manual_count = 0
             auto_count = 0
             try:
@@ -8062,17 +9056,61 @@ def _render_step1_route_actions(self, frame):
                         attrs = _annotation_xml_element_attrs(shape_el)
                         if _annotation_xml_element_is_manual(shape_el, attrs):
                             manual_count += 1
+                            image_manual_counts[normalized] += 1
                         else:
                             auto_count += 1
+                            image_auto_counts[normalized] += 1
             except Exception as exc:
                 summary["error"] = str(exc)
                 return summary
 
-            compatible_names = set(image_plate_counts.keys()) & set(expected_names or set())
+            expected_names = set(expected_names or set())
+            adoptable_names = set(adoptable_names or set())
+            approved_names = set(approved_names or set())
+            candidate_names = set(image_plate_counts.keys())
+            compatible_names = candidate_names & expected_names
+            adoptable_compatible_names = compatible_names & adoptable_names
+            approved_compatible_names = compatible_names & approved_names
+            expected_signatures = set()
+            try:
+                planner = CampaignIngestPlanner()
+                for name in expected_names:
+                    signature = tuple(
+                        str(text or "").strip().upper()
+                        for text in planner.extract_true_texts_from_filename(str(name or ""))
+                        if str(text or "").strip()
+                    )
+                    if signature:
+                        expected_signatures.add(signature)
+            except Exception:
+                expected_signatures = set()
+            same_plate_text_names = set()
+            if expected_signatures:
+                try:
+                    planner = CampaignIngestPlanner()
+                    for name in candidate_names - expected_names:
+                        signature = tuple(
+                            str(text or "").strip().upper()
+                            for text in planner.extract_true_texts_from_filename(str(name or ""))
+                            if str(text or "").strip()
+                        )
+                        if signature and signature in expected_signatures:
+                            same_plate_text_names.add(name)
+                except Exception:
+                    same_plate_text_names = set()
             summary["images"] = int(len(image_plate_counts))
             summary["plates"] = int(sum(image_plate_counts.values()))
             summary["compatible_images"] = int(len(compatible_names)) if expected_names else 0
             summary["compatible_plates"] = int(sum(int(image_plate_counts.get(name, 0) or 0) for name in compatible_names)) if expected_names else 0
+            summary["compatible_manual"] = int(sum(int(image_manual_counts.get(name, 0) or 0) for name in compatible_names)) if expected_names else 0
+            summary["compatible_auto"] = int(sum(int(image_auto_counts.get(name, 0) or 0) for name in compatible_names)) if expected_names else 0
+            summary["adoptable_images"] = int(len(adoptable_compatible_names)) if expected_names else 0
+            summary["adoptable_plates"] = int(sum(int(image_plate_counts.get(name, 0) or 0) for name in adoptable_compatible_names)) if expected_names else 0
+            summary["approved_overlap"] = int(len(approved_compatible_names)) if expected_names else 0
+            summary["approved_overlap_plates"] = int(sum(int(image_plate_counts.get(name, 0) or 0) for name in approved_compatible_names)) if expected_names else 0
+            summary["outside_images"] = int(len(candidate_names - expected_names)) if expected_names else 0
+            summary["same_plate_text_images"] = int(len(same_plate_text_names)) if expected_names else 0
+            summary["same_plate_text_plates"] = int(sum(int(image_plate_counts.get(name, 0) or 0) for name in same_plate_text_names)) if expected_names else 0
             summary["manual"] = int(manual_count)
             summary["auto"] = int(auto_count)
 
@@ -8081,10 +9119,14 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 manifest = {}
             run_type = str(dict(manifest or {}).get("annotation_run_type") or "").strip()
+            imported_from = str(dict(manifest or {}).get("imported_from_run_dir") or "").strip()
+            summary["is_import_shadow"] = bool(imported_from or run_type == "imported_run")
             if run_type == "manual_template":
                 summary["run_type"] = "Ręczne"
             elif run_type == "auto_annotation":
                 summary["run_type"] = "Auto"
+            elif run_type == "imported_run":
+                summary["run_type"] = "Kopia importu"
             else:
                 summary["run_type"] = "Nieustalone"
             model_label = str(dict(manifest or {}).get("plate_model_identity") or "").strip()
@@ -8099,15 +9141,31 @@ def _render_step1_route_actions(self, frame):
             return summary
 
         def _find_annotation_candidates(row_key: str) -> tuple[list[dict], set[str], str, list[Path]]:
-            expected_names, image_source_label = _current_annotation_expected_names()
+            find_started = perf_counter()
+            expected_names, adoptable_names, approved_names, image_source_label = _current_annotation_image_sets()
             roots = _annotation_candidate_roots(row_key)
             candidates: list[dict] = []
             seen_xml: set[str] = set()
+            try:
+                summary_cache = getattr(self, "_campaign_annotation_candidate_summary_cache", None)
+                if not isinstance(summary_cache, dict):
+                    summary_cache = {}
+                    setattr(self, "_campaign_annotation_candidate_summary_cache", summary_cache)
+            except Exception:
+                summary_cache = {}
+            try:
+                expected_token = CAMPAIGN.build_image_name_set_token(expected_names)
+                adoptable_token = CAMPAIGN.build_image_name_set_token(adoptable_names)
+                approved_token = CAMPAIGN.build_image_name_set_token(approved_names)
+            except Exception:
+                expected_token = str(len(expected_names or set()))
+                adoptable_token = str(len(adoptable_names or set()))
+                approved_token = str(len(approved_names or set()))
             for root in roots:
                 try:
-                    xml_paths = list(root.rglob("annotations.xml"))
+                    xml_paths = root.rglob("annotations.xml")
                 except Exception:
-                    xml_paths = []
+                    xml_paths = ()
                 for xml_path in xml_paths:
                     try:
                         resolved_key = str(Path(xml_path).resolve()).lower()
@@ -8116,8 +9174,37 @@ def _render_step1_route_actions(self, frame):
                     if resolved_key in seen_xml:
                         continue
                     seen_xml.add(resolved_key)
-                    candidate = _summarize_annotation_candidate(Path(xml_path), expected_names)
+                    try:
+                        xml_stat = Path(xml_path).stat()
+                        xml_stamp = (int(getattr(xml_stat, "st_mtime_ns", 0) or 0), int(getattr(xml_stat, "st_size", 0) or 0))
+                    except Exception:
+                        xml_stamp = (0, 0)
+                    cache_key = (
+                        resolved_key,
+                        xml_stamp,
+                        str(expected_token or ""),
+                        str(adoptable_token or ""),
+                        str(approved_token or ""),
+                    )
+                    cached_candidate = summary_cache.get(cache_key) if isinstance(summary_cache, dict) else None
+                    if isinstance(cached_candidate, dict):
+                        candidate = dict(cached_candidate)
+                    else:
+                        candidate = _summarize_annotation_candidate(
+                            Path(xml_path),
+                            expected_names,
+                            adoptable_names,
+                            approved_names,
+                        )
+                        try:
+                            if len(summary_cache) > 600:
+                                summary_cache.clear()
+                            summary_cache[cache_key] = dict(candidate)
+                        except Exception:
+                            pass
                     if int(candidate.get("plates", 0) or 0) <= 0:
+                        continue
+                    if bool(candidate.get("is_import_shadow")):
                         continue
                     candidates.append(candidate)
                     if len(candidates) >= 240:
@@ -8127,17 +9214,43 @@ def _render_step1_route_actions(self, frame):
             candidates.sort(
                 key=lambda item: (
                     int(item.get("compatible_images", 0) or 0),
+                    int(item.get("adoptable_images", 0) or 0),
                     int(item.get("compatible_plates", 0) or 0),
                     int(item.get("plates", 0) or 0),
                     float(item.get("mtime", 0.0) or 0.0),
                 ),
                 reverse=True,
             )
+            try:
+                elapsed_ms = int((perf_counter() - find_started) * 1000)
+                if elapsed_ms >= 120:
+                    logger.info(
+                        "[AT IMPORT PERF] find_candidates total=%sms roots=%s xml=%s rows=%s cache=%s",
+                        elapsed_ms,
+                        len(roots),
+                        len(seen_xml),
+                        len(candidates),
+                        len(summary_cache) if isinstance(summary_cache, dict) else 0,
+                    )
+            except Exception:
+                pass
             return candidates, expected_names, image_source_label, roots
 
         def _open_annotation_candidate_browser(row_key: str) -> bool:
             if str(row_key or "").strip() not in {"plate_run", "char_run"}:
                 return False
+            base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
+            if not base_ready:
+                try:
+                    self.app.themed_info(
+                        "Najpierw wskaż obrazy",
+                        _annotation_dependency_message(row_key),
+                        parent=dialog,
+                        tone="warning",
+                    )
+                except Exception:
+                    pass
+                return True
             if str(row_key or "").strip() == "char_run":
                 try:
                     self.app.themed_info(
@@ -8153,9 +9266,9 @@ def _render_step1_route_actions(self, frame):
             candidates, expected_names, image_source_label, roots = _find_annotation_candidates(row_key)
             browser = tk.Toplevel(dialog)
             try:
-                self.app.style_dialog_window(browser, title="Wybierz anotacje tablic", geometry="1120x660", parent=dialog)
+                self.app.style_dialog_window(browser, title="Import anotacji tablic", geometry="1260x700", parent=dialog)
             except Exception:
-                browser.title("Wybierz anotacje tablic")
+                browser.title("Import anotacji tablic")
             build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
             if callable(build_surface):
                 browser_body = build_surface(browser, tone="info")
@@ -8166,7 +9279,7 @@ def _render_step1_route_actions(self, frame):
 
             title_lbl = tk.Label(
                 browser_body,
-                text="Wybierz anotacje tablic z dostępnych katalogów",
+                text="Import anotacji tablic: porównaj źródła ze zbiorem obrazów",
                 fg=fg,
                 bg=browser_bg,
                 font=("Segoe UI", 13, "bold"),
@@ -8180,15 +9293,94 @@ def _render_step1_route_actions(self, frame):
             tk.Label(
                 browser_body,
                 text=campaign_ui_helpers._repair_polish_text(
-                    f"Tryb: {scope_label}. Pula porównania: {image_source_label}. "
-                    f"Skanowane katalogi: {roots_text}. Wybierz wiersz, który najlepiej pasuje do aktualnych obrazów."
+                    f"Tryb: {scope_label}. Aktualny zbiór obrazów: {image_source_label}. "
+                    f"Skanowane katalogi: {roots_text}. Każdy wiersz tabeli to osobne źródło AT. "
+                    "Wybierz wiersz, a potem importuj pasujące AT do kontroli w Z2."
                 ),
                 fg=muted,
                 bg=browser_bg,
                 justify=tk.LEFT,
                 anchor="w",
-                wraplength=1040,
+                wraplength=1180,
             ).pack(fill=tk.X, padx=16, pady=(0, 12))
+
+            selected_candidate_state: dict[str, dict | None] = {"candidate": None}
+            import_selected_button_ref: dict[str, tk.Button | None] = {"button": None}
+            selected_status_label_ref: dict[str, tk.Label | None] = {"label": None}
+            repaired_import_text_cache: dict[str, str] = {}
+            candidate_tooltip_cache: dict[str, dict[int, str]] = {}
+
+            def _repair_import_text(text: str) -> str:
+                raw = str(text or "")
+                cached = repaired_import_text_cache.get(raw)
+                if cached is not None:
+                    return cached
+                try:
+                    repaired = campaign_ui_helpers._repair_polish_text(raw)
+                except Exception:
+                    repaired = raw
+                repaired_import_text_cache[raw] = repaired
+                return repaired
+
+            def _bind_import_tooltip(widget, text: str) -> None:
+                tooltip_text = _repair_import_text(text)
+                if not tooltip_text:
+                    return
+                try:
+                    widget._simple_tooltip_text = tooltip_text
+                except Exception:
+                    pass
+                try:
+                    if bool(getattr(widget, "_aat_import_tooltip_bound", False)):
+                        return
+                    widget._aat_import_tooltip_bound = True
+                except Exception:
+                    pass
+
+                def _show_dynamic_tooltip(_event, target=widget) -> None:
+                    try:
+                        value = str(getattr(target, "_simple_tooltip_text", "") or "").strip()
+                    except Exception:
+                        value = ""
+                    if not value:
+                        return
+                    scheduler = getattr(self.app, "_schedule_simple_tooltip", None)
+                    if callable(scheduler):
+                        try:
+                            scheduler(target, value)
+                        except Exception:
+                            pass
+
+                def _hide_dynamic_tooltip(_event=None) -> None:
+                    hide = getattr(self.app, "_hide_simple_tooltip", None)
+                    if callable(hide):
+                        try:
+                            hide()
+                        except Exception:
+                            pass
+
+                try:
+                    widget.bind("<Enter>", _show_dynamic_tooltip, add="+")
+                    widget.bind("<Leave>", _hide_dynamic_tooltip, add="+")
+                    widget.bind("<ButtonPress-1>", _hide_dynamic_tooltip, add="+")
+                    widget.bind("<Destroy>", _hide_dynamic_tooltip, add="+")
+                except Exception:
+                    binder = getattr(self.app, "_bind_simple_tooltip", None)
+                    if callable(binder):
+                        try:
+                            binder(widget, tooltip_text)
+                        except Exception:
+                            pass
+
+            def _set_selected_status(text: str, tone: str = "neutral") -> None:
+                label = selected_status_label_ref.get("label")
+                if label is None:
+                    return
+                color = success if tone == "success" else warning if tone == "warning" else muted
+                try:
+                    label.config(text=_repair_import_text(text), fg=color)
+                except Exception:
+                    pass
 
             table_shell = tk.Frame(
                 browser_body,
@@ -8242,12 +9434,42 @@ def _render_step1_route_actions(self, frame):
             rows_frame.bind("<Configure>", _schedule_sync_scrollregion)
             canvas.bind("<Configure>", _schedule_sync_scrollregion)
 
-            column_weights = (2, 1, 1, 1, 1, 1, 2, 0)
+            column_weights = (5, 1, 2, 2, 1)
             for col, weight in enumerate(column_weights):
                 rows_frame.grid_columnconfigure(col, weight=weight, minsize=0)
-            header = ("Katalog", "Zgodne", "Tablice", "Manual", "Auto", "Typ", "Model / ścieżka", "Wskaż")
+            header = (
+                "Źródło\nAT",
+                "Obrazy\nw zbiorze O",
+                "Pasujące",
+                "Niepasujące",
+                "Razem\nAT",
+            )
+            header_tooltips = {
+                0: "Źródło, z którego możemy pobrać anotacje tablic.",
+                1: "Liczba obrazów w aktualnym zbiorze O. Do tego zbioru porównujemy AT.",
+                2: (
+                    "Mamy obraz dla tych anotacji. Jeśli obraz nie był jeszcze zatwierdzony, "
+                    "AT trafią do kontroli w Z2. Jeśli obraz był już [OK], pomijamy je, żeby nie dublować pracy."
+                ),
+                3: (
+                    "Brakuje obrazu dla tych anotacji. Tych AT nie importujemy, "
+                    "bo w aktualnym zbiorze O nie ma obrazu, którego dotyczą."
+                ),
+                4: "Wszystkie anotacje tablic znalezione w tym źródle.",
+            }
             header_bg2 = blend_hex_colors(field_bg, success, 0.10)
-            annotation_sort_state = {"column": 1 if expected_names else 2, "reverse": True}
+            annotation_sort_state = {"column": 2 if expected_names else 4, "reverse": True}
+            selected_annotation_key_state: dict[str, str] = {"key": "", "painted_key": ""}
+            annotation_row_widgets: dict[str, tuple[list[tk.Widget], str]] = {}
+            annotation_header_widgets: dict[int, tk.Widget] = {}
+            annotation_row_widget_cache: dict[str, list[tk.Label]] = {}
+            annotation_candidate_by_key: dict[str, dict] = {}
+            annotation_empty_label_ref: dict[str, tk.Label | None] = {"label": None}
+            annotation_render_state: dict[str, object] = {"after_id": None, "token": 0}
+            annotation_canvas_row_bg: dict[str, int] = {}
+            annotation_canvas_row_base: dict[str, str] = {}
+            annotation_canvas_index_to_key: dict[int, str] = {}
+            annotation_canvas_tooltip_state: dict[str, str] = {"key": ""}
 
             def _short_path(value: Path | str, limit: int = 72) -> str:
                 text = str(value or "").strip()
@@ -8255,7 +9477,179 @@ def _render_step1_route_actions(self, frame):
                     return text or "-"
                 return "..." + text[-max(12, limit - 3):]
 
-            def _choose_candidate(candidate: dict) -> None:
+            def _candidate_cache_key(candidate: dict | None) -> str:
+                if not candidate:
+                    return ""
+                for key in ("xml_path", "run_dir", "model", "name"):
+                    value = str(candidate.get(key) or "").strip()
+                    if value:
+                        return value
+                return str(id(candidate))
+
+            def _candidate_import_text(candidate: dict) -> str:
+                if not expected_names:
+                    return "brak puli"
+                compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
+                compatible_manual = int(candidate.get("compatible_manual", 0) or 0)
+                compatible_auto = int(candidate.get("compatible_auto", 0) or 0)
+                return f"{compatible_plates} AT / M {compatible_manual} / A {compatible_auto}"
+
+            def _candidate_resource_images_text() -> str:
+                return f"{len(expected_names or set())} obrazów" if expected_names else "-"
+
+            def _candidate_reject_text(candidate: dict) -> str:
+                return (
+                    f"{max(0, int(candidate.get('plates', 0) or 0) - int(candidate.get('compatible_plates', 0) or 0))} AT"
+                    if expected_names
+                    else "-"
+                )
+
+            def _candidate_total_text(candidate: dict) -> str:
+                return f"{int(candidate.get('plates', 0) or 0)} AT"
+
+            def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
+                if col == 1:
+                    return (
+                        "To aktualny zbiór obrazów O. AT porównujemy z nim po nazwach obrazów."
+                        if expected_names
+                        else "Najpierw wskaż zbiór obrazów O."
+                    )
+                if col == 2:
+                    compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
+                    adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
+                    approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
+                    return (
+                        f"Mamy obraz dla {compatible_plates} AT.\n"
+                        f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
+                        f"Pomijamy, bo już [OK]: {approved_plates} AT."
+                    )
+                if col == 3:
+                    rejected_plates = max(
+                        0,
+                        int(candidate.get("plates", 0) or 0)
+                        - int(candidate.get("compatible_plates", 0) or 0),
+                    )
+                    return (
+                        f"Brakuje obrazu dla {rejected_plates} AT.\n"
+                        "Tych anotacji nie importujemy, bo nie ma do czego ich przypiąć."
+                    )
+                if col == 4:
+                    return "Łączna liczba AT w tym źródle."
+                return "Kliknij wiersz, aby wybrać to źródło AT."
+
+            def _candidate_tooltips_cached(candidate: dict) -> dict[int, str]:
+                cache_key = _candidate_cache_key(candidate)
+                cached = candidate_tooltip_cache.get(cache_key)
+                if cached is not None:
+                    return cached
+                compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
+                adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
+                approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
+                compatible_manual = int(candidate.get("compatible_manual", 0) or 0)
+                compatible_auto = int(candidate.get("compatible_auto", 0) or 0)
+                rejected_plates = max(0, int(candidate.get("plates", 0) or 0) - compatible_plates)
+                tooltip_map = {
+                    0: "Kliknij wiersz, aby wybraÄ‡ to ĹşrĂłdĹ‚o AT.",
+                    1: (
+                        "To aktualny zbiĂłr obrazĂłw O. AT porĂłwnujemy z nim po nazwach obrazĂłw."
+                        if expected_names
+                        else "Najpierw wskaĹĽ zbiĂłr obrazĂłw O."
+                    ),
+                    2: (
+                        f"Mamy obraz dla {compatible_plates} AT.\n"
+                        f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
+                        f"Pomijamy, bo juĹĽ [OK]: {approved_plates} AT."
+                    ),
+                    3: (
+                        f"Brakuje obrazu dla {rejected_plates} AT.\n"
+                        "Tych anotacji nie importujemy, bo nie ma do czego ich przypiÄ…Ä‡."
+                    ),
+                    4: "ĹÄ…czna liczba AT w tym ĹşrĂłdle.",
+                }
+                candidate_tooltip_cache[cache_key] = tooltip_map
+                return tooltip_map
+
+            def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
+                return _candidate_tooltips_cached(candidate).get(col, "Kliknij wiersz, aby wybraÄ‡ to ĹşrĂłdĹ‚o AT.")
+
+            def _candidate_tooltips_cached(candidate: dict) -> dict[int, str]:
+                cache_key = _candidate_cache_key(candidate)
+                cached = candidate_tooltip_cache.get(cache_key)
+                if cached is not None:
+                    return cached
+                compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
+                adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
+                approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
+                rejected_plates = max(0, int(candidate.get("plates", 0) or 0) - compatible_plates)
+                tooltip_map = {
+                    0: "Kliknij wiersz, aby wybra\u0107 to \u017ar\u00f3d\u0142o AT.",
+                    1: (
+                        "To aktualny zbi\u00f3r obraz\u00f3w O. AT por\u00f3wnujemy z nim po nazwach obraz\u00f3w."
+                        if expected_names
+                        else "Najpierw wska\u017c zbi\u00f3r obraz\u00f3w O."
+                    ),
+                    2: (
+                        f"Mamy obraz dla {compatible_plates} AT.\n"
+                        f"Pasuj\u0105ce: M {compatible_manual} / A {compatible_auto}.\n"
+                        f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
+                        f"Pomijamy, bo ju\u017c [OK]: {approved_plates} AT."
+                    ),
+                    3: (
+                        f"Brakuje obrazu dla {rejected_plates} AT.\n"
+                        "Tych anotacji nie importujemy, bo nie ma do czego ich przypi\u0105\u0107."
+                    ),
+                    4: "\u0141\u0105czna liczba AT w tym \u017ar\u00f3dle.",
+                }
+                candidate_tooltip_cache[cache_key] = tooltip_map
+                return tooltip_map
+
+            def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
+                return _candidate_tooltips_cached(candidate).get(col, "Kliknij wiersz, aby wybra\u0107 to \u017ar\u00f3d\u0142o AT.")
+
+            def _candidate_source_text(candidate: dict, *, limit: int = 92) -> str:
+                name = str(candidate.get("name") or "-").strip() or "-"
+                path_text = str(candidate.get("model") or "").strip()
+                if not path_text:
+                    path_text = _short_path(candidate.get("run_dir", ""), limit)
+                return f"{name} | {path_text}" if path_text and path_text != "-" else name
+
+            def _set_analysis_candidate(candidate: dict | None) -> None:
+                selected_candidate_state["candidate"] = candidate
+                if not candidate:
+                    _set_selected_status("Nie wybrano źródła AT.", "neutral")
+                    try:
+                        btn = import_selected_button_ref.get("button")
+                        if btn is not None:
+                            btn.config(state=tk.DISABLED, bg=field_bg, fg=muted)
+                    except Exception:
+                        pass
+                    return
+                compatible_count = int(candidate.get("compatible_plates", 0) or 0)
+                import_count = int(candidate.get("adoptable_plates", 0) or 0)
+                already_ok = int(candidate.get("approved_overlap_plates", 0) or 0)
+                _set_selected_status(
+                    f"Wybrano wiersz. Do kontroli trafi {import_count} AT."
+                    if import_count > 0
+                    else (
+                        f"Pasujące AT są już zatwierdzone [OK]: {already_ok}. Nie tworzymy duplikatów."
+                        if compatible_count > 0 and already_ok > 0
+                        else "Wybrany wiersz nie ma anotacji, które można przekazać do kontroli."
+                    ),
+                    "success" if import_count > 0 else "warning",
+                )
+                try:
+                    btn = import_selected_button_ref.get("button")
+                    if btn is not None:
+                        enabled = import_count > 0
+                        btn.config(
+                            state=tk.NORMAL if enabled else tk.DISABLED,
+                            bg=blend_hex_colors(field_bg, success, 0.20) if enabled else field_bg,
+                            fg=fg if enabled else muted,
+                        )
+                except Exception:
+                    pass
+
+            def _import_candidate(candidate: dict) -> None:
                 xml_path = Path(candidate.get("xml_path"))
                 try:
                     browser.grab_release()
@@ -8282,27 +9676,76 @@ def _render_step1_route_actions(self, frame):
                     except Exception:
                         pass
 
+            def _select_candidate(candidate: dict, row_id: str = "") -> None:
+                _set_analysis_candidate(candidate)
+                if row_id:
+                    try:
+                        tree.selection_set(row_id)
+                        tree.focus(row_id)
+                        tree.see(row_id)
+                    except Exception:
+                        pass
+
+            def _candidate_selection_key(candidate: dict | None) -> str:
+                return _candidate_cache_key(candidate)
+
+            def _refresh_annotation_row_selection() -> None:
+                selected_key = str(selected_annotation_key_state.get("key") or "")
+                previous_key = str(selected_annotation_key_state.get("painted_key") or "")
+                selected_bg = blend_hex_colors(field_bg, accent, 0.16)
+                keys_to_refresh = {key for key in (previous_key, selected_key) if key}
+                if not keys_to_refresh and annotation_row_widgets:
+                    keys_to_refresh = set(annotation_row_widgets.keys())
+                for row_key in keys_to_refresh:
+                    row_entry = annotation_row_widgets.get(row_key)
+                    if row_entry is None:
+                        continue
+                    widgets, base_bg = row_entry
+                    row_bg = selected_bg if row_key == selected_key else base_bg
+                    for widget in widgets:
+                        try:
+                            widget.configure(bg=row_bg)
+                        except Exception:
+                            pass
+                selected_annotation_key_state["painted_key"] = selected_key
+
+            def _select_annotation_table_row(candidate: dict) -> None:
+                selected_annotation_key_state["key"] = _candidate_selection_key(candidate)
+                _select_candidate(candidate)
+                _refresh_annotation_row_selection()
+
+            def _select_annotation_table_row_by_key(row_key: str) -> None:
+                candidate = annotation_candidate_by_key.get(str(row_key or ""))
+                if candidate:
+                    _select_annotation_table_row(candidate)
+
+            def _import_selected_candidate() -> None:
+                candidate = selected_candidate_state.get("candidate")
+                if not candidate:
+                    return
+                if int(candidate.get("adoptable_plates", 0) or 0) <= 0:
+                    return
+                _import_candidate(candidate)
+
+            _set_analysis_candidate(None)
+
             def _annotation_sort_value(candidate: dict, col: int):
                 if col == 0:
                     return str(candidate.get("name") or "").strip().lower()
                 if col == 1:
-                    return (
-                        int(candidate.get("compatible_images", 0) or 0),
-                        int(candidate.get("compatible_plates", 0) or 0),
-                    )
+                    return len(expected_names or set())
                 if col == 2:
-                    return int(candidate.get("plates", 0) or 0)
-                if col == 3:
-                    return int(candidate.get("manual", 0) or 0)
-                if col == 4:
-                    return int(candidate.get("auto", 0) or 0)
-                if col == 5:
-                    return str(candidate.get("run_type") or "").strip().lower()
-                if col == 6:
                     return (
-                        str(candidate.get("model") or "").strip().lower()
-                        or str(candidate.get("run_dir") or "").strip().lower()
+                        int(candidate.get("compatible_plates", 0) or 0),
+                        int(candidate.get("compatible_images", 0) or 0),
                     )
+                if col == 3:
+                    return (
+                        max(0, int(candidate.get("plates", 0) or 0) - int(candidate.get("compatible_plates", 0) or 0)),
+                        max(0, int(candidate.get("images", 0) or 0) - int(candidate.get("compatible_images", 0) or 0)),
+                    )
+                if col == 4:
+                    return int(candidate.get("plates", 0) or 0)
                 return ""
 
             def _sorted_annotation_candidates() -> list[dict]:
@@ -8320,13 +9763,13 @@ def _render_step1_route_actions(self, frame):
                 )
 
             def _set_annotation_sort(col: int) -> None:
-                if col >= len(header) - 1:
+                if col >= len(header):
                     return
                 if annotation_sort_state.get("column") == col:
                     annotation_sort_state["reverse"] = not bool(annotation_sort_state.get("reverse"))
                 else:
                     annotation_sort_state["column"] = col
-                    annotation_sort_state["reverse"] = col in {1, 2, 3, 4}
+                    annotation_sort_state["reverse"] = col in {2, 3, 4}
                 _render_annotation_table()
                 try:
                     canvas.yview_moveto(0)
@@ -8334,17 +9777,30 @@ def _render_step1_route_actions(self, frame):
                     pass
 
             def _render_annotation_table() -> None:
-                for child in list(rows_frame.winfo_children()):
+                render_started = perf_counter()
+
+                def _log_import_table_render(row_count: int) -> None:
                     try:
-                        child.destroy()
+                        elapsed_ms = int((perf_counter() - render_started) * 1000)
+                        if elapsed_ms >= 80:
+                            logger.info(
+                                "[AT IMPORT PERF] render_table total=%sms rows=%s tooltip_cache=%s text_cache=%s",
+                                elapsed_ms,
+                                row_count,
+                                len(candidate_tooltip_cache),
+                                len(repaired_import_text_cache),
+                            )
                     except Exception:
                         pass
+
+                annotation_row_widgets.clear()
+                annotation_candidate_by_key.clear()
                 active_col = annotation_sort_state.get("column")
                 reverse = bool(annotation_sort_state.get("reverse"))
                 for col, text in enumerate(header):
                     suffix = " ↓" if active_col == col and reverse else " ↑" if active_col == col else ""
-                    if col < len(header) - 1:
-                        tk.Button(
+                    if col < len(header):
+                        header_btn = tk.Button(
                             rows_frame,
                             text=f"{text}{suffix}",
                             command=lambda column=col: _set_annotation_sort(column),
@@ -8356,7 +9812,9 @@ def _render_step1_route_actions(self, frame):
                             anchor="w",
                             padx=8,
                             pady=7,
-                        ).grid(row=0, column=col, sticky="nsew")
+                        )
+                        header_btn.grid(row=0, column=col, sticky="nsew")
+                        _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortować tabelę."))
                     else:
                         tk.Label(
                             rows_frame,
@@ -8383,355 +9841,685 @@ def _render_step1_route_actions(self, frame):
                         wraplength=960,
                     )
                     empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
+                    _log_import_table_render(0)
                     return
 
-                for row_idx, candidate in enumerate(_sorted_annotation_candidates(), start=1):
+                sorted_candidates = _sorted_annotation_candidates()
+                for row_idx, candidate in enumerate(sorted_candidates, start=1):
                     row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
                     compatible_text = (
-                        f"{int(candidate.get('compatible_images', 0) or 0)} / {int(candidate.get('compatible_plates', 0) or 0)}"
-                        if expected_names
-                        else "brak puli"
+                        _candidate_import_text(candidate)
                     )
-                    path_text = str(candidate.get("model") or "").strip()
-                    if not path_text:
-                        path_text = _short_path(candidate.get("run_dir", ""), 68)
+                    rejected_text = (
+                        _candidate_reject_text(candidate)
+                    )
+                    source_text = _candidate_source_text(candidate, limit=68)
                     row_values = (
-                        str(candidate.get("name") or "-"),
+                        source_text,
+                        _candidate_resource_images_text(),
                         compatible_text,
-                        str(int(candidate.get("plates", 0) or 0)),
-                        str(int(candidate.get("manual", 0) or 0)),
-                        str(int(candidate.get("auto", 0) or 0)),
-                        str(candidate.get("run_type") or "Nieustalone"),
-                        path_text,
+                        rejected_text,
+                        _candidate_total_text(candidate),
                     )
+                    row_key = _candidate_selection_key(candidate)
+                    row_widgets: list[tk.Widget] = []
                     for col, value in enumerate(row_values):
                         color = fg
-                        if col == 1 and expected_names and int(candidate.get("compatible_images", 0) or 0) > 0:
+                        if col == 2 and expected_names:
                             color = success
-                        elif col == 1 and expected_names:
-                            color = warning
-                        tk.Label(
+                        elif col == 3 and expected_names:
+                            color = error
+                        cell = tk.Label(
                             rows_frame,
-                            text=campaign_ui_helpers._repair_polish_text(str(value or "")),
+                            text=_repair_import_text(str(value or "")),
                             fg=color,
                             bg=row_bg2,
-                            font=("Segoe UI", 8, "bold" if col in {1, 2, 3, 4} else "normal"),
+                            font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
                             anchor="w",
                             justify=tk.LEFT,
-                            wraplength=(250 if col == 0 else 220 if col == 6 else 110),
+                            wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
                             padx=8,
                             pady=7,
-                        ).grid(row=row_idx, column=col, sticky="nsew")
-                    tk.Button(
-                        rows_frame,
-                        text="[Wskaż]",
-                        command=lambda item=candidate: _choose_candidate(item),
-                        cursor="hand2",
-                        bg=blend_hex_colors(field_bg, success, 0.18),
-                        fg=fg,
-                        relief=tk.FLAT,
-                        font=("Segoe UI", 8, "bold"),
-                        padx=8,
-                        pady=4,
-                    ).grid(row=row_idx, column=7, sticky="nsew", padx=4, pady=4)
+                            cursor="hand2",
+                        )
+                        cell.grid(row=row_idx, column=col, sticky="nsew")
+                        cell.bind("<Button-1>", lambda _event, item=candidate: _select_annotation_table_row(item), add="+")
+                        _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
+                        row_widgets.append(cell)
+                    annotation_row_widgets[row_key] = (row_widgets, row_bg2)
+                _refresh_annotation_row_selection()
                 _schedule_sync_scrollregion()
+                _log_import_table_render(len(sorted_candidates))
 
-            _render_annotation_table()
-            try:
-                table_shell.destroy()
-            except Exception:
-                pass
+            def _render_annotation_table() -> None:
+                render_started = perf_counter()
 
-            table_shell = tk.Frame(
-                browser_body,
-                bg=browser_bg,
-                bd=0,
-                highlightthickness=1,
-                highlightbackground=border,
-                highlightcolor=border,
-            )
-            table_shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
-            tree_columns = tuple(f"c{i}" for i in range(len(header)))
-            tree = ttk.Treeview(table_shell, columns=tree_columns, show="headings", selectmode="browse", height=16)
-            tree_scroll = ttk.Scrollbar(table_shell, orient=tk.VERTICAL, command=tree.yview)
-            tree.configure(yscrollcommand=tree_scroll.set)
-            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
-            tree_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
-            try:
-                style = ttk.Style(tree)
-                style.configure(
-                    "CampaignAnnotationCandidates.Treeview",
-                    background=field_bg,
-                    fieldbackground=field_bg,
-                    foreground=fg,
-                    rowheight=28,
-                )
-                style.map(
-                    "CampaignAnnotationCandidates.Treeview",
-                    background=[("selected", field_bg)],
-                    foreground=[("selected", fg)],
-                )
-                style.configure("CampaignAnnotationCandidates.Treeview.Heading", font=("Segoe UI", 8, "bold"))
-                tree.configure(style="CampaignAnnotationCandidates.Treeview")
-            except Exception:
-                pass
-            column_widths = (180, 78, 62, 62, 62, 92, 232, 64)
-            light_candidate_by_iid: dict[str, dict] = {}
-            light_annotation_hover_state: dict[str, str] = {"row_id": "", "column_id": ""}
-            light_annotation_hover = tk.Label(
-                tree,
-                text="",
-                fg=fg,
-                bg=blend_hex_colors(field_bg, success, 0.20),
-                bd=0,
-                highlightthickness=0,
-                font=("Segoe UI", 8),
-                anchor="center",
-                cursor="hand2",
-            )
+                def _log_import_table_render(row_count: int) -> None:
+                    try:
+                        elapsed_ms = int((perf_counter() - render_started) * 1000)
+                        if elapsed_ms >= 80:
+                            logger.info(
+                                "[AT IMPORT PERF] render_table_fast total=%sms rows=%s widgets=%s tooltip_cache=%s text_cache=%s",
+                                elapsed_ms,
+                                row_count,
+                                len(annotation_row_widget_cache),
+                                len(candidate_tooltip_cache),
+                                len(repaired_import_text_cache),
+                            )
+                    except Exception:
+                        pass
 
-            def _hide_light_annotation_hover() -> None:
-                try:
-                    light_annotation_hover.place_forget()
-                except Exception:
-                    pass
-                light_annotation_hover_state["row_id"] = ""
-                light_annotation_hover_state["column_id"] = ""
-
-            def _light_annotation_hover_target(event=None) -> tuple[str, str] | None:
-                try:
-                    row_id = str(tree.identify_row(event.y) or "")
-                    column_id = str(tree.identify_column(event.x) or "")
-                    if row_id and row_id in light_candidate_by_iid and column_id == f"#{len(header)}":
-                        return row_id, column_id
-                except Exception:
-                    return None
-                return None
-
-            def _show_light_annotation_hover(row_id: str, column_id: str) -> None:
-                try:
-                    if (
-                        row_id == str(light_annotation_hover_state.get("row_id") or "")
-                        and column_id == str(light_annotation_hover_state.get("column_id") or "")
-                    ):
-                        return
-                    bbox = tree.bbox(row_id, column_id)
-                    if not bbox:
-                        _hide_light_annotation_hover()
-                        return
-                    x, y, width, height = bbox
-                    text = str(tree.set(row_id, tree_columns[-1]) or "")
-                    if not text:
-                        _hide_light_annotation_hover()
-                        return
-                    light_annotation_hover.config(text=text)
-                    light_annotation_hover.place(
-                        x=int(x) + 1,
-                        y=int(y) + 1,
-                        width=max(1, int(width) - 2),
-                        height=max(1, int(height) - 2),
-                    )
-                    light_annotation_hover_state["row_id"] = row_id
-                    light_annotation_hover_state["column_id"] = column_id
-                except Exception:
-                    _hide_light_annotation_hover()
-
-            def _activate_light_annotation_hover(_event=None) -> str:
-                try:
-                    row_id = str(light_annotation_hover_state.get("row_id") or "")
-                    if row_id and row_id in light_candidate_by_iid:
-                        tree.selection_set(row_id)
-                        tree.focus(row_id)
-                        _choose_candidate(light_candidate_by_iid[row_id])
-                except Exception:
-                    pass
-                return "break"
-
-            def _update_light_annotation_hover(event=None) -> None:
-                target = _light_annotation_hover_target(event)
-                try:
-                    if target:
-                        tree.configure(cursor="hand2")
-                        _show_light_annotation_hover(target[0], target[1])
-                    else:
-                        tree.configure(cursor="")
-                        _hide_light_annotation_hover()
-                except Exception:
-                    pass
-
-            def _refresh_light_annotation_table() -> None:
-                _hide_light_annotation_hover()
-                for item in tree.get_children(""):
-                    tree.delete(item)
-                light_candidate_by_iid.clear()
+                annotation_row_widgets.clear()
+                annotation_candidate_by_key.clear()
                 active_col = annotation_sort_state.get("column")
                 reverse = bool(annotation_sort_state.get("reverse"))
-                for col, col_id in enumerate(tree_columns):
-                    suffix = " ↓" if active_col == col and reverse else " ↑" if active_col == col else ""
-                    tree.heading(
-                        col_id,
-                        text=campaign_ui_helpers._repair_polish_text(f"{header[col]}{suffix}"),
-                        anchor="w",
-                    )
-                if not candidates:
-                    tree.insert(
-                        "",
-                        "end",
-                        values=(
-                            "Nie znaleziono katalogów z annotations.xml.",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "[Wskaż ręcznie]",
-                            "",
-                            "",
-                        ),
-                    )
-                    return
-                for row_idx, candidate in enumerate(_sorted_annotation_candidates(), start=1):
-                    compatible_text = (
-                        f"{int(candidate.get('compatible_images', 0) or 0)} / {int(candidate.get('compatible_plates', 0) or 0)}"
-                        if expected_names
-                        else "brak puli"
-                    )
-                    path_text = str(candidate.get("model") or "").strip()
-                    if not path_text:
-                        path_text = _short_path(candidate.get("run_dir", ""), 68)
-                    values = (
-                        str(candidate.get("name") or "-"),
-                        compatible_text,
-                        str(int(candidate.get("plates", 0) or 0)),
-                        str(int(candidate.get("manual", 0) or 0)),
-                        str(int(candidate.get("auto", 0) or 0)),
-                        str(candidate.get("run_type") or "Nieustalone"),
-                        path_text,
-                        "[Wskaż]",
-                    )
-                    iid = f"annotation-{row_idx}"
-                    light_candidate_by_iid[iid] = candidate
-                    tree.insert(
-                        "",
-                        "end",
-                        iid=iid,
-                        values=tuple(campaign_ui_helpers._repair_polish_text(str(value or "")) for value in values),
-                    )
-
-            def _set_light_annotation_sort(col: int) -> None:
-                if col >= len(header) - 1:
-                    return
-                if annotation_sort_state.get("column") == col:
-                    annotation_sort_state["reverse"] = not bool(annotation_sort_state.get("reverse"))
-                else:
-                    annotation_sort_state["column"] = col
-                    annotation_sort_state["reverse"] = col in {1, 2, 3, 4}
-                _refresh_light_annotation_table()
-                try:
-                    tree.yview_moveto(0)
-                except Exception:
-                    pass
-
-            def _choose_light_annotation_selection() -> None:
-                try:
-                    selection = tree.selection()
-                    if not selection:
-                        return
-                    candidate = light_candidate_by_iid.get(str(selection[0]))
-                    if candidate:
-                        _choose_candidate(candidate)
-                except Exception:
-                    pass
-
-            def _on_light_annotation_tree_click(event=None):
-                try:
-                    row_id = str(tree.identify_row(event.y) or "")
-                    if not row_id or row_id not in light_candidate_by_iid:
-                        return
-                    tree.selection_set(row_id)
-                    tree.focus(row_id)
-                    if str(tree.identify_column(event.x) or "") == f"#{len(header)}":
-                        _choose_candidate(light_candidate_by_iid[row_id])
-                except Exception:
-                    pass
-
-            for col, col_id in enumerate(tree_columns):
-                tree.heading(col_id, command=lambda column=col: _set_light_annotation_sort(column))
-                tree.column(col_id, width=column_widths[col], minwidth=38, anchor="w", stretch=(col in {0, 6}))
-            tree.bind("<Double-1>", lambda _event: _choose_light_annotation_selection(), add="+")
-            tree.bind("<Return>", lambda _event: _choose_light_annotation_selection(), add="+")
-            tree.bind("<ButtonRelease-1>", _on_light_annotation_tree_click, add="+")
-            tree.bind("<Motion>", _update_light_annotation_hover, add="+")
-            tree.bind("<Leave>", lambda _event: (_hide_light_annotation_hover(), tree.configure(cursor="")), add="+")
-            light_annotation_hover.bind("<ButtonRelease-1>", _activate_light_annotation_hover, add="+")
-            light_annotation_hover.bind("<Leave>", lambda _event: _hide_light_annotation_hover(), add="+")
-            _refresh_light_annotation_table()
-
-            if False:
-                empty = tk.Label(
-                    rows_frame,
-                    text="Nie znaleziono katalogów z plikiem annotations.xml w wybranym trybie. Możesz wskazać plik ręcznie.",
-                    fg=warning,
-                    bg=browser_bg,
-                    font=("Segoe UI", 9),
-                    anchor="w",
-                    justify=tk.LEFT,
-                    padx=10,
-                    pady=16,
-                    wraplength=960,
-                )
-                empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
-            elif False:
-                for row_idx, candidate in enumerate(candidates, start=1):
-                    row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
-                    compatible_text = (
-                        f"{int(candidate.get('compatible_images', 0) or 0)} / {int(candidate.get('compatible_plates', 0) or 0)}"
-                        if expected_names
-                        else "brak puli"
-                    )
-                    path_text = str(candidate.get("model") or "").strip()
-                    if not path_text:
-                        path_text = _short_path(candidate.get("run_dir", ""), 68)
-                    row_values = (
-                        str(candidate.get("name") or "-"),
-                        compatible_text,
-                        str(int(candidate.get("plates", 0) or 0)),
-                        str(int(candidate.get("manual", 0) or 0)),
-                        str(int(candidate.get("auto", 0) or 0)),
-                        str(candidate.get("run_type") or "Nieustalone"),
-                        path_text,
-                    )
-                    for col, value in enumerate(row_values):
-                        color = fg
-                        if col == 1 and expected_names and int(candidate.get("compatible_images", 0) or 0) > 0:
-                            color = success
-                        elif col == 1 and expected_names:
-                            color = warning
-                        tk.Label(
+                for col, text in enumerate(header):
+                    suffix = " \u2193" if active_col == col and reverse else " \u2191" if active_col == col else ""
+                    header_btn = annotation_header_widgets.get(col)
+                    if header_btn is None:
+                        header_btn = tk.Button(
                             rows_frame,
-                            text=campaign_ui_helpers._repair_polish_text(str(value or "")),
-                            fg=color,
-                            bg=row_bg2,
-                            font=("Segoe UI", 8, "bold" if col in {1, 2, 3, 4} else "normal"),
+                            command=lambda column=col: _set_annotation_sort(column),
+                            cursor="hand2",
+                            bg=header_bg2,
+                            fg=fg,
+                            relief=tk.FLAT,
+                            font=("Segoe UI", 8, "bold"),
                             anchor="w",
-                            justify=tk.LEFT,
-                            wraplength=(250 if col == 0 else 220 if col == 6 else 110),
                             padx=8,
                             pady=7,
-                        ).grid(row=row_idx, column=col, sticky="nsew")
-                    tk.Button(
-                        rows_frame,
-                        text="Wskaż",
-                        command=lambda item=candidate: _choose_candidate(item),
-                        cursor="hand2",
-                        bg=blend_hex_colors(field_bg, success, 0.18),
-                        fg=fg,
-                        relief=tk.FLAT,
+                        )
+                        annotation_header_widgets[col] = header_btn
+                    try:
+                        header_btn.configure(text=f"{text}{suffix}", bg=header_bg2, fg=fg)
+                        header_btn.grid(row=0, column=col, sticky="nsew")
+                    except Exception:
+                        pass
+                    _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortowa\u0107 tabel\u0119."))
+
+                if not candidates:
+                    for widgets in list(annotation_row_widget_cache.values()):
+                        for widget in widgets:
+                            try:
+                                widget.grid_remove()
+                            except Exception:
+                                pass
+                    empty = annotation_empty_label_ref.get("label")
+                    if empty is None:
+                        empty = tk.Label(
+                            rows_frame,
+                            text="Nie znaleziono katalog\u00f3w z plikiem annotations.xml w wybranym trybie. Mo\u017cesz wskaza\u0107 plik r\u0119cznie.",
+                            fg=warning,
+                            bg=browser_bg,
+                            font=("Segoe UI", 9),
+                            anchor="w",
+                            justify=tk.LEFT,
+                            padx=10,
+                            pady=16,
+                            wraplength=960,
+                        )
+                        annotation_empty_label_ref["label"] = empty
+                    empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
+                    _log_import_table_render(0)
+                    return
+
+                empty = annotation_empty_label_ref.get("label")
+                if empty is not None:
+                    try:
+                        empty.grid_remove()
+                    except Exception:
+                        pass
+
+                visible_keys: set[str] = set()
+                sorted_candidates = _sorted_annotation_candidates()
+                resource_images_text = _candidate_resource_images_text()
+                for row_idx, candidate in enumerate(sorted_candidates, start=1):
+                    row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
+                    row_key = _candidate_selection_key(candidate)
+                    annotation_candidate_by_key[row_key] = candidate
+                    visible_keys.add(row_key)
+                    row_values = (
+                        _candidate_source_text(candidate, limit=68),
+                        resource_images_text,
+                        _candidate_import_text(candidate),
+                        _candidate_reject_text(candidate),
+                        _candidate_total_text(candidate),
+                    )
+                    row_widgets = annotation_row_widget_cache.get(row_key)
+                    if row_widgets is None:
+                        row_widgets = []
+                        for col in range(len(header)):
+                            cell = tk.Label(
+                                rows_frame,
+                                fg=fg,
+                                bg=row_bg2,
+                                font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
+                                anchor="w",
+                                justify=tk.LEFT,
+                                wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
+                                padx=8,
+                                pady=7,
+                                cursor="hand2",
+                            )
+                            cell.bind(
+                                "<Button-1>",
+                                lambda _event, key=row_key: _select_annotation_table_row_by_key(key),
+                                add="+",
+                            )
+                            row_widgets.append(cell)
+                        annotation_row_widget_cache[row_key] = row_widgets
+                    for col, value in enumerate(row_values):
+                        color = fg
+                        if col == 2 and expected_names:
+                            color = success
+                        elif col == 3 and expected_names:
+                            color = error
+                        cell = row_widgets[col]
+                        try:
+                            cell.configure(text=_repair_import_text(str(value or "")), fg=color, bg=row_bg2)
+                            cell.grid(row=row_idx, column=col, sticky="nsew")
+                        except Exception:
+                            pass
+                        _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
+                    annotation_row_widgets[row_key] = (row_widgets, row_bg2)
+
+                for row_key, widgets in list(annotation_row_widget_cache.items()):
+                    if row_key in visible_keys:
+                        continue
+                    for widget in widgets:
+                        try:
+                            widget.grid_remove()
+                        except Exception:
+                            pass
+                _refresh_annotation_row_selection()
+                _schedule_sync_scrollregion()
+                _log_import_table_render(len(sorted_candidates))
+
+            def _render_annotation_table() -> None:
+                pending = annotation_render_state.get("after_id")
+                if pending is not None:
+                    try:
+                        browser.after_cancel(pending)
+                    except Exception:
+                        pass
+                    annotation_render_state["after_id"] = None
+                try:
+                    annotation_render_state["token"] = int(annotation_render_state.get("token", 0) or 0) + 1
+                except Exception:
+                    annotation_render_state["token"] = 1
+                render_token = int(annotation_render_state.get("token", 0) or 0)
+                render_started = perf_counter()
+
+                def _log_import_table_render(row_count: int, *, done: bool) -> None:
+                    try:
+                        elapsed_ms = int((perf_counter() - render_started) * 1000)
+                        if elapsed_ms >= 80 or not done:
+                            logger.info(
+                                "[AT IMPORT PERF] render_table_batched total=%sms rows=%s widgets=%s done=%s tooltip_cache=%s text_cache=%s",
+                                elapsed_ms,
+                                row_count,
+                                len(annotation_row_widget_cache),
+                                int(bool(done)),
+                                len(candidate_tooltip_cache),
+                                len(repaired_import_text_cache),
+                            )
+                    except Exception:
+                        pass
+
+                annotation_row_widgets.clear()
+                annotation_candidate_by_key.clear()
+                active_col = annotation_sort_state.get("column")
+                reverse = bool(annotation_sort_state.get("reverse"))
+                for col, text in enumerate(header):
+                    suffix = " \u2193" if active_col == col and reverse else " \u2191" if active_col == col else ""
+                    header_btn = annotation_header_widgets.get(col)
+                    if header_btn is None:
+                        header_btn = tk.Button(
+                            rows_frame,
+                            command=lambda column=col: _set_annotation_sort(column),
+                            cursor="hand2",
+                            bg=header_bg2,
+                            fg=fg,
+                            relief=tk.FLAT,
+                            font=("Segoe UI", 8, "bold"),
+                            anchor="w",
+                            padx=8,
+                            pady=7,
+                        )
+                        annotation_header_widgets[col] = header_btn
+                    try:
+                        header_btn.configure(text=f"{text}{suffix}", bg=header_bg2, fg=fg)
+                        header_btn.grid(row=0, column=col, sticky="nsew")
+                    except Exception:
+                        pass
+                    _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortowa\u0107 tabel\u0119."))
+
+                for widgets in list(annotation_row_widget_cache.values()):
+                    for widget in widgets:
+                        try:
+                            widget.grid_remove()
+                        except Exception:
+                            pass
+
+                if not candidates:
+                    empty = annotation_empty_label_ref.get("label")
+                    if empty is None:
+                        empty = tk.Label(
+                            rows_frame,
+                            text="Nie znaleziono katalog\u00f3w z plikiem annotations.xml w wybranym trybie. Mo\u017cesz wskaza\u0107 plik r\u0119cznie.",
+                            fg=warning,
+                            bg=browser_bg,
+                            font=("Segoe UI", 9),
+                            anchor="w",
+                            justify=tk.LEFT,
+                            padx=10,
+                            pady=16,
+                            wraplength=960,
+                        )
+                        annotation_empty_label_ref["label"] = empty
+                    empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
+                    _schedule_sync_scrollregion()
+                    _log_import_table_render(0, done=True)
+                    return
+
+                empty = annotation_empty_label_ref.get("label")
+                if empty is not None:
+                    try:
+                        empty.grid_remove()
+                    except Exception:
+                        pass
+
+                sorted_candidates = _sorted_annotation_candidates()
+                for candidate in sorted_candidates:
+                    annotation_candidate_by_key[_candidate_selection_key(candidate)] = candidate
+                resource_images_text = _candidate_resource_images_text()
+                total_rows = len(sorted_candidates)
+                batch_size = 44 if total_rows >= 90 else max(1, total_rows)
+
+                def _render_batch(start_index: int = 0) -> None:
+                    if int(annotation_render_state.get("token", 0) or 0) != render_token:
+                        return
+                    end_index = min(total_rows, start_index + batch_size)
+                    for index in range(start_index, end_index):
+                        candidate = sorted_candidates[index]
+                        row_idx = index + 1
+                        row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
+                        row_key = _candidate_selection_key(candidate)
+                        row_values = (
+                            _candidate_source_text(candidate, limit=68),
+                            resource_images_text,
+                            _candidate_import_text(candidate),
+                            _candidate_reject_text(candidate),
+                            _candidate_total_text(candidate),
+                        )
+                        row_widgets = annotation_row_widget_cache.get(row_key)
+                        if row_widgets is None:
+                            row_widgets = []
+                            for col in range(len(header)):
+                                cell = tk.Label(
+                                    rows_frame,
+                                    fg=fg,
+                                    bg=row_bg2,
+                                    font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
+                                    anchor="w",
+                                    justify=tk.LEFT,
+                                    wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
+                                    padx=8,
+                                    pady=7,
+                                    cursor="hand2",
+                                )
+                                cell.bind(
+                                    "<Button-1>",
+                                    lambda _event, key=row_key: _select_annotation_table_row_by_key(key),
+                                    add="+",
+                                )
+                                row_widgets.append(cell)
+                            annotation_row_widget_cache[row_key] = row_widgets
+                        for col, value in enumerate(row_values):
+                            color = fg
+                            if col == 2 and expected_names:
+                                color = success
+                            elif col == 3 and expected_names:
+                                color = error
+                            cell = row_widgets[col]
+                            try:
+                                cell.configure(text=_repair_import_text(str(value or "")), fg=color, bg=row_bg2)
+                                cell.grid(row=row_idx, column=col, sticky="nsew")
+                            except Exception:
+                                pass
+                            _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
+                        annotation_row_widgets[row_key] = (row_widgets, row_bg2)
+                    _refresh_annotation_row_selection()
+                    _schedule_sync_scrollregion()
+                    if end_index < total_rows:
+                        _log_import_table_render(end_index, done=False)
+                        try:
+                            annotation_render_state["after_id"] = browser.after(
+                                1,
+                                lambda next_index=end_index: _render_batch(next_index),
+                            )
+                        except Exception:
+                            _render_batch(end_index)
+                    else:
+                        annotation_render_state["after_id"] = None
+                        _log_import_table_render(total_rows, done=True)
+
+                _render_batch(0)
+
+            def _render_annotation_table() -> None:
+                pending = annotation_render_state.get("after_id")
+                if pending is not None:
+                    try:
+                        browser.after_cancel(pending)
+                    except Exception:
+                        pass
+                    annotation_render_state["after_id"] = None
+                render_started = perf_counter()
+
+                def _log_import_table_canvas_render(row_count: int) -> None:
+                    try:
+                        elapsed_ms = int((perf_counter() - render_started) * 1000)
+                        if elapsed_ms >= 50:
+                            logger.info(
+                                "[AT IMPORT PERF] render_table_canvas total=%sms rows=%s canvas_items=%s tooltip_cache=%s text_cache=%s",
+                                elapsed_ms,
+                                row_count,
+                                len(canvas.find_withtag("at_import_table")),
+                                len(candidate_tooltip_cache),
+                                len(repaired_import_text_cache),
+                            )
+                    except Exception:
+                        pass
+
+                def _tag_int_value(tags: tuple[str, ...], prefix: str) -> int | None:
+                    for tag in tags:
+                        if str(tag).startswith(prefix):
+                            try:
+                                return int(str(tag)[len(prefix):])
+                            except Exception:
+                                return None
+                    return None
+
+                def _hide_canvas_tooltip(_event=None) -> None:
+                    annotation_canvas_tooltip_state["key"] = ""
+                    hide = getattr(self.app, "_hide_simple_tooltip", None)
+                    if callable(hide):
+                        try:
+                            hide()
+                        except Exception:
+                            pass
+
+                def _refresh_canvas_selection() -> None:
+                    selected_key = str(selected_annotation_key_state.get("key") or "")
+                    selected_bg = blend_hex_colors(field_bg, accent, 0.16)
+                    for row_key, item_id in list(annotation_canvas_row_bg.items()):
+                        try:
+                            canvas.itemconfigure(
+                                item_id,
+                                fill=selected_bg if row_key == selected_key else annotation_canvas_row_base.get(row_key, field_bg),
+                            )
+                        except Exception:
+                            pass
+                    selected_annotation_key_state["painted_key"] = selected_key
+
+                def _handle_canvas_row_click(event) -> None:
+                    try:
+                        item = canvas.find_withtag("current")
+                        if not item:
+                            return
+                        tags = tuple(str(tag) for tag in canvas.gettags(item[0]))
+                        index = _tag_int_value(tags, "at_import_idx_")
+                        if index is None:
+                            return
+                        row_key = annotation_canvas_index_to_key.get(index, "")
+                        candidate = annotation_candidate_by_key.get(row_key)
+                        if not candidate:
+                            return
+                        selected_annotation_key_state["key"] = row_key
+                        _set_analysis_candidate(candidate)
+                        _refresh_canvas_selection()
+                    except Exception:
+                        pass
+
+                def _handle_canvas_header_click(event) -> None:
+                    try:
+                        item = canvas.find_withtag("current")
+                        if not item:
+                            return
+                        tags = tuple(str(tag) for tag in canvas.gettags(item[0]))
+                        col = _tag_int_value(tags, "at_import_header_col_")
+                        if col is not None:
+                            _set_annotation_sort(col)
+                    except Exception:
+                        pass
+
+                def _handle_canvas_tooltip_motion(event) -> None:
+                    try:
+                        item = canvas.find_withtag("current")
+                        if not item:
+                            _hide_canvas_tooltip()
+                            return
+                        tags = tuple(str(tag) for tag in canvas.gettags(item[0]))
+                        col = _tag_int_value(tags, "at_import_cell_col_")
+                        row_index = _tag_int_value(tags, "at_import_idx_")
+                        header_col = _tag_int_value(tags, "at_import_header_col_")
+                        tooltip_text = ""
+                        tooltip_key = ""
+                        if row_index is not None and col is not None:
+                            row_key = annotation_canvas_index_to_key.get(row_index, "")
+                            candidate = annotation_candidate_by_key.get(row_key)
+                            if candidate:
+                                tooltip_text = _candidate_cell_tooltip(candidate, col)
+                                tooltip_key = f"row:{row_index}:{col}"
+                        elif header_col is not None:
+                            tooltip_text = header_tooltips.get(header_col, "Kliknij, aby posortowa\u0107 tabel\u0119.")
+                            tooltip_key = f"header:{header_col}"
+                        if not tooltip_text:
+                            _hide_canvas_tooltip()
+                            return
+                        if annotation_canvas_tooltip_state.get("key") == tooltip_key:
+                            return
+                        annotation_canvas_tooltip_state["key"] = tooltip_key
+                        try:
+                            canvas._simple_tooltip_text = _repair_import_text(tooltip_text)
+                        except Exception:
+                            pass
+                        hide = getattr(self.app, "_hide_simple_tooltip", None)
+                        if callable(hide):
+                            try:
+                                hide()
+                            except Exception:
+                                pass
+                        scheduler = getattr(self.app, "_schedule_simple_tooltip", None)
+                        if callable(scheduler):
+                            try:
+                                scheduler(canvas, _repair_import_text(tooltip_text))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                annotation_row_widgets.clear()
+                annotation_candidate_by_key.clear()
+                annotation_canvas_row_bg.clear()
+                annotation_canvas_row_base.clear()
+                annotation_canvas_index_to_key.clear()
+                try:
+                    canvas.itemconfigure(canvas_window, state="hidden")
+                except Exception:
+                    pass
+                try:
+                    canvas.delete("at_import_table")
+                except Exception:
+                    pass
+
+                table_width = int(canvas.winfo_width() or 0)
+                if table_width < 720:
+                    table_width = 1180
+                table_width = max(900, table_width - 2)
+                min_widths = [400, 130, 225, 160, 110]
+                total_min = sum(min_widths)
+                if total_min >= table_width:
+                    col_widths = list(min_widths)
+                    table_width = total_min
+                else:
+                    extra = table_width - total_min
+                    extra_weights = [7, 1, 2, 2, 1]
+                    weight_sum = sum(extra_weights)
+                    col_widths = [
+                        min_widths[index] + int(extra * extra_weights[index] / weight_sum)
+                        for index in range(len(min_widths))
+                    ]
+                    col_widths[0] += table_width - sum(col_widths)
+
+                x_positions: list[int] = [0]
+                for width_value in col_widths[:-1]:
+                    x_positions.append(x_positions[-1] + int(width_value))
+                header_h = 44
+                row_h = 38
+                row_pad_x = 9
+                active_col = annotation_sort_state.get("column")
+                reverse = bool(annotation_sort_state.get("reverse"))
+                line_color = blend_hex_colors(border, browser_bg, 0.25)
+                selected_bg = blend_hex_colors(field_bg, accent, 0.16)
+
+                for col, text in enumerate(header):
+                    x0 = x_positions[col]
+                    x1 = x0 + col_widths[col]
+                    suffix = " \u2193" if active_col == col and reverse else " \u2191" if active_col == col else ""
+                    tags = ("at_import_table", "at_import_header", f"at_import_header_col_{col}")
+                    canvas.create_rectangle(
+                        x0,
+                        0,
+                        x1,
+                        header_h,
+                        fill=header_bg2,
+                        outline=line_color,
+                        width=1,
+                        tags=tags,
+                    )
+                    canvas.create_text(
+                        x0 + row_pad_x,
+                        header_h / 2,
+                        text=_repair_import_text(f"{text}{suffix}"),
+                        fill=fg,
+                        anchor="w",
+                        justify=tk.LEFT,
                         font=("Segoe UI", 8, "bold"),
-                        padx=8,
-                        pady=4,
-                    ).grid(row=row_idx, column=7, sticky="nsew", padx=4, pady=4)
+                        width=max(20, col_widths[col] - 2 * row_pad_x),
+                        tags=tags,
+                    )
+
+                sorted_candidates = _sorted_annotation_candidates()
+                if not sorted_candidates:
+                    message = (
+                        "Nie znaleziono katalog\u00f3w z plikiem annotations.xml w wybranym trybie. "
+                        "Mo\u017cesz wskaza\u0107 plik r\u0119cznie."
+                    )
+                    canvas.create_rectangle(
+                        0,
+                        header_h,
+                        table_width,
+                        header_h + 72,
+                        fill=browser_bg,
+                        outline=line_color,
+                        tags=("at_import_table",),
+                    )
+                    canvas.create_text(
+                        12,
+                        header_h + 36,
+                        text=message,
+                        fill=warning,
+                        anchor="w",
+                        justify=tk.LEFT,
+                        font=("Segoe UI", 9),
+                        width=max(400, table_width - 24),
+                        tags=("at_import_table",),
+                    )
+                    canvas.configure(scrollregion=(0, 0, table_width, header_h + 74))
+                    _log_import_table_canvas_render(0)
+                    return
+
+                resource_images_text = _candidate_resource_images_text()
+                for index, candidate in enumerate(sorted_candidates):
+                    row_key = _candidate_selection_key(candidate)
+                    annotation_candidate_by_key[row_key] = candidate
+                    annotation_canvas_index_to_key[index] = row_key
+                    row_y0 = header_h + index * row_h
+                    row_y1 = row_y0 + row_h
+                    base_bg = blend_hex_colors(field_bg, card_bg, 0.25) if index % 2 else field_bg
+                    row_bg = selected_bg if row_key == str(selected_annotation_key_state.get("key") or "") else base_bg
+                    row_tags = ("at_import_table", "at_import_row", f"at_import_idx_{index}")
+                    row_bg_item = canvas.create_rectangle(
+                        0,
+                        row_y0,
+                        table_width,
+                        row_y1,
+                        fill=row_bg,
+                        outline=line_color,
+                        width=1,
+                        tags=row_tags + ("at_import_row_bg",),
+                    )
+                    annotation_canvas_row_bg[row_key] = row_bg_item
+                    annotation_canvas_row_base[row_key] = base_bg
+                    row_values = (
+                        _candidate_source_text(candidate, limit=88),
+                        resource_images_text,
+                        _candidate_import_text(candidate),
+                        _candidate_reject_text(candidate),
+                        _candidate_total_text(candidate),
+                    )
+                    for col, value in enumerate(row_values):
+                        x0 = x_positions[col]
+                        x1 = x0 + col_widths[col]
+                        color = fg
+                        if col == 2 and expected_names:
+                            color = success
+                        elif col == 3 and expected_names:
+                            color = error
+                        cell_tags = row_tags + ("at_import_cell", f"at_import_cell_col_{col}")
+                        canvas.create_text(
+                            x0 + row_pad_x,
+                            row_y0 + row_h / 2,
+                            text=_repair_import_text(str(value or "")),
+                            fill=color,
+                            anchor="w",
+                            justify=tk.LEFT,
+                            font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
+                            width=max(20, x1 - x0 - 2 * row_pad_x),
+                            tags=cell_tags,
+                        )
+
+                total_height = header_h + len(sorted_candidates) * row_h + 2
+                canvas.configure(scrollregion=(0, 0, table_width, total_height))
+                try:
+                    canvas.tag_bind("at_import_row", "<Button-1>", _handle_canvas_row_click)
+                    canvas.tag_bind("at_import_row", "<Enter>", lambda _event: canvas.config(cursor="hand2"))
+                    canvas.tag_bind("at_import_row", "<Leave>", lambda _event: canvas.config(cursor=""))
+                    canvas.tag_bind("at_import_header", "<Button-1>", _handle_canvas_header_click)
+                    canvas.tag_bind("at_import_header", "<Enter>", lambda _event: canvas.config(cursor="hand2"))
+                    canvas.tag_bind("at_import_header", "<Leave>", lambda _event: canvas.config(cursor=""))
+                    canvas.tag_bind("at_import_cell", "<Motion>", _handle_canvas_tooltip_motion)
+                    canvas.tag_bind("at_import_header", "<Motion>", _handle_canvas_tooltip_motion)
+                    if not bool(getattr(canvas, "_aat_import_canvas_base_bound", False)):
+                        canvas.bind("<Leave>", _hide_canvas_tooltip, add="+")
+                        canvas.bind("<ButtonPress-1>", _hide_canvas_tooltip, add="+")
+                        canvas._aat_import_canvas_base_bound = True
+                except Exception:
+                    pass
+                _refresh_canvas_selection()
+                _log_import_table_canvas_render(len(sorted_candidates))
+
+            _render_annotation_table()
 
             def _manual_choose() -> None:
+                pending_render = annotation_render_state.get("after_id")
+                if pending_render is not None:
+                    try:
+                        browser.after_cancel(pending_render)
+                    except Exception:
+                        pass
+                    annotation_render_state["after_id"] = None
                 try:
                     browser.grab_release()
                 except Exception:
@@ -8758,6 +10546,13 @@ def _render_step1_route_actions(self, frame):
                         pass
 
             def _close_browser() -> None:
+                pending_render = annotation_render_state.get("after_id")
+                if pending_render is not None:
+                    try:
+                        browser.after_cancel(pending_render)
+                    except Exception:
+                        pass
+                    annotation_render_state["after_id"] = None
                 pending = scroll_sync_after_id.get("id")
                 if pending is not None:
                     try:
@@ -8787,6 +10582,34 @@ def _render_step1_route_actions(self, frame):
                 padx=10,
                 pady=6,
             ).pack(side=tk.LEFT)
+            selected_status_label = tk.Label(
+                footer2,
+                text="Nie wybrano źródła AT.",
+                fg=muted,
+                bg=browser_bg,
+                font=("Segoe UI", 8),
+                anchor="w",
+            )
+            selected_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 8))
+            selected_status_label_ref["label"] = selected_status_label
+            import_selected_button = tk.Button(
+                footer2,
+                text="Importuj pasujące AT do kontroli w Z2",
+                command=_import_selected_candidate,
+                cursor="hand2",
+                bg=field_bg,
+                fg=muted,
+                relief=tk.FLAT,
+                padx=12,
+                pady=6,
+                state=tk.DISABLED,
+            )
+            import_selected_button.pack(side=tk.RIGHT, padx=(8, 0))
+            import_selected_button_ref["button"] = import_selected_button
+            try:
+                _set_analysis_candidate(selected_candidate_state.get("candidate"))
+            except Exception:
+                pass
             tk.Button(
                 footer2,
                 text="Zamknij",
@@ -8808,6 +10631,19 @@ def _render_step1_route_actions(self, frame):
 
         def _run_action(row_key: str, action_kind: str) -> None:
             before_windows = _resource_modal_toplevels()
+            if action_kind == "primary" and row_key in {"plate_run", "char_run"}:
+                base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
+                if not base_ready:
+                    try:
+                        self.app.themed_info(
+                            "Najpierw wskaż obrazy",
+                            _annotation_dependency_message(row_key),
+                            parent=dialog,
+                            tone="warning",
+                        )
+                    except Exception:
+                        pass
+                    return
             try:
                 dialog.grab_release()
             except Exception:
@@ -9284,7 +11120,29 @@ def _render_step1_route_actions(self, frame):
                 fulfillment_color = tone_colors.get(_fulfillment_tone(fulfillment), muted)
                 counter = str(snap.get("counter") or "").strip()
                 display_label = f"{label} [{counter}]" if counter and campaign_resource_counted(row_key) else label
-                primary_enabled = spec_enabled and row_key != "char_run" and _button_enabled(old_buttons.get(row_key))
+                annotation_dependency_blocked = False
+                if row_key in {"plate_run", "char_run"}:
+                    base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
+                    annotation_dependency_blocked = not base_ready
+                    if annotation_dependency_blocked:
+                        present = False
+                        fulfillment = _fulfillment_text(
+                            enabled=bool(spec_enabled),
+                            required=bool(required),
+                            present=False,
+                        )
+                        status_badge = _status_badge_text(
+                            enabled=bool(spec_enabled),
+                            required=bool(required),
+                            present=False,
+                        )
+                        fulfillment_color = tone_colors.get(_fulfillment_tone(fulfillment), muted)
+                primary_enabled = (
+                    spec_enabled
+                    and row_key != "char_run"
+                    and _button_enabled(old_buttons.get(row_key))
+                    and not annotation_dependency_blocked
+                )
                 more_enabled = spec_enabled
                 clear_enabled = spec_enabled and self._is_project_start_asset_clearable(row_key)
                 tree_actions[(row_key, "primary")] = bool(primary_enabled)
@@ -9296,6 +11154,9 @@ def _render_step1_route_actions(self, frame):
                 try:
                     source_text = str(snap.get("source") or "Nie wskazano")
                     validation_text = str(snap.get("validation") or "Brak")
+                    if annotation_dependency_blocked:
+                        validation_text = _annotation_dependency_message(row_key)
+                        tone_color = tone_colors.get("warning", warning)
                     row_widgets["primary_label"] = primary_label
                     row_widgets["source_full_text"] = (
                         resource_cell_detail_overrides.get((row_key, "source"))
@@ -9376,7 +11237,11 @@ def _render_step1_route_actions(self, frame):
                 for row_key, label, _primary_label in row_specs:
                     snapshot_obj = _snapshot_object(row_key, label)
                     resource_snapshots[snapshot_obj.canonical_key] = snapshot_obj
-                resource_report = build_transition_resource_report(active_specs, resource_snapshots)
+                resource_report = build_transition_resource_report(
+                    active_specs,
+                    resource_snapshots,
+                    selected_path=selected_path,
+                )
                 edge_spec = _edge_spec(edge)
                 current_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
                 path_match = bool(
@@ -9660,7 +11525,7 @@ def _render_step1_route_actions(self, frame):
                 except Exception:
                     pass
             if ok and not _graph_action_leaves_campaign_view(graph_action):
-                _refresh_graph_after_action()
+                _refresh_graph_after_action(rebuild_context=(graph_action == "set_iteration_path"))
             if ok and bool(getattr(action_spec, "opens_resources_after", False)):
                 try:
                     self.frame.after(80, lambda key=current_edge_key: _open_resources(key))
@@ -9670,6 +11535,8 @@ def _render_step1_route_actions(self, frame):
 
         def _add_transition_spec_actions() -> bool:
             added = False
+            if str(edge_key or "").strip() == "e3_to_e4":
+                return False
             for action_spec in get_transition_action_specs_for_edge(edge_key, current_iteration):
                 label = str(getattr(action_spec, "label", "") or "").strip()
                 graph_action = str(getattr(action_spec, "graph_action", "") or "").strip()
@@ -9845,21 +11712,15 @@ def _render_step1_route_actions(self, frame):
             if view_model is None:
                 return False
             added = False
-            for cta in (
-                getattr(view_model, "primary_cta", None),
-                getattr(view_model, "secondary_cta", None),
-            ):
-                if cta is None:
-                    continue
-                if not bool(getattr(cta, "enabled", True)):
-                    continue
-                label = str(getattr(cta, "label", "") or "").strip()
-                action = _step3_command_to_graph_action(str(getattr(cta, "command_id", "") or ""))
-                if not label or not action:
-                    continue
-                payload = {"context": dict(getattr(cta, "command_context", {}) or {})}
 
-                def _run_step3_cta(graph_action=action, action_payload=payload):
+            def _append_step3_action(label: str, graph_action: str, context: dict | None = None, tone: str = "info") -> bool:
+                normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
+                normalized_action = str(graph_action or "").strip()
+                if not normalized_label or not normalized_action:
+                    return False
+                payload = {"context": dict(context or {})}
+
+                def _run_step3_cta(graph_action=normalized_action, action_payload=payload):
                     payload_to_run = action_payload
                     if graph_action in {"open_z3", "continue_z3", "open_z3_detect", "open_z2_step3_repair"}:
                         payload_to_run = _payload_with_graph_gate_context(action_payload, edge_key, graph_action)
@@ -9879,13 +11740,46 @@ def _render_step1_route_actions(self, frame):
                         _refresh_graph_after_action()
                     return ok
 
-                spec_buttons.append(
-                    (
-                        label,
-                        _run_step3_cta,
-                        str(getattr(cta, "tone", "info") or "info"),
-                    )
-                )
+                spec_buttons.append((normalized_label, _run_step3_cta, str(tone or "info")))
+                return True
+
+            pz2_context = dict(ready_source or {})
+            pz2_context.update(
+                {
+                    "target_substep": "detect",
+                    "force_pz2": "1",
+                }
+            )
+            try:
+                pz2_done = bool(CAMPAIGN.is_step3_stage2_done())
+            except Exception:
+                pz2_done = False
+            try:
+                contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+                pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+                pz2_done = bool(pz2_done or pz2_contract.get("fulfilled"))
+            except Exception:
+                pass
+            pz2_label = (
+                "Popraw anotacje znaków w PZ2"
+                if pz2_done
+                else "Przygotuj anotacje znaków w PZ2"
+            )
+            if _append_step3_action(pz2_label, "open_z3_detect", pz2_context, "info"):
+                added = True
+
+            pz3_context = dict(ready_source or {})
+            pz3_context.update(
+                {
+                    "target_substep": "pz3",
+                    "force_pz3": "1",
+                }
+            )
+            pz3_action = "continue_z3" if ready_source else "open_z3"
+            if _append_step3_action("Utwórz dataset znaków w PZ3", pz3_action, pz3_context, "info"):
+                added = True
+
+            if _append_step3_action("Uzupełnij anotacje tablic", "open_z2_step3_repair", {}, "warning"):
                 added = True
             return added
 
@@ -9966,7 +11860,13 @@ def _render_step1_route_actions(self, frame):
                 added = True
             return added
 
-        def _refresh_graph_after_action() -> None:
+        def _refresh_graph_after_action(*, rebuild_context: bool = False) -> None:
+            if rebuild_context:
+                try:
+                    self.frame.after_idle(self._refresh_active_project_wizard_only)
+                    return
+                except Exception:
+                    pass
             try:
                 self.frame.after_idle(lambda: (_draw(), _bind_gate_tags()))
                 return
@@ -9993,10 +11893,25 @@ def _render_step1_route_actions(self, frame):
                         continue
 
                     def _run_spec_action(spec_action=action_spec, current_edge_key=edge_key):
+                        action_payload = dict(spec_action.payload or {})
+                        graph_action = str(getattr(spec_action, "graph_action", "") or "").strip()
+                        if graph_action in {
+                            "open_z2_campaign_context",
+                            "open_z2_step2_review",
+                            "open_z2_step3_repair",
+                            "open_z3",
+                            "continue_z3",
+                            "open_z3_detect",
+                        }:
+                            action_payload = _payload_with_graph_gate_context(
+                                action_payload,
+                                current_edge_key,
+                                graph_action,
+                            )
                         result = campaign_graph_actions.execute_campaign_graph_action(
                             self,
                             spec_action.graph_action,
-                            payload=dict(spec_action.payload or {}),
+                            payload=action_payload,
                         )
                         ok = bool(getattr(result, "ok", False))
                         message = str(getattr(result, "message", "") or "").strip()
@@ -10006,7 +11921,9 @@ def _render_step1_route_actions(self, frame):
                             except Exception:
                                 pass
                         if ok and not _graph_action_leaves_campaign_view(spec_action.graph_action):
-                            _refresh_graph_after_action()
+                            _refresh_graph_after_action(
+                                rebuild_context=(str(spec_action.graph_action or "").strip() == "set_iteration_path")
+                            )
                         if ok and spec_action.opens_resources_after:
                             try:
                                 self.frame.after(80, lambda key=current_edge_key: _open_resources(key))
@@ -10409,7 +12326,7 @@ def _render_step1_route_actions(self, frame):
                 )
 
         def _center_graph_world_vertically(width_value: float, height_value: float) -> None:
-            """Center the actual graph bbox, not only the abstract node row."""
+            """Center the graph skeleton without letting gate overlays reflow it."""
             try:
                 if gate_offsets or node_offsets or gate_zoom_scales:
                     return
@@ -10421,16 +12338,45 @@ def _render_step1_route_actions(self, frame):
                     return
             except Exception:
                 return
+            skeleton_y_values: list[float] = []
+
+            def _include_skeleton_y(value: float) -> None:
+                try:
+                    skeleton_y_values.append(float(value))
+                except Exception:
+                    pass
+
+            for geom in dict(node_geometry or {}).values():
+                if not isinstance(geom, dict):
+                    continue
+                try:
+                    y = float(geom.get("y", 0.0) or 0.0)
+                    h = float(geom.get("node_h", node_h) or node_h)
+                except Exception:
+                    continue
+                _include_skeleton_y(y - h / 2.0)
+                _include_skeleton_y(y + h / 2.0)
+
             try:
-                bbox = canvas.bbox("all")
+                graph_edges = list(CAMPAIGN_TRANSITION_GRAPH.edges)
             except Exception:
-                bbox = None
-            if not bbox or len(bbox) != 4:
+                graph_edges = []
+            for edge in graph_edges:
+                try:
+                    if not _t07_edge_visible(getattr(edge, "key", "")):
+                        continue
+                    for _point_x, point_y in _edge_render_world_points_for(edge):
+                        _include_skeleton_y(point_y)
+                    if _is_t07_graph_edge(getattr(edge, "key", "")):
+                        for _point_x, point_y in _return_edge_trunk_render_world_points():
+                            _include_skeleton_y(point_y)
+                except Exception:
+                    continue
+
+            if not skeleton_y_values:
                 return
-            try:
-                _left, top, _right, bottom = (float(value) for value in bbox)
-            except Exception:
-                return
+            top = min(skeleton_y_values)
+            bottom = max(skeleton_y_values)
             graph_h = max(1.0, bottom - top)
             top_pad = 44.0
             bottom_pad = 34.0
@@ -10486,7 +12432,9 @@ def _render_step1_route_actions(self, frame):
             if node is None:
                 return
             x, y = stage_pos[stage_key]
-            node_h_current = 76 if str(stage_key).strip().upper() == "E4Z" else node_h
+            normalized_stage_key = str(stage_key).strip().upper()
+            node_w_current = 168 if normalized_stage_key in {"E4T", "E4Z"} else node_w
+            node_h_current = 76 if normalized_stage_key == "E4Z" else node_h
             default_x, default_y = base_stage_pos[stage_key]
             stage_num = _stage_num(stage_key)
             stage_in_path = _stage_in_selected_path(stage_key)
@@ -10518,13 +12466,13 @@ def _render_step1_route_actions(self, frame):
                 "x_max": float(node_x_max),
                 "y_min": float(node_y_min),
                 "y_max": float(node_y_max),
-                "node_w": float(node_w),
+                "node_w": float(node_w_current),
                 "node_h": float(node_h_current),
             }
             canvas.create_rectangle(
-                x - node_w / 2,
+                x - node_w_current / 2,
                 y - node_h_current / 2,
-                x + node_w / 2,
+                x + node_w_current / 2,
                 y + node_h_current / 2,
                 fill=fill,
                 outline=blend_hex_colors(node_color, card_bg, 0.22),
@@ -10532,24 +12480,24 @@ def _render_step1_route_actions(self, frame):
                 tags=(group_tag,),
             )
             _draw_corner_drag_handle(
-                x - node_w / 2,
+                x - node_w_current / 2,
                 y - node_h_current / 2,
-                x + node_w / 2,
+                x + node_w_current / 2,
                 y + node_h_current / 2,
                 color=node_color,
                 base_fill=fill,
                 tags=(group_tag, drag_tag, "node_drag", "node_handle"),
             )
-            if str(stage_key).strip().upper() == "E4Z":
+            if normalized_stage_key == "E4Z":
                 title_y = y - 24
                 subtitle_y = y - 4
                 effect_y0 = y + 16
-                subtitle_width = max(1, int((node_w + 10) * zoom_for_fonts))
+                subtitle_width = max(1, int((node_w_current - 10) * zoom_for_fonts))
             else:
                 title_y = y - 15
                 subtitle_y = y + 2
                 effect_y0 = y + 14
-                subtitle_width = max(1, int((node_w - 8) * zoom_for_fonts))
+                subtitle_width = max(1, int((node_w_current - 12) * zoom_for_fonts))
             canvas.create_text(
                 x,
                 title_y,
@@ -10569,9 +12517,9 @@ def _render_step1_route_actions(self, frame):
             )
             effect_y1 = y + node_h_current / 2 - 6
             canvas.create_rectangle(
-                x - node_w / 2 + 8,
+                x - node_w_current / 2 + 8,
                 effect_y0,
-                x + node_w / 2 - 8,
+                x + node_w_current / 2 - 8,
                 effect_y1,
                 fill=blend_hex_colors(fill, node_color, 0.12 if reached else 0.04),
                 outline=blend_hex_colors(node_color, card_bg, 0.30 if reached else 0.62),
@@ -10584,7 +12532,7 @@ def _render_step1_route_actions(self, frame):
                 text=effect_text,
                 fill=fg if reached and (active or done) else muted,
                 font=_graph_font(6),
-                width=max(1, int((node_w - 26) * zoom_for_fonts)),
+                width=max(1, int((node_w_current - 26) * zoom_for_fonts)),
                 tags=history_tags,
             )
 
@@ -10603,17 +12551,6 @@ def _render_step1_route_actions(self, frame):
                         node_top,
                         float(geom.get("y", 0.0) or 0.0)
                         - float(geom.get("node_h", node_h) or node_h) / 2.0,
-                    )
-                except Exception:
-                    continue
-            for geom in dict(gate_geometry or {}).values():
-                if not isinstance(geom, dict):
-                    continue
-                try:
-                    node_top = min(
-                        node_top,
-                        float(geom.get("y", 0.0) or 0.0)
-                        - 18.0,
                     )
                 except Exception:
                     continue
@@ -11048,7 +12985,6 @@ def _render_step1_route_actions(self, frame):
             rects: list[tuple[float, float, float, float]] = []
             return_edge = str(edge_key).startswith("return_trunk")
             node_margin = 26.0 if return_edge else 18.0
-            gate_margin = 14.0 if return_edge else 12.0
             for stage_key, geom in dict(node_geometry or {}).items():
                 if str(stage_key) in ignore_stages or not isinstance(geom, dict):
                     continue
@@ -11065,31 +13001,6 @@ def _render_step1_route_actions(self, frame):
                     y - h / 2.0 - stage_margin,
                     x + w / 2.0 + stage_margin,
                     y + h / 2.0 + stage_margin,
-                ))
-            for gate_key, geom in dict(gate_geometry or {}).items():
-                if not isinstance(geom, dict):
-                    continue
-                if str(gate_key or "").strip() == edge_key:
-                    continue
-                if str(gate_key or "").strip() in gate_offsets:
-                    # A manually moved gate is a label pinned to an edge, not
-                    # an obstacle that should reshape the edge itself. Resetting
-                    # the graph clears offsets and restores automatic routing.
-                    continue
-                try:
-                    x = float(geom.get("x", 0.0) or 0.0)
-                    y = float(geom.get("y", 0.0) or 0.0)
-                    w = float(geom.get("gate_w", 0.0) or 0.0)
-                    h = float(geom.get("gate_h", 0.0) or 0.0)
-                except Exception:
-                    continue
-                if w <= 0 or h <= 0:
-                    continue
-                rects.append((
-                    x - gate_margin,
-                    y - gate_margin,
-                    x + w + gate_margin,
-                    y + h + gate_margin,
                 ))
             return rects
 
@@ -11912,14 +13823,21 @@ def _render_step1_route_actions(self, frame):
         graph_render_helpers["edge_anchor_point"] = _edge_anchor_point
         graph_render_helpers["connector_anchor_point"] = _connector_anchor_point_for_edge
 
-        def _return_edge_line_color() -> str:
+        def _edge_route_highlighted(edge) -> bool:
+            return bool(_edge_selected(edge) or _edge_in_selected_path(edge))
+
+        def _return_edge_line_color(edge=None) -> str:
+            if edge is not None:
+                if _edge_route_highlighted(edge):
+                    return active_edge_color
+                return edge_route_color if _edge_operable(edge) else muted_dim
             return_edges = [
                 graph_edge
                 for graph_edge in CAMPAIGN_TRANSITION_GRAPH.edges
                 if _is_t07_graph_edge(getattr(graph_edge, "key", ""))
             ]
-            if any(_edge_selected(graph_edge) or _edge_in_selected_path(graph_edge) for graph_edge in return_edges):
-                return success
+            if any(_edge_route_highlighted(graph_edge) for graph_edge in return_edges):
+                return active_edge_color
             active_edges = [graph_edge for graph_edge in return_edges if _edge_operable(graph_edge)]
             if active_edges:
                 return edge_route_color
@@ -11927,10 +13845,9 @@ def _render_step1_route_actions(self, frame):
 
         def _edge_line_color(edge) -> str:
             active = _edge_operable(edge)
-            selected = _edge_selected(edge)
             if _is_t07_graph_edge(getattr(edge, "key", "")):
-                return _return_edge_line_color()
-            return success if (selected or _edge_in_selected_path(edge)) else (edge_route_color if active else muted_dim)
+                return _return_edge_line_color(edge)
+            return active_edge_color if _edge_route_highlighted(edge) else (edge_route_color if active else muted_dim)
 
         graph_render_helpers["edge_line_color"] = _edge_line_color
 
@@ -12003,7 +13920,11 @@ def _render_step1_route_actions(self, frame):
                 half = size * 0.46
                 base_x = float(end_x) - ux * size
                 base_y = float(end_y) - uy * size
-                fill = accent
+                if key == "return_trunk":
+                    fill = _return_edge_line_color()
+                else:
+                    graph_edge = _edge_for_key(key)
+                    fill = _edge_line_color(graph_edge) if graph_edge is not None else accent
                 arrow_id = canvas.create_polygon(
                     float(end_x),
                     float(end_y),
@@ -12102,6 +14023,19 @@ def _render_step1_route_actions(self, frame):
         graph_render_helpers["sync_edge_arrowhead_from_line_item"] = _sync_edge_arrowhead_from_line_item
         graph_render_helpers["sync_edge_arrowheads_from_canvas"] = _sync_edge_arrowheads_from_canvas
 
+        def _node_output_connector_color(source_stage: str) -> str:
+            normalized_source = str(source_stage or "").strip()
+            outgoing_edges = [
+                edge
+                for edge in CAMPAIGN_TRANSITION_GRAPH.edges
+                if str(getattr(edge, "source", "") or "").strip() == normalized_source
+            ]
+            if any(_edge_route_highlighted(edge) for edge in outgoing_edges):
+                return active_edge_color
+            if any(_edge_gate_active(edge) or _edge_path_active(edge) for edge in outgoing_edges):
+                return edge_route_color
+            return muted_dim
+
         def _draw_node_output_connectors(
             *,
             screen_coords: bool = False,
@@ -12135,7 +14069,7 @@ def _render_step1_route_actions(self, frame):
                     ]
                     if not outgoing_edges:
                         continue
-                    color = success
+                    color = _node_output_connector_color(source_stage)
                     marker_id = canvas.create_rectangle(
                         dot_x - connector_w / 2.0,
                         dot_y - connector_h / 2.0,
@@ -12183,7 +14117,7 @@ def _render_step1_route_actions(self, frame):
                     dot_x = _screen_x(dot_x, viewport_w)
                     dot_y = _screen_y(dot_y, viewport_h)
                 connector_w, connector_h = _node_connector_size(screen_coords=screen_coords)
-                color = success
+                color = _node_output_connector_color(normalized_stage)
                 marker_id = canvas.create_rectangle(
                     dot_x - connector_w / 2.0,
                     dot_y - connector_h / 2.0,
@@ -12284,7 +14218,7 @@ def _render_step1_route_actions(self, frame):
                     viewport_h = height if height_value is None else height_value
                     dot_x = _screen_x(dot_x, viewport_w)
                     dot_y = _screen_y(dot_y, viewport_h)
-                color = success
+                color = _return_edge_line_color()
                 radius = 4.4 * (_graph_zoom() if screen_coords else 1.0)
                 radius = max(3.2, min(6.2, radius))
                 canvas.create_oval(
@@ -12304,12 +14238,12 @@ def _render_step1_route_actions(self, frame):
 
         def _refresh_return_edge_bundle(width_value: float, height_value: float) -> None:
             """Refresh the E4T/E4Z return bundle as one visual circuit."""
-            color = _return_edge_line_color()
-            line_fill = blend_hex_colors(color, card_bg, 0.18)
             for return_edge in CAMPAIGN_TRANSITION_GRAPH.edges:
                 if not _is_t07_graph_edge(getattr(return_edge, "key", "")):
                     continue
                 try:
+                    color = _return_edge_line_color(return_edge)
+                    line_fill = blend_hex_colors(color, card_bg, 0.18)
                     coords: list[float] = []
                     for point_x, point_y in _edge_render_world_points_for(return_edge):
                         coords.extend([
@@ -12860,7 +14794,7 @@ def _render_step1_route_actions(self, frame):
                             canvas.coords(line_id, *coords)
                             canvas.itemconfigure(
                                 line_id,
-                                fill=blend_hex_colors(_return_edge_line_color(), card_bg, 0.18),
+                                fill=blend_hex_colors(_return_edge_line_color(edge), card_bg, 0.18),
                                 width=2,
                                 dash=None,
                                 arrow=tk.NONE,
@@ -12944,11 +14878,35 @@ def _render_step1_route_actions(self, frame):
                 mini_w = max(156, min(232, 64 + min(mini_len, 64) * 2.6))
                 mini_h = 54
             mini_text_width = max(64, (mini_w - 28) * zoom_for_fonts)
+            post_clear_x_shift = 0.0
+            forced_y_after_clear: float | None = None
             if edge.kind == "shortcut":
                 y = anchor_y + 64
-                x_shift = -92 if edge.key == "e1_to_e3" else 92
+                if edge.key == "e1_to_e3":
+                    x_shift = -92
+                elif edge.key == "e2_to_e4":
+                    x_shift = 92
+                    post_clear_x_shift = -(mini_w / 2.0)
+                else:
+                    x_shift = 92
             else:
-                y = anchor_y + 64 if _is_t07_graph_edge(edge.key) else max(8, anchor_y - mini_h - 72)
+                if edge.key == "e3_to_e4":
+                    t02_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e1_to_e3")
+                    if t02_edge is not None:
+                        _t02_anchor_x, t02_anchor_y = _edge_anchor_point(t02_edge)
+                        y = t02_anchor_y + 64
+                    else:
+                        y = anchor_y + 64
+                elif _is_t07_graph_edge(edge.key):
+                    t04_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e2_to_e4")
+                    if t04_edge is not None:
+                        _t04_anchor_x, t04_anchor_y = _edge_anchor_point(t04_edge)
+                        forced_y_after_clear = t04_anchor_y + 64
+                        y = forced_y_after_clear
+                    else:
+                        y = anchor_y + 64
+                else:
+                    y = max(8, anchor_y - mini_h - 72)
                 if _is_t07_graph_edge(edge.key):
                     x_shift = 58
                 elif edge.key == "e3_to_e4":
@@ -12969,6 +14927,12 @@ def _render_step1_route_actions(self, frame):
             x = default_x + float(offset_x or 0.0)
             y = default_y + float(offset_y or 0.0)
             x, y = _find_clear_gate_position(edge.key, x, y, mini_w, mini_h, x_min, x_max, y_min, y_max)
+            if post_clear_x_shift:
+                default_x += float(post_clear_x_shift)
+                x += float(post_clear_x_shift)
+            if forced_y_after_clear is not None:
+                default_y = float(forced_y_after_clear)
+                y = default_y + float(offset_y or 0.0)
             fill = blend_hex_colors(card_bg, color, 0.028)
             outline = blend_hex_colors(color, card_bg, 0.18)
             connector_color = blend_hex_colors(muted_dim, card_bg, 0.14)
@@ -13048,7 +15012,9 @@ def _render_step1_route_actions(self, frame):
             if not _t07_edge_visible(getattr(edge, "key", "")):
                 return
             status_text, status_color = _edge_status(edge)
-            active = _edge_operable(edge)
+            gate_active = _edge_gate_active(edge)
+            active = gate_active
+            operable = _edge_operable(edge)
             selected = _edge_selected(edge)
             source_x, _source_y = stage_pos.get(edge.source, (0, node_y))
             target_x, _target_y = stage_pos.get(edge.target, (0, node_y))
@@ -13079,19 +15045,35 @@ def _render_step1_route_actions(self, frame):
             gate_h = title_h + row_h * 2 + resource_row_h + approve_row_h
             title_text_width = max(54, (gate_w - 30 * local_zoom) * zoom_for_fonts)
             default_x_shift = 0
+            post_clear_x_shift = 0.0
+            forced_y_after_clear: float | None = None
             if edge.key == "e1_to_e3":
                 default_y = anchor_y + 74
                 default_x_shift = -104
             elif edge.key == "e2_to_e4":
                 default_y = anchor_y + 74
                 default_x_shift = 104
+                post_clear_x_shift = -(gate_w / 2.0)
+            elif edge.key == "e3_to_e4":
+                t02_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e1_to_e3")
+                if t02_edge is not None:
+                    _t02_anchor_x, t02_anchor_y = _edge_anchor_point(t02_edge)
+                    default_y = t02_anchor_y + 74
+                else:
+                    default_y = anchor_y + 74
             elif _is_t07_graph_edge(edge.key):
-                default_y = anchor_y + 78
+                t04_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e2_to_e4")
+                if t04_edge is not None:
+                    _t04_anchor_x, t04_anchor_y = _edge_anchor_point(t04_edge)
+                    forced_y_after_clear = t04_anchor_y + 74
+                    default_y = forced_y_after_clear
+                else:
+                    default_y = anchor_y + 78
                 default_x_shift = 72
             else:
                 default_y = anchor_y - gate_h - 76
 
-            if not active:
+            if not gate_active:
                 _draw_gate_placeholder(
                     edge,
                     anchor_x=anchor_x,
@@ -13117,13 +15099,22 @@ def _render_step1_route_actions(self, frame):
             x = default_x + float(offset_x or 0.0)
             y = default_y + float(offset_y or 0.0)
             x, y = _find_clear_gate_position(edge.key, x, y, gate_w, gate_h, x_min, x_max, y_min, y_max)
+            if post_clear_x_shift:
+                default_x += float(post_clear_x_shift)
+                x += float(post_clear_x_shift)
+            if forced_y_after_clear is not None:
+                default_y = float(forced_y_after_clear)
+                y = default_y + float(offset_y or 0.0)
 
             group_tag = f"gate-group:{edge.key}"
             drag_tag = f"gate-drag:{edge.key}"
-            gate_color = status_color if active else muted_dim
-            fill = blend_hex_colors(card_bg, gate_color, 0.07 if active else 0.02)
-            outline = blend_hex_colors(gate_color, card_bg, 0.34)
-            connector_color = blend_hex_colors(gate_color, card_bg, 0.24)
+            select_tag = f"gate:{edge.key}:select"
+            selector_enabled = _edge_select_enabled(edge)
+            highlighted_route = _edge_route_highlighted(edge)
+            gate_color = active_edge_color if highlighted_route else (status_color if operable else muted_dim)
+            fill = blend_hex_colors(card_bg, gate_color, 0.07 if operable else 0.035)
+            outline = blend_hex_colors(gate_color, card_bg, 0.24 if highlighted_route else 0.34)
+            connector_color = gate_color if highlighted_route else blend_hex_colors(gate_color, card_bg, 0.24)
             connector_tag = f"gate-connector:{edge.key}"
             gate_geometry[edge.key] = {
                 "anchor_x": float(anchor_x),
@@ -13156,7 +15147,7 @@ def _render_step1_route_actions(self, frame):
             connector_id = canvas.create_line(
                 *connector_coords,
                 fill=connector_color,
-                width=1,
+                width=2 if highlighted_route else 1,
                 dash=(2, 2),
                 capstyle=tk.ROUND,
                 joinstyle=tk.ROUND,
@@ -13174,7 +15165,7 @@ def _render_step1_route_actions(self, frame):
                 tags=(group_tag,),
             )
 
-            title_fill = blend_hex_colors(fill, gate_color, 0.24 if active else 0.12)
+            title_fill = blend_hex_colors(fill, gate_color, 0.24 if operable else 0.12)
             canvas.create_rectangle(
                 x,
                 y,
@@ -13189,15 +15180,13 @@ def _render_step1_route_actions(self, frame):
                 x + 16 * local_zoom,
                 y + title_h / 2,
                 text=gate_title_text,
-                fill=success if selected else (fg if active else muted_dim),
+                fill=fg if operable else muted,
                 anchor="w",
                 font=_gate_font(8, local_zoom, "bold"),
                 width=title_text_width,
                 justify=tk.LEFT,
                 tags=(group_tag,),
             )
-            select_tag = f"gate:{edge.key}:select"
-            selector_enabled = _edge_select_enabled(edge)
             selector_tags = (group_tag, select_tag, "gate_button") if selector_enabled else (group_tag,)
             electrode_color = blend_hex_colors(accent if selected else muted_dim, "#ffffff", 0.08 if selected else 0.0)
             electrode_dim = blend_hex_colors(electrode_color, card_bg, 0.36 if selected else 0.62)
@@ -13325,13 +15314,24 @@ def _render_step1_route_actions(self, frame):
                     and _get_t07_repair_interruption_state()
                     and not _current_t07_training_finish_state()
                 )
+                step4_work_interrupted = bool(
+                    _is_t07_graph_edge(edge.key)
+                    and str(tag or "").endswith(":actions")
+                    and _current_step4_work_interruption_state()
+                    and not _current_t07_training_finish_state()
+                )
                 t06_work_interrupted = bool(
                     edge.key == "e3_to_e4"
                     and str(tag or "").endswith(":actions")
+                    and not _edge_ready(edge)
                     and _t06_interrupted_work_state()
                 )
-                if work_interrupted or t06_work_interrupted:
-                    pending_state = _t06_interrupted_work_state() if t06_work_interrupted else _get_t07_pending_repair_approved_state()
+                if work_interrupted or t06_work_interrupted or step4_work_interrupted:
+                    pending_state = (
+                        _t06_interrupted_work_state()
+                        if t06_work_interrupted
+                        else (_get_t07_pending_repair_approved_state() if work_interrupted else {})
+                    )
                     try:
                         pending_images = int(pending_state.get("unpromoted_approved_images", 0) or 0)
                     except Exception:
@@ -13371,18 +15371,18 @@ def _render_step1_route_actions(self, frame):
                 )
                 if approve_blink:
                     row_color = success
-                elif work_interrupted or t06_work_interrupted:
-                    row_color = accent if tag and enabled else (muted if active else muted_dim)
+                elif work_interrupted or t06_work_interrupted or step4_work_interrupted:
+                    row_color = accent if tag and enabled else (muted if operable else muted_dim)
                 elif is_approve_row and tag and enabled:
                     row_color = success
                 elif tag and enabled:
                     row_color = accent
                 else:
-                    row_color = muted if active else muted_dim
+                    row_color = muted if operable else muted_dim
                 value_color = status_color
                 if is_resource_row:
                     value_color = success if str(value or "").strip().upper() == "OK" else warning
-                if work_interrupted or t06_work_interrupted:
+                if work_interrupted or t06_work_interrupted or step4_work_interrupted:
                     value_color = error
                 if str(value or "").strip().upper().startswith("PRZERWANE"):
                     value_color = error
@@ -13402,7 +15402,7 @@ def _render_step1_route_actions(self, frame):
                     }
                 display_label = str(label or "")
                 if is_approve_row:
-                    display_label = _edge_approve_label(edge)
+                    display_label = _edge_approve_label(edge) or "ZATWIERDŹ"
                 if resource_detail_layout:
                     canvas.create_text(
                         x + 16 * local_zoom,
@@ -14111,12 +16111,7 @@ def _render_step1_route_actions(self, frame):
                             progress,
                             color=colors[index % len(colors)],
                         )
-                    try:
-                        canvas.tag_raise("graph_attention_flow")
-                        canvas.tag_raise("graph_overlay_fixed")
-                        canvas.tag_raise("gate_selector_tooltip")
-                    except Exception:
-                        pass
+                    _raise_graph_interactive_layers()
                     if progress < 1.0:
                         attention_state["after_id"] = canvas.after(28, _frame)
                     else:
@@ -14152,6 +16147,7 @@ def _render_step1_route_actions(self, frame):
         try:
             canvas.tag_lower("edge_line")
             canvas.tag_raise("graph_edge_arrow", "edge_line")
+            canvas.tag_raise("graph_node_output_connector")
         except Exception:
             pass
         _draw_pending_corner_handles(width, height)
@@ -14178,6 +16174,7 @@ def _render_step1_route_actions(self, frame):
         _draw_graph_legend()
         _sync_gate_approve_blink()
         _sync_gate_selector_arc_animation()
+        _raise_graph_interactive_layers()
         _maybe_start_graph_attention_flow()
 
     def _redraw_graph_fixed_overlay() -> None:
@@ -14188,10 +16185,7 @@ def _render_step1_route_actions(self, frame):
             _draw_graph_project_trace_overlay()
             _draw_graph_reset_overlay()
             _draw_graph_legend()
-            try:
-                canvas.tag_raise("graph_overlay_fixed")
-            except Exception:
-                pass
+            _raise_graph_interactive_layers()
         except tk.TclError:
             return
         except Exception:
@@ -14365,20 +16359,31 @@ def _render_step1_route_actions(self, frame):
             body_h = _measure_wrapped_text_height(body, body_font)
             tooltip_h = max(64, title_h + body_h + 28)
             tip_x = (x0 + x1) / 2
-            preferred_x = x0 - tooltip_w - 12
-            if preferred_x < 8:
-                preferred_x = x1 + 12
-            tooltip_x0 = max(8, min(width - tooltip_w - 8, preferred_x))
-            tooltip_y0 = max(8, min(height - tooltip_h - 8, y0 - 18))
+            gate_key = str(tag or "").split(":")[1] if len(str(tag or "").split(":")) >= 3 else ""
+            gate_geom = gate_geometry.get(gate_key, {}) if gate_key else {}
+            gate_x0 = _screen_x(float(gate_geom.get("x", 0.0)), width) if gate_geom else x1 + 8
+            gate_y0 = _screen_y(float(gate_geom.get("y", 0.0)), height) if gate_geom else y0
+            gate_w = float(gate_geom.get("gate_w", 0.0) or 0.0) if gate_geom else max(1.0, x1 - x0)
+            gate_h = float(gate_geom.get("gate_h", 0.0) or 0.0) if gate_geom else max(1.0, y1 - y0)
+            gate_x1 = _screen_x(float(gate_geom.get("x", 0.0)) + gate_w, width) if gate_geom else x1
+            gate_y1 = _screen_y(float(gate_geom.get("y", 0.0)) + gate_h, height) if gate_geom else y1
+            gate_center_x = (gate_x0 + gate_x1) / 2
+            tooltip_gap = 12
+            tooltip_x0 = max(8, min(width - tooltip_w - 8, gate_center_x - tooltip_w / 2))
+            preferred_y = gate_y0 - tooltip_h - tooltip_gap
+            if preferred_y < 8:
+                preferred_y = min(height - tooltip_h - 8, gate_y1 + tooltip_gap)
+            tooltip_y0 = max(8, min(height - tooltip_h - 8, preferred_y))
             tooltip_x1 = tooltip_x0 + tooltip_w
             tooltip_y1 = tooltip_y0 + tooltip_h
             panel_fill = blend_hex_colors(card_bg, color, 0.10)
             panel_outline = blend_hex_colors(color, card_bg, 0.30)
-            pointer_y = max(tooltip_y0 + 12, min(tooltip_y1 - 12, (y0 + y1) / 2))
+            tip_y = (y0 + y1) / 2
+            pointer_x = max(tooltip_x0 + 16, min(tooltip_x1 - 16, tip_x))
             pointer_points = (
-                (tooltip_x1, pointer_y - 5, tip_x, (y0 + y1) / 2, tooltip_x1, pointer_y + 5)
-                if tooltip_x1 <= tip_x
-                else (tooltip_x0, pointer_y - 5, tip_x, (y0 + y1) / 2, tooltip_x0, pointer_y + 5)
+                (pointer_x - 6, tooltip_y1, tip_x, tip_y, pointer_x + 6, tooltip_y1)
+                if tooltip_y1 <= tip_y
+                else (pointer_x - 6, tooltip_y0, tip_x, tip_y, pointer_x + 6, tooltip_y0)
             )
             canvas.create_polygon(
                 *pointer_points,
@@ -15093,6 +17098,8 @@ def _render_step1_route_actions(self, frame):
 
     def _bind_gate_tags() -> None:
         try:
+            if not canvas.winfo_exists():
+                return
             canvas.tag_bind("gate_button", "<Enter>", lambda _event: canvas.config(cursor="hand2"))
             canvas.tag_bind("gate_button", "<Leave>", lambda _event: canvas.config(cursor=""))
             canvas.tag_bind("gate_drag", "<Enter>", lambda _event: canvas.config(cursor="fleur"))
@@ -15124,8 +17131,10 @@ def _render_step1_route_actions(self, frame):
                     canvas.tag_bind(tag, "<Leave>", _clear_gate_field_hover)
                 drag_tag = f"gate-drag:{edge.key}"
                 canvas.tag_bind(drag_tag, "<ButtonPress-1>", lambda event, key=edge.key: _start_gate_drag(key, event))
+        except tk.TclError:
+            return
         except Exception:
-            pass
+            logger.exception("Błąd wiązania interaktywnych tagów grafu kampanii")
 
     def _request_graph_redraw(delay_ms: int = 18, *, restart: bool = False) -> None:
         try:
@@ -15151,8 +17160,10 @@ def _render_step1_route_actions(self, frame):
                     _draw()
                     _bind_gate_tags()
                 except tk.TclError:
+                    logger.exception("Błąd Tcl podczas odświeżania grafu kampanii")
                     return
                 except Exception:
+                    logger.exception("Błąd podczas odświeżania grafu kampanii")
                     return
 
             graph_redraw_state["after_id"] = canvas.after(max(1, int(delay_ms)), _run)
@@ -15161,7 +17172,7 @@ def _render_step1_route_actions(self, frame):
                 _draw()
                 _bind_gate_tags()
             except Exception:
-                pass
+                logger.exception("Błąd awaryjnego odświeżania grafu kampanii")
 
     def _is_graph_gate_item_under_cursor() -> bool:
         try:

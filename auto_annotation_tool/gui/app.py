@@ -1889,7 +1889,7 @@ class AutoAnnotationApp:
                 goal="Ta zakładka służy do przygotowania wariantu datasetu, wyboru splitu i uruchomienia treningu modelu.",
                 workflow=(
                     "W PZ1 wybierz tor i utwórz wariant datasetu.",
-                    "W PZ2 wybierz wariant, model bazowy i parametry treningu.",
+                    "W PZ2 wybierz wariant, model startowy treningu i parametry.",
                     "Po treningu sprawdź historię, walidację i ranking wyników.",
                 ),
                 glossary=(

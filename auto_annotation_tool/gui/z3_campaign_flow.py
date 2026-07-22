@@ -186,7 +186,10 @@ def _mark_t06_pz3_contract(
             "dataset_path": dataset_path,
             "exportable_plate_count": int(data.get("exportable_plate_count", 0) or 0),
             "exportable_char_count": int(data.get("exportable_char_count", 0) or 0),
+            "perfect_count": int(data.get("perfect_count", data.get("exportable_plate_count", 0)) or 0),
             "gold_dataset_valid": bool(data.get("gold_dataset_valid", True)),
+            "summary_path": str(data.get("_summary_path") or data.get("summary_path") or ""),
+            "summary_dir": str(data.get("_summary_dir") or data.get("summary_dir") or ""),
             "fulfilled_at": datetime.now().isoformat(timespec="seconds"),
         },
     )
@@ -1530,17 +1533,63 @@ def get_campaign_step3_source_refresh_state(
         except Exception:
             return False
 
+    def _same_path(left: str, right: str) -> bool:
+        left = str(left or "").strip()
+        right = str(right or "").strip()
+        if not left or not right:
+            return False
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except Exception:
+            return left == right
+
+    def _adopt_preview_dir(raw_value: str) -> str:
+        nonlocal preview_dir_raw
+        preview_dir_raw = str(raw_value or "").strip()
+        result["preview_dir"] = preview_dir_raw
+        if not preview_dir_raw:
+            return ""
+        try:
+            current_var = getattr(host, "preview_dir_var", None)
+            if current_var is not None and not _same_path(str(current_var.get() or ""), preview_dir_raw):
+                current_var.set(preview_dir_raw)
+        except Exception:
+            pass
+        try:
+            CAMPAIGN.set_step3_preview_dir(preview_dir_raw)
+        except Exception:
+            pass
+        try:
+            sync_registry = getattr(host, "_sync_campaign_step3_preview_artifact_registry", None)
+            if callable(sync_registry):
+                sync_registry(preview_dir_raw)
+        except Exception:
+            pass
+        return preview_dir_raw
+
+    def _find_latest_current_preview_dir() -> str:
+        finder = getattr(host, "_find_latest_extract_preview_run_dir", None)
+        if not callable(finder):
+            return ""
+        try:
+            candidate = str(finder(require_plates=True) or "").strip()
+        except Exception:
+            candidate = ""
+        if candidate and _is_ready_preview_dir(candidate):
+            return candidate
+        return ""
+
     if not _is_ready_preview_dir(preview_dir_raw):
         try:
             saved_preview_dir = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
         except Exception:
             saved_preview_dir = ""
         if saved_preview_dir and _is_ready_preview_dir(saved_preview_dir):
-            preview_dir_raw = saved_preview_dir
-            try:
-                host.preview_dir_var.set(saved_preview_dir)
-            except Exception:
-                pass
+            _adopt_preview_dir(saved_preview_dir)
+        else:
+            latest_preview_dir = _find_latest_current_preview_dir()
+            if latest_preview_dir:
+                _adopt_preview_dir(latest_preview_dir)
 
     result["source_xml"] = source_xml_raw
     result["source_run_dir"] = source_run_raw
@@ -1587,14 +1636,34 @@ def get_campaign_step3_source_refresh_state(
 
     try:
         if hasattr(host, "_preview_matches_current_extract_source") and not host._preview_matches_current_extract_source(preview_dir):
-            result.update(
-                needs_reextract=True,
-                reason="preview_source_mismatch",
-                message="Poprzednio wycięte tablice pochodzą z innego źródła Z2. Najpierw uruchamiam ponowne wycinanie.",
-            )
-            return result
+            latest_preview_dir = _find_latest_current_preview_dir()
+            if latest_preview_dir:
+                _adopt_preview_dir(latest_preview_dir)
+                preview_dir = Path(preview_dir_raw)
+                meta_path = preview_dir / "metadata.json"
+                images_dir = preview_dir / "images"
+            else:
+                result.update(
+                    needs_reextract=True,
+                    reason="preview_source_mismatch",
+                    message="Poprzednio wycięte tablice pochodzą z innego źródła Z2. Najpierw uruchamiam ponowne wycinanie.",
+                )
+                return result
     except Exception:
         pass
+
+    preview_has_current_manifest_contract = False
+    try:
+        manifest_state = dict(host._get_extract_preview_manifest_state(preview_dir) or {})
+        preview_has_current_manifest_contract = bool(
+            manifest_state.get("manifest_exists")
+            and manifest_state.get("source_matches")
+            and int(manifest_state.get("plate_count", 0) or 0) > 0
+        )
+        if preview_has_current_manifest_contract:
+            result["preview_contract_ready"] = True
+    except Exception:
+        preview_has_current_manifest_contract = False
 
     try:
         saved_state = CAMPAIGN.get_step3_extract_state() or {}
@@ -1618,7 +1687,12 @@ def get_campaign_step3_source_refresh_state(
     source_run_key = _safe_path_key(source_run_raw)
     saved_run_key = _safe_path_key(saved_run_raw)
 
-    if saved_xml_key and source_xml_key and saved_xml_key != source_xml_key:
+    if (
+        saved_xml_key
+        and source_xml_key
+        and saved_xml_key != source_xml_key
+        and not preview_has_current_manifest_contract
+    ):
         result.update(
             needs_reextract=True,
             reason="source_xml_changed",
@@ -1626,7 +1700,12 @@ def get_campaign_step3_source_refresh_state(
         )
         return result
 
-    if saved_run_key and source_run_key and saved_run_key != source_run_key:
+    if (
+        saved_run_key
+        and source_run_key
+        and saved_run_key != source_run_key
+        and not preview_has_current_manifest_contract
+    ):
         result.update(
             needs_reextract=True,
             reason="source_run_changed",
@@ -1637,7 +1716,7 @@ def get_campaign_step3_source_refresh_state(
     try:
         source_mtime = float(source_xml.stat().st_mtime)
         preview_mtime = float(meta_path.stat().st_mtime)
-        if source_mtime > (preview_mtime + 0.001):
+        if source_mtime > (preview_mtime + 0.001) and not preview_has_current_manifest_contract:
             result.update(
                 needs_reextract=True,
                 reason="source_xml_newer_than_preview",
@@ -1813,33 +1892,70 @@ def _ensure_campaign_pz2_preview_loaded(
         saved_preview_dir = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
         current_var = getattr(host, "preview_dir_var", None)
         current_preview_dir = str((current_var.get() if current_var is not None else "") or "").strip()
-        saved_ready = bool(
-            saved_preview_dir
-            and host._is_usable_step3_preview_dir(
-                saved_preview_dir,
-                require_plates=True,
-                check_campaign_inflated=False,
-            )
-        )
-        same_preview_dir = False
-        if saved_ready and current_preview_dir:
-            try:
-                same_preview_dir = Path(saved_preview_dir).resolve() == Path(current_preview_dir).resolve()
-            except Exception:
-                same_preview_dir = str(saved_preview_dir).strip() == str(current_preview_dir).strip()
-        if saved_ready:
-            if not same_preview_dir and current_var is not None:
-                current_var.set(saved_preview_dir)
-        else:
-            current_ready = bool(
-                current_preview_dir
+
+        def _ready_preview(raw_value: str) -> bool:
+            return bool(
+                raw_value
                 and host._is_usable_step3_preview_dir(
-                    current_preview_dir,
+                    raw_value,
                     require_plates=True,
                     check_campaign_inflated=False,
                 )
             )
-            if not current_ready:
+
+        def _source_current(raw_value: str) -> bool:
+            if not _ready_preview(raw_value):
+                return False
+            matcher = getattr(host, "_preview_matches_current_extract_source", None)
+            if not callable(matcher):
+                return True
+            try:
+                return bool(matcher(raw_value))
+            except Exception:
+                return False
+
+        def _same_preview(left: str, right: str) -> bool:
+            left = str(left or "").strip()
+            right = str(right or "").strip()
+            if not left or not right:
+                return False
+            try:
+                return Path(left).resolve() == Path(right).resolve()
+            except Exception:
+                return left == right
+
+        def _use_preview(raw_value: str) -> None:
+            raw_value = str(raw_value or "").strip()
+            if not raw_value:
+                return
+            if current_var is not None and not _same_preview(str(current_var.get() or ""), raw_value):
+                current_var.set(raw_value)
+            try:
+                CAMPAIGN.set_step3_preview_dir(raw_value)
+            except Exception:
+                pass
+            try:
+                sync_registry = getattr(host, "_sync_campaign_step3_preview_artifact_registry", None)
+                if callable(sync_registry):
+                    sync_registry(raw_value)
+            except Exception:
+                pass
+
+        if _source_current(current_preview_dir):
+            _use_preview(current_preview_dir)
+        elif _source_current(saved_preview_dir):
+            _use_preview(saved_preview_dir)
+        else:
+            latest_preview_dir = ""
+            finder = getattr(host, "_find_latest_extract_preview_run_dir", None)
+            if callable(finder):
+                try:
+                    latest_preview_dir = str(finder(require_plates=True) or "").strip()
+                except Exception:
+                    latest_preview_dir = ""
+            if _source_current(latest_preview_dir):
+                _use_preview(latest_preview_dir)
+            elif not _ready_preview(current_preview_dir):
                 host._restore_preview_context_from_project(require_plates=True)
         restore_ms = (time.perf_counter() - phase_start) * 1000.0
     except Exception:

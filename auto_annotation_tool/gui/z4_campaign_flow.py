@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,9 +13,18 @@ from .z4_view_models import (
     Step4DatasetWorkflowViewModel,
     Step4TrainingInputsViewModel,
 )
+from .z2_shared_ui import campaign_visible_gate_id
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
+
+
+def _char_dataset_gate_display_id() -> str:
+    return campaign_visible_gate_id("T06") or "T05"
+
+
+def _training_finish_gate_display_id() -> str:
+    return campaign_visible_gate_id("T07") or "T06"
 
 
 def _apply_campaign_project_base_model_selection(host: "TrainingTab", target: str | None) -> bool:
@@ -100,6 +110,7 @@ def build_step4_dataset_workflow_view_model(
             )
 
     if campaign_active and mode == "char":
+        char_dataset_gate_id = _char_dataset_gate_display_id()
         readiness = {}
         try:
             readiness = dict(host.get_campaign_step4_readiness(iteration_target="char") or {})
@@ -119,7 +130,7 @@ def build_step4_dataset_workflow_view_model(
             )
             split_intro = "Wariant treningowy znaków jest już gotowy. Możesz przejść do PZ2 i trenować model."
             split_summary = (
-                "Źródłowy dataset znaków z T06 ma już przygotowany wariant train/val/test.\n"
+                f"Źródłowy dataset znaków z {char_dataset_gate_id} ma już przygotowany wariant train/val/test.\n"
                 f"Gotowy wariant: {split_ready_value}\n"
                 f"Split: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}\n"
                 "Nie musisz przygotowywać wariantu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
@@ -135,12 +146,12 @@ def build_step4_dataset_workflow_view_model(
                 96,
             )
             split_intro = (
-                "Źródłowy dataset znaków został już wyeksportowany w T06. "
+                f"Źródłowy dataset znaków został już wyeksportowany w {char_dataset_gate_id}. "
                 "Teraz przygotuj z niego wariant treningowy train/val/test, aby odblokować PZ2."
             )
             split_summary = (
-                "To nie jest ponowny eksport datasetu z T06, tylko przygotowanie wariantu pod trening.\n"
-                f"Źródłowy dataset z T06: {split_src_value}"
+                f"To nie jest ponowny eksport datasetu z {char_dataset_gate_id}, tylko przygotowanie wariantu pod trening.\n"
+                f"Źródłowy dataset z {char_dataset_gate_id}: {split_src_value}"
             )
 
     if campaign_active and not route_selected:
@@ -178,8 +189,9 @@ def build_step4_dataset_workflow_view_model(
                 campaign_plate_stats = {}
             approved_images = int(campaign_plate_stats.get("images", 0) or 0)
             approved_plates = int(campaign_plate_stats.get("plates", 0) or 0)
+            finish_gate_id = _training_finish_gate_display_id()
             description = (
-                "Bramka T06 korzysta z zatwierdzonych tablic projektu. "
+                f"Bramka {finish_gate_id} korzysta z zatwierdzonych tablic projektu. "
                 f"Materiał: {approved_images} obraz(y), {approved_plates} tablic(e). "
                 "Utwórz wariant treningowy train/val/test, aby przejść do treningu modelu tablic."
             )
@@ -202,7 +214,7 @@ def build_step4_dataset_workflow_view_model(
                 )
             else:
                 description = (
-                    "Ten etap korzysta z gotowego źródłowego datasetu znaków z T06. "
+                    f"Ten etap korzysta z gotowego źródłowego datasetu znaków z {_char_dataset_gate_display_id()}. "
                     "PZ1 przygotuje z niego wariant treningowy train/val/test, a PZ2 uruchomi trening."
                 )
 
@@ -270,10 +282,11 @@ def build_step4_campaign_navigation_view_model(
     dataset_tab_visible = bool(getattr(host, "_step4_dataset_tab_visible", False))
     finish_ready = bool(getattr(host, "_step4_campaign_finish_ready", False))
     dataset_vm = build_step4_dataset_workflow_view_model(host)
+    finish_gate_id = _training_finish_gate_display_id()
     train_back_label = (
-        "Wróć do bramki T06 i zakończ decyzję"
+        f"Wróć do bramki {finish_gate_id} i zakończ decyzję"
         if campaign_active and finish_ready
-        else ("Wróć do bramki T06 w grafie" if campaign_active else "Wstecz do PZ1")
+        else (f"Wróć do bramki {finish_gate_id} w grafie" if campaign_active else "Wstecz do PZ1")
     )
 
     return Step4CampaignNavigationViewModel(
@@ -283,7 +296,7 @@ def build_step4_campaign_navigation_view_model(
         next_enabled=(not campaign_active) or (route_selected and train_unlocked),
         next_label=str(dataset_vm.next_label or "Dalej do treningu"),
         show_dataset_back=campaign_active,
-        dataset_back_label=("Wróć do bramki T06 w grafie" if campaign_active else ""),
+        dataset_back_label=(f"Wróć do bramki {finish_gate_id} w grafie" if campaign_active else ""),
         show_train_nav=True,
         show_train_back=True,
         train_back_label=train_back_label,
@@ -855,6 +868,27 @@ def return_to_campaign_from_step4(host: "TrainingTab"):
         return
 
     try:
+        current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+        iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=current_iteration) or {})
+        session = dict(iteration_state.get("step4_work_session") or {})
+        if bool(session.get("active")) and str(session.get("work_area", "") or "").strip().lower() == "z4":
+            now = datetime.datetime.now().isoformat(timespec="seconds")
+            session.update(
+                {
+                    "active": False,
+                    "state": "returned_to_graph",
+                    "returned_at": now,
+                    "updated_at": now,
+                }
+            )
+            CAMPAIGN.upsert_iteration_state(
+                iteration_num=current_iteration,
+                updates={"step4_work_session": session},
+            )
+    except Exception as exc:
+        logger.debug(f"Nie udało się domknąć znacznika przerwanej pracy Z4: {exc}")
+
+    try:
         campaign_tab = host.app.tabs.get("campaign")
         if campaign_tab:
             try:
@@ -1110,28 +1144,6 @@ def promote_trained_model_to_campaign_if_needed(host: "TrainingTab"):
     return False
 
 
-    try:
-        if target == "char":
-            host._append_train_log(
-                f"[MODEL] Ustawiono nowy aktywny model znaków projektu: {best_model}"
-            )
-        else:
-            host._append_train_log(
-                f"[MODEL] Ustawiono nowy aktywny model tablic projektu: {best_model}"
-            )
-    except Exception:
-        pass
-
-    try:
-        campaign_tab = host.app.tabs.get("campaign")
-        if campaign_tab:
-            campaign_tab._refresh_dashboard()
-    except Exception:
-        pass
-
-    return False
-
-
 def complete_campaign_step4_if_needed(host: "TrainingTab", target: str) -> bool:
     target = str(target or "").strip().lower()
     if target not in ("char", "plate"):
@@ -1158,7 +1170,7 @@ def complete_campaign_step4_if_needed(host: "TrainingTab", target: str) -> bool:
 
     try:
         host.app.update_status(
-            f"✅ Zakończono trening toru '{target}'. Model został zapisany w projekcie.",
+            f"Zakończono wybór wyniku toru '{target}'. Model został zapisany jako wynik bramki {_training_finish_gate_display_id()}.",
             "info"
         )
     except Exception:
@@ -1229,16 +1241,16 @@ def show_training_completion_summary(host: "TrainingTab", *, promoted: bool, can
         if not promoted:
             lines.append(
                 "Dalej: wybierz jawnie model projektu w historii treningow albo w rankingu. "
-                "Dopiero po takim wyborze bramka T06 bedzie gotowa do zatwierdzenia."
+                f"Dopiero po takim wyborze bramka {_training_finish_gate_display_id()} bedzie gotowa do zatwierdzenia."
             )
         if promoted and str(target or "").strip().lower() == "char":
             lines.append(
-                "Dalej: wróć do grafu i użyj pola Zatwierdź na bramce T06. "
+                f"Dalej: wróć do grafu i użyj pola Zatwierdź na bramce {_training_finish_gate_display_id()}. "
                 "To utrwali wynik treningu jako finał tej iteracji. Jeśli chcesz, możesz jeszcze wrócić do PZ1 i poprawić split datasetu znaków."
             )
         elif promoted:
             lines.append(
-                "Dalej: wróć do grafu i użyj pola Zatwierdź na bramce T06. "
+                f"Dalej: wróć do grafu i użyj pola Zatwierdź na bramce {_training_finish_gate_display_id()}. "
                 "To utrwali wynik treningu jako finał tej iteracji. W Z4 możesz jeszcze przebudować dataset tablic w PZ1, jeśli chcesz."
             )
     else:
@@ -1381,7 +1393,7 @@ def poll_training_completion(host: "TrainingTab"):
             except Exception:
                 pass
             host._set_training_ui_idle_state(
-                "Trening zakończony. Wynik jest gotowy: wróć do grafu i zatwierdź bramkę T06, aby utrwalić finał iteracji.",
+                f"Trening zakończony. Wynik jest wybrany: wróć do grafu i zatwierdź bramkę {_training_finish_gate_display_id()}, aby utrwalić finał iteracji.",
                 "#1e8449"
             )
         else:
@@ -1391,7 +1403,16 @@ def poll_training_completion(host: "TrainingTab"):
                     CAMPAIGN.set_step4_finish_state(False)
             except Exception:
                 pass
-            host._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
+            if run_status == TrainingStatus.COMPLETED.value:
+                host._set_training_ui_idle_state(
+                    (
+                        "Trening zakończony. Run jest kandydatem: wybierz go jako wynik bramki "
+                        f"{_training_finish_gate_display_id()} albo uruchom kolejny trening."
+                    ),
+                    "#2c3e50",
+                )
+            else:
+                host._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
 
         try:
             host._refresh_step4_campaign_navigation_ui()

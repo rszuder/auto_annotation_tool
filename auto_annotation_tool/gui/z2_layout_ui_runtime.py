@@ -986,18 +986,49 @@ def _set_preview_list_sort_mode(self, sort_mode: str):
     normalized = self._normalize_preview_list_sort_mode(sort_mode)
     if not normalized:
         return
+    current_sort = self._normalize_preview_list_sort_mode()
+    if normalized == current_sort:
+        self._refresh_preview_list_legend_theme()
+        return
     self.preview_list_sort_var.set(normalized)
     self._invalidate_preview_list_frozen_order()
-    if self._should_use_async_preview_list_population():
+
+    # Sortowanie zmienia tylko kolejność listy. Nie może przełączać podglądu.
+    self._suppress_preview_reload_on_list_select = True
+    try:
+        self.frame.after(250, lambda: setattr(self, "_suppress_preview_reload_on_list_select", False))
+    except Exception:
+        pass
+
+    try:
+        entries_count = int(len(self.current_annotations or []))
+    except Exception:
+        entries_count = 0
+    can_reuse_state_cache = isinstance(getattr(self, "_preview_list_render_state_cache", None), dict)
+    if entries_count >= 800 or self._should_use_async_preview_list_population(entries_count):
         self._populate_preview_list_async(
-            preserve_selection=False,
-            render_current=True,
-            batch_size=200,
+            preserve_selection=True,
+            render_current=False,
+            batch_size=1200,
+            invalidate_runtime=False,
+            rebuild_state_cache=not can_reuse_state_cache,
+            recolor_rows=True,
+            refresh_summary=True,
+            lightweight_summary=True,
+            show_population_state=False,
         )
     else:
-        self._refresh_preview_list(preserve_selection=False, render_current=True)
+        self._refresh_preview_list(
+            preserve_selection=True,
+            render_current=False,
+            invalidate_runtime=False,
+            rebuild_state_cache=not can_reuse_state_cache,
+            lightweight_summary=True,
+            recolor_rows=True,
+            refresh_summary=True,
+        )
     self._refresh_preview_list_legend_theme()
-    self._update_preview_toolbar_state()
+    self._update_preview_toolbar_state(refresh_summary=False)
 
 
 def _normalize_preview_list_sort_mode(self, sort_mode: str | None = None) -> str:

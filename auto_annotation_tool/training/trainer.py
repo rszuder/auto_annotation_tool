@@ -26,6 +26,7 @@ from ..config import (
     is_cuda_available,
 )
 from ..utils import cleanup_gpu_memory, safe_load_yaml
+from .dataset_augmentation import ensure_yolo_dataset_yaml_points_to_root
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
 from .resource_monitor import format_resource_sample_line, sample_system_memory
@@ -712,12 +713,17 @@ class YOLOPoseTrainer:
             report = dict(event.get("report") or {})
             if self.current_run is not None:
                 try:
+                    run_id = self.current_run.id
+                    self._reload_history_from_disk()
+                    refreshed = self.history.get_run(run_id)
+                    if refreshed is not None:
+                        self.current_run = refreshed
                     self.history.update_run(
-                        self.current_run.id,
+                        run_id,
                         resource_report=str(report.get("report_path") or ""),
                         resource_summary=str(report.get("summary_text") or format_resource_sample_line(report.get("last_sample") or {})),
                     )
-                    refreshed = self.history.get_run(self.current_run.id)
+                    refreshed = self.history.get_run(run_id)
                     if refreshed is not None:
                         self.current_run = refreshed
                 except Exception:
@@ -731,6 +737,7 @@ class YOLOPoseTrainer:
 
         if event_type == "training_end":
             self._worker_end_event_seen = True
+            self._reload_history_from_disk()
             if self.on_training_end:
                 try:
                     self.on_training_end(
@@ -926,8 +933,16 @@ class YOLOPoseTrainer:
         if not yaml_file.exists():
             return False, "Brak data.yaml", stats
 
+        yaml_ok, yaml_msg, yaml_changed = ensure_yolo_dataset_yaml_points_to_root(dataset_path)
+        if not yaml_ok:
+            return False, str(yaml_msg or "Nie udało się zweryfikować data.yaml"), stats
+        if yaml_changed:
+            logger.info(f"Poprawiono data.yaml datasetu treningowego: {dataset_path}")
+
         try:
             config = safe_load_yaml(yaml_file)
+            if not isinstance(config, dict):
+                return False, "Nieprawidłowy data.yaml", stats
 
             # Dataset detekcyjny nie musi definiować kpt_shape.
             if "kpt_shape" in config:
@@ -938,17 +953,48 @@ class YOLOPoseTrainer:
         except Exception as e:
             return False, f"Błąd: {e}", stats
 
+        def _resolve_config_root() -> Path:
+            raw_root = str(config.get("path") or "").strip()
+            if not raw_root:
+                return dataset_path
+            root_path = Path(raw_root)
+            if not root_path.is_absolute():
+                root_path = dataset_path / root_path
+            try:
+                return root_path.resolve()
+            except Exception:
+                return root_path
+
+        def _resolve_split_dir(split_name: str) -> Path:
+            raw_split = str(config.get(split_name) or f"images/{split_name}").strip()
+            split_path = Path(raw_split)
+            if not split_path.is_absolute():
+                split_path = _resolve_config_root() / split_path
+            try:
+                return split_path.resolve()
+            except Exception:
+                return split_path
+
+        try:
+            dataset_root = dataset_path.resolve()
+        except Exception:
+            dataset_root = dataset_path
+
         for split in ["train", "val"]:
-            img_dir = dataset_path / "images" / split
+            img_dir = _resolve_split_dir(split)
+            try:
+                img_dir.relative_to(dataset_root)
+            except Exception:
+                return False, f"Split {split} w data.yaml wychodzi poza wybrany dataset", stats
             if not img_dir.exists():
-                return False, f"Brak: images/{split}", stats
+                return False, f"Brak: {config.get(split) or f'images/{split}'}", stats
 
             count = sum(1 for f in img_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS)
             stats[f"{split}_images"] = count
             if count == 0:
-                return False, f"Brak obrazów w images/{split}", stats
+                return False, f"Brak obrazów w {config.get(split) or f'images/{split}'}", stats
 
-        test_dir = dataset_path / "images" / "test"
+        test_dir = _resolve_split_dir("test")
         if test_dir.exists():
             stats["test_images"] = sum(
                 1 for f in test_dir.iterdir() if f.suffix.lower() in CONFIG.IMAGE_EXTENSIONS

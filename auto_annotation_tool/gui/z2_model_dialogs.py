@@ -478,7 +478,22 @@ def _prompt_campaign_plate_auto_model_choice(self, *, force_campaign: bool = Fal
                 wraplength=690,
             ).pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
 
+            rendered_model_detail_paths: set[str] = set()
+
+            def _model_detail_key(model_path: Path | None) -> str:
+                if model_path is None:
+                    return ""
+                try:
+                    return str(Path(model_path).resolve()).casefold()
+                except Exception:
+                    return str(model_path).strip().casefold()
+
             def _add_details_block(label: str, model_path: Path | None, context_text: str) -> None:
+                model_key = _model_detail_key(model_path)
+                if model_key and model_key in rendered_model_detail_paths:
+                    return
+                if model_key:
+                    rendered_model_detail_paths.add(model_key)
                 block = tk.Frame(
                     details_body,
                     bg=field_bg,
@@ -1015,15 +1030,12 @@ def _prompt_campaign_return_to_wizard_ok_modal(
         text=(
             (
                 f"Czeka na przekazanie: {int(approved_images)} obrazów [OK] / "
-                f"{int(approved_plates or 0)} tablic. "
-                f"Wszystkich tablic w bieżącej pracy: {int(total_plates or 0)}."
+                f"{int(approved_plates or 0)} tablic."
             )
             if (is_t06_context or is_t07_repair_context)
             else (
-                f"Zatwierdzonych obrazów [OK]: {int(approved_images)}. "
-                f"Zatwierdzonych tablic: {int(approved_plates or 0)}. "
-                f"Minimum tablic: {int(required_plates or 0)}. "
-                f"Liczba oznaczonych tablic: {int(total_plates or 0)}."
+                f"Do przekazania: {int(approved_images)} obrazów [OK] / {int(approved_plates or 0)} tablic. "
+                f"Warunek: {int(approved_plates or 0)}/{int(required_plates or 0)} tablic [OK]."
             )
         ),
         bg=panel_bg,
@@ -1032,6 +1044,10 @@ def _prompt_campaign_return_to_wizard_ok_modal(
         anchor="w",
         justify=tk.LEFT,
     ).pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+
+    missing_images = max(0, int(required_images or 0) - int(approved_images or 0))
+    missing_plate = max(0, int(required_plates or 0) - int(approved_plates or 0))
+    missing_xml = bool(xml_required and not xml_exists)
 
     if is_t06_context:
         missing_plate = max(0, int(required_plates or 0) - int(approved_plates or 0))
@@ -1051,12 +1067,9 @@ def _prompt_campaign_return_to_wizard_ok_modal(
             "dopóki jawnie ich nie przekażesz.\n\n"
             "Możesz zostać w Z2 i oznaczać dalej albo przekazać obecną pulę [OK] do projektu i wrócić do grafu."
         )
-    elif int(required_plates or 0) > 0 or (xml_required and not xml_exists):
-        missing_images = max(0, int(required_images or 0) - int(approved_images or 0))
-        missing_plate = max(0, int(required_plates or 0) - int(approved_plates or 0))
-        missing_xml = bool(xml_required and not xml_exists)
+    elif missing_images > 0 or missing_plate > 0 or missing_xml:
         message_text = (
-            "Ten etap nie ma jeszcze minimalnej liczby anotacji potrzebnej do domknięcia E2.\n\n"
+            "Ta bramka nie ma jeszcze minimalnej liczby anotacji potrzebnej do przekazania materiału.\n\n"
             f"Minimum: {int(required_plates or 0)} zatwierdzonych tablic na obrazach oznaczonych jako [OK]"
             + (" i utworzony plik XML anotacji." if xml_required else ".")
             + "\n"
@@ -1558,8 +1571,17 @@ def _build_auto_annotation_model_quality_rows(self, model_path: Path | str | Non
 
     identity = self._get_model_identity_caption(safe_path)
     size_text = ""
+    created_text = ""
+    modified_text = ""
     try:
-        size_text = f"{safe_path.stat().st_size / (1024 * 1024):.1f} MB"
+        model_stat = safe_path.stat()
+        size_text = f"{model_stat.st_size / (1024 * 1024):.1f} MB"
+        created_raw = getattr(model_stat, "st_birthtime", None)
+        if created_raw is None:
+            created_raw = getattr(model_stat, "st_ctime", None)
+        if created_raw is not None:
+            created_text = datetime.datetime.fromtimestamp(float(created_raw)).strftime("%Y-%m-%d %H:%M:%S")
+        modified_text = datetime.datetime.fromtimestamp(float(model_stat.st_mtime)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         size_text = ""
 
@@ -1568,6 +1590,10 @@ def _build_auto_annotation_model_quality_rows(self, model_path: Path | str | Non
         rows.append(("Typ", identity, "info"))
     if size_text:
         rows.append(("Rozmiar", size_text, "info"))
+    if created_text:
+        rows.append(("Utworzono plik", created_text, "info"))
+    if modified_text:
+        rows.append(("Modyfikacja pliku", modified_text, "info"))
 
     metrics = self._get_plate_model_quality_metrics(safe_path)
     if metrics:

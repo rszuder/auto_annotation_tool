@@ -771,7 +771,22 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             wraplength=690,
         ).pack(anchor=tk.W, fill=tk.X, pady=(6, 12))
 
+        rendered_model_detail_paths: set[str] = set()
+
+        def _model_detail_key(model_path: Path | None) -> str:
+            if model_path is None:
+                return ""
+            try:
+                return str(Path(model_path).resolve()).casefold()
+            except Exception:
+                return str(model_path).strip().casefold()
+
         def _add_details_block(label: str, model_path: Path | None, context_text: str) -> None:
+            model_key = _model_detail_key(model_path)
+            if model_key and model_key in rendered_model_detail_paths:
+                return
+            if model_key:
+                rendered_model_detail_paths.add(model_key)
             block = tk.Frame(
                 content,
                 bg=field_bg,

@@ -323,6 +323,8 @@ def _write_annotation_run_manifest(self, run_dir: Path, input_dir: Path):
         "result_total_images": 0,
         "result_successful_images": 0,
         "result_total_plates": 0,
+        "selected_count": 0,
+        "source_plan_total_count": 0,
         "resume_preview_index": -1,
         "resume_preview_filename": "",
         "resume_preview_saved_at": "",
@@ -917,6 +919,8 @@ def _mark_annotation_run_completed(
         result_total_images=int(total_images),
         result_successful_images=int(successful_images),
         result_total_plates=int(total_plates),
+        selected_count=int(total_images),
+        source_plan_total_count=int(total_images),
         result_report_errors=int(getattr(report, "errors", 0) or 0),
         result_report_skipped=int(getattr(report, "skipped", 0) or 0),
     )
@@ -1245,16 +1249,69 @@ def _resolve_campaign_project_name_from_run_dir(run_dir: Path | str | None) -> s
     return ""
 
 
-def _promote_run_to_campaign_plate_approved_set(
+def _resolve_campaign_annotation_run_dir(run_dir: Path | str | None, project_name: str = "") -> Path | None:
+    try:
+        requested = Path(run_dir) if run_dir is not None else None
+    except Exception:
+        requested = None
+    if requested is None:
+        return None
+
+    try:
+        if requested.exists() and requested.is_dir() and (requested / "annotations.xml").exists():
+            return requested.resolve()
+    except Exception:
+        pass
+
+    run_name = str(requested.name or "").strip()
+    if not run_name:
+        return None
+
+    search_roots: list[Path] = []
+    try:
+        from ..campaign_manager import CAMPAIGN
+
+        resolved_project = str(project_name or "").strip() or _resolve_campaign_project_name_from_run_dir(requested)
+        if resolved_project:
+            project_root = CAMPAIGN.get_project_root_dir(resolved_project)
+            search_roots.extend([
+                project_root / "2_auto_annotations",
+                project_root / "_staging" / "auto_annotations",
+            ])
+    except Exception:
+        pass
+
+    try:
+        parent = requested.parent
+        if parent:
+            search_roots.append(parent)
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for root in search_roots:
+        try:
+            root_key = str(root.resolve()).strip().lower()
+        except Exception:
+            root_key = str(root).strip().lower()
+        if not root_key or root_key in seen:
+            continue
+        seen.add(root_key)
+        candidate = root / run_name
+        try:
+            if candidate.exists() and candidate.is_dir() and (candidate / "annotations.xml").exists():
+                return candidate.resolve()
+        except Exception:
+            continue
+    return None
+
+
+def _get_campaign_plate_approved_run_pool_state(
     self,
-    run_dir: Path,
+    run_dir: Path | str | None,
     *,
-    force_parse_xml: bool = False,
     project_name: str | None = None,
 ) -> dict:
-    if self._is_free_mode_session_context():
-        return {"ok": False, "reason": "free_mode"}
-
     try:
         from ..campaign_manager import CAMPAIGN
     except Exception:
@@ -1264,14 +1321,246 @@ def _promote_run_to_campaign_plate_approved_set(
     if not resolved_project_name:
         return {"ok": False, "reason": "campaign_inactive"}
 
+    resolved_run_dir = _resolve_campaign_annotation_run_dir(run_dir, resolved_project_name)
+    if resolved_run_dir is None:
+        return {"ok": False, "reason": "missing_run_dir", "run_dir": str(run_dir or "")}
+
+    try:
+        manifest = self._load_annotation_run_manifest(resolved_run_dir)
+    except Exception:
+        manifest = {}
+
+    try:
+        approved_names = set(self._load_annotation_run_approved_filenames(resolved_run_dir) or set())
+    except Exception:
+        approved_names = set()
+
+    try:
+        current_run_dir = getattr(self, "current_annotation_run_dir", None)
+        if current_run_dir is not None and self._paths_equivalent(current_run_dir, resolved_run_dir):
+            approved_names.update(set(self._get_preview_approved_filenames() or set()))
+    except Exception:
+        pass
+
+    normalized_approved_names = {
+        CAMPAIGN._normalize_image_set_name(name)
+        for name in set(approved_names or set())
+        if CAMPAIGN._normalize_image_set_name(name)
+    }
+    explicit_approval = bool(normalized_approved_names)
+    if not normalized_approved_names:
+        # Older campaign runs did not persist approval flags; for those runs,
+        # every image with a plate is the effective approved contribution.
+        if isinstance(manifest, dict) and "approved_filenames" not in manifest:
+            try:
+                normalized_approved_names = set(
+                    dict(CAMPAIGN._load_run_plate_counts_by_image(resolved_run_dir) or {}).keys()
+                )
+            except Exception:
+                normalized_approved_names = set()
+
+    if not normalized_approved_names:
+        return {
+            "ok": False,
+            "reason": "missing_approved_names",
+            "run_dir": str(resolved_run_dir),
+        }
+
+    try:
+        run_counts = dict(
+            CAMPAIGN._load_run_plate_counts_by_image(
+                resolved_run_dir,
+                image_names=set(normalized_approved_names) if explicit_approval else None,
+            )
+            or {}
+        )
+    except Exception:
+        run_counts = {}
+
+    approved_plate_names = {
+        CAMPAIGN._normalize_image_set_name(name)
+        for name, plate_count in run_counts.items()
+        if CAMPAIGN._normalize_image_set_name(name) and int(plate_count or 0) > 0
+    }
+    if not approved_plate_names:
+        return {
+            "ok": False,
+            "reason": "missing_approved_plates",
+            "run_dir": str(resolved_run_dir),
+            "approved_names": len(normalized_approved_names),
+        }
+
+    project_counts_by_name: dict[str, int] = {}
+    project_entry_keys: set[str] = set()
+    try:
+        approved_entries = list(CAMPAIGN.list_plate_approved_entries(resolved_project_name) or [])
+    except Exception:
+        approved_entries = []
+    for entry in approved_entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_key = str(entry.get("entry_key", "") or "").strip().lower()
+        if entry_key:
+            project_entry_keys.add(entry_key)
+        safe_name = CAMPAIGN._normalize_image_set_name(entry.get("image_name", ""))
+        if not safe_name:
+            continue
+        plate_count = 0
+        for plate_entry in list(entry.get("plates") or []):
+            if not isinstance(plate_entry, dict):
+                continue
+            if len(list(plate_entry.get("polygon") or [])) >= 4:
+                plate_count += 1
+        if plate_count <= 0:
+            try:
+                plate_count = int(entry.get("plate_count", 0) or 0)
+            except Exception:
+                plate_count = 0
+        if plate_count > 0:
+            project_counts_by_name[safe_name] = max(
+                int(project_counts_by_name.get(safe_name, 0) or 0),
+                int(plate_count),
+            )
+
+    input_dir = None
+    for raw_dir in (
+        manifest.get("source_input_dir") if isinstance(manifest, dict) else "",
+        manifest.get("input_dir") if isinstance(manifest, dict) else "",
+    ):
+        try:
+            candidate_dir = Path(str(raw_dir or "").strip())
+        except Exception:
+            candidate_dir = None
+        if candidate_dir is not None and candidate_dir.exists():
+            input_dir = candidate_dir
+            break
+    run_images_dir = resolved_run_dir / "images"
+    expected_entry_keys_by_name: dict[str, str] = {}
+    for safe_name in approved_plate_names:
+        source_image_path = None
+        for base_dir in (input_dir, run_images_dir if run_images_dir.exists() else None):
+            if base_dir is None:
+                continue
+            try:
+                candidate_path = Path(base_dir) / safe_name
+                if candidate_path.exists():
+                    source_image_path = candidate_path
+                    break
+            except Exception:
+                continue
+        if source_image_path is None:
+            continue
+        expected_key = _build_campaign_plate_entry_key(
+            image_name=safe_name,
+            source_image_path=source_image_path,
+        )
+        if expected_key:
+            expected_entry_keys_by_name[safe_name] = expected_key
+
+    def has_project_pool_entry(safe_name: str) -> bool:
+        expected_key = str(expected_entry_keys_by_name.get(safe_name, "") or "").strip().lower()
+        if expected_key:
+            return expected_key in project_entry_keys
+        return int(project_counts_by_name.get(safe_name, 0) or 0) > 0
+
+    missing_names = sorted(
+        safe_name
+        for safe_name in approved_plate_names
+        if not has_project_pool_entry(safe_name)
+    )
+    matched_names = sorted(set(approved_plate_names) - set(missing_names))
+    matched_plates = sum(int(run_counts.get(name, 0) or 0) for name in matched_names)
+    missing_plates = sum(int(run_counts.get(name, 0) or 0) for name in missing_names)
+
+    return {
+        "ok": not bool(missing_names),
+        "reason": "already_promoted" if not missing_names else "missing_from_project_pool",
+        "run_dir": str(resolved_run_dir),
+        "project_name": resolved_project_name,
+        "matched_images": len(matched_names),
+        "matched_plates": int(matched_plates or 0),
+        "missing_images": len(missing_names),
+        "missing_plates": int(missing_plates or 0),
+        "missing_names": missing_names,
+    }
+
+
+def _promote_run_to_campaign_plate_approved_set(
+    self,
+    run_dir: Path,
+    *,
+    force_parse_xml: bool = False,
+    project_name: str | None = None,
+) -> dict:
+    try:
+        from ..campaign_manager import CAMPAIGN
+    except Exception:
+        return {"ok": False, "reason": "campaign_unavailable"}
+
+    try:
+        active_project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+    except Exception:
+        active_project_name = ""
+    if self._is_free_mode_session_context() and not active_project_name:
+        return {"ok": False, "reason": "free_mode"}
+
+    resolved_project_name = str(project_name or "").strip() or _resolve_campaign_project_name_from_run_dir(run_dir)
+    if not resolved_project_name:
+        return {"ok": False, "reason": "campaign_inactive"}
+
+    resolved_run_dir = _resolve_campaign_annotation_run_dir(run_dir, resolved_project_name)
+    if resolved_run_dir is None:
+        return {"ok": False, "reason": "missing_run_dir", "run_dir": str(run_dir or "")}
+
     entries = self._build_campaign_plate_approved_entries_from_run(
-        run_dir,
+        resolved_run_dir,
         force_parse_xml=force_parse_xml,
     )
     if not entries:
-        return {"ok": False, "reason": "missing_entries"}
+        pool_state = _get_campaign_plate_approved_run_pool_state(
+            self,
+            resolved_run_dir,
+            project_name=resolved_project_name,
+        )
+        if bool(dict(pool_state or {}).get("ok")):
+            return {
+                "ok": True,
+                "reason": "already_promoted",
+                "run_dir": str(resolved_run_dir),
+                "matched_images": int(dict(pool_state or {}).get("matched_images", 0) or 0),
+                "matched_plates": int(dict(pool_state or {}).get("matched_plates", 0) or 0),
+            }
+        return {
+            "ok": False,
+            "reason": "missing_entries",
+            "run_dir": str(resolved_run_dir),
+            "pool_state": dict(pool_state or {}),
+        }
 
     result = CAMPAIGN.upsert_plate_approved_entries(entries, project_name=resolved_project_name)
+    try:
+        result = dict(result or {})
+        result.setdefault("run_dir", str(resolved_run_dir))
+        if str(Path(run_dir).resolve()) != str(resolved_run_dir):
+            result["requested_run_dir"] = str(run_dir)
+            result["resolved_run_dir"] = str(resolved_run_dir)
+    except Exception:
+        pass
+    if not bool(dict(result or {}).get("ok")):
+        pool_state = _get_campaign_plate_approved_run_pool_state(
+            self,
+            resolved_run_dir,
+            project_name=resolved_project_name,
+        )
+        if bool(dict(pool_state or {}).get("ok")):
+            result = {
+                "ok": True,
+                "reason": "already_promoted",
+                "run_dir": str(resolved_run_dir),
+                "previous_result": dict(result or {}),
+                "matched_images": int(dict(pool_state or {}).get("matched_images", 0) or 0),
+                "matched_plates": int(dict(pool_state or {}).get("matched_plates", 0) or 0),
+            }
     try:
         self._campaign_hidden_project_approved_runtime_cache = None
     except Exception:

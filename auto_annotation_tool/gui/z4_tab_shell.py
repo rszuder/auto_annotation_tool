@@ -227,10 +227,10 @@ def get_free_mode_assistant_context(self) -> dict:
     if selected_tab == str(getattr(self, "tab_train", "")):
         return {
             "location": "[Z4] Trening i analiza / [PZ2] Trening i wyniki",
-            "goal": "PZ2 korzysta z wariantu splitu przygotowanego w PZ1, wybiera model bazowy i uruchamia trening.",
+            "goal": "PZ2 korzysta z wariantu splitu przygotowanego w PZ1, wybiera model startowy treningu i uruchamia nowy run.",
             "workflow": (
                 "Wybierz wariant splitu z listy.",
-                "Wybierz model bazowy zgodny z typem datasetu.",
+                "Wybierz model startowy zgodny z typem datasetu.",
                 "Ustaw parametry startowe: epoki, batch, rozdzielczość, learning rate i urządzenie.",
                 "Uruchom trening i obserwuj postęp oraz terminal procesu.",
                 "Po treningu sprawdź historię runów, wykonaj walidację lub porównaj wyniki w rankingu.",

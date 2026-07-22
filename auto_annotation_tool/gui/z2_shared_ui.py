@@ -85,15 +85,15 @@ def get_campaign_return_to_graph_copy(host: "AnnotationTab") -> dict[str, object
         }
     if is_campaign_t04_char_route_context(host):
         return {
-            "section": f" Przekazanie [OK] do bramki {display_gate_id or 'T04'} ",
-            "button": f"Przekaż [OK] do bramki {display_gate_id or 'T04'} i wróć do grafu",
+            "section": " Przekazanie [OK] do pracy nad znakami ",
+            "button": "Przekaż [OK] do pracy nad znakami i wróć do grafu",
             "width": 42,
         }
     if graph_gate_id == "T05":
         return {
             "section": f" Przekazanie [OK] do bramki {display_gate_id or 'T04'} ",
-            "button": "Przekaż [OK] do puli YOLO i wróć do grafu",
-            "width": 42,
+            "button": f"Przekaż [OK] do puli YOLO tablic i wróć do bramki {display_gate_id or 'T04'}",
+            "width": 48,
         }
     return {
         "section": " Powrót do grafu ",

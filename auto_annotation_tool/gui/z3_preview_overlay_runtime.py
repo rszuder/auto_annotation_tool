@@ -226,7 +226,12 @@ def _extract_preview_action_from_current_item(self):
     return None
 
 def _clear_preview_canvas_action(self, event=None):
-    cleared_typing = self._cancel_preview_char_label_interaction(reset_mode=True, clear_hover=True)
+    previous_selected_index = getattr(self, "_preview_char_selected_index", None)
+    cleared_typing = self._cancel_preview_char_label_interaction(
+        reset_mode=True,
+        clear_hover=True,
+        redraw_canvas=False,
+    )
     if cleared_typing:
         self._preview_char_selected_index = None
         self._preview_pan_drag_state = None
@@ -235,7 +240,17 @@ def _clear_preview_canvas_action(self, event=None):
         self._preview_char_add_state = None
         self._refresh_preview_editor_toolbar()
         self._update_preview_edit_status("Zakończono tryb wpisywania znaków.", tone="muted")
-        if not self._refresh_preview_character_selection_visual(None):
+        try:
+            self._clear_preview_char_label_canvas_fields()
+        except Exception:
+            pass
+        affected_indices = set()
+        try:
+            if previous_selected_index is not None:
+                affected_indices.add(int(previous_selected_index))
+        except Exception:
+            affected_indices = set()
+        if affected_indices and not self._refresh_preview_character_selection_visual(affected_indices):
             if not self._redraw_preview_character_overlays_light():
                 self._on_preview_select(None)
         return "break"

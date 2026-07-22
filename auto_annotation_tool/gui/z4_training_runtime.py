@@ -71,6 +71,7 @@ from .z4_campaign_flow import (
     set_campaign_context,
     set_campaign_training_target,
 )
+from .z2_shared_ui import campaign_visible_gate_id
 from .z4_flow_models import (
     CharYoloDatasetSourceAdapter,
     PlateXmlImagesSourceAdapter,
@@ -112,6 +113,10 @@ from .z4_view_models import (
     Step4TrainingInputsViewModel,
 )
 
+
+def _step4_finish_gate_display_id() -> str:
+    return campaign_visible_gate_id("T07") or "T06"
+
 NAV_BUTTON_WIDTH = 18
 
 if PIL_AVAILABLE:
@@ -147,6 +152,19 @@ def _release_gpu_resources_before_training(self):
 def _start_training(self):
     if not YOLO_AVAILABLE:
         return messagebox.showerror("Błąd", "Brak ultralytics.")
+
+    try:
+        pinned_state = dict(self._get_pinned_step4_result_state() or {})
+    except Exception:
+        pinned_state = {}
+    if pinned_state:
+        return messagebox.showinfo(
+            "Model przypięty",
+            (
+                "Ta bramka ma już przypięty model wynikowy.\n\n"
+                "Aby uruchomić nowy trening albo zmienić konfigurację, najpierw użyj `Odepnij wynik`."
+            ),
+        )
 
     try:
         self._clear_step4_guidance()
@@ -266,14 +284,14 @@ def _start_training(self):
     if is_pose_dataset and not is_pose_model:
         return messagebox.showerror(
             "Niezgodność typu treningu",
-            "Wybrany dataset jest typu POSE (z keypointami), ale model bazowy NIE jest modelem pose.\n\n"
+            "Wybrany dataset jest typu POSE (z keypointami), ale model startowy NIE jest modelem pose.\n\n"
             "Wybierz model z dopiskiem '-pose'."
         )
 
     if not is_pose_dataset and is_pose_model:
         return messagebox.showerror(
             "Niezgodność typu treningu",
-            "Wybrany dataset jest typu DETECT, ale model bazowy jest typu POSE.\n\n"
+            "Wybrany dataset jest typu DETECT, ale model startowy jest typu POSE.\n\n"
             "Dla znaków tablic wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
         )
 
@@ -318,7 +336,7 @@ def _start_training(self):
     self._append_train_log("=" * 70)
     self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
     self._append_train_log(f"Dataset: {dataset_path}")
-    self._append_train_log(f"Wybór w polu 'Model bazowy (.pt)': {base_model_display}")
+    self._append_train_log(f"Wybór w polu 'Model startowy treningu (.pt)': {base_model_display}")
     self._append_train_log(f"Model przekazany do treningu: {base_model}")
     self._append_train_log(
         f"Urządzenie: {selected_device_display} -> {effective_device_desc} | backend Ultralytics: {device}"
@@ -329,6 +347,23 @@ def _start_training(self):
         f"Rozdzielczość wejściowa: {self._safe_training_int_value('imgsz_var', default=640, minimum=32)} | "
         f"Współczynnik uczenia: {self._safe_training_float_value('lr0_var', default=0.01, minimum=0.0001)}"
     )
+    try:
+        train_images = int(validation_stats.get("train_images", 0) or 0)
+        val_images = int(validation_stats.get("val_images", 0) or 0)
+        test_images = int(validation_stats.get("test_images", 0) or 0)
+        batch_size = self._safe_training_int_value("batch_var", default=16, minimum=1)
+        batches_per_epoch = int((train_images + batch_size - 1) // batch_size) if train_images > 0 else 0
+        self._append_train_log(
+            f"Zweryfikowany wariant datasetu: train={train_images}, val={val_images}, test={test_images} | "
+            f"data.yaml: {yaml_path}"
+        )
+        if batches_per_epoch > 0:
+            self._append_train_log(
+                f"Przewidywane partie na epokę: około {batches_per_epoch} "
+                f"(train={train_images}, batch={batch_size})."
+            )
+    except Exception:
+        pass
     self._append_train_log("=" * 70)
     self._release_gpu_resources_before_training()
 
@@ -359,10 +394,10 @@ def _start_training(self):
             text="Nie udało się uruchomić treningu.",
             foreground="#c0392b"
         )
-        self._append_train_log("[START] Trening nie wystartował. Sprawdź dataset, model bazowy i log powyżej.")
+        self._append_train_log("[START] Trening nie wystartował. Sprawdź dataset, model startowy i log powyżej.")
         return messagebox.showerror(
             "Nie udało się uruchomić treningu",
-            "Trening nie wystartował.\n\nSprawdź poprawność datasetu, modelu bazowego i log w terminalu procesu."
+            "Trening nie wystartował.\n\nSprawdź poprawność datasetu, modelu startowego i log w terminalu procesu."
         )
 
     self.current_run_id = run_id
@@ -411,7 +446,8 @@ def _start_training(self):
         try:
             label = "znaków" if self._pending_campaign_model_type == "char" else "tablic"
             self._append_train_log(
-                f"[TARGET] Ten trening zostanie zapisany jako aktywny model {label} projektu."
+                f"[TARGET] Ten trening utworzy kandydata na model {label}. "
+                "Wynikiem bramki stanie się dopiero po jawnym wyborze w sekcji wyniku."
             )
         except Exception:
             pass
@@ -563,6 +599,19 @@ def _bind_trainer_callbacks(self):
                 CAMPAIGN.set_step4_finish_state(False)
             except Exception:
                 pass
+        try:
+            self._reload_history_snapshot_from_disk()
+            current_run_id = str(getattr(self, "current_run_id", "") or "").strip()
+            current_run = self.history.get_run(current_run_id) if current_run_id else None
+            registry_status = str(getattr(current_run, "status", "") or "").strip().lower()
+            if current_run_id and CAMPAIGN.get_active_project_name():
+                self._remember_campaign_training_run_in_registry(
+                    run_id=current_run_id,
+                    status=registry_status or (TrainingStatus.COMPLETED.value if success else TrainingStatus.FAILED.value),
+                    target=getattr(self, "_pending_campaign_model_type", None) or self.get_campaign_training_target(),
+                )
+        except Exception:
+            pass
 
         status_text, status_color = self._resolve_training_end_feedback(success, safe_msg)
 
@@ -679,11 +728,17 @@ def _load_history(self):
 
     self.tree.delete(*self.tree.get_children())
     for run in self.history.get_all_runs():
+        if CAMPAIGN.get_active_project_name():
+            try:
+                if not self._does_history_run_match_active_campaign_target(run):
+                    continue
+            except Exception:
+                continue
         # Zachowaj pełne run.id, aby wybór historii i folderów był jednoznaczny.
         best_map = getattr(run, 'best_map50_95', 0.0) or 0.0
         run_target = ""
         try:
-            infer_target = getattr(self.history, "_infer_run_target", None)
+            infer_target = getattr(self, "_infer_history_run_target", None)
             if callable(infer_target):
                 run_target = str(infer_target(run) or "").strip().lower()
         except Exception:
@@ -929,9 +984,13 @@ def _refresh_campaign_training_result_selector(self):
         _rebuild_campaign_result_menu([])
         _set_selector_enabled(False)
         if detail_lbl is not None:
-            detail_lbl.configure(text="Wybór wyniku bramki T06 jest dostępny tylko w kampanii.")
+            detail_lbl.configure(text=f"Wybór wyniku bramki {_step4_finish_gate_display_id()} jest dostępny tylko w kampanii.")
         if action_btn is not None:
-            action_btn.configure(state=tk.DISABLED, text="Wybierz ten model jako wynik T06")
+            action_btn.configure(
+                state=tk.DISABLED,
+                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                command=self._use_campaign_training_result_choice,
+            )
         _set_status("POZA KAMPANIĄ", "muted")
         return
 
@@ -991,30 +1050,47 @@ def _refresh_campaign_training_result_selector(self):
 
     if not labels:
         if detail_lbl is not None:
-            detail_lbl.configure(text="Brak ukończonych runów pasujących do aktywnego toru bramki T06.")
+            detail_lbl.configure(text=f"Brak ukończonych runów pasujących do aktywnego toru bramki {_step4_finish_gate_display_id()}.")
         if action_btn is not None:
-            action_btn.configure(state=tk.DISABLED, text="Wybierz ten model jako wynik T06")
+            action_btn.configure(
+                state=tk.DISABLED,
+                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                command=self._use_campaign_training_result_choice,
+            )
         _set_status("BRAK KANDYDATA", "warning")
         return
 
     detail_text = _campaign_training_result_detail_text(self, selected_run)
     if selected_run_id and selected_run_id == finish_run_id:
         if action_btn is not None:
-            action_btn.configure(state=tk.DISABLED, text="Wynik T06 wybrany")
+            action_btn.configure(state=tk.NORMAL, text="Odepnij wynik", command=self._clear_pinned_step4_result)
         _set_status("WYNIK WYBRANY", "success")
         if detail_text:
             detail_text = (
                 f"{detail_text}\n"
-                "Model jest już wskazany jako wynik T06. Wróć do grafu i zatwierdź bramkę."
+                f"Model jest przypięty jako wynik {_step4_finish_gate_display_id()}. Jeśli chcesz zmienić decyzję, odepnij go tutaj."
+            )
+    elif finish_run_id:
+        if action_btn is not None:
+            action_btn.configure(state=tk.NORMAL, text="Odepnij wynik", command=self._clear_pinned_step4_result)
+        _set_status("WYNIK PRZYPIĘTY", "success")
+        if detail_text:
+            detail_text = (
+                f"{detail_text}\n"
+                "Inny model możesz wskazać dopiero po odpięciu aktualnego wyniku w tej sekcji."
             )
     else:
         if action_btn is not None:
-            action_btn.configure(state=tk.NORMAL, text="Wybierz ten model jako wynik T06")
+            action_btn.configure(
+                state=tk.NORMAL,
+                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                command=self._use_campaign_training_result_choice,
+            )
         _set_status("DO WYBORU", "warning")
         if detail_text:
             detail_text = (
                 f"{detail_text}\n"
-                "Jeśli to właściwy model, wybierz go jako wynik T06. To jeszcze nie zamyka bramki."
+                f"Jeśli to właściwy model, wybierz go jako wynik {_step4_finish_gate_display_id()}. To jeszcze nie zamyka bramki."
             )
     if detail_lbl is not None:
         detail_lbl.configure(text=detail_text)
@@ -1027,7 +1103,7 @@ def _use_campaign_training_result_choice(self):
     if run is None:
         return messagebox.showwarning(
             "Brak runu",
-            "Najpierw wybierz kandydata na wynik treningu dla bramki T06.",
+            f"Najpierw wybierz kandydata na wynik treningu dla bramki {_step4_finish_gate_display_id()}.",
         )
     run_id = str(getattr(run, "id", "") or "").strip()
     selected_ok = False
@@ -1104,6 +1180,21 @@ def _promote_selected_run_model_to_campaign(self):
         )
 
     try:
+        pinned_state = dict(self._get_pinned_step4_result_state() or {})
+    except Exception:
+        pinned_state = {}
+    pinned_run_id = str(pinned_state.get("run_id", "") or "").strip()
+    if pinned_run_id and pinned_run_id != run_id:
+        return messagebox.showwarning(
+            "Model jest przypięty",
+            (
+                "Ta bramka ma już przypięty model wynikowy.\n\n"
+                "Najpierw użyj `Odepnij wynik` w sekcji wyboru wyniku bramki, "
+                "a dopiero potem wybierz inny run albo uruchom nowy trening."
+            ),
+        )
+
+    try:
         iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
     except Exception:
         iteration_num = 0
@@ -1130,6 +1221,10 @@ def _promote_selected_run_model_to_campaign(self):
     except Exception:
         pass
     try:
+        self._refresh_step4_pinned_result_ui()
+    except Exception:
+        pass
+    try:
         campaign_tab = self.app.tabs.get("campaign")
         if campaign_tab:
             campaign_tab._refresh_dashboard()
@@ -1148,10 +1243,10 @@ def _promote_selected_run_model_to_campaign(self):
     except Exception:
         pass
     return messagebox.showinfo(
-        "Wynik T06 wybrany",
+        f"Wynik {_step4_finish_gate_display_id()} wybrany",
         (
-            f"Wybrano model {target_label} jako wynik bramki T06:\n{Path(best_weights).name}\n\n"
-            "To wybór artefaktu. Wróć do grafu i użyj pola Zatwierdź na bramce T06, "
+            f"Wybrano model {target_label} jako wynik bramki {_step4_finish_gate_display_id()}:\n{Path(best_weights).name}\n\n"
+            f"To wybór artefaktu. Wróć do grafu i użyj pola Zatwierdź na bramce {_step4_finish_gate_display_id()}, "
             "aby formalnie zamknąć przejście."
         )
     )
@@ -1323,6 +1418,172 @@ def _show_history_context_menu(self, event=None):
         pass
 
     try:
+        menu.tk_popup(event.x_root, event.y_root)
+    except Exception:
+        pass
+    finally:
+        try:
+            menu.grab_release()
+        except Exception:
+            pass
+
+def _selected_ranking_entry_ref(self) -> dict:
+    tree = getattr(self, "rank_tree", None)
+    if tree is None:
+        return {}
+    try:
+        item_id = str(tree.focus() or "")
+        if not item_id:
+            selection = list(tree.selection() or [])
+            item_id = str(selection[0]) if selection else ""
+    except Exception:
+        item_id = ""
+    refs = getattr(self, "_ranking_tree_entry_refs", {}) or {}
+    ref = refs.get(item_id, {})
+    return dict(ref) if isinstance(ref, dict) else {}
+
+def _selected_ranking_run(self):
+    ref = _selected_ranking_entry_ref(self)
+    run_id = str(ref.get("run_id", "") or "").strip()
+    if not run_id:
+        return None
+    try:
+        self._reload_history_snapshot_from_disk()
+    except Exception:
+        pass
+    try:
+        return self.history.get_run(run_id)
+    except Exception:
+        return None
+
+def _focus_history_run_from_ranking(self, run) -> bool:
+    run_id = str(getattr(run, "id", "") or "").strip()
+    if not run_id or not hasattr(self, "tree"):
+        return False
+    try:
+        self.tree.selection_set(run_id)
+        self.tree.focus(run_id)
+        self.tree.see(run_id)
+        return True
+    except Exception:
+        return False
+
+def _use_selected_ranking_model_as_campaign_result(self):
+    run = _selected_ranking_run(self)
+    if run is None:
+        return messagebox.showwarning(
+            "Brak runu projektu",
+            "Ten wpis rankingu nie jest powiązany z runem historii projektu, więc nie można go wskazać jako wynik bramki.",
+        )
+    if not _focus_history_run_from_ranking(self, run):
+        return messagebox.showwarning(
+            "Nie udało się wybrać runu",
+            "Nie udało się zaznaczyć runu z rankingu w historii treningów. Odśwież historię i spróbuj ponownie.",
+        )
+    return self._promote_selected_run_model_to_campaign()
+
+def _open_selected_ranking_run_details(self):
+    run = _selected_ranking_run(self)
+    if run is None:
+        return messagebox.showinfo(
+            "Brak szczegółów runu",
+            "Ten wpis rankingu nie jest powiązany z runem historii projektu.",
+        )
+    return self._open_run_details_modal(run)
+
+def _open_selected_ranking_model_folder(self):
+    ref = _selected_ranking_entry_ref(self)
+    model_path = str(ref.get("model_path", "") or "").strip()
+    target = None
+    if model_path:
+        try:
+            path = Path(model_path)
+            if path.exists():
+                target = path.parent if path.is_file() else path
+        except Exception:
+            target = None
+    if target is None:
+        run = _selected_ranking_run(self)
+        output_dir = str(getattr(run, "output_dir", "") or "").strip() if run is not None else ""
+        if output_dir:
+            try:
+                path = Path(output_dir)
+                if path.exists():
+                    target = path
+            except Exception:
+                target = None
+    if target is None:
+        return messagebox.showinfo("Brak folderu", "Nie udało się odnaleźć folderu modelu z tego wpisu rankingu.")
+    return self._open_path(target)
+
+def _copy_selected_ranking_choice_label(self):
+    ref = _selected_ranking_entry_ref(self)
+    label = str(ref.get("choice_label", "") or "").strip()
+    if not label:
+        return
+    try:
+        root = self.frame.winfo_toplevel()
+        root.clipboard_clear()
+        root.clipboard_append(label)
+    except Exception:
+        pass
+
+def _show_ranking_context_menu(self, event=None):
+    tree = getattr(self, "rank_tree", None)
+    if event is None or tree is None:
+        return
+    try:
+        row_id = tree.identify_row(event.y)
+    except Exception:
+        row_id = ""
+    if not row_id:
+        return
+    try:
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+    except Exception:
+        pass
+
+    ref = _selected_ranking_entry_ref(self)
+    run = _selected_ranking_run(self)
+    has_run = run is not None
+    has_path = bool(str(ref.get("model_path", "") or "").strip())
+    promotable = False
+    if has_run:
+        try:
+            promotable = bool(
+                CAMPAIGN.get_active_project_name()
+                and str(getattr(run, "status", "") or "").strip().lower() == TrainingStatus.COMPLETED.value
+                and self._infer_history_run_target(run) in {"plate", "char"}
+                and self._resolve_history_run_best_weights(run) is not None
+                and self._does_history_run_match_active_campaign_target(run)
+            )
+        except Exception:
+            promotable = False
+
+    try:
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(
+            label=f"Użyj jako wynik bramki {_step4_finish_gate_display_id()}",
+            command=self._use_selected_ranking_model_as_campaign_result,
+            state=(tk.NORMAL if promotable else tk.DISABLED),
+        )
+        menu.add_command(
+            label="Szczegóły runu",
+            command=self._open_selected_ranking_run_details,
+            state=(tk.NORMAL if has_run else tk.DISABLED),
+        )
+        menu.add_command(
+            label="Otwórz folder wag",
+            command=self._open_selected_ranking_model_folder,
+            state=(tk.NORMAL if has_path or has_run else tk.DISABLED),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Kopiuj podpis wyboru",
+            command=self._copy_selected_ranking_choice_label,
+            state=(tk.NORMAL if str(ref.get("choice_label", "") or "").strip() else tk.DISABLED),
+        )
         menu.tk_popup(event.x_root, event.y_root)
     except Exception:
         pass
@@ -1665,6 +1926,7 @@ def _load_ranking(self):
     self._ensure_plate_ranking_engine()
     entries = getattr(self.ranking_engine, 'entries', [])
     self.rank_tree.delete(*self.rank_tree.get_children())
+    self._ranking_tree_entry_refs = {}
 
     selected_reference = self._resolve_ranking_reference_source()
     selected_reference_path = str(selected_reference.get("reference_dir") or "").strip()
@@ -1697,6 +1959,51 @@ def _load_ranking(self):
         except Exception:
             project_model_paths = set()
 
+    try:
+        self._reload_history_snapshot_from_disk()
+    except Exception:
+        pass
+    ranking_run_cache: dict[str, object | None] = {}
+
+    def entry_training_run(entry):
+        raw = str(getattr(entry, "model_path", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            key = str(Path(raw).resolve()).lower()
+        except Exception:
+            key = str(Path(raw)).lower()
+        if key in ranking_run_cache:
+            return ranking_run_cache[key]
+        run = None
+        resolver = getattr(self, "_resolve_training_run_from_model_path", None)
+        if callable(resolver):
+            try:
+                run = resolver(Path(raw))
+            except Exception:
+                run = None
+        ranking_run_cache[key] = run
+        return run
+
+    def entry_labels(entry, scope: str) -> tuple[str, str, object | None]:
+        run = entry_training_run(entry)
+        model_path_raw = str(getattr(entry, "model_path", "") or "").strip()
+        model_file = Path(model_path_raw).name if model_path_raw else str(getattr(entry, "model_name", "") or "-")
+        if run is not None:
+            try:
+                choice_label = _campaign_training_result_choice_label(self, run)
+            except Exception:
+                choice_label = self._format_training_model_run_label(run)
+            return choice_label, model_file or "best.pt", run
+        fallback = format_ranking_model_label(
+            getattr(entry, "model_name", ""),
+            getattr(entry, "model_path", ""),
+            getattr(entry, "task_type", ""),
+        )
+        if scope == "Projekt":
+            return fallback, model_file or fallback, None
+        return fallback, model_file or fallback, None
+
     def entry_scope(entry) -> str:
         model_path_raw = str(getattr(entry, "model_path", "") or "").strip()
         if not model_path_raw:
@@ -1713,8 +2020,12 @@ def _load_ranking(self):
         return "Globalne"
 
     def entry_decision(entry, scope: str, index: int) -> str:
+        if index == 0:
+            if scope == "Projekt":
+                return "WYGRANY - wybierz jawnie"
+            return "WYGRANY referencyjny"
         if scope == "Projekt":
-            return "Kandydat projektu" if index > 0 else "Najlepszy kandydat"
+            return "Kandydat projektu"
         if scope == "Globalne":
             return "Model referencyjny"
         return "Kandydat"
@@ -1773,17 +2084,23 @@ def _load_ranking(self):
     best_reference = str(getattr(best, "reference_name", "") or "").strip()
     if not best_reference:
         best_reference = Path(str(getattr(best, "reference_path", "") or "-")).name or "-"
-    best_model_label = format_ranking_model_label(
-        getattr(best, "model_name", ""),
-        getattr(best, "model_path", ""),
-        getattr(best, "task_type", ""),
-    )
-    set_leader(
-        f"Lider: {best_model_label} | F1 {float(getattr(best, 'f1_score', 0) or 0):.1f}%",
-        (
+    best_result_label, best_model_label, best_run = entry_labels(best, best_scope)
+    if best_run is not None:
+        best_title = f"Wygrywa: {best_result_label} | F1 {float(getattr(best, 'f1_score', 0) or 0):.1f}%"
+        best_hint = (
             f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
-            "To rekomendacja rankingu, nie automatyczny wybór modelu projektowego."
-        ),
+            f"Tego samego podpisu szukaj w sekcji wyboru wyniku bramki {_step4_finish_gate_display_id()}. "
+            "Ranking nie wybiera modelu automatycznie."
+        )
+    else:
+        best_title = f"Wygrywa: {best_result_label} | F1 {float(getattr(best, 'f1_score', 0) or 0):.1f}%"
+        best_hint = (
+            f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
+            "To kandydat spoza historii projektu, więc nie ma podpisu runu z wyboru wyniku."
+        )
+    set_leader(
+        best_title,
+        best_hint,
         tone="success" if best_scope == "Projekt" else "warning",
     )
 
@@ -1793,14 +2110,11 @@ def _load_ranking(self):
             reference_name = Path(str(getattr(rep, "reference_path", "") or "-")).name or "-"
         scope = entry_scope(rep)
         row_tags = ("leader",) if i == 0 else ("project" if scope == "Projekt" else "global",)
-        model_label = format_ranking_model_label(
-            getattr(rep, "model_name", ""),
-            getattr(rep, "model_path", ""),
-            getattr(rep, "task_type", ""),
-        )
-        self.rank_tree.insert("", tk.END, values=(
-            i + 1,
+        result_label, model_label, run = entry_labels(rep, scope)
+        item_id = self.rank_tree.insert("", tk.END, values=(
+            "WYGRANY" if i == 0 else f"#{i + 1}",
             scope,
+            result_label,
             model_label,
             f"{float(getattr(rep, 'f1_score', 0) or 0):.1f}%",
             f"{float(getattr(rep, 'precision', 0) or 0):.1f}%",
@@ -1809,3 +2123,12 @@ def _load_ranking(self):
             reference_name,
             entry_decision(rep, scope, i),
         ), tags=row_tags)
+        try:
+            self._ranking_tree_entry_refs[item_id] = {
+                "run_id": str(getattr(run, "id", "") or "").strip() if run is not None else "",
+                "model_path": str(getattr(rep, "model_path", "") or "").strip(),
+                "choice_label": result_label,
+                "scope": scope,
+            }
+        except Exception:
+            pass

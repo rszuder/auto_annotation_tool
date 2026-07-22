@@ -111,8 +111,15 @@ def __init__(self, parent, app):
     self._preview_char_selected_index = None
     self._preview_char_drag_state = None
     self._preview_char_drag_window_bindings = []
+    self._preview_last_char_edit_interaction_ts = 0.0
+    self._preview_char_edit_trace_seq = 0
+    self._preview_latency_trace_seq = 0
+    self._preview_pending_select_latency_probe = None
+    self._preview_post_release_latency_probe = None
+    self._preview_metadata_save_defer_logged = False
     self._preview_char_add_state = None
     self._preview_char_hover_index = None
+    self._preview_char_hover_grip = None
     self._preview_char_hover_label_index = None
     self._preview_char_label_active_index = None
     self._preview_char_record_render_tags = {}

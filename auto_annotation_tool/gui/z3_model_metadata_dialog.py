@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
+import datetime
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from ..validators import read_model_metadata_sidecar
-from .web_slim_scrollbar import blend_hex_colors
+from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 
 def _format_model_value(value, *, percent: bool = False) -> str:
@@ -37,6 +38,32 @@ def _float_or_none(value):
         return float(value)
     except Exception:
         return None
+
+
+def _format_file_timestamp(value) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _model_file_timestamp_rows(model_path: Path) -> list[tuple[str, str]]:
+    try:
+        stat = model_path.stat()
+    except Exception:
+        return []
+
+    rows: list[tuple[str, str]] = []
+    created_raw = getattr(stat, "st_birthtime", None)
+    if created_raw is None:
+        created_raw = getattr(stat, "st_ctime", None)
+    created = _format_file_timestamp(created_raw)
+    modified = _format_file_timestamp(getattr(stat, "st_mtime", None))
+    if created:
+        rows.append(("Utworzono plik", created))
+    if modified:
+        rows.append(("Modyfikacja pliku", modified))
+    return rows
 
 
 def _read_results_csv_metrics(model_path: Path) -> dict:
@@ -87,6 +114,7 @@ def _build_model_rows(host, model_path: str) -> tuple[list[tuple[str, str]], str
         rows.append(("Ścieżka", str(safe_path.resolve())))
     except Exception:
         rows.append(("Ścieżka", str(safe_path)))
+    rows.extend(_model_file_timestamp_rows(safe_path))
 
     try:
         version, size = host._infer_yolo_arch_from_model_path(str(safe_path))
@@ -220,8 +248,8 @@ def show_yolo_model_metadata_dialog(host, model_path: str | None = None, *, titl
     parent = getattr(host, "_detection_pipeline_modal", None) or getattr(host, "frame", None)
     if not resolved_path:
         messagebox.showinfo(
-            "Parametry modelu YOLO",
-            "Najpierw wskaż model YOLO .pt. Parametry zostaną odczytane z pliku JSON obok modelu.",
+            "Parametry modelu detekcji",
+            "Najpierw wskaż model detekcji znaków .pt. Parametry zostaną odczytane z pliku JSON obok modelu.",
             parent=parent,
         )
         return
@@ -236,7 +264,7 @@ def show_yolo_model_metadata_dialog(host, model_path: str | None = None, *, titl
     accent = palette.get("accent", "#4ade80")
 
     dialog = tk.Toplevel(parent)
-    dialog_title = title or "Parametry modelu YOLO"
+    dialog_title = title or "Parametry modelu detekcji"
     dialog.title(dialog_title)
     try:
         styler = getattr(host.app, "style_dialog_window", None)
@@ -271,10 +299,53 @@ def show_yolo_model_metadata_dialog(host, model_path: str | None = None, *, titl
         anchor="w",
     ).grid(row=0, column=0, sticky="ew", pady=(0, 10))
 
-    table = tk.Frame(body, bg=panel_alt, highlightthickness=1, highlightbackground=border, highlightcolor=border)
-    table.grid(row=1, column=0, sticky="nsew")
+    table_shell = tk.Frame(body, bg=panel_bg, bd=0, highlightthickness=0)
+    table_shell.grid(row=1, column=0, sticky="nsew")
+    table_shell.grid_rowconfigure(0, weight=1)
+    table_shell.grid_columnconfigure(0, weight=1)
+
+    table_canvas = tk.Canvas(
+        table_shell,
+        bg=panel_alt,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+    )
+    table_scroll = WebSlimScrollbar(table_shell, orient=tk.VERTICAL, command=table_canvas.yview)
+    table_canvas.configure(yscrollcommand=table_scroll.set)
+    table_canvas.grid(row=0, column=0, sticky="nsew")
+    table_scroll.grid(row=0, column=1, sticky="ns")
+
+    table = tk.Frame(table_canvas, bg=panel_alt)
+    table_window = table_canvas.create_window((0, 0), window=table, anchor="nw")
     table.grid_columnconfigure(0, weight=0)
     table.grid_columnconfigure(1, weight=1)
+
+    def _sync_table_scrollregion(_event=None):
+        try:
+            table_canvas.configure(scrollregion=table_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _sync_table_width(event=None):
+        try:
+            table_canvas.itemconfigure(table_window, width=max(1, int(event.width)))
+        except Exception:
+            pass
+
+    def _on_table_mousewheel(event):
+        try:
+            delta = -1 if int(getattr(event, "delta", 0) or 0) > 0 else 1
+            table_canvas.yview_scroll(delta * 3, "units")
+            return "break"
+        except Exception:
+            return None
+
+    table.bind("<Configure>", _sync_table_scrollregion, add="+")
+    table_canvas.bind("<Configure>", _sync_table_width, add="+")
+    table_canvas.bind("<MouseWheel>", _on_table_mousewheel, add="+")
+    table.bind("<MouseWheel>", _on_table_mousewheel, add="+")
 
     for idx, (label, value) in enumerate(rows):
         bg = panel_alt if idx % 2 == 0 else blend_hex_colors(panel_alt, panel_bg, 0.35)

@@ -34,6 +34,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
+from .z2_shared_ui import campaign_visible_gate_id
 
 
 def _get_step2_disk_approval_fallback(
@@ -99,6 +100,17 @@ def _get_step2_disk_approval_fallback(
                 return candidate
         except Exception:
             return None
+        try:
+            from . import z2_manifest_runtime
+
+            resolved = z2_manifest_runtime._resolve_campaign_annotation_run_dir(
+                candidate,
+                str(CAMPAIGN.get_active_project_name() or "").strip(),
+            )
+            if resolved is not None:
+                return Path(resolved)
+        except Exception:
+            pass
         return None
 
     def count_run_approved(run_dir: Path | None) -> tuple[int, int]:
@@ -457,13 +469,42 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
         approval_iteration_target = self._get_iteration_target()
 
     graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
     extra_run_dirs = []
     if graph_gate_id == "T05":
         try:
             iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
             session = dict(iteration_state.get("t05_work_session") or {})
             session_state = str(session.get("state") or "").strip().lower()
-            session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
+            session_result = dict(session.get("last_return_result") or {})
+            session_resolved = bool(session_result.get("ok")) or session_state in {
+                "resolved",
+                "closed",
+                "complete",
+                "completed",
+            }
+            if session_resolved:
+                try:
+                    session_run = str(session.get("run_dir", "") or "").strip()
+                    now = datetime.now().isoformat(timespec="seconds")
+                    CAMPAIGN.upsert_iteration_state(
+                        updates={
+                            "t05_work_session": {
+                                **session,
+                                "active": False,
+                                "state": "resolved",
+                                "resolved_at": str(session.get("resolved_at") or now),
+                                "updated_at": now,
+                                "last_return_result": session_result,
+                                "run_dir": session_run,
+                            }
+                        }
+                    )
+                except Exception:
+                    pass
+                session_active = False
+            else:
+                session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
             session_run = str(session.get("run_dir", "") or "").strip()
             if session_active and session_run and session_state not in {"resolved", "closed", "complete", "completed"}:
                 extra_run_dirs.append(session_run)
@@ -560,6 +601,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
                 )
             except Exception:
                 pass
+            return
 
         try:
             pending_images = int(disk_fallback.get("unpromoted_approved_images", 0) or 0)
@@ -567,12 +609,22 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
         except Exception:
             pending_images, pending_plates = 0, 0
         if pending_images > 0 or pending_plates > 0:
+            pending_run_dir = disk_fallback.get("run_dir") or approval_context.get("run_dir")
+            if pending_run_dir is None:
+                try:
+                    self.app.update_status(
+                        f"Nie udało się dopisać zaległych [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do puli YOLO: brak ścieżki runu.",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+                return
             promote = getattr(annotation_tab, "_promote_run_to_campaign_plate_approved_set", None)
             if callable(promote):
                 try:
                     promote_result = dict(
                         promote(
-                            Path(approval_run_dir),
+                            Path(pending_run_dir),
                             force_parse_xml=True,
                             project_name=str(CAMPAIGN.get_active_project_name() or "").strip() or None,
                         )
@@ -584,6 +636,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
                 if bool(promote_result.get("ok")):
                     try:
                         now = datetime.now().isoformat(timespec="seconds")
+                        resolved_run_dir = Path(str(promote_result.get("run_dir") or pending_run_dir))
                         CAMPAIGN.upsert_iteration_state(
                             updates={
                                 "t05_work_session": {
@@ -591,7 +644,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
                                     "state": "resolved",
                                     "resolved_at": now,
                                     "updated_at": now,
-                                    "run_dir": str(Path(approval_run_dir).resolve()),
+                                    "run_dir": str(resolved_run_dir.resolve()),
                                     "approved_images": int(pending_images),
                                     "approved_plates": int(pending_plates),
                                     "last_return_result": promote_result,
@@ -607,7 +660,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
                     try:
                         self.app.update_status(
                             (
-                                f"Dopisano zaległe [OK] z T05 do puli YOLO: "
+                                f"Dopisano zaległe [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do puli YOLO: "
                                 f"{pending_images} obrazów / {pending_plates} tablic."
                             ),
                             "success",
@@ -617,7 +670,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
                 else:
                     try:
                         self.app.update_status(
-                            "Nie udało się dopisać zaległych [OK] z T05 do puli YOLO. Bramka nie została zatwierdzona.",
+                            f"Nie udało się dopisać zaległych [OK] z {graph_display_gate_id or graph_gate_id or 'bramki'} do puli YOLO. Bramka nie została zatwierdzona.",
                             "warning",
                         )
                     except Exception:
@@ -894,22 +947,66 @@ def _confirm_step3_without_current_iteration_contribution(self, contribution_sta
     if current_plates > 0 or project_plates <= 0 or total_plates <= 0:
         return True
 
+    try:
+        previous_char_model = dict(
+            CAMPAIGN.get_latest_trained_project_model(
+                "char",
+                before_iteration=iteration,
+                project_name=str(CAMPAIGN.get_active_project_name() or "").strip() or None,
+            )
+            or {}
+        )
+    except Exception:
+        previous_char_model = {}
+
+    previous_model_path = str(
+        previous_char_model.get("path")
+        or previous_char_model.get("best_weights")
+        or previous_char_model.get("model_path")
+        or ""
+    ).strip()
+    previous_model_exists = False
+    if previous_model_path:
+        try:
+            previous_model_exists = Path(previous_model_path).exists()
+        except Exception:
+            previous_model_exists = True
+    if not previous_model_exists:
+        return True
+
+    try:
+        previous_iteration = int(
+            previous_char_model.get("trained_iteration")
+            or previous_char_model.get("iteration")
+            or 0
+        )
+    except Exception:
+        previous_iteration = 0
+    previous_model_label = str(previous_char_model.get("name") or "").strip()
+    if not previous_model_label and previous_model_path:
+        previous_model_label = Path(previous_model_path).name
+    previous_info = ""
+    if previous_model_label:
+        previous_info = f" Ostatni wynik modelu znaków: {previous_model_label}"
+        previous_info += f" z iteracji {previous_iteration:03d}." if previous_iteration > 0 else "."
+
     message = (
-        f"Iteracja {iteration:03d} spełnia bramkę E3 dzięki tablicom z poprzednich iteracji, "
-        "ale w tej iteracji nie dodano żadnych nowych tablic do puli znaków.\n\n"
-        "Jeśli teraz zatwierdzisz E3 i przejdziesz do E4Z, trening znaków odbędzie się na tej samej puli danych "
-        "wejściowych co poprzednio. To zwykle nie przyniesie dodatkowych korzyści jakościowych, chyba że "
-        "świadomie zmieniono konfigurację treningu albo chcesz wykonać kontrolny run.\n\n"
-        "Możesz kontynuować mimo to albo wrócić do E3/Z2 i dodać nowe tablice do bieżącej iteracji."
+        f"Iteracja {iteration:03d} spełnia T05 dzięki tablicom przygotowanym wcześniej, "
+        "ale w tej iteracji nie dodano nowych tablic do pracy nad znakami.\n\n"
+        "Ponieważ w projekcie istnieje już wcześniejszy wytrenowany model znaków, kolejny trening znaków "
+        "użyje praktycznie tej samej puli wejściowej. To ma sens głównie wtedy, gdy zmieniasz konfigurację "
+        "treningu, split, augmentację albo chcesz wykonać run kontrolny."
+        f"{previous_info}\n\n"
+        "Możesz kontynuować mimo to albo wrócić do T05 i dodać lub poprawić materiał znaków."
     )
     try:
         return bool(
             self.app.themed_confirm(
-                "E3 bez nowych danych",
+                "T05 bez nowych danych znaków",
                 message,
                 parent=self.frame,
-                confirm_label="Zatwierdź mimo to",
-                cancel_label="Wróć do E3",
+                confirm_label="Kontynuuj do treningu znaków",
+                cancel_label="Wróć do T05",
                 tone="warning",
             )
         )

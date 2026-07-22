@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Z3/PZ1 source matching helpers for XML/image inputs."""
 
+import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -48,9 +49,11 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
     }
     plate_count = 0
     images_with_plates = 0
+    geometry_parts: list[str] = []
 
-    for image_el in image_elements.values():
+    for raw_image_name, image_el in image_elements.items():
         image_plate_count = 0
+        image_geometry_parts: list[str] = []
         for poly in image_el.findall(".//polygon[@label='plate']"):
             try:
                 points = [
@@ -62,15 +65,31 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
                 continue
             if len(points) >= 4:
                 image_plate_count += 1
+                image_geometry_parts.append(
+                    ";".join(f"{float(x):.3f},{float(y):.3f}" for x, y in points[:4])
+                )
 
         if image_plate_count > 0:
             images_with_plates += 1
             plate_count += image_plate_count
+            geometry_parts.append(
+                "|".join(
+                    (
+                        normalize_xml_image_relpath(raw_image_name),
+                        str(image_el.get("width") or ""),
+                        str(image_el.get("height") or ""),
+                        "#".join(image_geometry_parts),
+                    )
+                )
+            )
 
     return {
         "plate_count": int(plate_count),
         "images_with_plates": int(images_with_plates),
         "xml_images_total": int(len(image_elements)),
+        "xml_plate_geometry_hash": hashlib.sha1("\n".join(geometry_parts).encode("utf-8")).hexdigest()
+        if geometry_parts
+        else "",
     }
 
 
@@ -121,6 +140,7 @@ def current_extract_source_signature(host: "CharacterAnnotationTab") -> dict:
         "xml_plate_count": 0,
         "xml_images_with_plates": 0,
         "xml_images_total": 0,
+        "xml_plate_geometry_hash": "",
     }
     if not xml_path_raw:
         return signature
@@ -154,6 +174,7 @@ def current_extract_source_signature(host: "CharacterAnnotationTab") -> dict:
             "xml_plate_count": int(counts.get("plate_count", 0) or 0),
             "xml_images_with_plates": int(counts.get("images_with_plates", 0) or 0),
             "xml_images_total": int(counts.get("xml_images_total", 0) or 0),
+            "xml_plate_geometry_hash": str(counts.get("xml_plate_geometry_hash") or "").strip(),
         }
         signature.update(counted)
         try:
@@ -183,16 +204,48 @@ def extract_manifest_matches_current_source(
         return True
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
     current = current_extract_source_payload(host)
-    for key in ("xml_path", "images_dir", "annotation_run_dir"):
+    current_signature = current_extract_source_signature(host)
+    saved_hash = str(source.get("xml_plate_geometry_hash") or "").strip()
+    current_hash = str(current_signature.get("xml_plate_geometry_hash") or "").strip()
+    geometry_hash_matches = bool(saved_hash and current_hash and saved_hash == current_hash)
+
+    def _saved_current_int_match(key: str) -> bool:
+        saved_value = int(source.get(key, 0) or 0)
+        current_value = int(current_signature.get(key, 0) or 0)
+        return bool(saved_value > 0 and current_value > 0 and saved_value == current_value)
+
+    legacy_signature_matches = bool(
+        not (saved_hash and current_hash)
+        and _saved_current_int_match("xml_size")
+        and _saved_current_int_match("xml_plate_count")
+        and _saved_current_int_match("xml_images_with_plates")
+        and _saved_current_int_match("xml_images_total")
+    )
+    source_semantics_match = bool(geometry_hash_matches or legacy_signature_matches)
+
+    for key in ("images_dir", "xml_path", "annotation_run_dir"):
         saved_value = str(source.get(key) or "").strip()
         current_value = str(current.get(key) or "").strip()
         if not saved_value or not current_value:
             continue
         if not host._paths_equivalent(saved_value, current_value):
+            if source_semantics_match:
+                continue
             return False
 
-    current_signature = current_extract_source_signature(host)
-    for key in ("xml_mtime_ns", "xml_size"):
+    if saved_hash and current_hash:
+        if saved_hash != current_hash:
+            return False
+    else:
+        # Starsze manifesty nie mają hasha geometrii. W takim przypadku nie ufamy
+        # samemu mtime, bo XML bywa przepisywany bez zmiany anotacji.
+        for key in ("xml_size",):
+            saved_value = int(source.get(key, 0) or 0)
+            current_value = int(current_signature.get(key, 0) or 0)
+            if saved_value > 0 and current_value > 0 and saved_value != current_value:
+                return False
+
+    for key in ("xml_images_with_plates", "xml_images_total"):
         saved_value = int(source.get(key, 0) or 0)
         current_value = int(current_signature.get(key, 0) or 0)
         if saved_value > 0 and current_value > 0 and saved_value != current_value:
@@ -331,7 +384,15 @@ def find_latest_extract_preview_run_dir(host: "CharacterAnnotationTab", require_
         for p in root.rglob("*"):
             if not p.is_dir():
                 continue
-            if not host._is_usable_step3_preview_dir(p, require_plates=require_plates):
+            try:
+                usable = host._is_usable_step3_preview_dir(
+                    p,
+                    require_plates=require_plates,
+                    check_campaign_inflated=False,
+                )
+            except TypeError:
+                usable = host._is_usable_step3_preview_dir(p, require_plates=require_plates)
+            if not usable:
                 continue
             if not preview_matches_current_extract_source(host, p):
                 continue

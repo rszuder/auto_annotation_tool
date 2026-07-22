@@ -81,13 +81,13 @@ def get_detection_workflow_text(host, method_key: str | None, method_labels: dic
         key_by_label,
     )
     if resolved_method == "YOLO":
-        return "Pipeline: YOLO wykrywa znaki i klasy."
+        return "Pipeline: model detekcji YOLO wykrywa ramki i klasy znaków."
     if resolved_method == "BOTH":
         rescue_chars = host._get_hybrid_rescue_max_chars()
         rescue_text = f"rescue max {rescue_chars}" if rescue_chars > 0 else "rescue wyłączone"
-        return f"Pipeline: OCR czyta, YOLO dopasowuje; {rescue_text}."
+        return f"Pipeline: OCR czyta, model detekcji YOLO dopasowuje ramki; {rescue_text}."
     if resolved_method == "YOLO_OCR":
-        return "Pipeline: YOLO boxy, OCR odczyt cropów."
+        return "Pipeline: model detekcji YOLO daje boxy, OCR czyta cropy."
     return "Pipeline: OCR czyta i segmentuje znaki."
 
 
@@ -291,8 +291,8 @@ def show_detection_pipeline_model_details(host, model_path: str | None = None, *
     resolved_path = str(model_path or host._get_effective_yolo_model_path() or "").strip()
     if not resolved_path:
         messagebox.showinfo(
-            "Parametry modelu YOLO",
-            "Najpierw wskaż model YOLO .pt. Parametry zostaną odczytane z pliku JSON obok modelu.",
+            "Parametry modelu detekcji",
+            "Najpierw wskaż model detekcji znaków .pt. Parametry zostaną odczytane z pliku JSON obok modelu.",
             parent=getattr(host, "_detection_pipeline_modal", None) or getattr(host, "frame", None),
         )
         return
@@ -307,7 +307,7 @@ def pick_detection_pipeline_yolo_model(host) -> str:
         pass
     if selected:
         try:
-            host._show_detection_pipeline_model_details(selected, title="Parametry wybranego modelu YOLO")
+            host._show_detection_pipeline_model_details(selected, title="Parametry wybranego modelu detekcji")
         except Exception:
             pass
     return selected
@@ -404,16 +404,16 @@ def refresh_detection_pipeline_model_row(host, compiled: dict | None = None) -> 
         if version and size:
             model_name = f"{model_name} (YOLOv{version}{size})"
         text = (
-            f"Model YOLO z projektu: {model_name}"
+            f"Model detekcji znaków z projektu: {model_name}"
             if project_mode
-            else f"Model YOLO dla całego pipeline: {model_name}"
+            else f"Model detekcji znaków dla tego pipeline: {model_name}"
         )
         tone = "neutral"
     elif project_mode:
-        text = "Projekt nie ma przypiętego modelu znaków. Wskaż model YOLO .pt dla PZ2."
+        text = "Projekt nie ma przypiętego modelu detekcji znaków. Wskaż wytrenowany .pt dla PZ2."
         tone = "warning"
     else:
-        text = "Ten pipeline używa YOLO. Wybierz jeden model znaków .pt dla całego pipeline."
+        text = "Ten pipeline używa YOLO do detekcji. Wybierz wytrenowany model znaków .pt."
         tone = "warning"
 
     if status_lbl is not None:
@@ -422,7 +422,7 @@ def refresh_detection_pipeline_model_row(host, compiled: dict | None = None) -> 
 
     if browse_btn is not None:
         try:
-            browse_btn.configure(text=("Zmień model YOLO" if yolo_ready else "Wybierz model YOLO"))
+            browse_btn.configure(text=("Zmień model detekcji" if yolo_ready else "Wybierz model detekcji"))
         except Exception:
             pass
         try:

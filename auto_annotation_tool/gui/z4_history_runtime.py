@@ -182,13 +182,13 @@ def _does_history_run_match_active_campaign_target(self, run) -> bool:
     if not CAMPAIGN.get_active_project_name():
         return True
 
-    active_target = str(self.get_campaign_training_target() or CAMPAIGN.get_iteration_target() or "").strip().lower()
+    active_target = str(CAMPAIGN.get_iteration_target() or self.get_campaign_training_target() or "").strip().lower()
     if active_target not in {"char", "plate"}:
         return True
 
     run_target = ""
     try:
-        infer_target = getattr(self.history, "_infer_run_target", None)
+        infer_target = getattr(self, "_infer_history_run_target", None)
         if callable(infer_target):
             run_target = str(infer_target(run) or "").strip().lower()
     except Exception:

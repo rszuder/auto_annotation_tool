@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from ..campaign_manager import CAMPAIGN
 from .z4_campaign_flow import return_to_campaign_from_step4
 from .web_slim_scrollbar import blend_hex_colors
+from .z2_shared_ui import campaign_visible_gate_id
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
@@ -224,8 +225,9 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
     try:
         if vm.mode == "plate":
             if bool(vm.in_campaign):
+                finish_gate_id = campaign_visible_gate_id("T07") or "T06"
                 creator_intro = (
-                    "Praca nad bramką T06: utwórz wariant datasetu tablic z materiału projektu. "
+                    f"Praca nad bramką {finish_gate_id}: utwórz wariant datasetu tablic z materiału projektu. "
                     "Flow: 1. sprawdź materiał, 2. ustaw split, 3. opcjonalnie powiększ train, 4. utwórz wariant."
                 )
             else:
@@ -1085,7 +1087,12 @@ def accept_training_input_context(
     return True
 
 
-def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | None = None):
+def mark_step4_dataset_ready(
+    host: "TrainingTab",
+    dataset_path: str | Path | None = None,
+    *,
+    target: str | None = None,
+):
     if dataset_path:
         try:
             host.dataset_var.set(str(dataset_path))
@@ -1097,7 +1104,15 @@ def mark_step4_dataset_ready(host: "TrainingTab", dataset_path: str | Path | Non
     except Exception:
         dataset_text = str(dataset_path or "").strip()
 
-    target = _normalize_training_context_target(getattr(host, "_step4_dataset_mode", "char"))
+    target = _normalize_training_context_target(target or getattr(host, "_step4_dataset_mode", "char"))
+    try:
+        host._step4_dataset_mode = target
+    except Exception:
+        pass
+    try:
+        host.set_campaign_training_target(target)
+    except Exception:
+        pass
     try:
         builder = getattr(host, "_build_step4_dataset_training_source", None)
         if callable(builder):

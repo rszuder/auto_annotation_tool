@@ -1103,6 +1103,7 @@ def _build_missing_preview_annotations_bundle(
     *,
     existing_annotations: list[ImageAnnotation] | None = None,
     extra_hidden_filenames: set[str] | None = None,
+    scope_filenames: set[str] | None = None,
 ) -> dict[str, tuple[ImageAnnotation, Path]]:
     try:
         source_dir = Path(image_dir) if image_dir is not None else None
@@ -1139,10 +1140,41 @@ def _build_missing_preview_annotations_bundle(
             project_approved_source_keys = set()
 
     bundle: dict[str, tuple[ImageAnnotation, Path]] = {}
-    try:
-        image_paths = get_image_files(source_dir)
-    except Exception:
+    scope_names = {
+        str(name or "").strip().lower()
+        for name in set(scope_filenames or set())
+        if str(name or "").strip()
+    }
+    if scope_names:
         image_paths = []
+        missing_scope_names: set[str] = set()
+        for safe_name in sorted(scope_names):
+            candidate = source_dir / safe_name
+            try:
+                if candidate.exists() and candidate.is_file():
+                    image_paths.append(candidate)
+                    continue
+            except Exception:
+                pass
+            missing_scope_names.add(safe_name)
+        if missing_scope_names:
+            try:
+                shallow_map = {
+                    str(path.name or "").strip().lower(): Path(path)
+                    for path in source_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+                }
+            except Exception:
+                shallow_map = {}
+            for safe_name in sorted(missing_scope_names):
+                candidate = shallow_map.get(safe_name)
+                if candidate is not None:
+                    image_paths.append(candidate)
+    else:
+        try:
+            image_paths = get_image_files(source_dir)
+        except Exception:
+            image_paths = []
 
     for image_path in image_paths:
         safe_name = str(getattr(image_path, "name", "") or "").strip()
@@ -1259,23 +1291,47 @@ def _merge_annotation_bundle_into_payload(
 
 
 def _preview_list_item_color(self, ann) -> str:
+    return _preview_list_color_for_bucket(self, _preview_list_effective_color_bucket(self, ann))
+
+
+def _preview_list_color_for_bucket(self, bucket: str) -> str:
     palette = getattr(self.app, "palette", {})
-    reuse_color = palette.get("warning", "#f39c12")
-    corrected_color = palette.get("warning", "#f39c12")
-    ok_color = palette.get("success", "#27ae60")
-    err_color = palette.get("error", "#c0392b")
-    approved_color = palette.get("accent", "#0e639c")
-    bucket = self._preview_annotation_sort_bucket(ann)
+    normalized = str(bucket or "").strip().lower()
+    if normalized == "reused":
+        return palette.get("warning", "#f39c12")
+    if normalized == "approved":
+        return palette.get("accent", "#0e639c")
+    if normalized == "manual":
+        return palette.get("warning", "#f39c12")
+    if normalized == "auto":
+        return palette.get("success", "#27ae60")
+    return palette.get("error", "#c0392b")
+
+
+def _preview_list_effective_color_bucket(self, ann) -> str:
+    cached_state = self._get_preview_list_render_state(ann)
+    if isinstance(cached_state, dict):
+        if bool(cached_state.get("reused")):
+            return "reused"
+        bucket = str(cached_state.get("bucket", "") or "").strip().lower()
+        return bucket if bucket in {"approved", "manual", "auto", "problem"} else "problem"
 
     if self._preview_annotation_is_reused_from_previous_manual(ann):
-        return reuse_color
-    if bucket == "approved":
-        return approved_color
-    if bucket == "manual":
-        return corrected_color
-    if bucket == "auto":
-        return ok_color
-    return err_color
+        return "reused"
+    bucket = self._preview_annotation_sort_bucket(ann)
+    return bucket if bucket in {"approved", "manual", "auto", "problem"} else "problem"
+
+
+def _preview_list_color_plan(self, entries: list[tuple[int, ImageAnnotation]]) -> tuple[str, str]:
+    counts = {"approved": 0, "manual": 0, "auto": 0, "problem": 0, "reused": 0}
+    for _actual_idx, ann in entries or []:
+        bucket = _preview_list_effective_color_bucket(self, ann)
+        counts[bucket if bucket in counts else "problem"] += 1
+    dominant_bucket = max(
+        counts,
+        key=lambda key: (counts.get(key, 0), {"problem": 4, "auto": 3, "approved": 2, "manual": 1, "reused": 0}.get(key, 0)),
+    )
+    return dominant_bucket, _preview_list_color_for_bucket(self, dominant_bucket)
 
 
 def _preview_annotation_sort_bucket(self, ann) -> str:
@@ -1635,6 +1691,32 @@ def _get_preview_annotation_quality_summary(self, ann) -> dict:
             "max_fit_score": 0.0,
         }
 
+    def _cache_key() -> tuple:
+        key_parts = []
+        for det in plates:
+            attributes = dict(getattr(det, "attributes", {}) or {})
+            key_parts.append(
+                (
+                    id(det),
+                    tuple(round(float(value or 0.0), 3) for value in (getattr(det, "bbox", None) or ())),
+                    tuple(
+                        (round(float(x or 0.0), 3), round(float(y or 0.0), 3))
+                        for x, y in (getattr(det, "polygon", None) or ())
+                    ),
+                    str(attributes.get("fit_score", "") or ""),
+                    str(attributes.get("fit_score_source", "") or ""),
+                    round(float(getattr(det, "confidence", 0.0) or 0.0), 4),
+                )
+            )
+        return (id(ann), len(plates), tuple(key_parts))
+
+    initial_key = _cache_key()
+    cache = getattr(self, "_preview_annotation_quality_summary_cache", None)
+    if isinstance(cache, dict):
+        cached = cache.get(initial_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
     for det in plates:
         try:
             self._refresh_plate_detection_quality_metrics(det, ann)
@@ -1646,7 +1728,7 @@ def _get_preview_annotation_quality_summary(self, ann) -> dict:
         for score in (self._get_plate_detection_fit_score(det, ann) for det in plates)
         if score is not None
     ]
-    return {
+    summary = {
         "plate_count": len(plates),
         "min_confidence": min(confidences) if confidences else 0.0,
         "avg_confidence": (sum(confidences) / float(len(confidences))) if confidences else 0.0,
@@ -1656,6 +1738,19 @@ def _get_preview_annotation_quality_summary(self, ann) -> dict:
         "avg_fit_score": (sum(fit_scores) / float(len(fit_scores))) if fit_scores else 0.0,
         "max_fit_score": max(fit_scores) if fit_scores else 0.0,
     }
+    try:
+        cache = getattr(self, "_preview_annotation_quality_summary_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._preview_annotation_quality_summary_cache = cache
+        final_key = _cache_key()
+        cache[initial_key] = dict(summary)
+        cache[final_key] = dict(summary)
+        if len(cache) > 12000:
+            self._preview_annotation_quality_summary_cache = dict(list(cache.items())[-6000:])
+    except Exception:
+        pass
+    return summary
 
 
 def _get_plate_detections(self, ann) -> list[Detection]:
@@ -2594,16 +2689,29 @@ def _populate_preview_list_async(self, *args, **kwargs):
     return z2_workflow_methods._populate_preview_list_async(self, *args, **kwargs)
 
 
-def _refresh_preview_list(self, preserve_selection: bool = True, render_current: bool = False, on_progress=None):
+def _refresh_preview_list(
+    self,
+    preserve_selection: bool = True,
+    render_current: bool = False,
+    on_progress=None,
+    *,
+    invalidate_runtime: bool = True,
+    rebuild_state_cache: bool = True,
+    lightweight_summary: bool = False,
+    recolor_rows: bool = True,
+    refresh_summary: bool = True,
+):
     self._cancel_preview_list_population()
     self._set_preview_list_population_active(False)
-    self._invalidate_preview_runtime_caches()
-    try:
-        self._build_preview_list_render_state_cache(
-            list(enumerate(list(getattr(self, "current_annotations", []) or [])))
-        )
-    except Exception:
-        self._preview_list_render_state_cache = None
+    if invalidate_runtime:
+        self._invalidate_preview_runtime_caches()
+    if rebuild_state_cache:
+        try:
+            self._build_preview_list_render_state_cache(
+                list(enumerate(list(getattr(self, "current_annotations", []) or [])))
+            )
+        except Exception:
+            self._preview_list_render_state_cache = None
     entries = self._get_preview_list_entries()
     self._preview_list_display_indices = [actual_idx for actual_idx, _ann in entries]
     self._preview_list_display_index_map = {
@@ -2618,21 +2726,21 @@ def _refresh_preview_list(self, preserve_selection: bool = True, render_current:
         selected_actual_index = entries[0][0]
         selected_display_index = 0
 
+    default_color_bucket = "auto"
     try:
-        palette = getattr(self.app, "palette", {}) or {}
-        default_fg = (
-            palette.get("success", "#27ae60")
-            if len(entries) >= 3000
-            else palette.get("error", "#c0392b")
-        )
+        if recolor_rows:
+            default_color_bucket, default_fg = _preview_list_color_plan(self, entries)
+        else:
+            palette = getattr(self.app, "palette", {}) or {}
+            default_fg = palette.get("success", "#27ae60")
         self.preview_listbox.configure(fg=default_fg)
     except Exception:
         pass
     self.preview_listbox.delete(0, tk.END)
-    self._refresh_preview_list_summary()
+    if refresh_summary:
+        self._refresh_preview_list_summary(lightweight=bool(lightweight_summary or len(entries) >= 1200))
 
     total_count = len(entries)
-    color_all_rows = bool(total_count < 3000)
     lightweight_labels = bool(total_count >= 1200)
     insert_failures: list[tuple[int, str, str]] = []
     for idx, (_actual_idx, ann) in enumerate(entries):
@@ -2651,15 +2759,14 @@ def _refresh_preview_list(self, preserve_selection: bool = True, render_current:
             )
         except Exception as exc:
             primary_insert_error = str(exc)
-        bucket = self._preview_annotation_sort_bucket(ann)
-        if color_all_rows or bucket != "auto":
-            try:
-                if not color_all_rows and bucket == "auto":
-                    continue
-                item_color = self._preview_list_item_color(ann)
-                self.preview_listbox.itemconfig(idx, foreground=item_color)
-            except Exception:
-                pass
+        if recolor_rows:
+            bucket = _preview_list_effective_color_bucket(self, ann)
+            if bucket != default_color_bucket:
+                try:
+                    item_color = _preview_list_color_for_bucket(self, bucket)
+                    self.preview_listbox.itemconfig(idx, foreground=item_color)
+                except Exception:
+                    pass
         try:
             current_size = int(self.preview_listbox.size() or 0)
         except Exception:
@@ -2680,6 +2787,8 @@ def _refresh_preview_list(self, preserve_selection: bool = True, render_current:
             except Exception:
                 pass
 
+    if selected_display_index is not None and selected_actual_index is not None and entries and not render_current:
+        self._suppress_preview_reload_on_list_select = True
     self._clear_listbox_selection_fast(self.preview_listbox)
     if selected_display_index is not None and selected_actual_index is not None and entries:
         self.preview_listbox.selection_set(selected_display_index)
@@ -2688,6 +2797,14 @@ def _refresh_preview_list(self, preserve_selection: bool = True, render_current:
         self.current_preview_index = int(selected_actual_index)
         if render_current:
             self._load_current_preview_selection(reset_view=not preserve_selection, selection_changed=True)
+        else:
+            try:
+                self.frame.after(
+                    250,
+                    lambda: setattr(self, "_suppress_preview_reload_on_list_select", False),
+                )
+            except Exception:
+                self._suppress_preview_reload_on_list_select = False
     else:
         self.current_preview_index = None
         try:
@@ -2879,7 +2996,7 @@ def _select_preview_index(self, idx: int, *, reset_view: bool = True):
         return
     select_started = time.perf_counter()
     self._cancel_preview_selection_render()
-    self._defer_preview_autosave_for_navigation(delay_ms=700)
+    self._defer_preview_autosave_for_navigation(delay_ms=4500)
     safe_idx = max(0, min(int(idx), len(self.current_annotations) - 1))
     previous_idx = self.current_preview_index
     if bool(getattr(self, "_preview_fullscreen_active", False)):
@@ -3045,7 +3162,7 @@ def _select_preview_index_for_super_correction(self, idx: int):
         phase_ms[name] = max(0.0, (now - phase_at) * 1000.0)
         phase_at = now
 
-    self._defer_preview_autosave_for_navigation(delay_ms=700)
+    self._defer_preview_autosave_for_navigation(delay_ms=4500)
     safe_idx = max(0, min(int(idx), len(self.current_annotations) - 1))
     previous_idx = self.current_preview_index
     display_idx = self._get_preview_display_index(safe_idx)

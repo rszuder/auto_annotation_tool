@@ -59,15 +59,15 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         edge_key="e1_to_e2",
         source="E1",
         target="E2",
-        title="Bramka przygotowania anotacji tablic na obrazach",
+        title="Bramka wyboru źródła anotacji tablic",
         summary=(
-            "To wspólna bramka wejścia do E2/Z2. Kompletujesz tu obrazy oraz ewentualne AT, "
-            "a w pracy bramki wybierasz, czy przygotowane anotacje tablic pójdą dalej do modelu "
-            "tablic, czy do toru znaków."
+            "To wspólna bramka wejścia do E2/Z2. Dla toru tablic wymaga nowej puli obrazów, "
+            "a dla toru znaków może wykorzystać obrazy albo istniejące źródło tablic, jeśli "
+            "daje jeszcze sensowną pracę nad anotacjami znaków."
         ),
         route_label="E1 -> E2",
         badge_id="T01",
-        badge_label="Przygotuj anotacje tablic z obrazów w zasobach",
+        badge_label="Wybierz źródło anotacji tablic dla dalszej pracy",
         path_key="",
         tone="success",
         resources=(

@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_visible_gate_id,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -397,8 +398,8 @@ def _build_t06_rows_from_strict_approved_state(
     )
 
 
-def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
-    """Update only T06 right-panel counter values after an [OK] toggle.
+def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
+    """Update campaign Z2 right-panel counter values after an [OK] toggle.
 
     The full Z2 state refresh rebuilds several containers.  For a simple PPM
     approval change the row layout is already stable, so we only touch cached
@@ -421,11 +422,228 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
         or ""
     ).strip().upper()
     is_t07_repair = bool(graph_gate_id == "T05" and repair_origin_gate_id == "T07")
-    if graph_gate_id != "T06" and not is_t07_repair:
+    if graph_gate_id not in {"T04", "T05", "T06"} and not is_t07_repair:
         return False
 
     host = getattr(self, "approve_hint_table_frame", None)
     cache = getattr(host, "_compact_table_cache", None) if host is not None else None
+    if graph_gate_id in {"T04", "T05"} and not is_t07_repair:
+        cache_labels = tuple(cache.get("labels") or ()) if isinstance(cache, dict) else ()
+        if not isinstance(cache, dict) or len(cache_labels) < 4:
+            return False
+        try:
+            approval_context = dict(self._get_campaign_step2_approval_context() or {})
+        except Exception:
+            approval_context = {}
+        if not bool(approval_context.get("project_active")):
+            return False
+        run_dir = approval_context.get("run_dir") or getattr(self, "current_annotation_run_dir", None)
+        try:
+            xml_exists = bool(run_dir and (Path(run_dir) / "annotations.xml").exists())
+        except Exception:
+            xml_exists = False
+        count_state = getattr(self, "_current_preview_plate_count_cache", None)
+        if not isinstance(count_state, dict):
+            return False
+        count_state = dict(count_state)
+        total_images = int(count_state.get("images_with_plates", 0) or 0)
+        total_plates = int(count_state.get("total_plates", 0) or 0)
+        approved_images = int(count_state.get("approved_images", 0) or 0)
+        approved_plates = int(count_state.get("approved_plates", 0) or 0)
+        try:
+            gate_state = dict(self._build_campaign_z2_gate_overlay_state() or {})
+        except Exception:
+            try:
+                gate_state = dict(_build_campaign_z2_gate_overlay_state(self) or {})
+            except Exception:
+                gate_state = dict(getattr(self, "_campaign_step2_gate_overlay_state", {}) or {})
+        try:
+            required_plates = int(gate_state.get("required_plates", 0) or 0)
+        except Exception:
+            required_plates = 0
+        if required_plates <= 0:
+            try:
+                iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
+            except Exception:
+                iteration_target = ""
+            required_plates = (
+                int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+                if iteration_target == "char" or graph_gate_id == "T04"
+                else int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+            )
+        try:
+            project_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+            project_images = int(project_stats.get("images", 0) or 0)
+            project_plates = int(project_stats.get("plates", 0) or 0)
+        except Exception:
+            project_images = 0
+            project_plates = 0
+        session_images, session_plates = int(approved_images or 0), int(approved_plates or 0)
+        try:
+            iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
+        except Exception:
+            iteration_target = ""
+        if iteration_target not in {"plate", "char"}:
+            session_images, session_plates = int(approved_images or 0), int(approved_plates or 0)
+        effective_images = max(0, int(project_images or 0) + int(session_images or 0))
+        effective_plates = max(0, int(project_plates or 0) + int(session_plates or 0))
+        if effective_images <= 0 and effective_plates <= 0:
+            try:
+                effective_images = int(gate_state.get("approved_images", approved_images) or 0)
+            except Exception:
+                effective_images = int(approved_images or 0)
+            try:
+                effective_plates = int(gate_state.get("approved_plates", approved_plates) or 0)
+            except Exception:
+                effective_plates = int(approved_plates or 0)
+        missing_plates = max(0, int(required_plates or 0) - int(effective_plates or 0))
+        try:
+            current_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
+        except Exception:
+            current_iteration_num = 0
+        xml_required = bool(int(current_iteration_num or 0) <= 1)
+        xml_missing = bool(xml_required and not xml_exists)
+        ready = bool(
+            int(effective_plates or 0) >= int(required_plates or 0)
+            and not xml_missing
+            and not bool(getattr(self, "is_processing", False))
+        )
+        tone = "success" if ready else "warning"
+        try:
+            quality_info = CONFIG.describe_yolo_pose_dataset_quality(int(effective_plates or 0))
+        except Exception:
+            quality_info = {}
+        quality_label = str(quality_info.get("label", "SŁABY") or "SŁABY")
+        quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
+        next_quality_label = str(quality_info.get("next_label", "") or "").strip()
+        missing_next_quality = max(0, int(quality_info.get("missing_next", 0) or 0))
+        if missing_plates > 0:
+            missing_label = "Do otwarcia bramki brakuje"
+            missing_text = f"{missing_plates} tablic zatwierdzonych [OK]"
+            missing_tone = "warning"
+        elif missing_next_quality > 0 and next_quality_label:
+            missing_label = f"Do progu {next_quality_label} brakuje"
+            missing_text = f"{missing_next_quality} tablic zatwierdzonych [OK]"
+            missing_tone = "warning"
+        else:
+            missing_label = "Progi jakości"
+            missing_text = "Osiągnięto najwyższy próg jakości"
+            missing_tone = "success"
+        xml_text = "UTWORZONY" if xml_exists else ("WYMAGANY - BRAK" if xml_required else "BRAK")
+        xml_tone = "success" if xml_exists else "warning"
+        min_text = f"{missing_plates} tablic" + (" / XML" if xml_missing else "")
+        min_tone = "success" if missing_plates == 0 and not xml_missing else "warning"
+        if missing_next_quality > 0 and next_quality_label:
+            quality_next_text = f"Brakuje {missing_next_quality} tablic do progu {next_quality_label}"
+            quality_next_tone = "warning"
+        else:
+            quality_next_text = "Osiągnięto najwyższy próg jakości"
+            quality_next_tone = "success"
+        if (
+            len(cache_labels) == 8
+            and "Już zatwierdzone w projekcie" in cache_labels
+            and "Nowe [OK] z bieżącej listy" in cache_labels
+        ):
+            rows = [
+                (str(cache_labels[0] or ""), "OTWARTA" if ready else "ZAMKNIĘTA", tone),
+                (str(cache_labels[1] or ""), xml_text, xml_tone),
+                (
+                    str(cache_labels[2] or ""),
+                    f"{int(project_images or 0)} obrazów [OK] / {int(project_plates or 0)} tablic",
+                    "success" if int(project_plates or 0) > 0 else "muted",
+                ),
+                (
+                    str(cache_labels[3] or ""),
+                    f"{int(session_images or 0)} obrazów [OK] / {int(session_plates or 0)} tablic",
+                    "success" if int(session_plates or 0) > 0 else "warning",
+                ),
+                (
+                    str(cache_labels[4] or ""),
+                    f"{int(effective_images or 0)} obrazów [OK] / {int(effective_plates or 0)} tablic",
+                    "success" if int(effective_plates or 0) > 0 else "warning",
+                ),
+                (str(cache_labels[5] or ""), min_text, min_tone),
+                (str(cache_labels[6] or ""), quality_label, quality_tone),
+                (str(cache_labels[7] or ""), quality_next_text, quality_next_tone),
+            ]
+        elif len(cache_labels) == 6 and any(str(label or "").startswith("Po zamknięciu") for label in cache_labels):
+            rows = [
+                (str(cache_labels[0] or ""), "OTWARTA" if ready else "ZAMKNIĘTA", tone),
+                (str(cache_labels[1] or ""), xml_text, xml_tone),
+                (
+                    str(cache_labels[2] or ""),
+                    f"{int(effective_images or 0)} obrazów [OK] / {int(effective_plates or 0)} tablic",
+                    "success" if ready else "warning",
+                ),
+                (str(cache_labels[3] or ""), min_text, min_tone),
+                (str(cache_labels[4] or ""), quality_label, quality_tone),
+                (str(cache_labels[5] or ""), quality_next_text, quality_next_tone),
+            ]
+        else:
+            rows = [
+                ("Status bramki", "OTWARTA" if ready else "W TRAKCIE", tone),
+                (
+                    "Zatwierdzone [OK]",
+                    f"{effective_images} obrazów / {effective_plates} tablic",
+                    "success" if effective_plates > 0 else "warning",
+                ),
+                (
+                    missing_label,
+                    missing_text,
+                    missing_tone or ("success" if missing_plates <= 0 else "warning"),
+                ),
+                (
+                    "XML anotacji",
+                    "XML: OK" if xml_exists else f"XML: aktywny run ({int(total_images or 0)} obrazów / {int(total_plates or 0)} tablic)",
+                    "success" if xml_exists else "warning",
+                ),
+            ]
+        if len(cache_labels) == len(rows):
+            rows = [
+                (str(cache_labels[index] or ""), value, row_tone)
+                for index, (_label, value, row_tone) in enumerate(rows)
+            ]
+        elif tuple(label for label, _value, _tone in rows) != cache_labels:
+            return False
+        self._render_compact_info_table(
+            host,
+            rows,
+            default_value_tone=tone,
+            reuse_existing=True,
+            show_header=False,
+        )
+        try:
+            self._set_approve_hint_box_state(tone)
+        except Exception:
+            pass
+        try:
+            display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
+            self._campaign_step2_gate_overlay_state = {
+                **dict(gate_state or {}),
+                "visible": True,
+                "ready": bool(ready),
+                "tone": tone,
+                "title": str(gate_state.get("title") or f"BRAMKA {display_gate_id}"),
+                "gate_id": display_gate_id,
+                "source_gate_id": graph_gate_id,
+                "status": "OTWARTA" if ready else "ZAMKNIĘTA",
+                "approved_images": int(effective_images or 0),
+                "approved_plates": int(effective_plates or 0),
+                "required_plates": int(required_plates or 0),
+                "missing_plates": int(missing_plates or 0),
+                "missing_focus_row_label": missing_label,
+                "missing_focus_text": missing_text,
+                "missing_focus_tone": missing_tone or ("success" if missing_plates <= 0 else "warning"),
+            }
+            self._campaign_step2_approval_ready = bool(ready)
+        except Exception:
+            pass
+        try:
+            self._place_preview_campaign_gate_overlay(force_render=False)
+        except Exception:
+            pass
+        return True
+
     if is_t07_repair:
         expected_labels = (
             "Status naprawy",
@@ -442,16 +660,14 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
         except Exception:
             previous_images = 0
             previous_plates = 0
-        try:
-            run_ok_images, run_ok_plates = self._get_current_preview_plate_approved_counts()
-        except Exception:
-            run_ok_images, run_ok_plates = 0, 0
-        try:
-            count_state = dict(self._get_current_preview_plate_count_state() or {})
-            total_images = int(count_state.get("images_with_plates", 0) or 0)
-            total_plates = int(count_state.get("total_plates", 0) or 0)
-        except Exception:
-            total_images, total_plates = 0, 0
+        count_state = getattr(self, "_current_preview_plate_count_cache", None)
+        if not isinstance(count_state, dict):
+            return False
+        count_state = dict(count_state)
+        run_ok_images = int(count_state.get("approved_images", 0) or 0)
+        run_ok_plates = int(count_state.get("approved_plates", 0) or 0)
+        total_images = int(count_state.get("images_with_plates", 0) or 0)
+        total_plates = int(count_state.get("total_plates", 0) or 0)
         try:
             required_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
         except Exception:
@@ -551,10 +767,11 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
         and isinstance(source_baseline, dict)
         and source_baseline.get("token") == token
     ):
-        try:
-            current_images, current_plates = self._get_current_preview_plate_approved_counts()
-        except Exception:
-            current_images, current_plates = None, None
+        count_state = getattr(self, "_current_preview_plate_count_cache", None)
+        if not isinstance(count_state, dict):
+            return False
+        current_images = int(count_state.get("approved_images", 0) or 0)
+        current_plates = int(count_state.get("approved_plates", 0) or 0)
         if current_images is not None and current_plates is not None:
             previous_images = max(0, int(source_baseline.get("images", 0) or 0))
             previous_plates = max(0, int(source_baseline.get("plates", 0) or 0))
@@ -587,25 +804,6 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
                 pass
             return True
 
-    rows = _build_t06_rows_from_strict_approved_state(self, required_plates)
-    if rows is not None:
-        ready = bool(
-            len(rows) > 0
-            and str(rows[0][1] or "").strip().upper() == "OTWARTA"
-        )
-        self._render_compact_info_table(
-            host,
-            rows,
-            default_value_tone=("success" if ready else "warning"),
-            reuse_existing=True,
-            show_header=False,
-        )
-        try:
-            self._set_approve_hint_box_state("success" if ready else "warning")
-        except Exception:
-            pass
-        return True
-
     run_dir = getattr(self, "current_annotation_run_dir", None)
     try:
         token = f"{Path(run_dir).resolve() if run_dir else ''}|T06"
@@ -616,10 +814,12 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
     if not isinstance(source_cache, dict) or source_cache.get("token") != token:
         return False
 
-    try:
-        current_images, current_plates = self._get_current_preview_plate_approved_counts()
-    except Exception:
+    count_state = getattr(self, "_current_preview_plate_count_cache", None)
+    if not isinstance(count_state, dict):
         return False
+    count_state = dict(count_state)
+    current_images = int(count_state.get("approved_images", 0) or 0)
+    current_plates = int(count_state.get("approved_plates", 0) or 0)
 
     baseline = getattr(self, "_campaign_t06_entry_approval_baseline", None)
     if not isinstance(baseline, dict) or baseline.get("token") != token:
@@ -668,6 +868,313 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
     return True
 
 
+def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
+    return _try_update_campaign_right_panel_counts_after_approval(self)
+
+
+def _update_preview_approval_badge_fast(self, approved: bool) -> None:
+    """Update approval badges without rebuilding Z2 overlays."""
+    try:
+        theme = self._get_preview_overlay_dock_theme()
+        palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+        success = str(theme.get("active") or palette.get("success", "#27ae60"))
+        error = str(palette.get("error", "#c7422f"))
+        panel_fill = str(theme.get("fill") or palette.get("panel", "#101419"))
+        fill = success if bool(approved) else error
+        text_fill = "#111111" if self._legend_color_is_light(fill) else "#ffffff"
+        outline = blend_hex_colors(fill, panel_fill, 0.12)
+        label = getattr(self, "preview_overlay_dock_gate_approval_lbl", None)
+        if label is not None and str(label.winfo_manager()):
+            label.configure(
+                bg=fill,
+                fg=text_fill,
+                highlightbackground=outline,
+                highlightcolor=outline,
+                text="ZDJĘCIE OK" if bool(approved) else "ZDJĘCIE NIEZATWIERDZONE",
+            )
+        status_frame = getattr(self, "preview_image_status_frame", None)
+        status_label = getattr(self, "preview_image_status_lbl", None)
+        if status_frame is not None and status_label is not None and str(status_frame.winfo_manager()):
+            status_frame.configure(bg=fill, highlightbackground=outline, highlightcolor=outline)
+            status_label.configure(
+                bg=fill,
+                fg=text_fill,
+                text="ZDJĘCIE\nZATWIERDZONE [OK]" if bool(approved) else "ZDJĘCIE\nNIEZATWIERDZONE",
+            )
+        outline_updated = False
+        if bool(approved):
+            try:
+                canvas = getattr(self, "preview_canvas", None)
+                if canvas is not None:
+                    items = canvas.find_withtag("preview_plate_outline")
+                    if items:
+                        canvas.itemconfigure("preview_plate_outline", outline=success)
+                        outline_updated = True
+            except Exception:
+                outline_updated = False
+        try:
+            if not outline_updated:
+                self._refresh_preview_canvas_light()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _schedule_campaign_post_approval_refresh(self) -> None:
+    if bool(getattr(self, "_preview_fullscreen_active", False)):
+        self._preview_campaign_counter_refresh_pending_after_fullscreen = True
+        try:
+            self._cancel_preview_approval_followup_refresh()
+        except Exception:
+            pass
+        return
+
+    def _refresh_deferred_counts() -> None:
+        try:
+            if not _try_update_campaign_right_panel_counts_after_approval(self):
+                self._schedule_preview_approval_followup_refresh(delay_ms=1600)
+        except Exception:
+            self._schedule_preview_approval_followup_refresh(delay_ms=1600)
+
+    try:
+        self.frame.after(80, _refresh_deferred_counts)
+    except Exception:
+        _refresh_deferred_counts()
+
+
+def _schedule_campaign_char_source_refresh_after_approval(self, graph_gate_id: str) -> None:
+    if str(graph_gate_id or "").strip().upper() == "T06":
+        return
+    if bool(getattr(self, "_preview_fullscreen_active", False)):
+        self._campaign_char_effective_source_refresh_pending_after_fullscreen = True
+        try:
+            self._cancel_campaign_char_effective_source_refresh()
+        except Exception:
+            pass
+        return
+    self._schedule_campaign_char_effective_source_refresh()
+
+
+def _apply_preview_approval_fast(
+    self,
+    approved: bool,
+    selected_actual_indices: list[int],
+    approved_names: set[str],
+    approval_started: float,
+) -> bool:
+    """Minimal single-action OK toggle path used by keyboard shortcuts."""
+    annotations = list(getattr(self, "current_annotations", []) or [])
+    if not selected_actual_indices or not annotations:
+        return False
+
+    changed = 0
+    cleaned_without_plate = 0
+    skipped_without_plate = 0
+    approved_images_delta = 0
+    approved_plates_delta = 0
+    changed_filenames: set[str] = set()
+    changed_dirty_filenames: set[str] = set()
+    selected_annotations: list[tuple[int, ImageAnnotation]] = []
+    dirty_names = {
+        str(name or "").strip().lower()
+        for name in set(getattr(self, "_preview_dirty_images", set()) or set())
+        if str(name or "").strip()
+    }
+    render_cache = getattr(self, "_preview_list_render_state_cache", None)
+
+    for actual_index in selected_actual_indices:
+        try:
+            safe_index = int(actual_index)
+        except Exception:
+            continue
+        if safe_index < 0 or safe_index >= len(annotations):
+            continue
+        ann = annotations[safe_index]
+        selected_annotations.append((safe_index, ann))
+        filename = str(getattr(ann, "filename", "") or "").strip().lower()
+        if not filename:
+            continue
+        can_export = bool(self._preview_annotation_can_be_approved_for_export(ann))
+        was_approved = bool(
+            can_export
+            and (
+                filename in approved_names
+                or bool(getattr(ann, "_approved_for_training", False))
+            )
+        )
+        if approved and not can_export:
+            skipped_without_plate += 1
+            if was_approved or filename in approved_names:
+                approved_names.discard(filename)
+                cleaned_without_plate += 1
+                changed_filenames.add(filename)
+            try:
+                setattr(ann, "_approved_for_training", False)
+            except Exception:
+                pass
+            continue
+
+        if approved:
+            approved_names.add(filename)
+            now_approved = True
+            try:
+                setattr(ann, "_approved_for_training", True)
+            except Exception:
+                pass
+        else:
+            approved_names.discard(filename)
+            now_approved = False
+            try:
+                setattr(ann, "_approved_for_training", False)
+            except Exception:
+                pass
+
+        if now_approved != was_approved:
+            changed += 1
+            changed_filenames.add(filename)
+            if filename in dirty_names:
+                changed_dirty_filenames.add(filename)
+            try:
+                plate_count = int(len(self._get_plate_detections(ann)))
+            except Exception:
+                plate_count = 0
+            if plate_count > 0:
+                delta = 1 if now_approved else -1
+                approved_images_delta += delta
+                approved_plates_delta += delta * plate_count
+        try:
+            if isinstance(render_cache, dict):
+                render_cache.pop(id(ann), None)
+        except Exception:
+            pass
+
+    self._preview_approved_filenames = set(approved_names)
+    if not self._is_free_mode_session_context():
+        self._campaign_pending_approved_filenames = set(approved_names)
+
+    approval_state_changed = bool(changed > 0 or cleaned_without_plate > 0)
+    if approval_state_changed:
+        self._preview_approval_version = int(getattr(self, "_preview_approval_version", 0) or 0) + 1
+        cache = getattr(self, "_preview_list_summary_cache", None)
+        if isinstance(cache, dict):
+            cache["approved"] = max(0, int(cache.get("approved", 0) or 0) + int(approved_images_delta))
+            self._preview_list_summary_cache = cache
+        plate_cache = getattr(self, "_current_preview_plate_count_cache", None)
+        if isinstance(plate_cache, dict):
+            approved_set = getattr(self, "_preview_approved_filenames", None)
+            campaign_approved_set = getattr(self, "_campaign_pending_approved_filenames", None)
+            plate_cache["approved_images"] = max(
+                0,
+                int(plate_cache.get("approved_images", 0) or 0) + int(approved_images_delta),
+            )
+            plate_cache["approved_plates"] = max(
+                0,
+                int(plate_cache.get("approved_plates", 0) or 0) + int(approved_plates_delta),
+            )
+            plate_cache["approval_cache_token"] = (
+                int(id(approved_set)) if approved_set is not None else 0,
+                int(len(approved_set or set())),
+                int(id(campaign_approved_set)) if campaign_approved_set is not None else 0,
+                int(len(campaign_approved_set or set())),
+                int(getattr(self, "_preview_approval_version", 0) or 0),
+            )
+            self._current_preview_plate_count_cache = plate_cache
+        self._schedule_preview_approved_persist()
+
+    graph_gate_id = ""
+    if not self._is_free_mode_session_context():
+        try:
+            graph_gate_id = str(
+                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
+                or ""
+            ).strip().upper()
+        except Exception:
+            graph_gate_id = ""
+        if approval_state_changed and graph_gate_id in {"T04", "T05", "T06"} and changed_dirty_filenames:
+            try:
+                self._schedule_preview_autosave(
+                    delay_ms=6500,
+                    status_message="Zapisano poprawki zatwierdzonych ramek do annotations.xml.",
+                    refresh_workflow=False,
+                    refresh_export_sources=False,
+                )
+            except Exception as exc:
+                logger.debug(f"Nie udalo sie odroczyc zapisu XML po zmianie OK: {exc}")
+        if approval_state_changed:
+            _schedule_campaign_char_source_refresh_after_approval(self, graph_gate_id)
+
+    if approved and skipped_without_plate > 0:
+        if changed > 0:
+            status_text = (
+                f"Oznaczono jako OK: {changed} obraz(y). "
+                f"Pominięto {skipped_without_plate} bez ramki tablicy."
+            )
+        elif cleaned_without_plate > 0:
+            status_text = (
+                f"Usunięto błędny status OK z {cleaned_without_plate} obrazów bez ramki tablicy. "
+                "Obraz można zatwierdzić dopiero po dodaniu ramki."
+            )
+        else:
+            status_text = "Nie można oznaczyć jako OK: najpierw dodaj ramkę tablicy."
+    else:
+        status_text = (
+            (
+                f"Oznaczono jako OK: {changed} obraz(y)."
+                if approved
+                else f"Cofnięto OK dla {changed} obrazów."
+            )
+            if changed > 0
+            else (
+                "Zaznaczone obrazy były już oznaczone jako OK."
+                if approved
+                else "Zaznaczone obrazy nie miały znacznika OK."
+            )
+        )
+
+    self._update_preview_edit_status(status_text, refresh_toolbar=False, refresh_debug=False)
+    for actual_index, _ann in selected_annotations:
+        try:
+            self._refresh_preview_list_row_for_actual_index(
+                actual_index,
+                refresh_summary=False,
+                lightweight=True,
+            )
+        except Exception:
+            pass
+    if not bool(getattr(self, "_preview_fullscreen_active", False)):
+        try:
+            if isinstance(getattr(self, "_preview_list_summary_cache", None), dict):
+                self._refresh_preview_list_summary(lightweight=True)
+            else:
+                ok_widget = getattr(self, "preview_list_legend_dirty_count_lbl", None)
+                if ok_widget is not None and approved_images_delta:
+                    current_text = str(ok_widget.cget("text") or "0").strip()
+                    current_value = int(current_text) if current_text.isdigit() else 0
+                    ok_widget.configure(text=str(max(0, current_value + int(approved_images_delta))))
+        except Exception:
+            pass
+    _update_preview_approval_badge_fast(self, approved)
+    self._queue_free_mode_session_save()
+
+    if approval_state_changed:
+        _schedule_campaign_post_approval_refresh(self)
+
+    elapsed_ms = (time.perf_counter() - approval_started) * 1000.0
+    if elapsed_ms >= 180.0:
+        try:
+            logger.info(
+                "[Z2 PERF] approval_toggle_shortcut total=%.0fms selected=%s changed=%s approved=%s",
+                elapsed_ms,
+                len(selected_actual_indices),
+                changed,
+                int(bool(approved)),
+            )
+        except Exception:
+            pass
+    return True
+
+
 def _set_selected_preview_images_approved(
     self,
     approved: bool,
@@ -678,6 +1185,7 @@ def _set_selected_preview_images_approved(
     refresh_export_sources: bool = True,
     schedule_followup_refresh: bool = False,
 ) -> None:
+    approval_started = time.perf_counter()
     selected_actual_indices = (
         [int(idx) for idx in list(actual_indices or [])]
         if actual_indices is not None
@@ -687,7 +1195,33 @@ def _set_selected_preview_images_approved(
         self._update_preview_edit_status("Najpierw zaznacz na liście co najmniej jeden obraz.")
         return
 
-    approved_names = set(self._get_preview_approved_filenames())
+    fast_shortcut_approval = bool(
+        bool(schedule_followup_refresh)
+        and not bool(refresh_export_sources)
+        and not bool(persist_immediately)
+    )
+    if fast_shortcut_approval:
+        approved_names = {
+            str(name or "").strip().lower()
+            for name in set(getattr(self, "_preview_approved_filenames", set()) or set())
+            if str(name or "").strip()
+        }
+        if not self._is_free_mode_session_context():
+            approved_names.update(
+                str(name or "").strip().lower()
+                for name in set(getattr(self, "_campaign_pending_approved_filenames", set()) or set())
+                if str(name or "").strip()
+            )
+        if _apply_preview_approval_fast(
+            self,
+            approved,
+            selected_actual_indices,
+            approved_names,
+            approval_started,
+        ):
+            return
+    else:
+        approved_names = set(self._get_preview_approved_filenames_base())
     campaign_overlay_bundle = dict(getattr(self, "_campaign_auto_manual_overlay_bundle", {}) or {})
     try:
         initial_graph_gate_id = str(
@@ -891,28 +1425,25 @@ def _set_selected_preview_images_approved(
             ).strip().upper()
         except Exception:
             graph_gate_id = ""
-        if graph_gate_id == "T06" and approved_changed_filenames:
-            run_dir = getattr(self, "current_annotation_run_dir", None)
+        changed_filename_set = set(approved_changed_filenames) | set(unapproved_changed_filenames)
+        if graph_gate_id in {"T04", "T05", "T06"} and changed_filename_set:
             dirty_names = {
                 str(name or "").strip().lower()
                 for name in set(getattr(self, "_preview_dirty_images", set()) or set())
                 if str(name or "").strip()
             }
-            if dirty_names.intersection(approved_changed_filenames):
+            if dirty_names.intersection(changed_filename_set):
                 try:
-                    self._save_preview_edits(
-                        interactive=False,
-                        status_message=None,
-                        refresh_list=False,
+                    self._schedule_preview_autosave(
+                        delay_ms=6500,
+                        status_message="Zapisano poprawki zatwierdzonych ramek do annotations.xml.",
                         refresh_workflow=False,
                         refresh_export_sources=False,
                     )
                 except Exception as exc:
-                    logger.debug(f"Nie udalo sie zapisac XML po nadaniu OK w T06: {exc}")
-            try:
-                self._persist_preview_approved_filenames()
-            except Exception as exc:
-                logger.debug(f"Nie udalo sie zapisac manifestu OK w T06: {exc}")
+                    logger.debug(f"Nie udalo sie odroczyc zapisu XML po zmianie OK: {exc}")
+        if graph_gate_id == "T06" and approved_changed_filenames:
+            run_dir = getattr(self, "current_annotation_run_dir", None)
             try:
                 self._append_z2_trace(
                     "t06-approval-pending",
@@ -926,10 +1457,6 @@ def _set_selected_preview_images_approved(
         if graph_gate_id == "T06" and unapproved_changed_filenames:
             run_dir = getattr(self, "current_annotation_run_dir", None)
             try:
-                self._persist_preview_approved_filenames()
-            except Exception as exc:
-                logger.debug(f"Nie udalo sie zapisac manifestu po cofnieciu OK w T06: {exc}")
-            try:
                 self._append_z2_trace(
                     "t06-approval-retracted",
                     (
@@ -939,13 +1466,80 @@ def _set_selected_preview_images_approved(
                 )
             except Exception:
                 pass
-        if graph_gate_id != "T06":
-            self._schedule_campaign_char_effective_source_refresh()
+        _schedule_campaign_char_source_refresh_after_approval(self, graph_gate_id)
+
+    if fast_shortcut_approval:
+        if approved and skipped_without_plate > 0:
+            if changed > 0:
+                status_text = (
+                    f"Oznaczono jako OK: {changed} obraz(y). "
+                    f"Pominięto {skipped_without_plate} bez ramki tablicy."
+                )
+            elif cleaned_without_plate > 0:
+                status_text = (
+                    f"Usunięto błędny status OK z {cleaned_without_plate} obrazów bez ramki tablicy. "
+                    "Obraz można zatwierdzić dopiero po dodaniu ramki."
+                )
+            else:
+                status_text = "Nie można oznaczyć jako OK: najpierw dodaj ramkę tablicy."
+        else:
+            status_text = (
+                (
+                    f"Oznaczono jako OK: {changed} obraz(y)."
+                    if approved
+                    else f"Cofnięto OK dla {changed} obrazów."
+                )
+                if changed > 0
+                else (
+                    "Zaznaczone obrazy były już oznaczone jako OK."
+                    if approved
+                    else "Zaznaczone obrazy nie miały znacznika OK."
+                )
+            )
+        self._update_preview_edit_status(status_text)
+        if not bool(getattr(self, "_preview_fullscreen_active", False)):
+            for actual_index in selected_actual_indices:
+                try:
+                    self._refresh_preview_list_row_for_actual_index(
+                        actual_index,
+                        refresh_summary=False,
+                        lightweight=True,
+                    )
+                except Exception:
+                    pass
+        _update_preview_approval_badge_fast(self, approved)
+        self._queue_free_mode_session_save()
+        if approval_state_changed:
+            if bool(getattr(self, "_preview_fullscreen_active", False)):
+                self._preview_campaign_counter_refresh_pending_after_fullscreen = True
+                try:
+                    self._cancel_preview_approval_followup_refresh()
+                except Exception:
+                    pass
+            elif not _try_update_campaign_right_panel_counts_after_approval(self):
+                self._schedule_preview_approval_followup_refresh(delay_ms=2500)
+        elapsed_ms = (time.perf_counter() - approval_started) * 1000.0
+        if elapsed_ms >= 400.0:
+            try:
+                logger.info(
+                    "[Z2 PERF] approval_toggle_fast total=%.0fms selected=%s changed=%s approved=%s",
+                    elapsed_ms,
+                    len(selected_actual_indices),
+                    changed,
+                    int(bool(approved)),
+                )
+            except Exception:
+                pass
+        return
 
     restored_display_indices = []
     for actual_index in selected_actual_indices:
         try:
-            self._refresh_preview_list_row_for_actual_index(actual_index, refresh_summary=False)
+            self._refresh_preview_list_row_for_actual_index(
+                actual_index,
+                refresh_summary=False,
+                lightweight=True,
+            )
         except Exception:
             pass
         display_index = self._get_preview_display_index(actual_index)
@@ -963,6 +1557,7 @@ def _set_selected_preview_images_approved(
         pass
     self._refresh_preview_list_summary(lightweight=True)
     self._update_preview_toolbar_state(refresh_summary=False)
+    _update_preview_approval_badge_fast(self, approved)
     self._queue_free_mode_session_save()
     if approval_state_changed and refresh_export_sources:
         try:
@@ -973,19 +1568,7 @@ def _set_selected_preview_images_approved(
                 ).strip().upper()
             except Exception:
                 graph_gate_id = ""
-            try:
-                graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-                repair_origin_gate_id = str(
-                    graph_context.get("repair_origin_gate_id")
-                    or graph_context.get("source_graph_gate_id")
-                    or ""
-                ).strip().upper()
-            except Exception:
-                repair_origin_gate_id = ""
-            graph_gate_has_fast_counter = bool(
-                graph_gate_id == "T06"
-                or (graph_gate_id == "T05" and repair_origin_gate_id == "T07")
-            )
+            graph_gate_has_fast_counter = bool(graph_gate_id in {"T04", "T05", "T06"})
             skip_export_refresh = bool(
                 not self._is_free_mode_session_context()
                 and graph_gate_id in {"T04", "T05", "T06"}
@@ -995,12 +1578,12 @@ def _set_selected_preview_images_approved(
                 if active_run_dir is not None:
                     self._load_plate_dataset_context_from_run(active_run_dir, force_images_update=True)
                 self._refresh_plate_dataset_export_sources()
-            fast_t06_update = bool(
+            fast_counter_update = bool(
                 skip_export_refresh
                 and graph_gate_has_fast_counter
-                and _try_update_t06_right_panel_counts_after_approval(self)
+                and _try_update_campaign_right_panel_counts_after_approval(self)
             )
-            if not fast_t06_update:
+            if not fast_counter_update:
                 self._refresh_step2_action_states()
             if self._is_free_mode_session_context():
                 self._refresh_free_mode_workflow_ui()
@@ -1017,20 +1600,8 @@ def _set_selected_preview_images_approved(
             ).strip().upper()
         except Exception:
             graph_gate_id = ""
-        try:
-            graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-            repair_origin_gate_id = str(
-                graph_context.get("repair_origin_gate_id")
-                or graph_context.get("source_graph_gate_id")
-                or ""
-            ).strip().upper()
-        except Exception:
-            repair_origin_gate_id = ""
-        graph_gate_has_fast_counter = bool(
-            graph_gate_id == "T06"
-            or (graph_gate_id == "T05" and repair_origin_gate_id == "T07")
-        )
-        if not (graph_gate_has_fast_counter and _try_update_t06_right_panel_counts_after_approval(self)):
+        graph_gate_has_fast_counter = bool(graph_gate_id in {"T04", "T05", "T06"})
+        if not (graph_gate_has_fast_counter and _try_update_campaign_right_panel_counts_after_approval(self)):
             self._schedule_preview_approval_followup_refresh()
     if approved and skipped_without_plate > 0:
         if changed > 0:
@@ -1081,13 +1652,9 @@ def _set_selected_preview_images_approved(
     except Exception:
         pass
     try:
-        self._preview_overlay_dock_render_key = None
-        self._preview_overlay_dock_size = None
-        self._preview_overlay_dock_size_key = None
-        self._preview_overlay_dock_pre_gate_key = None
         self._preview_overlay_dock_gate_render_key = None
         self._preview_overlay_dock_inline_gate_state = None
-        self._place_preview_overlay_dock(force_render=True)
+        self._place_preview_overlay_dock(force_render=False)
     except Exception:
         pass
     try:
@@ -1099,6 +1666,26 @@ def _set_selected_preview_images_approved(
             self._place_preview_campaign_gate_overlay(force_render=True)
     except Exception:
         pass
+    elapsed_ms = (time.perf_counter() - approval_started) * 1000.0
+    if elapsed_ms >= 400.0:
+        try:
+            graph_gate_id = str(
+                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
+                or ""
+            ).strip().upper()
+        except Exception:
+            graph_gate_id = ""
+        try:
+            logger.info(
+                "[Z2 PERF] approval_toggle total=%.0fms gate=%s selected=%s changed=%s approved=%s",
+                elapsed_ms,
+                graph_gate_id or "-",
+                len(selected_actual_indices),
+                changed,
+                int(bool(approved)),
+            )
+        except Exception:
+            pass
 
 def _rename_selected_preview_image_file(self):
     if not self._ensure_preview_is_editable_for_action():
@@ -1505,14 +2092,22 @@ def _populate_preview_list_async(
     on_progress=None,
     on_ready=None,
     on_complete=None,
+    invalidate_runtime: bool = True,
+    rebuild_state_cache: bool = True,
+    recolor_rows: bool = True,
+    refresh_summary: bool = True,
+    lightweight_summary: bool = False,
+    show_population_state: bool = True,
 ):
     populate_started = time.perf_counter()
     self._cancel_preview_list_population()
-    self._invalidate_preview_runtime_caches()
-    self._set_preview_list_population_active(True)
+    if invalidate_runtime:
+        self._invalidate_preview_runtime_caches()
+    if show_population_state:
+        self._set_preview_list_population_active(True)
 
     source_annotations = list(getattr(self, "current_annotations", []) or [])
-    if len(source_annotations) >= 1200:
+    if rebuild_state_cache and len(source_annotations) >= 250:
         cache_started = time.perf_counter()
         try:
             self._build_preview_list_render_state_cache(list(enumerate(source_annotations)))
@@ -1567,18 +2162,19 @@ def _populate_preview_list_async(
         selected_actual_index = entries[0][0]
         selected_display_index = 0
 
+    default_color_bucket = "auto"
     try:
-        palette = getattr(self.app, "palette", {}) or {}
-        default_fg = (
-            palette.get("success", "#27ae60")
-            if len(entries) >= 3000
-            else palette.get("error", "#c0392b")
-        )
+        if recolor_rows:
+            default_color_bucket, default_fg = self._preview_list_color_plan(entries)
+        else:
+            palette = getattr(self.app, "palette", {}) or {}
+            default_fg = palette.get("success", "#27ae60")
         self.preview_listbox.configure(fg=default_fg)
     except Exception:
         pass
     self.preview_listbox.delete(0, tk.END)
-    self._refresh_preview_list_summary(lightweight=bool(len(entries) >= 1200))
+    if refresh_summary:
+        self._refresh_preview_list_summary(lightweight=bool(lightweight_summary or len(entries) >= 1200))
     signal_ready()
 
     if not entries:
@@ -1608,6 +2204,8 @@ def _populate_preview_list_async(
             return
 
         previous_idx = self.current_preview_index
+        if not render_current:
+            self._suppress_preview_reload_on_list_select = True
         self._clear_listbox_selection_fast(self.preview_listbox)
         self.preview_listbox.selection_set(selected_display_index)
         self.preview_listbox.activate(selected_display_index)
@@ -1623,6 +2221,13 @@ def _populate_preview_list_async(
         else:
             self._update_preview_toolbar_state()
             self._update_preview_edit_status()
+            try:
+                self.frame.after(
+                    250,
+                    lambda: setattr(self, "_suppress_preview_reload_on_list_select", False),
+                )
+            except Exception:
+                self._suppress_preview_reload_on_list_select = False
 
     def insert_batch(start_index: int = 0):
         if (
@@ -1638,7 +2243,6 @@ def _populate_preview_list_async(
 
         end_index = min(start_index + max(1, int(batch_size)), len(entries))
         total_count = len(entries)
-        color_all_rows = bool(total_count < 3000)
         lightweight_labels = bool(total_count >= 1200)
         batch_labels = []
         for idx in range(start_index, end_index):
@@ -1682,19 +2286,17 @@ def _populate_preview_list_async(
                     "[AnnotationTab][PERF] preview_list_batch_repair: "
                     f"expected={expected_count} inserted={inserted_count} repaired_total={repaired_size}"
                 )
-        for idx in range(start_index, end_index):
-            _actual_idx, ann = entries[idx]
-            try:
-                if not color_all_rows:
-                    # On large NEON-like runs the dominant bucket is auto.  The
-                    # listbox gets that color globally; only exceptions need a
-                    # per-row itemconfig call.
-                    if self._preview_annotation_sort_bucket(ann) == "auto":
+        if recolor_rows:
+            for idx in range(start_index, end_index):
+                _actual_idx, ann = entries[idx]
+                try:
+                    bucket = self._preview_list_effective_color_bucket(ann)
+                    if bucket == default_color_bucket:
                         continue
-                item_color = self._preview_list_item_color(ann)
-                self.preview_listbox.itemconfig(idx, foreground=item_color)
-            except Exception:
-                pass
+                    item_color = self._preview_list_color_for_bucket(bucket)
+                    self.preview_listbox.itemconfig(idx, foreground=item_color)
+                except Exception:
+                    pass
 
         if (
             not selection_applied
@@ -1930,6 +2532,83 @@ def _refresh_preview_list_legend_theme(self):
     except Exception:
         pass
 
+def _build_preview_list_summary_cache_key(self, annotations: list[ImageAnnotation]) -> tuple:
+    """Small status fingerprint so same-sized runs cannot reuse stale counters."""
+    safe_annotations = list(annotations or [])
+    fingerprint = 1469598103934665603
+    for idx, ann in enumerate(safe_annotations):
+        filename = str(getattr(ann, "filename", "") or "").strip().lower()
+        try:
+            approved_flag = int(bool(getattr(ann, "_approved_for_training", False)))
+        except Exception:
+            approved_flag = 0
+        plate_count = 0
+        manual_count = 0
+        auto_count = 0
+        try:
+            detections = list(getattr(ann, "detections", []) or [])
+        except Exception:
+            detections = []
+        for det in detections:
+            label = str(getattr(det, "label", "") or "").strip().lower()
+            if label not in CONFIG.PLATE_LABELS:
+                continue
+            plate_count += 1
+            attributes = dict(getattr(det, "attributes", {}) or {})
+            manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
+            manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
+            cvat_source = str(getattr(det, "_cvat_source", "") or "").strip().lower()
+            origin_source = str(
+                attributes.get("annotation_origin")
+                or attributes.get("cvat_source")
+                or attributes.get("source")
+                or ""
+            ).strip().lower()
+            auto_source = str(attributes.get("auto_source", "") or "").strip().lower()
+            if manually_edited or manual_source or cvat_source == "manual" or origin_source == "manual":
+                manual_count += 1
+            elif cvat_source == "auto" or origin_source == "auto" or auto_source or not manually_edited:
+                auto_count += 1
+
+        name_value = 0
+        for char in filename[:96]:
+            name_value = ((name_value * 131) + ord(char)) & 0xFFFFFFFFFFFFFFFF
+        row_value = (
+            int(idx + 1)
+            ^ (name_value << 1)
+            ^ (int(plate_count) << 17)
+            ^ (int(manual_count) << 29)
+            ^ (int(auto_count) << 37)
+            ^ (approved_flag << 47)
+        )
+        fingerprint ^= row_value & 0xFFFFFFFFFFFFFFFF
+        fingerprint = (fingerprint * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+
+    try:
+        context_key = str(self._get_preview_list_context_key() or "")
+    except Exception:
+        context_key = ""
+    xml_token = ""
+    try:
+        xml_path = self._get_current_annotation_xml_path()
+        if xml_path is not None:
+            stat = Path(xml_path).stat()
+            xml_token = f"{Path(xml_path).resolve()}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}"
+    except Exception:
+        xml_token = ""
+    try:
+        approval_version = int(getattr(self, "_preview_approval_version", 0) or 0)
+    except Exception:
+        approval_version = 0
+    return (
+        int(len(safe_annotations)),
+        int(fingerprint),
+        context_key,
+        xml_token,
+        approval_version,
+    )
+
+
 def _refresh_preview_list_summary(self, *, lightweight: bool = False):
     annotations = list(self.current_annotations or [])
     visible_entries = list(getattr(self, "_preview_list_display_indices", []) or [])
@@ -1945,10 +2624,12 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
     )
     char_repair_context = bool(campaign_context and approval_current_step == 3 and approval_iteration_target == "char")
     summary_cache = getattr(self, "_preview_list_summary_cache", None)
+    summary_cache_key = _build_preview_list_summary_cache_key(self, annotations)
     use_cached_counts = bool(
         lightweight
         and isinstance(summary_cache, dict)
         and int(summary_cache.get("total", -1) or -1) == int(len(annotations))
+        and summary_cache.get("cache_key") == summary_cache_key
     )
     if lightweight and not use_cached_counts and len(annotations) >= 1200:
         try:
@@ -2001,35 +2682,90 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
     if fit_threshold > 0.0:
         filter_parts.append(f"Fit >= {fit_threshold:.2f}")
     filter_text = " | ".join(filter_parts)
-    visible_plate_count = 0
-    visible_manual_images = 0
-    visible_auto_images = 0
-    visible_problem_images = 0
-    visible_approved_images = 0
-    try:
+
+    def _read_visible_origin_counts() -> tuple[int, int, int, int]:
+        visible_auto = 0
+        visible_manual = 0
+        visible_problem = 0
+        visible_approved = 0
+        render_cache = getattr(self, "_preview_list_render_state_cache", None)
+        has_render_cache = isinstance(render_cache, dict)
+
         for actual_idx in visible_entries:
-            safe_idx = int(actual_idx)
-            if 0 <= safe_idx < len(annotations):
-                ann = annotations[safe_idx]
-                visible_plate_count += int(len(self._get_plate_detections(ann)))
+            try:
+                safe_idx = int(actual_idx)
+            except Exception:
+                continue
+            if safe_idx < 0 or safe_idx >= len(annotations):
+                continue
+            ann = annotations[safe_idx]
+            state = render_cache.get(id(ann)) if has_render_cache else None
+            if isinstance(state, dict):
+                is_manual = bool(state.get("manual"))
+                is_auto = bool(state.get("auto"))
+                is_approved = bool(state.get("approved"))
+            else:
                 try:
-                    bucket = str(self._preview_annotation_sort_bucket(ann) or "").strip().lower()
+                    origin_tag = str(self._preview_annotation_origin_tag(ann) or "").strip().upper()
                 except Exception:
-                    bucket = "problem"
-                if bucket == "approved":
-                    visible_approved_images += 1
-                elif bucket == "manual":
-                    visible_manual_images += 1
-                elif bucket == "auto":
-                    visible_auto_images += 1
-                else:
-                    visible_problem_images += 1
-    except Exception:
+                    origin_tag = ""
+                try:
+                    is_manual = bool(origin_tag in {"M", "MANUAL"} or self._preview_annotation_is_manually_corrected(ann))
+                except Exception:
+                    is_manual = bool(origin_tag in {"M", "MANUAL"})
+                try:
+                    is_auto = bool((not is_manual) and (origin_tag in {"A", "AUTO"} or self._preview_annotation_has_auto_plate(ann)))
+                except Exception:
+                    is_auto = bool((not is_manual) and origin_tag in {"A", "AUTO"})
+                try:
+                    is_approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+                except Exception:
+                    is_approved = False
+
+            if is_manual:
+                visible_manual += 1
+            elif is_auto:
+                visible_auto += 1
+            elif not is_approved:
+                visible_problem += 1
+            if is_approved:
+                visible_approved += 1
+
+        return visible_auto, visible_manual, visible_problem, visible_approved
+
+    skip_visible_breakdown = bool(
+        lightweight
+        and use_cached_counts
+        and len(visible_entries) >= 250
+    )
+    if skip_visible_breakdown:
         visible_plate_count = total_plate_count if visible_count == len(annotations) else 0
-        visible_manual_images = manual_images if visible_count == len(annotations) else 0
-        visible_auto_images = auto_images if visible_count == len(annotations) else 0
-        visible_problem_images = problem_images if visible_count == len(annotations) else 0
-        visible_approved_images = approved_images if visible_count == len(annotations) else 0
+        (
+            visible_auto_images,
+            visible_manual_images,
+            visible_problem_images,
+            visible_approved_images,
+        ) = _read_visible_origin_counts()
+    else:
+        visible_plate_count = 0
+        (
+            visible_auto_images,
+            visible_manual_images,
+            visible_problem_images,
+            visible_approved_images,
+        ) = _read_visible_origin_counts()
+        try:
+            for actual_idx in visible_entries:
+                safe_idx = int(actual_idx)
+                if 0 <= safe_idx < len(annotations):
+                    ann = annotations[safe_idx]
+                    visible_plate_count += int(len(self._get_plate_detections(ann)))
+        except Exception:
+            visible_plate_count = total_plate_count if visible_count == len(annotations) else 0
+            visible_manual_images = manual_images if visible_count == len(annotations) else 0
+            visible_auto_images = auto_images if visible_count == len(annotations) else 0
+            visible_problem_images = problem_images if visible_count == len(annotations) else 0
+            visible_approved_images = approved_images if visible_count == len(annotations) else 0
     left_summary_parts: list[str] = []
     left_summary_parts.append(f"Zdjęcia: {visible_count}/{len(annotations)}")
     left_summary_parts.append(f"Tablice: {visible_plate_count}/{total_plate_count}")
@@ -2054,6 +2790,7 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
 
     if not use_cached_counts:
         self._preview_list_summary_cache = {
+            "cache_key": summary_cache_key,
             "total": int(len(annotations)),
             "reused_manual": int(reused_manual),
             "manual": int(manual_images),
@@ -2802,7 +3539,12 @@ def _save_preview_edits(
     if refresh_list:
         self._refresh_preview_list(preserve_selection=True, render_current=False)
     else:
-        self._refresh_preview_list_row_for_actual_index(saved_preview_index, refresh_summary=True)
+        self._refresh_preview_list_row_for_actual_index(
+            saved_preview_index,
+            refresh_summary=False,
+            lightweight=True,
+        )
+        self._update_preview_toolbar_state(refresh_summary=False)
 
     if refresh_export_sources:
         self._refresh_plate_dataset_export_sources()

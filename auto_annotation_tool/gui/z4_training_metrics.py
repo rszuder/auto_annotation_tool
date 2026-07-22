@@ -41,7 +41,14 @@ from ..config import (
 )
 from ..icons import IconManager
 from ..validators import validate_model_file, format_yolo_model_identity
-from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
+from ..training import (
+    DatasetCreator,
+    DatasetSplitter,
+    TrainingHistory,
+    TrainingStatus,
+    YOLOPoseTrainer,
+    ensure_yolo_dataset_yaml_points_to_root,
+)
 from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
@@ -932,7 +939,7 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         model_state = _resolve_selected_training_base_model_training_state(self)
     except Exception:
         model_state = {}
-    model_hint = str(model_state.get("detail") or "Model bazowy do fine-tuningu.").strip()
+    model_hint = str(model_state.get("detail") or "Model startowy tego treningu.").strip()
     try:
         _model_path, model_info = self._resolve_selected_training_base_model_info()
         model_value = self._build_training_model_summary_value(base_display, model_info)
@@ -982,7 +989,7 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         tone = "success"
     elif dataset_ready:
         status = "Uzupełnij model"
-        subtitle = "Dataset jest wybrany. Sprawdź model bazowy i zgodność typu treningu."
+        subtitle = "Dataset jest wybrany. Sprawdź model startowy i zgodność typu treningu."
         tone = "warning"
     else:
         status = "Czekam na wariant"
@@ -1383,12 +1390,48 @@ def _safe_training_float_value(self, attr_name: str, *, default: float, minimum:
     )
 
 def _resolve_training_dataset_yaml_path(self) -> Path | None:
+    dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+
+    def _normalize_dataset_root(value: str | Path | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            path = Path(raw)
+            if path.is_file() and path.name.lower() == "data.yaml":
+                path = path.parent
+            return str(path.resolve())
+        except Exception:
+            return raw
+
+    def _source_matches_current_selection(source: TrainingSource) -> bool:
+        selected_root = _normalize_dataset_root(dataset_value)
+        if not selected_root:
+            return True
+        for raw in (source.dataset_dir, source.yaml_path):
+            source_root = _normalize_dataset_root(raw)
+            if source_root and source_root == selected_root:
+                return True
+        return False
+
     try:
         source = getattr(self, "_last_training_source", None)
+        if (
+            isinstance(source, TrainingSource)
+            and source.has_dataset()
+            and not _source_matches_current_selection(source)
+        ):
+            source = None
         if not isinstance(source, TrainingSource) or not source.has_dataset():
             resolver = getattr(self, "_resolve_step4_dataset_summary_source", None)
             if callable(resolver):
                 source = resolver()
+        if (
+            isinstance(source, TrainingSource)
+            and source.has_dataset()
+            and not _source_matches_current_selection(source)
+        ):
+            source = None
         if isinstance(source, TrainingSource) and source.has_dataset():
             candidates: list[Path] = []
             if str(source.yaml_path or "").strip():
@@ -1402,7 +1445,6 @@ def _resolve_training_dataset_yaml_path(self) -> Path | None:
     except Exception:
         pass
 
-    dataset_value = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
     if not dataset_value:
         return None
 
@@ -1431,6 +1473,15 @@ def _validate_active_training_source_for_pz2(self) -> dict:
         return result
 
     dataset_root = yaml_path.parent
+    ok_yaml_root, yaml_root_msg, yaml_root_changed = ensure_yolo_dataset_yaml_points_to_root(dataset_root)
+    if not ok_yaml_root:
+        result["message"] = str(yaml_root_msg or "Nie udało się zweryfikować pliku data.yaml.")
+        return result
+    if yaml_root_changed:
+        try:
+            logger.info(f"Poprawiono path w data.yaml przed treningiem: {dataset_root}")
+        except Exception:
+            pass
     selected_target = self._get_selected_training_target()
     if not CAMPAIGN.get_active_project_name():
         if not self._is_free_training_dataset_variant_selected(dataset_root):
@@ -1567,8 +1618,208 @@ def _char_classification_dataset_message(self) -> str:
         "Datasety klasyfikacyjne są odkładane osobno w 4_training_datasets/4_char_classification."
     )
 
+def _get_pinned_step4_result_state(self) -> dict:
+    if not CAMPAIGN.get_active_project_name():
+        return {}
+
+    try:
+        context = _training_base_model_context(self)
+    except Exception:
+        context = {}
+    target = str(context.get("target") or "").strip().lower()
+    if target not in {"char", "plate"}:
+        try:
+            target = CONFIG.normalize_task_target(self.get_campaign_training_target())
+        except Exception:
+            target = "char"
+
+    try:
+        current_iteration = int(context.get("iteration") or CAMPAIGN.get_current_iteration_num() or 0)
+    except Exception:
+        current_iteration = 0
+
+    try:
+        stored = dict(CAMPAIGN.get_step4_finish_state() or {})
+    except Exception:
+        stored = {}
+    if not bool(stored.get("ready")) or not bool(stored.get("selection_confirmed")):
+        return {}
+
+    stored_target = str(stored.get("target", "") or "").strip().lower()
+    if stored_target and target and stored_target != target:
+        return {}
+
+    try:
+        stored_iteration = int(stored.get("iteration", 0) or 0)
+    except Exception:
+        stored_iteration = 0
+    if stored_iteration > 0 and current_iteration > 0 and stored_iteration != current_iteration:
+        return {}
+
+    try:
+        validated = dict(self.get_campaign_step4_finish_state(iteration_target=target) or {})
+    except Exception:
+        validated = {}
+    if not bool(validated.get("ready")):
+        return {}
+
+    stored_run_id = str(stored.get("run_id", "") or "").strip()
+    validated_run_id = str(validated.get("run_id", "") or "").strip()
+    if stored_run_id and validated_run_id and stored_run_id != validated_run_id:
+        return {}
+
+    state = dict(stored)
+    state.update({k: v for k, v in validated.items() if v not in ("", None)})
+    state["target"] = target
+    state["iteration"] = current_iteration or stored_iteration
+    state["target_label"] = context.get("target_label") or ("model tablic" if target == "plate" else "model znaków")
+    state["target_detail"] = context.get("target_detail") or state["target_label"]
+    state["iteration_label"] = context.get("iteration_label") or (f"IT{state['iteration']}" if state.get("iteration") else "IT")
+    state["model_path"] = str(stored.get("model_path", "") or state.get("model_path", "") or "").strip()
+    state["selection_confirmed"] = True
+    return state
+
+def _format_pinned_step4_result_detail(self, state: dict) -> str:
+    run_id = str(state.get("run_id", "") or "").strip()
+    model_path = str(state.get("model_path", "") or "").strip()
+    model_name = Path(model_path).name if model_path else "wybrany model"
+    iteration_label = str(state.get("iteration_label", "") or "").strip()
+    target_label = str(state.get("target_label", "") or "model").strip()
+    run_part = f" Run: {run_id}." if run_id else ""
+    return (
+        f"{iteration_label} • {target_label}: {model_name}.{run_part} "
+        "Ten model jest wynikiem bramki, więc split, model startowy, parametry i nowy trening są zablokowane. "
+        "Aby zmienić decyzję, odepnij wynik w sekcji wyboru wyniku bramki."
+    )
+
+def _set_step4_training_config_widgets_locked(self, locked: bool):
+    state_readonly = tk.DISABLED if locked else "readonly"
+    state_normal = tk.DISABLED if locked else tk.NORMAL
+
+    for attr in ("dataset_variant_combo", "base_combo"):
+        widget = getattr(self, attr, None)
+        if widget is None:
+            continue
+        try:
+            widget.configure(state=state_readonly)
+        except Exception:
+            pass
+
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    try:
+        is_custom = bool(self._is_custom_base_model_key(base_key))
+    except Exception:
+        is_custom = False
+
+    custom_entry = getattr(self, "base_custom_entry", None)
+    if custom_entry is not None:
+        try:
+            custom_entry.configure(state=(tk.DISABLED if locked or not is_custom else "readonly"))
+        except Exception:
+            pass
+
+    custom_btn = getattr(self, "base_custom_btn", None)
+    if custom_btn is not None:
+        try:
+            custom_btn.configure(state=(tk.DISABLED if locked or not is_custom else tk.NORMAL))
+        except Exception:
+            pass
+
+    apply_btn = getattr(self, "btn_apply_training_recommendation", None)
+    if apply_btn is not None:
+        try:
+            apply_btn.configure(state=state_normal)
+        except Exception:
+            pass
+
+    for cell in list(getattr(self, "_train_recommendation_cells", []) or []):
+        editor = cell.get("editor") if isinstance(cell, dict) else None
+        if editor is None:
+            continue
+        try:
+            editor.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+        except Exception:
+            pass
+
+def _refresh_step4_pinned_result_ui(self, pinned_state: dict | None = None) -> dict:
+    state = dict(pinned_state or _get_pinned_step4_result_state(self) or {})
+    locked = bool(state)
+    shell = getattr(self, "step4_pinned_result_shell", None)
+    detail_label = getattr(self, "step4_pinned_result_detail_lbl", None)
+    title_label = getattr(self, "step4_pinned_result_title_lbl", None)
+
+    try:
+        _set_step4_training_config_widgets_locked(self, locked)
+    except Exception:
+        pass
+
+    if shell is not None:
+        try:
+            if locked:
+                if title_label is not None:
+                    title_label.configure(text="Konfiguracja zablokowana")
+                if detail_label is not None:
+                    detail_label.configure(text=_format_pinned_step4_result_detail(self, state))
+                if not str(shell.winfo_manager()):
+                    shell.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 10))
+            else:
+                shell.pack_forget()
+        except Exception:
+            pass
+    return state
+
+def _clear_pinned_step4_result(self):
+    state = _get_pinned_step4_result_state(self)
+    if not state:
+        return
+    if not messagebox.askyesno(
+        "Odepnij wynik bramki",
+        (
+            "Odpiąć wybrany model jako wynik tej bramki?\n\n"
+            "Model i historia runu zostaną w projekcie, ale wróci możliwość zmiany splitu, "
+            "modelu startowego i uruchomienia nowego treningu."
+        ),
+    ):
+        return
+    try:
+        CAMPAIGN.set_step4_finish_state(False)
+    except Exception:
+        pass
+    try:
+        self._step4_campaign_finish_ready = False
+    except Exception:
+        pass
+    try:
+        self._refresh_step4_campaign_navigation_ui()
+    except Exception:
+        pass
+    try:
+        self._refresh_campaign_training_result_selector()
+    except Exception:
+        pass
+    try:
+        self._refresh_training_base_model_selection_ui()
+    except Exception:
+        pass
+    try:
+        self._refresh_training_start_state()
+    except Exception:
+        pass
+    try:
+        campaign_tab = self.app.tabs.get("campaign")
+        if campaign_tab:
+            campaign_tab._refresh_dashboard()
+    except Exception:
+        pass
+    try:
+        self._append_train_log("[MODEL] Odpięto model jako wynik bramki. Można ponownie trenować lub wybrać inny wynik.")
+    except Exception:
+        pass
+
 def _is_training_configuration_ready(self) -> bool:
     if not YOLO_AVAILABLE:
+        return False
+    if _get_pinned_step4_result_state(self):
         return False
     if self._step4_has_active_operation():
         return False
@@ -1610,7 +1861,7 @@ def _validate_training_base_model_target_compatibility(
 
     base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
     if not base_key:
-        return False, "Nie wybrano modelu bazowego."
+        return False, "Nie wybrano modelu startowego treningu."
 
     base_model = (
         str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
@@ -1618,7 +1869,7 @@ def _validate_training_base_model_target_compatibility(
         else base_key
     )
     if not base_model:
-        return False, "Nie wybrano modelu bazowego."
+        return False, "Nie wybrano modelu startowego treningu."
 
     if self._is_custom_base_model_key(base_key):
         try:
@@ -1652,20 +1903,20 @@ def _validate_training_base_model_target_compatibility(
                 message = (
                     "Wybrany plik pochodzi z treningu, który nie został ukończony.\n\n"
                     f"Run: {run_id or '-'} | status: {status_value or '-'}.\n"
-                    "Wybierz ukończony model bazowy albo uruchom właściwą akcję wznowienia."
+                    "Wybierz ukończony model startowy albo uruchom właściwą akcję wznowienia."
                 )
             if show_dialog:
-                messagebox.showerror("To nie jest model bazowy", message)
+                messagebox.showerror("To nie jest model startowy", message)
             return False, message
 
     is_pose_model = self._is_pose_base_model(base_key, base_model)
     if normalized_target == "plate" and not is_pose_model:
         message = (
             "Tor tablic wymaga modelu POSE.\n\n"
-            "Wybierz model z dopiskiem '-pose' albo model .pt wytrenowany wcześniej dla tablic."
+            "Wybierz model z dopiskiem '-pose' albo ukończony model .pt wytrenowany wcześniej dla tablic."
         )
         if show_dialog:
-            messagebox.showerror("Niezgodny model bazowy", message)
+            messagebox.showerror("Niezgodny model startowy", message)
         return False, message
 
     if normalized_target == "char" and is_pose_model:
@@ -1675,7 +1926,7 @@ def _validate_training_base_model_target_compatibility(
             "zamiast modelu pose."
         )
         if show_dialog:
-            messagebox.showerror("Niezgodny model bazowy", message)
+            messagebox.showerror("Niezgodny model startowy", message)
         return False, message
 
     return True, ""
@@ -1706,8 +1957,8 @@ def _ensure_new_training_uses_final_base_model(self) -> bool:
         try:
             run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
             logger.info(
-                "Z4/PZ2: checkpoint niedokończonego runu nie jest modelem bazowym nowego treningu; "
-                f"zdjęto z wyboru modelu bazowego run={run_id or '-'} i ustawiono {fallback}."
+                "Z4/PZ2: checkpoint niedokończonego runu nie jest modelem startowym nowego treningu; "
+                f"zdjęto z wyboru modelu startowego run={run_id or '-'} i ustawiono {fallback}."
             )
         except Exception:
             pass
@@ -1720,10 +1971,16 @@ def _refresh_training_start_state(self):
     if button is None:
         return
     ready = False
+    pinned_state = {}
     try:
+        pinned_state = _get_pinned_step4_result_state(self)
         _ensure_new_training_uses_final_base_model(self)
-        ready = bool(self._is_training_configuration_ready())
+        ready = bool(not pinned_state and self._is_training_configuration_ready())
         button.configure(state=(tk.NORMAL if ready else tk.DISABLED))
+    except Exception:
+        pass
+    try:
+        _refresh_step4_pinned_result_ui(self, pinned_state=pinned_state)
     except Exception:
         pass
     try:
@@ -1744,6 +2001,13 @@ def _refresh_training_start_state(self):
         pass
 
 def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, str]:
+    pinned_state = _get_pinned_step4_result_state(self)
+    if pinned_state:
+        return (
+            "Model przypięty",
+            _format_pinned_step4_result_detail(self, pinned_state),
+            "success",
+        )
     if ready:
         try:
             resumable_run_id = str(self._get_latest_campaign_resumable_run_id() or "").strip()
@@ -1753,7 +2017,7 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
             return (
                 "Gotowe do nowego treningu",
                 (
-                    "Kliknięcie rozpocznie nowy run na aktualnym wariancie datasetu i modelu bazowym. "
+                    "Kliknięcie rozpocznie nowy run na aktualnym wariancie datasetu i modelu startowym. "
                     f"Aby wznowić niedokończony run {resumable_run_id}: w historii treningów zaznacz jego wiersz, "
                     "kliknij prawym przyciskiem myszy i wybierz `Wznów trening`."
                 ),
@@ -1761,7 +2025,7 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
             )
         return (
             "Gotowe",
-            "Po kliknięciu rozpoczniemy trening na wybranym wariancie datasetu i modelu bazowym.",
+            "Po kliknięciu rozpoczniemy trening na wybranym wariancie datasetu i modelu startowym.",
             "success",
         )
     if not YOLO_AVAILABLE:
@@ -1805,7 +2069,7 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
     if not base_key:
         return (
             "Brakuje modelu",
-            "Wybierz model bazowy zgodny z torem treningu.",
+            "Wybierz model startowy zgodny z torem treningu.",
             "warning",
         )
     if self._is_custom_base_model_key(base_key):
@@ -1813,7 +2077,7 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
         if not custom_model or not Path(custom_model).exists():
             return (
                 "Brakuje modelu",
-                "Wskaż poprawny plik .pt dla modelu bazowego.",
+                "Wskaż poprawny plik .pt dla modelu startowego.",
                 "warning",
             )
         nonfinal_run = _selected_training_base_model_nonfinal_run(self)
@@ -1822,9 +2086,9 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
             return (
                 "Checkpoint wznowienia",
                 (
-                    f"Wybrany plik pochodzi z runu {status_value or 'nieukończonego'} i nie jest modelem bazowym. "
+                    f"Wybrany plik pochodzi z runu {status_value or 'nieukończonego'} i nie jest modelem startowym. "
                     "Aby kontynuować: zaznacz ten run w historii treningów, kliknij PPM i wybierz `Wznów trening`. "
-                    "Aby zacząć od nowa: wybierz preset albo ukończony model bazowy."
+                    "Aby zacząć od nowa: wybierz preset albo ukończony model startowy."
                 ),
                 "warning",
             )
@@ -1867,19 +2131,55 @@ def _refresh_training_start_gate(self, *, ready: bool):
     except Exception:
         pass
 
+def _training_base_model_context(self) -> dict:
+    try:
+        target = str(self._get_selected_training_target() or "").strip().lower()
+    except Exception:
+        try:
+            target = str(self.get_campaign_training_target() or "").strip().lower()
+        except Exception:
+            target = ""
+    target = CONFIG.normalize_task_target(target or "char")
+    if target not in {"plate", "char"}:
+        target = "char"
+
+    try:
+        iteration = int(CAMPAIGN.get_current_iteration_num() or 0) if CAMPAIGN.get_active_project_name() else 0
+    except Exception:
+        iteration = 0
+    iteration_label = f"IT{iteration}" if iteration > 0 else "tryb swobodny"
+
+    if target == "plate":
+        target_label = "model tablic"
+        target_detail = "model tablic (YOLO Pose)"
+    else:
+        target_label = "model znaków"
+        target_detail = "model znaków (YOLO Detect)"
+    return {
+        "target": target,
+        "target_label": target_label,
+        "target_detail": target_detail,
+        "iteration": iteration,
+        "iteration_label": iteration_label,
+        "prefix": f"{iteration_label} • {target_label}",
+    }
+
+
 def _resolve_selected_training_base_model_training_state(self) -> dict:
+    context = _training_base_model_context(self)
+    prefix = str(context.get("prefix") or "").strip()
     base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
     if not base_key:
         return {
-            "label": "BRAK MODELU",
-            "detail": "Nie wybrano modelu bazowego.",
+            "label": "WYBIERZ MODEL",
+            "detail": f"{prefix}. Wskaż preset albo plik .pt jako punkt startu treningu.",
             "tone": "warning",
         }
 
     if not self._is_custom_base_model_key(base_key):
         return {
-            "label": "NIEWYTRENOWANE W PROJEKCIE",
-            "detail": "Preset YOLO. Nie jest artefaktem treningu tej kampanii.",
+            "label": "PRESET STARTOWY YOLO",
+            "detail": f"{prefix}. Świeże wagi startowe, nie wynik wcześniejszego treningu projektu.",
             "tone": "muted",
         }
 
@@ -1887,7 +2187,7 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
     if not custom_model:
         return {
             "label": "BRAK PLIKU",
-            "detail": "Wskaż plik .pt albo wybierz preset YOLO.",
+            "detail": f"{prefix}. Wskaż plik .pt albo wybierz preset YOLO.",
             "tone": "warning",
         }
 
@@ -1899,7 +2199,7 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
     if model_path is None or not model_path.exists():
         return {
             "label": "BRAK PLIKU",
-            "detail": "Wskazany plik .pt nie istnieje.",
+            "detail": f"{prefix}. Wskazany plik .pt nie istnieje.",
             "tone": "danger",
         }
 
@@ -1914,19 +2214,19 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
         run_label = self._format_training_model_run_label(source_run)
         if status_value == TrainingStatus.COMPLETED.value:
             return {
-                "label": "WYTRENOWANY MODEL",
-                "detail": f"Artefakt ukończonego runu: {run_label}.",
+                "label": "MODEL PO TRENINGU",
+                "detail": f"{prefix}. Ukończony run jako punkt startu: {run_label}.",
                 "tone": "success",
             }
         return {
-            "label": "CHECKPOINT NIEUKOŃCZONY",
-            "detail": f"Run {run_label} ma status: {status_value or 'nieznany'}. Do kontynuacji użyj `Wznów trening`.",
+            "label": "CHECKPOINT RUNU",
+            "detail": f"{prefix}. Run {run_label} ma status: {status_value or 'nieznany'}; do kontynuacji użyj `Wznów trening`.",
             "tone": "warning",
         }
 
     return {
-        "label": "ZEWNĘTRZNY MODEL .PT",
-        "detail": "Aplikacja nie zna historii treningu tego pliku.",
+        "label": "PLIK STARTOWY .PT",
+        "detail": f"{prefix}. Zewnętrzne wagi startowe; aplikacja nie zna historii treningu tego pliku.",
         "tone": "info",
     }
 
@@ -1934,6 +2234,9 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
 def _refresh_training_base_model_identity_ui(self):
     label = getattr(self, "train_base_identity_lbl", None)
     status_label = getattr(self, "train_base_status_lbl", None)
+    title_label = getattr(self, "train_base_title_lbl", None)
+    caption_label = getattr(self, "train_base_caption_lbl", None)
+    context = _training_base_model_context(self)
     state = _resolve_selected_training_base_model_training_state(self)
     palette = getattr(self.app, "palette", {}) or {}
     tone = str(state.get("tone") or "muted")
@@ -1947,6 +2250,22 @@ def _refresh_training_base_model_identity_ui(self):
     }
     tone_fg = tone_colors.get(tone, palette.get("muted", "#c7c7c7"))
     tone_bg = blend_hex_colors(tone_fg, panel, 0.82)
+
+    try:
+        if title_label is not None:
+            title_label.configure(text=f"Model startowy: {context.get('target_label', 'model')}")
+    except Exception:
+        pass
+    try:
+        if caption_label is not None:
+            caption_label.configure(
+                text=(
+                    f"{context.get('iteration_label', 'IT')} • trenujesz {context.get('target_detail', 'model')}. "
+                    "To tylko punkt startu runu; wynik bramki wybierzesz po zakończeniu treningu."
+                )
+            )
+    except Exception:
+        pass
 
     if status_label is not None:
         try:
@@ -2078,7 +2397,7 @@ def _build_selected_training_base_model_identity_lines(self) -> list[str]:
         run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
         status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
         lines.append(f"Checkpoint niedokończonego treningu: {run_id or '-'} ({status_value or '-'})")
-        lines.append("Do kontynuacji użyj `Wznów trening`; to nie jest finalny model bazowy.")
+        lines.append("Do kontynuacji użyj `Wznów trening`; to nie jest finalny model startowy.")
 
     identity_label = format_yolo_model_identity(info)
     if identity_label:
@@ -2215,7 +2534,7 @@ def _get_training_gpu_capacity_block_reason(
     architecture_label = format_yolo_model_identity(base_model_info) or "duży model YOLO Pose"
     gpu_name = str(effective_device_profile.get("name") or "GPU").strip()
     return (
-        f"Wybrany model bazowy to {architecture_label}, a aktywne urządzenie to {gpu_name} "
+        f"Wybrany model startowy to {architecture_label}, a aktywne urządzenie to {gpu_name} "
         f"z około {memory_gb:.1f} GB VRAM.\n\n"
         "Ten rozmiar modelu pose na 4 GB VRAM w obecnym środowisku kończy się błędami pamięci CUDA "
         "jeszcze przed stabilnym startem treningu albo w pierwszych batchach.\n\n"

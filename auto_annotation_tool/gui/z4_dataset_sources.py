@@ -209,6 +209,11 @@ def _get_free_dataset_variant_choices(self) -> list[dict]:
             continue
         counts = self._get_dataset_split_image_counts(path)
         total = int(counts.get("total", 0) or 0)
+        if total <= 0:
+            # PZ2 wybiera warianty splitu utworzone w PZ1. Katalog źródłowy
+            # może mieć data.yaml, ale bez images/train|val|test nie jest
+            # wariantem treningowym i nie powinien mieszać się z listą.
+            continue
         if campaign_active and selected_target == "plate" and approved_plate_images > 0 and total != approved_plate_images:
             try:
                 path_resolved = str(Path(path).resolve())
@@ -248,8 +253,6 @@ def _get_free_dataset_variant_choices(self) -> list[dict]:
             f"val={int(counts.get('val', 0) or 0)}, "
             f"test={int(counts.get('test', 0) or 0)}"
         )
-        if total <= 0:
-            label = f"{path.name} | data.yaml"
         variants.append(
             {
                 "label": label,
@@ -1078,6 +1081,8 @@ def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -
         "median_height": 0,
         "median_long_edge": 0,
         "max_long_edge": 0,
+        "created_at": "",
+        "created_at_timestamp": 0,
     }
 
     yaml_path = dataset_yaml_path or self._resolve_training_dataset_yaml_path()
@@ -1085,6 +1090,25 @@ def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -
         return result
 
     dataset_root = yaml_path.parent
+    created_timestamp = 0.0
+    created_text = ""
+    try:
+        created_timestamp = float(dataset_root.stat().st_ctime or 0)
+    except Exception:
+        created_timestamp = 0.0
+    if created_timestamp <= 0:
+        try:
+            created_timestamp = float(yaml_path.stat().st_ctime or yaml_path.stat().st_mtime or 0)
+        except Exception:
+            created_timestamp = 0.0
+    if created_timestamp > 0:
+        try:
+            created_text = datetime.datetime.fromtimestamp(created_timestamp).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            created_text = ""
+    result["created_at"] = created_text
+    result["created_at_timestamp"] = int(created_timestamp or 0)
+
     train_dir = dataset_root / "images" / "train"
     val_dir = dataset_root / "images" / "val"
     test_dir = dataset_root / "images" / "test"
