@@ -5,6 +5,7 @@ Trener modeli YOLO Pose.
 """
 
 import gc
+import csv
 import json
 import math
 import os
@@ -647,6 +648,12 @@ class YOLOPoseTrainer:
         except Exception as e:
             logger.debug(f"Nie udało się zapisać sterowania workerem treningu: {e}")
 
+    def _clear_worker_control_flags(self):
+        try:
+            self._write_worker_control(pause=False, stop=False)
+        except Exception:
+            pass
+
     def _emit_worker_event(self, event: Dict):
         event_type = str((event or {}).get("type") or "").strip().lower()
         if not event_type:
@@ -857,6 +864,9 @@ class YOLOPoseTrainer:
                 self._finalize_worker_exit_without_end_event(process.returncode)
         finally:
             self.is_training = False
+            self.should_pause = False
+            self.should_stop = False
+            self._clear_worker_control_flags()
             self._close_worker_stdout_handle()
             self._worker_process = None
             self._worker_monitor_thread = None
@@ -1043,6 +1053,20 @@ class YOLOPoseTrainer:
         elif not str(base_model).lower().endswith(".pt"):
             model_file = f"{base_model}.pt"
 
+        run_metadata = {}
+        for key in (
+            "lineage_mode",
+            "parent_run_id",
+            "parent_model_path",
+            "parent_model_name",
+            "parent_model_target",
+            "parent_dataset_path",
+            "parent_best_map50",
+            "parent_best_map50_95",
+        ):
+            if key in kwargs:
+                run_metadata[key] = kwargs.get(key)
+
         if resume_from:
             run_id = self._resolve_run_id_from_resume_checkpoint(resume_from)
             logger.info(f"Rozpoznany run do wznowienia z checkpointu: {run_id or '[BRAK]'} | checkpoint={resume_from}")
@@ -1055,6 +1079,9 @@ class YOLOPoseTrainer:
                 run_id,
                 status=TrainingStatus.RUNNING.value,
                 started_at=datetime.now().isoformat(),
+                paused_at=None,
+                finished_at=None,
+                error_message="",
             )
         else:
             self.current_run = self.history.create_run(
@@ -1066,6 +1093,7 @@ class YOLOPoseTrainer:
                 img_size=img_size,
                 device=device,
                 lr0=lr0,
+                **run_metadata,
             )
 
         self.is_training = True
@@ -1227,7 +1255,95 @@ class YOLOPoseTrainer:
                     self._save_checkpoint(trainer)
                     raise InterruptedError("Wstrzymano")
 
-            def on_train_epoch_end(trainer):
+            def _safe_epoch_metric_float(value, default: float = 0.0) -> float:
+                try:
+                    return float(value)
+                except Exception:
+                    return float(default)
+
+            def _metric_from_sources(raw_metrics: Dict, csv_row: Dict, *keys: str) -> float:
+                for key in keys:
+                    if key in raw_metrics and raw_metrics.get(key) not in (None, ""):
+                        return _safe_epoch_metric_float(raw_metrics.get(key))
+                for key in keys:
+                    if key in csv_row and csv_row.get(key) not in (None, ""):
+                        return _safe_epoch_metric_float(csv_row.get(key))
+                return 0.0
+
+            def _read_epoch_results_csv_row(epoch: int) -> Dict:
+                results_path = Path(run.output_dir) / "train" / "results.csv"
+                if not results_path.exists():
+                    return {}
+                rows: list[Dict] = []
+                try:
+                    with results_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                        for row in csv.DictReader(handle):
+                            if isinstance(row, dict):
+                                rows.append(row)
+                except Exception:
+                    return {}
+                if not rows:
+                    return {}
+                for row in reversed(rows):
+                    try:
+                        if int(float(str(row.get("epoch", "")).strip() or 0)) == int(epoch):
+                            return row
+                    except Exception:
+                        continue
+                return rows[-1]
+
+            def _loss_from_sources(trainer, csv_row: Dict) -> float:
+                raw_loss = getattr(trainer, "loss", None)
+                try:
+                    if hasattr(raw_loss, "item"):
+                        return float(raw_loss.item())
+                    if raw_loss is not None:
+                        return float(raw_loss)
+                except Exception:
+                    pass
+
+                loss_keys = (
+                    "train/box_loss",
+                    "train/pose_loss",
+                    "train/kobj_loss",
+                    "train/cls_loss",
+                    "train/dfl_loss",
+                    "train/rle_loss",
+                )
+                values: list[float] = []
+                for key in loss_keys:
+                    value = csv_row.get(key)
+                    if value in (None, ""):
+                        continue
+                    try:
+                        values.append(float(value))
+                    except Exception:
+                        continue
+                return float(sum(values)) if values else 0.0
+
+            def _build_epoch_metrics(trainer, epoch: int) -> Dict:
+                raw_metrics = getattr(trainer, "metrics", {}) or {}
+                if hasattr(raw_metrics, "results_dict"):
+                    raw_metrics = getattr(raw_metrics, "results_dict", {}) or {}
+                raw_metrics = dict(raw_metrics or {})
+                csv_row = _read_epoch_results_csv_row(epoch)
+                return {
+                    "loss": _loss_from_sources(trainer, csv_row),
+                    "map50": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50(B)", "metrics/mAP50"),
+                    "map50_95": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50-95(B)", "metrics/mAP50-95"),
+                    "precision": _metric_from_sources(raw_metrics, csv_row, "metrics/precision(B)", "metrics/precision"),
+                    "recall": _metric_from_sources(raw_metrics, csv_row, "metrics/recall(B)", "metrics/recall"),
+                    "box_map50": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50(B)", "metrics/mAP50"),
+                    "box_map50_95": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50-95(B)", "metrics/mAP50-95"),
+                    "box_precision": _metric_from_sources(raw_metrics, csv_row, "metrics/precision(B)", "metrics/precision"),
+                    "box_recall": _metric_from_sources(raw_metrics, csv_row, "metrics/recall(B)", "metrics/recall"),
+                    "pose_map50": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50(P)", "metrics/mAP50"),
+                    "pose_map50_95": _metric_from_sources(raw_metrics, csv_row, "metrics/mAP50-95(P)", "metrics/mAP50-95"),
+                    "pose_precision": _metric_from_sources(raw_metrics, csv_row, "metrics/precision(P)", "metrics/precision"),
+                    "pose_recall": _metric_from_sources(raw_metrics, csv_row, "metrics/recall(P)", "metrics/recall"),
+                }
+
+            def on_fit_epoch_end(trainer):
                 if self.should_stop:
                     raise InterruptedError("Zatrzymano")
 
@@ -1236,22 +1352,7 @@ class YOLOPoseTrainer:
                     raise InterruptedError("Wstrzymano")
 
                 epoch = trainer.epoch + 1
-                raw_metrics = getattr(trainer, "metrics", {}) or {}
-                metrics = {
-                    "loss": float(trainer.loss.item()) if hasattr(trainer, "loss") else 0,
-                    "map50": float(raw_metrics.get("metrics/mAP50(B)", 0) or 0),
-                    "map50_95": float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0),
-                    "precision": float(raw_metrics.get("metrics/precision(B)", 0) or 0),
-                    "recall": float(raw_metrics.get("metrics/recall(B)", 0) or 0),
-                    "box_map50": float(raw_metrics.get("metrics/mAP50(B)", 0) or 0),
-                    "box_map50_95": float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0),
-                    "box_precision": float(raw_metrics.get("metrics/precision(B)", 0) or 0),
-                    "box_recall": float(raw_metrics.get("metrics/recall(B)", 0) or 0),
-                    "pose_map50": float(raw_metrics.get("metrics/mAP50(P)", 0) or 0),
-                    "pose_map50_95": float(raw_metrics.get("metrics/mAP50-95(P)", 0) or 0),
-                    "pose_precision": float(raw_metrics.get("metrics/precision(P)", 0) or 0),
-                    "pose_recall": float(raw_metrics.get("metrics/recall(P)", 0) or 0),
-                }
+                metrics = _build_epoch_metrics(trainer, epoch)
 
                 self._assert_finite_training_metrics(epoch, metrics)
                 self.history.add_metrics(run.id, epoch, metrics)
@@ -1326,7 +1427,7 @@ class YOLOPoseTrainer:
 
                 self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
                 self.model.add_callback("on_train_batch_end", on_train_batch_end)
-                self.model.add_callback("on_train_epoch_end", on_train_epoch_end)
+                self.model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
 
                 if attempt_index > 0:
                     retry_msg = (
@@ -1585,6 +1686,9 @@ class YOLOPoseTrainer:
 
         finally:
             self.is_training = False
+            self.should_pause = False
+            self.should_stop = False
+            self._clear_worker_control_flags()
             self._training_batch_state = None
             self._reset_runtime_state()
 

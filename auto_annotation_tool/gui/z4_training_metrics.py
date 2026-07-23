@@ -53,6 +53,9 @@ from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
+from .dataset_display import build_dataset_display_ref
+from .model_display import build_model_display_ref
+from .run_display import build_run_display_ref
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -173,53 +176,114 @@ def _set_training_metric_interpretation(self, text: str):
         return
     self._set_training_widget_text(label, str(text or "").strip())
 
-def _build_training_metric_interpretation(self, metrics: dict | None) -> str:
-    if not isinstance(metrics, dict) or not metrics:
-        return "Interpretacja pojawi się po pierwszej zakończonej epoce."
+def _metric_value_from_epoch_row(self, row: dict, key: str):
+    if not isinstance(row, dict):
+        return None
+    value = row.get(key)
+    if value is None and key == "pose_map50_95":
+        value = row.get("map50_95")
+    elif value is None and key == "pose_map50":
+        value = row.get("map50")
+    elif value is None and key == "box_map50_95":
+        value = row.get("map50_95")
+    elif value is None and key == "box_map50":
+        value = row.get("map50")
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+def _format_best_epoch_metric_piece(self, row: dict, key: str, label: str) -> str:
+    value = self._metric_value_from_epoch_row(row, key)
+    if value is None:
+        return ""
+    return f"{label} {value:.3f}"
+
+def _build_training_best_epoch_summary(self, metrics: dict | None = None, *, epoch: int | None = None) -> str:
+    history_rows = [
+        dict(row)
+        for row in list(getattr(self, "_current_training_metric_history", []) or [])
+        if isinstance(row, dict)
+    ]
+
+    if isinstance(metrics, dict) and metrics:
+        current_row = dict(metrics)
+        if epoch is not None and "epoch" not in current_row:
+            try:
+                current_row["epoch"] = int(epoch)
+            except Exception:
+                pass
+        if current_row:
+            current_epoch = str(current_row.get("epoch", "") or "").strip()
+            has_same_epoch = any(str(row.get("epoch", "") or "").strip() == current_epoch for row in history_rows)
+            if not current_epoch or not has_same_epoch:
+                history_rows.append(current_row)
+
+    if not history_rows:
+        return "Najlepsza epoka tego runu pojawi się po pierwszej zakończonej epoce."
 
     target = self.get_campaign_training_target()
-    loss = self._metric_float(metrics.get("loss", 0.0))
+    total_epochs = 0
+    try:
+        run = getattr(getattr(self, "trainer", None), "current_run", None)
+        total_epochs = int(getattr(run, "epochs", 0) or 0)
+    except Exception:
+        total_epochs = 0
 
     if target == "plate":
-        strict_value = self._metric_float(metrics.get("pose_map50_95", metrics.get("map50_95", 0.0)))
-        loose_value = self._metric_float(metrics.get("pose_map50", metrics.get("map50", 0.0)))
-        strict_name = "pose mAP50-95 (rogi)"
-
-        strict_label, strict_range = self._describe_metric_band(strict_value, "strict_map")
-        loose_label, loose_range = self._describe_metric_band(loose_value, "loose_map")
-
-        if strict_value < 0.40:
-            note = "Model dopiero uczy się precyzji rogów; do rektyfikacji będzie jeszcze dużo poprawek ręcznych."
-        elif strict_value < 0.60:
-            note = "Wynik jest już używalny do dalszej autoanotacji, ale rogi tablic nadal będą wymagaly korekt."
-        elif strict_value < 0.80:
-            note = "Rogi są lokalizowane dobrze; model nadaje się do codziennej pracy i dalszego dotrenowania."
-        else:
-            note = "Rogi są lapane bardzo dobrze; to mocny poziom do autoanotacji i rektyfikacji."
-
-        return (
-            f"Jakość: {strict_label}. {strict_name}: {strict_value:.3f}; "
-            f"mAP50: {loose_value:.3f}; loss: {loss:.3f}."
-        )
-
-    strict_value = self._metric_float(metrics.get("map50_95", 0.0))
-    loose_value = self._metric_float(metrics.get("map50", 0.0))
-    strict_label, strict_range = self._describe_metric_band(strict_value, "strict_map")
-    loose_label, loose_range = self._describe_metric_band(loose_value, "loose_map")
-
-    if strict_value < 0.40:
-        note = "Model wykrywa jeszcze zbyt malo stabilnie, wiec potrzeba dalszego treningu albo lepszego datasetu."
-    elif strict_value < 0.60:
-        note = "Wynik jest już używalny, ale model nadal będzie się mylic w trudniejszych przypadkach."
-    elif strict_value < 0.80:
-        note = "Model wykrywa dobrze i nadaje się do praktycznej pracy."
+        primary_key = "pose_map50_95"
+        primary_label = "pose mAP50-95"
+        secondary_key = "pose_map50"
+        secondary_label = "pose mAP50"
+        profile = "strict_map"
     else:
-        note = "Model wykrywa bardzo dobrze i jest gotowy do mocnego użycia."
+        primary_key = "map50_95"
+        primary_label = "mAP50-95"
+        secondary_key = "map50"
+        secondary_label = "mAP50"
+        profile = "strict_map"
 
-    return (
-        f"Jakość: {strict_label}. mAP50-95: {strict_value:.3f}; "
-        f"mAP50: {loose_value:.3f}; loss: {loss:.3f}."
-    )
+    scored_rows: list[tuple[float, dict]] = []
+    for row in history_rows:
+        value = self._metric_value_from_epoch_row(row, primary_key)
+        if value is not None:
+            scored_rows.append((value, row))
+
+    if not scored_rows:
+        return "Najlepsza epoka tego runu: czekam na główną metrykę po zakończeniu epoki."
+
+    best_value, best_row = max(scored_rows, key=lambda item: item[0])
+    best_epoch_raw = best_row.get("epoch")
+    try:
+        best_epoch = int(float(best_epoch_raw))
+    except Exception:
+        best_epoch = None
+
+    latest_row = history_rows[-1]
+    try:
+        latest_epoch = int(float(latest_row.get("epoch", 0) or 0))
+    except Exception:
+        latest_epoch = None
+    is_latest_best = bool(best_epoch is not None and latest_epoch is not None and best_epoch == latest_epoch)
+
+    band, _range_text = self._describe_metric_band(best_value, profile)
+    epoch_label = str(best_epoch) if best_epoch is not None else "-"
+    if total_epochs > 0:
+        epoch_label = f"{epoch_label}/{total_epochs}"
+
+    metric_pieces = [
+        f"{primary_label} {best_value:.3f}",
+        self._format_best_epoch_metric_piece(best_row, secondary_key, secondary_label),
+        self._format_best_epoch_metric_piece(best_row, "loss", "loss"),
+    ]
+    metric_text = " | ".join(piece for piece in metric_pieces if piece)
+    lead = "Nowa najlepsza epoka" if is_latest_best else "Najlepsza epoka dotąd"
+    return f"{lead}: {epoch_label} | {metric_text} | ocena: {band}. Porównanie dotyczy tylko tego runu."
+
+def _build_training_metric_interpretation(self, metrics: dict | None) -> str:
+    return self._build_training_best_epoch_summary(metrics)
 
 def _shorten_training_text(value, limit: int = 58) -> str:
     text = str(value or "").strip()
@@ -493,10 +557,10 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
         except Exception:
             pass
         return [
-            (("RAM", "-", "-", "-", "-", "czekam"), "training_info"),
-            (("VRAM", "-", "-", "-", "-", "czekam"), "training_info"),
-            (("CPU", "-", "-", "-", "-", "czekam"), "training_info"),
-            (("Aplikacja", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("RAM [MiB]", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("VRAM [MiB]", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("CPU [%]", "-", "-", "-", "-", "czekam"), "training_info"),
+            (("Proces [MiB]", "-", "-", "-", "-", "czekam"), "training_info"),
         ]
 
     system = dict(sample.get("system") or {})
@@ -511,7 +575,7 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
     rows.append(
         (
             (
-                "RAM",
+                "RAM [MiB]",
                 _format_training_resource_table_value(ram_used),
                 ram_min,
                 ram_max,
@@ -533,7 +597,7 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
         rows.append(
             (
                 (
-                    "VRAM",
+                    "VRAM [MiB]",
                     _format_training_resource_table_value(used),
                     gpu_min,
                     gpu_max,
@@ -544,7 +608,7 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
             )
         )
     else:
-        rows.append((("VRAM", "-", "-", "-", "-", "niedostępne"), "training_info"))
+        rows.append((("VRAM [MiB]", "-", "-", "-", "-", "niedostępne"), "training_info"))
 
     cpu_pct = system.get("cpu_percent")
     cpu_state, cpu_tag = _training_resource_tone(cpu_pct, warning=85.0, danger=96.0)
@@ -552,7 +616,7 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
     rows.append(
         (
             (
-                "CPU",
+                "CPU [%]",
                 _format_training_resource_percent_value(cpu_pct),
                 cpu_min,
                 cpu_max,
@@ -568,7 +632,7 @@ def _build_training_resource_sample_rows(self, sample: dict | None) -> list[tupl
     rows.append(
         (
             (
-                "Aplikacja",
+                "Proces [MiB]",
                 _format_training_resource_table_value(rss),
                 process_min,
                 process_max,
@@ -595,7 +659,7 @@ def _build_training_resource_report_rows(self, report: dict | None) -> list[tupl
     ram_min, _ram_live_max = _get_training_resource_extrema(self, "ram_used_mib")
     rows.append((
         (
-            "RAM",
+            "RAM [MiB]",
             _format_training_resource_table_value(system.get("ram_used_mib")),
             ram_min,
             _format_training_resource_table_value(report.get("max_ram_used_mib")),
@@ -615,7 +679,7 @@ def _build_training_resource_report_rows(self, report: dict | None) -> list[tupl
         rows.append(
             (
                 (
-                    "VRAM",
+                    "VRAM [MiB]",
                     _format_training_resource_table_value(gpu_current),
                     gpu_min,
                     _format_training_resource_table_value(gpu_reserved),
@@ -626,17 +690,17 @@ def _build_training_resource_report_rows(self, report: dict | None) -> list[tupl
             )
         )
     else:
-        rows.append((("VRAM", "-", "-", "-", "-", "brak GPU"), "training_info"))
+        rows.append((("VRAM [MiB]", "-", "-", "-", "-", "brak GPU"), "training_info"))
 
     cpu_pct = report.get("max_cpu_percent")
     cpu_state, cpu_tag = _training_resource_tone(cpu_pct, warning=85.0, danger=96.0)
     cpu_min, _cpu_live_max = _get_training_resource_extrema(self, "cpu_pct")
-    rows.append((("CPU", _format_training_resource_percent_value(system.get("cpu_percent")), cpu_min, _format_training_resource_percent_value(cpu_pct), "-", cpu_state), cpu_tag))
+    rows.append((("CPU [%]", _format_training_resource_percent_value(system.get("cpu_percent")), cpu_min, _format_training_resource_percent_value(cpu_pct), "-", cpu_state), cpu_tag))
 
     process_min, _process_live_max = _get_training_resource_extrema(self, "process_rss_mib")
     rows.append((
         (
-            "Aplikacja",
+            "Proces [MiB]",
             _format_training_resource_table_value(process.get("rss_mib")),
             process_min,
             _format_training_resource_table_value(report.get("max_process_rss_mib")),
@@ -659,7 +723,25 @@ def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
     if run is None:
         return []
 
-    dataset_display = self._format_workspace_relative_path(getattr(run, "dataset_path", "")) or "-"
+    try:
+        run_ref = build_run_display_ref(run, kind_hint="training")
+    except Exception:
+        run_ref = None
+    run_id = str(getattr(run, "id", "") or "").strip()
+    run_name = str(getattr(run, "name", "") or "").strip()
+    dataset_path_raw = str(getattr(run, "dataset_path", "") or "").strip()
+    if dataset_path_raw:
+        try:
+            dataset_target = self._infer_dataset_target(dataset_path_raw)
+        except Exception:
+            dataset_target = ""
+        dataset_display = build_dataset_display_ref(
+            dataset_path_raw,
+            target_hint=dataset_target,
+            count_loader=getattr(self, "_get_dataset_split_image_counts", None),
+        ).detail_label
+    else:
+        dataset_display = "-"
     best_weights = self._shorten_training_text(Path(getattr(run, "best_weights", "") or "").name or "-", 36)
     last_weights_raw = str(getattr(run, "last_weights", "") or "").strip()
     last_weights_name = self._shorten_training_text(Path(last_weights_raw).name or "-", 36) if last_weights_raw else "-"
@@ -747,10 +829,34 @@ def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
     else:
         resume_hint = "NIE - brakuje poprawnego checkpointu last.pt."
 
-    return [
+    lineage_rows: list[tuple[str, str]] = []
+    lineage_mode = str(getattr(run, "lineage_mode", "") or "").strip().lower()
+    if lineage_mode == "fine_tune":
+        parent_run_id = str(getattr(run, "parent_run_id", "") or "").strip() or "-"
+        parent_run_display = parent_run_id
+        if parent_run_id != "-":
+            try:
+                parent_run_display = build_run_display_ref({"run_id": parent_run_id}, kind_hint="training").id
+            except Exception:
+                parent_run_display = parent_run_id
+        parent_model_name = str(getattr(run, "parent_model_name", "") or "").strip()
+        parent_model_path = str(getattr(run, "parent_model_path", "") or "").strip()
+        if not parent_model_name and parent_model_path:
+            parent_model_name = Path(parent_model_path).name
+        parent_map = float(getattr(run, "parent_best_map50_95", 0.0) or 0.0)
+        parent_suffix = f" | poprzedni mAP50-95 {parent_map:.3f}" if parent_map > 0 else ""
+        lineage_rows.append((
+            "Rodowód",
+            f"Dotrenowanie od runu {parent_run_display} ({parent_model_name or 'best.pt'}){parent_suffix}",
+        ))
+
+    rows = [
+        ("ID runu", getattr(run_ref, "id", "") or run_id or "-"),
+        ("Nazwa techniczna", run_name or run_id or "-"),
         ("Status", self._format_history_run_status_label(run)),
         ("Dataset", dataset_display),
         ("Preset / plik startowy YOLO", base_model),
+        *lineage_rows,
         ("Start treningu", started_at),
         ("Postęp", f"{int(getattr(run, 'current_epoch', 0) or 0)}/{int(getattr(run, 'epochs', 0) or 0)} epok"),
         (
@@ -767,6 +873,7 @@ def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
         ("Wznowienie", resume_hint),
         ("Utworzono", created_at),
     ]
+    return rows
 
 def _build_training_run_metric_rows(self, run) -> list[tuple[str, str, str, str]]:
     if run is None:
@@ -885,8 +992,6 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         )
     else:
         dataset_root = dataset_yaml.parent
-        variant_name = str(getattr(self, "dataset_variant_var", tk.StringVar()).get() or "").strip()
-        dataset_name = variant_name or dataset_root.name
         counts = {"train": 0, "val": 0, "test": 0, "total": 0}
         source = getattr(self, "_last_training_source", None)
         source_stats = getattr(source, "stats", None)
@@ -927,9 +1032,13 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         train = int(counts.get("train", 0) or 0)
         val = int(counts.get("val", 0) or 0)
         test = int(counts.get("test", 0) or 0)
+        dataset_ref = build_dataset_display_ref(dataset_root, target_hint=target, counts=counts)
+        dataset_hint = f"YOLO {dataset_task}"
+        if dataset_ref.created_label:
+            dataset_hint = f"{dataset_hint} | utworzono {dataset_ref.created_label}"
         cards.extend(
             [
-                ("Dataset", self._shorten_training_text(dataset_name, 42), f"{target_label} | YOLO {dataset_task}"),
+                ("Dataset", dataset_ref.compact_label, dataset_hint),
                 ("Próbka", f"{total} obrazów", f"train {train} | val {val} | test {test} | klasy {class_count}"),
             ]
         )
@@ -1276,6 +1385,10 @@ def _apply_training_device_recommendation(self):
     self._apply_training_recommended_start_params()
 
 def _on_training_base_model_value_write(self, *_args):
+    try:
+        self._sync_step4_fine_tune_parent_selection()
+    except Exception:
+        pass
     try:
         self._refresh_training_base_model_selection_ui()
     except Exception:
@@ -1685,7 +1798,14 @@ def _format_pinned_step4_result_detail(self, state: dict) -> str:
     model_name = Path(model_path).name if model_path else "wybrany model"
     iteration_label = str(state.get("iteration_label", "") or "").strip()
     target_label = str(state.get("target_label", "") or "model").strip()
-    run_part = f" Run: {run_id}." if run_id else ""
+    if run_id:
+        try:
+            run_display = build_run_display_ref({"run_id": run_id}, kind_hint="training").id
+        except Exception:
+            run_display = run_id
+    else:
+        run_display = ""
+    run_part = f" Run: {run_display}." if run_display else ""
     return (
         f"{iteration_label} • {target_label}: {model_name}.{run_part} "
         "Ten model jest wynikiem bramki, więc split, model startowy, parametry i nowy trening są zablokowane. "
@@ -1891,18 +2011,22 @@ def _validate_training_base_model_target_compatibility(
         nonfinal_run = _selected_training_base_model_nonfinal_run(self)
         if nonfinal_run is not None:
             run_id = str(getattr(nonfinal_run, "id", "") or "").strip()
+            try:
+                run_display = build_run_display_ref(nonfinal_run, kind_hint="training").id
+            except Exception:
+                run_display = run_id
             status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
             if status_value in {TrainingStatus.FAILED.value, TrainingStatus.PAUSED.value}:
                 message = (
                     "Wybrany plik pochodzi z niedokończonego treningu.\n\n"
-                    f"Run: {run_id or '-'} | status: {status_value or '-'}.\n"
+                    f"Run: {run_display or '-'} | status: {status_value or '-'}.\n"
                     "Jeśli chcesz kontynuować ten trening, użyj akcji `Wznów trening` w historii. "
                     "`Rozpocznij trening` tworzy nowy run i nie powinien po cichu wznawiać checkpointu."
                 )
             else:
                 message = (
                     "Wybrany plik pochodzi z treningu, który nie został ukończony.\n\n"
-                    f"Run: {run_id or '-'} | status: {status_value or '-'}.\n"
+                    f"Run: {run_display or '-'} | status: {status_value or '-'}.\n"
                     "Wybierz ukończony model startowy albo uruchom właściwą akcję wznowienia."
                 )
             if show_dialog:
@@ -2009,6 +2133,20 @@ def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, 
             "success",
         )
     if ready:
+        try:
+            fine_tune_parent = self._resolve_step4_fine_tune_parent_run()
+        except Exception:
+            fine_tune_parent = None
+        if fine_tune_parent is not None:
+            run_label = self._format_training_model_run_label(fine_tune_parent)
+            return (
+                "Gotowe do dotrenowania",
+                (
+                    f"Kliknięcie rozpocznie nowy run od modelu z runu {run_label}. "
+                    "Poprzedni model zostaje bez zmian; wynik nowego treningu wybierzesz jawnie po zakończeniu."
+                ),
+                "success",
+            )
         try:
             resumable_run_id = str(self._get_latest_campaign_resumable_run_id() or "").strip()
         except Exception:
@@ -2165,6 +2303,66 @@ def _training_base_model_context(self) -> dict:
     }
 
 
+def _set_step4_fine_tune_parent_state(self, run, model_path: str | Path) -> None:
+    self._step4_fine_tune_parent_run_id = str(getattr(run, "id", "") or "").strip()
+    self._step4_fine_tune_parent_model_path = str(model_path or "").strip()
+
+
+def _clear_step4_fine_tune_parent_state(self) -> None:
+    self._step4_fine_tune_parent_run_id = ""
+    self._step4_fine_tune_parent_model_path = ""
+
+
+def _resolve_step4_fine_tune_parent_run(self):
+    parent_run_id = str(getattr(self, "_step4_fine_tune_parent_run_id", "") or "").strip()
+    parent_model_path = str(getattr(self, "_step4_fine_tune_parent_model_path", "") or "").strip()
+    if not parent_run_id or not parent_model_path:
+        return None
+
+    base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+    if not self._is_custom_base_model_key(base_key):
+        return None
+
+    selected_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+    if not selected_model:
+        return None
+
+    try:
+        if Path(selected_model).resolve() != Path(parent_model_path).resolve():
+            return None
+    except Exception:
+        if selected_model != parent_model_path:
+            return None
+
+    history = getattr(self, "history", None)
+    run = None
+    try:
+        run = history.get_run(parent_run_id) if history is not None else None
+    except Exception:
+        run = None
+    if run is None:
+        return None
+
+    status_value = str(getattr(run, "status", "") or "").strip().lower()
+    if status_value != TrainingStatus.COMPLETED.value:
+        return None
+    try:
+        if not self._does_history_run_match_active_campaign_target(run):
+            return None
+    except Exception:
+        pass
+    return run
+
+
+def _sync_step4_fine_tune_parent_selection(self) -> None:
+    if bool(getattr(self, "_step4_setting_fine_tune_base", False)):
+        return
+    if not str(getattr(self, "_step4_fine_tune_parent_run_id", "") or "").strip():
+        return
+    if _resolve_step4_fine_tune_parent_run(self) is None:
+        _clear_step4_fine_tune_parent_state(self)
+
+
 def _resolve_selected_training_base_model_training_state(self) -> dict:
     context = _training_base_model_context(self)
     prefix = str(context.get("prefix") or "").strip()
@@ -2201,6 +2399,18 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
             "label": "BRAK PLIKU",
             "detail": f"{prefix}. Wskazany plik .pt nie istnieje.",
             "tone": "danger",
+        }
+
+    fine_tune_parent = _resolve_step4_fine_tune_parent_run(self)
+    if fine_tune_parent is not None:
+        run_label = self._format_training_model_run_label(fine_tune_parent)
+        return {
+            "label": "DOTRENOWANIE",
+            "detail": (
+                f"{prefix}. Nowy run wystartuje od modelu z runu {run_label}. "
+                "Wynik pozostanie kandydatem, dopóki jawnie nie wybierzesz go jako wynik bramki."
+            ),
+            "tone": "info",
         }
 
     source_run = None
@@ -2267,6 +2477,35 @@ def _refresh_training_base_model_identity_ui(self):
     except Exception:
         pass
 
+    try:
+        if title_label is not None:
+            title_label.configure(text="Punkt startowy treningu")
+    except Exception:
+        pass
+    try:
+        if caption_label is not None:
+            caption_label.configure(
+                text=(
+                    "Wybierz model, od którego zacznie się nowy run. "
+                    "To nie jest jeszcze wynik bramki."
+                )
+            )
+    except Exception:
+        pass
+    try:
+        chips = getattr(self, "train_base_context_chips", {}) or {}
+        chip_values = {
+            "iteration": str(context.get("iteration_label") or "IT"),
+            "target": str(context.get("target_label") or "model"),
+            "backend": "YOLO Pose" if context.get("target") == "plate" else "YOLO Detect",
+        }
+        for chip_key, chip_text in chip_values.items():
+            chip = chips.get(chip_key)
+            if chip is not None:
+                chip.configure(text=chip_text)
+    except Exception:
+        pass
+
     if status_label is not None:
         try:
             status_label.configure(
@@ -2279,12 +2518,68 @@ def _refresh_training_base_model_identity_ui(self):
         except Exception:
             pass
 
+    try:
+        summary_values = getattr(self, "train_base_summary_values", {}) or {}
+        base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+        selected_text = base_key or "-"
+        origin_text = "Preset YOLO"
+        state_text = str(state.get("label") or "-")
+        custom_model = ""
+        if self._is_custom_base_model_key(base_key):
+            custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+            selected_text = Path(custom_model).name if custom_model else "-"
+            origin_text = "Plik .pt"
+            model_path = Path(custom_model) if custom_model else None
+            fine_tune_parent = _resolve_step4_fine_tune_parent_run(self)
+            source_run = None
+            if model_path is not None:
+                try:
+                    source_run = self._resolve_training_run_from_model_path(model_path)
+                except Exception:
+                    source_run = None
+            if fine_tune_parent is not None and model_path is not None:
+                run_label = self._format_training_model_run_label(fine_tune_parent)
+                selected_text = build_model_display_ref(
+                    model_path,
+                    run=fine_tune_parent,
+                    target_hint=context.get("target"),
+                    source_run_label=run_label,
+                ).id
+                origin_text = f"Dotrenowanie z {run_label}"
+            elif source_run is not None and model_path is not None:
+                run_label = self._format_training_model_run_label(source_run)
+                selected_text = build_model_display_ref(
+                    model_path,
+                    run=source_run,
+                    target_hint=context.get("target"),
+                    source_run_label=run_label,
+                ).id
+                status_value = str(getattr(source_run, "status", "") or "").strip().lower()
+                origin_text = f"Run {run_label}" if status_value == TrainingStatus.COMPLETED.value else f"Checkpoint {run_label}"
+            elif custom_model:
+                origin_text = "Zewnętrzny plik .pt"
+
+        summary_payload = {
+            "selected": selected_text,
+            "origin": origin_text,
+            "state": state_text,
+        }
+        for key, value in summary_payload.items():
+            value_label = summary_values.get(key)
+            if value_label is not None:
+                value_label.configure(text=str(value or "-"))
+        state_label = summary_values.get("state")
+        if state_label is not None:
+            state_label.configure(fg=tone_fg)
+    except Exception:
+        pass
+
     if label is None:
         return
 
     lines = self._build_selected_training_base_model_identity_lines()
     detail = str(state.get("detail") or "").strip()
-    if detail:
+    if detail and not getattr(self, "train_base_summary_values", None):
         lines.insert(0, detail)
     text = "\n".join(lines).strip()
     try:
@@ -2441,11 +2736,12 @@ def _build_training_recommendation_model_text(self) -> str:
 def _format_training_model_run_label(run) -> str:
     if run is None:
         return "-"
-    run_name = str(getattr(run, "name", "") or "").strip()
-    run_id = str(getattr(run, "id", "") or "").strip()
-    if run_name and run_id and run_name != run_id:
-        return f"{run_name} [{run_id}]"
-    return run_name or run_id or "-"
+    try:
+        return build_run_display_ref(run, kind_hint="training").id
+    except Exception:
+        run_name = str(getattr(run, "name", "") or "").strip()
+        run_id = str(getattr(run, "id", "") or "").strip()
+        return run_name or run_id or "-"
 
 def _format_training_model_size_label(raw_size: str | None) -> str:
     size = str(raw_size or "").strip().lower()

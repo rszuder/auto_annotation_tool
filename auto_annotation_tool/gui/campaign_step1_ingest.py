@@ -1273,31 +1273,62 @@ def _refresh_ingest_panel(self, snapshot_override: dict = None):
     self._refresh_ingest_selection_info()
     self._refresh_ingest_balance_chart()
 
-def _generate_ingest_plan(self):
-    if not CAMPAIGN.get_active_project_name():
-        return
-
-    master_pool = CAMPAIGN.get_master_pool_dir()
-    if master_pool is None:
-        messagebox.showwarning("Brak wybranego folderu zdjęć", "Najpierw wskaż główną pulę zdjęć.")
-        return
-    if not master_pool.exists() or not master_pool.is_dir():
-        messagebox.showwarning("Brak wybranego folderu zdjęć", f"Katalog nie istnieje:\n{master_pool}")
-        return
-
-    snapshot = CAMPAIGN.refresh_ingest_balance_snapshot()
-
+def _mark_ingest_plan_generation_pending(self, master_pool: Path) -> None:
+    self.current_ingest_plan = {}
+    self.ingest_plan_items = []
+    if getattr(self, "ingest_plan_listbox", None) is not None:
+        try:
+            self.ingest_plan_listbox.delete(0, tk.END)
+            self.ingest_plan_listbox.insert(tk.END, "Analizuję wybrany katalog zdjęć...")
+            self.ingest_plan_listbox.insert(tk.END, "Okno pozostaje aktywne; lista pojawi się po zakończeniu analizy.")
+            self.ingest_plan_listbox.itemconfig(0, foreground="#4f8de3")
+            self.ingest_plan_listbox.itemconfig(1, foreground="#888888")
+        except Exception:
+            pass
+    for widget in (
+        getattr(self, "btn_apply_ingest_plan", None),
+        getattr(self, "btn_ingest_master_analysis", None),
+    ):
+        if widget is None:
+            continue
+        try:
+            widget.config(state="disabled")
+        except Exception:
+            pass
     try:
-        plan = self._build_main_pack_plan(
-            master_pool_dir=master_pool,
-            current_balance=(snapshot or {}).get("char_balance", {}),
+        self.ingest_logic_lbl.config(
+            text=(
+                "Analizuję wybrany katalog zdjęć w tle. "
+                "Po zakończeniu pojawi się lista obrazów gotowych do użycia w tej iteracji."
+            )
         )
-    except Exception as e:
-        messagebox.showerror("Błąd ładowania wybranego folderu zdjęć E1", str(e))
-        return
+    except Exception:
+        pass
+    try:
+        self.app.update_status(f"Analizuję katalog zdjęć: {master_pool}", "info")
+    except Exception:
+        pass
+    try:
+        self.frame.update_idletasks()
+    except Exception:
+        pass
 
-    if not plan.get("ok", False):
-        messagebox.showwarning("Brak wybranego folderu zdjęć E1", str(plan.get("error", "Nie udało się załadować wybranego folderu zdjęć E1.")))
+
+def _same_ingest_source_path(left, right) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except Exception:
+        return str(left or "").strip().lower() == str(right or "").strip().lower()
+
+
+def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None) -> None:
+    if not isinstance(plan, dict) or not plan.get("ok", False):
+        messagebox.showwarning(
+            "Brak wybranego folderu zdjęć E1",
+            str(plan.get("error", "Nie udało się załadować wybranego folderu zdjęć E1."))
+            if isinstance(plan, dict)
+            else "Nie udało się załadować wybranego folderu zdjęć E1.",
+        )
         return
 
     self.current_ingest_plan = plan
@@ -1347,6 +1378,113 @@ def _generate_ingest_plan(self):
         self.app.update_status(status_text, "info")
     except Exception:
         pass
+
+
+def _generate_ingest_plan(self, *, async_mode: bool = True):
+    if not CAMPAIGN.get_active_project_name():
+        return
+
+    master_pool = CAMPAIGN.get_master_pool_dir()
+    if master_pool is None:
+        messagebox.showwarning("Brak wybranego folderu zdjęć", "Najpierw wskaż główną pulę zdjęć.")
+        return
+    if not master_pool.exists() or not master_pool.is_dir():
+        messagebox.showwarning("Brak wybranego folderu zdjęć", f"Katalog nie istnieje:\n{master_pool}")
+        return
+
+    if async_mode:
+        try:
+            project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            project_name = ""
+            iteration_num = 1
+        try:
+            master_pool = Path(master_pool)
+            master_token_path = str(master_pool.resolve())
+        except Exception:
+            master_token_path = str(master_pool)
+        token = (project_name, int(iteration_num or 1), master_token_path, perf_counter())
+        self._ingest_plan_generation_token = token
+        _mark_ingest_plan_generation_pending(self, master_pool)
+
+        def _worker() -> None:
+            started = perf_counter()
+            snapshot_result: dict = {}
+            plan_result: dict = {}
+            error_text = ""
+            try:
+                snapshot_result = CAMPAIGN.refresh_ingest_balance_snapshot(project_name) or {}
+                plan_result = self._build_main_pack_plan(
+                    master_pool_dir=master_pool,
+                    current_balance=(snapshot_result or {}).get("char_balance", {}),
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                try:
+                    logger.exception("Nie udało się przygotować planu E1 w tle")
+                except Exception:
+                    pass
+
+            elapsed_ms = int((perf_counter() - started) * 1000)
+
+            def _finish() -> None:
+                if getattr(self, "_ingest_plan_generation_token", None) != token:
+                    return
+                self._ingest_plan_generation_token = None
+                try:
+                    active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+                    active_iter = int(CAMPAIGN.get_current_iteration_num() or 1)
+                    active_pool = CAMPAIGN.get_master_pool_dir()
+                except Exception:
+                    active_project = ""
+                    active_iter = 0
+                    active_pool = None
+                if (
+                    active_project != project_name
+                    or int(active_iter or 0) != int(iteration_num or 1)
+                    or not _same_ingest_source_path(active_pool, master_pool)
+                ):
+                    return
+                try:
+                    logger.info(
+                        "[E1 PERF] generate_ingest_plan_async total=%sms raw=%s selected=%s source=%s",
+                        elapsed_ms,
+                        int((plan_result or {}).get("raw_total", 0) or 0),
+                        int((plan_result or {}).get("selected_total", 0) or 0),
+                        master_pool,
+                    )
+                except Exception:
+                    pass
+                if error_text:
+                    try:
+                        self._refresh_ingest_panel(snapshot_override=snapshot_result)
+                    except Exception:
+                        pass
+                    messagebox.showerror("Błąd ładowania wybranego folderu zdjęć E1", error_text)
+                    return
+                _finish_generated_ingest_plan(self, plan_result, snapshot_result)
+
+            try:
+                self.frame.after(0, _finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="campaign-e1-ingest-plan").start()
+        return
+
+    snapshot = CAMPAIGN.refresh_ingest_balance_snapshot()
+
+    try:
+        plan = self._build_main_pack_plan(
+            master_pool_dir=master_pool,
+            current_balance=(snapshot or {}).get("char_balance", {}),
+        )
+    except Exception as e:
+        messagebox.showerror("Błąd ładowania wybranego folderu zdjęć E1", str(e))
+        return
+
+    _finish_generated_ingest_plan(self, plan, snapshot)
 
 def _should_reuse_step1_source_despite_duplicate_plan(self, plan: dict) -> bool:
     if not isinstance(plan, dict) or not plan.get("ok", False):

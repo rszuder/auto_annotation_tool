@@ -378,8 +378,6 @@ def _update_ratio_labels(self):
 
 def _refresh_step4_creator_decision_summary(self):
     var = getattr(self, "creator_decision_summary_var", None)
-    if var is None:
-        return
     try:
         train = float(self.train_pct.get())
     except Exception:
@@ -389,23 +387,86 @@ def _refresh_step4_creator_decision_summary(self):
     except Exception:
         val = 10.0
     test = max(5.0, 100.0 - train - val)
-    try:
-        profile = self._get_step4_augmentation_profile("plate")
-    except Exception:
-        profile = None
-    aug_text = "bez syntetycznego powi\u0119kszenia"
-    if profile is not None and bool(getattr(profile, "enabled", False)):
+
+    def _estimate_counts(target: str) -> dict[str, int]:
+        normalized = CONFIG.normalize_task_target(target)
+        if normalized == "plate":
+            return _estimate_step4_creator_split_counts(self, train, val, test)
+        try:
+            total_count = int(_get_step4_augmentation_source_count(self, normalized) or 0)
+        except Exception:
+            total_count = 0
+        if total_count <= 0:
+            return {}
+        ratios = {"train": train, "val": val, "test": test}
+        try:
+            counts = DatasetCreator._allocate_split_counts(total_count, ratios)
+        except Exception:
+            counts = {}
+        if not counts:
+            train_count = int(round(total_count * train / 100.0))
+            val_count = int(round(total_count * val / 100.0))
+            train_count = max(0, min(total_count, train_count))
+            val_count = max(0, min(total_count - train_count, val_count))
+            counts = {
+                "train": train_count,
+                "val": val_count,
+                "test": max(0, total_count - train_count - val_count),
+            }
+        counts["total"] = total_count
+        return {key: max(0, int(value or 0)) for key, value in counts.items()}
+
+    def _refresh_table(prefix: str, target: str) -> tuple[str, str, str, str]:
+        normalized = CONFIG.normalize_task_target(target)
+        unit = "tablic" if normalized == "char" else "zdj\u0119\u0107"
+        counts = _estimate_counts(normalized)
+        try:
+            profile = self._get_step4_augmentation_profile(normalized)
+        except Exception:
+            profile = None
         try:
             extra = max(0, int(getattr(profile, "extra_count", 0) or 0))
         except Exception:
             extra = 0
-        if extra > 0:
-            aug_text = f"train powi\u0119kszony o +{extra} obraz\u00f3w"
-    text = f"Train {train:.0f}% | Val {val:.0f}% | Test {test:.0f}% | {aug_text}"
-    try:
-        var.set(text)
-    except Exception:
-        pass
+        augmentation_enabled = bool(getattr(profile, "enabled", False)) and extra > 0
+
+        values = {
+            "train": f"{train:.0f}%\n{counts.get('train', 0) or '-'} {unit}",
+            "val": f"{val:.0f}%\n{counts.get('val', 0) or '-'} {unit}",
+            "test": f"{test:.0f}%\n{counts.get('test', 0) or '-'} {unit}",
+            "augmentation": f"+{extra}\ntrain" if augmentation_enabled else "0\nwy\u0142.",
+        }
+        for key, text in values.items():
+            value_var = getattr(self, f"{prefix}_decision_{key}_var", None)
+            if value_var is not None:
+                try:
+                    value_var.set(text)
+                except Exception:
+                    pass
+
+        palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+        color_map = {
+            "train": palette.get("success", "#4ec9b0"),
+            "val": palette.get("warning", "#d7ba7d"),
+            "test": palette.get("accent", "#0e639c"),
+            "augmentation": palette.get("success", "#4ec9b0") if augmentation_enabled else palette.get("muted", "#c7c7c7"),
+        }
+        for key, widget in (getattr(self, f"_{prefix}_decision_value_widgets", {}) or {}).items():
+            try:
+                widget.configure(fg=color_map.get(key, palette.get("fg", "#f3f3f3")))
+            except Exception:
+                pass
+        return values["train"], values["val"], values["test"], values["augmentation"]
+
+    creator_values = _refresh_table("creator", "plate")
+    _refresh_table("split", "char")
+    if var is not None:
+        try:
+            var.set(
+                f"Train {train:.0f}% | Val {val:.0f}% | Test {test:.0f}% | {creator_values[3].replace(chr(10), ' ')}"
+            )
+        except Exception:
+            pass
 
 def _on_base_model_change(self):
     try:
@@ -1933,6 +1994,143 @@ def _get_step4_augmentation_source_count(self, target: str) -> int:
     except Exception:
         return 0
 
+def _get_step4_augmentation_char_source_images(self) -> list[Path]:
+    raw = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+    if not raw:
+        return []
+    src = Path(raw)
+    root = src.parent if src.is_file() and src.name.lower() == "data.yaml" else src
+    roots = [
+        root / "images" / "train",
+        root / "images",
+        root / "train" / "images",
+        root / "images" / "val",
+        root / "val" / "images",
+    ]
+    images: list[Path] = []
+    seen: set[str] = set()
+    for root_dir in roots:
+        try:
+            source_images = get_image_files(Path(root_dir))
+        except Exception:
+            continue
+        for image_path in source_images:
+            try:
+                key = str(image_path.resolve())
+            except Exception:
+                key = str(image_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            images.append(image_path)
+    return images
+
+def _step4_yolo_label_candidates_for_image(image_path: Path) -> list[Path]:
+    candidates: list[Path] = []
+    parts = image_path.parts
+    for index, part in enumerate(parts):
+        if str(part).lower() != "images":
+            continue
+        try:
+            candidate = Path(*parts[:index], "labels", *parts[index + 1:]).with_suffix(".txt")
+        except Exception:
+            continue
+        candidates.append(candidate)
+    candidates.append(image_path.with_suffix(".txt"))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+def _count_step4_yolo_label_objects_for_images(images: list[Path]) -> int:
+    count = 0
+    seen_labels: set[str] = set()
+    for image_path in images:
+        label_path = None
+        for candidate in _step4_yolo_label_candidates_for_image(Path(image_path)):
+            try:
+                key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            except Exception:
+                key = str(candidate)
+            if key in seen_labels:
+                continue
+            if candidate.exists() and candidate.is_file():
+                label_path = candidate
+                seen_labels.add(key)
+                break
+        if label_path is None:
+            continue
+        try:
+            lines = label_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            continue
+        count += sum(1 for line in lines if line.strip() and not line.lstrip().startswith("#"))
+    return max(0, int(count))
+
+def _get_step4_augmentation_char_label_count(self, source_count: int) -> int:
+    try:
+        source_total = max(0, int(source_count or 0))
+    except Exception:
+        source_total = 0
+    if source_total <= 0:
+        return 0
+    signature = _get_step4_augmentation_source_signature(self, "char")
+    cache = getattr(self, "_step4_aug_char_label_count_cache", None)
+    if (
+        isinstance(cache, dict)
+        and cache.get("signature") == signature
+        and int(cache.get("source_count", -1) or -1) == source_total
+    ):
+        try:
+            return max(0, int(cache.get("count", 0) or 0))
+        except Exception:
+            return 0
+    images = _get_step4_augmentation_char_source_images(self)
+    count = _count_step4_yolo_label_objects_for_images(images)
+    try:
+        setattr(
+            self,
+            "_step4_aug_char_label_count_cache",
+            {
+                "signature": signature,
+                "source_count": source_total,
+                "count": int(count),
+            },
+        )
+    except Exception:
+        pass
+    return count
+
+def _format_step4_augmentation_char_balance(
+    train_count: int,
+    source_count: int,
+    source_char_count: int,
+    extra_count: int,
+) -> tuple[str, str, str]:
+    if train_count <= 0:
+        return "-", f"+{max(0, int(extra_count or 0))}", "-"
+    try:
+        source_total = max(1, int(source_count or 1))
+        train_chars = int(round(max(0, int(source_char_count or 0)) * (train_count / source_total)))
+    except Exception:
+        train_chars = 0
+    try:
+        avg_chars = (train_chars / train_count) if train_count > 0 else 0.0
+        extra_chars = int(round(max(0, int(extra_count or 0)) * avg_chars))
+    except Exception:
+        extra_chars = 0
+    total_count = train_count + max(0, int(extra_count or 0))
+    return (
+        f"{train_count} tablic\n{train_chars} znak\u00f3w",
+        f"+{max(0, int(extra_count or 0))} tablic\n+{extra_chars} znak\u00f3w",
+        f"{total_count} tablic\n{train_chars + extra_chars} znak\u00f3w",
+    )
+
 def _refresh_step4_augmentation_balance(self, target: str, profile: AugmentationProfile | None = None):
     normalized = CONFIG.normalize_task_target(target)
     prefix = _get_step4_augmentation_prefix(normalized)
@@ -1969,9 +2167,21 @@ def _refresh_step4_augmentation_balance(self, target: str, profile: Augmentation
             except Exception:
                 pass
     try:
-        current_var.set(str(train_count) if train_count > 0 else "-")
-        extra_var.set(f"+{extra}")
-        total_var.set(str(train_count + extra) if train_count > 0 else "-")
+        if normalized == "char":
+            char_count = _get_step4_augmentation_char_label_count(self, source_count)
+            current_text, extra_text, total_text = _format_step4_augmentation_char_balance(
+                train_count,
+                source_count,
+                char_count,
+                extra,
+            )
+            current_var.set(current_text)
+            extra_var.set(extra_text)
+            total_var.set(total_text)
+        else:
+            current_var.set(str(train_count) if train_count > 0 else "-")
+            extra_var.set(f"+{extra}")
+            total_var.set(str(train_count + extra) if train_count > 0 else "-")
     except Exception:
         pass
 
@@ -2002,8 +2212,7 @@ def _refresh_step4_augmentation_summary(self, target: str | None = None):
                 configure_button.configure(
                     state=(tk.NORMAL if checkbox_enabled and extra_count > 0 else tk.DISABLED)
                 )
-            if normalized == "plate":
-                self._refresh_step4_creator_decision_summary()
+            self._refresh_step4_creator_decision_summary()
         except Exception:
             pass
 

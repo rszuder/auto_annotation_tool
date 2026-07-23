@@ -391,6 +391,7 @@ def _build_dataset_tab(self):
 
     summary_rows = (
         ("status", "Status"),
+        ("dataset_id", "ID datasetu"),
         ("target", "Dataset"),
         ("path", "Wariant"),
         ("split", "Train / val / test"),

@@ -2137,6 +2137,12 @@ class CharacterAnnotationTab:
             return "other_perfect"
 
         raw_strategy = str(data.get("fusion_strategy", "") or "").strip().lower()
+        details = data.get("fusion_details", {})
+        auto_strategy = ""
+        if isinstance(details, dict):
+            auto_strategy = str(details.get("auto_strategy", "") or "").strip().lower()
+        if raw_strategy == "manual_correction" and auto_strategy:
+            raw_strategy = auto_strategy
         if raw_strategy in ("ocr_exact", "ocr_only", "ocr_fallback"):
             return "ocr_exact"
         if raw_strategy in ("yolo_exact", "yolo_only", "yolo_fallback"):

@@ -43,6 +43,7 @@ from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .modal_scroll_guard import event_is_over_foreign_toplevel
 from .zoomable_canvas import ZoomableCanvas
 from .z4_campaign_flow import (
     build_step4_campaign_navigation_view_model,
@@ -658,6 +659,9 @@ def _scroll_canvas_overflows(self, canvas) -> bool:
 
 
 def _on_train_left_global_mousewheel(self, event):
+    if event_is_over_foreign_toplevel(getattr(self, "frame", None), event):
+        return "break"
+
     canvas = getattr(self, "train_left_canvas", None)
     if canvas is None:
         return None
@@ -678,6 +682,9 @@ def _on_train_left_global_mousewheel(self, event):
 
 
 def _on_dataset_mode_global_mousewheel(self, event):
+    if event_is_over_foreign_toplevel(getattr(self, "frame", None), event):
+        return "break"
+
     canvas = getattr(self, "ds_mode_canvas", None)
     if canvas is None:
         return None

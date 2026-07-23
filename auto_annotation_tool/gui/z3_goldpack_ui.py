@@ -914,6 +914,16 @@ def run_yolo_gold_export(
             success_summary["gold_dataset_valid"] = True
             success_summary["gold_dataset_validation_message"] = ""
             host._write_step3_export_summary(success_summary)
+            try:
+                from . import z3_campaign_flow
+
+                z3_campaign_flow.mark_step3_dataset_exported_for_campaign(
+                    host,
+                    success_summary,
+                    reason="dataset_exported",
+                )
+            except Exception:
+                pass
         except Exception:
             pass
         host._log(
@@ -1025,6 +1035,16 @@ def run_pz3_existing_dataset_split(host) -> None:
             success_summary["gold_dataset_valid"] = True
             success_summary["gold_dataset_validation_message"] = ""
             host._write_step3_export_summary(success_summary)
+            try:
+                from . import z3_campaign_flow
+
+                z3_campaign_flow.mark_step3_dataset_exported_for_campaign(
+                    host,
+                    success_summary,
+                    reason="dataset_split_exported",
+                )
+            except Exception:
+                pass
         except Exception:
             pass
         try:

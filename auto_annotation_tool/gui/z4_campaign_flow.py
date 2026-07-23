@@ -13,18 +13,31 @@ from .z4_view_models import (
     Step4DatasetWorkflowViewModel,
     Step4TrainingInputsViewModel,
 )
-from .z2_shared_ui import campaign_visible_gate_id
+from .dataset_display import build_dataset_display_ref
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
 
 
 def _char_dataset_gate_display_id() -> str:
-    return campaign_visible_gate_id("T06") or "T05"
+    return "T06"
 
 
 def _training_finish_gate_display_id() -> str:
-    return campaign_visible_gate_id("T07") or "T06"
+    return "T06"
+
+
+def _dataset_summary_id(path_like, *, target_hint: str, counts: dict | None = None) -> str:
+    raw = str(path_like or "").strip()
+    if not raw:
+        return ""
+    try:
+        return build_dataset_display_ref(raw, target_hint=target_hint, counts=counts).id
+    except Exception:
+        try:
+            return Path(raw).name
+        except Exception:
+            return raw
 
 
 def _apply_campaign_project_base_model_selection(host: "TrainingTab", target: str | None) -> bool:
@@ -124,9 +137,16 @@ def build_step4_dataset_workflow_view_model(
         char_ready_dataset = bool(char_ready_path and char_ready_train > 0 and char_ready_val > 0)
 
         if char_ready_dataset:
-            split_ready_value = host._shorten_training_text(
-                host._format_workspace_relative_path(char_ready_path),
-                96,
+            split_counts = {
+                "train": char_ready_train,
+                "val": char_ready_val,
+                "test": char_ready_test,
+                "total": char_ready_train + char_ready_val + char_ready_test,
+            }
+            split_ready_value = _dataset_summary_id(
+                char_ready_path,
+                target_hint="char",
+                counts=split_counts,
             )
             split_intro = "Wariant treningowy znaków jest już gotowy. Możesz przejść do PZ2 i trenować model."
             split_summary = (
@@ -141,10 +161,8 @@ def build_step4_dataset_workflow_view_model(
             split_toggle_label = "Ukryj opcje splitu" if show_split_details else "Popraw split"
             split_action_label = "Przebuduj wariant treningowy"
         else:
-            split_src_value = host._shorten_training_text(
-                host._format_workspace_relative_path(host.split_src_var.get()),
-                96,
-            )
+            split_src_raw = str(host.split_src_var.get() or "").strip()
+            split_src_value = _dataset_summary_id(split_src_raw, target_hint="char") if split_src_raw else "brak wskazanego datasetu"
             split_intro = (
                 f"Źródłowy dataset znaków został już wyeksportowany w {char_dataset_gate_id}. "
                 "Teraz przygotuj z niego wariant treningowy train/val/test, aby odblokować PZ2."

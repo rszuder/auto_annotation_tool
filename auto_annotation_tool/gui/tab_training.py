@@ -46,6 +46,7 @@ from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
+from .dataset_display import build_dataset_display_ref
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -175,6 +176,7 @@ class TrainingTab:
         self._train_left_wrap_targets = []
         self._train_left_section_separators = []
         self._latest_training_metrics = {}
+        self._current_training_metric_history = []
         self._last_training_completion_summary_run_id = None
         self._dynamic_metric_tables = []
         self._analysis_dialog = None
@@ -639,6 +641,12 @@ class TrainingTab:
         return z4_training_metrics._refresh_training_metric_reference(self, *args, **kwargs)
     def _set_training_metric_interpretation(self, *args, **kwargs):
         return z4_training_metrics._set_training_metric_interpretation(self, *args, **kwargs)
+    def _metric_value_from_epoch_row(self, *args, **kwargs):
+        return z4_training_metrics._metric_value_from_epoch_row(self, *args, **kwargs)
+    def _format_best_epoch_metric_piece(self, *args, **kwargs):
+        return z4_training_metrics._format_best_epoch_metric_piece(self, *args, **kwargs)
+    def _build_training_best_epoch_summary(self, *args, **kwargs):
+        return z4_training_metrics._build_training_best_epoch_summary(self, *args, **kwargs)
     def _build_training_metric_interpretation(self, *args, **kwargs):
         return z4_training_metrics._build_training_metric_interpretation(self, *args, **kwargs)
     @staticmethod
@@ -717,6 +725,14 @@ class TrainingTab:
         return z4_training_metrics._refresh_step4_pinned_result_ui(self, *args, **kwargs)
     def _clear_pinned_step4_result(self, *args, **kwargs):
         return z4_training_metrics._clear_pinned_step4_result(self, *args, **kwargs)
+    def _set_step4_fine_tune_parent_state(self, *args, **kwargs):
+        return z4_training_metrics._set_step4_fine_tune_parent_state(self, *args, **kwargs)
+    def _clear_step4_fine_tune_parent_state(self, *args, **kwargs):
+        return z4_training_metrics._clear_step4_fine_tune_parent_state(self, *args, **kwargs)
+    def _resolve_step4_fine_tune_parent_run(self, *args, **kwargs):
+        return z4_training_metrics._resolve_step4_fine_tune_parent_run(self, *args, **kwargs)
+    def _sync_step4_fine_tune_parent_selection(self, *args, **kwargs):
+        return z4_training_metrics._sync_step4_fine_tune_parent_selection(self, *args, **kwargs)
     def _refresh_training_base_model_identity_ui(self, *args, **kwargs):
         return z4_training_metrics._refresh_training_base_model_identity_ui(self, *args, **kwargs)
     def _resolve_selected_training_base_model_display(self, *args, **kwargs):
@@ -879,7 +895,7 @@ class TrainingTab:
                 pass
         if reload_history and hasattr(self, "rank_tree"):
             try:
-                if normalized_target == "plate" and self._is_ranking_tab_active():
+                if normalized_target in {"plate", "char"} and self._is_ranking_tab_active():
                     self._load_ranking()
             except Exception:
                 pass
@@ -1050,6 +1066,10 @@ class TrainingTab:
         )
         selected_value = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
         if selected_value and selected_value != previous_value:
+            try:
+                self._clear_step4_fine_tune_parent_state()
+            except Exception:
+                pass
             selection_ok, _selection_message = self._validate_training_base_model_target_compatibility(
                 target=self._get_selected_training_target(),
                 show_dialog=True,
@@ -1493,8 +1513,25 @@ class TrainingTab:
                 return str(current_path)
         return str(CONFIG.get_datasets_dir(self._get_selected_training_target()))
 
+    def _get_ranking_task_target(self) -> str:
+        try:
+            target = CONFIG.normalize_task_target(self._get_selected_training_target())
+        except Exception:
+            target = "plate"
+        return target if target in {"plate", "char"} else "plate"
+
+    def _get_ranking_task_label(self, target: str | None = None) -> str:
+        normalized = CONFIG.normalize_task_target(target or self._get_ranking_task_target())
+        if normalized == "char":
+            return "Znaki (Detect)"
+        return "Tablice (Pose)"
+
+    def _get_ranking_split_name(self) -> str:
+        raw = str(getattr(self, "rank_split_var", tk.StringVar(value="test")).get() or "test").strip().lower()
+        return raw if raw in {"val", "test"} else "test"
+
     def _get_ranking_models_default_dir(self) -> Path:
-        return self._get_preferred_models_dir("plate")
+        return self._get_preferred_models_dir(self._get_ranking_task_target())
 
     def _get_ranking_models_picker_dir(self) -> str:
         current_value = str(getattr(self, "rank_models_dir", tk.StringVar()).get() or "").strip()
@@ -1507,7 +1544,7 @@ class TrainingTab:
         return str(self._get_ranking_models_default_dir())
 
     def _ensure_plate_ranking_engine(self):
-        ranking_dir = Path(CONFIG.get_ranking_dir("plate"))
+        ranking_dir = Path(CONFIG.get_ranking_dir(self._get_ranking_task_target()))
         current_dir = Path(getattr(self.ranking_engine, "ranking_dir", ranking_dir))
         try:
             same_dir = current_dir.resolve() == ranking_dir.resolve()
@@ -1518,6 +1555,14 @@ class TrainingTab:
             self.ranking_engine = ModelRanking(ranking_dir=ranking_dir)
 
     def _get_default_ranking_reference_dir(self) -> str:
+        if self._get_ranking_task_target() == "char":
+            try:
+                dataset_yaml = self._resolve_training_dataset_yaml_path()
+                if dataset_yaml is not None and Path(dataset_yaml).exists():
+                    return str(Path(dataset_yaml).parent.resolve())
+            except Exception:
+                pass
+
         candidates: list[Path] = []
 
         try:
@@ -1562,12 +1607,20 @@ class TrainingTab:
             except Exception:
                 pass
 
-        try:
-            campaign_auto_dir = CAMPAIGN.get_dir("auto_ann")
-            if campaign_auto_dir is not None and Path(campaign_auto_dir).exists():
-                return str(Path(campaign_auto_dir).resolve())
-        except Exception:
-            pass
+        if self._get_ranking_task_target() == "char":
+            try:
+                datasets_dir = Path(CONFIG.get_datasets_dir("char"))
+                if datasets_dir.exists():
+                    return str(datasets_dir.resolve())
+            except Exception:
+                pass
+        else:
+            try:
+                campaign_auto_dir = CAMPAIGN.get_dir("auto_ann")
+                if campaign_auto_dir is not None and Path(campaign_auto_dir).exists():
+                    return str(Path(campaign_auto_dir).resolve())
+            except Exception:
+                pass
 
         try:
             default_dir = Path(CONFIG.get_auto_annotations_dir("plate"))
@@ -1604,6 +1657,133 @@ class TrainingTab:
         selected_raw = str(
             raw_value if raw_value is not None else getattr(self, "rank_data_dir", tk.StringVar()).get()
         ).strip()
+        if self._get_ranking_task_target() == "char":
+            split_name = self._get_ranking_split_name()
+            result = {
+                "ok": False,
+                "selected_path": selected_raw,
+                "reference_dir": "",
+                "reference_name": "",
+                "yaml_path": "",
+                "data_yaml_path": "",
+                "split_name": split_name,
+                "image_count": 0,
+                "message": (
+                    "Wybierz tor testowy znaków: folder z data.yaml albo sam plik data.yaml. "
+                    "Wszystkie modele znaków pobiegną po tym samym splicie."
+                ),
+            }
+            if not selected_raw:
+                return result
+
+            try:
+                selected_path = Path(selected_raw)
+            except Exception:
+                result["message"] = "Nie udało się odczytać wskazanego datasetu odniesienia."
+                return result
+
+            if not selected_path.exists():
+                result["message"] = f"Nie znaleziono wskazanego datasetu odniesienia: {selected_path}"
+                return result
+
+            yaml_path = selected_path / "data.yaml" if selected_path.is_dir() else selected_path
+            if not yaml_path.exists() or yaml_path.name.lower() != "data.yaml":
+                result["message"] = "Wskaż folder datasetu znaków z plikiem data.yaml albo sam plik data.yaml."
+                return result
+
+            try:
+                inferred_target = self._infer_dataset_target(str(yaml_path))
+            except Exception:
+                inferred_target = "char"
+            if inferred_target and inferred_target != "char":
+                result["message"] = (
+                    "Wskazany dataset nie wygląda na dataset znaków YOLO Detect. "
+                    f"Rozpoznany tor: {self._format_training_target_label(inferred_target)}."
+                )
+                return result
+
+            try:
+                cfg = safe_load_yaml(yaml_path) or {}
+            except Exception:
+                cfg = {}
+
+            split_value = cfg.get(split_name)
+            if not split_value:
+                result["message"] = (
+                    f"Tor testowy nie ma splitu `{split_name}` w data.yaml. "
+                    "Zmień split w Zaawansowanych albo wskaż inny dataset."
+                )
+                return result
+
+            def _dataset_root() -> Path:
+                raw_root = str(cfg.get("path") or "").strip()
+                if not raw_root:
+                    return yaml_path.parent
+                root_path = Path(raw_root)
+                return root_path if root_path.is_absolute() else yaml_path.parent / root_path
+
+            def _count_split_images(value) -> int:
+                root = _dataset_root()
+                values = value if isinstance(value, list) else [value]
+                total = 0
+                for item in values:
+                    raw_item = str(item or "").strip()
+                    if not raw_item:
+                        continue
+                    split_path = Path(raw_item)
+                    if not split_path.is_absolute():
+                        split_path = root / split_path
+                    try:
+                        if split_path.is_file() and split_path.suffix.lower() == ".txt":
+                            total += sum(
+                                1
+                                for line in split_path.read_text(encoding="utf-8-sig").splitlines()
+                                if line.strip()
+                            )
+                        elif split_path.is_dir():
+                            total += len(get_image_files(split_path))
+                        elif split_path.is_file() and split_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
+                            total += 1
+                    except Exception:
+                        continue
+                return total
+
+            image_count = _count_split_images(split_value)
+            if image_count <= 0:
+                result["message"] = (
+                    f"Split `{split_name}` w datasecie odniesienia nie zawiera obrazów możliwych do policzenia."
+                )
+                return result
+
+            try:
+                reference_dir = str(yaml_path.parent.resolve())
+                yaml_value = str(yaml_path.resolve())
+            except Exception:
+                reference_dir = str(yaml_path.parent)
+                yaml_value = str(yaml_path)
+
+            dataset_ref = build_dataset_display_ref(
+                yaml_path.parent,
+                target_hint="char",
+                counts={split_name: image_count, "total": image_count},
+            )
+
+            result.update(
+                {
+                    "ok": True,
+                    "reference_dir": reference_dir,
+                    "reference_name": f"{dataset_ref.id} / {split_name}",
+                    "yaml_path": yaml_value,
+                    "data_yaml_path": yaml_value,
+                    "image_count": image_count,
+                "message": (
+                    f"Gotowy tor znaków: {dataset_ref.id} | split `{split_name}` | "
+                    f"{image_count} obrazów. Każdy model dostanie ten sam egzamin."
+                ),
+                }
+            )
+            return result
+
         result = {
             "ok": False,
             "selected_path": selected_raw,
@@ -1614,8 +1794,8 @@ class TrainingTab:
             "image_paths": [],
             "image_count": 0,
             "message": (
-                "Wskaż folder runu Z2/PZ2, w którym po sprawdzeniu tablic zapisano zmiany. "
-                "To zwykle katalog z plikiem annotations.xml oraz zgodnymi obrazami."
+                "Wybierz tor testowy tablic: run Z2/PZ2 z zapisanym annotations.xml oraz zgodnymi obrazami. "
+                "To będzie wspólny egzamin dla modeli tablic."
             ),
         }
         if not selected_raw:
@@ -1747,7 +1927,7 @@ class TrainingTab:
                 "image_paths": image_paths,
                 "image_count": len(image_paths),
                 "message": (
-                    f"Gotowy zestaw: {reference_dir.name} | {len(image_paths)} obrazów. "
+                    f"Gotowy tor tablic: {reference_dir.name} | {len(image_paths)} obrazów. "
                     "System użyje zapisanych zmian z annotations.xml jako punktu odniesienia."
                 ),
             }
@@ -1760,23 +1940,51 @@ class TrainingTab:
         if button is None:
             return
 
+        if getattr(self, "rank_is_running", False):
+            if cancel_button is not None:
+                try:
+                    cancel_button.configure(state=tk.NORMAL)
+                except Exception:
+                    pass
+            return
+
         ready = False
-        if self._is_ranking_available_for_selected_target() and not getattr(self, "rank_is_running", False):
+        models_found = False
+        reference_info = {"ok": False}
+        if self._is_ranking_available_for_selected_target():
             models_dir_raw = str(getattr(self, "rank_models_dir", tk.StringVar()).get() or "").strip()
             reference_info = self._resolve_ranking_reference_source()
+            target = self._get_ranking_task_target()
+            scope = self._get_ranking_scope()
             try:
-                models_dir = Path(models_dir_raw)
+                models_dir = Path(models_dir_raw) if models_dir_raw else Path(".")
+                models_source_ready = scope != "Globalne" or (models_dir.exists() and models_dir.is_dir())
+                participants = (
+                    list(self._collect_ranking_participant_candidates(models_dir, target, scope))
+                    if models_source_ready
+                    else []
+                )
+                enabled_participants = self._filter_enabled_ranking_participants(participants)
+                models_found = bool(enabled_participants)
                 ready = (
-                    models_dir.exists()
-                    and models_dir.is_dir()
-                    and bool(self._collect_plate_ranking_model_candidates(models_dir))
+                    models_source_ready
+                    and models_found
                     and reference_info["ok"]
                 )
             except Exception:
                 ready = False
 
         try:
-            button.configure(state=(tk.NORMAL if ready else tk.DISABLED))
+            if not reference_info.get("ok"):
+                button_text = "[ TOR ] Wybierz tor testowy"
+            elif not models_found:
+                button_text = "[ KONIE ] Brak startujących"
+            else:
+                button_text = "[ START ] Uruchom wyścig"
+            button.configure(
+                state=(tk.NORMAL if ready else tk.DISABLED),
+                text=button_text,
+            )
         except Exception:
             pass
         if cancel_button is not None:
@@ -1799,10 +2007,117 @@ class TrainingTab:
     def _refresh_ranking_reference_ui(self, *_args):
         if not self._is_ranking_available_for_selected_target():
             return
-        if not self._is_ranking_tab_active():
+        if not self._is_ranking_tab_active() and getattr(self, "rank_target_lbl", None) is None:
             return
 
+        target = self._get_ranking_task_target()
+        if not getattr(self, "_rank_target_syncing", False):
+            previous_target = str(getattr(self, "_ranking_ui_target", "") or "")
+            if previous_target != target:
+                self._ranking_ui_target = target
+                self._rank_target_syncing = True
+                try:
+                    try:
+                        self._ensure_plate_ranking_engine()
+                    except Exception:
+                        pass
+                    models_var = getattr(self, "rank_models_dir", None)
+                    if models_var is not None:
+                        models_var.set(str(self._get_ranking_models_default_dir()))
+                    data_var = getattr(self, "rank_data_dir", None)
+                    if data_var is not None:
+                        data_var.set("")
+                    try:
+                        self._prefill_ranking_reference_if_empty()
+                    except Exception:
+                        pass
+                finally:
+                    self._rank_target_syncing = False
+
+        target_label = getattr(self, "rank_target_lbl", None)
         info = self._resolve_ranking_reference_source()
+        model_count = 0
+        enabled_model_count = 0
+        scope = self._get_ranking_scope()
+        try:
+            models_dir_raw = str(getattr(self, "rank_models_dir", tk.StringVar()).get() or "").strip()
+            models_dir = Path(models_dir_raw) if models_dir_raw else Path(".")
+            if scope != "Globalne" or (models_dir.exists() and models_dir.is_dir()):
+                participants = list(self._collect_ranking_participant_candidates(models_dir, target, scope))
+                model_count = len(participants)
+                enabled_model_count = len(self._filter_enabled_ranking_participants(participants))
+        except Exception:
+            model_count = 0
+            enabled_model_count = 0
+        if target_label is not None:
+            try:
+                target_label.configure(
+                    text=(
+                        f"Konie: {self._format_ranking_scope_label(scope, target)} | "
+                        f"startuje {enabled_model_count}/{model_count}."
+                    )
+                )
+            except Exception:
+                pass
+        scope_label = getattr(self, "rank_scope_lbl", None)
+        if scope_label is not None:
+            try:
+                scope_label.configure(text=f"Aktywny zakres: {self._format_ranking_scope_label(scope, target)}")
+            except Exception:
+                pass
+        palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+        scope_value_label = getattr(self, "rank_scope_value_lbl", None)
+        if scope_value_label is not None:
+            try:
+                scope_value_label.configure(
+                    text=self._format_ranking_scope_label(scope, target),
+                    fg=palette.get("accent", "#0e639c"),
+                )
+            except Exception:
+                pass
+        count_value_label = getattr(self, "rank_count_value_lbl", None)
+        if count_value_label is not None:
+            try:
+                count_value_label.configure(
+                    text=f"{enabled_model_count}/{model_count}" if model_count else "0",
+                    fg=(
+                        palette.get("success", "#2ecc71")
+                        if enabled_model_count > 0
+                        else palette.get("warning", "#f0b44c") if model_count > 0 else palette.get("error", "#e05d5d")
+                    ),
+                )
+            except Exception:
+                pass
+
+        track_label = getattr(self, "rank_track_lbl", None)
+        if track_label is not None:
+            try:
+                if info.get("ok"):
+                    track_label.configure(
+                        text=(
+                            f"Tor testowy: {info.get('reference_name') or '-'} | "
+                            f"{int(info.get('image_count', 0) or 0)} próbek | wspólny egzamin dla wszystkich modeli."
+                        )
+                    )
+                else:
+                    track_label.configure(text=f"Tor testowy: nie wybrano | {info.get('message') or ''}")
+            except Exception:
+                pass
+        track_count_value_label = getattr(self, "rank_track_count_value_lbl", None)
+        if track_count_value_label is not None:
+            try:
+                if info.get("ok"):
+                    track_count_value_label.configure(
+                        text=f"{int(info.get('image_count', 0) or 0)} próbek",
+                        fg=palette.get("success", "#2ecc71"),
+                    )
+                else:
+                    track_count_value_label.configure(
+                        text="brak",
+                        fg=palette.get("warning", "#f0b44c"),
+                    )
+            except Exception:
+                pass
 
         hint_label = getattr(self, "rank_reference_hint_lbl", None)
         if hint_label is not None:
@@ -2012,7 +2327,16 @@ class TrainingTab:
                 if dataset_yaml is None:
                     selected_text = "Brak wybranego wariantu."
                 else:
-                    selected_text = f"Folder: {self._format_workspace_relative_path(dataset_yaml.parent)}"
+                    try:
+                        counts = self._get_dataset_split_image_counts(dataset_yaml.parent)
+                    except Exception:
+                        counts = {}
+                    dataset_ref = build_dataset_display_ref(
+                        dataset_yaml.parent,
+                        target_hint=self._get_selected_training_target(),
+                        counts=counts,
+                    )
+                    selected_text = f"{dataset_ref.id} | {self._format_workspace_relative_path(dataset_yaml.parent)}"
                 selected_path_label.configure(text=selected_text)
             except Exception:
                 pass
@@ -2784,7 +3108,7 @@ class TrainingTab:
             pass
 
     def _is_ranking_available_for_selected_target(self) -> bool:
-        return CONFIG.normalize_task_target(self._get_selected_training_target()) == "plate"
+        return CONFIG.normalize_task_target(self._get_selected_training_target()) in {"plate", "char"}
 
     def _refresh_step4_analysis_tab_visibility(self):
         refresh_step4_analysis_tab_visibility(self)
@@ -3118,11 +3442,26 @@ class TrainingTab:
     def _build_validation_panel_v2(self, *args, **kwargs):
         return z4_validation_panel._build_validation_panel_v2(self, *args, **kwargs)
 
+    def _open_model_validation_modal(self, *args, **kwargs):
+        return z4_validation_panel._open_model_validation_modal(self, *args, **kwargs)
+
+    def _open_selected_run_validation_modal(self, *args, **kwargs):
+        return z4_validation_panel._open_selected_run_validation_modal(self, *args, **kwargs)
+
+    def _open_current_run_validation_modal(self, *args, **kwargs):
+        return z4_validation_panel._open_current_run_validation_modal(self, *args, **kwargs)
+
+    def _open_selected_ranking_validation_modal(self, *args, **kwargs):
+        return z4_validation_panel._open_selected_ranking_validation_modal(self, *args, **kwargs)
+
     def _format_validation_metric_band(self, *args, **kwargs):
         return z4_validation_panel._format_validation_metric_band(self, *args, **kwargs)
 
     def _extract_validation_metric_rows(self, *args, **kwargs):
         return z4_validation_panel._extract_validation_metric_rows(self, *args, **kwargs)
+
+    def _open_validation_results_modal(self, *args, **kwargs):
+        return z4_validation_panel._open_validation_results_modal(self, *args, **kwargs)
 
     def _set_validation_summary(self, *args, **kwargs):
         return z4_validation_panel._set_validation_summary(self, *args, **kwargs)
@@ -3172,16 +3511,40 @@ class TrainingTab:
         return z4_analysis_ranking._show_analysis_plot(self, *args, **kwargs)
     def _build_ranking_panel_v2(self, *args, **kwargs):
         return z4_analysis_ranking._build_ranking_panel_v2(self, *args, **kwargs)
+    def _open_ranking_track_modal(self, *args, **kwargs):
+        return z4_analysis_ranking._open_ranking_track_modal(self, *args, **kwargs)
+    def _open_ranking_participants_modal(self, *args, **kwargs):
+        return z4_analysis_ranking._open_ranking_participants_modal(self, *args, **kwargs)
     def _open_ranking_advanced_modal(self, *args, **kwargs):
         return z4_analysis_ranking._open_ranking_advanced_modal(self, *args, **kwargs)
     def _run_ranking_v2(self, *args, **kwargs):
         return z4_analysis_ranking._run_ranking_v2(self, *args, **kwargs)
     def _cancel_ranking_v2(self, *args, **kwargs):
         return z4_analysis_ranking._cancel_ranking_v2(self, *args, **kwargs)
+    def _open_ranking_report_viewer(self, *args, **kwargs):
+        return z4_analysis_ranking._open_ranking_report_viewer(self, *args, **kwargs)
+    def _export_ranking_analysis_report(self, *args, **kwargs):
+        return z4_analysis_ranking._export_ranking_analysis_report(self, *args, **kwargs)
     def _collect_project_plate_ranking_model_candidates(self, *args, **kwargs):
         return z4_analysis_ranking._collect_project_plate_ranking_model_candidates(self, *args, **kwargs)
+    def _collect_project_ranking_model_candidates(self, *args, **kwargs):
+        return z4_analysis_ranking._collect_project_ranking_model_candidates(self, *args, **kwargs)
     def _collect_plate_ranking_model_candidates(self, *args, **kwargs):
         return z4_analysis_ranking._collect_plate_ranking_model_candidates(self, *args, **kwargs)
+    def _collect_ranking_model_candidates(self, *args, **kwargs):
+        return z4_analysis_ranking._collect_ranking_model_candidates(self, *args, **kwargs)
+    def _get_ranking_scope(self, *args, **kwargs):
+        return z4_analysis_ranking._get_ranking_scope(self, *args, **kwargs)
+    def _format_ranking_scope_label(self, *args, **kwargs):
+        return z4_analysis_ranking._format_ranking_scope_label(self, *args, **kwargs)
+    def _ranking_model_candidate_scope(self, *args, **kwargs):
+        return z4_analysis_ranking._ranking_model_candidate_scope(self, *args, **kwargs)
+    def _collect_ranking_participant_candidates(self, *args, **kwargs):
+        return z4_analysis_ranking._collect_ranking_participant_candidates(self, *args, **kwargs)
+    def _filter_enabled_ranking_participants(self, *args, **kwargs):
+        return z4_analysis_ranking._filter_enabled_ranking_participants(self, *args, **kwargs)
+    def _collect_ranking_track_candidates(self, *args, **kwargs):
+        return z4_analysis_ranking._collect_ranking_track_candidates(self, *args, **kwargs)
     def _pick_file(self, *args, **kwargs):
         return z4_dataset_builder._pick_file(self, *args, **kwargs)
     def _pick_dir(self, *args, **kwargs):
@@ -3291,6 +3654,8 @@ class TrainingTab:
         return z4_training_runtime._bind_trainer_callbacks(self, *args, **kwargs)
     def _reload_history_snapshot_from_disk(self, *args, **kwargs):
         return z4_training_runtime._reload_history_snapshot_from_disk(self, *args, **kwargs)
+    def _set_training_running_ui_state(self, *args, **kwargs):
+        return z4_training_runtime._set_training_running_ui_state(self, *args, **kwargs)
     def _load_history(self, *args, **kwargs):
         return z4_training_runtime._load_history(self, *args, **kwargs)
     def _delete_selected(self, *args, **kwargs):
@@ -3299,6 +3664,12 @@ class TrainingTab:
         return z4_training_runtime._open_run_folder(self, *args, **kwargs)
     def _resume_selected_run(self, *args, **kwargs):
         return z4_training_runtime._resume_selected_run(self, *args, **kwargs)
+    def _is_history_run_fine_tune_candidate(self, *args, **kwargs):
+        return z4_training_runtime._is_history_run_fine_tune_candidate(self, *args, **kwargs)
+    def _select_selected_run_as_fine_tune_base(self, *args, **kwargs):
+        return z4_training_runtime._select_selected_run_as_fine_tune_base(self, *args, **kwargs)
+    def _select_selected_ranking_run_as_fine_tune_base(self, *args, **kwargs):
+        return z4_training_runtime._select_selected_ranking_run_as_fine_tune_base(self, *args, **kwargs)
     def _promote_selected_run_model_to_campaign(self, *args, **kwargs):
         return z4_training_runtime._promote_selected_run_model_to_campaign(self, *args, **kwargs)
     def _refresh_campaign_training_result_selector(self, *args, **kwargs):

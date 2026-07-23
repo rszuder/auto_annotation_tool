@@ -237,6 +237,71 @@ def _make_step4_flow_strip(self, parent):
     return strip
 
 
+def _make_step4_decision_table(self, parent, *, prefix: str, bg: str):
+    colors = _get_step4_table_colors(self)
+    shell = tk.Frame(
+        parent,
+        bg=colors["border"],
+        bd=0,
+        highlightthickness=0,
+        padx=1,
+        pady=1,
+    )
+    shell.pack(fill=tk.X, pady=(0, 10))
+    grid = tk.Frame(shell, bg=colors["border"], bd=0, highlightthickness=0)
+    grid.pack(fill=tk.X)
+    setattr(self, f"{prefix}_decision_summary_frame", shell)
+    setattr(self, f"{prefix}_decision_summary_grid", grid)
+
+    rows = {}
+    columns = (
+        ("train", "Train"),
+        ("val", "Val"),
+        ("test", "Test"),
+        ("augmentation", "Powiększenie"),
+    )
+    for column, (_key, title) in enumerate(columns):
+        grid.columnconfigure(column, weight=1, uniform=f"{prefix}_decision")
+        tk.Label(
+            grid,
+            text=title,
+            anchor=tk.CENTER,
+            padx=9,
+            pady=5,
+            bg=colors["header"],
+            fg=colors["accent"],
+            font=("Segoe UI Semibold", 8),
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["border"],
+            highlightcolor=colors["border"],
+        ).grid(row=0, column=column, sticky="nsew")
+
+    for column, (key, _title) in enumerate(columns):
+        var = tk.StringVar(value="-")
+        setattr(self, f"{prefix}_decision_{key}_var", var)
+        cell_bg = colors["row"] if column % 2 == 0 else colors["row_alt"]
+        value = tk.Label(
+            grid,
+            textvariable=var,
+            anchor=tk.CENTER,
+            justify=tk.CENTER,
+            padx=9,
+            pady=7,
+            bg=cell_bg,
+            fg=colors["fg"],
+            font=("Segoe UI Semibold", 10),
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["border"],
+            highlightcolor=colors["border"],
+        )
+        value.grid(row=1, column=column, sticky="nsew")
+        rows[key] = value
+    setattr(self, f"_{prefix}_decision_value_widgets", rows)
+    return shell
+
+
 def _build_step4_augmentation_controls(self, parent, *, target: str):
     normalized_target = CONFIG.normalize_task_target(target)
     prefix = "creator" if normalized_target == "plate" else "split"
@@ -356,11 +421,12 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
             balance_frame,
             textvariable=balance_vars[key],
             anchor=tk.CENTER,
+            justify=tk.CENTER,
             padx=9,
-            pady=7,
+            pady=6,
             bg=(table_colors["row"] if column % 2 == 0 else table_colors["row_alt"]),
             fg=table_colors["fg"],
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             bd=0,
             highlightthickness=1,
             highlightbackground=table_colors["border"],
@@ -417,7 +483,7 @@ def _build_creator_ui(self):
     summary_colors = _get_step4_table_colors(self)
     self.creator_campaign_summary_title = tk.Label(
         f,
-        text="1. Materia\u0142 projektu dla bramki T07",
+        text="1. Materia\u0142 projektu",
         font=("Segoe UI Semibold", 9),
         padx=2,
         pady=2,
@@ -675,51 +741,10 @@ def _build_creator_ui(self):
     self.btn_step4_create_frame = create_shell
     self.step4_creator_action_inner = create_inner
     self.btn_step4_create_frame.pack(fill=tk.X, pady=(12, 10))
-    decision_bg = blend_hex_colors(summary_colors["accent"], create_bg, 0.82)
     self.creator_decision_summary_var = tk.StringVar(
         value="Train 80% | Val 10% | Test 10% | bez syntetycznego powi\u0119kszenia"
     )
-    self.creator_decision_summary_frame = tk.Frame(
-        create_inner,
-        bg=summary_colors["border"],
-        bd=0,
-        highlightthickness=0,
-        padx=1,
-        pady=1,
-    )
-    self.creator_decision_summary_frame.pack(fill=tk.X, pady=(0, 10))
-    decision_inner = tk.Frame(
-        self.creator_decision_summary_frame,
-        bg=decision_bg,
-        bd=0,
-        highlightthickness=0,
-        padx=10,
-        pady=8,
-    )
-    decision_inner.pack(fill=tk.X)
-    tk.Label(
-        decision_inner,
-        text="Podsumowanie decyzji",
-        bg=decision_bg,
-        fg=summary_colors["accent"],
-        font=("Segoe UI Semibold", 8),
-        anchor="w",
-        justify=tk.LEFT,
-        bd=0,
-        highlightthickness=0,
-    ).pack(fill=tk.X)
-    tk.Label(
-        decision_inner,
-        textvariable=self.creator_decision_summary_var,
-        bg=decision_bg,
-        fg=summary_colors["fg"],
-        font=("Segoe UI Semibold", 10),
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=700,
-        bd=0,
-        highlightthickness=0,
-    ).pack(fill=tk.X, pady=(3, 0))
+    _make_step4_decision_table(self, create_inner, prefix="creator", bg=create_bg)
     create_button_row = tk.Frame(create_inner, bg=create_bg, bd=0, highlightthickness=0)
     create_button_row.pack(anchor=tk.W, fill=tk.X)
 
@@ -827,6 +852,93 @@ def _build_splitter_ui(self):
         justify=tk.LEFT,
         wraplength=720
     )
+    summary_colors = _get_step4_table_colors(self)
+    self.split_campaign_summary_frame = tk.Frame(
+        f,
+        bd=0,
+        padx=1,
+        pady=1,
+        bg=summary_colors["border"],
+        highlightthickness=0,
+    )
+    self.split_campaign_summary_grid = tk.Frame(
+        self.split_campaign_summary_frame,
+        bd=0,
+        highlightthickness=0,
+        bg=summary_colors["border"],
+    )
+    self.split_campaign_summary_grid.pack(fill=tk.X)
+    self.split_campaign_summary_grid.grid_columnconfigure(0, weight=0, minsize=150)
+    self.split_campaign_summary_grid.grid_columnconfigure(1, weight=1)
+    self._split_campaign_summary_header_widgets = []
+    self._split_campaign_summary_rows = {}
+    for column, text in enumerate(("Krok", "Stan")):
+        header_cell = tk.Label(
+            self.split_campaign_summary_grid,
+            text=text,
+            font=("Segoe UI Semibold", 8),
+            padx=9,
+            pady=5,
+            anchor="w",
+            bd=0,
+            highlightthickness=1,
+            bg=summary_colors["header"],
+            fg=summary_colors["accent"],
+            highlightbackground=summary_colors["border"],
+            highlightcolor=summary_colors["border"],
+        )
+        header_cell.grid(row=0, column=column, sticky="nsew")
+        self._split_campaign_summary_header_widgets.append(header_cell)
+    for row_index, (key, label_text) in enumerate(
+        (
+            ("source", "\u0179r\u00f3d\u0142o znak\u00f3w"),
+            ("variant", "Wariant treningowy"),
+            ("split", "Podzia\u0142"),
+        ),
+        start=1,
+    ):
+        row_bg = summary_colors["row"] if row_index % 2 else summary_colors["row_alt"]
+        label_cell = tk.Label(
+            self.split_campaign_summary_grid,
+            text=label_text,
+            font=("Segoe UI", 8),
+            padx=9,
+            pady=5,
+            anchor="w",
+            bd=0,
+            highlightthickness=1,
+            bg=row_bg,
+            fg=summary_colors["muted"],
+            highlightbackground=summary_colors["border"],
+            highlightcolor=summary_colors["border"],
+        )
+        label_cell.grid(row=row_index, column=0, sticky="nsew")
+        value_cell = tk.Frame(
+            self.split_campaign_summary_grid,
+            padx=9,
+            pady=4,
+            bd=0,
+            highlightthickness=1,
+            bg=row_bg,
+            highlightbackground=summary_colors["border"],
+            highlightcolor=summary_colors["border"],
+        ) if key == "split" else tk.Label(
+            self.split_campaign_summary_grid,
+            text="-",
+            font=("Segoe UI", 8),
+            padx=9,
+            pady=5,
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=1,
+            bg=row_bg,
+            fg=summary_colors["fg"],
+            highlightbackground=summary_colors["border"],
+            highlightcolor=summary_colors["border"],
+        )
+        value_cell.grid(row=row_index, column=1, sticky="nsew")
+        self._split_campaign_summary_rows[key] = (label_cell, value_cell)
 
     row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
     self.split_output_row = row2
@@ -864,6 +976,7 @@ def _build_splitter_ui(self):
     self.btn_step4_split_frame = split_shell
     self.step4_split_action_inner = split_inner
     self.btn_step4_split_frame.pack(fill=tk.X, pady=(12, 10))
+    _make_step4_decision_table(self, split_inner, prefix="split", bg=split_bg)
     split_button_row = tk.Frame(split_inner, bg=split_bg, bd=0, highlightthickness=0)
     split_button_row.pack(anchor=tk.W, fill=tk.X)
 
@@ -891,8 +1004,18 @@ def _build_splitter_ui(self):
     self.split_status = ttk.Label(self.split_feedback_frame, text="Gotowy")
     self.split_status.pack(anchor=tk.W)
     self._set_split_feedback_visibility(False)
+    def _on_split_source_change(*_args):
+        try:
+            self._refresh_dataset_split_cta_state()
+        except Exception:
+            pass
+        try:
+            self._refresh_step4_creator_decision_summary()
+        except Exception:
+            pass
+
     try:
-        self.split_src_var.trace_add("write", lambda *_args: self._refresh_dataset_split_cta_state())
+        self.split_src_var.trace_add("write", _on_split_source_change)
     except Exception:
         pass
     self._refresh_dataset_split_cta_state()

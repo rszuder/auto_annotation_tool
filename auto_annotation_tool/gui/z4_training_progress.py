@@ -136,6 +136,7 @@ def _reset_training_runtime_progress(self) -> None:
     self._training_last_total_epochs = 0
     self._training_last_batch = 0
     self._training_last_total_batches = 0
+    self._last_training_batch_ui_emit_at = 0.0
     try:
         self.train_epoch_progress_measure_lbl.configure(text="Bieżąca epoka")
     except Exception:

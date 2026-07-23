@@ -13,6 +13,8 @@ from tkinter import ttk, messagebox
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
 from ..training import TrainingStatus
+from .dataset_display import build_dataset_display_ref
+from .run_display import build_run_display_ref
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 
@@ -102,6 +104,66 @@ COMPARE_COLORS = (
 )
 
 
+def _training_compare_dialog_geometry(widget) -> tuple[int, int, int, int, bool]:
+    """Return a screen-safe initial geometry for the comparison modal."""
+    try:
+        screen_w = int(widget.winfo_screenwidth() or 1360)
+        screen_h = int(widget.winfo_screenheight() or 860)
+    except Exception:
+        screen_w, screen_h = 1360, 860
+
+    width = min(1360, max(940, screen_w - 96))
+    height = min(860, max(600, screen_h - 128))
+    width = min(width, max(720, screen_w - 48))
+    height = min(height, max(520, screen_h - 72))
+    x = max(0, int((screen_w - width) / 2))
+    y = max(0, int((screen_h - height) / 2) - 8)
+    compact = bool(width < 1180 or height < 760)
+    return int(width), int(height), int(x), int(y), compact
+
+
+def _apply_training_compare_dialog_geometry(dialog) -> bool:
+    try:
+        width, height, x, y, compact = _training_compare_dialog_geometry(dialog)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.minsize(min(980, width), min(560, height))
+        try:
+            screen_w = int(dialog.winfo_screenwidth() or width)
+            screen_h = int(dialog.winfo_screenheight() or height)
+            dialog.maxsize(max(width, screen_w), max(height, screen_h))
+        except Exception:
+            pass
+        return compact
+    except Exception:
+        try:
+            dialog.geometry("1180x760")
+            dialog.minsize(940, 560)
+        except Exception:
+            pass
+        return False
+
+
+def _toggle_training_compare_maximized(self):
+    dialog = getattr(self, "_training_compare_dialog", None)
+    if dialog is None:
+        return
+    try:
+        if str(dialog.state()) == "zoomed":
+            dialog.state("normal")
+        else:
+            dialog.state("zoomed")
+    except Exception:
+        try:
+            is_zoomed = bool(dialog.attributes("-zoomed"))
+            dialog.attributes("-zoomed", not is_zoomed)
+        except Exception:
+            return
+    try:
+        dialog.after_idle(self._draw_training_compare_chart)
+    except Exception:
+        pass
+
+
 def _training_compare_metric_by_key(key: str) -> dict[str, object]:
     raw = str(key or "").strip()
     for metric in COMPARE_METRICS:
@@ -119,6 +181,20 @@ def _format_compare_datetime(value: str | None, *, long: bool = False) -> str:
         return datetime.datetime.fromisoformat(raw).strftime(fmt)
     except Exception:
         return raw.replace("T", " ")[:19 if long else 16] or "-"
+
+
+def _compare_dataset_label(self, run) -> str:
+    dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
+    if not dataset_path:
+        return "-"
+    try:
+        target_hint = self._infer_history_run_target(run)
+    except Exception:
+        target_hint = ""
+    try:
+        return build_dataset_display_ref(dataset_path, target_hint=target_hint).id
+    except Exception:
+        return Path(dataset_path).name or "-"
 
 
 def _compare_float(value) -> float | None:
@@ -228,16 +304,31 @@ def _collect_compare_curves_for_run(run) -> dict[str, list[tuple[float, float]]]
 
 
 def _format_compare_run_label(self, run, index: int) -> str:
-    name = str(getattr(run, "name", "") or "").strip()
     run_id = str(getattr(run, "id", "") or "").strip()
-    dataset = Path(str(getattr(run, "dataset_path", "") or "")).name
-    base = name or run_id or f"run {index + 1}"
-    if len(base) > 42:
-        base = base[:39].rstrip() + "..."
-    suffix = dataset or run_id
+    dataset = _compare_dataset_label(self, run)
+    try:
+        base = build_run_display_ref(run, kind_hint="training").id
+    except Exception:
+        base = run_id or f"run {index + 1}"
+    suffix = dataset
     if suffix:
         return f"{index + 1}. {base} | {suffix}"
     return f"{index + 1}. {base}"
+
+
+def _training_compare_run_key(run) -> str:
+    run_id = str(getattr(run, "id", "") or "").strip()
+    if run_id:
+        return run_id.lower()
+    for attr in ("output_dir", "run_dir", "project_dir"):
+        raw = str(getattr(run, attr, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            return str(Path(raw).resolve()).lower()
+        except Exception:
+            return str(Path(raw)).lower()
+    return ""
 
 
 def _selected_training_compare_runs(self) -> list:
@@ -260,12 +351,18 @@ def _selected_training_compare_runs(self) -> list:
         self._reload_history_snapshot_from_disk()
     except Exception:
         pass
+    seen: set[str] = set()
     for run_id in selected_ids:
         try:
             run = self.history.get_run(str(run_id))
         except Exception:
             run = None
         if run is not None:
+            key = _training_compare_run_key(run)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
             runs.append(run)
     return runs
 
@@ -476,10 +573,17 @@ def _refresh_training_compare_legend(self):
 
 def _build_training_compare_runs_data(self, runs: list) -> list[dict[str, object]]:
     data = []
-    for index, run in enumerate(runs):
+    seen: set[str] = set()
+    for run in list(runs or []):
         run_id = str(getattr(run, "id", "") or "").strip()
         if not run_id:
             continue
+        key = _training_compare_run_key(run)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        index = len(data)
         curves = _collect_compare_curves_for_run(run)
         label = _format_compare_run_label(self, run, index)
         short_label = label if len(label) <= 44 else label[:41].rstrip() + "..."
@@ -494,6 +598,8 @@ def _build_training_compare_runs_data(self, runs: list) -> list[dict[str, object
                 "epochs": int(getattr(run, "epochs", 0) or 0),
             }
         )
+        if len(data) >= 8:
+            break
     return data
 
 
@@ -514,7 +620,7 @@ def _populate_training_compare_summary(self):
             target = self._format_history_run_target_label(self._infer_history_run_target(run))
         except Exception:
             target = "-"
-        dataset = Path(str(getattr(run, "dataset_path", "") or "")).name or "-"
+        dataset = _compare_dataset_label(self, run)
         started = _format_compare_datetime(getattr(run, "started_at", None) or getattr(run, "created_at", None))
         try:
             best95 = max((p[1] for p in (item.get("curves") or {}).get("map50_95", []) or []), default=float(getattr(run, "best_map50_95", 0.0) or 0.0))
@@ -529,7 +635,7 @@ def _populate_training_compare_summary(self):
             "■",
             target,
             started,
-            str(getattr(run, "name", "") or run_id),
+            build_run_display_ref(run, kind_hint="training").id,
             dataset,
             f"{int(getattr(run, 'current_epoch', 0) or 0)}/{int(getattr(run, 'epochs', 0) or 0)}",
             f"{best95:.3f}",
@@ -590,7 +696,7 @@ def _open_training_compare_modal(self, runs: list):
             "Zaznacz co najmniej dwa treningi w historii, aby porównać ich krzywe.",
         )
 
-    self._training_compare_runs_data = _build_training_compare_runs_data(self, runs[:8])
+    self._training_compare_runs_data = _build_training_compare_runs_data(self, runs)
     if len(self._training_compare_runs_data) < 2:
         return messagebox.showinfo(
             "Brak danych",
@@ -609,14 +715,13 @@ def _open_training_compare_modal(self, runs: list):
     if not dialog_exists:
         dialog = tk.Toplevel(self.frame)
         dialog.title("Porównanie treningów")
-        dialog.geometry("1360x860")
-        dialog.minsize(1100, 700)
-        dialog.transient(self.frame.winfo_toplevel())
         dialog.resizable(True, True)
+        compact_dialog = _apply_training_compare_dialog_geometry(dialog)
         dialog.protocol("WM_DELETE_WINDOW", self._close_training_compare_dialog)
+        dialog.bind("<F11>", lambda _event: _toggle_training_compare_maximized(self), add="+")
         self._training_compare_dialog = dialog
 
-        shell = ttk.Frame(dialog, padding=12, style="Panel.TFrame")
+        shell = ttk.Frame(dialog, padding=9 if compact_dialog else 12, style="Panel.TFrame")
         shell.pack(fill=tk.BOTH, expand=True)
         self._training_compare_shell = shell
 
@@ -635,23 +740,44 @@ def _open_training_compare_modal(self, runs: list):
             style="PanelMuted.TLabel",
             anchor=tk.W,
             justify=tk.LEFT,
+            wraplength=760 if compact_dialog else 980,
         ).grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        ttk.Button(
+            header,
+            text="Minimalizuj",
+            command=dialog.iconify,
+        ).grid(row=0, column=1, rowspan=2, sticky="ne", padx=(10, 6))
+        ttk.Button(
+            header,
+            text="Maksymalizuj",
+            command=lambda: _toggle_training_compare_maximized(self),
+        ).grid(row=0, column=2, rowspan=2, sticky="ne")
 
         summary_box = ttk.LabelFrame(shell, text=" Tabela decyzyjna ", padding=7)
         summary_box.pack(fill=tk.X, pady=(0, 10))
         columns = ("Kolor", "Tor", "Start", "Run", "Dataset", "Epoki", "Best mAP50-95", "Best mAP50", "Status")
-        self._training_compare_summary_tree = ttk.Treeview(summary_box, columns=columns, show="headings", height=5, selectmode="browse")
+        self._training_compare_summary_tree = ttk.Treeview(
+            summary_box,
+            columns=columns,
+            show="headings",
+            height=4 if compact_dialog else 5,
+            selectmode="browse",
+        )
+        heading_labels = {
+            "Best mAP50-95": "mAP50-95",
+            "Best mAP50": "mAP50",
+        }
         for name in columns:
-            self._training_compare_summary_tree.heading(name, text=name)
-        self._training_compare_summary_tree.column("Kolor", width=52, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Tor", width=90, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Start", width=110, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Run", width=270, stretch=True)
-        self._training_compare_summary_tree.column("Dataset", width=190, stretch=True)
-        self._training_compare_summary_tree.column("Epoki", width=70, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Best mAP50-95", width=112, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Best mAP50", width=96, stretch=False, anchor=tk.CENTER)
-        self._training_compare_summary_tree.column("Status", width=140, stretch=False)
+            self._training_compare_summary_tree.heading(name, text=heading_labels.get(name, name))
+        self._training_compare_summary_tree.column("Kolor", width=38, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Tor", width=64, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Start", width=86, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Run", width=210, stretch=True)
+        self._training_compare_summary_tree.column("Dataset", width=150, stretch=True)
+        self._training_compare_summary_tree.column("Epoki", width=54, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Best mAP50-95", width=82, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Best mAP50", width=72, stretch=False, anchor=tk.CENTER)
+        self._training_compare_summary_tree.column("Status", width=98, stretch=False)
         summary_scroll = WebSlimScrollbar(summary_box, orient=tk.VERTICAL, command=self._training_compare_summary_tree.yview)
         self._training_compare_summary_tree.configure(yscrollcommand=summary_scroll.set)
         self._training_compare_summary_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -725,7 +851,12 @@ def _open_training_compare_modal(self, runs: list):
         )
         self._training_compare_hover_lbl.pack(fill=tk.X, pady=(6, 0))
 
-        legend_canvas = tk.Canvas(legend_box, highlightthickness=0, bg=palette.get("panel", "#252526"), height=180)
+        legend_canvas = tk.Canvas(
+            legend_box,
+            highlightthickness=0,
+            bg=palette.get("panel", "#252526"),
+            height=140 if compact_dialog else 180,
+        )
         legend_scroll = WebSlimScrollbar(legend_box, orient=tk.VERTICAL, command=legend_canvas.yview)
         legend_canvas.configure(yscrollcommand=legend_scroll.set)
         legend_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)

@@ -30,6 +30,7 @@ from . import campaign_step1_ingest
 from . import campaign_stage_ui
 from . import campaign_stage_logic
 from .help_manager import HELP
+from .run_display import build_run_display_ref
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
@@ -338,7 +339,10 @@ def _step_goto_auto_annotation(
                 if opened_existing_run:
                     run_name = ""
                     try:
-                        run_name = Path(result.get("restore_run_dir") or "").name
+                        run_name = build_run_display_ref(
+                            {"run_dir": result.get("restore_run_dir") or ""},
+                            kind_hint="annotation",
+                        ).id
                     except Exception:
                         run_name = ""
                     self.app.update_status(
@@ -410,7 +414,10 @@ def _step_goto_auto_annotation(
                 if opened_existing_run:
                     run_name = ""
                     try:
-                        run_name = Path(result.get("restore_run_dir") or "").name
+                        run_name = build_run_display_ref(
+                            {"run_dir": result.get("restore_run_dir") or ""},
+                            kind_hint="annotation",
+                        ).id
                     except Exception:
                         run_name = ""
                     self.app.update_status(
@@ -567,7 +574,13 @@ def _show_step2_char_minimum_not_met_dialog(
     source_plates = max(0, int(source_plates or 0))
     min_plates = max(1, int(min_plates or self.STEP3_CHAR_MIN_PLATES))
     missing_plates = max(0, min_plates - source_plates)
-    run_line = f"Źródło: {run_name}\n" if str(run_name or "").strip() else ""
+    run_display_name = ""
+    if str(run_name or "").strip():
+        try:
+            run_display_name = build_run_display_ref({"run_name": run_name}, kind_hint="annotation").id
+        except Exception:
+            run_display_name = str(run_name or "").strip()
+    run_line = f"Źródło: {run_display_name}\n" if run_display_name else ""
     message = (
         f"{run_line}"
         "E2 nie ma jeszcze minimum do przejścia w tor znaków.\n\n"
@@ -614,14 +627,20 @@ def _finish_step2_char_and_focus_step3(
         min_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
         missing_plates = max(0, min_plates - source_plates)
         run_name = str(source_state.get("run_name", "") or "").strip()
+        run_display_name = ""
+        if run_name:
+            try:
+                run_display_name = build_run_display_ref({"run_name": run_name}, kind_hint="annotation").id
+            except Exception:
+                run_display_name = run_name
         try:
             self.app.update_status(
                 (
-                    f"Run {run_name}: zatwierdzonych obrazów {source_images}, zapisanych tablic {source_plates}. "
+                    f"Run {run_display_name or run_name}: zatwierdzonych obrazów {source_images}, zapisanych tablic {source_plates}. "
                     f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
                     "Najpierw przygotuj więcej tablic w Z2, a dopiero potem przejdź do znaków."
                 )
-                if run_name
+                if run_display_name or run_name
                 else (
                     f"Zatwierdzonych obrazów: {source_images}. Zapisanych tablic: {source_plates}. "
                     f"Minimum do wejścia do znaków: {min_plates} tablic; brakuje {missing_plates}. "
@@ -635,7 +654,7 @@ def _finish_step2_char_and_focus_step3(
             source_images=source_images,
             source_plates=source_plates,
             min_plates=min_plates,
-            run_name=run_name,
+            run_name=run_display_name or run_name,
         )
         if choice == "Wróć do E1":
             self._return_to_step1_for_char_source_rework(clear_target=False)
@@ -666,7 +685,9 @@ def _finish_step2_char_and_focus_step3(
     ).strip()
     try:
         if not ready_run_name and ready_run_dir is not None:
-            ready_run_name = Path(ready_run_dir).name
+            ready_run_name = build_run_display_ref({"run_dir": ready_run_dir}, kind_hint="annotation").id
+        elif ready_run_name:
+            ready_run_name = build_run_display_ref({"run_name": ready_run_name}, kind_hint="annotation").id
     except Exception:
         ready_run_name = ""
 

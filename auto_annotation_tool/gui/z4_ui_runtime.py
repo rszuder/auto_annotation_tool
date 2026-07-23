@@ -144,6 +144,7 @@ def _ensure_ui_dispatch_pump(self):
 def _drain_ui_dispatch_queue(self):
     self._ui_dispatch_after_id = None
 
+    processed = 0
     for _ in range(200):
         try:
             fn = self._ui_dispatch_queue.get_nowait()
@@ -154,11 +155,28 @@ def _drain_ui_dispatch_queue(self):
 
         try:
             fn()
+            processed += 1
         except Exception:
             pass
 
+    has_pending = False
     try:
-        self._ui_dispatch_after_id = self.frame.after(20, self._drain_ui_dispatch_queue)
+        has_pending = not self._ui_dispatch_queue.empty()
+    except Exception:
+        has_pending = False
+    active = bool(
+        has_pending
+        or processed > 0
+        or getattr(getattr(self, "trainer", None), "is_training", False)
+        or getattr(self, "is_processing", False)
+        or getattr(self, "dataset_build_is_running", False)
+        or getattr(self, "dataset_split_is_running", False)
+        or getattr(self, "val_is_running", False)
+        or getattr(self, "rank_is_running", False)
+    )
+    delay_ms = 20 if active else 250
+    try:
+        self._ui_dispatch_after_id = self.frame.after(delay_ms, self._drain_ui_dispatch_queue)
     except Exception:
         self._ui_dispatch_after_id = None
 

@@ -551,15 +551,81 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
         return result
 
     if target == "char":
+        def _current_iteration_step4_dataset_path() -> Path | None:
+            try:
+                iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
+            except Exception:
+                iteration_num = 0
+            if iteration_num <= 0:
+                return None
+
+            def _declared_dataset_iteration(record: dict) -> int:
+                if not isinstance(record, dict):
+                    return 0
+                for field in ("dataset_iteration", "created_iteration", "iteration"):
+                    try:
+                        value = int(record.get(field, 0) or 0)
+                    except Exception:
+                        value = 0
+                    if value > 0:
+                        return value
+                return 0
+
+            record = {}
+            try:
+                iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=iteration_num) or {})
+                record = dict(iteration_state.get("step4_dataset") or {})
+            except Exception:
+                record = {}
+            if not record:
+                try:
+                    bundle = dict(CAMPAIGN.get_iteration_artifact_bundle(iteration_num=iteration_num) or {})
+                    bundle_record = dict(bundle.get("step4_dataset") or {})
+                    if _declared_dataset_iteration(bundle_record) == iteration_num:
+                        record = bundle_record
+                    else:
+                        record = {}
+                except Exception:
+                    record = {}
+            if not record:
+                return None
+            record.setdefault("iteration", iteration_num)
+            record_target = str(record.get("target", "") or "").strip().lower()
+            if record_target and record_target != target:
+                return None
+            try:
+                total_images = int(record.get("total_images", 0) or 0)
+            except Exception:
+                total_images = 0
+            if total_images <= 0:
+                try:
+                    total_images = (
+                        int(record.get("train_images", 0) or 0)
+                        + int(record.get("val_images", 0) or 0)
+                        + int(record.get("test_images", 0) or 0)
+                    )
+                except Exception:
+                    total_images = 0
+            if total_images <= 0:
+                return None
+            dataset_path = str(record.get("dataset_path", "") or "").strip()
+            yaml_path = str(record.get("yaml_path", "") or "").strip()
+            candidates = []
+            if dataset_path:
+                candidates.append(Path(dataset_path))
+            if yaml_path:
+                candidates.append(Path(yaml_path).parent)
+            for candidate in candidates:
+                try:
+                    if candidate.exists() and candidate.is_dir():
+                        return candidate
+                except Exception:
+                    continue
+            return candidates[0] if candidates else None
+
         ready_dataset = None
         invalid_ready_result = None
-        try:
-            ready_candidates = self._find_ready_dataset_candidates(Path(datasets_dir))
-            preferred = [rec for rec in ready_candidates if rec[1] == target]
-            if preferred:
-                ready_dataset, _ready_target, _stamp = max(preferred, key=lambda rec: rec[2])
-        except Exception:
-            ready_dataset = None
+        ready_dataset = _current_iteration_step4_dataset_path()
 
         if ready_dataset is not None:
             ready_dataset_str = str(ready_dataset)

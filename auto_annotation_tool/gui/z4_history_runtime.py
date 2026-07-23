@@ -162,6 +162,10 @@ def _format_history_run_status_label(self, run) -> str:
     if run is None:
         return "-"
     status_value = str(getattr(run, "status", "") or "").strip().lower()
+    if status_value == TrainingStatus.RUNNING.value:
+        return "trwa trening"
+    if status_value == TrainingStatus.PENDING.value:
+        return "oczekuje"
     if status_value == TrainingStatus.PAUSED.value:
         if self._is_history_run_resume_allowed(run):
             return "paused (resume)"
@@ -174,6 +178,10 @@ def _format_history_run_status_label(self, run) -> str:
         if self._is_history_run_resumable(run):
             return "failed (archiwalny)"
         return "failed (brak last.pt)"
+    if status_value == TrainingStatus.COMPLETED.value:
+        lineage_mode = str(getattr(run, "lineage_mode", "") or "").strip().lower()
+        if lineage_mode == "fine_tune":
+            return "completed (dotren.)"
     return str(getattr(run, "status", "-") or "-")
 
 def _does_history_run_match_active_campaign_target(self, run) -> bool:

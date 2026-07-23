@@ -28,7 +28,7 @@ def _append_event(event_path: Path, payload: dict) -> None:
 
 def _read_control(control_path: Path) -> dict:
     try:
-        payload = json.loads(control_path.read_text(encoding="utf-8"))
+        payload = json.loads(control_path.read_text(encoding="utf-8-sig"))
     except Exception:
         payload = {}
     return payload if isinstance(payload, dict) else {}
