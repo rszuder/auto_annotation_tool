@@ -8992,11 +8992,106 @@ def _render_step1_route_actions(self, frame):
                 str(attrs.get("manual_source", "") or "").strip()
             )
 
+        def _project_approved_plate_manual_counts_by_image() -> dict[str, int]:
+            try:
+                manifest_path = CAMPAIGN.get_plate_approved_set_path()
+            except Exception:
+                manifest_path = None
+            cache_key = None
+            if manifest_path is not None:
+                try:
+                    stat = Path(manifest_path).stat()
+                    cache_key = (
+                        str(Path(manifest_path).resolve()).lower(),
+                        int(getattr(stat, "st_mtime_ns", 0) or 0),
+                        int(getattr(stat, "st_size", 0) or 0),
+                    )
+                except Exception:
+                    cache_key = None
+            try:
+                cached = getattr(self, "_campaign_project_plate_manual_counts_cache", None)
+                if (
+                    isinstance(cached, dict)
+                    and cache_key is not None
+                    and cached.get("cache_key") == cache_key
+                    and isinstance(cached.get("counts"), dict)
+                ):
+                    return dict(cached.get("counts") or {})
+            except Exception:
+                pass
+
+            counts: dict[str, int] = {}
+            try:
+                entries = list(CAMPAIGN.list_plate_approved_entries() or [])
+            except Exception:
+                entries = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                image_name = str(entry.get("image_name") or entry.get("entry_key") or "").strip()
+                normalized = str(CAMPAIGN._normalize_image_set_name(image_name) or "").strip().lower()
+                if not normalized:
+                    continue
+                try:
+                    plates = list(entry.get("plates") or [])
+                except Exception:
+                    plates = []
+                try:
+                    plate_count = int(entry.get("plate_count", 0) or 0)
+                except Exception:
+                    plate_count = 0
+                if plate_count <= 0:
+                    plate_count = len(plates)
+                entry_origin = str(
+                    entry.get("annotation_origin")
+                    or entry.get("origin")
+                    or entry.get("source")
+                    or ""
+                ).strip().lower()
+                entry_manual = entry_origin == "manual" or str(entry.get("manually_edited", "") or "").strip().lower() == "true"
+                manual_plate_count = plate_count if entry_manual and plate_count > 0 else 0
+                if not entry_manual:
+                    for plate in plates:
+                        if not isinstance(plate, dict):
+                            continue
+                        attrs = plate.get("attributes") if isinstance(plate.get("attributes"), dict) else {}
+                        values = [
+                            plate.get("annotation_origin"),
+                            plate.get("origin"),
+                            plate.get("source"),
+                            attrs.get("annotation_origin") if isinstance(attrs, dict) else "",
+                            attrs.get("manual_source") if isinstance(attrs, dict) else "",
+                            attrs.get("source") if isinstance(attrs, dict) else "",
+                        ]
+                        if str(plate.get("manually_edited", "") or "").strip().lower() == "true":
+                            manual_plate_count += 1
+                        elif isinstance(attrs, dict) and str(attrs.get("manually_edited", "") or "").strip().lower() == "true":
+                            manual_plate_count += 1
+                        elif any(str(value or "").strip().lower() == "manual" for value in values):
+                            manual_plate_count += 1
+                        elif isinstance(attrs, dict) and str(attrs.get("manual_source", "") or "").strip():
+                            manual_plate_count += 1
+                if manual_plate_count <= 0:
+                    continue
+                counts[normalized] = max(int(counts.get(normalized, 0) or 0), int(manual_plate_count))
+
+            try:
+                if cache_key is not None:
+                    setattr(
+                        self,
+                        "_campaign_project_plate_manual_counts_cache",
+                        {"cache_key": cache_key, "counts": dict(counts)},
+                    )
+            except Exception:
+                pass
+            return counts
+
         def _summarize_annotation_candidate(
             xml_path: Path,
             expected_names: set[str],
             adoptable_names: set[str],
             approved_names: set[str],
+            project_manual_plate_counts: dict[str, int] | None = None,
         ) -> dict:
             run_dir = Path(xml_path).parent
             summary = {
@@ -9018,6 +9113,7 @@ def _render_step1_route_actions(self, frame):
                 "same_plate_text_plates": 0,
                 "manual": 0,
                 "auto": 0,
+                "manual_overlay": 0,
                 "run_type": "",
                 "model": "",
                 "mtime": 0.0,
@@ -9063,6 +9159,28 @@ def _render_step1_route_actions(self, frame):
             except Exception as exc:
                 summary["error"] = str(exc)
                 return summary
+
+            project_manual_plate_counts = dict(project_manual_plate_counts or {})
+            if project_manual_plate_counts:
+                manual_overlay = 0
+                for normalized, plate_total in list(image_plate_counts.items()):
+                    try:
+                        total_for_image = int(plate_total or 0)
+                        project_manual_for_image = int(project_manual_plate_counts.get(normalized, 0) or 0)
+                    except Exception:
+                        continue
+                    if total_for_image <= 0 or project_manual_for_image <= 0:
+                        continue
+                    manual_for_image = min(total_for_image, project_manual_for_image)
+                    current_manual = int(image_manual_counts.get(normalized, 0) or 0)
+                    if manual_for_image <= current_manual:
+                        continue
+                    manual_overlay += manual_for_image - current_manual
+                    image_manual_counts[normalized] = manual_for_image
+                    image_auto_counts[normalized] = max(0, total_for_image - manual_for_image)
+                manual_count = int(sum(image_manual_counts.values()))
+                auto_count = max(0, int(sum(image_plate_counts.values())) - manual_count)
+                summary["manual_overlay"] = int(manual_overlay)
 
             expected_names = set(expected_names or set())
             adoptable_names = set(adoptable_names or set())
@@ -9144,6 +9262,9 @@ def _render_step1_route_actions(self, frame):
             find_started = perf_counter()
             expected_names, adoptable_names, approved_names, image_source_label = _current_annotation_image_sets()
             roots = _annotation_candidate_roots(row_key)
+            project_manual_plate_counts: dict[str, int] = {}
+            if str(row_key or "").strip() == "plate_run" and self._get_project_start_asset_scope(row_key) != "freemode":
+                project_manual_plate_counts = _project_approved_plate_manual_counts_by_image()
             candidates: list[dict] = []
             seen_xml: set[str] = set()
             try:
@@ -9161,6 +9282,14 @@ def _render_step1_route_actions(self, frame):
                 expected_token = str(len(expected_names or set()))
                 adoptable_token = str(len(adoptable_names or set()))
                 approved_token = str(len(approved_names or set()))
+            try:
+                manual_overlay_token = (
+                    len(project_manual_plate_counts),
+                    sum(int(value or 0) for value in project_manual_plate_counts.values()),
+                    hash(tuple(sorted(project_manual_plate_counts.items()))),
+                )
+            except Exception:
+                manual_overlay_token = (0, 0, 0)
             for root in roots:
                 try:
                     xml_paths = root.rglob("annotations.xml")
@@ -9185,6 +9314,7 @@ def _render_step1_route_actions(self, frame):
                         str(expected_token or ""),
                         str(adoptable_token or ""),
                         str(approved_token or ""),
+                        str(manual_overlay_token),
                     )
                     cached_candidate = summary_cache.get(cache_key) if isinstance(summary_cache, dict) else None
                     if isinstance(cached_candidate, dict):
@@ -9195,6 +9325,7 @@ def _render_step1_route_actions(self, frame):
                             expected_names,
                             adoptable_names,
                             approved_names,
+                            project_manual_plate_counts,
                         )
                         try:
                             if len(summary_cache) > 600:
@@ -9580,7 +9711,14 @@ def _render_step1_route_actions(self, frame):
                 compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
                 adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
                 approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
+                compatible_manual = int(candidate.get("compatible_manual", 0) or 0)
+                compatible_auto = int(candidate.get("compatible_auto", 0) or 0)
                 rejected_plates = max(0, int(candidate.get("plates", 0) or 0) - compatible_plates)
+                manual_note = (
+                    "\nM uwzgl\u0119dnia r\u0119czne decyzje zapisane w puli projektu."
+                    if int(candidate.get("manual_overlay", 0) or 0) > 0
+                    else ""
+                )
                 tooltip_map = {
                     0: "Kliknij wiersz, aby wybra\u0107 to \u017ar\u00f3d\u0142o AT.",
                     1: (
@@ -9593,6 +9731,7 @@ def _render_step1_route_actions(self, frame):
                         f"Pasuj\u0105ce: M {compatible_manual} / A {compatible_auto}.\n"
                         f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
                         f"Pomijamy, bo ju\u017c [OK]: {approved_plates} AT."
+                        f"{manual_note}"
                     ),
                     3: (
                         f"Brakuje obrazu dla {rejected_plates} AT.\n"
