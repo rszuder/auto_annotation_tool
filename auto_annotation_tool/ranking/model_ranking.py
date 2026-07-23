@@ -74,6 +74,16 @@ def format_ranking_model_label(model_name: str, model_path: str = "", task_type:
     return "Model tablic Pose · " + " · ".join(details)
 
 
+def _percent_metric(value) -> float:
+    try:
+        numeric = float(value or 0.0)
+    except Exception:
+        return 0.0
+    if 0.0 <= numeric <= 1.0:
+        return numeric * 100.0
+    return numeric
+
+
 @dataclass
 class ModelRankingEntry:
     """Wpis rankingu."""
@@ -98,6 +108,10 @@ class ModelRankingEntry:
     accuracy: float = 0.0
     precision: float = 0.0
     recall: float = 0.0
+    map50: float = 0.0
+    map50_95: float = 0.0
+    split_name: str = ""
+    metrics_source: str = ""
     
     @property
     def f1_score(self) -> float:
@@ -106,15 +120,25 @@ class ModelRankingEntry:
         if p + r == 0:
             return 0.0
         return 2 * (p * r) / (p + r)
+
+    @property
+    def ranking_score(self) -> float:
+        if str(self.metrics_source or "").strip().lower() == "yolo val":
+            return _percent_metric(self.map50_95)
+        if _percent_metric(self.map50_95) > 0:
+            return _percent_metric(self.map50_95)
+        return self.f1_score
     
     def to_dict(self) -> Dict:
         d = asdict(self)
         d["f1_score"] = round(self.f1_score, 2)
+        d["ranking_score"] = round(self.ranking_score, 2)
         return d
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'ModelRankingEntry':
-        data = {k: v for k, v in data.items() if k != "f1_score"}
+        known_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        data = {k: v for k, v in data.items() if k in known_fields}
         return cls(**data)
 
 
@@ -129,6 +153,52 @@ class ModelRanking:
         self.entries: List[ModelRankingEntry] = []
 
         self._load()
+
+    @staticmethod
+    def _path_key(path_like) -> str:
+        raw = str(path_like or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve()).lower()
+        except Exception:
+            return str(Path(raw)).lower()
+
+    @classmethod
+    def _entry_identity(cls, entry: ModelRankingEntry) -> tuple[str, str, str, str]:
+        model_key = cls._path_key(getattr(entry, "model_path", ""))
+        if not model_key:
+            model_key = str(getattr(entry, "model_name", "") or "").strip().lower()
+        reference_key = cls._path_key(getattr(entry, "reference_path", ""))
+        if not reference_key:
+            reference_key = str(getattr(entry, "reference_name", "") or "").strip().lower()
+        return (
+            model_key,
+            str(getattr(entry, "task_type", "") or "").strip().lower(),
+            reference_key,
+            str(getattr(entry, "split_name", "") or "").strip().lower(),
+        )
+
+    @staticmethod
+    def _entry_time_key(entry: ModelRankingEntry) -> str:
+        return str(getattr(entry, "date_evaluated", "") or "").strip()
+
+    @classmethod
+    def _unique_entries(cls, entries: List[ModelRankingEntry]) -> List[ModelRankingEntry]:
+        by_identity: Dict[tuple[str, str, str, str], ModelRankingEntry] = {}
+        fallback: List[ModelRankingEntry] = []
+        for entry in list(entries or []):
+            key = cls._entry_identity(entry)
+            if not key[0]:
+                fallback.append(entry)
+                continue
+            current = by_identity.get(key)
+            if current is None or cls._entry_time_key(entry) >= cls._entry_time_key(current):
+                by_identity[key] = entry
+        return [*by_identity.values(), *fallback]
+
+    def _dedupe_entries(self) -> None:
+        self.entries = self._unique_entries(self.entries)
     
     def _load(self):
         if self.ranking_file.exists():
@@ -141,6 +211,7 @@ class ModelRanking:
                     for e in data.get("entries", [])
                 ]
                 
+                self._dedupe_entries()
                 self._sort()
                 logger.info(f"Załadowano ranking: {len(self.entries)} modeli")
                 
@@ -160,7 +231,7 @@ class ModelRanking:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
     def _sort(self):
-        self.entries.sort(key=lambda e: e.f1_score, reverse=True)
+        self.entries.sort(key=lambda e: e.ranking_score, reverse=True)
     
     def add_entry(self, 
                   model_name: str,
@@ -188,9 +259,19 @@ class ModelRanking:
             plates_removed=comparison_stats.get("plates_removed", 0),
             accuracy=comparison_stats.get("accuracy", 0),
             precision=comparison_stats.get("precision", 0),
-            recall=comparison_stats.get("recall", 0)
+            recall=comparison_stats.get("recall", 0),
+            map50=_percent_metric(comparison_stats.get("map50", 0)),
+            map50_95=_percent_metric(comparison_stats.get("map50_95", 0)),
+            split_name=str(comparison_stats.get("split_name", "") or "").strip(),
+            metrics_source=str(comparison_stats.get("metrics_source", "") or "").strip(),
         )
         
+        new_identity = self._entry_identity(entry)
+        if new_identity[0]:
+            self.entries = [
+                current for current in self.entries
+                if self._entry_identity(current) != new_identity
+            ]
         self.entries.append(entry)
         self._sort()
         if save:
@@ -203,6 +284,9 @@ class ModelRanking:
     
     def get_ranking(self) -> List[ModelRankingEntry]:
         return self.entries
+
+    def get_unique_entries(self) -> List[ModelRankingEntry]:
+        return self._unique_entries(self.entries)
     
     def get_best_model(self) -> Optional[ModelRankingEntry]:
         if not self.entries:

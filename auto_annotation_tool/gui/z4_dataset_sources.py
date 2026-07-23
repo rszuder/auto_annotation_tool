@@ -46,6 +46,7 @@ from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
+from .dataset_display import build_dataset_display_ref
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -248,16 +249,15 @@ def _get_free_dataset_variant_choices(self) -> list[dict]:
             label_path = self._format_workspace_relative_path(path)
         except Exception:
             label_path = str(path)
-        label = (
-            f"{path.name} | train={int(counts.get('train', 0) or 0)}, "
-            f"val={int(counts.get('val', 0) or 0)}, "
-            f"test={int(counts.get('test', 0) or 0)}"
-        )
+        display_ref = build_dataset_display_ref(path, target_hint=target, counts=counts)
+        label = display_ref.combo_label
         variants.append(
             {
                 "label": label,
                 "path": str(path),
                 "display_path": label_path,
+                "dataset_id": display_ref.id,
+                "dataset_label": display_ref.detail_label,
                 "stamp": float(stamp or 0),
             }
         )
@@ -606,6 +606,7 @@ def _refresh_step4_dataset_summary_table(self):
     target = CONFIG.normalize_task_target(target)
     target_label = self._format_training_target_label(target)
     display_path = "Brak wybranego datasetu"
+    dataset_id_text = "-"
     data_yaml_text = "-"
     counts = source.stats.split_counts()
     ready = bool(source.validated)
@@ -635,9 +636,11 @@ def _refresh_step4_dataset_summary_table(self):
             data_yaml = Path(source.yaml_path) if str(source.yaml_path or "").strip() else root / "data.yaml"
             ready = bool(source.validated or data_yaml.exists())
             data_yaml_text = "jest" if ready else "brak"
-            display_path = root.name or self._format_workspace_relative_path(root)
             if int(counts.get("total", 0) or 0) <= 0:
                 counts = self._get_dataset_split_image_counts(root)
+            display_ref = build_dataset_display_ref(root, target_hint=target, counts=counts)
+            dataset_id_text = display_ref.id
+            display_path = display_ref.name or self._format_workspace_relative_path(root)
         except Exception:
             display_path = str(dataset_path)
             data_yaml_text = "brak"
@@ -656,6 +659,7 @@ def _refresh_step4_dataset_summary_table(self):
 
     values = {
         "status": status_text,
+        "dataset_id": dataset_id_text,
         "target": f"{target_label} | {source_label}" if source_label else target_label,
         "source": source_label if dataset_path else "-",
         "path": display_path,

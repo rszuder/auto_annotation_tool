@@ -44,6 +44,8 @@ from ..project_cache import PROJECT_CACHE
 from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..rectification.polygon_validator import PolygonValidator
 from ..training import DatasetCreator
+from .dataset_display import build_dataset_display_ref
+from .run_display import build_run_display_ref
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
 from ..validators import format_yolo_model_identity, validate_model_file
 from .canvas_progress_overlay import CanvasProgressOverlay
@@ -1643,8 +1645,15 @@ def _build_auto_annotation_model_quality_rows(self, model_path: Path | str | Non
         run_name = str(metrics.get("run_name") or "").strip()
         run_id = str(metrics.get("run_id") or "").strip()
         run_label = run_name or run_id
-        if run_name and run_id and run_id not in run_name:
-            run_label = f"{run_name} [{run_id}]"
+        if run_label:
+            try:
+                run_label = build_run_display_ref(
+                    {"run_name": run_name, "run_id": run_id},
+                    kind_hint="training",
+                ).id
+            except Exception:
+                if run_name and run_id and run_id not in run_name:
+                    run_label = f"{run_name} [{run_id}]"
         source = str(metrics.get("source") or "").strip()
         if run_label or source:
             source_line = "Źródło metryk"
@@ -1661,6 +1670,11 @@ def _build_auto_annotation_model_quality_rows(self, model_path: Path | str | Non
                 dataset_display = self._format_workspace_relative_path(dataset_path)
             except Exception:
                 dataset_display = dataset_path
+            try:
+                dataset_ref = build_dataset_display_ref(dataset_path)
+                dataset_display = f"{dataset_ref.id} | {dataset_display}"
+            except Exception:
+                pass
             rows.append(("Dataset", self._shorten_model_quality_text(dataset_display, 86), "info"))
         return rows, (table_tone if has_metric_numbers else "warning")
 

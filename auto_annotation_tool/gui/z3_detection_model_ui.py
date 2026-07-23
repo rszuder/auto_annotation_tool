@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import csv
+import json
 import re
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from textwrap import shorten
+from tkinter import filedialog, messagebox, ttk
 
+from ..campaign_ingest_planner import CHAR_ALPHABET
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
+from ..validators import format_yolo_model_identity, validate_model_file
+from .web_slim_scrollbar import blend_hex_colors
 
 
 def get_detection_active_model_status(host) -> tuple[str, str]:
@@ -296,23 +302,459 @@ def ensure_yolo_model_checkpoint(host) -> str:
     )
 
 
-def pick_yolo_model(host) -> str:
-    initial_dir = CONFIG.get_trained_models_dir("char")
-    if not initial_dir.exists():
-        initial_dir = CONFIG.DIR_6_MODELS
-    p = filedialog.askopenfilename(
-        initialdir=str(Path(initial_dir).absolute()),
-        title="Wybierz model detekcji YOLO znaków (.pt)",
-        filetypes=[("PyTorch", "*.pt")]
+def _detection_model_sidecar_candidates(model_path: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    def _add(candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        try:
+            normalized = candidate.resolve()
+        except Exception:
+            normalized = candidate
+        if all(str(existing) != str(normalized) for existing in candidates):
+            candidates.append(normalized)
+
+    suffix = str(model_path.suffix or "").strip()
+    if suffix:
+        _add(model_path.with_suffix(f"{suffix}.metadata.json"))
+    _add(model_path.with_suffix(".metadata.json"))
+    _add(model_path.with_suffix(".json"))
+    _add(model_path.with_name(f"{model_path.stem}_metadata.json"))
+    _add(model_path.with_name("model_metadata.json"))
+    _add(model_path.with_name("metadata.json"))
+    return candidates
+
+
+def _read_detection_model_extra_metadata(model_path: Path) -> dict:
+    for metadata_path in _detection_model_sidecar_candidates(Path(model_path)):
+        if not metadata_path.exists() or not metadata_path.is_file():
+            continue
+        try:
+            with metadata_path.open("r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        if not metrics and isinstance(extra.get("metrics"), dict):
+            metrics = extra.get("metrics") or {}
+        training = payload.get("training") if isinstance(payload.get("training"), dict) else {}
+        if not training and isinstance(extra.get("training"), dict):
+            training = extra.get("training") or {}
+        model_payload = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+        return {
+            "metadata_path": str(metadata_path),
+            "created_at": str(payload.get("created_at") or "").strip(),
+            "metrics": dict(metrics or {}),
+            "training": dict(training or {}),
+            "model": dict(model_payload or {}),
+            "schema": str(payload.get("schema") or "").strip(),
+        }
+    return {}
+
+
+def _detection_metric_float(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _detection_metric_percent(value) -> str:
+    numeric = _detection_metric_float(value)
+    if numeric is None:
+        return "-"
+    if abs(numeric) <= 1.000001:
+        numeric *= 100.0
+    return f"{numeric:.1f}%"
+
+
+def _detection_metric_value(metrics: dict, keys: tuple[str, ...]):
+    if not isinstance(metrics, dict):
+        return None
+    for key in keys:
+        if key in metrics and metrics.get(key) not in (None, ""):
+            return metrics.get(key)
+    latest = metrics.get("latest") if isinstance(metrics.get("latest"), dict) else {}
+    best_row = metrics.get("best_row") if isinstance(metrics.get("best_row"), dict) else {}
+    for source in (best_row, latest):
+        for key in keys:
+            if key in source and source.get(key) not in (None, ""):
+                return source.get(key)
+    return None
+
+
+def _read_detection_results_csv_metrics(model_path: Path) -> dict:
+    candidates: list[Path] = []
+    try:
+        candidates.append(model_path.parent.parent / "results.csv")
+        candidates.append(model_path.parent / "results.csv")
+    except Exception:
+        pass
+    for csv_path in candidates:
+        if not csv_path.exists() or not csv_path.is_file():
+            continue
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except Exception:
+            continue
+        if not rows:
+            continue
+
+        best_row = None
+        best_score = None
+        for row in rows:
+            score = _detection_metric_float(
+                row.get("metrics/mAP50-95(B)")
+                or row.get("metrics/mAP50-95(P)")
+                or row.get("metrics/mAP50-95")
+            )
+            if score is None:
+                score = _detection_metric_float(
+                    row.get("metrics/mAP50(B)")
+                    or row.get("metrics/mAP50(P)")
+                    or row.get("metrics/mAP50")
+                )
+            if score is None:
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+                best_row = row
+        best_row = best_row or rows[-1]
+        return {
+            "map50": _detection_metric_float(
+                best_row.get("metrics/mAP50(B)")
+                or best_row.get("metrics/mAP50(P)")
+                or best_row.get("metrics/mAP50")
+            ),
+            "map50_95": _detection_metric_float(
+                best_row.get("metrics/mAP50-95(B)")
+                or best_row.get("metrics/mAP50-95(P)")
+                or best_row.get("metrics/mAP50-95")
+            ),
+            "precision": _detection_metric_float(
+                best_row.get("metrics/precision(B)")
+                or best_row.get("metrics/precision(P)")
+                or best_row.get("metrics/precision")
+            ),
+            "recall": _detection_metric_float(
+                best_row.get("metrics/recall(B)")
+                or best_row.get("metrics/recall(P)")
+                or best_row.get("metrics/recall")
+            ),
+            "epoch": _detection_metric_float(best_row.get("epoch")),
+            "metrics_source": str(csv_path),
+        }
+    return {}
+
+
+def _detection_model_class_names(info: dict) -> list[str]:
+    raw = (
+        info.get("classes")
+        or info.get("names")
+        or info.get("class_names")
+        or info.get("labels")
+        or []
     )
-    if not p:
-        return ""
+    if isinstance(raw, dict):
+        try:
+            ordered = [raw[key] for key in sorted(raw, key=lambda item: int(item))]
+        except Exception:
+            ordered = list(raw.values())
+        return [str(name).strip() for name in ordered if str(name).strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(name).strip() for name in raw if str(name).strip()]
+    return []
+
+
+def _detection_looks_like_character_model_classes(class_names: list[str]) -> bool:
+    normalized = [str(name).strip().upper() for name in class_names if str(name).strip()]
+    if len(normalized) < 8:
+        return False
+    allowed = set(CHAR_ALPHABET)
+    return all(len(token) == 1 and token in allowed for token in normalized)
+
+
+def _detection_is_pose_model_info(info: dict) -> bool:
+    task = str(info.get("task") or "").strip().lower()
+    inferred_type = str(info.get("type") or "").strip().lower()
+    kpt_shape = info.get("kpt_shape")
+    has_keypoints = bool(info.get("keypoints")) or bool(kpt_shape)
+    if has_keypoints or task == "pose" or inferred_type == "pose":
+        return True
+    if task in {"detect", "detection"} or inferred_type in {"detect", "detection"}:
+        return False
+    architecture_text = " ".join(
+        str(info.get(key) or "").strip().lower()
+        for key in ("architecture_label", "source_architecture_label")
+    )
+    return "pose" in architecture_text
+
+
+def _format_detection_model_source(host, path_value) -> str:
+    raw_text = str(path_value or "").strip()
+    if not raw_text:
+        return "Nie wskazano"
+    try:
+        safe_path = Path(raw_text).resolve()
+    except Exception:
+        safe_path = Path(raw_text)
+
+    formatter_names = (
+        "_format_project_relative_path",
+        "_format_workspace_relative_path",
+    )
+    for formatter_name in formatter_names:
+        formatter = getattr(host, formatter_name, None)
+        if not callable(formatter):
+            continue
+        try:
+            formatted = str(formatter(str(safe_path)) or "").strip()
+            if formatted:
+                return formatted
+        except Exception:
+            pass
 
     try:
-        chosen = Path(p)
+        project_root = CAMPAIGN.get_active_project_root_dir()
+        if project_root is not None:
+            project_root = Path(project_root).resolve()
+            if str(safe_path).lower().startswith(str(project_root).lower()):
+                return str(safe_path.relative_to(project_root))
     except Exception:
-        return ""
+        pass
 
+    try:
+        workspace_root = Path(CONFIG.WORKSPACE_DIR).resolve()
+        if str(safe_path).lower().startswith(str(workspace_root).lower()):
+            return str(safe_path.relative_to(workspace_root))
+    except Exception:
+        pass
+    return str(safe_path)
+
+
+def _detection_model_candidate_roots(host) -> list[Path]:
+    roots: list[Path] = []
+
+    def _add_root(path_value) -> None:
+        if not path_value:
+            return
+        try:
+            path = Path(path_value)
+        except Exception:
+            return
+        if not path.exists() or not path.is_dir():
+            return
+        try:
+            key = str(path.resolve()).lower()
+        except Exception:
+            key = str(path).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(path)
+
+    seen: set[str] = set()
+    try:
+        active_model = str(host._get_effective_yolo_model_path() or "").strip()
+        if active_model:
+            active_path = Path(active_model)
+            if active_path.exists():
+                _add_root(active_path.parent)
+    except Exception:
+        pass
+    try:
+        project_model = str(CAMPAIGN.get_global_model("char") or "").strip()
+        if project_model:
+            project_path = Path(project_model)
+            if project_path.exists():
+                _add_root(project_path.parent)
+    except Exception:
+        pass
+    try:
+        project_root = CAMPAIGN.get_active_project_root_dir()
+        if project_root is not None:
+            project_root = Path(project_root)
+            _add_root(project_root / "5_training_runs")
+            _add_root(project_root / "6_models")
+    except Exception:
+        pass
+    try:
+        for candidate in CONFIG.get_model_search_dirs("char"):
+            _add_root(candidate)
+    except Exception:
+        _add_root(CONFIG.get_trained_models_dir("char"))
+        _add_root(CONFIG.DIR_6_MODELS)
+    return roots
+
+
+def _summarize_detection_model_candidate(host, model_path: Path, root: Path | None = None) -> dict:
+    safe_path = Path(model_path)
+    try:
+        stat = safe_path.stat()
+        mtime = float(getattr(stat, "st_mtime", 0.0) or 0.0)
+        size_mb = float(getattr(stat, "st_size", 0) or 0) / (1024 * 1024)
+    except Exception:
+        mtime = 0.0
+        size_mb = 0.0
+
+    try:
+        ok_light, message, info = validate_model_file(
+            safe_path,
+            allow_heavy_load=False,
+            write_sidecar=False,
+        )
+    except Exception as exc:
+        ok_light, message, info = False, str(exc), {}
+    info = dict(info or {})
+
+    extra = _read_detection_model_extra_metadata(safe_path)
+    metrics = dict(extra.get("metrics") or {})
+    training = dict(extra.get("training") or {})
+    model_payload = extra.get("model") if isinstance(extra.get("model"), dict) else {}
+    model_info = model_payload.get("info") if isinstance(model_payload.get("info"), dict) else {}
+    if model_info:
+        for key, value in model_info.items():
+            if key not in info or info.get(key) in (None, "", [], {}):
+                info[key] = value
+
+    csv_metrics = _read_detection_results_csv_metrics(safe_path)
+    for key, value in csv_metrics.items():
+        if value not in (None, "") and metrics.get(key) in (None, ""):
+            metrics[key] = value
+        if value not in (None, "") and info.get(key) in (None, ""):
+            info[key] = value
+
+    identity = str(format_yolo_model_identity(info) or "").strip()
+    if not identity:
+        identity = str(info.get("architecture_label") or info.get("source_architecture_label") or "").strip()
+    if not identity:
+        identity = "YOLO Pose" if "pose" in safe_path.name.lower() else "YOLO Detect" if safe_path.suffix.lower() == ".pt" else "Nieustalone"
+
+    class_names = _detection_model_class_names(info)
+    looks_like_char_model = _detection_looks_like_character_model_classes(class_names)
+    is_pose = _detection_is_pose_model_info(info)
+    task = str(info.get("task") or info.get("type") or "").strip().lower()
+    path_hint = str(safe_path).lower()
+    char_path_hint = any(token in path_hint for token in ("char", "chars", "znak", "characters_ocr"))
+    target_match = (not is_pose) and (
+        looks_like_char_model
+        or (task in {"detect", "detection"} and not class_names and char_path_hint)
+        or (not class_names and char_path_hint and safe_path.suffix.lower() == ".pt")
+    )
+
+    map50 = _detection_metric_value(
+        metrics,
+        ("box_map50", "map50", "best_map50", "metrics/mAP50(B)", "metrics/mAP50"),
+    )
+    map5095 = _detection_metric_value(
+        metrics,
+        (
+            "box_map50_95",
+            "map50_95",
+            "best_map50_95",
+            "metrics/mAP50-95(B)",
+            "metrics/mAP50-95",
+        ),
+    )
+    precision = _detection_metric_value(
+        metrics,
+        ("box_precision", "precision", "metrics/precision(B)", "metrics/precision"),
+    )
+    recall = _detection_metric_value(
+        metrics,
+        ("box_recall", "recall", "metrics/recall(B)", "metrics/recall"),
+    )
+
+    has_light_info = bool(ok_light or extra or csv_metrics)
+    if target_match and has_light_info:
+        tone = "success"
+        status = "Pasuje"
+    elif target_match:
+        tone = "warning"
+        status = "Sprawdź"
+    elif is_pose:
+        tone = "error"
+        status = "Model tablic"
+    else:
+        tone = "error"
+        status = "Inny typ"
+
+    return {
+        "path": str(safe_path),
+        "name": safe_path.name,
+        "root": _format_detection_model_source(host, root) if root is not None else "",
+        "relative_path": _format_detection_model_source(host, safe_path),
+        "identity": identity,
+        "status": status,
+        "tone": tone,
+        "message": str(message or "").strip(),
+        "target_match": bool(target_match),
+        "map50": map50,
+        "map50_95": map5095,
+        "precision": precision,
+        "recall": recall,
+        "map50_text": _detection_metric_percent(map50),
+        "map50_95_text": _detection_metric_percent(map5095),
+        "precision_text": _detection_metric_percent(precision),
+        "recall_text": _detection_metric_percent(recall),
+        "size_mb": float(size_mb),
+        "size_text": f"{size_mb:.1f} MB" if size_mb > 0 else "-",
+        "mtime": mtime,
+        "created_at": str(extra.get("created_at") or training.get("finished_at") or training.get("created_at") or "").strip(),
+        "metadata_path": str(extra.get("metadata_path") or "").strip(),
+    }
+
+
+def _find_detection_model_candidates(host) -> tuple[list[dict], list[Path]]:
+    roots = _detection_model_candidate_roots(host)
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            model_paths = Path(root).rglob("*.pt")
+        except Exception:
+            model_paths = ()
+        for model_path in model_paths:
+            try:
+                key = str(Path(model_path).resolve()).lower()
+            except Exception:
+                key = str(model_path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(_summarize_detection_model_candidate(host, Path(model_path), root))
+            if len(candidates) >= 260:
+                break
+        if len(candidates) >= 260:
+            break
+
+    def _score(item: dict) -> tuple[int, float, float, float]:
+        map5095 = _detection_metric_float(item.get("map50_95")) or -1.0
+        map50 = _detection_metric_float(item.get("map50")) or -1.0
+        if abs(map5095) <= 1.000001:
+            map5095 *= 100.0
+        if abs(map50) <= 1.000001:
+            map50 *= 100.0
+        return (
+            1 if bool(item.get("target_match")) else 0,
+            float(map5095),
+            float(map50),
+            float(item.get("mtime", 0.0) or 0.0),
+        )
+
+    candidates.sort(key=_score, reverse=True)
+    return candidates, roots
+
+
+def _apply_detection_yolo_model_selection(host, chosen: Path) -> str:
     if chosen.suffix.lower() != ".pt" or not chosen.exists():
         messagebox.showwarning(
             "Błędny model YOLO",
@@ -338,6 +780,460 @@ def pick_yolo_model(host) -> str:
     except Exception:
         pass
     return str(chosen)
+
+
+def _pick_yolo_model_file_dialog(host, initial_dir: Path | None = None) -> str:
+    safe_initial_dir = initial_dir or CONFIG.get_trained_models_dir("char")
+    if not safe_initial_dir.exists():
+        safe_initial_dir = CONFIG.DIR_6_MODELS
+    p = filedialog.askopenfilename(
+        initialdir=str(Path(safe_initial_dir).absolute()),
+        title="Wybierz model detekcji YOLO znaków (.pt)",
+        filetypes=[("PyTorch", "*.pt")]
+    )
+    if not p:
+        return ""
+
+    try:
+        chosen = Path(p)
+    except Exception:
+        return ""
+    return _apply_detection_yolo_model_selection(host, chosen)
+
+
+def _open_detection_yolo_model_candidate_browser(host) -> str:
+    candidates, roots = _find_detection_model_candidates(host)
+    palette = getattr(host.app, "palette", {})
+    panel_bg = palette.get("panel", "#252526")
+    panel_alt = palette.get("panel_alt", "#2d2d30")
+    field_bg = palette.get("field", "#1a1a1a")
+    fg = palette.get("fg", "#f3f3f3")
+    muted = palette.get("muted", "#c7c7c7")
+    success = palette.get("success", "#2ecc71")
+    warning = palette.get("warning", "#f39c12")
+    error = palette.get("error", "#e74c3c")
+    accent = palette.get("accent", success)
+    border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    selected_path: dict[str, str] = {"value": ""}
+
+    parent = getattr(host, "_detection_pipeline_modal", None) or getattr(host, "frame", None)
+    browser = tk.Toplevel(parent or host.frame)
+    try:
+        host.app.style_dialog_window(
+            browser,
+            title="Wybierz model detekcji znaków",
+            geometry="1180x680",
+            parent=parent or host.frame,
+        )
+    except Exception:
+        browser.title("Wybierz model detekcji znaków")
+
+    build_surface = getattr(host.app, "_build_themed_dialog_surface", None)
+    if callable(build_surface):
+        body = build_surface(browser, tone="info")
+    else:
+        body = tk.Frame(browser, bg=panel_bg)
+        body.pack(fill=tk.BOTH, expand=True)
+    body_bg = str(body.cget("bg") or panel_bg)
+
+    tk.Label(
+        body,
+        text="Model detekcji znaków dla PZ2",
+        fg=fg,
+        bg=body_bg,
+        font=("Segoe UI", 13, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X, padx=16, pady=(14, 4))
+
+    roots_text = ", ".join(str(root.name or root) for root in roots[:4]) or "brak katalogów"
+    if len(roots) > 4:
+        roots_text += f" +{len(roots) - 4}"
+    tk.Label(
+        body,
+        text=(
+            "Wybierz wytrenowany model YOLO Detect używany wyłącznie do inferencji w PZ2: "
+            "wykrywania i proponowania ramek znaków. Ten wybór nie zmienia modelu startowego treningu. "
+            f"Skanowane katalogi: {roots_text}."
+        ),
+        fg=muted,
+        bg=body_bg,
+        justify=tk.LEFT,
+        anchor="w",
+        wraplength=1110,
+    ).pack(fill=tk.X, padx=16, pady=(0, 12))
+
+    table_shell = tk.Frame(
+        body,
+        bg=body_bg,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+    )
+    table_shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 10))
+
+    header = (
+        "Model",
+        "Typ",
+        "Status",
+        "mAP50-95",
+        "mAP50",
+        "Precision",
+        "Recall",
+        "Rozmiar",
+        "Ścieżka",
+        "Wskaż",
+    )
+    tree_columns = tuple(f"c{i}" for i in range(len(header)))
+    tree = ttk.Treeview(table_shell, columns=tree_columns, show="headings", selectmode="browse", height=16)
+    tree_scroll = ttk.Scrollbar(table_shell, orient=tk.VERTICAL, command=tree.yview)
+    tree.configure(yscrollcommand=tree_scroll.set)
+    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+    tree_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+
+    try:
+        style = ttk.Style(tree)
+        style.configure(
+            "DetectionModelCandidates.Treeview",
+            background=field_bg,
+            fieldbackground=field_bg,
+            foreground=fg,
+            rowheight=30,
+            borderwidth=0,
+        )
+        style.map(
+            "DetectionModelCandidates.Treeview",
+            background=[("selected", blend_hex_colors(field_bg, accent, 0.18))],
+            foreground=[("selected", fg)],
+        )
+        style.configure("DetectionModelCandidates.Treeview.Heading", font=("Segoe UI", 8, "bold"))
+        tree.configure(style="DetectionModelCandidates.Treeview")
+    except Exception:
+        pass
+
+    column_widths = (250, 132, 92, 78, 66, 76, 64, 70, 230, 72)
+    candidate_by_iid: dict[str, dict] = {}
+    sort_state = {"column": None, "reverse": True}
+    hover_state: dict[str, str] = {"row_id": "", "column_id": ""}
+    hover_label = tk.Label(
+        tree,
+        text="",
+        fg=fg,
+        bg=blend_hex_colors(field_bg, success, 0.20),
+        bd=0,
+        highlightthickness=0,
+        font=("Segoe UI", 8, "bold"),
+        anchor="center",
+        cursor="hand2",
+    )
+
+    def _sort_metric(value) -> float:
+        numeric = _detection_metric_float(value)
+        if numeric is None:
+            return -1.0
+        if abs(numeric) <= 1.000001:
+            numeric *= 100.0
+        return float(numeric)
+
+    def _sort_value(candidate: dict, col: int):
+        if col == 0:
+            return str(candidate.get("name") or "").strip().lower()
+        if col == 1:
+            return str(candidate.get("identity") or "").strip().lower()
+        if col == 2:
+            tone_rank = {"success": 3, "warning": 2, "error": 1}
+            return (
+                int(tone_rank.get(str(candidate.get("tone") or "").strip(), 0)),
+                str(candidate.get("status") or "").strip().lower(),
+            )
+        if col == 3:
+            return _sort_metric(candidate.get("map50_95"))
+        if col == 4:
+            return _sort_metric(candidate.get("map50"))
+        if col == 5:
+            return _sort_metric(candidate.get("precision"))
+        if col == 6:
+            return _sort_metric(candidate.get("recall"))
+        if col == 7:
+            return float(candidate.get("size_mb", 0.0) or 0.0)
+        if col == 8:
+            return str(candidate.get("relative_path") or "").strip().lower()
+        return ""
+
+    def _sorted_candidates() -> list[dict]:
+        col = sort_state.get("column")
+        if col is None:
+            return list(candidates)
+        return sorted(
+            list(candidates),
+            key=lambda item: (
+                _sort_value(item, int(col)),
+                float(item.get("mtime", 0.0) or 0.0),
+                str(item.get("name") or "").strip().lower(),
+            ),
+            reverse=bool(sort_state.get("reverse")),
+        )
+
+    def _set_sort(col: int) -> None:
+        if col >= len(header) - 1:
+            return
+        if sort_state.get("column") == col:
+            sort_state["reverse"] = not bool(sort_state.get("reverse"))
+        else:
+            sort_state["column"] = col
+            sort_state["reverse"] = col in {2, 3, 4, 5, 6, 7}
+        _refresh_table()
+        try:
+            tree.yview_moveto(0)
+        except Exception:
+            pass
+
+    def _select_candidate(candidate: dict) -> None:
+        model_path = Path(str(candidate.get("path") or ""))
+        if model_path.suffix.lower() != ".pt" or not model_path.exists():
+            messagebox.showerror(
+                "Nieprawidłowy model",
+                "Wybrany plik nie istnieje albo nie ma rozszerzenia .pt.",
+                parent=browser,
+            )
+            return
+
+        if not bool(candidate.get("target_match")):
+            proceed = messagebox.askyesno(
+                "Model nie wygląda jak detektor znaków",
+                (
+                    "Wybrany plik nie wygląda jak model YOLO Detect znaków. "
+                    "Użycie modelu tablic/pose w PZ2 może dać błędne ramki. "
+                    "Czy mimo to użyć tego pliku?"
+                ),
+                parent=browser,
+            )
+            if not proceed:
+                return
+
+        selected = _apply_detection_yolo_model_selection(host, model_path)
+        if not selected:
+            return
+        selected_path["value"] = selected
+        try:
+            host.app.update_status(f"Wybrano model detekcji znaków: {model_path.name}", "info")
+        except Exception:
+            pass
+        _close_browser()
+
+    def _refresh_table() -> None:
+        _hide_hover()
+        for item in tree.get_children(""):
+            tree.delete(item)
+        candidate_by_iid.clear()
+        active_col = sort_state.get("column")
+        reverse = bool(sort_state.get("reverse"))
+        for col, col_id in enumerate(tree_columns):
+            suffix = " ↓" if active_col == col and reverse else " ↑" if active_col == col else ""
+            tree.heading(col_id, text=f"{header[col]}{suffix}", anchor="w")
+
+        if not candidates:
+            iid = "empty"
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    "Nie znaleziono kandydatów .pt.",
+                    "Wskaż ręcznie",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                ),
+            )
+            return
+
+        for row_idx, candidate in enumerate(_sorted_candidates(), start=1):
+            iid = f"model-{row_idx}"
+            candidate_by_iid[iid] = candidate
+            values = (
+                str(candidate.get("name") or "-"),
+                str(candidate.get("identity") or "-"),
+                str(candidate.get("status") or "-"),
+                str(candidate.get("map50_95_text") or "-"),
+                str(candidate.get("map50_text") or "-"),
+                str(candidate.get("precision_text") or "-"),
+                str(candidate.get("recall_text") or "-"),
+                str(candidate.get("size_text") or "-"),
+                shorten(str(candidate.get("relative_path") or "-"), width=42, placeholder="..."),
+                "[Wskaż]",
+            )
+            tree.insert("", "end", iid=iid, values=values)
+
+    def _choose_selection() -> None:
+        try:
+            selection = tree.selection()
+            if not selection:
+                return
+            candidate = candidate_by_iid.get(str(selection[0]))
+            if candidate:
+                _select_candidate(candidate)
+        except Exception:
+            pass
+
+    def _hide_hover() -> None:
+        try:
+            hover_label.place_forget()
+        except Exception:
+            pass
+        hover_state["row_id"] = ""
+        hover_state["column_id"] = ""
+
+    def _hover_target(event=None) -> tuple[str, str] | None:
+        try:
+            row_id = str(tree.identify_row(event.y) or "")
+            column_id = str(tree.identify_column(event.x) or "")
+            if row_id and row_id in candidate_by_iid and column_id == f"#{len(header)}":
+                return row_id, column_id
+        except Exception:
+            return None
+        return None
+
+    def _show_hover(row_id: str, column_id: str) -> None:
+        try:
+            if (
+                row_id == str(hover_state.get("row_id") or "")
+                and column_id == str(hover_state.get("column_id") or "")
+            ):
+                return
+            bbox = tree.bbox(row_id, column_id)
+            if not bbox:
+                _hide_hover()
+                return
+            x, y, width, height = bbox
+            text = str(tree.set(row_id, tree_columns[-1]) or "")
+            hover_label.config(text=text)
+            hover_label.place(
+                x=int(x) + 1,
+                y=int(y) + 1,
+                width=max(1, int(width) - 2),
+                height=max(1, int(height) - 2),
+            )
+            hover_state["row_id"] = row_id
+            hover_state["column_id"] = column_id
+        except Exception:
+            _hide_hover()
+
+    def _update_hover(event=None) -> None:
+        target = _hover_target(event)
+        try:
+            if target:
+                tree.configure(cursor="hand2")
+                _show_hover(target[0], target[1])
+            else:
+                tree.configure(cursor="")
+                _hide_hover()
+        except Exception:
+            pass
+
+    def _activate_hover(_event=None) -> str:
+        try:
+            row_id = str(hover_state.get("row_id") or "")
+            if row_id and row_id in candidate_by_iid:
+                tree.selection_set(row_id)
+                tree.focus(row_id)
+                _select_candidate(candidate_by_iid[row_id])
+        except Exception:
+            pass
+        return "break"
+
+    def _manual_choose() -> None:
+        initial = CONFIG.get_trained_models_dir("char")
+        try:
+            if roots:
+                initial = roots[0]
+        except Exception:
+            pass
+        _close_browser()
+        selected = _pick_yolo_model_file_dialog(host, initial)
+        if selected:
+            selected_path["value"] = selected
+
+    def _close_browser() -> None:
+        try:
+            browser.grab_release()
+        except Exception:
+            pass
+        try:
+            browser.destroy()
+        except Exception:
+            pass
+
+    for col, col_id in enumerate(tree_columns):
+        tree.heading(col_id, command=lambda column=col: _set_sort(column))
+        anchor = "center" if col in {3, 4, 5, 6, 7, 9} else "w"
+        stretch = col in {0, 1, 8}
+        tree.column(col_id, width=column_widths[col], minwidth=46, anchor=anchor, stretch=stretch)
+    tree.bind("<Double-1>", lambda _event: _choose_selection(), add="+")
+    tree.bind("<Return>", lambda _event: _choose_selection(), add="+")
+    tree.bind("<ButtonRelease-1>", lambda event: _select_candidate(candidate_by_iid[str(tree.identify_row(event.y))]) if str(tree.identify_row(event.y) or "") in candidate_by_iid and str(tree.identify_column(event.x) or "") == f"#{len(header)}" else None, add="+")
+    tree.bind("<Motion>", _update_hover, add="+")
+    tree.bind("<Leave>", lambda _event: (_hide_hover(), tree.configure(cursor="")), add="+")
+    hover_label.bind("<ButtonRelease-1>", _activate_hover, add="+")
+    hover_label.bind("<Leave>", lambda _event: _hide_hover(), add="+")
+    _refresh_table()
+
+    footer = tk.Frame(body, bg=body_bg)
+    footer.pack(fill=tk.X, padx=16, pady=(0, 14))
+    tk.Label(
+        footer,
+        text="mAP50-95 jest głównym skrótem jakości; Precision i Recall pomagają ocenić ostrożność oraz czułość modelu.",
+        fg=muted,
+        bg=body_bg,
+        anchor="w",
+    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+    tk.Button(
+        footer,
+        text="Wskaż plik ręcznie",
+        command=_manual_choose,
+        cursor="hand2",
+        bg=panel_alt,
+        fg=fg,
+        relief=tk.FLAT,
+        padx=12,
+        pady=7,
+    ).pack(side=tk.RIGHT, padx=(8, 0))
+    tk.Button(
+        footer,
+        text="Zamknij",
+        command=_close_browser,
+        cursor="hand2",
+        bg=panel_alt,
+        fg=fg,
+        relief=tk.FLAT,
+        padx=12,
+        pady=7,
+    ).pack(side=tk.RIGHT)
+
+    try:
+        browser.protocol("WM_DELETE_WINDOW", _close_browser)
+        browser.transient(parent or host.frame)
+        browser.grab_set()
+    except Exception:
+        pass
+    try:
+        browser.wait_window()
+    except Exception:
+        pass
+    return selected_path["value"]
+
+
+def pick_yolo_model(host) -> str:
+    try:
+        return str(_open_detection_yolo_model_candidate_browser(host) or "")
+    except Exception as exc:
+        logger.debug(f"Nie udało się otworzyć przeglądarki modeli detekcji PZ2: {exc}")
+        return _pick_yolo_model_file_dialog(host)
 
 
 def update_yolo_visibility(host):

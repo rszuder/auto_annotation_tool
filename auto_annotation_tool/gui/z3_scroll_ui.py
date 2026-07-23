@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Scroll and adaptive canvas helpers for Z3/PZ panels."""
 
+from .modal_scroll_guard import event_is_over_foreign_toplevel
+
 
 def sync_detect_right_scrollregion(host: "CharacterAnnotationTab", event=None) -> None:
     if not hasattr(host, "detect_right_canvas") or host.detect_right_canvas is None:
@@ -273,6 +275,9 @@ def canvas_overflows(canvas) -> bool:
 
 
 def on_detect_right_global_mousewheel(host: "CharacterAnnotationTab", event):
+    if event_is_over_foreign_toplevel(getattr(host, "frame", None), event):
+        return "break"
+
     try:
         if widget_contains_point(getattr(host, "preview_canvas", None), int(event.x_root), int(event.y_root)):
             return "break"
@@ -290,6 +295,9 @@ def on_detect_right_global_mousewheel(host: "CharacterAnnotationTab", event):
 
 
 def on_cvat_export_global_mousewheel(host: "CharacterAnnotationTab", event):
+    if event_is_over_foreign_toplevel(getattr(host, "frame", None), event):
+        return "break"
+
     host._suppress_selection_hover_during_scroll()
     if host._inertial_scroll.scroll_canvas_if_targeted(
         getattr(host, "cvat_export_canvas", None),

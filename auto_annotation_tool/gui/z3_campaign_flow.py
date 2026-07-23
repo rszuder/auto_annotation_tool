@@ -217,6 +217,43 @@ def _read_ready_step3_export_summary(host: "CharacterAnnotationTab") -> dict:
     return summary
 
 
+def mark_step3_dataset_exported_for_campaign(
+    host: "CharacterAnnotationTab",
+    summary: dict,
+    *,
+    reason: str = "dataset_exported",
+) -> bool:
+    """Persist the T06/PZ3 contract as soon as PZ3 creates a valid AZ dataset."""
+    gold_ok = bool(summary.get("gold_dataset_created")) and bool(summary.get("gold_dataset_valid", True))
+    dataset_path = str(summary.get("gold_dataset_path") or "").strip()
+    if not (gold_ok and dataset_path):
+        return False
+    try:
+        if not Path(dataset_path).exists():
+            return False
+    except Exception:
+        return False
+    _mark_t06_pz2_contract(host, reason=str(reason or "dataset_exported"), force=True)
+    _mark_t06_pz3_contract(host, summary, reason=str(reason or "dataset_exported"), force=True)
+    _mark_t06_z3_work_session(
+        host,
+        state="completed",
+        substep=3,
+        reason=str(reason or "dataset_exported"),
+        force=True,
+    )
+    try:
+        CAMPAIGN.set_current_step(3)
+        CAMPAIGN.set_step3_ready()
+    except Exception:
+        pass
+    try:
+        CAMPAIGN.invalidate_step3_char_source_state_cache()
+    except Exception:
+        pass
+    return True
+
+
 def enter_campaign_step3_mode(host: "CharacterAnnotationTab"):
     """
     Start kroku 3 od początku.
@@ -469,17 +506,7 @@ def return_step3_result_to_wizard(host: "CharacterAnnotationTab", summary: dict)
     gold_ok = bool(summary.get("gold_dataset_created")) and bool(summary.get("gold_dataset_valid", True))
 
     if gold_ok:
-        _mark_t06_pz2_contract(host, reason="dataset_exported", force=True)
-        _mark_t06_pz3_contract(host, summary, reason="dataset_exported", force=True)
-        _mark_t06_z3_work_session(
-            host,
-            state="completed",
-            substep=3,
-            reason="dataset_exported",
-            force=True,
-        )
-        CAMPAIGN.set_current_step(3)
-        CAMPAIGN.set_step3_ready()
+        mark_step3_dataset_exported_for_campaign(host, summary, reason="dataset_exported")
         status_msg = (
             "Z3 przygotowało poprawny dataset znaków. "
             f"Wróć do grafu i zatwierdź bramkę {CHAR_WORK_GATE_DISPLAY_ID}, aby odblokować dalszą pracę."

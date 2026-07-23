@@ -45,7 +45,6 @@ from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
 from .z4_train_progress_bar import TrainProgressBar
-from .z2_shared_ui import campaign_visible_gate_id
 from .z4_campaign_flow import (
     build_step4_campaign_navigation_view_model,
     build_step4_dataset_workflow_view_model,
@@ -107,7 +106,6 @@ from . import z4_theme_runtime
 from . import z4_tab_shell
 from . import z4_history_runtime
 from . import z4_dataset_panels
-from . import z4_validation_panel
 from . import z4_dataset_tab_builder
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
@@ -568,15 +566,51 @@ def _build_train_tab(self):
 
     self.train_base_title_lbl = tk.Label(
         self.train_base_shell,
-        text="Model startowy",
-        font=("Segoe UI", 12),
+        text="Punkt startowy treningu",
+        font=("Segoe UI Semibold", 12),
         anchor="w",
         bd=0,
         highlightthickness=0,
         bg=palette.get("panel_alt", palette.get("panel", "#252526")),
         fg=palette.get("fg", "#f3f3f3"),
     )
-    self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(9, 2))
+    self.train_base_title_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(9, 4))
+    self.train_base_context_row = tk.Frame(
+        self.train_base_shell,
+        bg=palette.get("panel_alt", palette.get("panel", "#252526")),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.train_base_context_row.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 6))
+    self.train_base_context_chips = {}
+    chip_bg = blend_hex_colors(
+        palette.get("accent", "#0e639c"),
+        palette.get("panel_alt", palette.get("panel", "#252526")),
+        0.84,
+    )
+    chip_fg = palette.get("fg", "#f3f3f3")
+    for chip_key, chip_text in (
+        ("iteration", "IT"),
+        ("target", "Model"),
+        ("backend", "YOLO"),
+    ):
+        chip_lbl = tk.Label(
+            self.train_base_context_row,
+            text=chip_text,
+            font=("Segoe UI Semibold", 8),
+            anchor=tk.CENTER,
+            justify=tk.CENTER,
+            bd=0,
+            highlightthickness=1,
+            padx=7,
+            pady=2,
+            bg=chip_bg,
+            fg=chip_fg,
+            highlightbackground=section_border,
+            highlightcolor=section_border,
+        )
+        chip_lbl.pack(side=tk.LEFT, padx=(0, 6))
+        self.train_base_context_chips[chip_key] = chip_lbl
     self.train_base_status_lbl = tk.Label(
         self.train_base_shell,
         text="PUNKT STARTU",
@@ -606,7 +640,21 @@ def _build_train_tab(self):
     )
     self.train_base_caption_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 7))
     self._register_train_left_wrap_target(self.train_base_caption_lbl, container=self.train_base_shell, padding=24, min_wrap=220)
+    self.train_base_caption_lbl.configure(
+        text=(
+            "Wybierz model, od którego zacznie się nowy run. "
+            "To nie jest jeszcze wynik bramki."
+        )
+    )
 
+    self.train_base_combo_lbl = ttk.Label(
+        self.train_base_shell,
+        text="Model startowy",
+        style="PanelMuted.TLabel",
+        anchor=tk.W,
+        justify=tk.LEFT,
+    )
+    self.train_base_combo_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 3))
     self.base_combo = ttk.Combobox(self.train_base_shell, textvariable=self.base_model_var, values=base_values, state="readonly")
     self.base_combo.pack(fill=tk.X, padx=10, pady=(0, 7))
     if not str(self.base_model_var.get() or "").strip():
@@ -624,6 +672,7 @@ def _build_train_tab(self):
         style="PanelMuted.TLabel",
     )
     self.base_custom_lbl.pack(side=tk.LEFT, padx=(0, 6))
+    self.base_custom_lbl.configure(text="Plik .pt:")
 
     self.base_custom_entry = ttk.Entry(self.custom_row, textvariable=self.base_custom_var, state=tk.DISABLED)
     self.base_custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -635,6 +684,66 @@ def _build_train_tab(self):
         command=self._pick_base_custom_model
     )
     self.base_custom_btn.pack(side=tk.LEFT, padx=(8, 0))
+    self.base_custom_btn.configure(text="Wskaż plik .pt")
+
+    self.train_base_summary_shell = tk.Frame(
+        self.train_base_shell,
+        bg=palette.get("panel", "#252526"),
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=section_border,
+        highlightcolor=section_border,
+    )
+    self.train_base_summary_shell.pack(fill=tk.X, padx=10, pady=(0, 8))
+    self.train_base_summary_shell.grid_columnconfigure(1, weight=1)
+    self.train_base_summary_values = {}
+    self.train_base_summary_cells = []
+    for row_index, (row_key, row_label) in enumerate((
+        ("selected", "Wybrano"),
+        ("origin", "Pochodzenie"),
+        ("state", "Stan"),
+    )):
+        row_bg = (
+            palette.get("panel", "#252526")
+            if row_index % 2 == 0
+            else palette.get("panel_alt", palette.get("panel", "#252526"))
+        )
+        key_lbl = tk.Label(
+            self.train_base_summary_shell,
+            text=row_label,
+            font=("Segoe UI", 8),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            bg=row_bg,
+            fg=palette.get("muted", "#c7c7c7"),
+            padx=8,
+            pady=4,
+            bd=0,
+        )
+        key_lbl.grid(row=row_index, column=0, sticky="nsew")
+        self.train_base_summary_cells.append((row_index, key_lbl, "key"))
+        value_lbl = tk.Label(
+            self.train_base_summary_shell,
+            text="-",
+            font=("Segoe UI Semibold", 8),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            bg=row_bg,
+            fg=palette.get("fg", "#f3f3f3"),
+            padx=8,
+            pady=4,
+            bd=0,
+            wraplength=320,
+        )
+        value_lbl.grid(row=row_index, column=1, sticky="nsew")
+        self.train_base_summary_cells.append((row_index, value_lbl, "value"))
+        self.train_base_summary_values[row_key] = value_lbl
+        self._register_train_left_wrap_target(
+            value_lbl,
+            container=self.train_base_summary_shell,
+            padding=96,
+            min_wrap=180,
+        )
 
     self.train_base_identity_lbl = ttk.Label(
         self.train_base_shell,
@@ -1203,15 +1312,18 @@ def _build_train_tab(self):
         height=4,
         style="TrainingCompact.Treeview",
     )
+    resource_heading_labels = {
+        "Zasób": "Zasób / jedn.",
+    }
     for name, width, anchor in (
-        ("Zasób", 74, tk.W),
+        ("Zasób", 96, tk.W),
         ("Teraz", 62, tk.CENTER),
         ("Min", 52, tk.CENTER),
         ("Max", 52, tk.CENTER),
         ("Wolne", 60, tk.CENTER),
         ("Stan", 70, tk.CENTER),
     ):
-        self.train_resource_tree.heading(name, text=name)
+        self.train_resource_tree.heading(name, text=resource_heading_labels.get(name, name))
         self.train_resource_tree.column(name, width=width, minwidth=width, anchor=anchor, stretch=(name in {"Zasób", "Stan"}))
     self.train_resource_tree.pack(fill=tk.X, padx=(0, 2))
     try:
@@ -1221,7 +1333,7 @@ def _build_train_tab(self):
         pass
     self.train_metric_hint_lbl = ttk.Label(
         settings_col,
-        text="Interpretacja pojawi się po pierwszej zakończonej epoce.",
+        text="Najlepsza epoka tego runu pojawi się po pierwszej zakończonej epoce.",
         style="Panel.TLabel",
         anchor=tk.W,
         justify=tk.LEFT,
@@ -1337,14 +1449,19 @@ def _build_train_tab(self):
     except Exception:
         pass
 
+    self.campaign_training_result_host = ttk.Frame(
+        self.right,
+        padding=(8, 0, 6, 4),
+        style="Panel.TFrame",
+    )
+    self.campaign_training_result_host.pack(fill=tk.X)
+
     self.right_nb = ttk.Notebook(self.right)
     self.right_nb.pack(fill=tk.BOTH, expand=True)
 
     self.hist_tab = ttk.Frame(self.right_nb)
-    self.val_tab = ttk.Frame(self.right_nb)
     self.ranking_tab = ttk.Frame(self.right_nb)
     self.right_nb.add(self.hist_tab, text="Historia treningów")
-    self.right_nb.add(self.val_tab, text="Walidacja")
     self.right_nb.add(self.ranking_tab, text="Ranking")
     self._step4_ranking_tab_visible = True
     self.right_nb.bind("<<NotebookTabChanged>>", self._sync_step4_analysis_nav_buttons)
@@ -1364,23 +1481,23 @@ def _build_train_tab(self):
     )
     self.campaign_training_result_var = getattr(self, "campaign_training_result_var", tk.StringVar())
     self._campaign_training_result_choices = {}
-    finish_gate_id = campaign_visible_gate_id("T07") or "T06"
+    finish_gate_id = "T06"
     self.campaign_training_result_shell = tk.Frame(
-        hist_top,
+        self.campaign_training_result_host,
         bg=result_bg,
         bd=0,
         highlightthickness=1,
         highlightbackground=result_border,
         highlightcolor=result_border,
     )
-    self.campaign_training_result_shell.pack(fill=tk.X, pady=(0, 10))
+    self.campaign_training_result_shell.pack(fill=tk.X, pady=(0, 5))
     result_title_row = tk.Frame(self.campaign_training_result_shell, bg=result_bg, bd=0, highlightthickness=0)
-    result_title_row.pack(fill=tk.X, padx=10, pady=(9, 4))
+    result_title_row.pack(fill=tk.X, padx=9, pady=(6, 2))
     result_title_row.grid_columnconfigure(0, weight=1)
     self.campaign_training_result_title_lbl = tk.Label(
         result_title_row,
         text=f"Wybór wyniku bramki {finish_gate_id}",
-        font=("Segoe UI", 12),
+        font=("Segoe UI Semibold", 10),
         anchor=tk.W,
         justify=tk.LEFT,
         bg=result_bg,
@@ -1402,8 +1519,8 @@ def _build_train_tab(self):
         highlightthickness=1,
         highlightbackground=result_border,
         highlightcolor=result_border,
-        padx=8,
-        pady=3,
+        padx=7,
+        pady=2,
     )
     self.campaign_training_result_status_lbl.grid(row=0, column=1, sticky="e", padx=(8, 0))
     self.campaign_training_result_copy_lbl = ttk.Label(
@@ -1417,9 +1534,9 @@ def _build_train_tab(self):
         justify=tk.LEFT,
         wraplength=760,
     )
-    self.campaign_training_result_copy_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 7))
+    # Keep the global selector compact so it does not steal vertical space from Ranking.
     result_pick_row = ttk.Frame(self.campaign_training_result_shell, style="Panel.TFrame")
-    result_pick_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+    result_pick_row.pack(fill=tk.X, padx=9, pady=(0, 6))
     result_pick_row.columnconfigure(0, weight=1)
     result_field_bg = palette.get("field", "#1f1f1f")
     result_field_fg = palette.get("fg", "#f3f3f3")
@@ -1432,6 +1549,7 @@ def _build_train_tab(self):
         highlightcolor=palette.get("success", "#2ecc71"),
         bd=0,
     )
+    self.campaign_training_result_selector_shell = result_selector_shell
     result_selector_shell.grid(row=0, column=0, sticky="ew")
     result_selector_shell.grid_columnconfigure(0, weight=1)
     self.campaign_training_result_entry = tk.Entry(
@@ -1450,7 +1568,7 @@ def _build_train_tab(self):
         disabledforeground=palette.get("muted_dim", "#777777"),
         cursor="xterm",
     )
-    self.campaign_training_result_entry.grid(row=0, column=0, sticky="ew", padx=(8, 2), pady=5)
+    self.campaign_training_result_entry.grid(row=0, column=0, sticky="ew", padx=(8, 2), pady=4)
     self.campaign_training_result_menu = tk.Menu(
         result_selector_shell,
         tearoff=0,
@@ -1465,6 +1583,7 @@ def _build_train_tab(self):
     def _open_campaign_result_menu(_event=None):
         menu = getattr(self, "campaign_training_result_menu", None)
         button = getattr(self, "campaign_training_result_dropdown_btn", None)
+        selector = getattr(self, "campaign_training_result_selector_shell", None)
         if menu is None or button is None:
             return "break"
         try:
@@ -1473,7 +1592,8 @@ def _build_train_tab(self):
         except Exception:
             pass
         try:
-            menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+            anchor = selector if selector is not None else button
+            menu.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
         finally:
             try:
                 menu.grab_release()
@@ -1547,7 +1667,7 @@ def _build_train_tab(self):
         justify=tk.LEFT,
         wraplength=760,
     )
-    self.campaign_training_result_detail_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 9))
+    # Detailed guidance is available in the action modals; this header stays one-line.
 
     history_area = tk.Frame(
         hist_top,
@@ -1572,17 +1692,18 @@ def _build_train_tab(self):
 
     hist_tree_shell = ttk.LabelFrame(history_area, text=" Historia treningów ", padding=6)
     hist_tree_shell.grid(row=1, column=0, sticky="nsew")
-    columns = ("Tor", "Start", "Run", "Status", "Epoki", "Best mAP50-95", "Czas")
+    columns = ("Tor", "Model", "Dataset", "Run", "Start", "Status", "Epoki", "mAP50-95")
     self.tree = ttk.Treeview(hist_tree_shell, columns=columns, show="headings", height=5, selectmode="extended")
     for c in columns:
         self.tree.heading(c, text=c)
-    self.tree.column("Tor", width=84, stretch=False, anchor=tk.CENTER)
-    self.tree.column("Start", width=104, stretch=False, anchor=tk.CENTER)
-    self.tree.column("Run", width=300, minwidth=220, stretch=True)
-    self.tree.column("Status", width=140, stretch=False)
-    self.tree.column("Epoki", width=64, stretch=False)
-    self.tree.column("Best mAP50-95", width=102, stretch=False, anchor=tk.CENTER)
-    self.tree.column("Czas", width=76, stretch=False)
+    self.tree.column("Tor", width=62, stretch=False, anchor=tk.CENTER)
+    self.tree.column("Model", width=122, minwidth=96, stretch=True, anchor=tk.W)
+    self.tree.column("Dataset", width=118, minwidth=96, stretch=True, anchor=tk.W)
+    self.tree.column("Run", width=118, minwidth=96, stretch=True, anchor=tk.W)
+    self.tree.column("Start", width=90, stretch=False, anchor=tk.CENTER)
+    self.tree.column("Status", width=104, stretch=False)
+    self.tree.column("Epoki", width=54, stretch=False, anchor=tk.CENTER)
+    self.tree.column("mAP50-95", width=76, stretch=False, anchor=tk.CENTER)
 
     yscroll = WebSlimScrollbar(hist_tree_shell, orient=tk.VERTICAL, command=self.tree.yview)
     self.tree.configure(yscrollcommand=yscroll.set)
@@ -1593,6 +1714,8 @@ def _build_train_tab(self):
     self.tree.bind("<Button-3>", self._show_history_context_menu, add="+")
     self.history_context_menu = tk.Menu(self.tree, tearoff=0)
     self.history_context_menu.add_command(label="Wznów trening", command=self._resume_selected_run)
+    self.history_context_menu.add_command(label="Dotrenuj od best.pt", command=self._select_selected_run_as_fine_tune_base)
+    self.history_context_menu.add_command(label="[ TEST ] Waliduj best.pt", command=self._open_selected_run_validation_modal)
     self.history_context_menu.add_command(label="Szczegóły runu", command=self._open_selected_run_details)
     self.history_context_menu.add_command(label="Porównaj zaznaczone runy", command=self._open_selected_runs_compare)
     self.history_context_menu.add_command(label="Otwórz folder", command=self._open_run_folder)
@@ -1695,8 +1818,15 @@ def _build_train_tab(self):
         "Porównaj wybrane",
         self._open_selected_runs_compare,
     ).grid(row=0, column=1, sticky="ew", pady=(0, 2))
+    _history_action_button(
+        "Dotrenuj wybrany model",
+        self._select_selected_run_as_fine_tune_base,
+    ).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(6, 0))
+    _history_action_button(
+        "[ TEST ] Waliduj model",
+        self._open_selected_run_validation_modal,
+    ).grid(row=1, column=1, sticky="ew", pady=(6, 0))
 
-    self._build_validation_panel_v2(self.val_tab)
     self._build_ranking_panel_v2(self.ranking_tab)
     self._refresh_step4_analysis_tab_visibility()
     self._sync_step4_analysis_nav_buttons()

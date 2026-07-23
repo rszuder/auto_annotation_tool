@@ -30,6 +30,7 @@ from . import campaign_step1_ingest
 from . import campaign_stage_ui
 from . import campaign_graph_actions
 from .help_manager import HELP
+from .run_display import build_run_display_ref
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
@@ -1789,6 +1790,9 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
         session_time = _contract_time(session)
         session_state = str(session.get("state") or "").strip().lower()
         session_gate = str(session.get("working_gate_id") or "").strip().upper()
+        session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+        session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
+        session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
         session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
 
         def _contract_int(payload: dict, key: str) -> int:
@@ -1807,12 +1811,15 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
             pz2_time
             and pz3_time
             and pz2_time > pz3_time + 0.001
-            and not (pz2_marker_only and pz2_same_export_scope)
+            and not (session_gate == "T06" and session_active and session_targets_pz2)
+            and not pz2_marker_only
         )
         stale_after_session = bool(
             session_gate == "T06"
             and session_active
             and session_state not in {"resolved", "closed", "complete", "completed"}
+            and not session_targets_pz2
+            and session_targets_pz3
             and (not pz3_time or not session_time or session_time > pz3_time + 0.001)
         )
         if stale_after_pz2 or stale_after_session:
@@ -1856,6 +1863,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                 session_gate == "T06"
                 and session_active
                 and str(session.get("work_area") or "").strip().lower() == "z3"
+                and not session_targets_pz2
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             ):
                 try:
@@ -1899,6 +1907,11 @@ def _get_char_repair_guidance(self, source_state: dict | None = None) -> dict:
     images_with_plates = int(state.get("images_with_plates", 0) or 0)
     total_plates = int(state.get("total_plates", 0) or 0)
     run_name = str(state.get("run_name", "") or "").strip()
+    if run_name:
+        try:
+            run_name = build_run_display_ref({"run_name": run_name}, kind_hint="annotation").id
+        except Exception:
+            pass
     source_scope = str(state.get("source_scope", "") or "").strip().lower()
     split_preview = self._get_char_training_split_preview(total_plates)
     source_context = dict(state.get("bootstrap") or {})

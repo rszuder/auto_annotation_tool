@@ -53,6 +53,9 @@ from ..ranking import ModelRanking, format_ranking_model_label
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
+from .dataset_display import build_dataset_display_ref
+from .model_display import build_model_display_ref
+from .run_display import build_run_display_ref
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -71,7 +74,6 @@ from .z4_campaign_flow import (
     set_campaign_context,
     set_campaign_training_target,
 )
-from .z2_shared_ui import campaign_visible_gate_id
 from .z4_flow_models import (
     CharYoloDatasetSourceAdapter,
     PlateXmlImagesSourceAdapter,
@@ -115,7 +117,7 @@ from .z4_view_models import (
 
 
 def _step4_finish_gate_display_id() -> str:
-    return campaign_visible_gate_id("T07") or "T06"
+    return "T06"
 
 NAV_BUTTON_WIDTH = 18
 
@@ -173,7 +175,8 @@ def _start_training(self):
 
     self._set_step4_process_console_text("Uruchamianie treningu...\n")
     self._latest_training_metrics = {}
-    self._set_training_metric_interpretation("Interpretacja pojawi się po zakończeniu pierwszej epoki.")
+    self._current_training_metric_history = []
+    self._set_training_metric_interpretation("Najlepsza epoka tego runu pojawi się po pierwszej zakończonej epoce.")
     self._last_training_resource_log_at = 0.0
     try:
         self._set_training_widget_text(
@@ -295,6 +298,31 @@ def _start_training(self):
             "Dla znaków tablic wybierz zwykły model detect, np. 'yolo11n' lub 'yolo11s'."
         )
 
+    fine_tune_parent_run = None
+    fine_tune_run_label = ""
+    fine_tune_metadata = {}
+    try:
+        fine_tune_parent_run = self._resolve_step4_fine_tune_parent_run()
+    except Exception:
+        fine_tune_parent_run = None
+    if fine_tune_parent_run is not None:
+        try:
+            parent_best = self._resolve_history_run_best_weights(fine_tune_parent_run)
+        except Exception:
+            parent_best = None
+        if parent_best is not None and Path(parent_best).exists():
+            fine_tune_run_label = self._format_training_model_run_label(fine_tune_parent_run)
+            fine_tune_metadata = {
+                "lineage_mode": "fine_tune",
+                "parent_run_id": str(getattr(fine_tune_parent_run, "id", "") or "").strip(),
+                "parent_model_path": str(parent_best),
+                "parent_model_name": Path(parent_best).name,
+                "parent_model_target": selected_target,
+                "parent_dataset_path": str(getattr(fine_tune_parent_run, "dataset_path", "") or "").strip(),
+                "parent_best_map50": float(getattr(fine_tune_parent_run, "best_map50", 0.0) or 0.0),
+                "parent_best_map50_95": float(getattr(fine_tune_parent_run, "best_map50_95", 0.0) or 0.0),
+            }
+
     try:
         requested_imgsz = self._safe_training_int_value("imgsz_var", default=640, minimum=0)
     except Exception:
@@ -338,6 +366,10 @@ def _start_training(self):
     self._append_train_log(f"Dataset: {dataset_path}")
     self._append_train_log(f"Wybór w polu 'Model startowy treningu (.pt)': {base_model_display}")
     self._append_train_log(f"Model przekazany do treningu: {base_model}")
+    if fine_tune_metadata:
+        self._append_train_log(
+            f"Tryb runu: dotrenowanie | rodzic: {fine_tune_run_label or fine_tune_metadata.get('parent_run_id', '-')}"
+        )
     self._append_train_log(
         f"Urządzenie: {selected_device_display} -> {effective_device_desc} | backend Ultralytics: {device}"
     )
@@ -379,7 +411,8 @@ def _start_training(self):
             batch_size=self._safe_training_int_value("batch_var", default=16, minimum=1),
             img_size=self._safe_training_int_value("imgsz_var", default=640, minimum=32),
             device=device,
-            lr0=self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001)
+            lr0=self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001),
+            **fine_tune_metadata,
         )
     except Exception as e:
         self._end_step4_operation("z4.training.run")
@@ -420,17 +453,21 @@ def _start_training(self):
         self._set_training_resource_sample(None)
     except Exception:
         pass
-    self.btn_start_train.configure(state=tk.DISABLED)
-    self.btn_pause_train.configure(state=tk.NORMAL)
-    self.btn_stop_train.configure(state=tk.NORMAL)
-    self._set_training_widget_text(self.train_progress_label, f"Uruchomiono run treningowy: {run_id}")
+    try:
+        run_display = build_run_display_ref({"run_id": run_id}, kind_hint="training").id
+    except Exception:
+        run_display = str(run_id or "").strip()
+    self._set_training_running_ui_state(
+        run_id,
+        status_text=f"Uruchomiono run treningowy: {run_display}",
+    )
     self._training_started_monotonic = time.perf_counter()
     self._training_started_wall_clock = datetime.datetime.now()
 
     try:
         self._remember_campaign_training_run_in_registry(
             run_id=str(run_id or "").strip(),
-            status=TrainingStatus.PENDING.value,
+            status=TrainingStatus.RUNNING.value,
             target=self.get_campaign_training_target(),
         )
     except Exception:
@@ -495,10 +532,22 @@ def _bind_trainer_callbacks(self):
         run = self.trainer.current_run
         if not run:
             return
+        now = time.perf_counter()
+        try:
+            batch_idx_int = int(batch_idx)
+            total_batches_int = int(total_batches)
+        except Exception:
+            batch_idx_int = 0
+            total_batches_int = 0
+        terminal_batch = bool(total_batches_int > 0 and batch_idx_int >= total_batches_int)
+        last_emit = float(getattr(self, "_last_training_batch_ui_emit_at", 0.0) or 0.0)
+        if not terminal_batch and (now - last_emit) < 0.18:
+            return
+        self._last_training_batch_ui_emit_at = now
 
         overall_pct = (((max(1, int(epoch)) - 1) + (float(batch_pct) / 100.0)) / max(1, int(run.epochs))) * 100.0
-        if int(batch_idx) > 0 and int(total_batches) > 0:
-            status_text = f"Trwa trening: Epoka {epoch}/{run.epochs} | partia {batch_idx}/{total_batches}"
+        if batch_idx_int > 0 and total_batches_int > 0:
+            status_text = f"Trwa trening: Epoka {epoch}/{run.epochs} | partia {batch_idx_int}/{total_batches_int}"
         else:
             status_text = f"Trwa trening: Epoka {epoch}/{run.epochs} | przygotowanie partii"
 
@@ -521,8 +570,8 @@ def _bind_trainer_callbacks(self):
             self._update_training_progress_meta(
                 epoch=int(epoch),
                 total_epochs=int(run.epochs),
-                batch_idx=int(batch_idx),
-                total_batches=int(total_batches),
+                batch_idx=batch_idx_int,
+                total_batches=total_batches_int,
                 overall_pct=float(overall_pct),
                 epoch_pct=float(batch_pct),
                 eta_seconds=eta_seconds,
@@ -535,13 +584,30 @@ def _bind_trainer_callbacks(self):
         run = self.trainer.current_run
         if not run: return
         pct = (epoch / max(1, run.epochs)) * 100.0
-        self._latest_training_metrics = dict(metrics or {})
+        epoch_metrics = dict(metrics or {})
+        try:
+            epoch_metrics["epoch"] = int(epoch)
+        except Exception:
+            epoch_metrics["epoch"] = epoch
+        self._latest_training_metrics = dict(epoch_metrics)
+        try:
+            metric_history = list(getattr(self, "_current_training_metric_history", []) or [])
+            epoch_key = str(epoch_metrics.get("epoch", "") or "").strip()
+            if epoch_key:
+                metric_history = [
+                    row for row in metric_history
+                    if str((row or {}).get("epoch", "") or "").strip() != epoch_key
+                ]
+            metric_history.append(dict(epoch_metrics))
+            self._current_training_metric_history = metric_history
+        except Exception:
+            self._current_training_metric_history = [dict(epoch_metrics)]
 
         # Pobieranie wyników mAP
         map50 = metrics.get('map50', 0)
         map50_95 = metrics.get('map50_95', 0)
         loss = metrics.get('loss', 0)
-        interpretation = self._build_training_metric_interpretation(metrics)
+        interpretation = self._build_training_best_epoch_summary(epoch_metrics, epoch=epoch)
 
         # Formatowanie logu na żywo
         if self.get_campaign_training_target() == "plate":
@@ -580,6 +646,10 @@ def _bind_trainer_callbacks(self):
 
     def on_end(success, msg):
         safe_msg = self._sanitize_training_text(msg)
+        try:
+            self._end_step4_operation("z4.training.run")
+        except Exception as e:
+            logger.debug(f"Nie udalo sie zwolnic blokady Z4 po zakonczeniu treningu: {e}")
         end_line = f"[KONIEC] {'SUKCES' if success else 'BŁĄD/STOP'} | {safe_msg}"
         self._append_train_log(end_line)
         if not success:
@@ -701,6 +771,49 @@ def _reload_history_snapshot_from_disk(self) -> bool:
 
     return True
 
+def _set_training_running_ui_state(self, run_id: str | None = None, *, status_text: str | None = None):
+    resolved_run_id = str(run_id or getattr(self, "current_run_id", "") or "").strip()
+
+    try:
+        self.btn_start_train.configure(state=tk.DISABLED)
+    except Exception:
+        pass
+    try:
+        self.btn_pause_train.configure(state=tk.NORMAL)
+    except Exception:
+        pass
+    try:
+        self.btn_stop_train.configure(state=tk.NORMAL)
+    except Exception:
+        pass
+
+    if status_text:
+        try:
+            self._set_training_widget_text(self.train_progress_label, status_text)
+            self.train_progress_label.configure(foreground="#2c3e50")
+        except Exception:
+            pass
+
+    if not resolved_run_id:
+        return
+
+    try:
+        self._load_history()
+    except Exception as e:
+        logger.debug(f"Nie udalo sie odswiezyc historii po starcie treningu: {e}")
+
+    tree = getattr(self, "tree", None)
+    if tree is None:
+        return
+    try:
+        if tree.exists(resolved_run_id):
+            tree.selection_set(resolved_run_id)
+            tree.focus(resolved_run_id)
+            tree.see(resolved_run_id)
+            self._on_run_selected()
+    except Exception:
+        pass
+
 def _load_history(self):
     if not hasattr(self, "tree"):
         return
@@ -751,8 +864,31 @@ def _load_history(self):
             except Exception:
                 run_target = ""
         target_label = self._format_history_run_target_label(run_target)
-        run_name = str(getattr(run, "name", "") or "").strip()
-        run_label = run_name or str(getattr(run, "id", "") or "")
+        run_label = build_run_display_ref(run, kind_hint="training").id
+        dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
+        if dataset_path:
+            try:
+                dataset_label = build_dataset_display_ref(dataset_path, target_hint=run_target).id
+            except Exception:
+                dataset_label = Path(dataset_path).name or "-"
+        else:
+            dataset_label = "-"
+        try:
+            best_weights = self._resolve_history_run_best_weights(run)
+        except Exception:
+            best_weights = None
+        if best_weights is not None:
+            try:
+                model_label = build_model_display_ref(
+                    best_weights,
+                    run=run,
+                    target_hint=run_target,
+                    source_run_label=run_label,
+                ).id
+            except Exception:
+                model_label = Path(best_weights).name or "-"
+        else:
+            model_label = "-"
         started_short = _format_history_datetime(
             getattr(run, "started_at", None),
             fallback=_format_history_datetime(getattr(run, "created_at", None)),
@@ -760,12 +896,13 @@ def _load_history(self):
 
         self.tree.insert("", tk.END, iid=str(run.id), values=(
             target_label,
-            started_short,
+            model_label,
+            dataset_label,
             run_label,
+            started_short,
             self._format_history_run_status_label(run),
             f"{run.current_epoch}/{run.epochs}",
             f"{float(best_map):.3f}",
-            str(run.duration_str)
         ))
 
     if selected_run_id:
@@ -838,19 +975,33 @@ def _campaign_training_result_candidates(self) -> list:
 
 def _campaign_training_result_choice_label(self, run) -> str:
     run_id = str(getattr(run, "id", "") or "").strip() or "-"
-    started = str(getattr(run, "started_at", "") or getattr(run, "created_at", "") or "").strip()
-    started_short = ""
-    if started:
+    run_ref = build_run_display_ref(run, kind_hint="training")
+    try:
+        target_hint = self._infer_history_run_target(run)
+    except Exception:
+        target_hint = ""
+    try:
+        best_weights = self._resolve_history_run_best_weights(run)
+    except Exception:
+        best_weights = None
+    if best_weights is not None:
         try:
-            started_short = datetime.datetime.fromisoformat(started).strftime("%d.%m %H:%M")
+            model_ref = build_model_display_ref(
+                best_weights,
+                run=run,
+                target_hint=target_hint,
+                source_run_label=run_ref.id or run_id,
+            )
+            model_name = model_ref.id
         except Exception:
-            started_short = started.replace("T", " ")[:16]
+            model_name = Path(best_weights).name or "model"
+    else:
+        model_name = "model"
     try:
         score = float(getattr(run, "best_map50_95", 0.0) or 0.0)
     except Exception:
         score = 0.0
-    dataset_name = Path(str(getattr(run, "dataset_path", "") or "")).name or "-"
-    return f"start {started_short or run_id} | mAP50-95 {score:.3f} | {dataset_name} | {run_id}"
+    return f"{model_name} | mAP50-95 {score:.3f} | run {run_ref.id or run_id}"
 
 def _campaign_training_result_detail_text(self, run) -> str:
     if run is None:
@@ -864,6 +1015,25 @@ def _campaign_training_result_detail_text(self, run) -> str:
         best_weights = self._resolve_history_run_best_weights(run)
     except Exception:
         best_weights = None
+    run_ref = build_run_display_ref(run, kind_hint="training")
+    try:
+        model_ref = build_model_display_ref(
+            best_weights,
+            run=run,
+            target_hint=target,
+            source_run_label=run_ref.id or str(getattr(run, "id", "") or "-"),
+        )
+        model_text = model_ref.id
+    except Exception:
+        model_text = Path(best_weights).name if best_weights else "-"
+    dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
+    if dataset_path:
+        try:
+            dataset_text = build_dataset_display_ref(dataset_path, target_hint=target).id
+        except Exception:
+            dataset_text = Path(dataset_path).name or "-"
+    else:
+        dataset_text = "-"
     try:
         score = float(getattr(run, "best_map50_95", 0.0) or 0.0)
     except Exception:
@@ -877,7 +1047,8 @@ def _campaign_training_result_detail_text(self, run) -> str:
     else:
         started_text = "-"
     return (
-        f"{target_label} | run: {str(getattr(run, 'id', '') or '-')} | "
+        f"{target_label} | model: {model_text} | "
+        f"dataset: {dataset_text} | run: {run_ref.id or str(getattr(run, 'id', '') or '-')} | "
         f"start: {started_text} | "
         f"epoki: {getattr(run, 'current_epoch', '-')}/{getattr(run, 'epochs', '-')} | "
         f"mAP50-95: {score:.3f} | best.pt: {Path(best_weights).name if best_weights else '-'}"
@@ -1312,6 +1483,17 @@ def _resume_selected_run(self):
         )
 
     self.current_run_id = resumed_run_id
+    try:
+        self._reload_history_snapshot_from_disk()
+        refreshed_run = self.history.get_run(str(resumed_run_id))
+        if refreshed_run is not None:
+            run = refreshed_run
+    except Exception:
+        pass
+    try:
+        resumed_run_display = build_run_display_ref(run, kind_hint="training").id
+    except Exception:
+        resumed_run_display = str(resumed_run_id or "").strip()
     self._last_training_completion_summary_run_id = None
     self._step4_campaign_finish_ready = False
     try:
@@ -1319,21 +1501,47 @@ def _resume_selected_run(self):
             CAMPAIGN.set_step4_finish_state(False)
     except Exception:
         pass
-    self._set_train_progress_values(overall=0.0, epoch=0.0)
-    self._reset_training_runtime_progress()
-    self._set_train_live_metrics(None)
-    self.btn_start_train.configure(state=tk.DISABLED)
-    self.btn_pause_train.configure(state=tk.NORMAL)
-    self.btn_stop_train.configure(state=tk.NORMAL)
-    self.train_progress_label.configure(
-        text=f"Wznowiono run treningu: {resumed_run_id}",
-        foreground="#2c3e50"
+    self._set_training_running_ui_state(
+        resumed_run_id,
+        status_text=f"Wznowiono run treningu: {resumed_run_display}",
+    )
+
+    try:
+        previous_metrics = [
+            dict(row)
+            for row in list(getattr(run, "metrics_history", []) or [])
+            if isinstance(row, dict)
+        ]
+    except Exception:
+        previous_metrics = []
+    self._current_training_metric_history = previous_metrics
+    self._latest_training_metrics = dict(previous_metrics[-1]) if previous_metrics else {}
+    try:
+        self._set_train_progress_values(overall=0.0, epoch=0.0)
+        self._reset_training_runtime_progress()
+        self._set_train_live_metrics(self._latest_training_metrics or None)
+        self._set_training_metric_interpretation(
+            self._build_training_best_epoch_summary(self._latest_training_metrics or None)
+        )
+    except Exception as e:
+        logger.debug(f"Nie udalo sie odtworzyc metryk UI po wznowieniu treningu: {e}")
+    self._set_training_running_ui_state(
+        resumed_run_id,
+        status_text=f"Wznowiono run treningu: {resumed_run_display}",
     )
     self._training_started_monotonic = time.perf_counter()
     self._training_started_wall_clock = datetime.datetime.now()
     self._append_train_log(f"[RESUME] Wznowiono trening z checkpointu: {last_weights}")
     if CAMPAIGN.get_active_project_name():
         self._pending_campaign_model_type = self.get_campaign_training_target()
+        try:
+            self._remember_campaign_training_run_in_registry(
+                run_id=str(resumed_run_id or "").strip(),
+                status=TrainingStatus.RUNNING.value,
+                target=self._pending_campaign_model_type,
+            )
+        except Exception:
+            pass
     else:
         self._pending_campaign_model_type = None
 
@@ -1378,16 +1586,20 @@ def _show_history_context_menu(self, event=None):
 
     selected_run = self._selected_run()
     resumable = bool(selected_run is not None and self._is_history_run_resume_allowed(selected_run))
+    fine_tunable = bool(selected_run is not None and self._is_history_run_fine_tune_candidate(selected_run))
     exportable = False
     promotable = False
+    validation_ready = False
     if selected_run is not None:
         try:
             exportable = bool(
                 self._infer_history_run_target(selected_run) in {"plate", "char", "vehicle"}
                 and self._resolve_history_run_best_weights(selected_run) is not None
             )
+            validation_ready = exportable
         except Exception:
             exportable = False
+            validation_ready = False
         try:
             promotable = bool(
                 CAMPAIGN.get_active_project_name()
@@ -1400,6 +1612,14 @@ def _show_history_context_menu(self, event=None):
             promotable = False
     try:
         menu.entryconfigure("Wznów trening", state=(tk.NORMAL if resumable else tk.DISABLED))
+    except Exception:
+        pass
+    try:
+        menu.entryconfigure("Dotrenuj od best.pt", state=(tk.NORMAL if fine_tunable else tk.DISABLED))
+    except Exception:
+        pass
+    try:
+        menu.entryconfigure("[ TEST ] Waliduj best.pt", state=(tk.NORMAL if validation_ready else tk.DISABLED))
     except Exception:
         pass
     try:
@@ -1482,6 +1702,100 @@ def _use_selected_ranking_model_as_campaign_result(self):
         )
     return self._promote_selected_run_model_to_campaign()
 
+
+def _is_history_run_fine_tune_candidate(self, run) -> bool:
+    if run is None:
+        return False
+    if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.COMPLETED.value:
+        return False
+    try:
+        get_pinned = getattr(self, "_get_pinned_step4_result_state", None)
+        if callable(get_pinned):
+            if get_pinned():
+                return False
+    except Exception:
+        pass
+    try:
+        if not self._does_history_run_match_active_campaign_target(run):
+            return False
+    except Exception:
+        return False
+    try:
+        best_weights = self._resolve_history_run_best_weights(run)
+    except Exception:
+        best_weights = None
+    return bool(best_weights is not None and Path(best_weights).exists())
+
+
+def _select_selected_run_as_fine_tune_base(self):
+    run = self._selected_run()
+    if run is None:
+        return messagebox.showwarning(
+            "Brak runu",
+            "Najpierw wybierz ukończony run z historii treningów."
+        )
+    if not self._is_history_run_fine_tune_candidate(run):
+        return messagebox.showwarning(
+            "Nie można dotrenować",
+            (
+                "Dotrenowanie może wystartować tylko od ukończonego runu zgodnego z aktywnym torem "
+                "i posiadającego dostępny plik best.pt.\n\n"
+                "Jeśli run jest przerwany, użyj `Wznów trening` zamiast dotrenowania."
+            ),
+        )
+
+    best_weights = self._resolve_history_run_best_weights(run)
+    if best_weights is None:
+        return messagebox.showerror("Brak best.pt", "Wybrany run nie ma dostępnego pliku best.pt.")
+
+    self._step4_setting_fine_tune_base = True
+    try:
+        self.base_model_var.set(self._get_custom_base_model_label())
+        self.base_custom_var.set(str(best_weights))
+        self._set_step4_fine_tune_parent_state(run, best_weights)
+    finally:
+        self._step4_setting_fine_tune_base = False
+
+    try:
+        self._refresh_training_base_model_selection_ui()
+        self._refresh_training_base_model_identity_ui()
+        self._refresh_training_execution_summary()
+        self._refresh_training_start_state()
+    except Exception:
+        pass
+
+    run_label = self._format_training_model_run_label(run)
+    try:
+        self._append_train_log(
+            f"[DOTRENOWANIE] Ustawiono model startowy z runu {run_label}: {best_weights}"
+        )
+    except Exception:
+        pass
+    return messagebox.showinfo(
+        "Dotrenowanie ustawione",
+        (
+            f"Model z runu {run_label} został ustawiony jako punkt startowy dotrenowania.\n\n"
+            "Teraz wybierz wariant datasetu i parametry, a potem użyj `Rozpocznij trening`. "
+            "Powstanie nowy run-kandydat; poprzedni model nie zostanie nadpisany."
+        ),
+    )
+
+
+def _select_selected_ranking_run_as_fine_tune_base(self):
+    run = _selected_ranking_run(self)
+    if run is None:
+        return messagebox.showwarning(
+            "Brak runu projektu",
+            "Ten wpis rankingu nie jest powiązany z runem historii projektu."
+        )
+    if not _focus_history_run_from_ranking(self, run):
+        return messagebox.showwarning(
+            "Nie udało się wybrać runu",
+            "Nie udało się zaznaczyć runu z rankingu w historii treningów."
+        )
+    return self._select_selected_run_as_fine_tune_base()
+
+
 def _open_selected_ranking_run_details(self):
     run = _selected_ranking_run(self)
     if run is None:
@@ -1549,6 +1863,7 @@ def _show_ranking_context_menu(self, event=None):
     has_run = run is not None
     has_path = bool(str(ref.get("model_path", "") or "").strip())
     promotable = False
+    fine_tunable = False
     if has_run:
         try:
             promotable = bool(
@@ -1560,6 +1875,10 @@ def _show_ranking_context_menu(self, event=None):
             )
         except Exception:
             promotable = False
+        try:
+            fine_tunable = bool(self._is_history_run_fine_tune_candidate(run))
+        except Exception:
+            fine_tunable = False
 
     try:
         menu = tk.Menu(tree, tearoff=0)
@@ -1567,6 +1886,11 @@ def _show_ranking_context_menu(self, event=None):
             label=f"Użyj jako wynik bramki {_step4_finish_gate_display_id()}",
             command=self._use_selected_ranking_model_as_campaign_result,
             state=(tk.NORMAL if promotable else tk.DISABLED),
+        )
+        menu.add_command(
+            label="Dotrenuj od tego modelu",
+            command=self._select_selected_ranking_run_as_fine_tune_base,
+            state=(tk.NORMAL if fine_tunable else tk.DISABLED),
         )
         menu.add_command(
             label="Szczegóły runu",
@@ -1577,6 +1901,11 @@ def _show_ranking_context_menu(self, event=None):
             label="Otwórz folder wag",
             command=self._open_selected_ranking_model_folder,
             state=(tk.NORMAL if has_path or has_run else tk.DISABLED),
+        )
+        menu.add_command(
+            label="[ TEST ] Waliduj ten model",
+            command=self._open_selected_ranking_validation_modal,
+            state=(tk.NORMAL if has_path else tk.DISABLED),
         )
         menu.add_separator()
         menu.add_command(
@@ -1677,6 +2006,7 @@ def _open_run_details_modal(self, run):
 
     run_id = str(getattr(run, "id", "") or "").strip()
     run_name = str(getattr(run, "name", "") or run_id or "run").strip()
+    run_ref = build_run_display_ref(run, kind_hint="training")
     palette = getattr(self.app, "palette", {}) if getattr(self, "app", None) is not None else {}
 
     dialog = getattr(self, "_run_details_dialog", None)
@@ -1765,13 +2095,19 @@ def _open_run_details_modal(self, run):
         ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(
             actions,
+            text="[ TEST ] Waliduj model",
+            command=self._open_current_run_validation_modal,
+            style="WorkflowCard.TButton",
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            actions,
             text="Zamknij",
             command=self._close_run_details_dialog,
         ).pack(side=tk.RIGHT)
 
     self._run_details_current_run_id = run_id
     try:
-        self.run_details_title_lbl.configure(text=f"Szczegóły runu: {self._shorten_training_text(run_name, 72)}")
+        self.run_details_title_lbl.configure(text=f"Szczegóły runu: {run_ref.id or self._shorten_training_text(run_name, 72)}")
     except Exception:
         pass
     try:
@@ -1791,7 +2127,7 @@ def _open_run_details_modal(self, run):
     )
 
     try:
-        dialog.title(f"Szczegóły runu | {self._shorten_training_text(run_name, 48)}")
+        dialog.title(f"Szczegóły runu | {run_ref.id or self._shorten_training_text(run_name, 48)}")
         dialog.deiconify()
         dialog.lift()
         dialog.focus_force()
@@ -1849,12 +2185,12 @@ def _run_validation(self):
         return
 
     self.val_is_running = True
-    self.btn_run_val.config(state=tk.DISABLED, text="Walidacja w toku...")
+    self.btn_run_val.config(state=tk.DISABLED, text="[ START ] Walidacja w toku...")
     self.val_status.config(text="Walidacja w toku...", foreground="#d35400")
     self._set_validation_summary(
         f"Trwa walidacja: {Path(model_path).name} | split: {self.val_split_var.get()}",
         [],
-        "Model jest sprawdzany na wskazanym splicie. Po zakończeniu tabela odświeży wynik automatycznie.",
+        "Model jest sprawdzany na wskazanym splicie. Po zakończeniu odblokuje się tabela wyników.",
     )
     self._set_step4_process_console_text(
         f"Inicjalizowanie silnika YOLO do ewaluacji...\n"
@@ -1894,7 +2230,7 @@ def _run_validation(self):
                 self._set_validation_summary(
                     f"Walidacja zakończona: {model_name} | split: {split_name}",
                     rows,
-                    "Tabela pokazuje najważniejsze metryki walidacyjne i ich orientacyjną ocenę.",
+                    "Otwórz tabelę metryk, aby przejrzeć wartości zwrócone przez YOLO.",
                 )
             )
             self._ui(lambda: messagebox.showinfo("Sukces", "Walidacja zakończona pomyślnie!"))
@@ -1915,7 +2251,7 @@ def _run_validation(self):
         finally:
             self.val_is_running = False
             self._end_step4_operation("z4.validation.run")
-            self._ui(lambda: self.btn_run_val.config(state=tk.NORMAL, text="Uruchom walidację"))
+            self._ui(lambda: self.btn_run_val.config(state=tk.NORMAL, text="[ START ] Uruchom walidację"))
             self._ui(self._refresh_training_start_state)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -1924,14 +2260,26 @@ def _load_ranking(self):
     if not hasattr(self, "rank_tree"):
         return
     self._ensure_plate_ranking_engine()
-    entries = getattr(self.ranking_engine, 'entries', [])
+    target = self._get_ranking_task_target()
+    target_task = self._get_ranking_task_label(target)
+    get_unique_entries = getattr(self.ranking_engine, "get_unique_entries", None)
+    if callable(get_unique_entries):
+        entries = get_unique_entries()
+    else:
+        entries = getattr(self.ranking_engine, 'entries', [])
     self.rank_tree.delete(*self.rank_tree.get_children())
     self._ranking_tree_entry_refs = {}
 
     selected_reference = self._resolve_ranking_reference_source()
     selected_reference_path = str(selected_reference.get("reference_dir") or "").strip()
     selected_reference_raw = str(selected_reference.get("selected_path") or "").strip()
-    selected_scope = str(getattr(getattr(self, "rank_scope_var", None), "get", lambda: "Wszystkie")() or "Wszystkie").strip()
+    selected_split = str(selected_reference.get("split_name") or "").strip()
+    selected_scope = self._get_ranking_scope()
+    models_dir_raw = str(getattr(getattr(self, "rank_models_dir", None), "get", lambda: "")() or "").strip()
+    try:
+        models_dir = Path(models_dir_raw) if models_dir_raw else None
+    except Exception:
+        models_dir = None
 
     try:
         project_root = CAMPAIGN.get_active_project_root_dir()
@@ -1951,7 +2299,7 @@ def _load_ranking(self):
     project_model_paths: set[str] = set()
     if CAMPAIGN.get_active_project_name():
         try:
-            for candidate in self._collect_project_plate_ranking_model_candidates():
+            for candidate in self._collect_project_ranking_model_candidates(target):
                 try:
                     project_model_paths.add(str(Path(candidate).resolve()).lower())
                 except Exception:
@@ -2008,6 +2356,21 @@ def _load_ranking(self):
         model_path_raw = str(getattr(entry, "model_path", "") or "").strip()
         if not model_path_raw:
             return "Globalne"
+        return model_path_scope(model_path_raw)
+
+    def model_path_key(path_like) -> str:
+        raw = str(path_like or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve()).lower()
+        except Exception:
+            return str(Path(raw)).lower()
+
+    def model_path_scope(path_like) -> str:
+        model_path_raw = str(path_like or "").strip()
+        if not model_path_raw:
+            return "Globalne"
         try:
             model_path = Path(model_path_raw).resolve()
             model_key = str(model_path).lower()
@@ -2019,6 +2382,49 @@ def _load_ranking(self):
             pass
         return "Globalne"
 
+    def candidate_labels(model_path: Path, scope: str) -> tuple[str, str, object | None]:
+        run = None
+        resolver = getattr(self, "_resolve_training_run_from_model_path", None)
+        if callable(resolver):
+            try:
+                run = resolver(Path(model_path))
+            except Exception:
+                run = None
+        model_file = Path(model_path).name
+        if run is not None:
+            try:
+                return _campaign_training_result_choice_label(self, run), model_file or "best.pt", run
+            except Exception:
+                try:
+                    return self._format_training_model_run_label(run), model_file or "best.pt", run
+                except Exception:
+                    pass
+        fallback = format_ranking_model_label(model_file, str(model_path), target_task)
+        return fallback, model_file or fallback, run
+
+    candidate_paths: list[Path] = []
+    try:
+        if selected_scope in {"Projekt", "Wszystkie"}:
+            candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
+        elif models_dir is not None and models_dir.exists() and models_dir.is_dir():
+            candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
+    except Exception:
+        candidate_paths = []
+    try:
+        candidate_paths = list(self._filter_enabled_ranking_participants(candidate_paths) or [])
+    except Exception:
+        pass
+
+    candidate_by_key: dict[str, Path] = {}
+    for candidate_path in candidate_paths:
+        key = model_path_key(candidate_path)
+        if not key:
+            continue
+        scope = model_path_scope(candidate_path)
+        if selected_scope in {"Projekt", "Globalne"} and scope != selected_scope:
+            continue
+        candidate_by_key.setdefault(key, Path(candidate_path))
+
     def entry_decision(entry, scope: str, index: int) -> str:
         if index == 0:
             if scope == "Projekt":
@@ -2029,6 +2435,35 @@ def _load_ranking(self):
         if scope == "Globalne":
             return "Model referencyjny"
         return "Kandydat"
+
+    def entry_reference_label(entry) -> str:
+        raw_path = str(getattr(entry, "reference_path", "") or "").strip()
+        raw_name = str(getattr(entry, "reference_name", "") or "").strip()
+        if target == "char" and raw_path:
+            try:
+                return build_dataset_display_ref(raw_path, target_hint="char").id
+            except Exception:
+                pass
+        return raw_name or (Path(raw_path).name if raw_path else "-") or "-"
+
+    def pending_reference_label() -> str:
+        raw_path = selected_reference_path
+        raw_name = str(selected_reference.get("reference_name") or "").strip()
+        if target == "char" and raw_path:
+            try:
+                return build_dataset_display_ref(raw_path, target_hint="char").id
+            except Exception:
+                pass
+        return raw_name or (Path(raw_path).name if raw_path else "-") or "-"
+
+    def ranking_date_label(entry) -> str:
+        raw = str(getattr(entry, "date_evaluated", "") or "").strip()
+        if not raw:
+            return "-"
+        try:
+            return datetime.datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return raw.replace("T", " ")[:16] or "-"
 
     def set_leader(title: str, hint: str, *, tone: str = "muted"):
         title_label = getattr(self, "rank_leader_title", None)
@@ -2051,7 +2486,36 @@ def _load_ranking(self):
             except Exception:
                 pass
 
-    filtered_entries = [e for e in entries if getattr(e, 'task_type', '') == "Tablice (Pose)"]
+    def insert_pending_candidate_rows(ranked_keys: set[str] | None = None, *, start_index: int = 1) -> None:
+        ranked_keys = ranked_keys or set()
+        row_index = start_index
+        for key, candidate_path in sorted(candidate_by_key.items(), key=lambda item: str(item[1]).lower()):
+            if key in ranked_keys:
+                continue
+            scope = model_path_scope(candidate_path)
+            result_label, _model_label, run = candidate_labels(candidate_path, scope)
+            tag = "pending_project" if scope == "Projekt" else "pending_global"
+            item_id = self.rank_tree.insert("", tk.END, values=(
+                f"#{row_index}",
+                result_label,
+                scope,
+                "-",
+                "-",
+                "-",
+                "czeka na test",
+            ), tags=(tag,))
+            row_index += 1
+            try:
+                self._ranking_tree_entry_refs[item_id] = {
+                    "run_id": str(getattr(run, "id", "") or "").strip() if run is not None else "",
+                    "model_path": str(candidate_path),
+                    "choice_label": result_label,
+                    "scope": scope,
+                }
+            except Exception:
+                pass
+
+    filtered_entries = [e for e in entries if getattr(e, 'task_type', '') == target_task]
     if selected_reference_raw and not selected_reference.get("ok"):
         filtered_entries = []
     elif selected_reference_path:
@@ -2059,11 +2523,16 @@ def _load_ranking(self):
             e for e in filtered_entries
             if normalize_path(getattr(e, "reference_path", "")) == normalize_path(selected_reference_path)
         ]
+        if target == "char" and selected_split:
+            filtered_entries = [
+                e for e in filtered_entries
+                if str(getattr(e, "split_name", "") or "").strip() == selected_split
+            ]
     if selected_scope in {"Projekt", "Globalne"}:
         filtered_entries = [e for e in filtered_entries if entry_scope(e) == selected_scope]
-    filtered_entries.sort(key=lambda x: getattr(x, 'f1_score', 0), reverse=True)
+    filtered_entries.sort(key=lambda x: getattr(x, 'ranking_score', getattr(x, 'f1_score', 0)), reverse=True)
 
-    if not filtered_entries:
+    if not filtered_entries and not candidate_by_key:
         scope_hint = selected_scope.lower()
         if selected_reference_raw and not selected_reference.get("ok"):
             set_leader(
@@ -2074,26 +2543,44 @@ def _load_ranking(self):
         else:
             set_leader(
                 f"Brak wyników dla zakresu: {selected_scope}",
-                f"Uruchom ranking albo przełącz zakres. Zakres {scope_hint} nie zawiera jeszcze porównanych modeli.",
+                f"Uruchom ranking albo przełącz zakres. Zakres {scope_hint} nie zawiera jeszcze porównanych modeli dla trybu {target_task}.",
                 tone="muted",
             )
         return
 
+    if not filtered_entries:
+        if selected_reference_raw and not selected_reference.get("ok"):
+            set_leader(
+                "Kandydaci są, ale zestaw odniesienia nie jest gotowy",
+                str(selected_reference.get("message") or "Wskaż poprawny folder runu odniesienia przed testem rankingowym."),
+                tone="warning",
+            )
+        else:
+            set_leader(
+                "Kandydaci czekają na test rankingowy",
+                (
+                    f"Zakres: {selected_scope}. Tabela pokazuje modele, które wezmą udział w porównaniu. "
+                    "Po uruchomieniu rankingu te wiersze dostaną metryki i kolejność."
+                ),
+                tone="warning",
+            )
+        insert_pending_candidate_rows()
+        return
+
     best = filtered_entries[0]
     best_scope = entry_scope(best)
-    best_reference = str(getattr(best, "reference_name", "") or "").strip()
-    if not best_reference:
-        best_reference = Path(str(getattr(best, "reference_path", "") or "-")).name or "-"
-    best_result_label, best_model_label, best_run = entry_labels(best, best_scope)
+    best_reference = entry_reference_label(best)
+    best_result_label, _best_model_label, best_run = entry_labels(best, best_scope)
+    best_score = float(getattr(best, 'ranking_score', getattr(best, 'f1_score', 0)) or 0)
     if best_run is not None:
-        best_title = f"Wygrywa: {best_result_label} | F1 {float(getattr(best, 'f1_score', 0) or 0):.1f}%"
+        best_title = f"Wygrywa: {best_result_label} | ocena {best_score:.1f}%"
         best_hint = (
             f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
             f"Tego samego podpisu szukaj w sekcji wyboru wyniku bramki {_step4_finish_gate_display_id()}. "
             "Ranking nie wybiera modelu automatycznie."
         )
     else:
-        best_title = f"Wygrywa: {best_result_label} | F1 {float(getattr(best, 'f1_score', 0) or 0):.1f}%"
+        best_title = f"Wygrywa: {best_result_label} | ocena {best_score:.1f}%"
         best_hint = (
             f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
             "To kandydat spoza historii projektu, więc nie ma podpisu runu z wyboru wyniku."
@@ -2104,23 +2591,21 @@ def _load_ranking(self):
         tone="success" if best_scope == "Projekt" else "warning",
     )
 
+    ranked_model_keys: set[str] = set()
     for i, rep in enumerate(filtered_entries):
-        reference_name = str(getattr(rep, "reference_name", "") or "").strip()
-        if not reference_name:
-            reference_name = Path(str(getattr(rep, "reference_path", "") or "-")).name or "-"
         scope = entry_scope(rep)
         row_tags = ("leader",) if i == 0 else ("project" if scope == "Projekt" else "global",)
-        result_label, model_label, run = entry_labels(rep, scope)
+        result_label, _model_label, run = entry_labels(rep, scope)
+        score = float(getattr(rep, 'ranking_score', getattr(rep, 'f1_score', 0)) or 0)
+        precision = float(getattr(rep, 'precision', 0) or 0)
+        recall = float(getattr(rep, 'recall', 0) or 0)
         item_id = self.rank_tree.insert("", tk.END, values=(
             "WYGRANY" if i == 0 else f"#{i + 1}",
-            scope,
             result_label,
-            model_label,
-            f"{float(getattr(rep, 'f1_score', 0) or 0):.1f}%",
-            f"{float(getattr(rep, 'precision', 0) or 0):.1f}%",
-            f"{float(getattr(rep, 'recall', 0) or 0):.1f}%",
-            int(getattr(rep, 'total_images', 0) or 0),
-            reference_name,
+            scope,
+            ranking_date_label(rep),
+            f"{score:.1f}%",
+            f"{precision:.1f}/{recall:.1f}" if (precision > 0 or recall > 0) else "-",
             entry_decision(rep, scope, i),
         ), tags=row_tags)
         try:
@@ -2132,3 +2617,6 @@ def _load_ranking(self):
             }
         except Exception:
             pass
+        ranked_model_keys.add(model_path_key(getattr(rep, "model_path", "")))
+
+    insert_pending_candidate_rows(ranked_model_keys, start_index=len(filtered_entries) + 1)

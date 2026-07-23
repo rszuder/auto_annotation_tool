@@ -90,7 +90,7 @@ for definition in RESOURCE_DEFINITIONS.values():
         _ALIASES[str(alias).strip()] = definition.key
 
 
-RESOURCE_ORDER: Tuple[str, ...] = ("images", "plate_model", "char_model", "plate_run", "char_run")
+RESOURCE_ORDER: Tuple[str, ...] = ("images", "plate_run", "char_run", "plate_model", "char_model")
 
 
 def normalize_campaign_resource_key(key: str | None) -> str:

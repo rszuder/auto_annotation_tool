@@ -728,7 +728,17 @@ class CampaignTab:
             return False
 
         current = CAMPAIGN.get_master_pool_dir()
-        initial = current if current and current.exists() else Path(CONFIG.DIR_1_RAW)
+        initial = Path(CONFIG.DIR_1_RAW)
+        if current:
+            try:
+                current_path = Path(current)
+                if current_path.exists() and current_path.is_dir():
+                    parent = current_path.parent
+                    initial = parent if parent.exists() and parent.is_dir() else current_path
+                elif current_path.parent.exists() and current_path.parent.is_dir():
+                    initial = current_path.parent
+            except Exception:
+                initial = Path(CONFIG.DIR_1_RAW)
         dialog_title = "Wybierz obrazy tej iteracji"
         if not self._is_first_iteration_start_context():
             dialog_title = "Wybierz katalog głównej puli zdjęć dla aktywnego projektu"

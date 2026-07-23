@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from ..campaign_manager import CAMPAIGN
 from .z4_campaign_flow import return_to_campaign_from_step4
 from .web_slim_scrollbar import blend_hex_colors
-from .z2_shared_ui import campaign_visible_gate_id
+from .dataset_display import build_dataset_display_ref
 
 if TYPE_CHECKING:
     from .tab_training import TrainingTab
@@ -59,6 +59,18 @@ def _configure_step4_next_button(host: "TrainingTab", label: str, *, state=None)
 
 def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
     vm = host._get_step4_dataset_workflow_view_model()
+
+    def _dataset_ref_id(path_like, *, target_hint: str, counts: dict | None = None) -> str:
+        raw = str(path_like or "").strip()
+        if not raw:
+            return "-"
+        try:
+            return build_dataset_display_ref(raw, target_hint=target_hint, counts=counts).id
+        except Exception:
+            try:
+                return Path(raw).name
+            except Exception:
+                return raw
 
     def _refresh_creator_campaign_summary_table() -> None:
         frame = getattr(host, "creator_campaign_summary_frame", None)
@@ -204,6 +216,128 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             except Exception:
                 pass
 
+    def _refresh_split_campaign_summary_table() -> None:
+        frame = getattr(host, "split_campaign_summary_frame", None)
+        rows = getattr(host, "_split_campaign_summary_rows", None)
+        if frame is None or not rows:
+            return
+        if not bool(getattr(vm, "in_campaign", False)) or str(getattr(vm, "mode", "") or "") != "char":
+            _set_pack_visible(frame, False)
+            return
+
+        palette = getattr(host.app, "palette", {})
+        panel = palette.get("panel", "#252526")
+        panel_alt = palette.get("panel_alt", "#2d2d30")
+        field = palette.get("field", panel_alt)
+        border_base = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        fg = palette.get("fg", "#f3f3f3")
+        muted = palette.get("muted", "#c7c7c7")
+        success = palette.get("success", "#4ec9b0")
+        warning = palette.get("warning", "#d7ba7d")
+        accent = palette.get("accent", "#0e639c")
+        border = blend_hex_colors(success, border_base, 0.62)
+        header_bg = blend_hex_colors(success, panel_alt, 0.84)
+        row_alt = blend_hex_colors(panel_alt, panel, 0.45)
+
+        readiness = {}
+        try:
+            readiness = dict(host.get_campaign_step4_readiness(iteration_target="char") or {})
+        except Exception:
+            readiness = {}
+        source_dataset = str(readiness.get("source_dataset") or "").strip()
+        if not source_dataset:
+            try:
+                source_dataset = str(host.split_src_var.get() or "").strip()
+            except Exception:
+                source_dataset = ""
+        ready_dataset = str(readiness.get("ready_dataset") or "").strip()
+        train_count = int(readiness.get("train_images", 0) or 0)
+        val_count = int(readiness.get("val_images", 0) or 0)
+        test_count = int(readiness.get("test_images", 0) or 0)
+        counts = {
+            "train": train_count,
+            "val": val_count,
+            "test": test_count,
+            "total": train_count + val_count + test_count,
+        }
+        has_ready_variant = bool(ready_dataset and train_count > 0 and val_count > 0)
+        values = {
+            "source": _dataset_ref_id(source_dataset, target_hint="char"),
+            "variant": (
+                _dataset_ref_id(ready_dataset, target_hint="char", counts=counts)
+                if has_ready_variant
+                else "Jeszcze nie utworzono wariantu"
+            ),
+        }
+
+        try:
+            frame.configure(bg=border, highlightbackground=border, highlightcolor=border)
+            getattr(host, "split_campaign_summary_grid", frame).configure(bg=border)
+        except Exception:
+            pass
+        for widget in getattr(host, "_split_campaign_summary_header_widgets", ()) or ():
+            try:
+                widget.configure(bg=header_bg, fg=success, highlightbackground=border, highlightcolor=border)
+            except Exception:
+                pass
+
+        for index, (key, widgets) in enumerate(rows.items()):
+            label_widget, value_widget = widgets
+            bg = field if index % 2 == 0 else row_alt
+            try:
+                label_widget.configure(bg=bg, fg=muted, highlightbackground=border, highlightcolor=border)
+                if key == "split" and isinstance(value_widget, tk.Frame):
+                    value_widget.configure(bg=bg, highlightbackground=border, highlightcolor=border)
+                    for child in value_widget.winfo_children():
+                        child.destroy()
+                    line = tk.Frame(value_widget, bd=0, highlightthickness=0, bg=bg)
+                    line.pack(anchor=tk.W, fill=tk.X)
+
+                    def add_count(label: str, count: int, color: str, suffix: str = ""):
+                        tk.Label(
+                            line,
+                            text=label,
+                            font=("Segoe UI", 8),
+                            bg=bg,
+                            fg=fg,
+                            bd=0,
+                            highlightthickness=0,
+                        ).pack(side=tk.LEFT)
+                        tk.Label(
+                            line,
+                            text=str(max(0, int(count or 0))),
+                            font=("Segoe UI Semibold", 10),
+                            bg=bg,
+                            fg=color,
+                            bd=0,
+                            highlightthickness=0,
+                        ).pack(side=tk.LEFT)
+                        if suffix:
+                            tk.Label(
+                                line,
+                                text=suffix,
+                                font=("Segoe UI", 8),
+                                bg=bg,
+                                fg=fg,
+                                bd=0,
+                                highlightthickness=0,
+                            ).pack(side=tk.LEFT)
+
+                    add_count("train ", train_count, success, "  ")
+                    add_count("val ", val_count, warning, "  ")
+                    add_count("test ", test_count, accent, "")
+                    continue
+                value_widget.configure(
+                    text=str(values.get(key, "-") or "-"),
+                    bg=bg,
+                    fg=(success if key == "variant" and has_ready_variant else fg if key != "variant" else warning),
+                    highlightbackground=border,
+                    highlightcolor=border,
+                    wraplength=680,
+                )
+            except Exception:
+                pass
+
     try:
         route_manager = str(host.step4_route_panel_frame.winfo_manager())
     except Exception:
@@ -225,10 +359,9 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
     try:
         if vm.mode == "plate":
             if bool(vm.in_campaign):
-                finish_gate_id = campaign_visible_gate_id("T07") or "T06"
                 creator_intro = (
-                    f"Praca nad bramką {finish_gate_id}: utwórz wariant datasetu tablic z materiału projektu. "
-                    "Flow: 1. sprawdź materiał, 2. ustaw split, 3. opcjonalnie powiększ train, 4. utwórz wariant."
+                    "Utwórz wariant datasetu tablic z materiału projektu. "
+                    "PZ1 ustawia split i opcjonalnie powiększa część train."
                 )
             else:
                 creator_intro = (
@@ -237,7 +370,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             host._set_training_widget_text(host.creator_intro_lbl, creator_intro)
             host._set_training_widget_text(
                 host.btn_step4_create,
-                "Utwórz split treningowy",
+                "Utwórz wariant datasetu tablic",
             )
             try:
                 host._refresh_dataset_creator_cta_state()
@@ -369,12 +502,20 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             except Exception:
                 pass
             host._set_training_widget_text(host.split_source_summary_lbl, str(vm.split_summary or ""))
-            if str(host.split_source_summary_lbl.winfo_manager()) != "pack":
-                host.split_source_summary_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+            _refresh_split_campaign_summary_table()
+            _set_pack_visible(host.split_source_summary_lbl, False)
+            _set_pack_visible(
+                getattr(host, "split_campaign_summary_frame", None),
+                True,
+                fill=tk.X,
+                pady=(0, 8),
+                after=host.split_intro_lbl,
+            )
             split_aug_frame = getattr(host, "split_augmentation_frame", None)
             try:
+                split_summary_table = getattr(host, "split_campaign_summary_frame", None)
                 if bool(vm.show_split_details):
-                    _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=host.split_source_summary_lbl)
+                    _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=split_summary_table)
                     _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(0, 10), after=host.split_ratios_frame)
                     _set_pack_visible(host.btn_step4_split_frame, True, fill=tk.X, pady=(12, 10), after=(split_aug_frame or host.split_ratios_frame))
                 else:
@@ -404,6 +545,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 host._refresh_dataset_split_cta_state()
             except Exception:
                 pass
+            _set_pack_visible(getattr(host, "split_campaign_summary_frame", None), False)
             try:
                 host._step4_char_split_details_visible = False
                 if str(host.btn_step4_split_toggle.winfo_manager()) == "pack":
@@ -513,6 +655,10 @@ def refresh_step4_training_inputs_mode_ui(host: "TrainingTab"):
         "Od tego modelu zacznie się trening na wybranym datasecie. Możesz użyć modelu projektu, presetu albo własnego .pt."
         if bool(vm.in_campaign)
         else "Od tego modelu zacznie się trening na wybranym datasecie."
+    )
+    base_caption_text = (
+        "Wybierz model, od którego zacznie się nowy run. "
+        "To nie jest jeszcze wynik bramki."
     )
     host._set_training_widget_text(base_caption, base_caption_text)
 
@@ -1171,6 +1317,8 @@ def mark_step4_dataset_ready(
                 iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
             except Exception:
                 iteration_num = 1
+            payload["iteration"] = int(iteration_num)
+            payload["dataset_iteration"] = int(iteration_num)
             CAMPAIGN.upsert_iteration_state(
                 iteration_num=iteration_num,
                 updates={"step4_dataset": payload},

@@ -69,6 +69,16 @@ class TrainingRun:
     plots_dir: str = ""
     resource_report: str = ""
     resource_summary: str = ""
+
+    # Rodowód runu
+    lineage_mode: str = "new"
+    parent_run_id: str = ""
+    parent_model_path: str = ""
+    parent_model_name: str = ""
+    parent_model_target: str = ""
+    parent_dataset_path: str = ""
+    parent_best_map50: float = 0.0
+    parent_best_map50_95: float = 0.0
     
     def to_dict(self) -> Dict:
         return asdict(self)

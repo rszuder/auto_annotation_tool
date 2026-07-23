@@ -33,6 +33,7 @@ from . import campaign_ui_helpers
 from . import campaign_project_browser
 from . import campaign_model_status
 from .help_manager import HELP
+from .run_display import build_run_display_ref
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
@@ -1256,7 +1257,11 @@ def _get_project_start_effective_model_state(self, model_type: str) -> dict:
         detail_lines.append("Metryki: " + " | ".join(metric_parts))
     run_id = str(model_info.get("run_id") or "").strip()
     if run_id:
-        detail_lines.append(f"Trening: {run_id}")
+        try:
+            run_display = build_run_display_ref({"run_id": run_id}, kind_hint="training").id
+        except Exception:
+            run_display = run_id
+        detail_lines.append(f"Trening: {run_display}")
     created_at = str(model_info.get("finished_at") or model_info.get("created_at") or "").strip()
     if created_at:
         detail_lines.append(f"Data: {created_at}")
@@ -2639,12 +2644,29 @@ def _show_project_start_images_analysis_dialog(self, parent=None) -> None:
         pass
 
 def _get_project_start_effective_images_source(self) -> dict:
+    def _same_path(left, right) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return Path(left).resolve() == Path(right).resolve()
+        except Exception:
+            return str(left or "").strip().lower() == str(right or "").strip().lower()
+
     master_pool = CAMPAIGN.get_master_pool_dir()
     master_pool_exists = bool(master_pool and master_pool.exists() and master_pool.is_dir())
     master_pool_count = 0
     try:
         plan = getattr(self, "current_ingest_plan", None)
-        if isinstance(plan, dict) and int(plan.get("selected_total", 0) or 0) > 0:
+        plan_source = str(
+            (plan or {}).get("master_pool_dir")
+            or (plan or {}).get("source_dir")
+            or ""
+        ).strip() if isinstance(plan, dict) else ""
+        if (
+            isinstance(plan, dict)
+            and int(plan.get("selected_total", 0) or 0) > 0
+            and (not plan_source or _same_path(plan_source, master_pool))
+        ):
             master_pool_count = int(plan.get("raw_total", 0) or plan.get("selected_total", 0) or 0)
     except Exception:
         master_pool_count = 0
@@ -2661,7 +2683,16 @@ def _get_project_start_effective_images_source(self) -> dict:
                 )
             except Exception:
                 summary_matches = False
-            if summary_matches:
+            summary_source = str(
+                summary.get("master_pool_dir")
+                or summary.get("source_dir")
+                or ""
+            ).strip()
+            summary_source_matches = (
+                not master_pool_exists
+                or bool(summary_source and _same_path(summary_source, master_pool))
+            )
+            if summary_matches and summary_source_matches:
                 master_pool_count = int(summary.get("raw_total", 0) or summary.get("selected_total", 0) or 0)
 
     try:
@@ -2690,12 +2721,27 @@ def _get_project_start_effective_images_source(self) -> dict:
             else 0
         )
 
+    try:
+        step1_approved = str(CAMPAIGN.get_step1_status() or "").strip().lower() == "approved"
+    except Exception:
+        step1_approved = False
+    prefer_master_pool = bool(master_pool_exists and not step1_approved)
+
     effective_images_dir = (
+        master_pool
+        if prefer_master_pool
+        else
         Path(logical_iteration_dir)
         if iteration_images_count > 0 and logical_iteration_dir is not None
         else master_pool
     )
-    effective_images_count = iteration_images_count if iteration_images_count > 0 else master_pool_count
+    effective_images_count = (
+        master_pool_count
+        if prefer_master_pool
+        else iteration_images_count
+        if iteration_images_count > 0
+        else master_pool_count
+    )
     effective_images_exists = bool(
         effective_images_dir
         and Path(effective_images_dir).exists()

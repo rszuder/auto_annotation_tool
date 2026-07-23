@@ -279,7 +279,7 @@
     "full_help": "Uruchamia albo anuluje nowe porównanie modeli z głównej karty rankingu. Ustawienia źródeł zmieniasz osobno w Zaawansowanych."
   },
   "tr_rank_cat": {
-    "full_help": "Informacja, jaki typ modeli porównuje ranking. W obecnym workflow ranking dotyczy modeli tablic."
+    "full_help": "Informacja, jaki typ modeli porównuje ranking. Dla tablic używany jest run z poprawkami jako odniesienie, a dla znaków wspólny dataset YOLO Detect z plikiem data.yaml."
   },
   "tr_rank_conf": {
     "full_help": "Zaawansowane ustawienia źródeł rankingu. Wskazujesz tu modele i materiał odniesienia, ale samo porównanie uruchamiasz z głównej karty."

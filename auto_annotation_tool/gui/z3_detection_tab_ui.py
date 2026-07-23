@@ -1803,7 +1803,10 @@ def build_detection_tab(
 
     self.hybrid_box_backend_info_lbl = ttk.Label(
         self.hybrid_rescue_frame,
-        text="Włącz, jeśli finalny box do treningu ma pochodzić z YOLO, a nie z technicznego podziału OCR.",
+        text=(
+            "Włącz, jeśli finalny box do treningu ma pochodzić z YOLO, a nie z technicznego podziału OCR. "
+            "Ramki końcowe z YOLO nie nadpisują manuali: ręczne boxy są chronione, a automat uzupełnia tylko pozostałe miejsca."
+        ),
         style="PanelMuted.TLabel",
         wraplength=320,
         justify=tk.LEFT,

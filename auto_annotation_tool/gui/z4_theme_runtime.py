@@ -207,6 +207,55 @@ def apply_theme(self):
                 )
             except Exception:
                 pass
+    context_row = getattr(self, "train_base_context_row", None)
+    if context_row is not None:
+        try:
+            context_row.configure(bg=base_bg)
+        except Exception:
+            pass
+    try:
+        chip_bg = blend_hex_colors(palette.get("accent", "#0e639c"), base_bg, 0.84)
+        for chip in (getattr(self, "train_base_context_chips", {}) or {}).values():
+            try:
+                chip.configure(
+                    bg=chip_bg,
+                    fg=palette.get("fg", "#f3f3f3"),
+                    highlightbackground=section_border,
+                    highlightcolor=section_border,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+    combo_label = getattr(self, "train_base_combo_lbl", None)
+    if combo_label is not None:
+        try:
+            combo_label.configure(background=base_bg, foreground=palette.get("muted", "#c7c7c7"))
+        except Exception:
+            pass
+    summary_shell = getattr(self, "train_base_summary_shell", None)
+    if summary_shell is not None:
+        try:
+            summary_shell.configure(
+                bg=palette.get("panel", "#252526"),
+                highlightbackground=section_border,
+                highlightcolor=section_border,
+            )
+        except Exception:
+            pass
+    try:
+        for row_index, cell, cell_kind in getattr(self, "train_base_summary_cells", []) or []:
+            row_bg = (
+                palette.get("panel", "#252526")
+                if int(row_index) % 2 == 0
+                else palette.get("panel_alt", palette.get("panel", "#252526"))
+            )
+            cell.configure(
+                bg=row_bg,
+                fg=palette.get("muted", "#c7c7c7") if cell_kind == "key" else palette.get("fg", "#f3f3f3"),
+            )
+    except Exception:
+        pass
     for label_name in ("dataset_variant_title_lbl", "train_dataset_selected_path_lbl"):
         label = getattr(self, label_name, None)
         if label is None:

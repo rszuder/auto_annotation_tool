@@ -65,6 +65,9 @@ from . import campaign_stage_logic
 from . import campaign_navigation
 from . import campaign_iteration_flow
 from . import campaign_graph_actions
+from .dataset_display import build_dataset_display_ref
+from .model_display import build_model_display_ref
+from .run_display import build_run_display_ref
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -91,6 +94,74 @@ def _format_gate_work_suggestion_text(value) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def _campaign_dataset_display_id(path_like, *, target_hint: str | None = None, counts: dict | None = None) -> str:
+    raw = str(path_like or "").strip()
+    if not raw:
+        return ""
+    try:
+        return build_dataset_display_ref(raw, target_hint=target_hint, counts=counts).id
+    except Exception:
+        try:
+            return Path(raw).parent.name if Path(raw).name.lower() == "data.yaml" else Path(raw).name
+        except Exception:
+            return raw
+
+
+def _campaign_model_display_id(model_info, *, target_hint: str | None = None) -> str:
+    try:
+        return build_model_display_ref(model_info, target_hint=target_hint).id
+    except Exception:
+        if isinstance(model_info, dict):
+            for key in ("run_id", "id", "best_weights", "model_path", "path"):
+                raw = str(model_info.get(key, "") or "").strip()
+                if raw:
+                    try:
+                        return Path(raw).stem if key not in {"run_id", "id"} else raw
+                    except Exception:
+                        return raw
+        raw = str(model_info or "").strip()
+        if not raw:
+            return ""
+        try:
+            return Path(raw).stem
+        except Exception:
+            return raw
+
+
+def _campaign_run_display_id(run_info, *, kind_hint: str | None = None) -> str:
+    if isinstance(run_info, dict):
+        for key in ("run_name", "name", "run_id", "id"):
+            raw_direct = str(run_info.get(key, "") or "").strip()
+            if re.match(r"^(TRN|Z2|Z3|DST|RUN)-", raw_direct, re.IGNORECASE):
+                return raw_direct
+    else:
+        raw_direct = str(run_info or "").strip()
+        if re.match(r"^(TRN|Z2|Z3|DST|RUN)-", raw_direct, re.IGNORECASE):
+            return raw_direct
+    try:
+        return build_run_display_ref(run_info, kind_hint=kind_hint).id
+    except Exception:
+        if isinstance(run_info, dict):
+            for key in ("run_name", "name", "run_id", "id", "run_dir", "path", "output_dir"):
+                raw = str(run_info.get(key, "") or "").strip()
+                if raw:
+                    if re.match(r"^(TRN|Z2|Z3|DST|RUN)-", raw, re.IGNORECASE):
+                        return raw
+                    try:
+                        return Path(raw).name
+                    except Exception:
+                        return raw
+        raw = str(run_info or "").strip()
+        if not raw:
+            return ""
+        if re.match(r"^(TRN|Z2|Z3|DST|RUN)-", raw, re.IGNORECASE):
+            return raw
+        try:
+            return Path(raw).name
+        except Exception:
+            return raw
 
 
 def _is_t07_graph_edge(edge_key: str | None) -> bool:
@@ -204,7 +275,7 @@ def _format_char_dataset_resource_status(char_gate: dict | None) -> tuple[str, s
     counter = str(char_count) if ok and char_count > 0 else ""
 
     if ok:
-        source = Path(ready_dataset).name if ready_dataset else "Dataset znaków YOLO"
+        source = _campaign_dataset_display_id(ready_dataset, target_hint="char") if ready_dataset else "Dataset znaków YOLO"
         if reason == "source_dataset_ready_for_split":
             detail = (
                 "Gotowe: praca „Przygotuj dataset znaków w Z3” utworzyła źródłowy dataset znaków YOLO Detect. "
@@ -2231,16 +2302,34 @@ def _render_step1_route_actions(self, frame):
             iteration_num = 0
         if iteration_num <= 0:
             return {}
+
+        def _declared_dataset_iteration(record: dict) -> int:
+            if not isinstance(record, dict):
+                return 0
+            for field in ("dataset_iteration", "created_iteration", "iteration"):
+                try:
+                    value = int(record.get(field, 0) or 0)
+                except Exception:
+                    value = 0
+                if value > 0:
+                    return value
+            return 0
+
         try:
             iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=iteration_num) or {})
             record = dict(iteration_state.get("step4_dataset") or {})
         except Exception:
             record = {}
         if record:
+            record.setdefault("iteration", iteration_num)
             return record
         try:
             bundle = dict(CAMPAIGN.get_iteration_artifact_bundle(iteration_num=iteration_num) or {})
-            record = dict(bundle.get("step4_dataset") or {})
+            bundle_record = dict(bundle.get("step4_dataset") or {})
+            if _declared_dataset_iteration(bundle_record) == iteration_num:
+                record = bundle_record
+            else:
+                record = {}
         except Exception:
             record = {}
         return record
@@ -2711,6 +2800,9 @@ def _render_step1_route_actions(self, frame):
         session_time = _contract_time(session)
         session_state = str(session.get("state") or "").strip().lower()
         session_gate = str(session.get("working_gate_id") or "").strip().upper()
+        session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+        session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
+        session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
         session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
 
         def _contract_int(payload: dict, key: str) -> int:
@@ -2729,12 +2821,15 @@ def _render_step1_route_actions(self, frame):
             pz2_time
             and pz3_time
             and pz2_time > pz3_time + 0.001
-            and not (pz2_marker_only and pz2_same_export_scope)
+            and not (session_gate == "T06" and session_active and session_targets_pz2)
+            and not pz2_marker_only
         )
         stale_after_session = bool(
             session_gate == "T06"
             and session_active
             and session_state not in {"resolved", "closed", "complete", "completed"}
+            and not session_targets_pz2
+            and session_targets_pz3
             and (not pz3_time or not session_time or session_time > pz3_time + 0.001)
         )
         if stale_after_pz2 or stale_after_session:
@@ -2744,11 +2839,16 @@ def _render_step1_route_actions(self, frame):
                     session_time = _contract_time(session)
                     session_state = str(session.get("state") or "").strip().lower()
                     session_gate = str(session.get("working_gate_id") or "").strip().upper()
+                    session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+                    session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
+                    session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
                     session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
                     stale_after_session = bool(
                         session_gate == "T06"
                         and session_active
                         and session_state not in {"resolved", "closed", "complete", "completed"}
+                        and not session_targets_pz2
+                        and session_targets_pz3
                         and (not pz3_time or not session_time or session_time > pz3_time + 0.001)
                     )
                     if not stale_after_session:
@@ -3307,10 +3407,14 @@ def _render_step1_route_actions(self, frame):
             exported_gate = _t06_exported_char_dataset_state()
             ready_dataset = str(exported_gate.get("ready_dataset") or exported_gate.get("dataset_hint") or "").strip()
             pz3_export_ready = bool(exported_gate.get("ok") and ready_dataset)
+            session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+            session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
+            session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
             if (
                 pz3_export_ready
                 and session_gate_id == "T06"
                 and session_work_area == "z3"
+                and session_targets_pz3
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             ):
                 now = datetime.now().isoformat(timespec="seconds")
@@ -3326,6 +3430,31 @@ def _render_step1_route_actions(self, frame):
                 session_active = False
                 session_state = "completed"
             if pz3_export_ready:
+                if (
+                    session_active
+                    and session_gate_id == "T06"
+                    and session_work_area == "z3"
+                    and session_targets_pz2
+                    and session_state not in {"resolved", "closed", "complete", "completed"}
+                ):
+                    _t06_interrupted_work_cache = {
+                        "interrupted_work": True,
+                        "interrupted_kind": "z3",
+                        "work_area": "z3",
+                        "substep": "pz2",
+                        "valid_export_exists": True,
+                        "ready_dataset": ready_dataset,
+                        "dataset_hint": ready_dataset,
+                        "t06_work_session": dict(session or {}),
+                        "unpromoted_approved_images": 0,
+                        "unpromoted_approved_plates": 0,
+                        "interrupted_title": "Niedokończona korekta PZ2",
+                        "interrupted_detail": (
+                            "Gotowy eksport AZ nadal obowiązuje. Niedokończona korekta PZ2 jest szkicem roboczym: "
+                            "możesz ją kontynuować albo zatwierdzić bramkę na podstawie ostatniego eksportu."
+                        ),
+                    }
+                    return dict(_t06_interrupted_work_cache)
                 _t06_interrupted_work_cache = {}
                 return {}
             z3_session_touched = bool(
@@ -3685,7 +3814,10 @@ def _render_step1_route_actions(self, frame):
                 run_approved_images = max(int(run_approved_images or 0), pending_t05_images)
                 run_approved_plates = max(int(run_approved_plates or 0), pending_t05_plates)
                 try:
-                    run_approved_name = Path(pending_t05_state.get("run_dir", "")).name or run_approved_name
+                    run_approved_name = (
+                        _campaign_run_display_id({"run_dir": pending_t05_state.get("run_dir", "")}, kind_hint="annotation")
+                        or run_approved_name
+                    )
                 except Exception:
                     run_approved_name = run_approved_name or "przerwana praca T05"
         approved_images = int(project_approved_images or 0) + int(run_approved_images or 0)
@@ -3702,7 +3834,8 @@ def _render_step1_route_actions(self, frame):
                 f"ApprovedSet projektu: {project_approved_images} zdjęć / {project_approved_plates} tablic"
             )
         if run_approved_images > 0 or run_approved_plates > 0:
-            run_label = f" ({run_approved_name})" if run_approved_name else ""
+            display_run_name = _campaign_run_display_id({"run_name": run_approved_name}, kind_hint="annotation") if run_approved_name else ""
+            run_label = f" ({display_run_name or run_approved_name})" if run_approved_name else ""
             approved_source_parts.append(
                 f"bieżący run Z2{run_label}: {run_approved_images} zdjęć / {run_approved_plates} tablic"
             )
@@ -3767,10 +3900,10 @@ def _render_step1_route_actions(self, frame):
         elif training_candidate:
             candidate_target = str(training_candidate.get("target", "") or current_target).strip().lower()
             candidate_label = "model tablic" if candidate_target == "plate" else "model znaków" if candidate_target == "char" else "model"
-            candidate_run = str(training_candidate.get("run_id") or training_candidate.get("id") or "").strip()
+            candidate_model_id = _campaign_model_display_id(training_candidate, target_hint=candidate_target or current_target)
             candidate_weights = str(training_candidate.get("best_weights", "") or "").strip()
             candidate_name = Path(candidate_weights).name if candidate_weights else "best.pt"
-            training_source = f"Ukończony run: {candidate_run or candidate_name}"
+            training_source = f"Model do wyboru: {candidate_model_id or candidate_name}"
             training_validation = (
                 f"Wynik treningu istnieje ({candidate_label}: {candidate_name}), ale nie został jeszcze wybrany "
                 "jako wynik bramki. Wejdź w Praca -> Trenuj model i wybierz model projektu."
@@ -5506,9 +5639,27 @@ def _render_step1_route_actions(self, frame):
         t07_readiness_cache[cache_key] = dict(readiness)
         return readiness
 
-    def _t07_has_ready_dataset() -> bool:
+    def _t07_readiness_source_dataset_path() -> str:
         readiness = _t07_step4_readiness()
-        return bool(str(readiness.get("ready_dataset") or "").strip())
+        reason = str(readiness.get("reason") or "").strip().lower()
+        source = str(readiness.get("source_dataset") or "").strip()
+        if reason == "source_dataset_ready_for_split" and source:
+            return source
+        if _t07_target() != "char":
+            return ""
+        candidate = str(readiness.get("ready_dataset") or readiness.get("dataset_hint") or "").strip()
+        if not candidate:
+            return ""
+        try:
+            manifest_path = Path(candidate) / "metadata_manifest.json"
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                split_enabled = manifest.get("split_enabled")
+                if split_enabled is False or str(split_enabled).strip().lower() in {"false", "0", "no"}:
+                    return candidate
+        except Exception:
+            pass
+        return ""
 
     def _t07_has_current_iteration_dataset() -> bool:
         record = _current_iteration_step4_dataset_record()
@@ -5529,8 +5680,14 @@ def _render_step1_route_actions(self, frame):
             )
         return bool((dataset_path or yaml_path) and total_images > 0)
 
+    def _t07_has_ready_dataset() -> bool:
+        return _t07_has_current_iteration_dataset()
+
+    def _t07_has_source_dataset_for_split() -> bool:
+        return bool(_t07_readiness_source_dataset_path()) and not _t07_has_current_iteration_dataset()
+
     def _t07_blocks_training_before_dataset() -> bool:
-        return _t07_iteration_num() <= 1 and not _t07_has_ready_dataset()
+        return not _t07_has_current_iteration_dataset()
 
     t07_repair_interruption_cache: dict | None = None
     t07_pending_repair_cache: dict | None = None
@@ -5788,8 +5945,8 @@ def _render_step1_route_actions(self, frame):
                 return ("Ostatni trening nieudany. Powtórz trening albo zakończ iterację bez treningu.", "Trenuj model")
             if _t07_has_current_iteration_dataset():
                 return ("Zalecane: Trenuj model", "Trenuj model")
-            if _t07_has_ready_dataset():
-                return ("Zalecane: trenuj model; wariant datasetu jest już gotowy", "Trenuj model")
+            if _t07_has_source_dataset_for_split():
+                return ("Zalecane: utwórz wariant datasetu; źródło znaków jest gotowe", "Utwórz wariant datasetu")
             return ("Zalecane: przygotuj wariant datasetu", "Utwórz wariant datasetu")
 
         recommendation_text, recommended_label = _t07_recommendation()
@@ -5868,7 +6025,7 @@ def _render_step1_route_actions(self, frame):
             name = ""
             try:
                 raw_path = str(record.get("dataset_path") or record.get("yaml_path") or "").strip()
-                name = Path(raw_path).name if raw_path else ""
+                name = _campaign_dataset_display_id(raw_path, target_hint=_t07_target()) if raw_path else ""
             except Exception:
                 name = ""
             parts = []
@@ -5880,9 +6037,9 @@ def _render_step1_route_actions(self, frame):
 
         def _t07_training_status_text(finish_state: dict) -> str:
             target_label = "model tablic" if _t07_target() == "plate" else "model znaków"
-            run_id = str(finish_state.get("run_id", "") or "").strip()
-            if run_id:
-                return f"{target_label}: {run_id}"
+            model_id = _campaign_model_display_id(finish_state, target_hint=_t07_target())
+            if model_id:
+                return f"{target_label}: {model_id}"
             return f"{target_label} gotowy"
 
         def _step4_interrupted_work_kind() -> str:
@@ -5893,7 +6050,7 @@ def _render_step1_route_actions(self, frame):
                 return "dataset"
             if substep in {"pz2", "train", "training"}:
                 return "training"
-            if _t07_has_current_iteration_dataset() or _t07_has_ready_dataset():
+            if _t07_has_current_iteration_dataset():
                 return "training"
             return "dataset"
 
@@ -5958,11 +6115,11 @@ def _render_step1_route_actions(self, frame):
                         "tone": success,
                         "fill": 0.14,
                     }
-                if _t07_has_ready_dataset():
+                if _t07_has_source_dataset_for_split():
                     return {
                         "mark": "→",
-                        "title": "AWARYJNIE: PRZEBUDUJ",
-                        "detail": "wariant jest gotowy; wejdź tylko gdy chcesz zmienić split",
+                        "title": "ŹRÓDŁO GOTOWE",
+                        "detail": "utwórz wariant train/val/test",
                         "tone": success if is_recommended else muted,
                         "fill": 0.10 if is_recommended else 0.055,
                     }
@@ -5994,20 +6151,20 @@ def _render_step1_route_actions(self, frame):
                     }
                 candidate_state = _current_t07_training_candidate_state()
                 if candidate_state:
-                    run_id = str(candidate_state.get("run_id") or candidate_state.get("id") or "").strip()
+                    model_id = _campaign_model_display_id(candidate_state, target_hint=_t07_target())
                     return {
                         "mark": "→",
                         "title": "WYNIK DO WYBORU",
-                        "detail": f"{run_id}: wybierz model projektu" if run_id else "wybierz model projektu",
+                        "detail": f"{model_id}: wybierz model projektu" if model_id else "wybierz model projektu",
                         "tone": warning,
                         "fill": 0.12,
                     }
                 failed_state = _current_t07_training_failure_state()
                 if failed_state:
-                    run_id = str(failed_state.get("run_id") or failed_state.get("id") or "").strip()
+                    model_id = _campaign_model_display_id(failed_state, target_hint=_t07_target())
                     detail = "powtórz trening albo zakończ bez treningu"
-                    if run_id:
-                        detail = f"{run_id}: {detail}"
+                    if model_id:
+                        detail = f"{model_id}: {detail}"
                     return {
                         "mark": "!",
                         "title": "TRENING NIEUDANY",
@@ -6016,11 +6173,11 @@ def _render_step1_route_actions(self, frame):
                         "mark_tone": error,
                         "fill": 0.13,
                     }
-                if _t07_has_current_iteration_dataset() or _t07_has_ready_dataset():
+                if _t07_has_current_iteration_dataset():
                     return {
                         "mark": "→" if is_recommended else "○",
                         "title": "GOTOWE DO STARTU" if is_recommended else "CZEKA NA START",
-                        "detail": "wariant datasetu jest dostępny",
+                        "detail": "wariant tej iteracji jest dostępny",
                         "tone": success if is_recommended else muted,
                         "fill": 0.10 if is_recommended else 0.045,
                     }
@@ -6123,8 +6280,8 @@ def _render_step1_route_actions(self, frame):
                 warning_title = "Niedomknięty finał treningu Z4/PZ2"
                 finish_target = str(training_finish_state.get("target", "") or "").strip().lower()
                 finish_label = "model tablic" if finish_target == "plate" else "model znaków"
-                run_id = str(training_finish_state.get("run_id", "") or "").strip()
-                run_suffix = f" Run: {run_id}." if run_id else ""
+                model_id = _campaign_model_display_id(training_finish_state, target_hint=finish_target or _t07_target())
+                run_suffix = f" Model: {model_id}." if model_id else ""
                 warning_text = (
                     f"Wynik treningu ({finish_label}) jest już zapisany, ale nie został jeszcze utrwalony na bramce {display_gate_id}."
                     f"{run_suffix} Wróć do grafu i użyj pola Zatwierdź, aby zapisać finał tej iteracji."
@@ -6203,7 +6360,7 @@ def _render_step1_route_actions(self, frame):
             )
             disabled_reason = ""
             if normalized_label == "Trenuj model" and _t07_blocks_training_before_dataset():
-                disabled_reason = "Najpierw utwórz wariant datasetu"
+                disabled_reason = "Najpierw utwórz wariant datasetu w tej iteracji"
                 is_recommended = False
             if pending_repair_images > 0 and not (is_repair_settlement or is_repair_resume):
                 disabled_reason = "Najpierw rozlicz [OK]"
@@ -6422,8 +6579,32 @@ def _render_step1_route_actions(self, frame):
             return bool(pz2_contract.get("fulfilled") or legacy_pz2_done)
 
         def _t06_pz3_contract_ready() -> bool:
+            try:
+                if bool((pending_t06 or {}).get("valid_export_exists")):
+                    return True
+            except Exception:
+                pass
+            try:
+                pending_ready_dataset = str(
+                    (pending_t06 or {}).get("ready_dataset")
+                    or (pending_t06 or {}).get("dataset_hint")
+                    or ""
+                ).strip()
+                if pending_ready_dataset:
+                    return True
+            except Exception:
+                pass
             contracts = _t06_contracts()
             pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
+            pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+            dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
+            if bool(pz3_contract.get("fulfilled")) and dataset_raw and pz3_reason != "approve_step3_backfill":
+                try:
+                    dataset_path = Path(dataset_raw)
+                    if dataset_path.exists() and dataset_path.is_dir() and self._looks_like_campaign_char_dataset_dir(dataset_path):
+                        return True
+                except Exception:
+                    return True
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             return bool(gate.get("ok") and ready_dataset)
@@ -6443,6 +6624,18 @@ def _render_step1_route_actions(self, frame):
             if pending_substep in t06_pz2_substep_hints:
                 return True
             return not _t06_pending_z3_targets_pz3()
+
+        def _t06_pz2_draft_after_ready_export() -> bool:
+            if not (pending_z3_work and _t06_pending_z3_targets_pz2()):
+                return False
+            try:
+                if bool((pending_t06 or {}).get("valid_export_exists")):
+                    return True
+                if str((pending_t06 or {}).get("ready_dataset") or (pending_t06 or {}).get("dataset_hint") or "").strip():
+                    return True
+            except Exception:
+                pass
+            return bool(_t06_pz3_contract_ready())
 
         def _t06_plate_pool_summary() -> tuple[int, int]:
             nonlocal t06_pool_stats_cache
@@ -6488,8 +6681,28 @@ def _render_step1_route_actions(self, frame):
         t06_repair_material_state = _t06_repair_material_state()
         buttons = list(buttons or [])
 
+        def _t06_label_is_char_dataset_pz3(label: str) -> bool:
+            normalized = str(label or "").strip().lower()
+            return bool(
+                "pz3" in normalized
+                or "z3" in normalized
+                or "dataset znak" in normalized
+                or "datasetu znak" in normalized
+                or "źródłowy dataset" in normalized
+                or "zrodlowy dataset" in normalized
+                or (
+                    "az" in normalized
+                    and (
+                        "dataset" in normalized
+                        or "znak" in normalized
+                    )
+                )
+            )
+
         def _t06_label_is_char_pz2(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if _t06_label_is_char_dataset_pz3(normalized):
+                return False
             return bool(
                 "pz2" in normalized
                 and (
@@ -6502,6 +6715,8 @@ def _render_step1_route_actions(self, frame):
 
         def _t06_label_is_resume(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if _t06_label_is_char_dataset_pz3(normalized):
+                return False
             if _t06_label_is_char_pz2(normalized):
                 return False
             if "z2" in normalized:
@@ -6526,6 +6741,8 @@ def _render_step1_route_actions(self, frame):
 
         def _t06_label_is_z3(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if _t06_label_is_char_dataset_pz3(normalized):
+                return True
             if _t06_label_is_char_pz2(normalized):
                 return False
             if "z2" in normalized:
@@ -6609,6 +6826,11 @@ def _render_step1_route_actions(self, frame):
             z3_label = _t06_first_action_label(_t06_label_is_pz3_work)
             pz2_label = _t06_first_action_label(_t06_label_is_char_pz2)
             resume_label = _t06_first_action_label(_t06_label_is_resume)
+            if _t06_pz2_draft_after_ready_export():
+                return (
+                    "Bramka ma gotowy eksport AZ. Niedokończona korekta PZ2 jest opcjonalnym szkicem roboczym.",
+                    "",
+                )
             if pending_z3_work and _t06_pending_z3_targets_pz3() and z3_label:
                 return _t06_recommendation_for(z3_label)
             if pending_z3_work and _t06_pending_z3_targets_pz2() and pz2_label:
@@ -6658,7 +6880,13 @@ def _render_step1_route_actions(self, frame):
             if pending_work
             else f"Wybierz pracę {CHAR_WORK_GATE_DISPLAY_ID}. PZ2 służy do przygotowania anotacji znaków na tablicach, a PZ3 tworzy i eksportuje AZ wymagane do otwarcia bramki."
         )
-        if pending_z3_work and _t06_pending_z3_targets_pz2():
+        if _t06_pz2_draft_after_ready_export():
+            intro = (
+                f"Masz gotowy eksport AZ dla {CHAR_WORK_GATE_DISPLAY_ID}. "
+                "Przerwana korekta PZ2 jest tylko szkicem roboczym: możesz ją kontynuować, "
+                "ale możesz też zatwierdzić bramkę na podstawie ostatniego poprawnego eksportu."
+            )
+        elif pending_z3_work and _t06_pending_z3_targets_pz2():
             intro = (
                 f"Praca {CHAR_WORK_GATE_DISPLAY_ID} została przerwana w PZ2. "
                 "Wybierz krok 1, aby dokończyć anotacje znaków na tablicach."
@@ -6707,9 +6935,16 @@ def _render_step1_route_actions(self, frame):
         def _is_t06_z3_action(label: str) -> bool:
             return _t06_label_is_z3(label)
 
-        def _t06_action_status(normalized_label: str, *, disabled_reason: str, is_resume: bool, is_z3_action: bool, is_recommended: bool) -> dict:
+        def _t06_action_status(
+            normalized_label: str,
+            *,
+            disabled_reason: str,
+            is_resume: bool,
+            is_z3_action: bool,
+            is_char_pz2: bool,
+            is_recommended: bool,
+        ) -> dict:
             label_lower = str(normalized_label or "").strip().lower()
-            is_char_pz2 = _t06_label_is_char_pz2(normalized_label)
             if disabled_reason:
                 return {
                     "mark": "!",
@@ -6717,6 +6952,23 @@ def _render_step1_route_actions(self, frame):
                     "detail": campaign_ui_helpers._repair_polish_text(disabled_reason),
                     "tone": muted,
                     "fill": 0.055,
+                }
+            if _t06_pz2_draft_after_ready_export() and is_char_pz2:
+                return {
+                    "mark": "!",
+                    "title": "SZKIC: PZ2 PRZERWANE",
+                    "detail": "gotowy eksport AZ nadal obowiązuje",
+                    "tone": warning,
+                    "mark_tone": error,
+                    "fill": 0.14,
+                }
+            if _t06_pz2_draft_after_ready_export() and is_z3_action:
+                return {
+                    "mark": "✓",
+                    "title": "WYKONANE: AZ",
+                    "detail": "możesz przejrzeć albo utworzyć ponownie",
+                    "tone": success,
+                    "fill": 0.14,
                 }
             if pending_z3_work and _t06_pending_z3_targets_pz2() and is_char_pz2:
                 return {
@@ -6806,10 +7058,13 @@ def _render_step1_route_actions(self, frame):
                     "fill": 0.12,
                 }
             if is_z3_action and pz3_ready:
+                gate = _t06_char_gate()
+                ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+                dataset_id = _campaign_dataset_display_id(ready_dataset, target_hint="char") if ready_dataset else ""
                 return {
                     "mark": "✓",
                     "title": "WYKONANE: AZ",
-                    "detail": "dataset znaków gotowy",
+                    "detail": f"dataset znaków gotowy: {dataset_id}" if dataset_id else "dataset znaków gotowy",
                     "tone": success,
                     "fill": 0.14,
                 }
@@ -7129,6 +7384,14 @@ def _render_step1_route_actions(self, frame):
             is_resume = _is_t06_resume_action(normalized_label)
             is_z3_action = _is_t06_z3_action(normalized_label)
             is_char_pz2 = _t06_label_is_char_pz2(normalized_label)
+            if index == 1 and not is_z3_action:
+                is_char_pz2 = True
+                is_resume = False
+            elif index == 2:
+                is_z3_action = True
+                is_char_pz2 = False
+                is_resume = False
+            draft_after_ready_export = _t06_pz2_draft_after_ready_export()
             disabled_reason = ""
             if (
                 is_resume
@@ -7139,16 +7402,30 @@ def _render_step1_route_actions(self, frame):
             if (
                 is_z3_action
                 and not is_char_pz2
+                and not draft_after_ready_export
                 and not _t06_pz2_contract_ready()
+                and not _t06_pz3_contract_ready()
                 and not _t06_pending_z3_targets_pz3()
             ):
                 disabled_reason = "Najpierw przygotuj anotacje znaków w PZ2."
             is_enabled = not disabled_reason
             is_recommended = bool(recommended_label and normalized_label == recommended_label)
-            tone_color = success if (is_recommended or (pending_ok_work and is_z3_action)) else (warning if pending_work else (success if str(tone or "").strip() != "warning" else warning))
+            tone_color = (
+                success
+                if (
+                    is_recommended
+                    or (pending_ok_work and is_z3_action)
+                    or (draft_after_ready_export and is_z3_action)
+                )
+                else (warning if pending_work else (success if str(tone or "").strip() != "warning" else warning))
+            )
             row_bg = blend_hex_colors(field_bg, tone_color, 0.10 if (pending_work or is_recommended) else 0.045)
             btn_bg = blend_hex_colors(field_bg, tone_color, 0.22 if is_enabled else 0.10)
-            row_border = blend_hex_colors(tone_color, field_bg, 0.42 if is_recommended else (0.38 if pending_work and (is_resume or is_z3_action) else 0.20))
+            row_border = blend_hex_colors(
+                tone_color,
+                field_bg,
+                0.42 if is_recommended else (0.38 if pending_work and (is_resume or is_z3_action or is_char_pz2) else 0.20),
+            )
             if not is_enabled:
                 row_bg = blend_hex_colors(field_bg, muted, 0.045)
                 btn_bg = blend_hex_colors(field_bg, muted, 0.10)
@@ -7179,6 +7456,7 @@ def _render_step1_route_actions(self, frame):
                 disabled_reason=disabled_reason,
                 is_resume=is_resume,
                 is_z3_action=is_z3_action,
+                is_char_pz2=is_char_pz2,
                 is_recommended=is_recommended,
             )
             status_tone = str(status.get("tone") or muted)
@@ -7582,9 +7860,13 @@ def _render_step1_route_actions(self, frame):
                 _source, dataset_state, dataset_tone, _counter = _format_char_dataset_resource_status(gate)
                 if pz3_ready:
                     if pz3_contract_ok and str(pz3_contract.get("dataset_path") or "").strip():
+                        dataset_id = _campaign_dataset_display_id(
+                            str(pz3_contract.get("dataset_path") or ""),
+                            target_hint="char",
+                        )
                         pz3_state = (
                             "Kontrakt PZ3 spełniony: utworzono źródłowy dataset znaków. "
-                            f"Ścieżka: {Path(str(pz3_contract.get('dataset_path') or '')).name}."
+                            f"Dataset: {dataset_id or 'DS-ZN'}."
                         )
                     else:
                         pz3_state = dataset_state
@@ -7872,11 +8154,37 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             pass
 
+        show_t02_resource_map = any(
+            str(getattr(spec, "key", "") or "") == "e1_to_e3_char_from_ready_plates"
+            for spec in active_specs
+        )
+
+        def _resource_gate_display_id() -> str:
+            if len(active_specs) == 1:
+                try:
+                    visible = _visible_badge_id(getattr(active_specs[0], "badge_id", ""))
+                except Exception:
+                    visible = str(getattr(active_specs[0], "badge_id", "") or "").strip()
+                if visible:
+                    return visible
+            return "E1"
+
+        resource_gate_id = _resource_gate_display_id()
+        resource_modal_title = f"Zasoby bramki {resource_gate_id}" if resource_gate_id else "Zasoby bramki"
+
         dialog = tk.Toplevel(self.frame)
         try:
-            self.app.style_dialog_window(dialog, title="Zasoby E1", geometry="1240x620", parent=self.frame)
+            geometry = "1320x720" if show_t02_resource_map else "1320x640"
+            self.app.style_dialog_window(dialog, title=resource_modal_title, geometry=geometry, parent=self.frame)
         except Exception:
-            dialog.title("Zasoby E1")
+            dialog.title(resource_modal_title)
+        try:
+            dialog.resizable(True, True)
+            dialog.minsize(1060, 500)
+            if str(dialog.tk.call("tk", "windowingsystem") or "") == "win32":
+                dialog.wm_transient("")
+        except Exception:
+            pass
 
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
         if callable(build_surface):
@@ -7889,7 +8197,7 @@ def _render_step1_route_actions(self, frame):
         spec_title = active_specs[0].title if len(active_specs) == 1 else "E1"
         title_lbl = tk.Label(
             body,
-            text=f"Zasoby: {spec_title}",
+            text=f"Zasoby bramki {resource_gate_id}: {spec_title}",
             fg=fg,
             bg=body_bg,
             font=("Segoe UI", 12, "bold"),
@@ -7899,26 +8207,26 @@ def _render_step1_route_actions(self, frame):
         tk.Label(
             body,
             text=campaign_ui_helpers._repair_polish_text(
-                "Uzupełnij zasoby wymagane przez wybraną bramkę. Szczegóły stanu są w tabeli."
+                "Sprawdź wejścia bramki. Brakujące zasoby wybierasz bezpośrednio w tabeli."
             ),
             fg=muted,
             bg=body_bg,
             justify=tk.LEFT,
             anchor="w",
-            wraplength=1040,
+            wraplength=1120,
         ).pack(fill=tk.X, padx=14, pady=(0, 10))
 
-        if any(str(getattr(spec, "key", "") or "") == "e1_to_e3_char_from_ready_plates" for spec in active_specs):
+        if show_t02_resource_map:
             tk.Label(
                 body,
                 text=campaign_ui_helpers._repair_polish_text(
-                    "T03 wymaga istniejącego źródła tablic, najczęściej AT: anotacji tablic na zdjęciach. Katalog obrazów jest tylko źródłem pomocniczym do dopasowania materiału."
+                    f"{resource_gate_id}: wymagane są zgodne AT. Obrazy służą tylko do dopasowania importu i kontroli zgodności."
                 ),
                 fg=warning,
                 bg=body_bg,
                 justify=tk.LEFT,
                 anchor="w",
-                wraplength=1040,
+                wraplength=1120,
                 font=("Segoe UI", 8),
             ).pack(fill=tk.X, padx=14, pady=(0, 10))
 
@@ -8133,8 +8441,38 @@ def _render_step1_route_actions(self, frame):
             pass
         _draw_scope_switch("project")
 
+        dependency_map_state: dict[str, object] = {"canvas": None, "nodes": {}, "hover": ""}
+        if show_t02_resource_map:
+            map_shell = tk.Frame(
+                body,
+                bg=blend_hex_colors(body_bg, field_bg, 0.34),
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=blend_hex_colors(border, success, 0.22),
+                highlightcolor=blend_hex_colors(border, success, 0.22),
+            )
+            map_shell.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+            tk.Label(
+                map_shell,
+                text="Jak zasoby T02 są ze sobą powiązane",
+                fg=fg,
+                bg=str(map_shell.cget("bg") or body_bg),
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).pack(fill=tk.X, padx=10, pady=(8, 0))
+            dependency_canvas = tk.Canvas(
+                map_shell,
+                height=260,
+                bg=str(map_shell.cget("bg") or body_bg),
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            dependency_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
+            dependency_map_state["canvas"] = dependency_canvas
+
         table = tk.Frame(body, bg=body_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
-        table.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+        table.pack(fill=tk.X if show_t02_resource_map else tk.BOTH, expand=not show_t02_resource_map, padx=14, pady=(0, 10))
         table.grid_rowconfigure(0, weight=1)
         table.grid_columnconfigure(0, weight=1, minsize=0)
         table.grid_columnconfigure(1, weight=0, minsize=0)
@@ -8184,12 +8522,16 @@ def _render_step1_route_actions(self, frame):
             columns=resource_tree_columns,
             show="headings",
             selectmode="browse",
-            height=max(5, min(8, len(row_specs) + 1)),
+            height=5 if show_t02_resource_map else max(5, min(8, len(row_specs) + 1)),
         )
-        resource_scroll = ttk.Scrollbar(table, orient=tk.VERTICAL, command=resource_tree.yview)
-        resource_tree.configure(yscrollcommand=resource_scroll.set)
-        resource_tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
-        resource_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        resource_scroll = None
+        if show_t02_resource_map:
+            resource_tree.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
+        else:
+            resource_scroll = ttk.Scrollbar(table, orient=tk.VERTICAL, command=resource_tree.yview)
+            resource_tree.configure(yscrollcommand=resource_scroll.set)
+            resource_tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+            resource_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
         resource_tree_state["tree"] = resource_tree
         try:
             style = ttk.Style(resource_tree)
@@ -8209,15 +8551,15 @@ def _render_step1_route_actions(self, frame):
             resource_tree.configure(style="CampaignResourceAssets.Treeview")
         except Exception:
             pass
-        resource_widths = (44, 132, 92, 116, 212, 62, 66, 66)
+        resource_widths = (54, 190, 116, 220, 360, 74, 76, 86)
         for col_id, label, width in zip(resource_tree_columns, header_labels, resource_widths):
             resource_tree.heading(col_id, text=label)
             resource_tree.column(
                 col_id,
                 width=width,
-                minwidth=38,
+                minwidth=48,
                 anchor=("center" if col_id in {"status", "primary", "more", "clear"} else "w"),
-                stretch=(col_id in {"source", "validation"}),
+                stretch=(col_id in {"resource", "source", "validation"}),
             )
         try:
             resource_tree.tag_configure("disabled", foreground=muted_dim)
@@ -8225,6 +8567,7 @@ def _render_step1_route_actions(self, frame):
             resource_tree.tag_configure("ready", foreground=success)
             resource_tree.tag_configure("required_missing", foreground=palette.get("danger", palette.get("error", "#ff5a5f")))
             resource_tree.tag_configure("required_ready", foreground=success)
+            resource_tree.tag_configure("active_resource", background=blend_hex_colors(field_bg, success, 0.12))
         except Exception:
             pass
         resource_hover_state: dict[str, object] = {
@@ -9117,12 +9460,19 @@ def _render_step1_route_actions(self, frame):
                 "run_type": "",
                 "model": "",
                 "mtime": 0.0,
+                "xml_created_at": 0.0,
                 "error": "",
                 "is_import_shadow": False,
             }
             try:
                 stat = Path(xml_path).stat()
                 summary["mtime"] = float(getattr(stat, "st_mtime", 0.0) or 0.0)
+                summary["xml_created_at"] = float(
+                    getattr(stat, "st_birthtime", 0.0)
+                    or getattr(stat, "st_ctime", 0.0)
+                    or getattr(stat, "st_mtime", 0.0)
+                    or 0.0
+                )
             except Exception:
                 pass
 
@@ -9565,11 +9915,12 @@ def _render_step1_route_actions(self, frame):
             rows_frame.bind("<Configure>", _schedule_sync_scrollregion)
             canvas.bind("<Configure>", _schedule_sync_scrollregion)
 
-            column_weights = (5, 1, 2, 2, 1)
+            column_weights = (5, 1, 1, 2, 2, 1)
             for col, weight in enumerate(column_weights):
                 rows_frame.grid_columnconfigure(col, weight=weight, minsize=0)
             header = (
                 "Źródło\nAT",
+                "Data\nXML",
                 "Obrazy\nw zbiorze O",
                 "Pasujące",
                 "Niepasujące",
@@ -9577,19 +9928,20 @@ def _render_step1_route_actions(self, frame):
             )
             header_tooltips = {
                 0: "Źródło, z którego możemy pobrać anotacje tablic.",
-                1: "Liczba obrazów w aktualnym zbiorze O. Do tego zbioru porównujemy AT.",
-                2: (
+                1: "Data utworzenia pliku annotations.xml dla tego artefaktu AT.",
+                2: "Liczba obrazów w aktualnym zbiorze O. Do tego zbioru porównujemy AT.",
+                3: (
                     "Mamy obraz dla tych anotacji. Jeśli obraz nie był jeszcze zatwierdzony, "
                     "AT trafią do kontroli w Z2. Jeśli obraz był już [OK], pomijamy je, żeby nie dublować pracy."
                 ),
-                3: (
+                4: (
                     "Brakuje obrazu dla tych anotacji. Tych AT nie importujemy, "
                     "bo w aktualnym zbiorze O nie ma obrazu, którego dotyczą."
                 ),
-                4: "Wszystkie anotacje tablic znalezione w tym źródle.",
+                5: "Wszystkie anotacje tablic znalezione w tym źródle.",
             }
             header_bg2 = blend_hex_colors(field_bg, success, 0.10)
-            annotation_sort_state = {"column": 2 if expected_names else 4, "reverse": True}
+            annotation_sort_state = {"column": 3 if expected_names else 5, "reverse": True}
             selected_annotation_key_state: dict[str, str] = {"key": "", "painted_key": ""}
             annotation_row_widgets: dict[str, tuple[list[tk.Widget], str]] = {}
             annotation_header_widgets: dict[int, tk.Widget] = {}
@@ -9638,6 +9990,50 @@ def _render_step1_route_actions(self, frame):
             def _candidate_total_text(candidate: dict) -> str:
                 return f"{int(candidate.get('plates', 0) or 0)} AT"
 
+            def _candidate_xml_created_text(candidate: dict) -> str:
+                try:
+                    timestamp = float(candidate.get("xml_created_at") or candidate.get("mtime") or 0.0)
+                except Exception:
+                    timestamp = 0.0
+                if timestamp <= 0:
+                    return "-"
+                try:
+                    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return "-"
+
+            def _candidate_run_ref(candidate: dict):
+                try:
+                    return build_run_display_ref(
+                        {
+                            "run_dir": str(candidate.get("run_dir") or "").strip(),
+                            "path": str(candidate.get("xml_path") or "").strip(),
+                            "name": str(candidate.get("name") or "").strip(),
+                        },
+                        kind_hint="annotation",
+                    )
+                except Exception:
+                    return None
+
+            def _candidate_source_detail_text(candidate: dict) -> str:
+                ref = _candidate_run_ref(candidate)
+                display_id = str(getattr(ref, "id", "") or "").strip()
+                run_name = str(getattr(ref, "name", "") or candidate.get("name") or "").strip()
+                run_path = str(
+                    getattr(ref, "path", "")
+                    or candidate.get("run_dir")
+                    or candidate.get("xml_path")
+                    or ""
+                ).strip()
+                parts = []
+                if display_id:
+                    parts.append(f"ID: {display_id}")
+                if run_name:
+                    parts.append(f"Run: {run_name}")
+                if run_path:
+                    parts.append(f"Ścieżka: {run_path}")
+                return "\n".join(parts) if parts else "Kliknij wiersz, aby wybrać to źródło AT."
+
             def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
                 if col == 1:
                     return (
@@ -9679,6 +10075,11 @@ def _render_step1_route_actions(self, frame):
                 compatible_manual = int(candidate.get("compatible_manual", 0) or 0)
                 compatible_auto = int(candidate.get("compatible_auto", 0) or 0)
                 rejected_plates = max(0, int(candidate.get("plates", 0) or 0) - compatible_plates)
+                manual_note = (
+                    "\nM uwzgl\u0119dnia r\u0119czne decyzje zapisane w puli projektu."
+                    if int(candidate.get("manual_overlay", 0) or 0) > 0
+                    else ""
+                )
                 tooltip_map = {
                     0: "Kliknij wiersz, aby wybraÄ‡ to ĹşrĂłdĹ‚o AT.",
                     1: (
@@ -9720,24 +10121,28 @@ def _render_step1_route_actions(self, frame):
                     else ""
                 )
                 tooltip_map = {
-                    0: "Kliknij wiersz, aby wybra\u0107 to \u017ar\u00f3d\u0142o AT.",
+                    0: _candidate_source_detail_text(candidate),
                     1: (
+                        "Data utworzenia pliku annotations.xml.\n"
+                        f"W tabeli: {_candidate_xml_created_text(candidate)}."
+                    ),
+                    2: (
                         "To aktualny zbi\u00f3r obraz\u00f3w O. AT por\u00f3wnujemy z nim po nazwach obraz\u00f3w."
                         if expected_names
                         else "Najpierw wska\u017c zbi\u00f3r obraz\u00f3w O."
                     ),
-                    2: (
+                    3: (
                         f"Mamy obraz dla {compatible_plates} AT.\n"
                         f"Pasuj\u0105ce: M {compatible_manual} / A {compatible_auto}.\n"
                         f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
                         f"Pomijamy, bo ju\u017c [OK]: {approved_plates} AT."
                         f"{manual_note}"
                     ),
-                    3: (
+                    4: (
                         f"Brakuje obrazu dla {rejected_plates} AT.\n"
                         "Tych anotacji nie importujemy, bo nie ma do czego ich przypi\u0105\u0107."
                     ),
-                    4: "\u0141\u0105czna liczba AT w tym \u017ar\u00f3dle.",
+                    5: "\u0141\u0105czna liczba AT w tym \u017ar\u00f3dle.",
                 }
                 candidate_tooltip_cache[cache_key] = tooltip_map
                 return tooltip_map
@@ -9746,11 +10151,12 @@ def _render_step1_route_actions(self, frame):
                 return _candidate_tooltips_cached(candidate).get(col, "Kliknij wiersz, aby wybra\u0107 to \u017ar\u00f3d\u0142o AT.")
 
             def _candidate_source_text(candidate: dict, *, limit: int = 92) -> str:
-                name = str(candidate.get("name") or "-").strip() or "-"
-                path_text = str(candidate.get("model") or "").strip()
-                if not path_text:
-                    path_text = _short_path(candidate.get("run_dir", ""), limit)
-                return f"{name} | {path_text}" if path_text and path_text != "-" else name
+                ref = _candidate_run_ref(candidate)
+                display_id = str(getattr(ref, "id", "") or "").strip()
+                if not display_id:
+                    display_id = str(candidate.get("name") or "-").strip() or "-"
+                run_type = str(candidate.get("run_type") or "").strip()
+                return f"{display_id} | {run_type}" if run_type else display_id
 
             def _set_analysis_candidate(candidate: dict | None) -> None:
                 selected_candidate_state["candidate"] = candidate
@@ -9872,18 +10278,20 @@ def _render_step1_route_actions(self, frame):
                 if col == 0:
                     return str(candidate.get("name") or "").strip().lower()
                 if col == 1:
-                    return len(expected_names or set())
+                    return float(candidate.get("xml_created_at") or candidate.get("mtime") or 0.0)
                 if col == 2:
+                    return len(expected_names or set())
+                if col == 3:
                     return (
                         int(candidate.get("compatible_plates", 0) or 0),
                         int(candidate.get("compatible_images", 0) or 0),
                     )
-                if col == 3:
+                if col == 4:
                     return (
                         max(0, int(candidate.get("plates", 0) or 0) - int(candidate.get("compatible_plates", 0) or 0)),
                         max(0, int(candidate.get("images", 0) or 0) - int(candidate.get("compatible_images", 0) or 0)),
                     )
-                if col == 4:
+                if col == 5:
                     return int(candidate.get("plates", 0) or 0)
                 return ""
 
@@ -9908,7 +10316,7 @@ def _render_step1_route_actions(self, frame):
                     annotation_sort_state["reverse"] = not bool(annotation_sort_state.get("reverse"))
                 else:
                     annotation_sort_state["column"] = col
-                    annotation_sort_state["reverse"] = col in {2, 3, 4}
+                    annotation_sort_state["reverse"] = col in {1, 3, 4, 5}
                 _render_annotation_table()
                 try:
                     canvas.yview_moveto(0)
@@ -10496,14 +10904,14 @@ def _render_step1_route_actions(self, frame):
                 if table_width < 720:
                     table_width = 1180
                 table_width = max(900, table_width - 2)
-                min_widths = [400, 130, 225, 160, 110]
+                min_widths = [330, 136, 126, 225, 160, 110]
                 total_min = sum(min_widths)
                 if total_min >= table_width:
                     col_widths = list(min_widths)
                     table_width = total_min
                 else:
                     extra = table_width - total_min
-                    extra_weights = [7, 1, 2, 2, 1]
+                    extra_weights = [6, 1, 1, 2, 2, 1]
                     weight_sum = sum(extra_weights)
                     col_widths = [
                         min_widths[index] + int(extra * extra_weights[index] / weight_sum)
@@ -10603,6 +11011,7 @@ def _render_step1_route_actions(self, frame):
                     annotation_canvas_row_base[row_key] = base_bg
                     row_values = (
                         _candidate_source_text(candidate, limit=88),
+                        _candidate_xml_created_text(candidate),
                         resource_images_text,
                         _candidate_import_text(candidate),
                         _candidate_reject_text(candidate),
@@ -10612,9 +11021,9 @@ def _render_step1_route_actions(self, frame):
                         x0 = x_positions[col]
                         x1 = x0 + col_widths[col]
                         color = fg
-                        if col == 2 and expected_names:
+                        if col == 3 and expected_names:
                             color = success
-                        elif col == 3 and expected_names:
+                        elif col == 4 and expected_names:
                             color = error
                         cell_tags = row_tags + ("at_import_cell", f"at_import_cell_col_{col}")
                         canvas.create_text(
@@ -10624,7 +11033,7 @@ def _render_step1_route_actions(self, frame):
                             fill=color,
                             anchor="w",
                             justify=tk.LEFT,
-                            font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
+                            font=("Segoe UI", 8, "bold" if col in {3, 4, 5} else "normal"),
                             width=max(20, x1 - x0 - 2 * row_pad_x),
                             tags=cell_tags,
                         )
@@ -10865,6 +11274,67 @@ def _render_step1_route_actions(self, frame):
                 iid = ""
             return _row_key_from_resource_iid(iid)
 
+        def _resource_clear_unavailable_message(row_key: str) -> str:
+            normalized_key = str(row_key or "").strip()
+            if normalized_key == "char_run":
+                return "Import i odpinanie AZ nie jest jeszcze podłączone w zasobach E1."
+            if normalized_key == "plate_run":
+                try:
+                    snapshot = _snapshot_object("plate_run", campaign_resource_label("plate_run"))
+                    has_project_source = bool(
+                        snapshot.has_source
+                        or int(snapshot.counter_value or 0) > 0
+                        or str(snapshot.tone or "").strip().lower() == "success"
+                    )
+                except Exception:
+                    has_project_source = False
+                if has_project_source:
+                    return (
+                        "Ten wiersz pokazuje AT z projektu albo historii iteracji, a nie pojedyncze wskazanie do odpięcia. "
+                        "Możesz wskazać inne źródło AT przez Import."
+                    )
+                return "Nie ma ręcznie wskazanego importu AT do odpięcia."
+            if normalized_key == "images":
+                return "Nie ma wskazanego zbioru obrazów do odpięcia."
+            if normalized_key in {"plate_model", "char_model"}:
+                return "Nie ma wskazanego modelu do odpięcia."
+            return "Ta akcja nie jest teraz dostępna dla wybranego zasobu."
+
+        def _resource_clear_cell_text(row_key: str, *, enabled: bool, spec_enabled: bool) -> str:
+            if enabled:
+                return "[Wyczyść]"
+            if not spec_enabled:
+                return "-"
+            normalized_key = str(row_key or "").strip()
+            if normalized_key == "char_run":
+                return "planowane"
+            if normalized_key == "plate_run":
+                try:
+                    snapshot = _snapshot_object("plate_run", campaign_resource_label("plate_run"))
+                    has_project_source = bool(
+                        snapshot.has_source
+                        or int(snapshot.counter_value or 0) > 0
+                        or str(snapshot.tone or "").strip().lower() == "success"
+                    )
+                except Exception:
+                    has_project_source = False
+                return "z projektu" if has_project_source else "-"
+            return "-"
+
+        def _resource_source_table_text(row_key: str, source_text: str) -> str:
+            raw = str(source_text or "").strip()
+            if str(row_key or "").strip() != "plate_run" or not raw:
+                return raw
+            raw_lower = raw.lower()
+            looks_like_run = any(
+                token in raw_lower
+                for token in ("run_", "annotations.xml", "auto_annotation", "auto_annotations", "\\", "/")
+            )
+            if not looks_like_run:
+                return raw
+            display_id = _campaign_run_display_id({"run_dir": raw, "path": raw}, kind_hint="annotation")
+            return display_id or raw
+
         def _run_selected_resource_action(action_kind: str) -> None:
             row_key = _selected_resource_key()
             if not row_key:
@@ -10875,6 +11345,9 @@ def _render_step1_route_actions(self, frame):
                 _run_action(row_key, action_kind)
             else:
                 try:
+                    if action_kind == "clear":
+                        self.app.update_status(_resource_clear_unavailable_message(row_key), "warning")
+                        return
                     self.app.update_status("Ta akcja nie jest teraz dostępna dla wybranego zasobu.", "warning")
                 except Exception:
                     pass
@@ -10915,7 +11388,13 @@ def _render_step1_route_actions(self, frame):
             row_widgets = widgets.get(row_key, {}) if row_key else {}
             row_label = str(row_widgets.get("row_label") or row_key or "").strip()
             if row_label:
-                resource_action_var.set(f"Wybrany zasób: {row_label}")
+                clear_enabled = bool(row_key and actions.get((row_key, "clear"), False))
+                if row_key and not clear_enabled:
+                    resource_action_var.set(
+                        f"Wybrany zasób: {row_label}. {_resource_clear_unavailable_message(row_key)}"
+                    )
+                else:
+                    resource_action_var.set(f"Wybrany zasób: {row_label}")
             else:
                 resource_action_var.set("Zaznacz zasób w tabeli, a tutaj dostaniesz jawne przyciski pracy.")
             primary_label = str(row_widgets.get("primary_label") or "Akcja")
@@ -10926,9 +11405,14 @@ def _render_step1_route_actions(self, frame):
             }
             for action_kind, button in resource_action_buttons.items():
                 enabled = bool(row_key and actions.get((row_key, action_kind), False))
+                label_text = labels.get(action_kind, action_kind)
+                if action_kind == "clear" and row_key and not enabled:
+                    clear_label = _resource_clear_cell_text(row_key, enabled=False, spec_enabled=True)
+                    if clear_label not in {"", "-"}:
+                        label_text = clear_label
                 try:
                     button.config(
-                        text=labels.get(action_kind, action_kind),
+                        text=label_text,
                         bg=(
                             blend_hex_colors(field_bg, success, 0.16)
                             if enabled
@@ -10957,6 +11441,21 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 pass
 
+        def _refresh_resource_active_tree_tags() -> None:
+            tree = resource_tree_state.get("tree")
+            if tree is None:
+                return
+            selected_key = str(resource_tree_state.get("selected_key") or "").strip()
+            try:
+                for iid in tree.get_children(""):
+                    row_key = _row_key_from_resource_iid(str(iid))
+                    tags = tuple(tag for tag in tree.item(iid, "tags") if str(tag) != "active_resource")
+                    if row_key and row_key == selected_key:
+                        tags = tuple(tags) + ("active_resource",)
+                    tree.item(iid, tags=tags)
+            except Exception:
+                pass
+
         def _set_active_resource_row(row_id: str) -> str:
             tree = resource_tree_state.get("tree")
             row_key = _row_key_from_resource_iid(row_id)
@@ -10968,7 +11467,298 @@ def _render_step1_route_actions(self, frame):
                 except Exception:
                     pass
             _clear_resource_tree_selection()
+            _refresh_resource_active_tree_tags()
+            try:
+                _draw_t02_resource_map()
+            except Exception:
+                pass
             return row_key
+
+        def _t02_resource_snapshot_state(row_key: str) -> tuple[bool, bool, str, str]:
+            try:
+                label = campaign_resource_label(row_key, row_key)
+                snapshot = _snapshot_object(row_key, label)
+                requirement = _resource_requirement(row_key, str(getattr(snapshot, "requirement", "") or ""))
+                required = str(requirement or "").strip().lower() in {
+                    "required",
+                    "route_required",
+                    "route_required_plate",
+                    "route_required_char",
+                }
+                present = _snapshot_fulfills_requirement(snapshot, required=bool(required))
+                tone = str(getattr(snapshot, "tone", "") or "").strip().lower()
+                counter = str(getattr(snapshot, "counter_text", "") or "").strip()
+                return bool(present), bool(required), tone, counter
+            except Exception:
+                return False, False, "muted", ""
+
+        def _t02_resource_map_text(row_key: str) -> str:
+            return {
+                "input_bundle": "Komplet O + AT jest wymaganym wejściem T02: obrazy i zgodne anotacje tablic muszą pasować do siebie.",
+                "images": "O jest bazą dopasowania. AT musi odnosić się do obrazów projektu.",
+                "plate_run": "AT to część kompletu wymaganego. Bez zgodnych anotacji tablic T02 nie ma sensownego wejścia do znaków.",
+                "char_run": "AZ jest opcjonalnym przyspieszeniem: jeśli pasuje, można odtworzyć wcześniejsze boksy znaków.",
+                "plate_model": "MT nie jest częścią skrótu T02. Może być zasobem projektu, ale nie zastępuje kompletu O + AT.",
+                "char_model": "MZ może pomagać przy pracy nad znakami na wyodrębnionych tablicach, ale nie otwiera T02 bez O + AT.",
+                "plates": "Wyodrębnione tablice powstają z kompletu O + AT. To materiał wejściowy do pracy nad znakami.",
+                "dataset": "Dataset znaków powstaje później, po przygotowaniu lub imporcie anotacji znaków.",
+            }.get(str(row_key or ""), "")
+
+        def _select_t02_resource_from_map(row_key: str) -> None:
+            if row_key not in {"images", "plate_run", "char_run", "plate_model", "char_model"}:
+                try:
+                    self.app.update_status(_t02_resource_map_text(row_key), "info")
+                except Exception:
+                    pass
+                return
+            iid = f"resource:{row_key}"
+            _set_active_resource_row(iid)
+            _refresh_resource_action_bar()
+            try:
+                tree = resource_tree_state.get("tree")
+                if tree is not None:
+                    tree.see(iid)
+            except Exception:
+                pass
+            try:
+                self.app.update_status(_t02_resource_map_text(row_key), "info")
+            except Exception:
+                pass
+
+        def _draw_t02_resource_map(*_args) -> None:
+            if not show_t02_resource_map:
+                return
+            canvas = dependency_map_state.get("canvas")
+            if canvas is None:
+                return
+            try:
+                canvas.delete("all")
+                width = max(760, int(canvas.winfo_width() or canvas.winfo_reqwidth() or 1120))
+                height = max(240, int(canvas.winfo_height() or 260))
+                selected_key = str(resource_tree_state.get("selected_key") or "").strip()
+                bg = str(canvas.cget("bg") or body_bg)
+                line_color = blend_hex_colors(accent, muted, 0.32)
+                disabled_line = blend_hex_colors(muted, bg, 0.55)
+                node_h = max(60, min(68, int(height * 0.25)))
+                node_w = node_h + 8
+                bundle_h = node_h + 44
+                y_main = max(16, min(34, int(height * 0.08)))
+                bundle_w = max(276, min(368, int(width * 0.32)))
+                plate_w = node_w
+                az_w = node_w
+                dataset_w = node_w
+                available_gap = width - 44 - bundle_w - plate_w - az_w - dataset_w
+                gap = max(34, min(132, int(available_gap / 3)))
+                total_map_w = bundle_w + plate_w + az_w + dataset_w + gap * 3
+                start_x = max(22, int((width - total_map_w) / 2))
+                bundle_x = start_x
+                plates_x = bundle_x + bundle_w + gap
+                az_x = plates_x + plate_w + gap
+                dataset_x = az_x + az_w + gap
+                y_support = min(
+                    height - node_h - 10,
+                    max(y_main + bundle_h + 46, int(height * 0.78)),
+                )
+
+                def _state_for(key: str) -> tuple[str, str, str]:
+                    if key in {"plates", "dataset"}:
+                        at_present, _at_required, _at_tone, _at_counter = _t02_resource_snapshot_state("plate_run")
+                        az_present, _az_required, _az_tone, _az_counter = _t02_resource_snapshot_state("char_run")
+                        if key == "plates":
+                            return ("success" if at_present else "muted", "", "")
+                        return ("success" if az_present else "info", "", "")
+                    if key == "input_bundle":
+                        image_present, _image_required, _image_tone, _image_counter = _t02_resource_snapshot_state("images")
+                        at_present, _at_required, _at_tone, _at_counter = _t02_resource_snapshot_state("plate_run")
+                        if image_present and at_present:
+                            return ("success", "komplet", "")
+                        return ("error", "brakuje", "")
+                    present, required, tone, counter = _t02_resource_snapshot_state(key)
+                    if present:
+                        return ("success", "jest", counter)
+                    if required:
+                        return ("error", "brak", counter)
+                    return ("info" if key in {"plate_model", "char_model", "char_run"} else "muted", "opcjonalne", counter)
+
+                def _tone_colors(tone_name: str) -> tuple[str, str, str]:
+                    normalized = str(tone_name or "").strip().lower()
+                    if normalized == "success":
+                        base = success
+                    elif normalized in {"error", "warning"}:
+                        base = palette.get("danger", palette.get("error", "#ff5a5f")) if normalized == "error" else warning
+                    elif normalized == "info":
+                        base = accent
+                    else:
+                        base = muted
+                    return (
+                        blend_hex_colors(field_bg, base, 0.13),
+                        blend_hex_colors(base, fg, 0.18),
+                        base,
+                    )
+
+                def _node(
+                    x: int,
+                    y: int,
+                    key: str,
+                    title: str,
+                    subtitle: str = "",
+                    *,
+                    virtual: bool = False,
+                    width_value: int | None = None,
+                ) -> int:
+                    current_w = int(width_value or node_w)
+                    tone_name, status_label, counter = _state_for(key)
+                    fill, outline, label_color = _tone_colors(tone_name)
+                    is_selected = bool(selected_key == key or (key == "plates" and selected_key == "plate_run"))
+                    if virtual and tone_name == "muted":
+                        label_color = muted
+                    tag = f"t02_map:{key}"
+                    canvas.create_rectangle(
+                        x,
+                        y,
+                        x + current_w,
+                        y + node_h,
+                        fill=fill,
+                        outline=(success if is_selected else outline),
+                        width=2 if is_selected else 1,
+                        tags=("t02_resource_map", tag),
+                    )
+                    canvas.create_text(
+                        x + current_w / 2,
+                        y + node_h / 2 - 9,
+                        text=campaign_ui_helpers._repair_polish_text(title),
+                        fill=label_color,
+                        font=("Segoe UI", 8, "bold"),
+                        anchor=tk.CENTER,
+                        width=current_w - 8,
+                        tags=("t02_resource_map", tag),
+                    )
+                    detail = subtitle
+                    if status_label:
+                        detail = f"{status_label}{(' | ' + counter) if counter else ''}"
+                    canvas.create_text(
+                        x + current_w / 2,
+                        y + node_h / 2 + 12,
+                        text=campaign_ui_helpers._repair_polish_text(detail),
+                        fill=fg if tone_name == "success" else muted,
+                        font=("Segoe UI", 7),
+                        anchor=tk.CENTER,
+                        width=current_w - 8,
+                        tags=("t02_resource_map", tag),
+                    )
+                    tooltip = _t02_resource_map_text(key)
+                    canvas.tag_bind(tag, "<Button-1>", lambda _event, value=key: _select_t02_resource_from_map(value))
+                    canvas.tag_bind(tag, "<Enter>", lambda _event, value=tooltip: self.app.update_status(value, "info"))
+                    return current_w
+
+                def _input_bundle(x: int, y: int) -> None:
+                    tone_name, status_label, _counter = _state_for("input_bundle")
+                    fill, outline, label_color = _tone_colors(tone_name)
+                    selected_bundle = selected_key in {"images", "plate_run"}
+                    tag = "t02_map:input_bundle"
+                    canvas.create_rectangle(
+                        x,
+                        y,
+                        x + bundle_w,
+                        y + bundle_h,
+                        fill=fill,
+                        outline=(success if selected_bundle else outline),
+                        width=2 if selected_bundle else 1,
+                        tags=("t02_resource_map", tag),
+                    )
+                    canvas.create_text(
+                        x + 10,
+                        y + 10,
+                        text=campaign_ui_helpers._repair_polish_text("Komplet wymagany"),
+                        fill=label_color,
+                        font=("Segoe UI", 8, "bold"),
+                        anchor=tk.W,
+                        tags=("t02_resource_map", tag),
+                    )
+                    canvas.create_text(
+                        x + bundle_w - 10,
+                        y + 10,
+                        text=campaign_ui_helpers._repair_polish_text(status_label),
+                        fill=label_color,
+                        font=("Segoe UI", 7, "bold"),
+                        anchor=tk.E,
+                        tags=("t02_resource_map", tag),
+                    )
+                    inner_y = y + 34
+                    relation_w = 48
+                    inner_w = node_w
+                    left_x = x + max(12, int((bundle_w - (inner_w * 2) - relation_w) / 2))
+                    right_x = left_x + inner_w + relation_w
+                    _node(left_x, inner_y, "images", "O", "obrazy", width_value=inner_w)
+                    _node(right_x, inner_y, "plate_run", "AT", "tablice", width_value=inner_w)
+                    canvas.create_line(
+                        left_x + inner_w + 6,
+                        inner_y + node_h // 2,
+                        right_x - 6,
+                        inner_y + node_h // 2,
+                        fill=success,
+                        width=2,
+                        arrow=tk.BOTH,
+                        arrowshape=(7, 8, 3),
+                        tags=("t02_resource_map", tag),
+                    )
+                    tooltip = _t02_resource_map_text("input_bundle")
+                    canvas.tag_bind(tag, "<Button-1>", lambda _event: self.app.update_status(tooltip, "info"))
+                    canvas.tag_bind(tag, "<Enter>", lambda _event, value=tooltip: self.app.update_status(value, "info"))
+
+                def _arrow(x0: int, y0: int, x1: int, y1: int, *, active: bool = True) -> None:
+                    canvas.create_line(
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        fill=line_color if active else disabled_line,
+                        width=2,
+                        arrow=tk.LAST,
+                        arrowshape=(8, 9, 3),
+                        tags=("t02_resource_map",),
+                    )
+
+                main_y = y_main
+                main_mid_y = main_y + bundle_h // 2
+                _input_bundle(bundle_x, main_y)
+                _arrow(bundle_x + bundle_w + 5, main_mid_y, plates_x - 5, main_mid_y)
+                _node(plates_x, main_mid_y - node_h // 2, "plates", "Tablice", "wyodr.", virtual=True, width_value=plate_w)
+                _arrow(plates_x + plate_w + 5, main_mid_y, az_x - 5, main_mid_y)
+                _node(az_x, main_mid_y - node_h // 2, "char_run", "AZ", "znaki", width_value=az_w)
+                _arrow(az_x + az_w + 5, main_mid_y, dataset_x - 5, main_mid_y)
+                _node(dataset_x, main_mid_y - node_h // 2, "dataset", "Dataset", "dalej", virtual=True, width_value=dataset_w)
+
+                model_w = node_w
+                mz_x = max(12, min(width - model_w - 12, plates_x + int((plate_w - model_w) / 2)))
+                mt_x = max(12, min(width - model_w - 12, bundle_x + int((bundle_w - model_w) / 2)))
+                _node(mt_x, y_support, "plate_model", "MT", "poza T02", virtual=False, width_value=model_w)
+                _node(mz_x, y_support, "char_model", "MZ", "wsparcie", virtual=False, width_value=model_w)
+                _arrow(mz_x + model_w // 2, y_support, plates_x + plate_w // 2, main_y + bundle_h + 4, active=False)
+
+                canvas.create_text(
+                    width - 10,
+                    main_y + 10,
+                    text="kliknij kafel, aby wskazać wiersz tabeli",
+                    fill=muted,
+                    font=("Segoe UI", 7),
+                    anchor=tk.E,
+                    tags=("t02_resource_map",),
+                )
+            except Exception:
+                pass
+
+        try:
+            canvas = dependency_map_state.get("canvas")
+            if canvas is not None:
+                canvas.bind("<Configure>", _draw_t02_resource_map, add="+")
+                canvas.bind(
+                    "<Leave>",
+                    lambda _event: self.app.update_status("", "info") if hasattr(self.app, "update_status") else None,
+                    add="+",
+                )
+        except Exception:
+            pass
 
         def _hide_resource_hover_cell() -> None:
             label = resource_hover_state.get("label")
@@ -11142,7 +11932,12 @@ def _render_step1_route_actions(self, frame):
                     _run_action(row_key, action_kind)
                 else:
                     try:
-                        self.app.update_status("Ta akcja nie jest teraz dostępna dla wybranego zasobu.", "warning")
+                        message = (
+                            _resource_clear_unavailable_message(row_key)
+                            if action_kind == "clear"
+                            else "Ta akcja nie jest teraz dostępna dla wybranego zasobu."
+                        )
+                        self.app.update_status(message, "warning")
                     except Exception:
                         pass
             except Exception:
@@ -11291,7 +12086,8 @@ def _render_step1_route_actions(self, frame):
                     tone_color = muted_dim
                     fulfillment_color = muted_dim
                 try:
-                    source_text = str(snap.get("source") or "Nie wskazano")
+                    source_full_text = str(snap.get("source") or "Nie wskazano")
+                    source_text = _resource_source_table_text(row_key, source_full_text)
                     validation_text = str(snap.get("validation") or "Brak")
                     if annotation_dependency_blocked:
                         validation_text = _annotation_dependency_message(row_key)
@@ -11299,7 +12095,7 @@ def _render_step1_route_actions(self, frame):
                     row_widgets["primary_label"] = primary_label
                     row_widgets["source_full_text"] = (
                         resource_cell_detail_overrides.get((row_key, "source"))
-                        or source_text
+                        or source_full_text
                     )
                     row_widgets["validation_full_text"] = validation_text
                     row_widgets["row_label"] = display_label
@@ -11322,7 +12118,11 @@ def _render_step1_route_actions(self, frame):
                             shorten(validation_text, width=64, placeholder="..."),
                             f"[{primary_label}]" if primary_enabled else "-",
                             "[Więcej]" if more_enabled else "-",
-                            "[Wyczyść]" if clear_enabled else "-",
+                            _resource_clear_cell_text(
+                                row_key,
+                                enabled=bool(clear_enabled),
+                                spec_enabled=bool(spec_enabled),
+                            ),
                         )
                         if iid not in tree_items:
                             tree.insert("", "end", iid=iid, values=values)
@@ -11366,7 +12166,9 @@ def _render_step1_route_actions(self, frame):
                                 tree.focus(iid)
                                 break
                     _clear_resource_tree_selection()
+                    _refresh_resource_active_tree_tags()
                     _refresh_resource_action_bar()
+                    _draw_t02_resource_map()
                 except Exception:
                     pass
             if not refresh_gate:
@@ -11406,7 +12208,7 @@ def _render_step1_route_actions(self, frame):
                 pass
 
         footer = tk.Frame(body, bg=body_bg)
-        footer.pack(fill=tk.X, padx=14, pady=(0, 14))
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 14))
         tk.Button(
             footer,
             text="Odśwież",
@@ -11432,7 +12234,10 @@ def _render_step1_route_actions(self, frame):
 
         _refresh_rows()
         try:
-            dialog.transient(self.frame)
+            if str(dialog.tk.call("tk", "windowingsystem") or "") != "win32":
+                dialog.transient(self.frame)
+            else:
+                dialog.wm_transient("")
             dialog.grab_set()
         except Exception:
             pass
@@ -11564,7 +12369,7 @@ def _render_step1_route_actions(self, frame):
             if _is_t07_graph_edge(current_edge_key) and graph_action == "open_z4" and _t07_blocks_training_before_dataset():
                 try:
                     self.app.update_status(
-                        "W pierwszej iteracji najpierw przygotuj wariant treningowy train/val/test.",
+                        "Najpierw przygotuj wariant treningowy train/val/test dla bieżącej iteracji.",
                         "warning",
                     )
                 except Exception:
@@ -11689,7 +12494,7 @@ def _render_step1_route_actions(self, frame):
                     elif graph_action == "open_z4_dataset":
                         label = (
                             "Przebuduj wariant datasetu"
-                            if (_t07_has_current_iteration_dataset() or _t07_has_ready_dataset())
+                            if _t07_has_current_iteration_dataset()
                             else "Utwórz wariant datasetu"
                         )
                     elif graph_action == "prepare_step4_without_training":
