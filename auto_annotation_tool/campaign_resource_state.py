@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .campaign_resource_catalog import (
@@ -33,6 +33,7 @@ class CampaignResourceSnapshot:
     tone: str = "muted"
     counter_text: str = ""
     description: str = ""
+    meta: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def counted(self) -> bool:
@@ -72,7 +73,7 @@ class CampaignResourceSnapshot:
     def is_enabled(self) -> bool:
         return str(self.requirement or "").strip().lower() != "disabled"
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "canonical_key": self.canonical_key,
@@ -86,6 +87,7 @@ class CampaignResourceSnapshot:
             "counter": self.counter_text,
             "counter_value": str(self.counter_value),
             "description": self.description,
+            "meta": dict(self.meta or {}),
         }
 
 
@@ -137,6 +139,11 @@ def build_campaign_resource_snapshot(
     requirement = str(row_data.get("requirement") or fallback_requirement or "optional").strip().lower()
     tone = str(row_data.get("tone") or fallback_tone or "muted").strip().lower() or "muted"
     counter_text = str(row_data.get("counter_text") or "").strip()
+    meta = row_data.get("meta")
+    if not isinstance(meta, Mapping):
+        meta = row_data.get("resource_meta")
+    if not isinstance(meta, Mapping):
+        meta = {}
     return CampaignResourceSnapshot(
         key=key,
         canonical_key=canonical_key,
@@ -148,4 +155,5 @@ def build_campaign_resource_snapshot(
         tone=tone,
         counter_text=counter_text,
         description=campaign_resource_description(canonical_key),
+        meta=dict(meta),
     )

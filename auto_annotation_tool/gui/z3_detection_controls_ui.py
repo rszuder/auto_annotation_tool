@@ -36,6 +36,54 @@ def compose_detection_method_status(host, detail: str | None = None) -> str:
     return f"{base} | {detail_text}"
 
 
+def compose_detection_run_model_info(host) -> tuple[str, str]:
+    method_key = str(host._get_detection_method_key() or "OCR").strip().upper()
+    uses_yolo = method_key in ("YOLO", "BOTH", "YOLO_OCR")
+    method_label = host._get_detection_method_status_label()
+    pipeline_label = host._get_detection_pipeline_short_label(method_key)
+    model_path = str(host._get_effective_yolo_model_path() or "").strip()
+
+    detector_label = "nieużywany w pipeline OCR"
+    map_label = "-"
+    tone = "muted"
+
+    if model_path and Path(model_path).exists():
+        stats = {}
+        try:
+            from .z3_detection_model_ui import get_detection_model_quick_stats
+
+            stats = get_detection_model_quick_stats(model_path)
+        except Exception:
+            stats = {}
+
+        detector_label = str(stats.get("identity") or "").strip()
+        version, size = host._infer_yolo_arch_from_model_path(model_path)
+        if not detector_label and version and size:
+            detector_label = f"YOLOv{version}{size}"
+        if not detector_label:
+            detector_label = "YOLO"
+        map_label = str(stats.get("map50_95_text") or "-").strip() or "-"
+        if version and size:
+            detector_label = detector_label if f"{version}{size}" in detector_label.lower() else f"{detector_label} ({version}{size})"
+        if uses_yolo:
+            tone = "success"
+        else:
+            detector_label = f"{detector_label} (nieaktywny)"
+            tone = "muted"
+    elif uses_yolo:
+        detector_label = "brak wybranego modelu .pt"
+        tone = "warning"
+
+    text = "\n".join(
+        (
+            f"Pipeline: {method_label} ({pipeline_label})",
+            f"Detektor YOLO: {detector_label}",
+            f"mAP50-95: {map_label}",
+        )
+    )
+    return text, tone
+
+
 def get_detection_pipeline_short_label(host, method_key: str | None = None) -> str:
     block_labels = {
         "ocr_symbol": "O",
@@ -145,29 +193,55 @@ def refresh_last_detection_status_label(host, summary: dict | None = None) -> No
     button = getattr(host, "btn_detection_last_details", None)
     if button is not None:
         try:
-            button.configure(state="normal" if data else "disabled")
+            button.configure(state="normal")
         except Exception:
             pass
 
 
+def get_current_detection_status_text(host) -> str:
+    label = getattr(host, "test_status_lbl", None)
+    if label is not None:
+        try:
+            text = str(label.cget("text") or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            return text
+    try:
+        return host._compose_detection_method_status("gotowa do uruchomienia")
+    except Exception:
+        return "Tryb pracy: gotowa do uruchomienia"
+
+
 def show_last_detection_details(host) -> None:
     summary = host._load_last_detection_summary()
-    if not summary:
-        return messagebox.showinfo("Ostatnia detekcja", "Brak zapisanego podsumowania ostatniej detekcji.")
 
     rows = [
-        ("Zakończono", format_detection_datetime(summary.get("finished_at") or summary.get("started_at"))),
-        ("Pipeline", str(summary.get("pipeline") or summary.get("method_label") or "OCR")),
-        ("Tablice", f"{int(summary.get('processed_plates', summary.get('plates', 0)) or 0)}/{int(summary.get('plates', 0) or 0)}"),
-        ("Znaki", str(int(summary.get("characters", 0) or 0))),
-        ("Perfect", str(int(summary.get("perfect", 0) or 0))),
-        ("Urządzenie", str(summary.get("device") or "brak danych")),
+        ("Tryb pracy", get_current_detection_status_text(host)),
     ]
-    model = str(summary.get("model") or "").strip()
-    if model:
-        rows.append(("Model", Path(model).name))
+
+    if summary:
+        rows.extend(
+            [
+                ("Zakończono", format_detection_datetime(summary.get("finished_at") or summary.get("started_at"))),
+                ("Pipeline", str(summary.get("pipeline") or summary.get("method_label") or "OCR")),
+                (
+                    "Tablice",
+                    f"{int(summary.get('processed_plates', summary.get('plates', 0)) or 0)}/{int(summary.get('plates', 0) or 0)}",
+                ),
+                ("Znaki", str(int(summary.get("characters", 0) or 0))),
+                ("Perfect", str(int(summary.get("perfect", 0) or 0))),
+                ("Urządzenie", str(summary.get("device") or "brak danych")),
+            ]
+        )
+        model = str(summary.get("model") or "").strip()
+        if model:
+            rows.append(("Model", Path(model).name))
+    else:
+        rows.append(("Ostatnia detekcja", "brak zapisanego przebiegu"))
+
     body = "\n".join(f"{label}: {value}" for label, value in rows)
-    return messagebox.showinfo("Ostatnia detekcja", body)
+    return messagebox.showinfo("Szczegóły detekcji", body)
 
 
 def normalize_detection_method_key(raw_value=None, method_labels: dict | None = None, key_by_label: dict | None = None) -> str:
@@ -252,10 +326,14 @@ def set_detection_method_key(host, method_key: str, method_labels: dict, *, save
 
 def refresh_detection_active_model_label(host) -> None:
     label = getattr(host, "detect_active_model_lbl", None)
-    if label is None:
-        return
-    text, tone = host._get_detection_active_model_status()
-    host._set_themed_label_state(label, text=text, tone=tone)
+    if label is not None:
+        text, tone = host._get_detection_active_model_status()
+        host._set_themed_label_state(label, text=text, tone=tone)
+    run_label = getattr(host, "detect_run_model_info_lbl", None)
+    if run_label is not None:
+        text, tone = compose_detection_run_model_info(host)
+        if not host._set_inline_status_label_state(run_label, text=text, tone=tone, emphasis=False):
+            host._set_themed_label_state(run_label, text=text, tone=tone, emphasis=False)
     refresh_detection_refiner_guard_label(host)
 
 
@@ -539,7 +617,14 @@ def bind_detect_mode_card(host, widget, mode_key: str):
         return "break"
 
     def _hover(enabled: bool):
-        self._detect_mode_hover_key = mode_key if enabled else None
+        if bool(getattr(self, "_selection_hover_suppressed", False)):
+            self._detect_mode_hover_key = None
+            return
+        current_hover = str(getattr(self, "_detect_mode_hover_key", "") or "").strip().upper()
+        next_hover = mode_key if enabled else (None if current_hover == mode_key else current_hover or None)
+        if (next_hover or "") == (current_hover or ""):
+            return
+        self._detect_mode_hover_key = next_hover
         self._refresh_detect_mode_cards()
 
     enabled = bool(widgets.get("enabled", True))
@@ -658,7 +743,7 @@ def refresh_detect_mode_cards(host, card_meta: dict):
         if frame is not None:
             self._bind_detect_mode_card(frame, mode_key)
     self._refresh_detection_workflow_info_label()
-    self._refresh_detection_refiner_guard_label()
+    self._refresh_detection_active_model_label()
 
 
 def toggle_detection_advanced_panel(host):

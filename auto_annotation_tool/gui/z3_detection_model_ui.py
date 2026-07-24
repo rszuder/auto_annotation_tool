@@ -455,6 +455,45 @@ def _read_detection_results_csv_metrics(model_path: Path) -> dict:
     return {}
 
 
+def get_detection_model_quick_stats(model_path: str | Path) -> dict:
+    safe_path = Path(model_path)
+    if not str(safe_path).strip() or not safe_path.exists():
+        return {"identity": "", "map50_95_text": "-"}
+
+    extra = _read_detection_model_extra_metadata(safe_path)
+    metrics = dict(extra.get("metrics") or {})
+    model_payload = extra.get("model") if isinstance(extra.get("model"), dict) else {}
+    model_info = model_payload.get("info") if isinstance(model_payload.get("info"), dict) else {}
+    info = dict(model_info or {})
+
+    csv_metrics = _read_detection_results_csv_metrics(safe_path)
+    for key, value in csv_metrics.items():
+        if value not in (None, "") and metrics.get(key) in (None, ""):
+            metrics[key] = value
+        if value not in (None, "") and info.get(key) in (None, ""):
+            info[key] = value
+
+    identity = str(format_yolo_model_identity(info) or "").strip()
+    if not identity:
+        identity = str(info.get("architecture_label") or info.get("source_architecture_label") or "").strip()
+
+    map5095 = _detection_metric_value(
+        metrics,
+        (
+            "box_map50_95",
+            "map50_95",
+            "best_map50_95",
+            "metrics/mAP50-95(B)",
+            "metrics/mAP50-95(P)",
+            "metrics/mAP50-95",
+        ),
+    )
+    return {
+        "identity": identity,
+        "map50_95_text": _detection_metric_percent(map5095),
+    }
+
+
 def _detection_model_class_names(info: dict) -> list[str]:
     raw = (
         info.get("classes")

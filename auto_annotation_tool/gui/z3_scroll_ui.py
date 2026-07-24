@@ -34,6 +34,10 @@ def sync_detect_right_scrollregion(host: "CharacterAnnotationTab", event=None) -
             host._schedule_detect_right_adaptive_wrap_refresh()
         except Exception:
             pass
+        try:
+            schedule_detect_right_scroll_bind_refresh(host)
+        except Exception:
+            pass
 
     delay_ms = 85 if bool(getattr(host, "_pz2_panel_resize_active", False)) else 24
     try:
@@ -157,6 +161,58 @@ def schedule_detect_right_adaptive_wrap_refresh(host: "CharacterAnnotationTab") 
             host._detect_right_wrap_after_id = None
         except Exception:
             pass
+
+
+def schedule_detect_right_scroll_bind_refresh(host: "CharacterAnnotationTab", delay_ms: int = 120) -> None:
+    content = getattr(host, "detect_right_content", None)
+    canvas = getattr(host, "detect_right_canvas", None)
+    if content is None or canvas is None:
+        return
+
+    pending = getattr(host, "_detect_right_scroll_bind_after_id", None)
+    if pending is not None:
+        try:
+            content.after_cancel(pending)
+        except Exception:
+            pass
+        try:
+            host._detect_right_scroll_bind_after_id = None
+        except Exception:
+            pass
+
+    def _apply_bind_refresh() -> None:
+        try:
+            host._detect_right_scroll_bind_after_id = None
+        except Exception:
+            pass
+        try:
+            if not bool(content.winfo_exists()) or not bool(canvas.winfo_exists()):
+                return
+        except Exception:
+            return
+        try:
+            host._bind_scroll_canvas_children(
+                content,
+                canvas,
+                host._detect_right_canvas_overflows,
+            )
+        except Exception:
+            pass
+        pinned = getattr(host, "detect_right_pinned_status_host", None)
+        if pinned is not None:
+            try:
+                host._bind_scroll_canvas_children(
+                    pinned,
+                    canvas,
+                    host._detect_right_canvas_overflows,
+                )
+            except Exception:
+                pass
+
+    try:
+        host._detect_right_scroll_bind_after_id = content.after(max(20, int(delay_ms)), _apply_bind_refresh)
+    except Exception:
+        _apply_bind_refresh()
 
 
 def sync_cvat_export_scrollregion(host: "CharacterAnnotationTab", event=None) -> None:
@@ -284,6 +340,7 @@ def on_detect_right_global_mousewheel(host: "CharacterAnnotationTab", event):
     except Exception:
         pass
 
+    suppress_selection_hover_during_scroll(host)
     if host._inertial_scroll.scroll_canvas_if_targeted(
         getattr(host, "detect_right_canvas", None),
         event,
@@ -333,12 +390,20 @@ def restore_scroll_canvas_focus(canvas) -> None:
     if canvas is None:
         return
     try:
+        if canvas.focus_get() is canvas:
+            return
+    except Exception:
+        pass
+    try:
         canvas.focus_set()
     except Exception:
         pass
 
 
 def redirect_child_mousewheel_to_canvas(host: "CharacterAnnotationTab", event, canvas, overflow_checker=None):
+    if canvas is getattr(host, "detect_right_canvas", None):
+        suppress_selection_hover_during_scroll(host)
+
     if host._inertial_scroll.redirect_child_mousewheel_to_canvas(
         event,
         canvas,
@@ -384,18 +449,28 @@ def bind_scroll_canvas_children(host: "CharacterAnnotationTab", root, canvas, ov
         "Spinbox",
     }
 
+    bind_marker = f"_z3_scroll_bound_{id(canvas)}"
+
     def _walk(widget):
         def _handle_mousewheel(event, c=canvas, oc=overflow_checker):
             if c is getattr(host, "cvat_export_canvas", None):
                 return host._redirect_pz3_child_mousewheel_to_canvas(event)
             return host._redirect_child_mousewheel_to_canvas(event, c, oc)
 
+        already_bound = False
         try:
-            widget.bind("<MouseWheel>", _handle_mousewheel, add="+")
-            widget.bind("<Button-4>", _handle_mousewheel, add="+")
-            widget.bind("<Button-5>", _handle_mousewheel, add="+")
+            already_bound = bool(getattr(widget, bind_marker, False))
         except Exception:
-            pass
+            already_bound = False
+
+        if not already_bound:
+            try:
+                widget.bind("<MouseWheel>", _handle_mousewheel, add="+")
+                widget.bind("<Button-4>", _handle_mousewheel, add="+")
+                widget.bind("<Button-5>", _handle_mousewheel, add="+")
+                setattr(widget, bind_marker, True)
+            except Exception:
+                pass
 
         try:
             class_name = str(widget.winfo_class())

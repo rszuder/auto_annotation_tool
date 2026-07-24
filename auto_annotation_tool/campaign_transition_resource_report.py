@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
 from .campaign_iteration_paths import normalize_iteration_path
+from .campaign_resource_contracts import resource_contract_ready
 from .campaign_resource_catalog import campaign_resource_label, normalize_campaign_resource_key
 from .campaign_resource_state import CampaignResourceSnapshot
 from .campaign_transition_specs import CampaignTransitionSpec, TransitionResourceSpec
@@ -42,21 +43,7 @@ class TransitionResourceReportRow:
     def present(self) -> bool:
         if self.snapshot is None:
             return False
-        tone = str(self.snapshot.tone or "").strip().lower()
-        if self.required:
-            if tone == "success":
-                return True
-            if tone in {"warning", "muted", "error", "danger", ""}:
-                return False
-        if self.key == "approved_plates":
-            return tone == "success"
-        if self.canonical_key == "char_dataset":
-            return tone == "success"
-        return bool(
-            self.snapshot.has_source
-            or self.snapshot.counter_value > 0
-            or tone == "success"
-        )
+        return resource_contract_ready(self.snapshot, required=bool(self.required))
 
     @property
     def blocking_missing(self) -> bool:
@@ -118,9 +105,7 @@ def _best_resource_specs(specs: Iterable[CampaignTransitionSpec]) -> dict[str, T
 
 
 def _snapshot_ready(snapshot: CampaignResourceSnapshot | None) -> bool:
-    if snapshot is None:
-        return False
-    return str(snapshot.tone or "").strip().lower() == "success"
+    return resource_contract_ready(snapshot, required=True)
 
 
 def _effective_requirement(
@@ -138,7 +123,7 @@ def _effective_requirement(
     canonical = normalize_campaign_resource_key(resource.key)
     image_snapshot = snapshots.get("images")
     plate_snapshot = snapshots.get("plate_run") or snapshots.get("approved_plates")
-    images_ready = _snapshot_ready(image_snapshot) or int(getattr(image_snapshot, "counter_value", 0) or 0) > 0
+    images_ready = _snapshot_ready(image_snapshot)
     plates_ready = _snapshot_ready(plate_snapshot)
 
     if canonical == "images":
@@ -146,11 +131,11 @@ def _effective_requirement(
             return "route_required_plate"
         if path == "char_from_images":
             return "alternative" if plates_ready else "route_required_char"
-        return "optional"
+        return requirement
     if canonical == "plate_run":
         if path == "char_from_images":
             return "route_required_char" if plates_ready and not images_ready else "alternative"
-        return "optional"
+        return requirement
     return requirement
 
 

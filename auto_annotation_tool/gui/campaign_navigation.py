@@ -17,6 +17,7 @@ import threading
 
 from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
 from ..campaign_manager import CAMPAIGN
+from ..campaign_iteration_paths import normalize_iteration_path
 from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
 from ..validators import validate_model_file, format_yolo_model_identity
 from ..icons import IconManager
@@ -177,6 +178,24 @@ def _step_goto_auto_annotation(
                 "Najpierw wybierz w E1 tor iteracji: tablice albo znaki.",
                 "warning"
             )
+        except Exception:
+            pass
+        return
+    try:
+        current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+    except Exception:
+        current_iteration_path = ""
+    if iteration_target == "char" and current_iteration_path == "char_from_ready_plates" and int(CAMPAIGN.get_current_step() or 0) < 3:
+        try:
+            self.app.update_status(
+                "Ten tor korzysta z istniejącego źródła tablic i pomija Z2. Zatwierdź bramkę T03, aby przejść do pracy nad znakami.",
+                "info",
+            )
+        except Exception:
+            pass
+        try:
+            self.request_wizard_stage_focus(step_num=2)
+            self._refresh_dashboard()
         except Exception:
             pass
         return

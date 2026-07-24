@@ -1473,7 +1473,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
     except Exception:
         graph_entry_context = {}
     graph_gate_id = str(graph_entry_context.get("graph_gate_id") or "").strip().upper()
-    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id == "T05" else graph_gate_id
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
     graph_display_gate_id = graph_display_gate_id or graph_gate_id
     graph_repair_origin_gate_id = str(
         graph_entry_context.get("repair_origin_gate_id")
@@ -1948,7 +1948,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
     elif campaign_context and str(approve_hint_text or "").strip():
         approve_hint_title_text = "Status bieżącego etapu"
 
-    if graph_gate_id == "T05" and graph_display_gate_id != graph_gate_id:
+    if graph_gate_id and graph_display_gate_id and graph_display_gate_id != graph_gate_id:
         approve_context_text = approve_context_text.replace(graph_gate_id, graph_display_gate_id)
         approve_hint_text = approve_hint_text.replace(graph_gate_id, graph_display_gate_id)
         approve_hint_title_text = approve_hint_title_text.replace(graph_gate_id, graph_display_gate_id)
@@ -3032,7 +3032,7 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
         except Exception:
             graph_context = {}
         graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-        graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id == "T05" else graph_gate_id
+        graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
         graph_display_gate_id = graph_display_gate_id or graph_gate_id
         graph_close_gate_display_id = campaign_visible_gate_id("T07") or "T07"
         graph_gate_is_t05 = bool(graph_gate_id == "T05")
