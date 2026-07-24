@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .campaign_resource_catalog import normalize_campaign_resource_key
+from .campaign_resource_contracts import resource_contract_ready, resource_snapshot_contract_managed
 from .campaign_resource_state import CampaignResourceSnapshot
 from .campaign_transition_graph import campaign_stage_status_key, campaign_stage_step
 from .campaign_transition_specs import CampaignTransitionSpec
@@ -83,26 +84,36 @@ def is_transition_ready(spec: CampaignTransitionSpec | None, ctx: CampaignTransi
         explicit_path = str(ctx.explicit_selected_path or "").strip()
         if explicit_path not in {"plate_training", "char_from_images"}:
             return False
+        image_snapshot = ctx.resource_snapshot("images")
         image_count = max(int(ctx.image_count or 0), ctx.resource_counter("images"))
+        images_ready = bool(image_count > 0 and resource_contract_ready(image_snapshot, required=True))
         if explicit_path == "plate_training":
-            return image_count > 0
+            return images_ready
 
         plate_snapshot = ctx.resource_snapshot("plate_run") or ctx.resource_snapshot("approved_plates")
         plate_snapshot_count = 0
         plate_snapshot_ready = False
         if plate_snapshot is not None:
             plate_snapshot_count = int(plate_snapshot.counter_value or 0)
-            plate_snapshot_ready = str(plate_snapshot.tone or "").strip().lower() == "success"
+            plate_snapshot_ready = resource_contract_ready(plate_snapshot, required=True)
         plate_count = max(int(ctx.plate_material_count or 0), plate_snapshot_count)
-        plate_ready = bool(ctx.material_ready or plate_snapshot_ready or plate_count >= int(ctx.min_plates or 10))
-        return bool(image_count > 0 or plate_ready)
+        if plate_snapshot is not None and resource_snapshot_contract_managed(plate_snapshot):
+            plate_ready = bool(plate_snapshot_ready)
+        else:
+            plate_ready = bool(ctx.material_ready or plate_snapshot_ready or plate_count >= int(ctx.min_plates or 10))
+        return bool(images_ready or plate_ready)
     if spec.key == "e1_to_e3_char_from_ready_plates":
         plate_snapshot = ctx.resource_snapshot("plate_run")
         plate_snapshot_count = 0
-        if plate_snapshot is not None and str(plate_snapshot.tone or "").strip().lower() == "success":
-            plate_snapshot_count = int(plate_snapshot.counter_value or 0)
+        plate_snapshot_ready = False
+        if plate_snapshot is not None:
+            plate_snapshot_ready = resource_contract_ready(plate_snapshot, required=True)
+            if plate_snapshot_ready:
+                plate_snapshot_count = int(plate_snapshot.counter_value or 0)
         plate_count = max(int(ctx.plate_material_count or 0), plate_snapshot_count)
-        return bool(ctx.material_ready or plate_count >= int(ctx.min_plates or 10))
+        if plate_snapshot is not None and resource_snapshot_contract_managed(plate_snapshot):
+            return bool(plate_snapshot_ready)
+        return bool(ctx.material_ready or plate_snapshot_ready or plate_count >= int(ctx.min_plates or 10))
 
     required_resources = [
         resource
@@ -126,23 +137,7 @@ def is_transition_ready(spec: CampaignTransitionSpec | None, ctx: CampaignTransi
                 ):
                     return False
                 continue
-            if normalize_campaign_resource_key(resource_key) == "char_dataset":
-                if str(snapshot.tone or "").strip().lower() != "success":
-                    return False
-                continue
-            if normalize_campaign_resource_key(resource_key) == "training_result":
-                if str(snapshot.tone or "").strip().lower() != "success":
-                    return False
-                continue
-            if normalize_campaign_resource_key(resource_key) in {"plate_run", "char_run"}:
-                if str(snapshot.tone or "").strip().lower() != "success":
-                    return False
-                continue
-            if not (
-                snapshot.has_source
-                or snapshot.counter_value > 0
-                or str(snapshot.tone or "").strip().lower() == "success"
-            ):
+            if not resource_contract_ready(snapshot, required=True):
                 return False
         return True
 

@@ -108,6 +108,24 @@ def apply_final_truth_count_guard(host, characters, true_texts, fusion_details: 
     if not isinstance(trim_details, dict) or not trim_details:
         return ordered_chars, fusion_details
 
+    manual_ids = {
+        id(rec)
+        for rec in ordered_chars
+        if isinstance(rec, dict) and host._is_manual_character_record(rec)
+    }
+    if manual_ids:
+        fitted_ids = {id(rec) for rec in list(fitted_chars or [])}
+        if not manual_ids.issubset(fitted_ids):
+            merged_details = dict(fusion_details or {})
+            merged_details["gt_count_guard_applied"] = False
+            merged_details["gt_count_guard_stage"] = "final_characters"
+            merged_details["gt_count_guard_manual_protected"] = True
+            merged_details["gt_count_guard_manual_count"] = int(len(manual_ids))
+            merged_details["gt_count_guard_skipped_trimmed_extra_boxes"] = int(
+                trim_details.get("trimmed_extra_boxes", 0) or 0
+            )
+            return ordered_chars, merged_details
+
     merged_details = dict(fusion_details or {})
     merged_details.update(trim_details)
     merged_details["gt_count_guard_applied"] = True

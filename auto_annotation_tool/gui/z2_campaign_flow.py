@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..config import logger
+from ..campaign_iteration_paths import normalize_iteration_path
 from .z2_flow_models import (
     Z2CampaignRuntimeState,
     Z2CopyPayload,
@@ -222,6 +223,21 @@ def open_campaign_step2_entry(
             current_step_for_graph = int(CAMPAIGN.get_current_step() or 0)
         except Exception:
             current_step_for_graph = 0
+        try:
+            current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+        except Exception:
+            current_iteration_path = ""
+        if target == "char" and current_iteration_path == "char_from_ready_plates" and current_step_for_graph < 3:
+            try:
+                logger.warning(
+                    "[Z2 GRAPH] blocked entry for char_from_ready_plates path; this gate skips Z2 "
+                    "step=%s context=%s",
+                    current_step_for_graph,
+                    str(source_context or {}),
+                )
+            except Exception:
+                pass
+            return {"ok": False, "reason": "char_ready_plates_skips_z2"}
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
         if not str(graph_context.get("graph_gate_id") or "").strip():
             if target == "char" and current_step_for_graph >= 3:
@@ -230,6 +246,8 @@ def open_campaign_step2_entry(
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e3_to_e4",
                         "graph_gate_id": "T06",
+                        "graph_visible_gate_id": campaign_visible_gate_id("T06"),
+                        "graph_display_gate_id": campaign_visible_gate_id("T06") or "T06",
                         "graph_gate_label": "Dataset znaków",
                         "graph_transition_title": "Bramka datasetu znaków do treningu",
                         "graph_transition_source": "E3",
@@ -243,6 +261,8 @@ def open_campaign_step2_entry(
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e2_to_e3",
                         "graph_gate_id": "T04",
+                        "graph_visible_gate_id": campaign_visible_gate_id("T04"),
+                        "graph_display_gate_id": campaign_visible_gate_id("T04") or "T04",
                         "graph_gate_label": "Przekazanie tablic do pracy nad znakami",
                         "graph_transition_title": "Przekazanie tablic do pracy nad znakami",
                         "graph_transition_source": "E2",
@@ -256,6 +276,8 @@ def open_campaign_step2_entry(
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e2_to_e4",
                         "graph_gate_id": "T05",
+                        "graph_visible_gate_id": campaign_visible_gate_id("T05"),
+                        "graph_display_gate_id": campaign_visible_gate_id("T05") or "T05",
                         "graph_gate_label": "Trening modelu tablic",
                         "graph_transition_title": "Trenuj model tablic",
                         "graph_transition_source": "E2",
@@ -728,7 +750,7 @@ def open_campaign_step2_entry(
             host._campaign_step2_transition_skip_heavy_finalize = True
         _mark_phase("open_run")
 
-        if char_repair_without_run and not opened_existing_run:
+        if target == "char" and not restore_preview and not opened_existing_run:
             # Nie budujemy listy obrazów ani roboczego XML synchronicznie w ścieżce
             # T04/T06 -> Z2. Na dużych projektach (np. NEON) samo przejście do Z2
             # blokowało GUI na kilkadziesiąt sekund. Lista i ewentualny run roboczy
@@ -811,7 +833,6 @@ def open_campaign_step2_entry(
 
         deferred_preview_load = bool(
             defer_initial_preview_load
-            and not restored_snapshot
             and not opened_existing_run
             and not bool(getattr(host, "current_annotations", None))
         )
@@ -1405,10 +1426,10 @@ def _apply_campaign_graph_gate_copy_payload(
             "więc nie wybierasz osobnej ścieżki i nie zarządzasz nim ręcznie."
         )
         payload["manual_hint_tone"] = "muted"
-    if gate_id == "T05" and display_gate_id != gate_id:
+    if gate_id and display_gate_id and display_gate_id != gate_id:
         for payload_key, payload_value in list(payload.items()):
             if isinstance(payload_value, str):
-                payload[payload_key] = payload_value.replace("T05", display_gate_id)
+                payload[payload_key] = payload_value.replace(gate_id, display_gate_id)
     return payload
 
 

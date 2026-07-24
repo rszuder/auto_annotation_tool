@@ -905,6 +905,7 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
 
     inline_label_defaults = {
         "ext_status": ("neutral", True),
+        "detect_run_model_info_lbl": ("muted", False),
         "test_status_lbl": ("neutral", False),
         "test_progress_count_lbl": ("muted", True),
         "winner_name_lbl": ("neutral", True),

@@ -1480,6 +1480,21 @@ def build_detection_tab(
     self.detect_right_scrollbar.grid(row=0, column=1, sticky="ns")
     self.detect_right_canvas.configure(yscrollcommand=self.detect_right_scrollbar.set)
 
+    def _on_detect_right_canvas_mousewheel(event):
+        return self._redirect_child_mousewheel_to_canvas(
+            event,
+            self.detect_right_canvas,
+            self._detect_right_canvas_overflows,
+        )
+
+    for widget in (right_panel, self.detect_right_scroll_host, self.detect_right_canvas):
+        try:
+            widget.bind("<MouseWheel>", _on_detect_right_canvas_mousewheel, add="+")
+            widget.bind("<Button-4>", _on_detect_right_canvas_mousewheel, add="+")
+            widget.bind("<Button-5>", _on_detect_right_canvas_mousewheel, add="+")
+        except Exception:
+            pass
+
     self.detect_right_content = ttk.Frame(self.detect_right_canvas, style="Panel.TFrame")
     self.detect_right_content.grid_columnconfigure(0, weight=1)
     self.detect_right_content_window = self.detect_right_canvas.create_window(
@@ -2620,14 +2635,14 @@ def build_detection_tab(
     self.btn_back_to_extract.configure(text="Wstecz do PZ1", padding=(6, 0), width=NAV_BUTTON_WIDTH)
 
     self.btn_run_detection_frame = tk.Frame(self.detect_actions_row, bd=0, highlightthickness=0)
-    self.btn_run_detection_frame.grid(row=0, column=0, sticky="w")
+    self.btn_run_detection_frame.grid(row=0, column=0, sticky="nsw")
 
     self.btn_run_detection_pulse_frame = tk.Frame(
         self.btn_run_detection_frame,
         bd=0,
         highlightthickness=0
     )
-    self.btn_run_detection_pulse_frame.pack(anchor=tk.W)
+    self.btn_run_detection_pulse_frame.pack(anchor=tk.W, fill=tk.Y)
 
     self.btn_run_detection = ttk.Button(
         self.btn_run_detection_pulse_frame,
@@ -2635,13 +2650,35 @@ def build_detection_tab(
         command=self._run_detection_stage,
         style="Accent.TButton"
     )
-    self.btn_run_detection.pack(fill=tk.X)
-    self.btn_run_detection.configure(text="Uruchom detekcję znaków", padding=(7, 0))
+    self.btn_run_detection.pack(fill=tk.BOTH, expand=True)
+    self.btn_run_detection.configure(text="Uruchom detekcję", padding=(10, 15), width=18)
 
     self.detect_run_status_frame = ttk.Frame(self.detect_actions_row)
     self.detect_run_status_frame.grid(row=0, column=1, sticky="ew", padx=(12, 0))
     self.detect_run_status_frame.grid_columnconfigure(0, weight=1)
     self.detect_run_status_frame.grid_columnconfigure(1, weight=0)
+
+    self.detect_run_info_stack = ttk.Frame(self.detect_run_status_frame)
+    self.detect_run_info_stack.grid(row=0, column=0, sticky="ew")
+
+    self.detect_run_model_info_lbl = tk.Label(
+        self.detect_run_info_stack,
+        text=(
+            "Pipeline: OCR\n"
+            "Detektor YOLO: nieużywany w pipeline OCR\n"
+            "mAP50-95: -"
+        ),
+        anchor="nw",
+        justify="left",
+        wraplength=430,
+        font=("Segoe UI", 8),
+        bd=0,
+        highlightthickness=0,
+        padx=0,
+        pady=0,
+    )
+    self.detect_run_model_info_lbl._inline_status_font = ("Segoe UI", 8)
+    self.detect_run_model_info_lbl.pack(anchor=tk.W, fill=tk.X, pady=0, ipady=0)
 
     self.test_status_lbl = tk.Label(
         self.detect_run_status_frame,
@@ -2653,7 +2690,6 @@ def build_detection_tab(
         highlightthickness=0
     )
     self.test_status_lbl._inline_status_font = ("Segoe UI", 8)
-    self.test_status_lbl.grid(row=0, column=0, sticky="w", pady=(0, 0))
     self._set_inline_status_label_state(
         self.test_status_lbl,
         text="Tryb pracy: OCR | gotowa do uruchomienia",
@@ -2673,7 +2709,6 @@ def build_detection_tab(
         highlightthickness=0,
     )
     self.detect_manual_guard_lbl._inline_status_font = ("Segoe UI", 8)
-    self.detect_manual_guard_lbl.grid(row=1, column=0, sticky="ew", pady=(0, 1))
     self._set_inline_status_label_state(
         self.detect_manual_guard_lbl,
         text=manual_guard_text,
@@ -2693,7 +2728,6 @@ def build_detection_tab(
         highlightthickness=0,
     )
     self.detect_refiner_guard_lbl._inline_status_font = ("Segoe UI", 8)
-    self.detect_refiner_guard_lbl.grid(row=2, column=0, sticky="ew", pady=(0, 1))
     self._set_inline_status_label_state(
         self.detect_refiner_guard_lbl,
         text=refiner_guard_text,
@@ -2702,7 +2736,7 @@ def build_detection_tab(
     )
 
     self.detect_last_run_lbl = tk.Label(
-        self.detect_run_status_frame,
+        self.detect_run_info_stack,
         text="Ostatnia detekcja: brak zapisanego przebiegu",
         anchor="w",
         justify="left",
@@ -2712,7 +2746,7 @@ def build_detection_tab(
         highlightthickness=0,
     )
     self.detect_last_run_lbl._inline_status_font = ("Segoe UI", 8)
-    self.detect_last_run_lbl.grid(row=3, column=0, sticky="ew", pady=(0, 1))
+    self.detect_last_run_lbl.pack(anchor=tk.W, fill=tk.X, pady=0, ipady=0)
     self.btn_detection_last_details = ttk.Button(
         self.detect_run_status_frame,
         text="Szczegóły",
@@ -2720,7 +2754,7 @@ def build_detection_tab(
         style="WorkflowCard.TButton",
         width=9,
     )
-    self.btn_detection_last_details.grid(row=3, column=1, sticky="e", padx=(8, 0), pady=(0, 1))
+    self.btn_detection_last_details.grid(row=0, column=1, sticky="se", padx=(8, 0), pady=(0, 0))
     self._refresh_last_detection_status_label()
     self._refresh_detection_refiner_guard_label()
 
@@ -2730,7 +2764,7 @@ def build_detection_tab(
         bd=0,
         highlightthickness=0,
     )
-    self.test_progress_row.grid(row=4, column=0, columnspan=2, sticky="w")
+    self.test_progress_row.grid(row=1, column=0, columnspan=2, sticky="w")
 
     self.test_progress = SlimProgressBar(
         self.test_progress_row,
@@ -2856,6 +2890,7 @@ def build_detection_tab(
 
     ensure_self_adaptive_wrap(getattr(self, "detect_active_model_lbl", None), padding=6, min_wrap=160)
     ensure_self_adaptive_wrap(getattr(self, "yolo_model_status_lbl", None), padding=6, min_wrap=120)
+    ensure_self_adaptive_wrap(getattr(self, "detect_run_model_info_lbl", None), padding=6, min_wrap=220)
     ensure_self_adaptive_wrap(getattr(self, "preview_dir_hint_lbl", None), padding=6, min_wrap=140)
     ensure_self_adaptive_wrap(getattr(self, "preview_load_note_lbl", None), padding=6, min_wrap=140)
     ensure_self_adaptive_wrap(getattr(self, "preview_record_source_lbl", None), padding=6, min_wrap=180)
@@ -2887,18 +2922,24 @@ def build_detection_tab(
             self.detect_right_canvas,
             self._detect_right_canvas_overflows
         )
+        self._bind_scroll_canvas_children(
+            self.detect_right_pinned_status_host,
+            self.detect_right_canvas,
+            self._detect_right_canvas_overflows
+        )
 
+    try:
+        self.frame.after_idle(_deferred_bind_detect_right_scroll_children)
+    except Exception:
+        _deferred_bind_detect_right_scroll_children()
     try:
         self.frame.after(900, _deferred_bind_detect_right_scroll_children)
     except Exception:
-        _deferred_bind_detect_right_scroll_children()
+        pass
     _mark_build_phase("help_and_adaptive")
     self.frame.after_idle(self._sync_detect_right_scrollregion)
     self.frame.after_idle(self._sync_detect_right_canvas_width)
     self.frame.after_idle(self._init_preview_vertical_split)
-    self.frame.bind_all("<MouseWheel>", self._on_detect_right_global_mousewheel, add="+")
-    self.frame.bind_all("<Button-4>", self._on_detect_right_global_mousewheel, add="+")
-    self.frame.bind_all("<Button-5>", self._on_detect_right_global_mousewheel, add="+")
     _mark_build_phase("final_bindings", threshold_ms=80.0)
 
     if build_profile_marks:

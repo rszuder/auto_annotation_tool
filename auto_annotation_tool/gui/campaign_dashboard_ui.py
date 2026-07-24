@@ -43,6 +43,7 @@ from ..campaign_resource_catalog import (
     normalize_campaign_resource_key,
     ordered_campaign_resource_keys,
 )
+from ..campaign_resource_contracts import resource_contract_ready
 from ..campaign_resource_state import CampaignResourceSnapshot, build_campaign_resource_snapshot
 from ..campaign_transition_resource_report import build_transition_resource_report
 from ..campaign_iteration_paths import (
@@ -1427,6 +1428,13 @@ def _render_step1_route_actions(self, frame):
             validation=validation_text,
             tone=tone,
             counter_text=str(effective_count) if effective_count > 0 else "",
+            meta={
+                "contract_kind": "O",
+                "contract_ready": bool(tone == "success" and effective_count > 0 and effective_exists),
+                "image_count": int(effective_count or 0),
+                "image_dir": str(effective_path or ""),
+                "iteration_path": selected_path,
+            },
         )
 
     stage_status = {}
@@ -2589,35 +2597,11 @@ def _render_step1_route_actions(self, frame):
 
     def _transition_resource_present(resource_key: str) -> bool:
         snapshot = _transition_resource_snapshot(resource_key)
-        if snapshot is None:
-            return False
         normalized_key = normalize_campaign_resource_key(resource_key)
-        if normalized_key in {"plate_run", "char_run"}:
-            try:
-                return str(snapshot.tone or "").strip().lower() == "success"
-            except Exception:
-                return False
-        if str(resource_key or "").strip() == "char_dataset":
-            try:
-                return str(snapshot.tone or "").strip().lower() == "success"
-            except Exception:
-                return False
-        try:
-            if bool(snapshot.has_source):
-                return True
-        except Exception:
-            pass
-        try:
-            if int(snapshot.counter_value or 0) > 0:
-                return True
-        except Exception:
-            pass
-        try:
-            if str(snapshot.tone or "").strip().lower() == "success":
-                return True
-        except Exception:
-            pass
-        return False
+        return resource_contract_ready(
+            snapshot,
+            required=normalized_key in {"plate_run", "char_run", "char_dataset", "training_result"},
+        )
 
     def _t06_exported_char_dataset_state() -> dict:
         missing = {
@@ -3739,6 +3723,13 @@ def _render_step1_route_actions(self, frame):
                     validation=validation_text,
                     tone="success",
                     description=campaign_resource_description(resource_key),
+                    meta={
+                        "contract_kind": "model",
+                        "contract_ready": True,
+                        "model_type": normalized_type,
+                        "model_path": str(model_path or ""),
+                        "model_iteration": int(source_iteration or 0),
+                    },
                 ),
                 prefer_success=True,
             )
@@ -3770,6 +3761,12 @@ def _render_step1_route_actions(self, frame):
                     validation=plate_validation,
                     tone=plate_tone,
                     counter_text=str(plate_material_counter) if plate_material_counter > 0 else "",
+                    meta={
+                        "contract_kind": "AT",
+                        "contract_ready": bool(plate_tone == "success" and plate_material_counter >= int(min_plates or 10)),
+                        "approved_plates": int(plate_material_counter or 0),
+                        "min_plates": int(min_plates or 10),
+                    },
                 ),
                 prefer_success=True,
             )
@@ -3858,6 +3855,13 @@ def _render_step1_route_actions(self, frame):
             tone=("success" if approved_ready else "warning"),
             counter_text=str(approved_plates) if approved_plates > 0 else "",
             description="Anotacje tablic zatwierdzone statusem [OK].",
+            meta={
+                "contract_kind": "AT",
+                "contract_ready": bool(approved_ready),
+                "approved_images": int(approved_images or 0),
+                "approved_plates": int(approved_plates or 0),
+                "min_plates": int(min_plates or 10),
+            },
         )
 
         if bool(getattr(self, "_project_open_lightweight_refresh", False)):
@@ -3878,6 +3882,11 @@ def _render_step1_route_actions(self, frame):
             validation=char_validation,
             tone=char_tone,
             counter_text=char_counter,
+            meta={
+                "contract_kind": "AT->AZ",
+                "contract_ready": bool(str(char_tone or "").strip().lower() == "success"),
+                "dataset_state": dict(char_gate or {}),
+            },
         )
 
         training_ready = bool(_current_t07_training_finish_ready())
@@ -3926,6 +3935,12 @@ def _render_step1_route_actions(self, frame):
                 source=training_source,
                 validation=training_validation,
                 tone=training_tone,
+                meta={
+                    "contract_kind": "training_result",
+                    "contract_ready": bool(str(training_tone or "").strip().lower() == "success"),
+                    "has_training_candidate": bool(training_candidate),
+                    "no_training_ready": bool(no_training_ready),
+                },
             ),
             prefer_success=True,
         )
@@ -7590,27 +7605,7 @@ def _render_step1_route_actions(self, frame):
             return "info"
 
         def _snapshot_fulfills_requirement(snapshot, *, required: bool = False) -> bool:
-            if snapshot is None:
-                return False
-            try:
-                tone = str(getattr(snapshot, "tone", "") or "").strip().lower()
-            except Exception:
-                tone = ""
-            if tone == "success":
-                return True
-            if tone in {"error", "danger"}:
-                return False
-            try:
-                if int(getattr(snapshot, "counter_value", 0) or 0) > 0 and not required:
-                    return True
-            except Exception:
-                pass
-            if required and tone in {"warning", "muted", ""}:
-                return False
-            try:
-                return bool(getattr(snapshot, "has_source", False))
-            except Exception:
-                return False
+            return resource_contract_ready(snapshot, required=bool(required))
 
         if edge.source != "E1":
             def _requirement_text(requirement: str) -> str:
@@ -8267,11 +8262,13 @@ def _render_step1_route_actions(self, frame):
                         return "route_required_plate"
                     if current_path_for_resources == "char_from_images":
                         return "alternative" if material_ready else "route_required_char"
-                    return "optional"
+                    resource = resource_specs_by_key.get(row_key)
+                    return str(getattr(resource, "requirement", "") or fallback or "optional")
                 if normalized_row_key == "plate_run":
                     if current_path_for_resources == "char_from_images":
                         return "route_required_char" if material_ready and not image_potential else "alternative"
-                    return "optional"
+                    resource = resource_specs_by_key.get(row_key)
+                    return str(getattr(resource, "requirement", "") or fallback or "optional")
             resource = resource_specs_by_key.get(row_key)
             if resource is not None:
                 return str(getattr(resource, "requirement", "") or "optional")
@@ -8932,6 +8929,13 @@ def _render_step1_route_actions(self, frame):
                 validation=validation_text,
                 tone=tone,
                 counter_text=str(effective_count) if effective_count > 0 else "",
+                meta={
+                    "contract_kind": "O",
+                    "contract_ready": bool(tone == "success" and effective_count > 0 and effective_exists),
+                    "image_count": int(effective_count or 0),
+                    "image_dir": str(effective_dir or ""),
+                    "iteration_path": selected_path,
+                },
             )
 
         def _snapshot_object(row_key: str, fallback_label: str):
@@ -8958,6 +8962,12 @@ def _render_step1_route_actions(self, frame):
                         validation=str(model_state.get("validation") or "Brak"),
                         tone=str(model_state.get("tone") or "success"),
                         description=campaign_resource_description(row_key),
+                        meta={
+                            "contract_kind": "model",
+                            "contract_ready": bool(str(model_state.get("tone") or "success").strip().lower() == "success"),
+                            "model_type": model_type,
+                            "model_path": str(model_state.get("path") or ""),
+                        },
                     )
             if row_key == "plate_run":
                 explicit_snapshot = build_campaign_resource_snapshot(
@@ -8992,6 +9002,7 @@ def _render_step1_route_actions(self, frame):
                         tone=str(graph_snapshot.tone or "success"),
                         counter_text=str(graph_counter) if graph_counter > 0 else str(graph_snapshot.counter_text or ""),
                         description=campaign_resource_description("plate_run"),
+                        meta=dict(getattr(graph_snapshot, "meta", {}) or {}),
                     )
             if row_key == "char_run" and not row:
                 return build_campaign_resource_snapshot(
@@ -10034,76 +10045,6 @@ def _render_step1_route_actions(self, frame):
                     parts.append(f"Ścieżka: {run_path}")
                 return "\n".join(parts) if parts else "Kliknij wiersz, aby wybrać to źródło AT."
 
-            def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
-                if col == 1:
-                    return (
-                        "To aktualny zbiór obrazów O. AT porównujemy z nim po nazwach obrazów."
-                        if expected_names
-                        else "Najpierw wskaż zbiór obrazów O."
-                    )
-                if col == 2:
-                    compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
-                    adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
-                    approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
-                    return (
-                        f"Mamy obraz dla {compatible_plates} AT.\n"
-                        f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
-                        f"Pomijamy, bo już [OK]: {approved_plates} AT."
-                    )
-                if col == 3:
-                    rejected_plates = max(
-                        0,
-                        int(candidate.get("plates", 0) or 0)
-                        - int(candidate.get("compatible_plates", 0) or 0),
-                    )
-                    return (
-                        f"Brakuje obrazu dla {rejected_plates} AT.\n"
-                        "Tych anotacji nie importujemy, bo nie ma do czego ich przypiąć."
-                    )
-                if col == 4:
-                    return "Łączna liczba AT w tym źródle."
-                return "Kliknij wiersz, aby wybrać to źródło AT."
-
-            def _candidate_tooltips_cached(candidate: dict) -> dict[int, str]:
-                cache_key = _candidate_cache_key(candidate)
-                cached = candidate_tooltip_cache.get(cache_key)
-                if cached is not None:
-                    return cached
-                compatible_plates = int(candidate.get("compatible_plates", 0) or 0)
-                adoptable_plates = int(candidate.get("adoptable_plates", 0) or 0)
-                approved_plates = int(candidate.get("approved_overlap_plates", 0) or 0)
-                compatible_manual = int(candidate.get("compatible_manual", 0) or 0)
-                compatible_auto = int(candidate.get("compatible_auto", 0) or 0)
-                rejected_plates = max(0, int(candidate.get("plates", 0) or 0) - compatible_plates)
-                manual_note = (
-                    "\nM uwzgl\u0119dnia r\u0119czne decyzje zapisane w puli projektu."
-                    if int(candidate.get("manual_overlay", 0) or 0) > 0
-                    else ""
-                )
-                tooltip_map = {
-                    0: "Kliknij wiersz, aby wybraÄ‡ to ĹşrĂłdĹ‚o AT.",
-                    1: (
-                        "To aktualny zbiĂłr obrazĂłw O. AT porĂłwnujemy z nim po nazwach obrazĂłw."
-                        if expected_names
-                        else "Najpierw wskaĹĽ zbiĂłr obrazĂłw O."
-                    ),
-                    2: (
-                        f"Mamy obraz dla {compatible_plates} AT.\n"
-                        f"Do kontroli w Z2 trafi: {adoptable_plates} AT.\n"
-                        f"Pomijamy, bo juĹĽ [OK]: {approved_plates} AT."
-                    ),
-                    3: (
-                        f"Brakuje obrazu dla {rejected_plates} AT.\n"
-                        "Tych anotacji nie importujemy, bo nie ma do czego ich przypiÄ…Ä‡."
-                    ),
-                    4: "ĹÄ…czna liczba AT w tym ĹşrĂłdle.",
-                }
-                candidate_tooltip_cache[cache_key] = tooltip_map
-                return tooltip_map
-
-            def _candidate_cell_tooltip(candidate: dict, col: int) -> str:
-                return _candidate_tooltips_cached(candidate).get(col, "Kliknij wiersz, aby wybraÄ‡ to ĹşrĂłdĹ‚o AT.")
-
             def _candidate_tooltips_cached(candidate: dict) -> dict[int, str]:
                 cache_key = _candidate_cache_key(candidate)
                 cached = candidate_tooltip_cache.get(cache_key)
@@ -10322,436 +10263,6 @@ def _render_step1_route_actions(self, frame):
                     canvas.yview_moveto(0)
                 except Exception:
                     pass
-
-            def _render_annotation_table() -> None:
-                render_started = perf_counter()
-
-                def _log_import_table_render(row_count: int) -> None:
-                    try:
-                        elapsed_ms = int((perf_counter() - render_started) * 1000)
-                        if elapsed_ms >= 80:
-                            logger.info(
-                                "[AT IMPORT PERF] render_table total=%sms rows=%s tooltip_cache=%s text_cache=%s",
-                                elapsed_ms,
-                                row_count,
-                                len(candidate_tooltip_cache),
-                                len(repaired_import_text_cache),
-                            )
-                    except Exception:
-                        pass
-
-                annotation_row_widgets.clear()
-                annotation_candidate_by_key.clear()
-                active_col = annotation_sort_state.get("column")
-                reverse = bool(annotation_sort_state.get("reverse"))
-                for col, text in enumerate(header):
-                    suffix = " ↓" if active_col == col and reverse else " ↑" if active_col == col else ""
-                    if col < len(header):
-                        header_btn = tk.Button(
-                            rows_frame,
-                            text=f"{text}{suffix}",
-                            command=lambda column=col: _set_annotation_sort(column),
-                            cursor="hand2",
-                            bg=header_bg2,
-                            fg=fg,
-                            relief=tk.FLAT,
-                            font=("Segoe UI", 8, "bold"),
-                            anchor="w",
-                            padx=8,
-                            pady=7,
-                        )
-                        header_btn.grid(row=0, column=col, sticky="nsew")
-                        _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortować tabelę."))
-                    else:
-                        tk.Label(
-                            rows_frame,
-                            text=text,
-                            fg=fg,
-                            bg=header_bg2,
-                            font=("Segoe UI", 8, "bold"),
-                            anchor="w",
-                            padx=8,
-                            pady=7,
-                        ).grid(row=0, column=col, sticky="nsew")
-
-                if not candidates:
-                    empty = tk.Label(
-                        rows_frame,
-                        text="Nie znaleziono katalogów z plikiem annotations.xml w wybranym trybie. Możesz wskazać plik ręcznie.",
-                        fg=warning,
-                        bg=browser_bg,
-                        font=("Segoe UI", 9),
-                        anchor="w",
-                        justify=tk.LEFT,
-                        padx=10,
-                        pady=16,
-                        wraplength=960,
-                    )
-                    empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
-                    _log_import_table_render(0)
-                    return
-
-                sorted_candidates = _sorted_annotation_candidates()
-                for row_idx, candidate in enumerate(sorted_candidates, start=1):
-                    row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
-                    compatible_text = (
-                        _candidate_import_text(candidate)
-                    )
-                    rejected_text = (
-                        _candidate_reject_text(candidate)
-                    )
-                    source_text = _candidate_source_text(candidate, limit=68)
-                    row_values = (
-                        source_text,
-                        _candidate_resource_images_text(),
-                        compatible_text,
-                        rejected_text,
-                        _candidate_total_text(candidate),
-                    )
-                    row_key = _candidate_selection_key(candidate)
-                    row_widgets: list[tk.Widget] = []
-                    for col, value in enumerate(row_values):
-                        color = fg
-                        if col == 2 and expected_names:
-                            color = success
-                        elif col == 3 and expected_names:
-                            color = error
-                        cell = tk.Label(
-                            rows_frame,
-                            text=_repair_import_text(str(value or "")),
-                            fg=color,
-                            bg=row_bg2,
-                            font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
-                            anchor="w",
-                            justify=tk.LEFT,
-                            wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
-                            padx=8,
-                            pady=7,
-                            cursor="hand2",
-                        )
-                        cell.grid(row=row_idx, column=col, sticky="nsew")
-                        cell.bind("<Button-1>", lambda _event, item=candidate: _select_annotation_table_row(item), add="+")
-                        _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
-                        row_widgets.append(cell)
-                    annotation_row_widgets[row_key] = (row_widgets, row_bg2)
-                _refresh_annotation_row_selection()
-                _schedule_sync_scrollregion()
-                _log_import_table_render(len(sorted_candidates))
-
-            def _render_annotation_table() -> None:
-                render_started = perf_counter()
-
-                def _log_import_table_render(row_count: int) -> None:
-                    try:
-                        elapsed_ms = int((perf_counter() - render_started) * 1000)
-                        if elapsed_ms >= 80:
-                            logger.info(
-                                "[AT IMPORT PERF] render_table_fast total=%sms rows=%s widgets=%s tooltip_cache=%s text_cache=%s",
-                                elapsed_ms,
-                                row_count,
-                                len(annotation_row_widget_cache),
-                                len(candidate_tooltip_cache),
-                                len(repaired_import_text_cache),
-                            )
-                    except Exception:
-                        pass
-
-                annotation_row_widgets.clear()
-                annotation_candidate_by_key.clear()
-                active_col = annotation_sort_state.get("column")
-                reverse = bool(annotation_sort_state.get("reverse"))
-                for col, text in enumerate(header):
-                    suffix = " \u2193" if active_col == col and reverse else " \u2191" if active_col == col else ""
-                    header_btn = annotation_header_widgets.get(col)
-                    if header_btn is None:
-                        header_btn = tk.Button(
-                            rows_frame,
-                            command=lambda column=col: _set_annotation_sort(column),
-                            cursor="hand2",
-                            bg=header_bg2,
-                            fg=fg,
-                            relief=tk.FLAT,
-                            font=("Segoe UI", 8, "bold"),
-                            anchor="w",
-                            padx=8,
-                            pady=7,
-                        )
-                        annotation_header_widgets[col] = header_btn
-                    try:
-                        header_btn.configure(text=f"{text}{suffix}", bg=header_bg2, fg=fg)
-                        header_btn.grid(row=0, column=col, sticky="nsew")
-                    except Exception:
-                        pass
-                    _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortowa\u0107 tabel\u0119."))
-
-                if not candidates:
-                    for widgets in list(annotation_row_widget_cache.values()):
-                        for widget in widgets:
-                            try:
-                                widget.grid_remove()
-                            except Exception:
-                                pass
-                    empty = annotation_empty_label_ref.get("label")
-                    if empty is None:
-                        empty = tk.Label(
-                            rows_frame,
-                            text="Nie znaleziono katalog\u00f3w z plikiem annotations.xml w wybranym trybie. Mo\u017cesz wskaza\u0107 plik r\u0119cznie.",
-                            fg=warning,
-                            bg=browser_bg,
-                            font=("Segoe UI", 9),
-                            anchor="w",
-                            justify=tk.LEFT,
-                            padx=10,
-                            pady=16,
-                            wraplength=960,
-                        )
-                        annotation_empty_label_ref["label"] = empty
-                    empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
-                    _log_import_table_render(0)
-                    return
-
-                empty = annotation_empty_label_ref.get("label")
-                if empty is not None:
-                    try:
-                        empty.grid_remove()
-                    except Exception:
-                        pass
-
-                visible_keys: set[str] = set()
-                sorted_candidates = _sorted_annotation_candidates()
-                resource_images_text = _candidate_resource_images_text()
-                for row_idx, candidate in enumerate(sorted_candidates, start=1):
-                    row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
-                    row_key = _candidate_selection_key(candidate)
-                    annotation_candidate_by_key[row_key] = candidate
-                    visible_keys.add(row_key)
-                    row_values = (
-                        _candidate_source_text(candidate, limit=68),
-                        resource_images_text,
-                        _candidate_import_text(candidate),
-                        _candidate_reject_text(candidate),
-                        _candidate_total_text(candidate),
-                    )
-                    row_widgets = annotation_row_widget_cache.get(row_key)
-                    if row_widgets is None:
-                        row_widgets = []
-                        for col in range(len(header)):
-                            cell = tk.Label(
-                                rows_frame,
-                                fg=fg,
-                                bg=row_bg2,
-                                font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
-                                anchor="w",
-                                justify=tk.LEFT,
-                                wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
-                                padx=8,
-                                pady=7,
-                                cursor="hand2",
-                            )
-                            cell.bind(
-                                "<Button-1>",
-                                lambda _event, key=row_key: _select_annotation_table_row_by_key(key),
-                                add="+",
-                            )
-                            row_widgets.append(cell)
-                        annotation_row_widget_cache[row_key] = row_widgets
-                    for col, value in enumerate(row_values):
-                        color = fg
-                        if col == 2 and expected_names:
-                            color = success
-                        elif col == 3 and expected_names:
-                            color = error
-                        cell = row_widgets[col]
-                        try:
-                            cell.configure(text=_repair_import_text(str(value or "")), fg=color, bg=row_bg2)
-                            cell.grid(row=row_idx, column=col, sticky="nsew")
-                        except Exception:
-                            pass
-                        _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
-                    annotation_row_widgets[row_key] = (row_widgets, row_bg2)
-
-                for row_key, widgets in list(annotation_row_widget_cache.items()):
-                    if row_key in visible_keys:
-                        continue
-                    for widget in widgets:
-                        try:
-                            widget.grid_remove()
-                        except Exception:
-                            pass
-                _refresh_annotation_row_selection()
-                _schedule_sync_scrollregion()
-                _log_import_table_render(len(sorted_candidates))
-
-            def _render_annotation_table() -> None:
-                pending = annotation_render_state.get("after_id")
-                if pending is not None:
-                    try:
-                        browser.after_cancel(pending)
-                    except Exception:
-                        pass
-                    annotation_render_state["after_id"] = None
-                try:
-                    annotation_render_state["token"] = int(annotation_render_state.get("token", 0) or 0) + 1
-                except Exception:
-                    annotation_render_state["token"] = 1
-                render_token = int(annotation_render_state.get("token", 0) or 0)
-                render_started = perf_counter()
-
-                def _log_import_table_render(row_count: int, *, done: bool) -> None:
-                    try:
-                        elapsed_ms = int((perf_counter() - render_started) * 1000)
-                        if elapsed_ms >= 80 or not done:
-                            logger.info(
-                                "[AT IMPORT PERF] render_table_batched total=%sms rows=%s widgets=%s done=%s tooltip_cache=%s text_cache=%s",
-                                elapsed_ms,
-                                row_count,
-                                len(annotation_row_widget_cache),
-                                int(bool(done)),
-                                len(candidate_tooltip_cache),
-                                len(repaired_import_text_cache),
-                            )
-                    except Exception:
-                        pass
-
-                annotation_row_widgets.clear()
-                annotation_candidate_by_key.clear()
-                active_col = annotation_sort_state.get("column")
-                reverse = bool(annotation_sort_state.get("reverse"))
-                for col, text in enumerate(header):
-                    suffix = " \u2193" if active_col == col and reverse else " \u2191" if active_col == col else ""
-                    header_btn = annotation_header_widgets.get(col)
-                    if header_btn is None:
-                        header_btn = tk.Button(
-                            rows_frame,
-                            command=lambda column=col: _set_annotation_sort(column),
-                            cursor="hand2",
-                            bg=header_bg2,
-                            fg=fg,
-                            relief=tk.FLAT,
-                            font=("Segoe UI", 8, "bold"),
-                            anchor="w",
-                            padx=8,
-                            pady=7,
-                        )
-                        annotation_header_widgets[col] = header_btn
-                    try:
-                        header_btn.configure(text=f"{text}{suffix}", bg=header_bg2, fg=fg)
-                        header_btn.grid(row=0, column=col, sticky="nsew")
-                    except Exception:
-                        pass
-                    _bind_import_tooltip(header_btn, header_tooltips.get(col, "Kliknij, aby posortowa\u0107 tabel\u0119."))
-
-                for widgets in list(annotation_row_widget_cache.values()):
-                    for widget in widgets:
-                        try:
-                            widget.grid_remove()
-                        except Exception:
-                            pass
-
-                if not candidates:
-                    empty = annotation_empty_label_ref.get("label")
-                    if empty is None:
-                        empty = tk.Label(
-                            rows_frame,
-                            text="Nie znaleziono katalog\u00f3w z plikiem annotations.xml w wybranym trybie. Mo\u017cesz wskaza\u0107 plik r\u0119cznie.",
-                            fg=warning,
-                            bg=browser_bg,
-                            font=("Segoe UI", 9),
-                            anchor="w",
-                            justify=tk.LEFT,
-                            padx=10,
-                            pady=16,
-                            wraplength=960,
-                        )
-                        annotation_empty_label_ref["label"] = empty
-                    empty.grid(row=1, column=0, columnspan=len(header), sticky="nsew")
-                    _schedule_sync_scrollregion()
-                    _log_import_table_render(0, done=True)
-                    return
-
-                empty = annotation_empty_label_ref.get("label")
-                if empty is not None:
-                    try:
-                        empty.grid_remove()
-                    except Exception:
-                        pass
-
-                sorted_candidates = _sorted_annotation_candidates()
-                for candidate in sorted_candidates:
-                    annotation_candidate_by_key[_candidate_selection_key(candidate)] = candidate
-                resource_images_text = _candidate_resource_images_text()
-                total_rows = len(sorted_candidates)
-                batch_size = 44 if total_rows >= 90 else max(1, total_rows)
-
-                def _render_batch(start_index: int = 0) -> None:
-                    if int(annotation_render_state.get("token", 0) or 0) != render_token:
-                        return
-                    end_index = min(total_rows, start_index + batch_size)
-                    for index in range(start_index, end_index):
-                        candidate = sorted_candidates[index]
-                        row_idx = index + 1
-                        row_bg2 = blend_hex_colors(field_bg, card_bg, 0.25) if row_idx % 2 else field_bg
-                        row_key = _candidate_selection_key(candidate)
-                        row_values = (
-                            _candidate_source_text(candidate, limit=68),
-                            resource_images_text,
-                            _candidate_import_text(candidate),
-                            _candidate_reject_text(candidate),
-                            _candidate_total_text(candidate),
-                        )
-                        row_widgets = annotation_row_widget_cache.get(row_key)
-                        if row_widgets is None:
-                            row_widgets = []
-                            for col in range(len(header)):
-                                cell = tk.Label(
-                                    rows_frame,
-                                    fg=fg,
-                                    bg=row_bg2,
-                                    font=("Segoe UI", 8, "bold" if col in {2, 3, 4} else "normal"),
-                                    anchor="w",
-                                    justify=tk.LEFT,
-                                    wraplength=(500 if col == 0 else 120 if col in {1, 4} else 190),
-                                    padx=8,
-                                    pady=7,
-                                    cursor="hand2",
-                                )
-                                cell.bind(
-                                    "<Button-1>",
-                                    lambda _event, key=row_key: _select_annotation_table_row_by_key(key),
-                                    add="+",
-                                )
-                                row_widgets.append(cell)
-                            annotation_row_widget_cache[row_key] = row_widgets
-                        for col, value in enumerate(row_values):
-                            color = fg
-                            if col == 2 and expected_names:
-                                color = success
-                            elif col == 3 and expected_names:
-                                color = error
-                            cell = row_widgets[col]
-                            try:
-                                cell.configure(text=_repair_import_text(str(value or "")), fg=color, bg=row_bg2)
-                                cell.grid(row=row_idx, column=col, sticky="nsew")
-                            except Exception:
-                                pass
-                            _bind_import_tooltip(cell, _candidate_cell_tooltip(candidate, col))
-                        annotation_row_widgets[row_key] = (row_widgets, row_bg2)
-                    _refresh_annotation_row_selection()
-                    _schedule_sync_scrollregion()
-                    if end_index < total_rows:
-                        _log_import_table_render(end_index, done=False)
-                        try:
-                            annotation_render_state["after_id"] = browser.after(
-                                1,
-                                lambda next_index=end_index: _render_batch(next_index),
-                            )
-                        except Exception:
-                            _render_batch(end_index)
-                    else:
-                        annotation_render_state["after_id"] = None
-                        _log_import_table_render(total_rows, done=True)
-
-                _render_batch(0)
 
             def _render_annotation_table() -> None:
                 pending = annotation_render_state.get("after_id")
@@ -12301,10 +11812,14 @@ def _render_step1_route_actions(self, frame):
             visual_path = str(getattr(spec, "path_key", "") or "").strip()
             if not visual_path and graph_edge is not None and tuple(getattr(graph_edge, "paths", ()) or ()):
                 visual_path = str(selected_path or "").strip()
+            raw_gate_id = str(getattr(spec, "badge_id", "") or "").strip()
+            visible_gate_id = campaign_visible_gate_id(raw_gate_id) if raw_gate_id else ""
             return {
                 "source": "campaign_graph",
                 "graph_edge_key": str(current_edge_key or "").strip(),
-                "graph_gate_id": str(getattr(spec, "badge_id", "") or "").strip(),
+                "graph_gate_id": raw_gate_id,
+                "graph_visible_gate_id": visible_gate_id,
+                "graph_display_gate_id": visible_gate_id or raw_gate_id,
                 "graph_gate_label": str(getattr(spec, "badge_label", "") or "").strip(),
                 "graph_transition_title": str(getattr(spec, "title", "") or "").strip(),
                 "graph_transition_source": visual_source,
@@ -12339,6 +11854,8 @@ def _render_step1_route_actions(self, frame):
                         # only the still-open material that can feed T05 again.
                         "graph_edge_key": "e2_to_e4",
                         "graph_gate_id": "T05",
+                        "graph_visible_gate_id": campaign_visible_gate_id("T05"),
+                        "graph_display_gate_id": campaign_visible_gate_id("T05") or "T05",
                         "graph_gate_label": "Trening modelu tablic",
                         "graph_transition_title": "Uzupełnij anotacje tablic",
                         "graph_transition_source": "E2",
@@ -12985,10 +12502,14 @@ def _render_step1_route_actions(self, frame):
             visual_path = str(getattr(spec, "path_key", "") or "").strip()
             if not visual_path and graph_edge is not None and tuple(getattr(graph_edge, "paths", ()) or ()):
                 visual_path = str(selected_path or "").strip()
+            raw_gate_id = str(getattr(spec, "badge_id", "") or "").strip()
+            visible_gate_id = campaign_visible_gate_id(raw_gate_id) if raw_gate_id else ""
             context = {
                 "source": "campaign_graph",
                 "graph_edge_key": str(edge_key or "").strip(),
-                "graph_gate_id": str(getattr(spec, "badge_id", "") or "").strip(),
+                "graph_gate_id": raw_gate_id,
+                "graph_visible_gate_id": visible_gate_id,
+                "graph_display_gate_id": visible_gate_id or raw_gate_id,
                 "graph_gate_label": str(getattr(spec, "badge_label", "") or "").strip(),
                 "graph_transition_title": str(getattr(spec, "title", "") or "").strip(),
                 "graph_transition_source": visual_source,
@@ -13082,7 +12603,12 @@ def _render_step1_route_actions(self, frame):
             pass
         graph_zoom_preview_state["after_id"] = None
         graph_zoom_preview_state["factor"] = 1.0
-        canvas.delete("all")
+        previous_frame_tag = "graph_redraw_previous_frame"
+        try:
+            if canvas.find_all():
+                canvas.addtag_withtag(previous_frame_tag, "all")
+        except Exception:
+            previous_frame_tag = ""
         graph_wizard_stage_status_cache.clear()
         gate_geometry.clear()
         gate_field_geometry.clear()
@@ -17120,6 +16646,11 @@ def _render_step1_route_actions(self, frame):
         _sync_gate_selector_arc_animation()
         _raise_graph_interactive_layers()
         _maybe_start_graph_attention_flow()
+        if previous_frame_tag:
+            try:
+                canvas.delete(previous_frame_tag)
+            except Exception:
+                pass
 
     def _redraw_graph_fixed_overlay() -> None:
         try:

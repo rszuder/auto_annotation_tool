@@ -17,6 +17,7 @@ import threading
 
 from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
 from ..campaign_manager import CAMPAIGN
+from ..campaign_iteration_paths import normalize_iteration_path
 from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
 from ..validators import validate_model_file, format_yolo_model_identity
 from ..icons import IconManager
@@ -732,11 +733,16 @@ def _approve_step1_from_wizard(self):
 
 
 def _get_annotation_step2_view_model(self):
+    try:
+        current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+    except Exception:
+        current_iteration_path = ""
     cache_key = (
         str(CAMPAIGN.get_active_project_name() or "").strip(),
         int(CAMPAIGN.get_current_iteration_num() or 1),
         int(CAMPAIGN.get_current_step() or 1),
         str(CAMPAIGN.get_iteration_target() or "").strip().lower(),
+        str(current_iteration_path or "").strip().lower(),
         str(CAMPAIGN.get_step1_status() or "").strip().lower(),
         str(CAMPAIGN.get_step2_status() or "").strip().lower(),
         str(CAMPAIGN.get_step3_status() or "").strip().lower(),
@@ -766,6 +772,24 @@ def _get_annotation_step2_view_model(self):
         )
         vm_cache[cache_key] = locked_vm
         return locked_vm
+    if iteration_target == "char" and current_iteration_path == "char_from_ready_plates":
+        skipped_vm = Step2ViewModel(
+            stage_key="step2",
+            iteration_target=iteration_target,
+            current_step=current_step,
+            step2_status=step2_status,
+            state=("done" if step2_status == "approved" else "skipped"),
+            title="E2. Tablice",
+            summary="Ten tor korzysta z istniejącego źródła tablic i pomija pracę w Z2.",
+            details=(
+                "Bramka T03 nie otwiera listy obrazów w Z2. Jeśli źródło tablic jest poprawnie "
+                "wskazane w zasobach, zatwierdź bramkę i przejdź dalej do pracy nad znakami."
+            ),
+            primary_cta=None,
+            secondary_cta=None,
+        )
+        vm_cache[cache_key] = skipped_vm
+        return skipped_vm
     if (
         current_step == 2
         and not iteration_target

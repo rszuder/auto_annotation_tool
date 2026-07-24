@@ -24,6 +24,7 @@ from ..campaign_iteration_paths import (
     iteration_path_target,
     normalize_iteration_path,
 )
+from ..campaign_resource_contracts import build_resource_contract_meta
 from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
 from ..validators import validate_model_file, format_yolo_model_identity
 from ..icons import IconManager
@@ -1995,6 +1996,7 @@ def _set_project_start_asset_row_state(
     tone: str = "muted",
     requirement: str = "",
     counter_text: str = "",
+    meta: dict | None = None,
 ) -> None:
     rows = getattr(self, "ingest_start_asset_row_widgets", {}) or {}
     row = rows.get(str(row_key or "").strip())
@@ -2013,6 +2015,7 @@ def _set_project_start_asset_row_state(
     requirement_key = str(requirement or "").strip().lower()
     row["requirement"] = requirement_key
     row["counter_text"] = str(counter_text or "").strip()
+    row["meta"] = dict(meta or {})
     try:
         base_label = str(row.get("base_label") or "").strip()
         counter = str(row.get("counter_text") or "").strip()
@@ -4776,6 +4779,19 @@ def _refresh_project_start_panel(self) -> None:
             else "Wybierz ścieżkę E1. Po wyborze graf pokaże właściwe warunki."
         )
         images_validation_tone = "warning"
+    images_meta = build_resource_contract_meta(
+        "O",
+        contract_ready=bool(
+            route_selected
+            and current_iteration_path in {"plate_training", "char_from_images"}
+            and effective_images_count > 0
+            and effective_images_dir is not None
+            and effective_images_exists
+        ),
+        image_count=int(effective_images_count or 0),
+        image_dir=str(effective_images_dir or ""),
+        iteration_path=current_iteration_path,
+    )
     self._set_project_start_asset_row_state(
         "images",
         source_text=images_source_text,
@@ -4784,6 +4800,7 @@ def _refresh_project_start_panel(self) -> None:
         tone=images_validation_tone,
         requirement=images_requirement,
         counter_text=str(int(effective_images_count or 0)),
+        meta=images_meta,
     )
 
     plate_source_info = self._get_project_start_plate_source_info()
@@ -4793,6 +4810,26 @@ def _refresh_project_start_panel(self) -> None:
     plate_run_source_text = self._format_project_start_asset_source(plate_xml_path or plate_run_path)
     plate_run_counter_images = 0
     plate_run_counter_plates = 0
+    plate_run_meta = build_resource_contract_meta(
+        "O->AT",
+        contract_ready=bool(
+            char_material_ready
+            and int(char_plate_material_count or 0) >= int(char_min_plates or 0)
+        ),
+        requires_rematch=False,
+        source_mode=plate_source_mode,
+        source_run_path=plate_run_path,
+        source_xml_path=plate_xml_path,
+        source_input_path=str(plate_source_info.get("images_path") or "").strip(),
+        expected_images_dir=str(effective_images_dir or ""),
+        matched_images=0,
+        matched_plates=0,
+        adoptable_images=0,
+        adoptable_plates=0,
+        approved_overlap_images=0,
+        approved_overlap_plates=0,
+        iteration_path=current_iteration_path,
+    )
     if current_iteration_path == "char_from_ready_plates":
         plate_run_requirement = "route_required_char"
         if char_material_ready:
@@ -4845,9 +4882,19 @@ def _refresh_project_start_panel(self) -> None:
         if plate_run_dir is None or not plate_run_dir.exists() or not plate_run_dir.is_dir():
             plate_run_validation_text = "Nie znaleziono pliku annotations.xml."
             plate_run_validation_tone = "error"
+            plate_run_meta.update(
+                contract_ready=False,
+                requires_rematch=False,
+                contract_message=plate_run_validation_text,
+            )
         elif not (plate_run_dir / "annotations.xml").exists():
             plate_run_validation_text = "Nie znaleziono pliku annotations.xml."
             plate_run_validation_tone = "error"
+            plate_run_meta.update(
+                contract_ready=False,
+                requires_rematch=False,
+                contract_message=plate_run_validation_text,
+            )
         else:
             try:
                 annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
@@ -4860,16 +4907,29 @@ def _refresh_project_start_panel(self) -> None:
             if effective_images_dir is None or not effective_images_exists:
                 plate_run_validation_text = "Najpierw wskaż obrazy tej iteracji."
                 plate_run_validation_tone = "warning"
+                plate_run_meta.update(
+                    contract_ready=False,
+                    requires_rematch=bool(plate_run_path),
+                    contract_message=plate_run_validation_text,
+                )
             else:
                 compatibility = self._check_project_start_run_compatibility(plate_run_dir, effective_images_dir, adoptable_only=True)
                 if compatibility.get("checked") and int(compatibility.get("total", 0) or 0) <= 0:
                     plate_run_validation_text = "XML nie zawiera anotacji tablic do importu."
                     plate_run_validation_tone = "warning"
+                    plate_run_meta.update(
+                        checked=True,
+                        contract_ready=False,
+                        requires_rematch=False,
+                        contract_message=plate_run_validation_text,
+                    )
                 elif compatibility.get("checked") and compatibility.get("ok"):
                     plate_run_counter_images = int(compatibility.get("matched", 0) or 0)
                     plate_run_counter_plates = int(compatibility.get("matched_plate_count", 0) or 0)
                     approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    approved_overlap_plates = int(compatibility.get("approved_overlap_plates", 0) or 0)
                     adoptable_matched = int(compatibility.get("adoptable_matched", plate_run_counter_images) or 0)
+                    adoptable_matched_plates = int(compatibility.get("adoptable_matched_plate_count", 0) or 0)
                     adoption_note = f" | do kontroli: {adoptable_matched} | już [OK]: {approved_overlap}"
                     plate_run_validation_text = (
                         f"OK | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
@@ -4878,22 +4938,54 @@ def _refresh_project_start_panel(self) -> None:
                         f"{adoption_note}"
                     )
                     plate_run_validation_tone = "success"
+                    plate_run_meta.update(
+                        checked=True,
+                        contract_ready=bool(
+                            char_material_ready
+                            or approved_overlap_plates >= int(char_min_plates or 0)
+                            or (
+                                plate_source_mode == "approved"
+                                and plate_run_counter_plates >= int(char_min_plates or 0)
+                            )
+                        ),
+                        requires_rematch=False,
+                        matched_images=int(compatibility.get("matched", 0) or 0),
+                        matched_plates=plate_run_counter_plates,
+                        adoptable_images=adoptable_matched,
+                        adoptable_plates=adoptable_matched_plates,
+                        approved_overlap_images=approved_overlap,
+                        approved_overlap_plates=approved_overlap_plates,
+                        contract_message=plate_run_validation_text,
+                    )
                 elif compatibility.get("checked") and int(compatibility.get("matched", 0) or 0) > 0:
                     approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    approved_overlap_plates = int(compatibility.get("approved_overlap_plates", 0) or 0)
                     incomplete_count = int(compatibility.get("incomplete", 0) or 0)
                     plate_run_counter_images = int(compatibility.get("matched", 0) or 0)
                     plate_run_counter_plates = int(compatibility.get("matched_plate_count", 0) or 0)
                     overlap_text = f" | pominięte zatwierdzone: {approved_overlap}" if approved_overlap > 0 else ""
                     incomplete_text = f" | niepełne wg nazwy: {incomplete_count}" if incomplete_count > 0 else ""
                     plate_run_validation_text = (
-                        f"Do kontroli | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
+                        f"Wymaga ponownego dopasowania do O | {int(compatibility.get('matched', 0) or 0)} anotacji -> "
                         f"{int(compatibility.get('matched', 0) or 0)} obrazów / "
                         f"{int(compatibility.get('matched_plate_count', 0) or 0)} tablic"
                         f"{overlap_text}{incomplete_text}"
                     )
-                    plate_run_validation_tone = "success"
+                    plate_run_validation_tone = "warning"
+                    plate_run_meta.update(
+                        checked=True,
+                        contract_ready=bool(char_material_ready and approved_overlap_plates >= int(char_min_plates or 0)),
+                        requires_rematch=not bool(char_material_ready and approved_overlap_plates >= int(char_min_plates or 0)),
+                        matched_images=plate_run_counter_images,
+                        matched_plates=plate_run_counter_plates,
+                        approved_overlap_images=approved_overlap,
+                        approved_overlap_plates=approved_overlap_plates,
+                        incomplete_images=incomplete_count,
+                        contract_message=plate_run_validation_text,
+                    )
                 elif compatibility.get("checked"):
                     approved_overlap = int(compatibility.get("approved_overlap", 0) or 0)
+                    approved_overlap_plates = int(compatibility.get("approved_overlap_plates", 0) or 0)
                     incomplete_count = int(compatibility.get("incomplete", 0) or 0)
                     missing_count = int(compatibility.get("missing", 0) or 0)
                     if approved_overlap > 0 and missing_count <= 0 and incomplete_count <= 0:
@@ -4902,6 +4994,14 @@ def _refresh_project_start_panel(self) -> None:
                             f"Zgodne | pasujące obrazy są już zatwierdzone [OK]: {approved_overlap}."
                         )
                         plate_run_validation_tone = "success"
+                        plate_run_meta.update(
+                            checked=True,
+                            contract_ready=bool(char_material_ready or approved_overlap_plates >= int(char_min_plates or 0)),
+                            requires_rematch=False,
+                            approved_overlap_images=approved_overlap,
+                            approved_overlap_plates=approved_overlap_plates,
+                            contract_message=plate_run_validation_text,
+                        )
                     elif approved_overlap > 0:
                         plate_run_counter_images = int(approved_overlap or 0)
                         plate_run_validation_text = (
@@ -4909,22 +5009,53 @@ def _refresh_project_start_panel(self) -> None:
                             f"do sprawdzenia: {missing_count + incomplete_count}"
                         )
                         plate_run_validation_tone = "warning"
+                        plate_run_meta.update(
+                            checked=True,
+                            contract_ready=bool(char_material_ready and approved_overlap_plates >= int(char_min_plates or 0)),
+                            requires_rematch=not bool(char_material_ready and approved_overlap_plates >= int(char_min_plates or 0)),
+                            approved_overlap_images=approved_overlap,
+                            approved_overlap_plates=approved_overlap_plates,
+                            missing_images=missing_count,
+                            incomplete_images=incomplete_count,
+                            contract_message=plate_run_validation_text,
+                        )
                     elif incomplete_count > 0:
                         plate_run_validation_text = (
                             f"Brak importu | {incomplete_count} anotacji nie obejmuje wszystkich tablic z nazwy pliku."
                         )
                         plate_run_validation_tone = "error"
+                        plate_run_meta.update(
+                            checked=True,
+                            contract_ready=False,
+                            requires_rematch=True,
+                            incomplete_images=incomplete_count,
+                            contract_message=plate_run_validation_text,
+                        )
                     else:
                         plate_run_validation_text = (
                             f"Niezgodne z aktualnym zbiorem E1 | brak {missing_count} "
                             f"z {int(compatibility.get('total', 0) or 0)} anotowanych obrazów."
                         )
                         plate_run_validation_tone = "error"
+                        plate_run_meta.update(
+                            checked=True,
+                            contract_ready=False,
+                            requires_rematch=True,
+                            missing_images=missing_count,
+                            contract_message=plate_run_validation_text,
+                        )
                 else:
                     plate_run_validation_text = "Run zapisany. Sprawdź zgodność po wskazaniu aktualnego zbioru E1."
                     plate_run_validation_tone = "warning"
+                    plate_run_meta.update(
+                        contract_ready=False,
+                        requires_rematch=True,
+                        contract_message=plate_run_validation_text,
+                    )
     if plate_source_mode == "draft" and plate_run_path:
-        if current_iteration_path == "char_from_ready_plates":
+        if bool(plate_run_meta.get("requires_rematch")):
+            plate_run_validation_tone = "warning"
+        elif current_iteration_path == "char_from_ready_plates":
             plate_run_validation_text = (
                 f"AT do kontroli | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
                 "To jeszcze nie spełnia T03. Sprawdź AT w Z2 i zatwierdź właściwe obrazy."
@@ -4936,6 +5067,14 @@ def _refresh_project_start_panel(self) -> None:
                 "Sprawdź je w Z2; status [OK] nadajesz dopiero po kontroli."
             )
             plate_run_validation_tone = "muted"
+        plate_run_meta.update(
+            contract_ready=bool(
+                char_material_ready
+                and int(char_plate_material_count or 0) >= int(char_min_plates or 0)
+            ),
+            source_mode="draft",
+            contract_message=plate_run_validation_text,
+        )
     self._set_project_start_asset_row_state(
         "plate_run",
         source_text=plate_run_source_text,
@@ -4948,6 +5087,7 @@ def _refresh_project_start_panel(self) -> None:
             if plate_run_counter_images > 0 or plate_run_counter_plates > 0
             else "0"
         ),
+        meta=plate_run_meta,
     )
 
     plate_model_source_text = self._format_project_start_asset_source(plate_model_path)
@@ -5042,6 +5182,13 @@ def _refresh_project_start_panel(self) -> None:
         char_run_validation_text = "Opcjonalne | import anotacji znaków jest zasobem planowanym."
         char_run_validation_tone = "muted"
         char_run_requirement = ""
+    char_run_meta = build_resource_contract_meta(
+        "O/AT->AZ",
+        contract_ready=False,
+        requires_rematch=False,
+        source_mode="",
+        iteration_path=current_iteration_path,
+    )
     self._set_project_start_asset_row_state(
         "char_run",
         source_text="Nie wskazano",
@@ -5050,6 +5197,7 @@ def _refresh_project_start_panel(self) -> None:
         tone=char_run_validation_tone,
         requirement=char_run_requirement,
         counter_text="0",
+        meta=char_run_meta,
     )
 
     try:

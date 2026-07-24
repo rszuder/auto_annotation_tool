@@ -14,6 +14,7 @@ from .campaign_iteration_paths import STEP1_ITERATION_PATHS
 from .campaign_resource_state import CampaignResourceSnapshot
 from .campaign_transition_evaluator import CampaignTransitionEvalContext, is_transition_ready
 from .campaign_transition_graph import CAMPAIGN_TRANSITION_GRAPH
+from .campaign_transition_resource_report import build_transition_resource_report
 from .campaign_transition_specs import (
     TRANSITION_SPECS,
     get_transition_action_specs_for_edge,
@@ -40,7 +41,14 @@ def _edge(edge_key: str):
     return edge
 
 
-def _snapshot(key: str, *, counter: int = 0, source: str = "project", tone: str = "success") -> CampaignResourceSnapshot:
+def _snapshot(
+    key: str,
+    *,
+    counter: int = 0,
+    source: str = "project",
+    tone: str = "success",
+    meta: dict | None = None,
+) -> CampaignResourceSnapshot:
     return CampaignResourceSnapshot(
         key=key,
         canonical_key=key,
@@ -51,6 +59,7 @@ def _snapshot(key: str, *, counter: int = 0, source: str = "project", tone: str 
         validation="OK",
         tone=tone,
         counter_text=str(counter) if counter else "",
+        meta=dict(meta or {}),
     )
 
 
@@ -105,6 +114,25 @@ def main() -> None:
     for legacy_edge in ("e1_to_e2_plate_training", "e1_to_e2_char_from_images"):
         legacy_specs = get_transition_specs_for_edge(legacy_edge)
         _require(legacy_specs == e1_to_e2_specs, f"{legacy_edge} no longer aliases to merged T01")
+
+    def _report_by_key(specs, snapshots, *, selected_path: str = ""):
+        report = build_transition_resource_report(specs, snapshots, selected_path=selected_path)
+        return {row.key: row for row in report.rows}
+
+    t01_empty_report = _report_by_key(e1_to_e2_specs, {}, selected_path="")
+    _require(
+        t01_empty_report.get("images") is not None and t01_empty_report["images"].requirement == "required",
+        "T01 resources must keep images required before a path is selected",
+    )
+    t01_plate_report = _report_by_key(
+        e1_to_e2_specs,
+        {"images": _snapshot("images", counter=12)},
+        selected_path="plate_training",
+    )
+    _require(
+        t01_plate_report["images"].requirement == "route_required_plate" and t01_plate_report["images"].present,
+        "T01 plate resources must show images as the fulfilled route requirement",
+    )
 
     badge_ids = {spec.badge_id for spec in TRANSITION_SPECS}
     _require("T02" not in badge_ids, "T02 is still present as an active badge")
@@ -165,6 +193,27 @@ def main() -> None:
     )
     _require(is_transition_ready(merged_spec, image_path_ctx), "T01 plate path should be ready with images and an explicit work-path choice")
 
+    stale_image_path_ctx = CampaignTransitionEvalContext(
+        selected_path="plate_training",
+        explicit_selected_path="plate_training",
+        image_count=12,
+        resource_snapshots={
+            "images": _snapshot(
+                "images",
+                counter=12,
+                meta={
+                    "contract_kind": "O",
+                    "contract_ready": False,
+                    "stale": True,
+                },
+            )
+        },
+    )
+    _require(
+        not is_transition_ready(merged_spec, stale_image_path_ctx),
+        "T01 must not be ready when the O resource contract is stale",
+    )
+
     plate_path_without_images_ctx = CampaignTransitionEvalContext(
         selected_path="plate_training",
         explicit_selected_path="plate_training",
@@ -212,6 +261,11 @@ def main() -> None:
         resource_snapshots={},
     )
     _require(not is_transition_ready(t03_spec, no_plate_ctx), "T03 must not be ready without a plate source")
+    t03_empty_report = _report_by_key(t03_specs, {}, selected_path="char_from_ready_plates")
+    _require(
+        t03_empty_report.get("plate_run") is not None and t03_empty_report["plate_run"].requirement == "required",
+        "T03 resources must require AT/plate source",
+    )
 
     wrong_path_ctx = CampaignTransitionEvalContext(
         selected_path="plate_training",
@@ -229,6 +283,66 @@ def main() -> None:
     )
     _require(is_transition_ready(t03_spec, plate_ctx), "T03 should be ready with an existing plate source")
 
+    positive_contract_ctx = CampaignTransitionEvalContext(
+        selected_path="char_from_ready_plates",
+        plate_material_count=0,
+        material_ready=False,
+        resource_snapshots={
+            "plate_run": _snapshot(
+                "plate_run",
+                counter=0,
+                tone="warning",
+                meta={
+                    "contract_kind": "O->AT",
+                    "contract_ready": True,
+                },
+            )
+        },
+    )
+    _require(
+        is_transition_ready(t03_spec, positive_contract_ctx),
+        "T03 should accept a positive non-enforced AT contract",
+    )
+    t03_positive_report = _report_by_key(
+        t03_specs,
+        {
+            "plate_run": _snapshot(
+                "plate_run",
+                tone="warning",
+                meta={
+                    "contract_kind": "O->AT",
+                    "contract_ready": True,
+                },
+            )
+        },
+        selected_path="char_from_ready_plates",
+    )
+    _require(
+        t03_positive_report["plate_run"].present,
+        "T03 resource report should show a positive AT contract as present",
+    )
+
+    negative_contract_fallback_ctx = CampaignTransitionEvalContext(
+        selected_path="char_from_ready_plates",
+        plate_material_count=20,
+        material_ready=True,
+        resource_snapshots={
+            "plate_run": _snapshot(
+                "plate_run",
+                counter=20,
+                tone="success",
+                meta={
+                    "contract_kind": "O->AT",
+                    "contract_ready": False,
+                },
+            )
+        },
+    )
+    _require(
+        is_transition_ready(t03_spec, negative_contract_fallback_ctx),
+        "T03 must not let a negative non-enforced contract override legacy-ready material",
+    )
+
     draft_plate_ctx = CampaignTransitionEvalContext(
         selected_path="char_from_ready_plates",
         plate_material_count=0,
@@ -236,6 +350,28 @@ def main() -> None:
         resource_snapshots={"plate_run": _snapshot("plate_run", counter=20, tone="warning")},
     )
     _require(not is_transition_ready(t03_spec, draft_plate_ctx), "T03 must not be ready with draft plate annotations")
+
+    stale_plate_ctx = CampaignTransitionEvalContext(
+        selected_path="char_from_ready_plates",
+        plate_material_count=20,
+        material_ready=True,
+        resource_snapshots={
+            "plate_run": _snapshot(
+                "plate_run",
+                counter=20,
+                tone="success",
+                meta={
+                    "contract_kind": "O->AT",
+                    "contract_ready": False,
+                    "requires_rematch": True,
+                },
+            )
+        },
+    )
+    _require(
+        not is_transition_ready(t03_spec, stale_plate_ctx),
+        "T03 must not be ready when AT requires rematching to the current O resource",
+    )
 
     t04_spec = get_transition_specs_for_edge("e2_to_e3")[0]
     t05_spec = get_transition_specs_for_edge("e2_to_e4")[0]
