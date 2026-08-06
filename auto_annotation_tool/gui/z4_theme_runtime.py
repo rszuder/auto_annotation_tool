@@ -481,6 +481,52 @@ def apply_theme(self):
         except Exception:
             pass
 
+    try:
+        z4_training_runtime._configure_history_tree_tags(self)
+    except Exception:
+        pass
+
+    try:
+        result_bg = blend_hex_colors(
+            palette.get("success", "#2ecc71"),
+            palette.get("panel", "#252526"),
+            0.82,
+        )
+        result_border = blend_hex_colors(
+            palette.get("success", "#2ecc71"),
+            palette.get("panel_border", palette.get("border", "#3c3c3c")),
+            0.24,
+        )
+        for frame_name in (
+            "campaign_training_result_shell",
+            "campaign_training_result_title_row",
+            "campaign_training_result_pick_row",
+        ):
+            frame = getattr(self, frame_name, None)
+            if frame is not None:
+                frame.configure(bg=result_bg)
+        result_shell = getattr(self, "campaign_training_result_shell", None)
+        if result_shell is not None:
+            result_shell.configure(
+                highlightbackground=result_border,
+                highlightcolor=result_border,
+            )
+        result_title = getattr(self, "campaign_training_result_title_lbl", None)
+        if result_title is not None:
+            result_title.configure(
+                bg=result_bg,
+                fg=palette.get("success", "#2ecc71"),
+                font=("Segoe UI Semibold", 12),
+            )
+        result_copy = getattr(self, "campaign_training_result_copy_lbl", None)
+        if result_copy is not None:
+            result_copy.configure(
+                bg=result_bg,
+                fg=palette.get("muted", "#c7c7c7"),
+            )
+    except Exception:
+        pass
+
     for line in getattr(self, "_train_left_section_separators", []):
         if line is None:
             continue

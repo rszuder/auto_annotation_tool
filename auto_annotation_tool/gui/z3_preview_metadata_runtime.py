@@ -84,30 +84,20 @@ def _normalize_preview_expected_text_values(value) -> list[str]:
         normalized.append(prepared)
     return normalized
 
-def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
+def _merge_preview_expected_text_values(*groups) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in list(group or []):
+            prepared = str(item or "").strip().upper()
+            if not prepared or prepared in seen:
+                continue
+            seen.add(prepared)
+            merged.append(prepared)
+    return merged
+
+def _get_preview_filename_expected_texts(self, data: dict | None = None) -> list[str]:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
-    if isinstance(source_data, dict):
-        for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
-            prepared = str(source_data.get(field_name, "") or "").strip().upper()
-            if prepared:
-                return [prepared]
-        for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
-            prepared_values = _normalize_preview_expected_text_values(source_data.get(field_name))
-            if prepared_values:
-                return prepared_values
-        attrs = source_data.get("plate_attributes")
-        if isinstance(attrs, dict):
-            for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
-                prepared = str(attrs.get(field_name, "") or "").strip().upper()
-                if prepared:
-                    return [prepared]
-            for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
-                prepared_values = _normalize_preview_expected_text_values(attrs.get(field_name))
-                if prepared_values:
-                    return prepared_values
-        expected_source = str(source_data.get("source_expected_text_source") or "").strip().lower()
-        if expected_source == "ambiguous_filename_tokens":
-            return []
     normalized = []
     seen = set()
     for candidate in self._get_preview_reference_text_values(source_data):
@@ -121,6 +111,124 @@ def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
             normalized.append(prepared)
     return normalized
 
+def _should_merge_filename_expected_texts(data: dict | None, explicit_values: list[str], filename_values: list[str]) -> bool:
+    if not isinstance(data, dict) or not filename_values:
+        return False
+    explicit_set = {str(item or "").strip().upper() for item in list(explicit_values or []) if str(item or "").strip()}
+    filename_set = {str(item or "").strip().upper() for item in list(filename_values or []) if str(item or "").strip()}
+    if not filename_set or filename_set.issubset(explicit_set):
+        return False
+
+    attrs = data.get("plate_attributes")
+    expected_source = str(data.get("source_expected_text_source") or "").strip().lower()
+    if not expected_source and isinstance(attrs, dict):
+        expected_source = str(attrs.get("source_expected_text_source") or "").strip().lower()
+    if expected_source in {"ambiguous_filename_tokens", "filename_order", "filename_order_backfill"}:
+        return True
+
+    try:
+        source_plate_count = int(data.get("source_plate_count") or 0)
+    except Exception:
+        source_plate_count = 0
+    if source_plate_count > 1:
+        return True
+    if len(filename_set) > 1:
+        return True
+    return False
+
+def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    filename_values = self._get_preview_filename_expected_texts(source_data if isinstance(source_data, dict) else None)
+    if isinstance(source_data, dict):
+        for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
+            prepared_values = _normalize_preview_expected_text_values(source_data.get(field_name))
+            if prepared_values:
+                if _should_merge_filename_expected_texts(source_data, prepared_values, filename_values):
+                    return _merge_preview_expected_text_values(prepared_values, filename_values)
+                return prepared_values
+        attrs = source_data.get("plate_attributes")
+        if isinstance(attrs, dict):
+            for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
+                prepared_values = _normalize_preview_expected_text_values(attrs.get(field_name))
+                if prepared_values:
+                    if _should_merge_filename_expected_texts(source_data, prepared_values, filename_values):
+                        return _merge_preview_expected_text_values(prepared_values, filename_values)
+                    return prepared_values
+        for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
+            prepared = str(source_data.get(field_name, "") or "").strip().upper()
+            if prepared:
+                prepared_values = [prepared]
+                if _should_merge_filename_expected_texts(source_data, prepared_values, filename_values):
+                    return _merge_preview_expected_text_values(prepared_values, filename_values)
+                return prepared_values
+        if isinstance(attrs, dict):
+            for field_name in ("source_expected_text", "expected_text", "ground_truth_text"):
+                prepared = str(attrs.get(field_name, "") or "").strip().upper()
+                if prepared:
+                    prepared_values = [prepared]
+                    if _should_merge_filename_expected_texts(source_data, prepared_values, filename_values):
+                        return _merge_preview_expected_text_values(prepared_values, filename_values)
+                    return prepared_values
+    return filename_values
+
+def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, chars=None) -> dict:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    source_chars = chars
+    if source_chars is None and isinstance(source_data, dict):
+        source_chars = source_data.get("characters", [])
+    if not isinstance(source_chars, list):
+        source_chars = []
+
+    expected_texts = self._get_preview_expected_texts(source_data if isinstance(source_data, dict) else None)
+    expected_texts = [
+        str(text or "").strip().upper()
+        for text in (expected_texts or [])
+        if str(text or "").strip()
+    ]
+
+    try:
+        candidate_text = self._characters_to_text(source_chars, data=source_data).strip().upper()
+    except Exception:
+        candidate_text = ""
+
+    expected_lengths = sorted({len(text) for text in expected_texts if text})
+    matched_text = candidate_text if candidate_text and candidate_text in expected_texts else ""
+    target_text = ""
+    target_length = 0
+    count_resolved = False
+    resolution = "none"
+
+    if matched_text:
+        target_text = matched_text
+        target_length = len(matched_text)
+        count_resolved = True
+        resolution = "exact_reading"
+    elif len(expected_texts) == 1:
+        target_text = expected_texts[0]
+        target_length = len(target_text)
+        count_resolved = True
+        resolution = "single_expected"
+    elif len(expected_lengths) == 1:
+        target_length = int(expected_lengths[0])
+        count_resolved = True
+        resolution = "uniform_length"
+    elif expected_lengths:
+        resolution = "ambiguous_lengths"
+
+    return {
+        "candidate_text": candidate_text,
+        "expected_texts": expected_texts,
+        "expected_lengths": expected_lengths,
+        "matched_text": matched_text,
+        "target_text": target_text,
+        "target_length": int(target_length or 0),
+        "target_lengths": ([int(target_length)] if count_resolved and int(target_length or 0) > 0 else expected_lengths),
+        "text_resolved": bool(matched_text),
+        "count_resolved": bool(count_resolved),
+        "ambiguous": bool(expected_lengths and not count_resolved),
+        "resolution": resolution,
+    }
+
 def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
     base_status = self._derive_preview_status_from_characters(chars)
     if base_status != "perfect":
@@ -131,14 +239,14 @@ def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
     except Exception:
         pass
 
-    expected_texts = self._get_preview_expected_texts(data)
+    expected_resolution = self._resolve_preview_expected_text_for_crop(data, chars)
+    expected_texts = list(expected_resolution.get("expected_texts", []) or [])
     if not expected_texts:
         if self._preview_has_reference_text_source(data):
             return "needs_fix"
         return base_status
 
-    candidate_text = self._characters_to_text(chars, data=data).strip().upper()
-    if candidate_text and candidate_text in expected_texts:
+    if bool(expected_resolution.get("text_resolved")):
         return "perfect"
     return "needs_fix"
 
@@ -291,6 +399,11 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
         except Exception:
             last_edit_interaction = 0.0
         recent_char_edit = bool(last_edit_interaction > 0.0 and (now - last_edit_interaction) < 2.2)
+        try:
+            last_preview_navigation = float(getattr(self, "_preview_last_navigation_interaction_ts", 0.0) or 0.0)
+        except Exception:
+            last_preview_navigation = 0.0
+        recent_preview_navigation = bool(last_preview_navigation > 0.0 and (now - last_preview_navigation) < 1.5)
         hot_char_target = bool(
             getattr(self, "_preview_char_hover_grip", None) is not None
             or getattr(self, "_preview_char_hover_index", None) is not None
@@ -301,6 +414,7 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
             or getattr(self, "_preview_layout_separator_drag_state", None) is not None
             or getattr(self, "_preview_badge_drag_state", None) is not None
             or recent_char_edit
+            or recent_preview_navigation
             or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
         ):
             if not bool(getattr(self, "_preview_metadata_save_defer_logged", False)):
@@ -309,6 +423,7 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
                     self._log_preview_edit_flow(
                         "metadata_save_deferred",
                         recent_edit=int(bool(recent_char_edit)),
+                        recent_nav=int(bool(recent_preview_navigation)),
                         hot_target=int(bool(hot_char_target)),
                         edit_mode=int(bool(getattr(self, "_preview_char_edit_mode", False))),
                     )
@@ -351,9 +466,24 @@ def _schedule_preview_info_refresh(self, delay_ms: int = 180):
         except Exception:
             last_edit_interaction = 0.0
         recent_char_edit = bool(last_edit_interaction > 0.0 and (now - last_edit_interaction) < 2.2)
+        try:
+            last_preview_navigation = float(getattr(self, "_preview_last_navigation_interaction_ts", 0.0) or 0.0)
+        except Exception:
+            last_preview_navigation = 0.0
+        recent_preview_navigation = bool(last_preview_navigation > 0.0 and (now - last_preview_navigation) < 1.5)
         hot_char_target = bool(
             getattr(self, "_preview_char_hover_grip", None) is not None
             or getattr(self, "_preview_char_hover_index", None) is not None
+        )
+        edit_session_recent = bool(last_edit_interaction > 0.0 and (now - last_edit_interaction) < 6.0)
+        edit_session_active = bool(
+            edit_session_recent
+            and (
+                getattr(self, "_preview_char_edit_mode", False)
+                or getattr(self, "_preview_char_label_mode", False)
+                or getattr(self, "_preview_char_label_active_index", None) is not None
+                or getattr(self, "_preview_char_selected_index", None) is not None
+            )
         )
         if (
             getattr(self, "_preview_char_drag_state", None) is not None
@@ -361,14 +491,18 @@ def _schedule_preview_info_refresh(self, delay_ms: int = 180):
             or getattr(self, "_preview_layout_separator_drag_state", None) is not None
             or getattr(self, "_preview_badge_drag_state", None) is not None
             or recent_char_edit
+            or recent_preview_navigation
+            or edit_session_active
             or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
         ):
             try:
                 self._log_preview_edit_flow(
                     "preview_info_refresh_deferred",
                     recent_edit=int(bool(recent_char_edit)),
+                    recent_nav=int(bool(recent_preview_navigation)),
                     hot_target=int(bool(hot_char_target)),
                     edit_mode=int(bool(getattr(self, "_preview_char_edit_mode", False))),
+                    edit_session=int(bool(edit_session_active)),
                 )
             except Exception:
                 pass
@@ -466,8 +600,8 @@ def _refresh_preview_listbox_row(self, plate_id: str | None = None):
         return
 
     data = self.preview_metadata.get(pid, {})
-    status = str(data.get("status", "unknown")).strip().lower()
     label = self._format_plate_listbox_label(pid, data)
+    status = str(data.get("status", "unknown")).strip().lower()
 
     try:
         selected_rows = {int(idx) for idx in listbox.curselection()}
@@ -615,6 +749,22 @@ def _clear_listbox_selection_fast(listbox) -> None:
         except Exception:
             pass
 
+def _see_listbox_index_if_needed(listbox, index: int) -> None:
+    if listbox is None:
+        return
+    try:
+        target = int(index)
+        top = int(listbox.nearest(0))
+        bottom = int(listbox.nearest(max(0, int(listbox.winfo_height() or 1) - 1)))
+        if top <= target <= bottom:
+            return
+    except Exception:
+        pass
+    try:
+        listbox.see(int(index))
+    except Exception:
+        pass
+
 def _handle_preview_list_arrow_nav(self, offset: int):
     try:
         self.plates_listbox.focus_set()
@@ -637,12 +787,13 @@ def _select_preview_relative(self, offset: int):
         return False
 
     try:
+        self._preview_last_navigation_interaction_ts = time.monotonic()
         self._suppress_preview_reload_on_list_select = True
         self._preview_fast_select_render = True
         self._clear_listbox_selection_fast(listbox)
         listbox.selection_set(target_idx)
         listbox.activate(target_idx)
-        listbox.see(target_idx)
+        _see_listbox_index_if_needed(listbox, target_idx)
     except Exception:
         return False
 
@@ -652,7 +803,8 @@ def _select_preview_relative(self, offset: int):
     try:
         scheduler = getattr(self, "_schedule_preview_select_render", None)
         if callable(scheduler):
-            scheduler(delay_ms=1)
+            delay_ms = 1 if bool(getattr(self, "_preview_keyboard_crop_navigation_active", False)) else 18
+            scheduler(delay_ms=delay_ms)
         else:
             self._on_preview_select(None)
     except Exception:

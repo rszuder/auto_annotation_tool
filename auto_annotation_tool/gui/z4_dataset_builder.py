@@ -50,6 +50,7 @@ from ..training import (
     TrainingStatus,
     YOLOPoseTrainer,
     augment_yolo_dataset_train_split,
+    describe_augmentation_randomness_mode,
     ensure_yolo_dataset_yaml_points_to_root,
     get_albumentations_status,
     install_albumentations,
@@ -1192,7 +1193,7 @@ def _refresh_dataset_creator_cta_state(self):
     try:
         if busy:
             self._style_training_success_label(status)
-            self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
+            self._set_training_widget_text(status, "Przygotowanie wariantu jest w toku...")
         elif enabled:
             self._style_training_success_label(status)
             self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
@@ -1217,7 +1218,7 @@ def _resolve_dataset_split_inputs(self) -> dict:
     adapter = CharYoloDatasetSourceAdapter(
         validator=self._validate_char_yolo_split_source,
         provenance=self._format_training_source_provenance("Źródło PZ1"),
-        source_stage="Z3/PZ2",
+        source_stage="Z3/PZ3",
     )
     validation = adapter.validate(src_raw)
     result["message"] = validation.message or result["message"]
@@ -1267,7 +1268,7 @@ def _refresh_dataset_split_cta_state(self):
     try:
         if busy:
             self._style_training_success_label(status)
-            self._set_training_widget_text(status, "Przygotowanie datasetu jest w toku...")
+            self._set_training_widget_text(status, "Przygotowanie wariantu jest w toku...")
         elif enabled:
             self._style_training_success_label(status)
             self._set_training_widget_text(status, str(info.get("message") or "Gotowy."))
@@ -1749,7 +1750,40 @@ def _format_step4_dataset_result_path(self, dataset_path: str | Path | None) -> 
     except Exception:
         return raw
 
-def _open_pz2_from_dataset_result(self):
+def _open_pz2_from_dataset_result(self, dataset_path: str | Path | None = None, target: str | None = None):
+    dataset_text = str(dataset_path or "").strip()
+    normalized_target = ""
+    try:
+        normalized_target = CONFIG.normalize_task_target(target or getattr(self, "_step4_dataset_mode", "char"))
+    except Exception:
+        normalized_target = str(target or getattr(self, "_step4_dataset_mode", "char") or "char").strip().lower()
+        if normalized_target not in {"plate", "char"}:
+            normalized_target = "char"
+
+    if dataset_text:
+        try:
+            accepted = self._accept_training_input_context(
+                source="pz1",
+                target=normalized_target,
+                dataset_path=dataset_text,
+                select_training=False,
+            )
+        except Exception:
+            accepted = False
+        if not accepted:
+            try:
+                self.dataset_var.set(dataset_text)
+            except Exception:
+                pass
+            try:
+                self._step4_dataset_mode = normalized_target
+            except Exception:
+                pass
+            try:
+                self._step4_train_unlocked = True
+            except Exception:
+                pass
+
     try:
         self._refresh_step4_campaign_navigation_ui()
     except Exception:
@@ -1759,6 +1793,19 @@ def _open_pz2_from_dataset_result(self):
     except Exception:
         try:
             self.main_nb.select(self.tab_train)
+        except Exception:
+            pass
+    for callback_name in (
+        "_refresh_dataset_variant_choices",
+        "_sync_dataset_variant_selection",
+        "_update_training_dataset_hint",
+        "_refresh_training_start_state",
+        "_refresh_training_recommendation_table",
+    ):
+        try:
+            callback = getattr(self, callback_name, None)
+            if callable(callback):
+                callback()
         except Exception:
             pass
 
@@ -1829,7 +1876,9 @@ def _default_step4_augmentation_profile(target: str) -> AugmentationProfile:
         plate_reflect_curve_strength=0.0,
         blur_strength=0.0,
         blur_enabled=False,
+        randomness_mode="realistic",
         class_name=("plate" if normalized == "plate" else ""),
+        task_target=normalized,
     )
 
 def _ensure_step4_augmentation_profile(self, target: str) -> AugmentationProfile:
@@ -1880,9 +1929,11 @@ def _format_step4_augmentation_summary(profile: AugmentationProfile, target: str
     class_suffix = ""
     if CONFIG.normalize_task_target(target) == "plate" and profile.class_name:
         class_suffix = f" Klasa: {profile.class_name}."
+    randomness_suffix = f" Losowość: {describe_augmentation_randomness_mode(getattr(profile, 'randomness_mode', 'realistic'))}."
     return (
         f"Powi\u0119kszenie syntetyczne train: +{profile.extra_count} obraz\u00f3w "
         f"do aktualnego wariantu train.{class_suffix} "
+        f"{randomness_suffix} "
         "Procenty splitu dotycz\u0105 bazy przed powi\u0119kszeniem; po dodaniu syntetyk\u00f3w finalny udzia\u0142 train wzro\u015bnie. "
         "Syntetyki pozostaj\u0105 tylko w tym wariancie treningowym i nie s\u0105 baz\u0105 kolejnej iteracji."
     )
@@ -2513,6 +2564,7 @@ def _get_step4_augmentation_profile(self, target: str) -> AugmentationProfile:
             sample_size=as_int(f"{prefix}_aug_sample_var", int(getattr(profile, "sample_size", 1) or 1)),
             extra_count=as_int(f"{prefix}_aug_extra_var", int(getattr(profile, "extra_count", 0) or 0)),
             class_name=(class_name if normalized_target == "plate" else str(getattr(profile, "class_name", "") or "")),
+            task_target=normalized_target,
         ).normalized()
 
     return AugmentationProfile(
@@ -2580,7 +2632,9 @@ def _get_step4_augmentation_profile(self, target: str) -> AugmentationProfile:
             bool(_read_step4_var(self, f"{prefix}_aug_blur_var", False))
             or as_float(f"{prefix}_aug_blur_strength_var", 0.0) > 0.001
         ),
+        randomness_mode="realistic",
         class_name=class_name,
+        task_target=normalized_target,
     ).normalized()
 
 def _step4_profile_requests_augmentation(profile: AugmentationProfile | None) -> bool:
@@ -3033,7 +3087,7 @@ def _handle_step4_dataset_success_result(
     self._schedule_step4_dataset_summary_refresh()
 
     if result_action == "train":
-        self._open_pz2_from_dataset_result()
+        self._open_pz2_from_dataset_result(dataset_path=dataset_path, target=target)
 
 def _handle_step4_dataset_failure_result(
     self,
@@ -3145,7 +3199,7 @@ def _create_dataset_thread(self):
 
     augmentation_profile = self._get_step4_augmentation_profile("plate")
 
-    if not self._begin_step4_operation("z4.dataset.build", "Z4: przygotowanie datasetu tablic"):
+    if not self._begin_step4_operation("z4.dataset.build", "Z4: przygotowanie wariantu treningowego tablic"):
         return
     self.dataset_build_is_running = True
 
@@ -3361,14 +3415,14 @@ def _split_dataset_thread(self):
 
     augmentation_profile = self._get_step4_augmentation_profile("char")
 
-    if not self._begin_step4_operation("z4.dataset.split", "Z4: przygotowanie datasetu znaków"):
+    if not self._begin_step4_operation("z4.dataset.split", "Z4: przygotowanie wariantu treningowego znaków"):
         return
     self.dataset_split_is_running = True
 
     self._set_split_feedback_visibility(True)
     self.split_progress_var.set(0)
     self._style_training_success_label(self.split_status)
-    self._set_training_widget_text(self.split_status, "Rozpoczynam przygotowanie datasetu...")
+    self._set_training_widget_text(self.split_status, "Rozpoczynam przygotowanie wariantu treningowego...")
     try:
         self.frame.update_idletasks()
     except Exception:
@@ -3475,7 +3529,7 @@ def _split_dataset_thread(self):
                 )
             else:
                 self._ui(lambda: self._style_training_error_label(self.split_status))
-                self._ui(lambda: self._set_training_widget_text(self.split_status, "Błąd przygotowania datasetu"))
+                self._ui(lambda: self._set_training_widget_text(self.split_status, "Błąd przygotowania wariantu"))
                 self._ui(
                     lambda msg=str(msg): self._handle_step4_dataset_failure_result(
                         message=msg,
@@ -3485,9 +3539,9 @@ def _split_dataset_thread(self):
                 )
 
         except Exception as e:
-            logger.exception("Krytyczny błąd przygotowania datasetu znaków w Z4/PZ1")
+            logger.exception("Krytyczny błąd przygotowania wariantu treningowego znaków w Z4/PZ1")
             self._ui(lambda: self._style_training_error_label(self.split_status))
-            self._ui(lambda err=str(e): self._set_training_widget_text(self.split_status, f"Krytyczny błąd przygotowania datasetu: {err}"))
+            self._ui(lambda err=str(e): self._set_training_widget_text(self.split_status, f"Krytyczny błąd przygotowania wariantu: {err}"))
             self._ui(
                 lambda err=str(e): self._handle_step4_dataset_failure_result(
                     message=err,

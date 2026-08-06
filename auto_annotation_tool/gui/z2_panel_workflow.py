@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     campaign_visible_gate_id,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
@@ -317,13 +318,18 @@ def _refresh_free_mode_workflow_ui(self):
     self._set_widget_packed(self.source_section_separator, False)
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+        repair_origin_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("repair_origin_edge_key"),
+            graph_context.get("repair_origin_gate_id")
+            or graph_context.get("source_graph_gate_id"),
+        )
         graph_t05_repair_from_t07 = bool(
-            str(graph_context.get("graph_gate_id") or "").strip().upper() == "T05"
-            and str(
-                graph_context.get("repair_origin_gate_id")
-                or graph_context.get("source_graph_gate_id")
-                or ""
-            ).strip().upper() == "T07"
+            graph_gate_id == "T04"
+            and repair_origin_gate_id == "T06"
         )
     except Exception:
         graph_t05_repair_from_t07 = False
@@ -790,16 +796,19 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
                 payload_followup_text = ""
         try:
             graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-            graph_gate_id_for_followup = str(graph_context.get("graph_gate_id") or "").strip().upper()
-            graph_origin_gate_id = str(
+            graph_gate_id_for_followup = campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
+            graph_origin_gate_id = campaign_gate_id_for_edge(
+                graph_context.get("repair_origin_edge_key"),
                 graph_context.get("repair_origin_gate_id")
-                or graph_context.get("source_graph_gate_id")
-                or ""
-            ).strip().upper()
+                or graph_context.get("source_graph_gate_id"),
+            )
             repair_t07_followup = bool(
                 repair_followup
-                and graph_gate_id_for_followup == "T05"
-                and graph_origin_gate_id == "T07"
+                and graph_gate_id_for_followup == "T04"
+                and graph_origin_gate_id == "T06"
             )
         except Exception:
             repair_t07_followup = False
@@ -808,7 +817,7 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
             base_title = (
                 "Naprawa źródła tablic dla E3"
                 if repair_followup and not repair_t07_followup
-                else "Naprawa tablic przed decyzją T07"
+                else "Naprawa tablic przed decyzją T06"
                 if repair_t07_followup
                 else "Korekta wyniku autoanotacji"
                 if (campaign_context and from_auto)
@@ -832,30 +841,37 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
         except Exception:
             pass
         try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
+            graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+            graph_gate_id = campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
         except Exception:
             graph_gate_id = ""
         graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
-        if repair_t07_followup:
+        if graph_gate_id == "T02":
+            campaign_help_text = (
+                "Kontrolujesz import AT dla bramki T02. Sprawdź ramki tablic na obrazach pasujących "
+                "do aktualnego zbioru O i nadaj [OK] tylko poprawnym pozycjom. Po powrocie wrócisz "
+                "do T02; dopiero przycisk Zatwierdź na bramce zdecyduje o przejściu dalej do pracy nad znakami."
+            )
+        elif repair_t07_followup:
             campaign_help_text = (
                 "Uzupełnij albo popraw ramki tablic w Z2. Poprawne obrazy oznacz [OK]. "
-                "Po wyjściu wrócisz do bramki T07."
+                "Po wyjściu wrócisz do bramki T06."
             )
         elif repair_followup:
             campaign_help_text = (
                 "Uzupełnij brakujące ramki tablic w Z2. Po zapisaniu oznacz poprawne obrazy jako OK "
                 "z menu listy i zatwierdź powrót do E3 po prawej."
             )
-        elif graph_gate_id == "T06":
+        elif graph_gate_id == "T05":
             campaign_help_text = (
                 f"Pracujesz nad otwarciem bramki {graph_display_gate_id or graph_gate_id}: uzupełnij lub popraw ramki tablic potrzebne "
                 "do dalszej pracy nad znakami. Program zapisuje zmiany automatycznie. Obrazy poprawne "
                 "oznacz statusem [OK]; ta zatwierdzona pula zasili Z3/PZ2 po powrocie do grafu."
             )
-        elif graph_gate_id == "T04":
+        elif graph_gate_id == "T03":
             campaign_help_text = (
                 "Masz otwartą kartę Z2 z załadowanym katalogiem zawierającym plik anotacji XML. "
                 "Pracujesz nad otwarciem bramki T04: rysuj nowe ramki tablic albo koryguj istniejące "
@@ -863,7 +879,7 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
                 "opisane nadaj statusem [OK] na liście wyników. Status [OK] zasila licznik bramki T04 "
                 "i po osiągnięciu minimum pozwala zamknąć T04 na mapie kampanii oraz przejść do pracy nad znakami."
             )
-        elif graph_gate_id == "T05":
+        elif graph_gate_id == "T04":
             campaign_help_text = (
                 "Masz otwartą kartę Z2 z załadowanym katalogiem zawierającym plik anotacji XML. "
                 "Pracujesz nad otwarciem bramki T05: rysuj nowe ramki tablic albo koryguj istniejące "
@@ -880,8 +896,14 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
                 "Autoanotację możesz uruchomić jako wsparcie pracy w Z2, jeśli chcesz użyć modelu "
                 "tablic do przygotowania lub uzupełnienia ramek; wynik nadal wymaga kontroli."
             )
-        if graph_gate_id == "T05" and graph_display_gate_id != graph_gate_id:
-            campaign_help_text = campaign_help_text.replace("T05", graph_display_gate_id)
+        if graph_gate_id == "T03":
+            campaign_help_text = campaign_help_text.replace("T04", "T03")
+        elif graph_gate_id == "T04":
+            campaign_help_text = campaign_help_text.replace("T05", "T04")
+        elif graph_gate_id == "T05":
+            campaign_help_text = campaign_help_text.replace("T06", "T05")
+        if repair_t07_followup:
+            campaign_help_text = campaign_help_text.replace("T07", "T06")
         self._set_inline_label_state(
             help_label,
             text=(

@@ -2856,8 +2856,8 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self._campaign_step2_splash_overlay,
         bd=0,
         highlightthickness=1,
-        padx=22,
-        pady=20,
+        padx=20,
+        pady=16,
     )
     self._campaign_step2_splash_card.place(relx=0.5, rely=0.18, anchor="n")
     self._campaign_step2_splash_card.grid_columnconfigure(0, weight=1)
@@ -2866,7 +2866,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         text="Przygotowuję Z2",
         anchor="w",
         justify=tk.LEFT,
-        font=("Segoe UI Semibold", 13),
+        font=("Segoe UI Semibold", 12),
         bd=0,
         highlightthickness=0,
     )
@@ -2880,25 +2880,26 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         bd=0,
         highlightthickness=0,
     )
-    self._campaign_step2_splash_body_lbl.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    self._campaign_step2_splash_body_lbl.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     self._campaign_step2_splash_progress_var = tk.DoubleVar(value=0.0)
     self._campaign_step2_splash_progress = tk.Canvas(
         self._campaign_step2_splash_card,
+        width=520,
         height=16,
         bd=0,
         highlightthickness=0,
     )
-    self._campaign_step2_splash_progress.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+    self._campaign_step2_splash_progress.grid(row=2, column=0, sticky="ew", pady=(11, 0))
     self._campaign_step2_splash_progress_pct_lbl = tk.Label(
         self._campaign_step2_splash_card,
         text="0%",
         anchor="e",
         justify=tk.RIGHT,
-        font=("Segoe UI", 9, "bold"),
+        font=("Segoe UI", 8, "bold"),
         bd=0,
         highlightthickness=0,
     )
-    self._campaign_step2_splash_progress_pct_lbl.grid(row=3, column=0, sticky="e", pady=(6, 0))
+    self._campaign_step2_splash_progress_pct_lbl.grid(row=3, column=0, sticky="e", pady=(5, 0))
     self._campaign_step2_splash_overlay.place_forget()
 
     log_tools = ttk.Frame(center_frame)

@@ -153,6 +153,16 @@ def _flush_loaded_tab_runtime_state(self) -> None:
             logger.debug(f"Nie udalo sie wymusic pelnego zapisu zakladki {tab_name}: {e}")
 
         try:
+            on_app_close = getattr(tab, "_on_app_close", None)
+            if callable(on_app_close):
+                try:
+                    on_app_close(None)
+                except TypeError:
+                    on_app_close()
+        except Exception as e:
+            logger.debug(f"Nie udalo sie wykonac haka zamkniecia zakladki {tab_name}: {e}")
+
+        try:
             flush_session = getattr(tab, "flush_free_mode_session_state", None)
             if callable(flush_session):
                 flush_session()

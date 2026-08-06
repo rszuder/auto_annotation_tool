@@ -24,6 +24,7 @@ def _iter_project_workspace_dirs(root: Path) -> list[Path]:
     runs_root = root / "5_training_runs"
     models_root = root / "6_models"
     rankings_root = root / "7_rankings"
+    presets_root = root / "8_presets"
     staging_root = root / "_staging"
 
     return [
@@ -34,6 +35,17 @@ def _iter_project_workspace_dirs(root: Path) -> list[Path]:
         runs_root,
         models_root,
         rankings_root,
+        presets_root,
+        presets_root / "ocr",
+        presets_root / "detection_pipeline",
+        presets_root / "augmentation",
+        presets_root / "augmentation" / "plate",
+        presets_root / "augmentation" / "char",
+        presets_root / "training",
+        presets_root / "training" / "plate",
+        presets_root / "training" / "char",
+        presets_root / "ranking_scenarios",
+        # Legacy fallback kept for existing OCR presets.
         root / "8_ocr_presets",
         staging_root,
         staging_root / "auto_annotations",
@@ -61,6 +73,11 @@ def _get_project_default_fields(self) -> Dict[str, Any]:
         "project_start_plate_source_input": "",
         "project_start_plate_source_mode": "",
         "project_start_plate_source_iteration": 0,
+        "t02_at_review_committed_iteration": 0,
+        "t02_at_review_committed_at": "",
+        "t02_at_review_committed_run": "",
+        "t02_at_review_committed_images": 0,
+        "t02_at_review_committed_plates": 0,
         "step1_source_manual_clear_iteration": 0,
         "step1_restored_image_source_dir": "",
         "step1_status": "pending",
@@ -87,6 +104,7 @@ def _get_project_default_fields(self) -> Dict[str, Any]:
         "step3_extract_xml_path": "",
         "step3_extract_images_dir": "",
         "step3_preview_dir": "",
+        "step3_detection_yolo_model": "",
         "project_status": "active",
         "project_paused_at": "",
         "project_completed_at": "",
@@ -122,6 +140,11 @@ def _get_default_project_template(self, name: str) -> Dict[str, Any]:
         "project_start_plate_source_input": "",
         "project_start_plate_source_mode": "",
         "project_start_plate_source_iteration": 0,
+        "t02_at_review_committed_iteration": 0,
+        "t02_at_review_committed_at": "",
+        "t02_at_review_committed_run": "",
+        "t02_at_review_committed_images": 0,
+        "t02_at_review_committed_plates": 0,
         "step1_status": "pending",
         "step2_status": "pending",
         "step2_staging_run": "",
@@ -155,6 +178,7 @@ def _get_default_project_template(self, name: str) -> Dict[str, Any]:
         "step3_extract_xml_path": "",
         "step3_extract_images_dir": "",
         "step3_preview_dir": "",
+        "step3_detection_yolo_model": "",
         "project_status": "active",
         "project_paused_at": "",
         "project_completed_at": "",

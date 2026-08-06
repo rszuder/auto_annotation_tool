@@ -9,7 +9,14 @@ from tkinter import ttk
 from ..config import logger
 from .canvas_progress_overlay import CanvasProgressOverlay
 from .z3_detection_guard_dialog import prompt_pz2_detection_guard_options
-from .z3_detection_runtime import run_detection_stage, run_fast_ocr_test, unlock_ui_after_testing
+from .z3_detection_runtime import (
+    confirm_last_detection_result,
+    refresh_detection_review_controls,
+    run_detection_stage,
+    run_fast_ocr_test,
+    undo_last_detection_result,
+    unlock_ui_after_testing,
+)
 from .z3_detection_controls_ui import (
     apply_detection_advanced_section_style,
     apply_detection_param_row_style,
@@ -24,6 +31,7 @@ from .z3_detection_controls_ui import (
     get_detection_method_status_label,
     get_hybrid_detection_status_text,
     get_hybrid_rescue_max_chars,
+    get_yolo_rescue_enabled,
     get_yolo_box_ocr_status_text,
     handle_detect_mode_selection,
     normalize_detection_method_key,
@@ -54,6 +62,8 @@ from .z3_detection_pipeline_ui import (
     get_detection_pipeline_block_style,
     get_detection_pipeline_builder_blocks,
     set_detection_pipeline_builder_blocks,
+    get_saved_detection_pipeline_blocks,
+    save_detection_pipeline_blocks,
     select_detection_pipeline_builder_block,
     set_detection_pipeline_builder_preset,
     append_detection_pipeline_builder_block,
@@ -67,12 +77,14 @@ from .z3_detection_pipeline_ui import (
     refresh_detection_pipeline_builder_property_panel,
     pick_detection_pipeline_yolo_model,
     show_detection_pipeline_model_details,
+    open_detection_pipeline_advanced_modal,
     draw_detection_pipeline_builder_canvas,
     open_detection_pipeline_builder,
 )
 from .z3_detection_model_ui import (
     get_detection_active_model_status,
     has_configured_yolo_detection_model,
+    get_campaign_detection_yolo_model_path,
     get_campaign_char_model_path,
     get_effective_yolo_model_path,
     sync_yolo_model_binding,
@@ -1388,6 +1400,19 @@ def build_detection_tab(
     self.plates_listbox.bind("<Down>", lambda _event: self._handle_preview_list_arrow_nav(1), add=False)
     self.plates_listbox.bind("<KP_Up>", lambda _event: self._handle_preview_list_arrow_nav(-1), add=False)
     self.plates_listbox.bind("<KP_Down>", lambda _event: self._handle_preview_list_arrow_nav(1), add=False)
+    def _handle_preview_list_qe_nav(event):
+        try:
+            self.plates_listbox.focus_set()
+        except Exception:
+            pass
+        result = self._on_preview_canvas_keypress(event)
+        return result or "break"
+
+    self.plates_listbox.bind("<KeyPress-q>", _handle_preview_list_qe_nav, add=False)
+    self.plates_listbox.bind("<KeyPress-Q>", _handle_preview_list_qe_nav, add=False)
+    self.plates_listbox.bind("<KeyPress-e>", _handle_preview_list_qe_nav, add=False)
+    self.plates_listbox.bind("<KeyPress-E>", _handle_preview_list_qe_nav, add=False)
+    self.plates_listbox.bind("<Escape>", self._on_preview_escape_shortcut, add=False)
     self.plates_listbox.bind("<MouseWheel>", self._on_plates_listbox_mousewheel, add="+")
     self.plates_listbox.bind("<Button-4>", self._on_plates_listbox_mousewheel, add="+")
     self.plates_listbox.bind("<Button-5>", self._on_plates_listbox_mousewheel, add="+")
@@ -1519,7 +1544,8 @@ def build_detection_tab(
     self.detect_settings_title_lbl.pack(fill=tk.X, pady=(0, 6))
 
     detect_mode_cards_frame = tk.Frame(set_lf, bd=0, highlightthickness=0)
-    detect_mode_cards_frame.pack(fill=tk.X, pady=(0, 8))
+    # Presety są wybierane dopiero w budowniczym pipeline. Prawy panel pokazuje
+    # aktualny pipeline i jedno jawne CTA do jego zmiany.
     detect_mode_cards_frame.grid_columnconfigure(0, weight=1)
 
     self._detect_mode_cards = {}
@@ -1574,6 +1600,66 @@ def build_detection_tab(
 
     self._refresh_detect_mode_cards()
 
+    pipeline_shell_border = blend_hex_colors(
+        palette.get("success", "#2ecc71"),
+        palette.get("panel", "#252526"),
+        0.74,
+    )
+    pipeline_shell_fill = blend_hex_colors(
+        palette.get("success", "#2ecc71"),
+        palette.get("panel", "#252526"),
+        0.90,
+    )
+    self.detect_pipeline_summary_shell = tk.Frame(
+        set_lf,
+        bg=pipeline_shell_border,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=pipeline_shell_border,
+        highlightcolor=pipeline_shell_border,
+    )
+    self.detect_pipeline_summary_shell.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+    self.detect_pipeline_summary_inner = tk.Frame(
+        self.detect_pipeline_summary_shell,
+        bg=pipeline_shell_fill,
+        bd=0,
+        highlightthickness=0,
+        padx=10,
+        pady=9,
+    )
+    self.detect_pipeline_summary_inner.pack(fill=tk.X, padx=1, pady=1)
+    self.detect_pipeline_summary_inner.grid_columnconfigure(0, weight=1)
+
+    self.detect_pipeline_summary_title_lbl = tk.Label(
+        self.detect_pipeline_summary_inner,
+        text="Aktywny pipeline detekcji",
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 9, "bold"),
+        bg=pipeline_shell_fill,
+        fg=palette.get("fg", "#f3f3f3"),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.detect_pipeline_summary_title_lbl.grid(row=0, column=0, sticky="ew")
+
+    self.detect_run_model_info_lbl = tk.Label(
+        self.detect_pipeline_summary_inner,
+        text="OCR (O) | YOLO: bez YOLO | mAP50-95: -",
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=320,
+        font=("Segoe UI", 9, "bold"),
+        bg=pipeline_shell_fill,
+        bd=0,
+        highlightthickness=0,
+        padx=0,
+        pady=0,
+    )
+    self.detect_run_model_info_lbl._inline_status_font = ("Segoe UI", 9, "bold")
+    self.detect_run_model_info_lbl._inline_status_bg = pipeline_shell_fill
+    self.detect_run_model_info_lbl.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+
     self.detect_workflow_info_lbl = ttk.Label(
         set_lf,
         text=self._get_detection_workflow_text(),
@@ -1581,7 +1667,6 @@ def build_detection_tab(
         wraplength=0,
         justify=tk.LEFT,
     )
-    self.detect_workflow_info_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
 
     self.detect_active_model_lbl = ttk.Label(
         set_lf,
@@ -1590,24 +1675,32 @@ def build_detection_tab(
         wraplength=320,
         justify=tk.LEFT,
     )
-    self.detect_active_model_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
     self.yolo_model_status_lbl = self.detect_active_model_lbl
-    self._refresh_detection_active_model_label()
 
-    self.yolo_model_row = ttk.Frame(set_lf)
-    self.yolo_model_row.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
-    self.yolo_model_row.grid_columnconfigure(0, weight=0)
+    self.yolo_model_row = tk.Frame(self.detect_pipeline_summary_inner, bg=pipeline_shell_fill, bd=0, highlightthickness=0)
+    self.yolo_model_row.grid(row=2, column=0, sticky="ew")
+    self.yolo_model_row.grid_columnconfigure(0, weight=1)
     self.yolo_model_row.grid_columnconfigure(1, weight=0)
-    self.yolo_model_row.grid_columnconfigure(2, weight=1)
+    self.yolo_model_row.grid_columnconfigure(2, weight=0)
 
     self.detect_pipeline_builder_btn = ttk.Button(
         self.yolo_model_row,
-        text="Otwórz budowniczy pipeline",
+        text="Zmień pipeline",
         command=self._open_detection_pipeline_builder,
         style="WorkflowCard.TButton",
     )
-    self.detect_pipeline_builder_btn.grid(row=0, column=0, sticky="w")
-    self.detect_pipeline_builder_btn.configure(padding=(8, 2))
+    self.detect_pipeline_builder_btn.grid(row=0, column=0, sticky="ew")
+    self.detect_pipeline_builder_btn.configure(padding=(8, 6))
+
+    self.btn_detection_last_details = ttk.Button(
+        self.yolo_model_row,
+        text="Szczegóły",
+        command=self._show_last_detection_details,
+        style="WorkflowCard.TButton",
+        width=9,
+    )
+    self.btn_detection_last_details.grid(row=0, column=1, sticky="e", padx=(8, 0))
+    self.btn_detection_last_details.configure(padding=(8, 6))
 
     self.det_yolo_model_browse_btn = ttk.Button(
         self.yolo_model_row,
@@ -1615,9 +1708,10 @@ def build_detection_tab(
         command=self._pick_yolo_model,
         style="WorkflowCard.TButton"
     )
-    self.det_yolo_model_browse_btn.grid(row=0, column=1, sticky="w", padx=(8, 0))
+    self.det_yolo_model_browse_btn.grid(row=0, column=2, sticky="w", padx=(8, 0))
     self.det_yolo_model_browse_btn.configure(padding=(8, 2))
     self._refresh_yolo_model_picker_state()
+    self._refresh_detection_active_model_label()
 
     self._refresh_device_options()
 
@@ -1677,12 +1771,12 @@ def build_detection_tab(
 
     self.hybrid_rescue_stage_lbl, self.hybrid_rescue_stage_divider = make_detection_stage_header(
         self.hybrid_rescue_frame,
-        "2. Dopasowanie znaków do pozycji",
+        "2. Ratunek brakujących znaków",
     )
 
     self.hybrid_rescue_title_lbl = tk.Label(
         self.hybrid_rescue_frame,
-        text="YOLO rescue w hybrydzie",
+        text="Rescue YOLO",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -1697,7 +1791,7 @@ def build_detection_tab(
 
     self.hybrid_rescue_info_lbl = ttk.Label(
         self.hybrid_rescue_frame,
-        text="YOLO może poprawić kilka miejsc w napisie, gdy OCR pomyli znak albo przypisze go do złej pozycji.",
+        text="Gdy normalny próg confidence zostawi mniej znaków niż wynika z napisu tablicy, system może zrobić kontrolny przebieg do 0.10. Wynik przechodzi tylko wtedy, gdy poprawia dopasowanie.",
         style="PanelMuted.TLabel",
         wraplength=320,
         justify=tk.LEFT,
@@ -1708,67 +1802,75 @@ def build_detection_tab(
     except Exception:
         pass
 
-    self.hybrid_rescue_slider_row = make_detection_param_row(self.hybrid_rescue_frame, pady=(0, 8))
-    self.hybrid_rescue_slider_row.grid_columnconfigure(1, weight=1)
-
-    self.hybrid_rescue_limit_lbl = tk.Label(
-        self.hybrid_rescue_slider_row,
-        text="Limit poprawianych pozycji:",
+    self.hybrid_rescue_toggle_row = make_detection_param_row(
+        self.hybrid_rescue_frame,
+        cursor="hand2",
+        pady=(0, 8),
+    )
+    self.hybrid_rescue_toggle_indicator = tk.Canvas(
+        self.hybrid_rescue_toggle_row,
+        width=16,
+        height=16,
+        bd=0,
+        highlightthickness=0,
+        cursor="hand2",
+    )
+    self.hybrid_rescue_toggle_indicator.pack(side=tk.LEFT, padx=(0, 6))
+    self.hybrid_rescue_toggle_lbl = tk.Label(
+        self.hybrid_rescue_toggle_row,
+        text="Odzysk niskopewnych znaków",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
+        cursor="hand2",
     )
-    self.hybrid_rescue_limit_lbl.grid(row=0, column=0, sticky="w")
-
-    self._hybrid_rescue_scale_updating = False
-
-    def _on_hybrid_rescue_scale_change(raw_value=None):
-        if getattr(self, "_hybrid_rescue_scale_updating", False):
-            return
-
-        try:
-            snapped = int(round(float(raw_value)))
-        except Exception:
-            snapped = self._get_hybrid_rescue_max_chars()
-
-        snapped = max(0, min(5, snapped))
-
-        try:
-            self._hybrid_rescue_scale_updating = True
-            if int(self.hybrid_rescue_max_chars_var.get()) != snapped:
-                self.hybrid_rescue_max_chars_var.set(snapped)
-            if hasattr(self, "hybrid_rescue_scale"):
-                self.hybrid_rescue_scale.set(float(snapped))
-        except Exception:
-            pass
-        finally:
-            self._hybrid_rescue_scale_updating = False
-
-    self.hybrid_rescue_scale = ttk.Scale(
-        self.hybrid_rescue_slider_row,
-        from_=0,
-        to=5,
-        orient=tk.HORIZONTAL,
-        variable=self.hybrid_rescue_max_chars_var,
-        command=_on_hybrid_rescue_scale_change,
-        style="Horizontal.TScale",
-    )
-    self.hybrid_rescue_scale.grid(row=0, column=1, sticky="ew", padx=(10, 8))
-
+    self.hybrid_rescue_toggle_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
     self.hybrid_rescue_value_lbl = tk.Label(
-        self.hybrid_rescue_slider_row,
-        width=4,
+        self.hybrid_rescue_toggle_row,
+        width=5,
         anchor="e",
         bd=0,
         highlightthickness=0,
+        cursor="hand2",
     )
-    self.hybrid_rescue_value_lbl.grid(row=0, column=2, sticky="e")
+    self.hybrid_rescue_value_lbl.pack(side=tk.RIGHT, padx=(8, 0))
+
+    def _toggle_hybrid_rescue(_event=None):
+        if not getattr(self, "hybrid_rescue_row_info", {}).get("enabled", True):
+            return "break"
+        try:
+            enabled = self._get_hybrid_rescue_max_chars() > 0
+            self.hybrid_rescue_max_chars_var.set(0 if enabled else 1)
+        except Exception:
+            self.hybrid_rescue_max_chars_var.set(1)
+        return "break"
+
+    for widget in (self.hybrid_rescue_toggle_row, self.hybrid_rescue_toggle_indicator, self.hybrid_rescue_toggle_lbl, self.hybrid_rescue_value_lbl):
+        widget.bind("<Button-1>", _toggle_hybrid_rescue)
+
+    hybrid_rescue_row_info = {
+        "kind": "check",
+        "frame": self.hybrid_rescue_toggle_row,
+        "indicator": self.hybrid_rescue_toggle_indicator,
+        "label": self.hybrid_rescue_toggle_lbl,
+        "extra_widgets": [self.hybrid_rescue_value_lbl],
+        "selected_getter": lambda: self._get_hybrid_rescue_max_chars() > 0,
+        "enabled": True,
+        "hovered": False,
+    }
+    for widget in (self.hybrid_rescue_toggle_row, self.hybrid_rescue_toggle_indicator, self.hybrid_rescue_toggle_lbl, self.hybrid_rescue_value_lbl):
+        widget.bind("<Enter>", lambda _event, info=hybrid_rescue_row_info: self._set_selection_row_hover(info, True))
+        widget.bind("<Leave>", lambda _event, info=hybrid_rescue_row_info: self._set_selection_row_hover(info, False))
+    self.hybrid_rescue_row_info = hybrid_rescue_row_info
+    self.yolo_option_rows.append(hybrid_rescue_row_info)
 
     def _refresh_hybrid_rescue_value(*_args):
         try:
             current_value = self._get_hybrid_rescue_max_chars()
-            self.hybrid_rescue_value_lbl.configure(text=("OFF" if current_value <= 0 else str(current_value)))
+            self.hybrid_rescue_value_lbl.configure(text=("OFF" if current_value <= 0 else "AUTO"))
+            self._apply_yolo_option_check_style()
+            self._save_local_setting("char_hybrid_rescue_max_chars", 1 if current_value > 0 else 0)
             self._refresh_detection_workflow_info_label()
             if self._get_detection_method_key() == "BOTH" and hasattr(self, "test_status_lbl"):
                 self._set_test_status(
@@ -1776,19 +1878,13 @@ def build_detection_tab(
                     "info"
                 )
         except Exception:
-            self.hybrid_rescue_value_lbl.configure(text="2")
+            self.hybrid_rescue_value_lbl.configure(text="AUTO")
 
     try:
         self.hybrid_rescue_max_chars_var.trace_add("write", _refresh_hybrid_rescue_value)
     except Exception:
         pass
-    _on_hybrid_rescue_scale_change(self.hybrid_rescue_max_chars_var.get())
     _refresh_hybrid_rescue_value()
-    self._register_detection_param_row(
-        self.hybrid_rescue_slider_row,
-        labels=[self.hybrid_rescue_limit_lbl, self.hybrid_rescue_value_lbl],
-        scales=[self.hybrid_rescue_scale],
-    )
 
     self.hybrid_box_backend_stage_lbl, self.hybrid_box_backend_stage_divider = make_detection_stage_header(
         self.hybrid_rescue_frame,
@@ -1991,7 +2087,7 @@ def build_detection_tab(
     self.yolo_conf_row = make_detection_param_row(self.yolo_tuning_lf)
     self.yolo_conf_lbl = tk.Label(
         self.yolo_conf_row,
-        text="Confidence:",
+        text="Confidence YB:",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -2000,14 +2096,37 @@ def build_detection_tab(
     self.yolo_conf_lbl.pack(side=tk.LEFT)
     self.yolo_conf_spin = ttk.Spinbox(
         self.yolo_conf_row,
-        from_=0.0,
+        from_=0.00001,
         to=1.0,
         increment=0.05,
-        textvariable=self.yolo_conf_var,
-        width=8
+        textvariable=self.yolo_box_conf_var,
+        width=9,
+        format="%.5f",
     )
     self.yolo_conf_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_conf_row, labels=[self.yolo_conf_lbl])
+
+    self.yolo_symbol_conf_row = make_detection_param_row(self.yolo_tuning_lf)
+    self.yolo_symbol_conf_lbl = tk.Label(
+        self.yolo_symbol_conf_row,
+        text="Confidence YS:",
+        anchor="w",
+        justify=tk.LEFT,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.yolo_symbol_conf_lbl.pack(side=tk.LEFT)
+    self.yolo_symbol_conf_spin = ttk.Spinbox(
+        self.yolo_symbol_conf_row,
+        from_=0.00001,
+        to=1.0,
+        increment=0.05,
+        textvariable=self.yolo_symbol_conf_var,
+        width=9,
+        format="%.5f",
+    )
+    self.yolo_symbol_conf_spin.pack(side=tk.RIGHT, padx=(6, 0))
+    self._register_detection_param_row(self.yolo_symbol_conf_row, labels=[self.yolo_symbol_conf_lbl])
 
     ttk.Label(
         self.yolo_tuning_lf,
@@ -2033,7 +2152,8 @@ def build_detection_tab(
         to=0.99,
         increment=0.05,
         textvariable=self.yolo_iou_var,
-        width=8
+        width=9,
+        format="%.5f",
     )
     self.yolo_iou_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_iou_row, labels=[self.yolo_iou_lbl])
@@ -2062,7 +2182,8 @@ def build_detection_tab(
         to=1.0,
         increment=0.05,
         textvariable=self.yolo_overlap_var,
-        width=8
+        width=9,
+        format="%.5f",
     )
     self.yolo_overlap_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_overlap_row, labels=[self.yolo_overlap_lbl])
@@ -2348,7 +2469,7 @@ def build_detection_tab(
 
     self.preview_load_note_lbl = tk.Label(
         preview_status_lf,
-        text="Stan bramki i jakość zbioru pokazuje szuflada na canvasie. Szczegóły pozycji sprawdzisz na liście tablic.",
+        text="Status pracy, liczniki i jakość zbioru są widoczne tutaj. Szuflada na canvasie służy jako szybki skrót w trakcie edycji.",
         justify="left",
         wraplength=320,
         anchor="w",
@@ -2358,7 +2479,7 @@ def build_detection_tab(
     self.preview_load_note_lbl.grid(row=1, column=0, sticky="ew", pady=(0, 1))
     self._set_inline_status_label_state(
         self.preview_load_note_lbl,
-        text="Stan bramki i jakość zbioru pokazuje szuflada na canvasie. Szczegóły pozycji sprawdzisz na liście tablic.",
+        text="Status pracy, liczniki i jakość zbioru są widoczne tutaj. Szuflada na canvasie służy jako szybki skrót w trakcie edycji.",
         tone="muted",
         emphasis=False
     )
@@ -2522,8 +2643,7 @@ def build_detection_tab(
         emphasis=False
     )
     try:
-        self.preview_counts_frame.grid_remove()
-        self.preview_layout_summary_lbl.grid_remove()
+        self.preview_repair_progress_status_lbl.grid_remove()
         self.preview_fusion_info_lbl.grid_remove()
         self.preview_box_mode_info_lbl.grid_remove()
     except Exception:
@@ -2619,8 +2739,11 @@ def build_detection_tab(
     self.detect_nav_row.grid_columnconfigure(1, weight=1)
     self.detect_nav_row.grid_columnconfigure(2, weight=0)
 
+    detection_action_button_padding = (10, 13)
+
     self.detect_actions_row = ttk.Frame(footer_nav)
-    self.detect_actions_row.grid(row=0, column=0, sticky="ew")
+    self.detect_actions_row.grid(row=0, column=0, sticky="ew", pady=(4, 4))
+    self.detect_actions_row.grid_rowconfigure(0, weight=0)
     self.detect_actions_row.grid_columnconfigure(0, weight=0)
     self.detect_actions_row.grid_columnconfigure(1, weight=1)
     self.detect_actions_row.grid_columnconfigure(2, weight=0)
@@ -2635,14 +2758,14 @@ def build_detection_tab(
     self.btn_back_to_extract.configure(text="Wstecz do PZ1", padding=(6, 0), width=NAV_BUTTON_WIDTH)
 
     self.btn_run_detection_frame = tk.Frame(self.detect_actions_row, bd=0, highlightthickness=0)
-    self.btn_run_detection_frame.grid(row=0, column=0, sticky="nsw")
+    self.btn_run_detection_frame.grid(row=0, column=0, sticky="w")
 
     self.btn_run_detection_pulse_frame = tk.Frame(
         self.btn_run_detection_frame,
         bd=0,
         highlightthickness=0
     )
-    self.btn_run_detection_pulse_frame.pack(anchor=tk.W, fill=tk.Y)
+    self.btn_run_detection_pulse_frame.pack(side=tk.LEFT, anchor=tk.CENTER)
 
     self.btn_run_detection = ttk.Button(
         self.btn_run_detection_pulse_frame,
@@ -2650,35 +2773,51 @@ def build_detection_tab(
         command=self._run_detection_stage,
         style="Accent.TButton"
     )
-    self.btn_run_detection.pack(fill=tk.BOTH, expand=True)
-    self.btn_run_detection.configure(text="Uruchom detekcję", padding=(10, 15), width=18)
+    self.btn_run_detection.pack(fill=tk.X)
+    self.btn_run_detection.configure(
+        text="Uruchom detekcję",
+        padding=detection_action_button_padding,
+        width=34,
+    )
+
+    def _sync_run_detection_button_to_list_width(event=None):
+        try:
+            raw_width = int(getattr(event, "width", 0) or self.preview_list_host.winfo_width() or 0)
+        except Exception:
+            raw_width = 0
+        if raw_width <= 0:
+            return
+        width_chars = max(26, min(56, int(round(raw_width / 9.0))))
+        try:
+            self.btn_run_detection.configure(width=width_chars)
+        except Exception:
+            pass
+
+    try:
+        self.preview_list_host.bind("<Configure>", _sync_run_detection_button_to_list_width, add="+")
+        self.btn_run_detection.after_idle(_sync_run_detection_button_to_list_width)
+    except Exception:
+        pass
+
+    self.detection_review_actions_frame = ttk.Frame(self.btn_run_detection_frame)
+    self.detection_review_actions_frame.pack(side=tk.LEFT, anchor=tk.CENTER, padx=(8, 0))
+    self.btn_undo_detection_result = ttk.Button(
+        self.detection_review_actions_frame,
+        text="Cofnij detekcję",
+        command=self._undo_last_detection_result,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_undo_detection_result.pack(side=tk.LEFT)
+    self.btn_undo_detection_result.configure(padding=detection_action_button_padding, width=16, state=tk.DISABLED)
+    self.btn_confirm_detection_result = None
 
     self.detect_run_status_frame = ttk.Frame(self.detect_actions_row)
-    self.detect_run_status_frame.grid(row=0, column=1, sticky="ew", padx=(12, 0))
+    self.detect_run_status_frame.grid_rowconfigure(0, weight=0)
     self.detect_run_status_frame.grid_columnconfigure(0, weight=1)
     self.detect_run_status_frame.grid_columnconfigure(1, weight=0)
 
     self.detect_run_info_stack = ttk.Frame(self.detect_run_status_frame)
     self.detect_run_info_stack.grid(row=0, column=0, sticky="ew")
-
-    self.detect_run_model_info_lbl = tk.Label(
-        self.detect_run_info_stack,
-        text=(
-            "Pipeline: OCR\n"
-            "Detektor YOLO: nieużywany w pipeline OCR\n"
-            "mAP50-95: -"
-        ),
-        anchor="nw",
-        justify="left",
-        wraplength=430,
-        font=("Segoe UI", 8),
-        bd=0,
-        highlightthickness=0,
-        padx=0,
-        pady=0,
-    )
-    self.detect_run_model_info_lbl._inline_status_font = ("Segoe UI", 8)
-    self.detect_run_model_info_lbl.pack(anchor=tk.W, fill=tk.X, pady=0, ipady=0)
 
     self.test_status_lbl = tk.Label(
         self.detect_run_status_frame,
@@ -2696,6 +2835,8 @@ def build_detection_tab(
         tone="neutral",
         emphasis=False
     )
+    self.test_status_lbl.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(3, 0))
+    self.test_status_lbl.grid_remove()
 
     manual_guard_text = "Ochrona manuali: detekcja uzupełnia lub odświeża tylko pozostałe znaki."
     self.detect_manual_guard_lbl = tk.Label(
@@ -2747,16 +2888,10 @@ def build_detection_tab(
     )
     self.detect_last_run_lbl._inline_status_font = ("Segoe UI", 8)
     self.detect_last_run_lbl.pack(anchor=tk.W, fill=tk.X, pady=0, ipady=0)
-    self.btn_detection_last_details = ttk.Button(
-        self.detect_run_status_frame,
-        text="Szczegóły",
-        command=self._show_last_detection_details,
-        style="WorkflowCard.TButton",
-        width=9,
-    )
-    self.btn_detection_last_details.grid(row=0, column=1, sticky="se", padx=(8, 0), pady=(0, 0))
+    self.detect_last_run_lbl.pack_forget()
     self._refresh_last_detection_status_label()
     self._refresh_detection_refiner_guard_label()
+    self._refresh_detection_review_controls()
 
     self.test_progress_row = tk.Frame(
         self.detect_run_status_frame,
@@ -2764,8 +2899,6 @@ def build_detection_tab(
         bd=0,
         highlightthickness=0,
     )
-    self.test_progress_row.grid(row=1, column=0, columnspan=2, sticky="w")
-
     self.test_progress = SlimProgressBar(
         self.test_progress_row,
         maximum=100,

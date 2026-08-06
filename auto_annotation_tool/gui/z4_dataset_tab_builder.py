@@ -122,6 +122,7 @@ YOLO = None
 
 
 def _build_dataset_tab(self):
+    build_started = time.perf_counter()
     root = ttk.Frame(self.tab_dataset, padding=8)
     root.pack(fill=tk.BOTH, expand=True)
 
@@ -140,7 +141,7 @@ def _build_dataset_tab(self):
 
     self.step4_route_intro_lbl = ttk.Label(
         left,
-        text="Najpierw wybierz typ datasetu. PZ1 utworzy dla niego wariant splitu, który potem wybierzesz w PZ2.",
+        text="Najpierw wybierz typ datasetu. PZ1 utworzy wariant treningowy, który potem wybierzesz w PZ2.",
         font=("Segoe UI", 9),
         wraplength=205,
         justify=tk.LEFT
@@ -229,7 +230,7 @@ def _build_dataset_tab(self):
     self.step4_char_route_badge_lbl.pack(side=tk.RIGHT, padx=(6, 0))
     self.step4_char_route_desc_lbl = tk.Label(
         self.step4_char_route_card,
-        text="YOLO Detect. Źródłem jest gotowy dataset znaków, z którego PZ1 utworzy wariant splitu.",
+        text="YOLO Detect. Źródłem jest gotowy dataset znaków, z którego PZ1 utworzy wariant treningowy.",
         wraplength=195,
         justify=tk.LEFT,
         anchor="w",
@@ -489,12 +490,12 @@ def _build_dataset_tab(self):
 
     self.ds_creator_frame = ttk.LabelFrame(
         self.ds_mode_host,
-        text=" Budowa datasetu tablic (YOLO Pose) ",
+        text=" Wariant treningowy tablic (YOLO Pose) ",
         padding=10
     )
     self.ds_split_frame = ttk.LabelFrame(
         self.ds_mode_host,
-        text=" Przygotowanie datasetu znaków (YOLO Detect) ",
+        text=" Wariant treningowy znaków (YOLO Detect) ",
         padding=10
     )
 
@@ -627,7 +628,19 @@ def _build_dataset_tab(self):
     self._set_step4_builder_log_visibility(False)
     self._set_step4_dataset_mode(initial_mode, show_locked_message=False)
     try:
-        self.frame.after_idle(self._refresh_step4_dataset_mode_ui)
-        self.frame.after(80, self._refresh_step4_dataset_mode_ui)
+        def sync_dataset_canvas_after_first_paint():
+            try:
+                self._sync_dataset_mode_canvas_width()
+                self._sync_dataset_mode_scrollregion()
+            except Exception:
+                pass
+
+        self.frame.after_idle(sync_dataset_canvas_after_first_paint)
     except Exception:
         pass
+    elapsed_ms = int((time.perf_counter() - build_started) * 1000)
+    if elapsed_ms >= 300:
+        try:
+            logger.info(f"[Z4/PZ1 PERF] build_dataset_tab total={elapsed_ms}ms mode={initial_mode}")
+        except Exception:
+            pass

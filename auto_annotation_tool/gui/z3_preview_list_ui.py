@@ -106,11 +106,13 @@ def get_preview_sort_source_count(host: "CharacterAnnotationTab", mode_key: str,
 
     counts = host._count_character_sources(chars, data=source_data)
     if normalized_key == "YOLO":
-        return int(counts.get("yolo", 0)) + int(counts.get("yolo_box_ocr", 0))
+        return int(counts.get("yolo_box", 0)) + int(counts.get("yolo_symbol", 0))
     if normalized_key == "OCR":
-        return int(counts.get("ocr", 0))
+        return int(counts.get("generated_box", 0)) + int(counts.get("ocr_symbol", 0))
     if normalized_key == "M":
-        return int(counts.get("manual", 0))
+        return int(counts.get("manual_box", 0)) + int(counts.get("manual_sign", 0))
+    if normalized_key == "BOXES":
+        return int(len(chars))
     return 0
 
 
@@ -136,6 +138,13 @@ def get_preview_sort_priority(host: "CharacterAnnotationTab", pid: str, data: di
             0 if matches_layout else 1,
             0 if status == "perfect" else (1 if status == "needs_fix" else 2),
             -int(total_boxes),
+            int(original_index),
+        )
+
+    if mode_key == "BOXES":
+        return (
+            -int(total_boxes),
+            0 if status == "perfect" else (1 if status == "needs_fix" else 2),
             int(original_index),
         )
 
@@ -369,7 +378,19 @@ def format_preview_record_source_label(host: "CharacterAnnotationTab", data: dic
 
 
 def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, data: dict) -> str:
-    status = str(data.get("status", "unknown")).strip().lower()
+    try:
+        status = str(
+            host._get_preview_live_status(
+                data,
+                chars=data.get("characters", []) if isinstance(data, dict) else None,
+                plate_id=plate_id,
+            )
+            or data.get("status", "unknown")
+        ).strip().lower()
+        if isinstance(data, dict) and status:
+            data["status"] = status
+    except Exception:
+        status = str(data.get("status", "unknown")).strip().lower()
     if hasattr(host, "_characters_to_display_text"):
         chars_txt = host._characters_to_display_text(data.get("characters", []), data=data, separator=" / ")
     else:

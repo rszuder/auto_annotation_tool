@@ -182,7 +182,21 @@ def _import_external_annotation_run_to_workspace(
     compatible_images_dir: Path | str | None = None,
     allowed_normalized_names: set[str] | None = None,
     copy_images: bool = True,
+    progress_callback=None,
 ) -> tuple[Path | None, str, bool]:
+    def _notify_progress(percent: float, message: str) -> None:
+        if not callable(progress_callback):
+            return
+        try:
+            value = max(0.0, min(100.0, float(percent or 0.0)))
+        except Exception:
+            value = 0.0
+        try:
+            progress_callback(value, str(message or ""))
+        except Exception:
+            pass
+
+    _notify_progress(2, "Sprawdzam katalog runu AT...")
     source_run_dir = self._resolve_existing_run_dir(source_run_dir)
     if source_run_dir is None:
         return None, "Nie znaleziono wskazanego katalogu runu.", False
@@ -191,6 +205,7 @@ def _import_external_annotation_run_to_workspace(
     if not source_xml_path.exists():
         return None, "Wybrany katalog nie zawiera pliku annotations.xml.", False
 
+    _notify_progress(8, "Odczytuję annotations.xml...")
     try:
         annotations = self._parse_cvat_preview_annotations(source_xml_path)
     except Exception as e:
@@ -212,6 +227,7 @@ def _import_external_annotation_run_to_workspace(
             ann for ann in annotations
             if normalize_name(str(getattr(ann, "filename", "") or "")) in allowed_names
         ]
+    _notify_progress(18, "Filtruję AT pasujące do aktualnego zbioru obrazów...")
 
     if not annotations:
         return None, "Wybrany run nie zawiera obrazow zgodnych z wybranym katalogiem zdjęć.", False
@@ -227,21 +243,26 @@ def _import_external_annotation_run_to_workspace(
         annotations,
         image_roots,
     )
+    _notify_progress(32, "Sprawdzam powiązanie AT z obrazami...")
     should_copy_images = bool(copy_images)
     relative_name_map: dict[str, str] = {}
     used_import_paths: set[str] = set()
     if should_copy_images:
-        for idx, (filename, _raw_path, source_image_path) in enumerate(resolved_images):
+        total_images = max(1, len(resolved_images))
+        for idx, (filename, _raw_path, source_image_path) in enumerate(resolved_images, start=1):
             relative_path = self._build_safe_imported_image_relative_path(
                 filename,
-                index=idx,
+                index=idx - 1,
                 used_paths=used_import_paths,
             )
             relative_name_map[filename] = str(relative_path).replace("\\", "/")
-            resolved_images[idx] = (filename, relative_path, source_image_path)
+            resolved_images[idx - 1] = (filename, relative_path, source_image_path)
+            if idx == 1 or idx == total_images or idx % 25 == 0:
+                _notify_progress(34 + (idx / total_images) * 12, "Przygotowuję mapowanie obrazów importu...")
     else:
         for filename, _raw_path, _source_image_path in resolved_images:
             relative_name_map[filename] = str(filename or "").replace("\\", "/")
+        _notify_progress(46, "Przygotowuję import AT bez kopiowania obrazów...")
 
     if missing_images:
         preview_missing = "\n".join(missing_images[:5])
@@ -264,12 +285,18 @@ def _import_external_annotation_run_to_workspace(
 
         if should_copy_images:
             imported_images_dir.mkdir(parents=True, exist_ok=True)
-            for _original_name, relative_path, source_image_path in resolved_images:
+            total_images = max(1, len(resolved_images))
+            for idx, (_original_name, relative_path, source_image_path) in enumerate(resolved_images, start=1):
                 target_image_path = imported_images_dir / relative_path
                 target_image_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_image_path, target_image_path)
+                if idx == 1 or idx == total_images or idx % 10 == 0:
+                    _notify_progress(46 + (idx / total_images) * 20, "Kopiuję obrazy do roboczego runu importu...")
+        else:
+            _notify_progress(66, "Tworzę roboczy run importu AT...")
 
         imported_xml_path = imported_run_dir / "annotations.xml"
+        _notify_progress(70, "Przepisuję annotations.xml tylko dla pasujących obrazów...")
         xml_tree = ET.parse(source_xml_path)
         xml_root = xml_tree.getroot()
         allowed_original_names = set(relative_name_map.keys())
@@ -284,6 +311,7 @@ def _import_external_annotation_run_to_workspace(
             if should_copy_images and original_name in relative_name_map:
                 image_el.set("name", relative_name_map[original_name])
         xml_tree.write(imported_xml_path, encoding="utf-8", xml_declaration=True)
+        _notify_progress(82, "Zapisano annotations.xml roboczego importu...")
 
         source_report_path = source_run_dir / "report.txt"
         if source_report_path.exists():
@@ -337,7 +365,8 @@ def _import_external_annotation_run_to_workspace(
                 set(source_manifest.get("manual_touched_filenames") or [])
                 or self._collect_preview_manually_touched_filenames(annotations, include_dirty=False)
             ),
-            "approved_filenames": sorted(
+            "approved_filenames": [],
+            "imported_source_approved_filenames": sorted(
                 str(relative_name_map.get(str(name or "").strip(), str(name or "").strip()) or "").lower()
                 for name in list(source_manifest.get("approved_filenames") or [])
                 if str(name or "").strip() in allowed_original_names
@@ -356,11 +385,13 @@ def _import_external_annotation_run_to_workspace(
             json.dumps(imported_manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        _notify_progress(96, "Zapisano manifest importu AT...")
         try:
             if self._is_free_mode_session_context():
                 self._register_free_mode_branch_artifact(imported_run_dir, artifact_type="owned_run_dirs")
         except Exception:
             pass
+        _notify_progress(100, "Import AT przygotowany do kontroli w Z2.")
         return imported_run_dir, "", False
     except Exception as e:
         if imported_run_dir is not None:

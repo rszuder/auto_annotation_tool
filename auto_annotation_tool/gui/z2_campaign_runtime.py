@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     campaign_visible_gate_id,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
@@ -1826,6 +1827,12 @@ def _build_campaign_plate_approved_entries_from_run(
         )
         else self._load_annotation_run_approved_filenames(safe_run_dir)
     )
+    if explicit_approval_enabled and not approved_filenames:
+        try:
+            approved_state = dict(self._get_run_plate_strict_approved_state(safe_run_dir) or {})
+            approved_filenames = set(approved_state.get("approved_filenames") or set())
+        except Exception:
+            approved_filenames = set()
     extra_included_lookup = {
         str(name or "").strip().lower()
         for name in set(extra_included_filenames or set())
@@ -2639,21 +2646,30 @@ def _promote_campaign_char_repair_ok_to_approved_pool_before_return(self) -> dic
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
     graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
+    repair_origin_edge_key = str(
+        graph_context.get("repair_origin_edge_key")
+        or graph_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
+    repair_origin_gate_id = campaign_gate_id_for_edge(repair_origin_edge_key, repair_origin_gate_id)
     is_t07_plate_repair = bool(
-        graph_gate_id == "T05"
-        and repair_origin_gate_id == "T07"
+        graph_gate_id == "T04"
+        and repair_origin_gate_id == "T06"
         and current_step == 4
         and iteration_target == "plate"
     )
     is_t06_char_work = bool(
-        graph_gate_id == "T06"
+        graph_gate_id == "T05"
         and current_step == 3
         and iteration_target == "char"
     )
@@ -2804,7 +2820,7 @@ def _promote_campaign_char_repair_ok_to_approved_pool_before_return(self) -> dic
         elif is_t06_char_work:
             status_message = (
                 f"Przekazano {approved_images} zdjęć [OK] do źródła Z3 dla bramki "
-                f"{campaign_visible_gate_id('T06') or 'T05'}."
+                "T05."
             )
         else:
             status_message = f"Przeniesiono {approved_images} zdjęć [OK] do katalogu zatwierdzonych dla E3."
@@ -2861,22 +2877,31 @@ def _promote_campaign_t05_ok_to_approved_pool_before_return(self) -> dict:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
     graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
+    repair_origin_edge_key = str(
+        graph_context.get("repair_origin_edge_key")
+        or graph_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
+    repair_origin_gate_id = campaign_gate_id_for_edge(repair_origin_edge_key, repair_origin_gate_id)
 
     if not (
         active_project
-        and graph_gate_id == "T05"
-        and repair_origin_gate_id != "T07"
+        and graph_gate_id == "T04"
+        and repair_origin_gate_id != "T06"
         and current_step == 2
         and iteration_target == "plate"
     ):
-        return {"ok": False, "reason": "not_t05_return"}
+        return {"ok": False, "reason": "not_t04_return"}
 
     try:
         approval_context = dict(self._get_campaign_step2_approval_context() or {})
@@ -3074,12 +3099,21 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
     repair_origin_gate_id = ""
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+        repair_origin_edge_key = str(
+            graph_context.get("repair_origin_edge_key")
+            or graph_context.get("source_graph_edge_key")
+            or ""
+        ).strip()
         repair_origin_gate_id = str(
             graph_context.get("repair_origin_gate_id")
             or graph_context.get("source_graph_gate_id")
             or ""
         ).strip().upper()
+        repair_origin_gate_id = campaign_gate_id_for_edge(repair_origin_edge_key, repair_origin_gate_id)
     except Exception:
         graph_gate_id = ""
         repair_origin_gate_id = ""
@@ -3124,14 +3158,14 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
         iteration_target = str(project_data.get("iteration_target", iteration_target) or iteration_target).strip().lower()
 
     is_t07_plate_repair = bool(
-        graph_gate_id == "T05"
-        and repair_origin_gate_id == "T07"
+        graph_gate_id == "T04"
+        and repair_origin_gate_id == "T06"
         and current_step == 4
         and iteration_target == "plate"
     )
     is_t05_plate_work = bool(
-        graph_gate_id == "T05"
-        and repair_origin_gate_id != "T07"
+        graph_gate_id == "T04"
+        and repair_origin_gate_id != "T06"
         and current_step == 2
         and iteration_target == "plate"
     )
@@ -3173,8 +3207,8 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
                 {
                     "active": True,
                     "state": "interrupted",
-                    "source_gate_id": "T05",
-                    "working_gate_id": "T05",
+                    "source_gate_id": "T04",
+                    "working_gate_id": "T04",
                     "edge_key": "e2_to_e4",
                     "run_dir": str(safe_run_dir.resolve()),
                     "approved_images": int(approved_images or 0),
@@ -3211,8 +3245,8 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
                 {
                     "active": True,
                     "state": "interrupted",
-                    "source_gate_id": "T07",
-                    "working_gate_id": "T05",
+                    "source_gate_id": "T06",
+                    "working_gate_id": "T04",
                     "edge_key": "e4_to_e1",
                     "run_dir": str(safe_run_dir.resolve()),
                     "approved_images": int(approved_images or 0),
@@ -3236,10 +3270,10 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
         return {"ok": False, "reason": "t07_repair_requires_formal_return"}
     is_char_repair_context = bool(
         iteration_target == "char"
-        and (current_step == 3 or graph_gate_id == "T06" or repair_mode)
+        and (current_step == 3 or graph_gate_id == "T05" or repair_mode)
     )
     is_t06_char_work = bool(
-        graph_gate_id == "T06"
+        graph_gate_id == "T05"
         and iteration_target == "char"
         and current_step == 3
     )
@@ -3344,8 +3378,8 @@ def _sync_campaign_char_repair_approved_run_to_project_source(
                 {
                     "active": True,
                     "state": "interrupted",
-                    "source_gate_id": "T06",
-                    "working_gate_id": "T06",
+                    "source_gate_id": "T05",
+                    "working_gate_id": "T05",
                     "edge_key": "e3_to_e4",
                     "run_dir": str(safe_run_dir.resolve()),
                     "approved_images": int(approved_images or 0),
@@ -3563,19 +3597,31 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id == "T05" else graph_gate_id
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
     graph_display_gate_id = graph_display_gate_id or graph_gate_id
     graph_gate_label = str(graph_context.get("graph_gate_label") or "").strip()
+    graph_repair_origin_edge_key = str(
+        graph_context.get("repair_origin_edge_key")
+        or graph_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     graph_repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
-    graph_gate_is_t04 = graph_gate_id == "T04"
-    graph_gate_is_t05 = graph_gate_id == "T05"
-    graph_gate_is_t06 = graph_gate_id == "T06"
-    graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T07")
+    graph_repair_origin_gate_id = campaign_gate_id_for_edge(
+        graph_repair_origin_edge_key,
+        graph_repair_origin_gate_id,
+    )
+    graph_gate_is_t04 = graph_gate_id == "T03"
+    graph_gate_is_t05 = graph_gate_id == "T04"
+    graph_gate_is_t06 = graph_gate_id == "T05"
+    graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T06")
     graph_gate_known = bool(graph_gate_is_t04 or graph_gate_is_t05 or graph_gate_is_t06)
     graph_gate_copy_id = graph_display_gate_id or graph_gate_id
 
@@ -3742,6 +3788,27 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
             else f"Bramka {graph_gate_id} gotowa do zamknięcia."
         )
 
+    if graph_gate_id == "T03":
+        message = str(message or "").replace("T04", "T03")
+        detail = str(detail or "").replace("T04", "T03")
+        instruction = str(instruction or "").replace("T04", "T03")
+        gate_title = str(gate_title or "").replace("T04", "T03")
+    if graph_gate_id == "T04":
+        message = str(message or "").replace("T05", "T04")
+        detail = str(detail or "").replace("T05", "T04")
+        instruction = str(instruction or "").replace("T05", "T04")
+        gate_title = str(gate_title or "").replace("T05", "T04")
+    if graph_gate_id == "T05":
+        message = str(message or "").replace("T06", "T05")
+        detail = str(detail or "").replace("T06", "T05")
+        instruction = str(instruction or "").replace("T06", "T05")
+        gate_title = str(gate_title or "").replace("T06", "T05")
+    if graph_gate_is_t05_repair_from_t07:
+        message = str(message or "").replace("T07", "T06")
+        detail = str(detail or "").replace("T07", "T06")
+        instruction = str(instruction or "").replace("T07", "T06")
+        gate_title = str(gate_title or "").replace("T07", "T06")
+
     if graph_gate_id and graph_gate_copy_id and graph_gate_copy_id != graph_gate_id:
         message = str(message or "").replace(graph_gate_id, graph_gate_copy_id)
         detail = str(detail or "").replace(graph_gate_id, graph_gate_copy_id)
@@ -3753,7 +3820,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         "ready": bool(ready),
         "tone": tone,
         "title": gate_title,
-        "gate_id": ("T07" if graph_gate_is_t05_repair_from_t07 else graph_display_gate_id),
+        "gate_id": ("T06" if graph_gate_is_t05_repair_from_t07 else graph_display_gate_id),
         "source_gate_id": graph_gate_id,
         "gate_label": graph_gate_label,
         "status": "OTWARTA" if ready else "ZAMKNIĘTA",

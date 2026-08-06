@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
 from ..project_cache import PROJECT_CACHE
-from .z2_shared_ui import campaign_visible_gate_id
 from .z3_view_models import (
     Step3CampaignNavigationViewModel,
     Step3EntryFlowViewModel,
@@ -23,7 +22,8 @@ if TYPE_CHECKING:
     from .tab_character_annotation import CharacterAnnotationTab
 
 
-CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+CHAR_WORK_GATE_DISPLAY_ID = "T05"
+CHAR_WORK_GATE_SESSION_IDS = {CHAR_WORK_GATE_DISPLAY_ID, "T06"}
 
 
 def _is_t06_z3_work_context(host: "CharacterAnnotationTab", context: dict | None = None) -> bool:
@@ -41,12 +41,12 @@ def _is_t06_z3_work_context(host: "CharacterAnnotationTab", context: dict | None
             pass
     gate_id = str(ctx.get("graph_gate_id") or ctx.get("gate_id") or "").strip().upper()
     edge_key = str(ctx.get("graph_edge_key") or ctx.get("edge_key") or "").strip().lower()
-    if gate_id == "T06" or edge_key == "e3_to_e4":
+    if gate_id in CHAR_WORK_GATE_SESSION_IDS or edge_key == "e3_to_e4":
         return True
     try:
         session = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_work_session") or {})
         return (
-            str(session.get("working_gate_id") or "").strip().upper() == "T06"
+            str(session.get("working_gate_id") or "").strip().upper() in CHAR_WORK_GATE_SESSION_IDS
             and str(session.get("work_area") or "").strip().lower() == "z3"
             and bool(session.get("active"))
         )
@@ -72,7 +72,7 @@ def _mark_t06_z3_work_session(
         session = dict(iteration_state.get("t06_work_session") or {})
     except Exception:
         session = {}
-    if session and str(session.get("work_area") or "").strip().lower() not in {"", "z3"}:
+    if session and str(session.get("work_area") or "").strip().lower() not in {"", "z3"} and not force:
         # Nie nadpisujemy przerwanej pracy Z2 zaległymi [OK].
         return
     try:
@@ -84,7 +84,7 @@ def _mark_t06_z3_work_session(
         {
             "active": bool(active),
             "state": normalized_state,
-            "working_gate_id": "T06",
+            "working_gate_id": "T05",
             "work_area": "z3",
             "substep": max(1, current_substep),
             "updated_at": now,
@@ -94,6 +94,10 @@ def _mark_t06_z3_work_session(
         session.setdefault("started_at", now)
         session["last_active_at"] = now
     else:
+        if normalized_state in {"resolved", "closed", "complete", "completed"}:
+            previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
+            if previous_interrupted_at:
+                session.setdefault("resolved_interrupted_at", previous_interrupted_at)
         session["closed_at"] = now
     if reason:
         session["reason"] = str(reason or "").strip()
@@ -107,6 +111,88 @@ def _mark_t06_z3_work_session(
         CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
     except Exception as exc:
         logger.debug(f"Nie udało się zapisać sesji pracy T06/Z3: {exc}")
+
+
+def mark_step3_work_interrupted_on_app_close(host: "CharacterAnnotationTab") -> bool:
+    """Mark campaign Z3/T05 work as interrupted when the app is closed from Z3."""
+    if not getattr(host, "_step3_linear_mode", False) or not CAMPAIGN.get_active_project_name():
+        return False
+
+    selected_tab_key = ""
+    try:
+        selected_tab_key = str(host.app._get_selected_tab_key() or "").strip().lower()
+    except Exception:
+        selected_tab_key = ""
+
+    selected_substep = None
+    try:
+        selected_subtab = str(host.main_nb.select())
+        if selected_subtab == str(host.tab_dataset):
+            selected_substep = 3
+        elif selected_subtab == str(host.tab_detect):
+            selected_substep = 2
+        elif selected_subtab == str(host.tab_extract):
+            selected_substep = 1
+    except Exception:
+        selected_substep = None
+    selected_work_substep = bool(selected_tab_key == "characters" and selected_substep in {2, 3})
+
+    try:
+        iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
+        session = dict(iteration_state.get("t06_work_session") or {})
+    except Exception:
+        session = {}
+
+    session_state = str(session.get("state") or "").strip().lower()
+    session_gate = str(session.get("working_gate_id") or "").strip().upper()
+    session_area = str(session.get("work_area") or "").strip().lower()
+    if selected_substep in {2, 3} and not selected_work_substep:
+        try:
+            selected_work_substep = bool(
+                _is_t06_z3_work_context(host)
+                or (session_gate in CHAR_WORK_GATE_SESSION_IDS and session_area in {"", "z3"})
+            )
+        except Exception:
+            selected_work_substep = bool(session_gate in CHAR_WORK_GATE_SESSION_IDS and session_area in {"", "z3"})
+    if session_state in {"resolved", "closed", "complete", "completed"} and not selected_work_substep:
+        return False
+    if session_state == "paused" and selected_tab_key != "characters":
+        return False
+
+    if session and session_area not in {"", "z3"} and not selected_work_substep:
+        return False
+    session_active = bool(session.get("active")) or session_state in {"active", "started", "dirty", "interrupted"}
+    should_mark = bool(
+        selected_work_substep
+        or (
+            session_gate in CHAR_WORK_GATE_SESSION_IDS
+            and session_area == "z3"
+            and session_active
+        )
+    )
+    if not should_mark:
+        return False
+
+    if selected_substep in {2, 3}:
+        substep = selected_substep
+    else:
+        try:
+            substep = int(session.get("substep") or CAMPAIGN.get_step3_substep() or 1)
+        except Exception:
+            substep = 1
+
+    _mark_t06_z3_work_session(
+        host,
+        state="interrupted",
+        substep=max(1, int(substep or 1)),
+        reason="app_closed_from_z3",
+        force=True,
+    )
+    try:
+        CAMPAIGN.invalidate_step3_char_source_state_cache()
+    except Exception:
+        pass
+    return True
 
 
 def _mark_t06_contract(
@@ -2075,7 +2161,7 @@ def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = Fa
     host._set_subtab_state(host.tab_dataset, "disabled")
 
     CAMPAIGN.set_step3_substep(2)
-    _mark_t06_z3_work_session(host, state="active", substep=2, reason="enter_pz2")
+    _mark_t06_z3_work_session(host, state="active", substep=2, reason="enter_pz2", force=True)
     try:
         after_id = getattr(host, "_detect_preview_autoload_after_id", None)
         if after_id is not None:
@@ -2208,7 +2294,7 @@ def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
 
     _mark_t06_pz2_contract(host, reason="enter_pz3")
     CAMPAIGN.set_step3_substep(3)
-    _mark_t06_z3_work_session(host, state="active", substep=3, reason="enter_pz3")
+    _mark_t06_z3_work_session(host, state="active", substep=3, reason="enter_pz3", force=True)
     host._select_subtab(host.tab_dataset)
     host._persist_step3_progress()
     host._set_button_emphasis("btn_run_detection_frame", False)
@@ -2258,6 +2344,7 @@ def back_to_substep_2_campaign(host: "CharacterAnnotationTab"):
     host._set_button_emphasis("btn_to_dataset_frame", False)
 
     CAMPAIGN.set_step3_substep(2)
+    _mark_t06_z3_work_session(host, state="active", substep=2, reason="back_to_pz2", force=True)
     host._select_subtab(host.tab_detect)
     host._persist_step3_progress()
 
@@ -2268,9 +2355,21 @@ def persist_step3_progress(host: "CharacterAnnotationTab"):
 
     try:
         if CAMPAIGN.get_active_project_name():
-            if str(CAMPAIGN.get_step2_status() or "").strip().lower() != "approved":
+            current_step = int(CAMPAIGN.get_current_step() or 0)
+            step2_status = str(CAMPAIGN.get_step2_status() or "").strip().lower()
+            iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+            iteration_path = str(CAMPAIGN.get_iteration_path() or "").strip().lower()
+            if (
+                current_step < 3
+                and iteration_target == "char"
+                and iteration_path == "char_from_images"
+                and step2_status != "approved"
+            ):
+                logger.debug("[Z3] Pomijam zapis postepu E3: T03 czeka jeszcze na jawne zatwierdzenie.")
+                return
+            if step2_status != "approved":
                 CAMPAIGN.approve_step2()
-            if int(CAMPAIGN.get_current_step() or 0) < 3:
+            if current_step < 3:
                 CAMPAIGN.set_current_step(3)
     except Exception as exc:
         logger.debug(f"Nie udało się zsynchronizowac stanu kampanii z E3: {exc}")
@@ -2288,7 +2387,7 @@ def persist_step3_progress(host: "CharacterAnnotationTab"):
         current_substep = 1
 
     CAMPAIGN.set_step3_substep(current_substep)
-    _mark_t06_z3_work_session(host, state="active", substep=current_substep, reason="persist_progress")
+    _mark_t06_z3_work_session(host, state="active", substep=current_substep, reason="persist_progress", force=True)
 
     stage1_done = False
     stage2_done = False

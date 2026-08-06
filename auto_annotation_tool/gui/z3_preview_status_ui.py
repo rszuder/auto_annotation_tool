@@ -402,10 +402,8 @@ def set_preview_counts_info(
         if widget is None:
             continue
         try:
-            if total_count > 0 and not str(widget.winfo_manager()):
+            if not str(widget.winfo_manager()):
                 widget.grid()
-            elif total_count <= 0 and str(widget.winfo_manager()):
-                widget.grid_remove()
         except Exception:
             pass
     label_map = (
@@ -481,9 +479,21 @@ def build_plates_list_legend_counts(host: "CharacterAnnotationTab", counts: dict
 
         chars = list(data.get("characters", []) or [])
         source_counts = host._count_character_sources(chars, data=data)
-        manual_count = int(source_counts.get("manual", 0) or 0)
-        ocr_count = int(source_counts.get("ocr", 0) or 0)
-        yolo_count = int(source_counts.get("yolo", 0) or 0)
+        manual_count = max(
+            int(source_counts.get("manual", 0) or 0),
+            int(source_counts.get("manual_box", 0) or 0),
+            int(source_counts.get("manual_sign", 0) or 0),
+        )
+        ocr_count = max(
+            int(source_counts.get("ocr", 0) or 0),
+            int(source_counts.get("generated_box", 0) or 0),
+            int(source_counts.get("ocr_symbol", 0) or 0),
+        )
+        yolo_count = max(
+            int(source_counts.get("yolo", 0) or 0),
+            int(source_counts.get("yolo_box", 0) or 0),
+            int(source_counts.get("yolo_symbol", 0) or 0),
+        )
         hybrid_count = int(source_counts.get("yolo_box_ocr", 0) or 0) + int(source_counts.get("yolo_rescue", 0) or 0)
 
         box_total += int(len(chars))

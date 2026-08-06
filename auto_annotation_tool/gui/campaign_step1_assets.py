@@ -132,10 +132,13 @@ def _set_project_start_mode(self, mode: str | None, *, refresh: bool = True) -> 
     if refresh:
         self._refresh_ingest_panel()
 
-def _project_start_model_candidate_roots(self, model_type: str) -> list[Path]:
+def _project_start_model_candidate_roots(self, model_type: str, scope_override: str | None = None) -> list[Path]:
     normalized_type = "plate" if str(model_type or "").strip().lower() == "plate" else "char"
     row_key = "plate_model" if normalized_type == "plate" else "char_model"
-    scope = self._get_project_start_asset_scope(row_key)
+    scope_value = str(scope_override or "").strip().lower()
+    if scope_value not in {"project", "freemode"}:
+        scope_value = self._get_project_start_asset_scope(row_key)
+    scope = "freemode" if scope_value == "freemode" else "project"
     project_root = CAMPAIGN.get_active_project_root_dir()
     project_models_dir = CAMPAIGN.get_dir("models")
     roots: list[Path] = []
@@ -415,9 +418,14 @@ def _summarize_project_start_model_candidate(self, model_path: Path, model_type:
     }
 
 
-def _find_project_start_model_candidates(self, model_type: str) -> tuple[list[dict], list[Path]]:
+def _find_project_start_model_candidates(
+    self,
+    model_type: str,
+    *,
+    scope_override: str | None = None,
+) -> tuple[list[dict], list[Path]]:
     normalized_type = "plate" if str(model_type or "").strip().lower() == "plate" else "char"
-    roots = self._project_start_model_candidate_roots(normalized_type)
+    roots = self._project_start_model_candidate_roots(normalized_type, scope_override=scope_override)
     candidates: list[dict] = []
     seen: set[str] = set()
     for root in roots:
@@ -461,7 +469,23 @@ def _open_project_start_model_candidate_browser(self, model_type: str, parent=No
     normalized_type = "plate" if str(model_type or "").strip().lower() == "plate" else "char"
     row_key = "plate_model" if normalized_type == "plate" else "char_model"
     title_label = "model tablic MT" if normalized_type == "plate" else "model znaków MZ"
-    candidates, roots = self._find_project_start_model_candidates(normalized_type)
+    model_scope_state = {
+        "scope": "freemode" if self._get_project_start_asset_scope(row_key) == "freemode" else "project",
+    }
+    candidates: list[dict] = []
+    try:
+        roots = self._project_start_model_candidate_roots(
+            normalized_type,
+            scope_override=str(model_scope_state.get("scope") or "project"),
+        )
+    except Exception:
+        roots = []
+    model_load_state: dict[str, object] = {
+        "loading": True,
+        "error": "",
+        "elapsed_ms": 0,
+        "token": 0,
+    }
     palette = getattr(self.app, "palette", {})
     card_bg = palette.get("panel", "#252526")
     field_bg = palette.get("field", "#1a1a1a")
@@ -494,22 +518,189 @@ def _open_project_start_model_candidate_browser(self, model_type: str, parent=No
         anchor="w",
     )
     title_lbl.pack(fill=tk.X, padx=16, pady=(14, 4))
-    scope_label = "Swobodny" if self._get_project_start_asset_scope(row_key) == "freemode" else "Projekt"
-    roots_text = ", ".join(str(root.name or root) for root in roots[:4]) or "brak katalogów"
-    if len(roots) > 4:
-        roots_text += f" +{len(roots) - 4}"
+    model_scope_button_refs: dict[str, tk.Button] = {}
+    model_scope_info_var = tk.StringVar(value="")
+
+    def _refresh_model_scope_info() -> None:
+        active_scope = "freemode" if str(model_scope_state.get("scope") or "").strip().lower() == "freemode" else "project"
+        scope_label = "Swobodny" if active_scope == "freemode" else "Projekt"
+        roots_text = ", ".join(str(root.name or root) for root in roots[:4]) or "brak katalogów"
+        if len(roots) > 4:
+            roots_text += f" +{len(roots) - 4}"
+        try:
+            model_scope_info_var.set(
+                campaign_ui_helpers._repair_polish_text(
+                    f"Tryb: {scope_label}. Skanowane katalogi: {roots_text}. "
+                    "Tabela pokazuje zgodność typu modelu i skrótowe metryki, jeśli plik ma lekkie metadane."
+                )
+            )
+        except Exception:
+            pass
+        for scope_value, button in list(model_scope_button_refs.items()):
+            try:
+                active_button = scope_value == active_scope
+                button.config(
+                    bg=blend_hex_colors(field_bg, success, 0.24) if active_button else field_bg,
+                    fg=fg if active_button else muted,
+                    font=("Segoe UI", 8, "bold" if active_button else "normal"),
+                )
+            except Exception:
+                pass
+
+    def _switch_model_candidate_scope(next_scope: str) -> None:
+        nonlocal candidates, roots
+        normalized_scope = "freemode" if str(next_scope or "").strip().lower() == "freemode" else "project"
+        if normalized_scope == str(model_scope_state.get("scope") or "").strip().lower():
+            return
+        try:
+            self._set_project_start_asset_scope(row_key, normalized_scope, persist=True)
+        except Exception:
+            pass
+        model_scope_state["scope"] = normalized_scope
+        candidates = []
+        try:
+            roots = self._project_start_model_candidate_roots(
+                normalized_type,
+                scope_override=normalized_scope,
+            )
+        except Exception:
+            roots = []
+        load_token = int(model_load_state.get("token", 0) or 0) + 1
+        model_load_state["token"] = load_token
+        model_load_state["loading"] = True
+        model_load_state["error"] = ""
+        model_load_state["elapsed_ms"] = 0
+        try:
+            model_sort_state["column"] = None
+            model_sort_state["reverse"] = True
+        except Exception:
+            pass
+        _refresh_model_scope_info()
+        _set_model_loading_progress(True)
+        try:
+            _refresh_light_model_table()
+            tree.yview_moveto(0)
+        except Exception:
+            try:
+                _render_model_table()
+                canvas.yview_moveto(0)
+            except Exception:
+                pass
+        _start_model_candidate_loading(load_token=load_token)
+
     tk.Label(
         body,
-        text=campaign_ui_helpers._repair_polish_text(
-            f"Tryb: {scope_label}. Skanowane katalogi: {roots_text}. "
-            "Tabela pokazuje zgodność typu modelu i skrótowe metryki, jeśli plik ma lekkie metadane."
-        ),
+        textvariable=model_scope_info_var,
         fg=muted,
         bg=body_bg,
         justify=tk.LEFT,
         anchor="w",
         wraplength=1100,
     ).pack(fill=tk.X, padx=16, pady=(0, 12))
+    model_scope_shell = tk.Frame(
+        body,
+        bg=blend_hex_colors(body_bg, success, 0.045),
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=blend_hex_colors(border, success, 0.18),
+        highlightcolor=blend_hex_colors(border, success, 0.18),
+    )
+    model_scope_shell.pack(fill=tk.X, padx=16, pady=(0, 12))
+    tk.Label(
+        model_scope_shell,
+        text="Zakres źródeł modelu",
+        fg=fg,
+        bg=str(model_scope_shell.cget("bg") or body_bg),
+        font=("Segoe UI", 9, "bold"),
+        anchor="w",
+    ).pack(side=tk.LEFT, padx=(10, 12), pady=8)
+    for scope_value, scope_text in (("project", "Projekt"), ("freemode", "Swobodny")):
+        button = tk.Button(
+            model_scope_shell,
+            text=scope_text,
+            command=lambda value=scope_value: _switch_model_candidate_scope(value),
+            cursor="hand2",
+            bg=field_bg,
+            fg=muted,
+            activebackground=blend_hex_colors(field_bg, success, 0.30),
+            activeforeground=fg,
+            relief=tk.FLAT,
+            font=("Segoe UI", 8),
+            padx=12,
+            pady=5,
+        )
+        button.pack(side=tk.LEFT, padx=(0, 6), pady=7)
+        model_scope_button_refs[scope_value] = button
+    tk.Label(
+        model_scope_shell,
+        text="Zakres dotyczy tylko tej listy kandydatów.",
+        fg=muted,
+        bg=str(model_scope_shell.cget("bg") or body_bg),
+        font=("Segoe UI", 8),
+        anchor="w",
+    ).pack(side=tk.LEFT, padx=(8, 10), pady=8)
+    _refresh_model_scope_info()
+
+    model_progress_state = {"visible": False, "running": False}
+    model_progress_var = tk.StringVar(value="")
+    model_progress_shell = tk.Frame(
+        body,
+        bg=blend_hex_colors(body_bg, success, 0.045),
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=blend_hex_colors(border, success, 0.20),
+        highlightcolor=blend_hex_colors(border, success, 0.20),
+    )
+    model_progress_label = tk.Label(
+        model_progress_shell,
+        textvariable=model_progress_var,
+        fg=success,
+        bg=str(model_progress_shell.cget("bg") or body_bg),
+        font=("Segoe UI", 9, "bold"),
+        anchor="w",
+    )
+    model_progress_label.pack(side=tk.LEFT, padx=(10, 12), pady=8)
+    model_progress_bar = ttk.Progressbar(
+        model_progress_shell,
+        mode="indeterminate",
+        length=220,
+    )
+    model_progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(0, 10), pady=9)
+
+    def _set_model_loading_progress(visible: bool, text: str = "") -> None:
+        if visible:
+            model_progress_var.set(
+                campaign_ui_helpers._repair_polish_text(
+                    text or "Wczytuję modele i metryki..."
+                )
+            )
+            if not bool(model_progress_state.get("visible")):
+                try:
+                    model_progress_shell.pack(fill=tk.X, padx=16, pady=(0, 12))
+                except Exception:
+                    pass
+                model_progress_state["visible"] = True
+            if not bool(model_progress_state.get("running")):
+                try:
+                    model_progress_bar.start(14)
+                except Exception:
+                    pass
+                model_progress_state["running"] = True
+            return
+        if bool(model_progress_state.get("running")):
+            try:
+                model_progress_bar.stop()
+            except Exception:
+                pass
+            model_progress_state["running"] = False
+        if bool(model_progress_state.get("visible")):
+            try:
+                model_progress_shell.pack_forget()
+            except Exception:
+                pass
+            model_progress_state["visible"] = False
+
+    _set_model_loading_progress(True)
 
     table_shell = tk.Frame(
         body,
@@ -903,6 +1094,30 @@ def _open_project_start_model_candidate_browser(self, model_type: str, parent=No
                 text=campaign_ui_helpers._repair_polish_text(f"{header[col]}{suffix}"),
                 anchor="w",
             )
+        if bool(model_load_state.get("loading")) or str(model_load_state.get("error") or "").strip():
+            error_text = str(model_load_state.get("error") or "").strip()
+            message = (
+                f"Nie udało się wczytać listy modeli: {error_text}"
+                if error_text
+                else "Wczytuję listę modeli i metryki..."
+            )
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    campaign_ui_helpers._repair_polish_text(message),
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                ),
+            )
+            return
         if not candidates:
             tree.insert(
                 "",
@@ -942,6 +1157,73 @@ def _open_project_start_model_candidate_browser(self, model_type: str, parent=No
                 iid=iid,
                 values=tuple(campaign_ui_helpers._repair_polish_text(str(value or "")) for value in values),
             )
+
+    def _start_model_candidate_loading(load_token: int | None = None) -> None:
+        nonlocal candidates, roots
+        if load_token is None:
+            load_token = int(model_load_state.get("token", 0) or 0) + 1
+            model_load_state["token"] = load_token
+        active_scope = "freemode" if str(model_scope_state.get("scope") or "").strip().lower() == "freemode" else "project"
+        model_load_state["loading"] = True
+        model_load_state["error"] = ""
+        _set_model_loading_progress(True)
+
+        def _worker() -> None:
+            result_candidates: list[dict] = []
+            result_roots: list[Path] = list(roots or [])
+            error_text = ""
+            started = perf_counter()
+            try:
+                result_candidates, result_roots = self._find_project_start_model_candidates(
+                    normalized_type,
+                    scope_override=active_scope,
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                try:
+                    logger.exception("Nie udało się przygotować listy modeli startowych")
+                except Exception:
+                    pass
+            elapsed_ms = int((perf_counter() - started) * 1000)
+
+            def _finish() -> None:
+                nonlocal candidates, roots
+                try:
+                    if not browser.winfo_exists():
+                        return
+                except Exception:
+                    return
+                if int(model_load_state.get("token", 0) or 0) != int(load_token or 0):
+                    return
+                candidates = list(result_candidates or [])
+                roots = list(result_roots or [])
+                model_load_state["loading"] = False
+                model_load_state["error"] = error_text
+                model_load_state["elapsed_ms"] = elapsed_ms
+                _set_model_loading_progress(False)
+                _refresh_model_scope_info()
+                _refresh_light_model_table()
+                try:
+                    tree.yview_moveto(0)
+                except Exception:
+                    pass
+
+            try:
+                browser.after(0, _finish)
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(
+                target=_worker,
+                daemon=True,
+                name=f"campaign-{normalized_type}-model-candidates",
+            ).start()
+        except Exception as exc:
+            model_load_state["loading"] = False
+            model_load_state["error"] = str(exc)
+            _set_model_loading_progress(False)
+            _refresh_light_model_table()
 
     def _set_light_model_sort(col: int) -> None:
         if col >= len(header) - 1:
@@ -992,8 +1274,13 @@ def _open_project_start_model_candidate_browser(self, model_type: str, parent=No
     light_model_hover.bind("<ButtonRelease-1>", _activate_light_model_hover, add="+")
     light_model_hover.bind("<Leave>", lambda _event: _hide_light_model_hover(), add="+")
     _refresh_light_model_table()
+    try:
+        browser.after(80, _start_model_candidate_loading)
+    except Exception:
+        _start_model_candidate_loading()
 
     def _close_browser() -> None:
+        _set_model_loading_progress(False)
         pending = scroll_sync_after_id.get("id")
         if pending is not None:
             try:
@@ -2416,37 +2703,200 @@ def _show_project_start_images_analysis_dialog(self, parent=None) -> None:
     muted = palette.get("muted", "#b8b8b8")
     panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
     accent = palette.get("accent", "#4fc1ff")
+    perf_start = perf_counter()
+    perf_last = perf_start
 
-    master_pool = CAMPAIGN.get_master_pool_dir()
-    master_pool_exists = bool(master_pool and master_pool.exists() and master_pool.is_dir())
-    master_pool_images = self._count_images_in_dir(master_pool, recursive=True) if master_pool_exists else 0
-    if master_pool_exists:
-        _ensure_project_start_analysis_plan(self)
-    step1_context = self._get_step1_manifest_context(self._load_ingest_manifest_cached())
+    def _log_hist_perf(stage: str) -> None:
+        nonlocal perf_last
+        now = perf_counter()
+        elapsed_ms = (now - perf_last) * 1000.0
+        total_ms = (now - perf_start) * 1000.0
+        perf_last = now
+        if elapsed_ms >= 120.0 or total_ms >= 250.0:
+            logger.info(
+                "[T02 HIST PERF] stage=%s elapsed=%.1fms total=%.1fms",
+                stage,
+                elapsed_ms,
+                total_ms,
+            )
+
+    manifest = self._load_ingest_manifest_cached()
+    manifest_selected_images = list(manifest.get("selected_images", []) or []) if isinstance(manifest, dict) else []
+    manifest_histogram = Counter()
+    if isinstance(manifest, dict):
+        try:
+            manifest_histogram.update(
+                {
+                    str(ch): int(value)
+                    for ch, value in dict(manifest.get("char_histogram") or {}).items()
+                    if int(value or 0) > 0
+                }
+            )
+        except Exception:
+            manifest_histogram = Counter()
+        if not manifest_histogram:
+            for item in manifest_selected_images:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    manifest_histogram.update(
+                        {
+                            str(ch): int(value)
+                            for ch, value in dict(item.get("char_histogram") or {}).items()
+                            if int(value or 0) > 0
+                        }
+                    )
+                except Exception:
+                    continue
+        if not manifest_histogram and manifest_selected_images:
+            planner = CampaignIngestPlanner()
+            for item in manifest_selected_images:
+                if not isinstance(item, dict):
+                    continue
+                true_texts = list(item.get("ground_truth_texts") or [])
+                if not true_texts:
+                    true_texts = planner.extract_true_texts_from_filename(str(item.get("name") or ""))
+                try:
+                    manifest_histogram.update(planner.build_char_histogram(true_texts))
+                except Exception:
+                    continue
+    _log_hist_perf("manifest")
+
+    active_project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+    try:
+        active_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
+    except Exception:
+        active_iteration_num = 1
+    try:
+        manifest_signature = (
+            "manifest_analysis",
+            active_project_name,
+            active_iteration_num,
+            self._build_cache_token_for_path(CAMPAIGN.get_ingest_manifest_path()),
+        )
+    except Exception:
+        manifest_signature = None
+
+    current_plan = self.current_ingest_plan if isinstance(getattr(self, "current_ingest_plan", {}), dict) else {}
+    try:
+        current_plan_iteration = int(current_plan.get("iteration", 0) or 0)
+    except Exception:
+        current_plan_iteration = 0
+    current_plan_project = str(current_plan.get("project", "") or "").strip()
+    current_plan_matches = bool(
+        current_plan
+        and (not current_plan_project or current_plan_project == active_project_name)
+        and (current_plan_iteration <= 0 or current_plan_iteration == active_iteration_num)
+    )
+    has_manifest_display_plan = bool(
+        manifest_signature
+        and current_plan_matches
+        and getattr(self, "_existing_iteration_ingest_plan_signature", None) == manifest_signature
+        and current_plan.get("selected_balance")
+    )
+
+    current_balance = Counter((self.last_ingest_snapshot or {}).get("char_balance", {}) or {})
+    if manifest_selected_images and manifest_histogram and not has_manifest_display_plan:
+        manifest_plan = self._build_ingest_plan_from_manifest_for_display(
+            manifest,
+            current_balance=current_balance,
+        )
+        if manifest_plan:
+            self.current_ingest_plan = manifest_plan
+            current_plan = manifest_plan
+            current_plan_matches = True
+            try:
+                self._existing_iteration_ingest_plan_signature = manifest_signature
+            except Exception:
+                pass
+    _log_hist_perf("plan")
+
+    try:
+        manifest_selected_count = int(manifest.get("selected_count", 0) or len(manifest_selected_images) or 0) if isinstance(manifest, dict) else 0
+    except Exception:
+        manifest_selected_count = len(manifest_selected_images)
+    plan_selected_count = int(current_plan.get("selected_total", 0) or 0) if current_plan_matches else 0
+    latest_summary = {}
+    try:
+        latest_summary = dict(CAMPAIGN.load_latest_ingest_plan_summary() or {})
+    except Exception:
+        latest_summary = {}
+    try:
+        latest_summary_iteration = int(latest_summary.get("iteration", 0) or 0)
+    except Exception:
+        latest_summary_iteration = 0
+    latest_summary_project = str(latest_summary.get("project", "") or "").strip()
+    latest_summary_matches = bool(
+        latest_summary
+        and (not latest_summary_project or latest_summary_project == active_project_name)
+        and (latest_summary_iteration <= 0 or latest_summary_iteration == active_iteration_num)
+    )
+    latest_summary_balance = Counter()
+    if latest_summary_matches:
+        for raw_balance in (
+            latest_summary.get("selected_balance"),
+            latest_summary.get("char_histogram"),
+        ):
+            if not isinstance(raw_balance, dict) or not raw_balance:
+                continue
+            try:
+                latest_summary_balance.update(
+                    {
+                        str(ch): int(value)
+                        for ch, value in dict(raw_balance).items()
+                        if int(value or 0) > 0
+                    }
+                )
+            except Exception:
+                latest_summary_balance = Counter()
+            if latest_summary_balance:
+                break
+    try:
+        master_pool = CAMPAIGN.get_master_pool_dir()
+    except Exception:
+        master_pool = None
+    master_pool_images = int(
+        (latest_summary or {}).get("raw_total", 0)
+        or (latest_summary or {}).get("selected_total", 0)
+        or manifest_selected_count
+        or plan_selected_count
+        or 0
+    )
+    # Read-only details must never rescan the image directory; histogram is
+    # produced when the image resource is added and read here from manifest/cache.
+    context_builder = getattr(self, "_get_step1_manifest_context_lightweight", None)
+    if callable(context_builder):
+        step1_context = context_builder(
+            latest_summary,
+            iter_image_count=manifest_selected_count,
+            plan_count=plan_selected_count,
+        )
+    else:
+        step1_context = self._get_step1_manifest_context(manifest)
+    _log_hist_perf("context")
     source_total = int(step1_context.get("source_total", 0) or 0)
     project_overlap = int(step1_context.get("project_overlap_filenames", 0) or 0)
     new_to_project = int(step1_context.get("new_to_project_count", 0) or 0)
     approved_overlap = int(step1_context.get("skipped_duplicate_approved", 0) or 0)
     selected_total = int(
         step1_context.get("current_iteration_package_count", 0)
-        or self.current_ingest_plan.get("selected_total", 0)
+        or (latest_summary.get("selected_total", 0) if latest_summary_matches else 0)
+        or plan_selected_count
+        or manifest_selected_count
         or 0
     )
-    if master_pool_exists:
-        source_names = self._collect_image_names_in_dir(master_pool, recursive=True)
-        previous_project_names = self._collect_previous_project_image_names_for_step1()
-        if source_names:
-            project_overlap = int(len(source_names & previous_project_names))
-            new_to_project = int(max(0, len(source_names) - project_overlap))
-            source_total = int(len(source_names))
-            master_pool_images = int(len(source_names))
     source_diverged = bool(
         master_pool_images > 0
         and selected_total > 0
         and master_pool_images != selected_total
     )
-    selected_balance = Counter(self.current_ingest_plan.get("selected_balance", {}) or {})
-    current_balance = Counter((self.last_ingest_snapshot or {}).get("char_balance", {}) or {})
+    selected_balance = Counter()
+    if manifest_histogram:
+        selected_balance = Counter(manifest_histogram)
+    elif latest_summary_balance:
+        selected_balance = Counter(latest_summary_balance)
+    elif current_plan_matches:
+        selected_balance = Counter(current_plan.get("selected_balance", {}) or {})
 
     parent_widget = parent or getattr(self, "frame", None) or getattr(self.app, "root", None)
     try:
@@ -2619,10 +3069,12 @@ def _show_project_start_images_analysis_dialog(self, parent=None) -> None:
     chart_canvas.bind("<Configure>", _refresh_modal_chart)
     dialog.bind("<Escape>", lambda _e: dialog.destroy())
     _refresh_modal_chart()
+    _log_hist_perf("render")
 
     fit_dialog = getattr(self.app, "_fit_dialog_to_content", None)
     if callable(fit_dialog):
         fit_dialog(dialog, parent=parent_window or parent_widget, min_width=820, min_height=660)
+    _log_hist_perf("fit")
     try:
         dialog.transient(parent_window or parent_widget)
     except Exception:
@@ -2833,6 +3285,10 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
     if not row_key:
         return
 
+    if row_key == "images":
+        self._show_project_start_images_analysis_dialog(parent=parent)
+        return
+
     image_source = self._get_project_start_effective_images_source()
     master_pool = CAMPAIGN.get_master_pool_dir()
     master_pool_exists = bool(master_pool and master_pool.exists() and master_pool.is_dir())
@@ -2849,10 +3305,7 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
     title = "Szczegóły zasobu"
     body_lines: list[str] = []
 
-    if row_key == "images":
-        self._show_project_start_images_analysis_dialog(parent=parent)
-        return
-    elif row_key == "plate_run":
+    if row_key == "plate_run":
         title = "Anotacje tablic"
         plate_source_info = self._get_project_start_plate_source_info()
         plate_run_path = str(plate_source_info.get("run_path") or "").strip()
@@ -3182,6 +3635,7 @@ def _show_project_start_annotation_import_modal(
     compatibility: dict,
     origin_summary: dict | None,
     partial_line: str,
+    parent=None,
 ) -> str | None:
     palette = dict(getattr(self.app, "palette", {}) or {})
     panel = palette.get("panel", "#111827")
@@ -3195,14 +3649,14 @@ def _show_project_start_annotation_import_modal(
     warning = palette.get("warning", "#f59e0b")
     error = palette.get("error", "#ef4444")
 
-    parent = getattr(self, "frame", None)
-    dialog = tk.Toplevel(parent or getattr(self.app, "root", None))
+    dialog_parent = parent or getattr(self, "frame", None)
+    dialog = tk.Toplevel(dialog_parent or getattr(self.app, "root", None))
     try:
         self.app.style_dialog_window(
             dialog,
             title="Import anotacji tablic",
             geometry="900x760",
-            parent=parent,
+            parent=dialog_parent,
         )
         body = self.app._build_themed_dialog_surface(dialog, tone="info")
     except Exception:
@@ -3550,7 +4004,7 @@ def _show_project_start_annotation_import_modal(
     ).pack(side=tk.RIGHT, padx=(8, 0))
 
     try:
-        self.app._fit_dialog_to_content(dialog, parent=parent, min_width=900, min_height=720)
+        self.app._fit_dialog_to_content(dialog, parent=dialog_parent, min_width=900, min_height=720)
     except Exception:
         pass
     dialog.bind("<Escape>", lambda _event: _close_with(None))
@@ -3572,6 +4026,7 @@ def _choose_project_start_annotation_import_mode(
     origin_table: str,
     origin_summary: dict | None = None,
     partial_line: str,
+    parent=None,
 ) -> str | None:
     try:
         choice = self._show_project_start_annotation_import_modal(
@@ -3580,6 +4035,7 @@ def _choose_project_start_annotation_import_mode(
             compatibility=compatibility,
             origin_summary=origin_summary,
             partial_line=partial_line,
+            parent=parent,
         )
         if choice in {"approved", "draft"}:
             return choice
@@ -3603,7 +4059,7 @@ def _choose_project_start_annotation_import_mode(
         choice = dialog(
             "Import anotacji tablic",
             message,
-            parent=self.frame,
+            parent=parent or getattr(self, "frame", None),
             buttons=[
                 "Anuluj",
                 "Importuj AT do kontroli w Z2",
@@ -3616,7 +4072,7 @@ def _choose_project_start_annotation_import_mode(
         choice = messagebox.askokcancel(
             "Import anotacji tablic",
             message,
-            parent=self.frame,
+            parent=parent or getattr(self, "frame", None),
         )
         if choice is True:
             choice = "Importuj AT do kontroli w Z2"
@@ -3991,9 +4447,31 @@ def _summarize_project_start_xml_match(self, xml_path: Path | None, images_dir: 
     )
     return summary
 
-def _import_project_start_plate_run(self, selected_xml_path: Path | str | None = None) -> None:
+def _import_project_start_plate_run(
+    self,
+    selected_xml_path: Path | str | None = None,
+    *,
+    progress_callback=None,
+    parent=None,
+    refresh_dashboard_after_import: bool = True,
+    confirm_import: bool = True,
+) -> bool:
+    def _notify_progress(percent: float, message: str) -> None:
+        if not callable(progress_callback):
+            return
+        try:
+            value = max(0.0, min(100.0, float(percent or 0.0)))
+        except Exception:
+            value = 0.0
+        try:
+            progress_callback(value, str(message or ""))
+        except Exception:
+            pass
+
     if not CAMPAIGN.get_active_project_name():
         return
+
+    dialog_parent = parent or getattr(self, "frame", None)
 
     iteration_target = self._get_iteration_target()
     if iteration_target not in {"plate", "char"}:
@@ -4007,11 +4485,11 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             self.app.themed_info(
                 "Najpierw wybierz tor E1",
                 message,
-                parent=self.frame,
+                parent=dialog_parent,
                 tone="warning",
             )
         except Exception:
-            messagebox.showwarning("Najpierw wybierz tor E1", message, parent=self.frame)
+            messagebox.showwarning("Najpierw wybierz tor E1", message, parent=dialog_parent)
         try:
             self.step1_panel_expanded = True
             self.request_wizard_stage_focus(step_num=1)
@@ -4020,6 +4498,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             pass
         return
 
+    _notify_progress(4, "Sprawdzam wybrany zbiór obrazów O...")
     try:
         image_source = dict(self._get_project_start_effective_images_source() or {})
     except Exception:
@@ -4039,11 +4518,11 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             self.app.themed_info(
                 "Najpierw wskaż obrazy",
                 message,
-                parent=self.frame,
+                parent=dialog_parent,
                 tone="warning",
             )
         except Exception:
-            messagebox.showwarning("Najpierw wskaż obrazy", message, parent=self.frame)
+            messagebox.showwarning("Najpierw wskaż obrazy", message, parent=dialog_parent)
         return
 
     annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
@@ -4051,7 +4530,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self.app.themed_error(
             "Brak Z2",
             "Nie udało się odnalezc zakładki Z2 potrzebnej do importu gotowych anotacji tablic.",
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
 
@@ -4079,14 +4558,14 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
     try:
         selected_xml_path = Path(selected_xml)
     except Exception:
-        self.app.themed_error("Błąd importu", "Nieprawidłowa ścieżka pliku annotations.xml.", parent=self.frame)
+        self.app.themed_error("Błąd importu", "Nieprawidłowa ścieżka pliku annotations.xml.", parent=dialog_parent)
         return
 
     if str(selected_xml_path.name or "").strip().lower() != "annotations.xml":
         self.app.themed_error(
             "Błąd importu",
             "Wskaż właściwy plik annotations.xml z katalogu runu anotacji tablic.",
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
 
@@ -4097,9 +4576,10 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self.app.themed_error(
             "Błąd importu",
             "Nie znaleziono wskazanego pliku annotations.xml.",
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
+    _notify_progress(10, "Sprawdzam plik annotations.xml...")
     selected_run_dir = selected_xml_path.parent
     package_images_dir = selected_run_dir / "images"
     try:
@@ -4124,7 +4604,10 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
     except Exception:
         safe_run_dir = None
 
-    final_run_dir = safe_run_dir
+    # Import AT is always a local review draft. Even if the source run already
+    # belongs to our workspace, its previous OK decisions must not open the
+    # current gate before Z2 control approves them for the active O set.
+    final_run_dir = None
     selected_images_dir = Path(project_images_dir) if project_images_dir is not None else None
     if selected_images_dir is not None:
         try:
@@ -4139,11 +4622,20 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
     pre_import_compatibility = {}
 
     if selected_images_dir is not None:
+        _notify_progress(16, "Liczymy zgodność AT z aktualnym zbiorem O...")
         pre_import_compatibility = self._check_project_start_run_compatibility(
             selected_run_dir,
             selected_images_dir,
             adoptable_only=True,
         )
+
+    def _workspace_import_progress(percent: float, message: str) -> None:
+        try:
+            raw_value = max(0.0, min(100.0, float(percent or 0.0)))
+        except Exception:
+            raw_value = 0.0
+        _notify_progress(18.0 + raw_value * 0.52, message)
+
     package_matched_count = int(
         pre_import_compatibility.get("package_matched", pre_import_compatibility.get("matched", 0)) or 0
     )
@@ -4155,7 +4647,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Wszystkie rozpoznane obrazy z tego zbioru są już zatwierdzone w projekcie albo katalog nie zawiera "
                 "obrazów możliwych do powiązania z annotations.xml."
             ),
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
 
@@ -4170,6 +4662,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
             compatible_images_dir=selected_images_dir,
             allowed_normalized_names=(allowed_import_names or None),
             copy_images=False,
+            progress_callback=_workspace_import_progress,
         )
         if imported_run_dir is None and needs_image_dir:
             prompt_dir = selected_images_dir or package_images_dir or Path(CONFIG.DIR_1_RAW)
@@ -4197,7 +4690,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                         "W wybranym katalogu nie ma obrazów pasujących do annotations.xml.\n\n"
                         "Import E1 pomija obrazy już zatwierdzone w projekcie."
                     ),
-                    parent=self.frame,
+                    parent=dialog_parent,
                 )
                 return
             allowed_import_names = selected_image_names or {
@@ -4210,12 +4703,13 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 compatible_images_dir=selected_images_dir,
                 allowed_normalized_names=(allowed_import_names or None),
                 copy_images=False,
+                progress_callback=_workspace_import_progress,
             )
         if imported_run_dir is None:
             self.app.themed_error(
                 "Import anotacji tablic",
                 error_message or "Nie udało się zaimportowac wskazanych anotacji tablic.",
-                parent=self.frame,
+                parent=dialog_parent,
             )
             return
         final_run_dir = imported_run_dir
@@ -4237,7 +4731,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Nie udało się ustalić zbioru obrazów zgodnego z annotations.xml.\n\n"
                 "Wskaż najpierw zbiór obrazów w E1 albo wybierz run anotacji, który zawiera obrazy lub manifest z input_dir."
             ),
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
 
@@ -4245,6 +4739,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         selected_image_names = self._get_project_start_adoptable_normalized_image_names(resolved_images_dir)
         original_xml_match = self._summarize_project_start_xml_match(selected_xml_path, resolved_images_dir)
 
+    _notify_progress(72, "Weryfikuję finalny zakres AT do kontroli...")
     compatibility = self._check_project_start_run_compatibility(final_run_dir, resolved_images_dir, adoptable_only=True)
     final_package_matched_count = int(
         compatibility.get("package_matched", compatibility.get("matched", 0)) or 0
@@ -4257,7 +4752,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Import E1 pomija obrazy, które są już zatwierdzone w projekcie. "
                 "Wskaż zbiór obrazów zgodny z annotations.xml albo usuń błędnie wybrane źródło."
             ),
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
 
@@ -4274,12 +4769,13 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 compatible_images_dir=resolved_images_dir,
                 allowed_normalized_names=(matched_names or selected_image_names),
                 copy_images=False,
+                progress_callback=_workspace_import_progress,
             )
             if imported_run_dir is None:
                 self.app.themed_error(
                     "Import anotacji tablic",
                     error_message or "Nie udało się przygotować zgodnego podzbioru anotacji.",
-                    parent=self.frame,
+                    parent=dialog_parent,
                 )
                 return
             final_run_dir = imported_run_dir
@@ -4315,7 +4811,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                     "Nie znaleziono żadnego zgodnego wpisu do importu."
                     + (f"\n\nPrzykłady brakujących plików:\n{missing_preview}{missing_suffix}" if missing_preview else "")
                 ),
-                parent=self.frame,
+                parent=dialog_parent,
             )
             return
 
@@ -4350,7 +4846,7 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Najpierw wskaż zbiór obrazów zgodny z annotations.xml."
                 + (f"\n\nPrzyklady brakujacych plikow:\n{missing_preview}{missing_suffix}" if missing_preview else "")
             ),
-            parent=self.frame,
+            parent=dialog_parent,
         )
         return
     if compatibility.get("checked") and compatibility.get("ok"):
@@ -4377,9 +4873,9 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Nie tworzymy duplikatów i nie nadpisujemy zatwierdzonych anotacji."
             )
             try:
-                self.app.themed_info("Import anotacji tablic", message, parent=self.frame, tone="info")
+                self.app.themed_info("Import anotacji tablic", message, parent=dialog_parent, tone="info")
             except Exception:
-                messagebox.showinfo("Import anotacji tablic", message, parent=self.frame)
+                messagebox.showinfo("Import anotacji tablic", message, parent=dialog_parent)
             return
         partial_line = (
             f"{original_missing_count} anotowanych obrazów z XML nie ma dopasowania w aktualnym zbiorze. "
@@ -4389,22 +4885,29 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
                 "Wszystkie anotowane obrazy z XML pasują po nazwie do aktualnego zbioru."
             )
         )
-        origin_summary = self._summarize_project_start_annotation_import_origin(final_run_dir, compatibility)
-        origin_table = self._format_project_start_annotation_import_origin_table(origin_summary)
-        import_mode = self._choose_project_start_annotation_import_mode(
-            xml_label=xml_label,
-            images_label=images_label,
-            compatibility=compatibility,
-            origin_table=origin_table,
-            origin_summary=origin_summary,
-            partial_line=partial_line,
-        )
-        if import_mode is None:
-            return
-        import_mode = "draft"
+        if bool(confirm_import):
+            origin_summary = self._summarize_project_start_annotation_import_origin(final_run_dir, compatibility)
+            origin_table = self._format_project_start_annotation_import_origin_table(origin_summary)
+            import_mode = self._choose_project_start_annotation_import_mode(
+                xml_label=xml_label,
+                images_label=images_label,
+                compatibility=compatibility,
+                origin_table=origin_table,
+                origin_summary=origin_summary,
+                partial_line=partial_line,
+                parent=dialog_parent,
+            )
+            if import_mode is None:
+                _notify_progress(0, "Import AT anulowany. Wybierz źródło ponownie albo zamknij okno.")
+                return
+            import_mode = "draft"
+        else:
+            _notify_progress(80, "Potwierdzono import wybranego AT do kontroli w Z2...")
+            import_mode = "draft"
     else:
         import_mode = "draft"
 
+    _notify_progress(86, "Zapisuję AT jako materiał do kontroli w Z2...")
     if resolved_images_dir is not None and resolved_images_dir.exists() and resolved_images_dir.is_dir():
         try:
             CAMPAIGN.set_master_pool_dir(resolved_images_dir)
@@ -4438,9 +4941,10 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self._sync_iteration_artifact_registry_from_project_start()
     except Exception:
         pass
+    _notify_progress(94, "Odświeżam zasoby bramki po imporcie AT...")
     if resolved_images_dir is not None and self._get_iteration_image_count() == 0:
         self._generate_ingest_plan()
-    else:
+    elif bool(refresh_dashboard_after_import):
         self._refresh_dashboard()
 
     try:
@@ -4455,6 +4959,8 @@ def _import_project_start_plate_run(self, selected_xml_path: Path | str | None =
         self.app.update_status(status_text, "info")
     except Exception:
         pass
+    _notify_progress(100, "AT zaimportowane do kontroli w Z2.")
+    return True
 
 def _get_step1_assets_intro_text() -> str:
     return (

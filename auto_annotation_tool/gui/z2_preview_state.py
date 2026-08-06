@@ -2995,6 +2995,10 @@ def _select_preview_index(self, idx: int, *, reset_view: bool = True):
     if not self.current_annotations:
         return
     select_started = time.perf_counter()
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     self._cancel_preview_selection_render()
     self._defer_preview_autosave_for_navigation(delay_ms=4500)
     safe_idx = max(0, min(int(idx), len(self.current_annotations) - 1))
@@ -3069,6 +3073,7 @@ def _load_preview_image_cached(self, img_path: Path, ann=None, *, update_annotat
     with lock:
         preview_image = image_cache.get(cache_key)
     if preview_image is None:
+        load_started_at = time.perf_counter()
         img = cv2.imread(str(img_path))
         if img is None:
             raise ValueError("Nie można załadować obrazu do podglądu.")
@@ -3076,7 +3081,18 @@ def _load_preview_image_cached(self, img_path: Path, ann=None, *, update_annotat
         preview_image = Image.fromarray(img_rgb)
         with lock:
             image_cache[cache_key] = preview_image
-            while len(image_cache) > 7:
+            load_elapsed_ms = max(0.0, (time.perf_counter() - load_started_at) * 1000.0)
+            if load_elapsed_ms >= 120.0:
+                try:
+                    logger.info(
+                        "[Z2 PERF] preview_image_load_cached total=%.0fms cache=%s file=%s",
+                        load_elapsed_ms,
+                        len(image_cache),
+                        Path(img_path).name,
+                    )
+                except Exception:
+                    pass
+            while len(image_cache) > z2_preview_editor.PREVIEW_IMAGE_CACHE_LIMIT:
                 try:
                     image_cache.pop(next(iter(image_cache)))
                 except Exception:
@@ -3153,6 +3169,10 @@ def _select_preview_index_for_super_correction(self, idx: int):
     if not self.current_annotations:
         return
     select_started = time.perf_counter()
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1600)
+    except Exception:
+        pass
     phase_at = select_started
     phase_ms: dict[str, float] = {}
 
@@ -3260,7 +3280,7 @@ def _select_preview_relative(self, step: int):
         target_actual = max(0, min(current + int(step), len(self.current_annotations) - 1))
         self._select_preview_index(
             target_actual,
-            reset_view=not bool(getattr(self, "_preview_fullscreen_active", False)),
+            reset_view=True,
         )
         _schedule_preview_neighbor_prefetch(
             self,
@@ -3280,7 +3300,7 @@ def _select_preview_relative(self, step: int):
         return "break"
     self._select_preview_index(
         target_actual,
-        reset_view=not bool(getattr(self, "_preview_fullscreen_active", False)),
+        reset_view=True,
     )
     _schedule_preview_neighbor_prefetch(
         self,

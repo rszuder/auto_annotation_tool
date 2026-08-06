@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -182,17 +183,36 @@ def _annotation_run_input_scope_filenames(manifest: dict | None) -> set[str]:
     return {name for name in names if name}
 
 
+def _is_t02_at_review_restore_context(self) -> bool:
+    try:
+        graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    try:
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+    except Exception:
+        graph_gate_id = ""
+    return bool(
+        str(graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or str(graph_gate_id or "").strip().upper() == "T02"
+    )
+
+
 def _sync_t06_approved_run_before_restore_filter(self, run_dir: Path | None, approved_filenames: set[str]) -> None:
     if self._is_free_mode_session_context() or not approved_filenames:
         return
     try:
-        graph_gate_id = str(
-            dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-            or ""
-        ).strip().upper()
+        graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
     except Exception:
         graph_gate_id = ""
-    if graph_gate_id != "T06":
+    if graph_gate_id != "T05":
         return
     try:
         normalized_approved = {
@@ -245,8 +265,11 @@ def _is_t06_interrupted_restore_context(self, run_dir: Path | None = None) -> bo
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    if graph_gate_id != "T06":
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    if graph_gate_id != "T05":
         return False
 
     resume_flag = str(graph_context.get("resume_interrupted_t06") or "").strip().lower()
@@ -397,9 +420,10 @@ def _restore_preview_from_annotation_run(
         if image_dir is None:
             return False
 
+        t02_at_review_context = _is_t02_at_review_restore_context(self)
         hidden_char_effective_filenames = set()
         hidden_char_effective_count = 0
-        if not self._is_free_mode_session_context():
+        if not self._is_free_mode_session_context() and not t02_at_review_context:
             active_extract_run = None
             try:
                 from ..campaign_manager import CAMPAIGN
@@ -432,13 +456,16 @@ def _restore_preview_from_annotation_run(
             graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
         except Exception:
             graph_context = {}
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-        repair_origin_gate_id = str(
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+        repair_origin_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("repair_origin_edge_key"),
             graph_context.get("repair_origin_gate_id")
-            or graph_context.get("source_graph_gate_id")
-            or ""
-        ).strip().upper()
-        if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+            or graph_context.get("source_graph_gate_id"),
+        )
+        if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
             project_approved_filenames = set(self._get_campaign_plate_approved_filenames() or set())
             run_only_approved = set(run_approved_filenames or set()) - project_approved_filenames
             hidden_char_effective_filenames -= run_only_approved
@@ -466,16 +493,20 @@ def _restore_preview_from_annotation_run(
             else set()
         )
 
-        annotations, filtered_run_approved_filenames, hidden_project_approved_count = (
-            self._filter_campaign_project_approved_annotations(
-                annotations,
-                image_dir=image_dir,
-                run_dir=run_dir,
-                run_approved_filenames=run_approved_filenames,
-                extra_hidden_filenames=extra_hidden_for_restore,
-                preserve_manual_hidden_filenames=preserve_manual_hidden_for_restore,
+        if t02_at_review_context:
+            filtered_run_approved_filenames = set(run_approved_filenames or set())
+            hidden_project_approved_count = 0
+        else:
+            annotations, filtered_run_approved_filenames, hidden_project_approved_count = (
+                self._filter_campaign_project_approved_annotations(
+                    annotations,
+                    image_dir=image_dir,
+                    run_dir=run_dir,
+                    run_approved_filenames=run_approved_filenames,
+                    extra_hidden_filenames=extra_hidden_for_restore,
+                    preserve_manual_hidden_filenames=preserve_manual_hidden_for_restore,
+                )
             )
-        )
 
         self._clear_preview_editor_state(clear_dirty=True)
         self.current_annotations = annotations
@@ -1055,9 +1086,10 @@ def _apply_annotation_run_restore_payload(
             pass
     _sync_t06_approved_run_before_restore_filter(self, run_dir, run_approved_filenames)
     _mark_apply_phase("pre_sync")
+    t02_at_review_context = _is_t02_at_review_restore_context(self)
     hidden_char_effective_filenames = set()
     hidden_char_effective_count = 0
-    if not self._is_free_mode_session_context():
+    if not self._is_free_mode_session_context() and not t02_at_review_context:
         active_extract_run = None
         try:
             from ..campaign_manager import CAMPAIGN
@@ -1088,13 +1120,16 @@ def _apply_annotation_run_restore_payload(
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    repair_origin_gate_id = str(
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    repair_origin_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("repair_origin_edge_key"),
         graph_context.get("repair_origin_gate_id")
-        or graph_context.get("source_graph_gate_id")
-        or ""
-    ).strip().upper()
-    if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+        or graph_context.get("source_graph_gate_id"),
+    )
+    if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
         project_approved_filenames = set(self._get_campaign_plate_approved_filenames() or set())
         run_only_approved = set(run_approved_filenames or set()) - project_approved_filenames
         hidden_char_effective_filenames -= run_only_approved
@@ -1122,16 +1157,20 @@ def _apply_annotation_run_restore_payload(
         else set()
     )
 
-    annotations, filtered_run_approved_filenames, hidden_project_approved_count = (
-        self._filter_campaign_project_approved_annotations(
-            annotations,
-            image_dir=image_dir,
-            run_dir=run_dir,
-            run_approved_filenames=run_approved_filenames,
-            extra_hidden_filenames=extra_hidden_for_restore,
-            preserve_manual_hidden_filenames=preserve_manual_hidden_for_restore,
+    if t02_at_review_context:
+        filtered_run_approved_filenames = set(run_approved_filenames or set())
+        hidden_project_approved_count = 0
+    else:
+        annotations, filtered_run_approved_filenames, hidden_project_approved_count = (
+            self._filter_campaign_project_approved_annotations(
+                annotations,
+                image_dir=image_dir,
+                run_dir=run_dir,
+                run_approved_filenames=run_approved_filenames,
+                extra_hidden_filenames=extra_hidden_for_restore,
+                preserve_manual_hidden_filenames=preserve_manual_hidden_for_restore,
+            )
         )
-    )
     _mark_apply_phase("filter_project_approved")
 
     if clear_existing_state:
@@ -1151,7 +1190,7 @@ def _apply_annotation_run_restore_payload(
         pass
     self.plate_dataset_run_var.set(str(run_dir))
     self._preview_approved_filenames = set(filtered_run_approved_filenames)
-    if not self._is_free_mode_session_context():
+    if not self._is_free_mode_session_context() and not t02_at_review_context:
         try:
             self._sync_campaign_iteration_artifact_registry(
                 run_dir=run_dir,
@@ -1210,10 +1249,13 @@ def _apply_annotation_run_restore_payload(
 
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
     except Exception:
         graph_gate_id = ""
-    if graph_gate_id == "T06":
+    if graph_gate_id == "T05":
         try:
             baseline_token = f"{Path(run_dir).resolve()}|T06"
         except Exception:
@@ -1312,20 +1354,24 @@ def _apply_annotation_run_restore_payload(
     _mark_apply_phase("approved_missing_bundle")
 
     self._load_plate_dataset_context_from_run(run_dir, force_images_update=False)
-    try:
-        self._restore_campaign_step2_generated_from_run(run_dir, only_when_pending=True)
-    except Exception:
-        pass
+    if not t02_at_review_context:
+        try:
+            self._restore_campaign_step2_generated_from_run(run_dir, only_when_pending=True)
+        except Exception:
+            pass
     self._sync_preview_approval_flags_from_current_sets()
     _mark_apply_phase("run_context")
 
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        active_graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        active_graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
     except Exception:
         active_graph_gate_id = ""
     restore_index = payload.get("restore_index")
-    if active_graph_gate_id == "T06":
+    if active_graph_gate_id == "T05":
         # T06 is a "continue adding plates" gate. Showing the last preview
         # first and then jumping to the first row looks like a visual glitch,
         # so make the first visible row the initial source of truth.
@@ -1337,8 +1383,38 @@ def _apply_annotation_run_restore_payload(
     self.current_preview_index = restore_index
     self._preview_session_restore_index = restore_index
     self._preview_session_restore_filename = str(payload.get("restore_filename") or "").strip()
-    large_async_restore = bool(use_async_list and len(annotations or []) >= 1200)
+    large_async_restore = bool(use_async_list and (len(annotations or []) >= 1200 or t02_at_review_context))
+    # T02 może wczytywać kilka tysięcy pozycji naraz. Duże porcje listboxa
+    # wyglądają jak "async", ale w Tk potrafią zamrozić UI na długie sekundy.
+    async_list_batch_size = 220 if t02_at_review_context else 350
     initial_preview_scheduled = False
+
+    def _schedule_t02_post_restore_layout_fit() -> None:
+        if not t02_at_review_context:
+            return
+        try:
+            self._schedule_main_pane_layout_refresh(
+                force_defaults=not bool(getattr(self, "_main_pane_layout_initialized", False)),
+                delay_ms=40,
+            )
+        except Exception:
+            pass
+
+        def _fit_after_layout() -> None:
+            try:
+                if getattr(getattr(self, "preview_canvas", None), "original_image", None) is None:
+                    return
+                self._preview_force_fit_after_resize = True
+                self._schedule_preview_layout_restore_after_resize()
+            except Exception:
+                pass
+
+        for delay_ms in (140, 360):
+            try:
+                self.frame.after(int(delay_ms), _fit_after_layout)
+            except Exception:
+                _fit_after_layout()
+                break
 
     def _schedule_initial_preview_render() -> None:
         nonlocal initial_preview_scheduled
@@ -1382,15 +1458,16 @@ def _apply_annotation_run_restore_payload(
         _mark_finish_phase("list_summary")
         graph_gate_id = ""
         try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
+            graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+            graph_gate_id = campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
         except Exception:
             graph_gate_id = ""
         campaign_context = bool(not self._is_free_mode_session_context())
         if (
-            graph_gate_id == "T06"
+            graph_gate_id == "T05"
             and campaign_context
             and run_approved_filenames
         ):
@@ -1414,7 +1491,7 @@ def _apply_annotation_run_restore_payload(
         _mark_finish_phase("t06_sync")
         skip_export_source_refresh = bool(
             campaign_context
-            and graph_gate_id in {"T04", "T05", "T06"}
+            and graph_gate_id in {"T03", "T04", "T05"}
         )
         if skip_export_source_refresh:
             try:
@@ -1510,12 +1587,14 @@ def _apply_annotation_run_restore_payload(
 
     if large_async_restore:
         _schedule_initial_preview_render()
+        _schedule_t02_post_restore_layout_fit()
     else:
         try:
             if self.current_annotations and self.current_preview_index is not None:
                 self._select_preview_index(int(self.current_preview_index), reset_view=True)
         except Exception:
             pass
+        _schedule_t02_post_restore_layout_fit()
 
     if large_async_restore:
         # The run data is already restored at this point. Painting thousands of
@@ -1525,7 +1604,9 @@ def _apply_annotation_run_restore_payload(
         self._populate_preview_list_async(
             preserve_selection=True,
             render_current=False,
-            batch_size=350,
+            batch_size=async_list_batch_size,
+            on_complete=_schedule_t02_post_restore_layout_fit if t02_at_review_context else None,
+            lightweight_summary=bool(t02_at_review_context),
         )
         _mark_apply_phase("schedule_async_list")
     else:
@@ -1822,7 +1903,10 @@ def _restore_preview_from_session_run(self):
         run_is_manual_template = False
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
     except Exception:
         graph_gate_id = ""
     successful_run_image_count = 0
@@ -1856,7 +1940,7 @@ def _restore_preview_from_session_run(self):
         else 0
     )
     skip_t06_successful_scan = bool(
-        graph_gate_id == "T06"
+        graph_gate_id == "T05"
         and successful_run_image_count > 0
         and len(annotations) >= successful_run_image_count
     )
@@ -2440,8 +2524,9 @@ def _prepare_annotation_run_restore_payload(
 
     image_map: dict[str, Path] = {}
     missing_restored_count = 0
+    t02_at_review_context = _is_t02_at_review_restore_context(self)
     hidden_char_effective_filenames = set()
-    if not self._is_free_mode_session_context():
+    if not self._is_free_mode_session_context() and not t02_at_review_context:
         try:
             hidden_char_effective_filenames = self._get_campaign_char_effective_source_hidden_filenames()
         except Exception:
@@ -2453,7 +2538,10 @@ def _prepare_annotation_run_restore_payload(
         run_is_manual_template = False
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
     except Exception:
         graph_gate_id = ""
     successful_run_image_count = 0
@@ -2487,7 +2575,7 @@ def _prepare_annotation_run_restore_payload(
         else 0
     )
     skip_t06_successful_scan = bool(
-        graph_gate_id == "T06"
+        graph_gate_id == "T05"
         and successful_run_image_count > 0
         and len(annotations) >= successful_run_image_count
     )
@@ -2502,6 +2590,9 @@ def _prepare_annotation_run_restore_payload(
     if skip_large_nearly_complete_scan and not scoped_input_run:
         skip_missing_scan = True
         _mark_prepare_phase("skip_missing_nearly_complete_large_run")
+    if t02_at_review_context:
+        skip_missing_scan = True
+        _mark_prepare_phase("skip_missing_t02_at_review")
     if skip_missing_scan:
         _mark_prepare_phase("skip_missing_complete_run")
     if not run_is_manual_template and not skip_missing_scan:

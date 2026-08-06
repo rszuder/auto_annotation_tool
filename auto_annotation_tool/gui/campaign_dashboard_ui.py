@@ -43,7 +43,7 @@ from ..campaign_resource_catalog import (
     normalize_campaign_resource_key,
     ordered_campaign_resource_keys,
 )
-from ..campaign_resource_contracts import resource_contract_ready
+from ..campaign_resource_contracts import build_resource_contract_meta, resource_contract_ready, resource_snapshot_meta
 from ..campaign_resource_state import CampaignResourceSnapshot, build_campaign_resource_snapshot
 from ..campaign_transition_resource_report import build_transition_resource_report
 from ..campaign_iteration_paths import (
@@ -72,12 +72,13 @@ from .run_display import build_run_display_ref
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
-from .z2_shared_ui import campaign_visible_gate_id
+from .z2_shared_ui import campaign_gate_id_for_edge, campaign_visible_gate_id
 from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
 
 T07_GRAPH_EDGE_KEYS = {"e4_to_e1", "e4t_to_e1", "e4z_to_e1"}
-CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+CHAR_WORK_GATE_DISPLAY_ID = "T05"
+CHAR_WORK_GATE_SESSION_IDS = {CHAR_WORK_GATE_DISPLAY_ID, "T06"}
 GATE_WORK_INFOGRAPHIC_INK = "#111827"
 
 
@@ -329,14 +330,24 @@ def _show_project_loading_overlay(
     *,
     title: str = "Ładuję projekt",
     body: str = "",
+    eyebrow: str = "ODTWARZANIE PROJEKTU",
     tone: str = "info",
     progress: float | None = None,
 ) -> None:
     progress_value = progress
+    try:
+        finalizing_progress = bool(progress_value is not None and float(progress_value) >= 99.5)
+    except Exception:
+        finalizing_progress = False
+    determinate_progress = progress_value is not None
     overlay = getattr(self, "project_loading_overlay", None)
     card = getattr(self, "project_loading_card", None)
+    accent_bar = getattr(self, "project_loading_accent_bar", None)
+    content = getattr(self, "project_loading_content", None)
+    eyebrow_lbl = getattr(self, "project_loading_eyebrow_lbl", None)
     title_lbl = getattr(self, "project_loading_title_lbl", None)
     body_lbl = getattr(self, "project_loading_body_lbl", None)
+    step_lbl = getattr(self, "project_loading_step_lbl", None)
     progress_bar = getattr(self, "project_loading_progress", None)
     host = getattr(self, "main_container", None)
     if overlay is None or card is None or title_lbl is None or body_lbl is None or progress_bar is None or host is None:
@@ -346,22 +357,69 @@ def _show_project_loading_overlay(
     panel_bg = palette.get("panel", "#252526")
     fg = palette.get("fg", "#f3f3f3")
     tone_key = str(tone or "info").strip().lower()
-    if tone_key == "success":
-        accent = palette.get("success", "#2ecc71")
-    elif tone_key == "error":
+    # Loading overlays should not change personality mid-flight.  A final
+    # "success" state used to repaint the whole splash green, which looked like
+    # a second, unrelated component. Keep loading visually steady.
+    visual_tone_key = "info" if tone_key == "success" else tone_key
+    if visual_tone_key == "error":
         accent = palette.get("error", "#e74c3c")
+    elif visual_tone_key == "warning":
+        accent = palette.get("warning", palette.get("accent", "#4f8de3"))
     else:
         accent = palette.get("accent", "#4f8de3")
 
-    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.24)
-    card_bg = blend_hex_colors(panel_bg, accent, 0.10)
-    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.48)
+    muted = palette.get("muted", "#c7c7c7")
+    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.18)
+    card_bg = blend_hex_colors(panel_bg, accent, 0.045)
+    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.28)
 
     try:
+        try:
+            host_w = int(host.winfo_width() or host.winfo_reqwidth() or 620)
+            card_width = max(460, min(620, host_w - 112))
+            body_length = len(str(body or "").strip())
+            card_height = 190 if body_length > 110 else 176
+            card.place_configure(relx=0.5, rely=0.16, anchor="n", width=card_width, height=card_height)
+            body_lbl.configure(wraplength=max(320, card_width - 96))
+        except Exception:
+            pass
         overlay.configure(bg=overlay_bg, highlightbackground=overlay_bg, highlightcolor=overlay_bg)
         card.configure(bg=card_bg, highlightbackground=border_color, highlightcolor=border_color)
-        title_lbl.configure(text=campaign_ui_helpers._repair_polish_text(str(title or "").strip()), bg=card_bg, fg=accent)
+        if accent_bar is not None:
+            accent_bar.configure(bg=accent)
+        if content is not None:
+            content.configure(bg=card_bg)
+        if eyebrow_lbl is not None:
+            eyebrow_lbl.configure(
+                text=campaign_ui_helpers._repair_polish_text(str(eyebrow or "").strip() or "PRZYGOTOWANIE WIDOKU"),
+                bg=card_bg,
+                fg=blend_hex_colors(accent, fg, 0.12),
+            )
+        title_lbl.configure(
+            text=campaign_ui_helpers._repair_polish_text(str(title or "").strip()),
+            bg=card_bg,
+            fg=blend_hex_colors(accent, fg, 0.06),
+        )
         body_lbl.configure(text=campaign_ui_helpers._repair_polish_text(str(body or "").strip()), bg=card_bg, fg=fg)
+        if step_lbl is not None:
+            if progress_value is None:
+                step_text = "Trwa przygotowanie widoku..."
+            else:
+                try:
+                    visible_progress = max(0.0, min(99.0, float(progress_value)))
+                    step_text = f"Postęp ładowania: {visible_progress:.0f}%"
+                except Exception:
+                    step_text = "Trwa przygotowanie widoku..."
+            step_lbl.configure(text=campaign_ui_helpers._repair_polish_text(step_text), bg=card_bg, fg=muted)
+            try:
+                if progress_value is None:
+                    if finalizing_progress:
+                        step_text = "Finalizuję widok. Za chwilę pokażę gotowy panel..."
+                    else:
+                        step_text = "Przygotowuję widok. Dłuższe kroki mogą chwilę potrwać..."
+                    step_lbl.configure(text=campaign_ui_helpers._repair_polish_text(step_text), bg=card_bg, fg=muted)
+            except Exception:
+                pass
         if hasattr(self.app, "ensure_adaptive_wrap"):
             self.app.ensure_adaptive_wrap(body_lbl, container=card, padding=44, min_wrap=240)
     except Exception:
@@ -369,14 +427,14 @@ def _show_project_loading_overlay(
 
     try:
         progress_bar.stop()
-        if progress_value is None:
+        if not determinate_progress:
             progress_bar.configure(mode="indeterminate", maximum=100.0, value=0.0)
-            progress_bar.start(12)
+            progress_bar.start(24)
         else:
             progress_bar.configure(
                 mode="determinate",
                 maximum=100.0,
-                value=max(0.0, min(100.0, float(progress_value))),
+                value=max(0.0, min(99.0, float(progress_value))),
             )
     except Exception:
         pass
@@ -477,6 +535,23 @@ def _build_active_project_dashboard_state(self) -> dict:
         selected_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
     except Exception:
         selected_iteration_path = ""
+    step2_char_review_pending = bool(
+        curr_step == 2
+        and step1_approved
+        and iteration_target == "char"
+        and selected_iteration_path == "char_from_images"
+        and step2_status == "generated"
+        and step3_status == "pending"
+    )
+    if step2_char_review_pending:
+        # T03 is an explicit gate decision. Old Z3 artifacts must not advance it
+        # during project restore before the user confirms this gate.
+        has_saved_step3_progress = False
+        try:
+            if not str(CAMPAIGN.get_graph_selected_edge_key() or "").strip():
+                CAMPAIGN.set_graph_selected_edge_key("e2_to_e3")
+        except Exception:
+            pass
     if (
         selected_iteration_path == "char_from_ready_plates"
         and iteration_target == "char"
@@ -589,11 +664,13 @@ def _build_active_project_dashboard_state(self) -> dict:
         except Exception as e:
             logger.debug(f"Nie udało się wyczyscic przestarzalego stanu Z3 przy starcie iteracji: {e}")
 
-    if not iteration_target and (curr_step >= 3 or step3_status != "pending" or has_saved_step3_progress):
+    active_step3_state = bool(curr_step >= 3 or step3_status != "pending")
+
+    if not iteration_target and active_step3_state:
         CAMPAIGN.set_iteration_target("char")
         iteration_target = "char"
 
-    if iteration_target == "char" and (curr_step >= 3 or step3_status != "pending" or has_saved_step3_progress):
+    if iteration_target == "char" and active_step3_state:
         if step2_status != "approved":
             try:
                 CAMPAIGN.approve_step2()
@@ -713,7 +790,7 @@ def _refresh_active_project_wizard_only(self) -> None:
             self._show_project_loading_overlay(
                 title="Ładuję projekt",
                 body="Kończę odświeżanie i ustawiam docelowy widok projektu.",
-                tone="success",
+                tone="info",
                 progress=100.0,
             )
             self.frame.after(90, self._hide_project_loading_overlay)
@@ -2402,9 +2479,15 @@ def _render_step1_route_actions(self, frame):
     def _current_t07_training_finish_ready() -> bool:
         return bool(_current_t07_training_finish_state())
 
+    step4_training_candidate_cache: dict | None = None
+
     def _current_t07_training_candidate_state() -> dict:
         """Completed current-iteration training that still waits for explicit model choice."""
 
+        nonlocal step4_training_candidate_cache
+        if step4_training_candidate_cache is not None:
+            return dict(step4_training_candidate_cache)
+        step4_training_candidate_cache = {}
         if _current_t07_training_finish_state():
             return {}
         training_record = _current_iteration_step4_training_record()
@@ -2441,6 +2524,7 @@ def _render_step1_route_actions(self, frame):
         result = dict(training_record)
         result.setdefault("target", record_target or target)
         result.setdefault("iteration", record_iteration or active_iteration)
+        step4_training_candidate_cache = dict(result)
         return result
 
     step4_work_interruption_cache: dict | None = None
@@ -2603,6 +2687,224 @@ def _render_step1_route_actions(self, frame):
             required=normalized_key in {"plate_run", "char_run", "char_dataset", "training_result"},
         )
 
+    def _project_start_plate_run_contract_snapshot(
+        fallback_label: str | None = None,
+    ) -> CampaignResourceSnapshot | None:
+        try:
+            source_info = dict(self._get_project_start_plate_source_info() or {})
+        except Exception:
+            source_info = {}
+        run_path = str(source_info.get("run_path") or "").strip()
+        xml_path = str(source_info.get("xml_path") or "").strip()
+        images_path = str(source_info.get("images_path") or "").strip()
+        source_mode = str(source_info.get("source_mode") or "").strip().lower()
+        if not (run_path or xml_path):
+            return None
+
+        run_dir = None
+        xml_file = None
+        try:
+            if run_path:
+                candidate = Path(run_path)
+                if candidate.exists() and candidate.is_dir():
+                    run_dir = candidate
+                    xml_file = candidate / "annotations.xml"
+            if xml_path:
+                candidate_xml = Path(xml_path)
+                if candidate_xml.exists() and candidate_xml.is_file():
+                    xml_file = candidate_xml
+                    if run_dir is None:
+                        run_dir = candidate_xml.parent
+        except Exception:
+            run_dir = None
+            xml_file = None
+
+        source_raw = xml_path or run_path
+        try:
+            source_text = self._format_project_start_asset_source(source_raw)
+        except Exception:
+            source_text = str(source_raw or "").strip() or "Nie wskazano"
+
+        images_count = 0
+        plates_count = 0
+        if run_dir is not None:
+            try:
+                annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+                counter = getattr(annotation_tab, "_get_run_plate_annotation_counts", None)
+                if callable(counter):
+                    images_count, plates_count = counter(run_dir)
+            except Exception:
+                images_count, plates_count = 0, 0
+
+        try:
+            image_source = dict(self._get_project_start_effective_images_source() or {})
+        except Exception:
+            image_source = {}
+        effective_dir = image_source.get("effective_dir")
+        effective_exists = bool(image_source.get("effective_exists"))
+        try:
+            effective_count = int(image_source.get("effective_count", 0) or 0)
+        except Exception:
+            effective_count = 0
+
+        compatibility = {}
+        if run_dir is not None and xml_file is not None and effective_dir is not None and effective_exists:
+            try:
+                compatibility = dict(
+                    self._check_project_start_run_compatibility(
+                        run_dir,
+                        effective_dir,
+                        adoptable_only=True,
+                    )
+                    or {}
+                )
+            except Exception:
+                compatibility = {}
+
+        try:
+            required_min_plates = int(min_plates or getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+        except Exception:
+            required_min_plates = 10
+
+        checked = bool(compatibility.get("checked"))
+        matched_images = int(compatibility.get("matched", images_count) or 0) if checked else int(images_count or 0)
+        matched_plates = int(compatibility.get("matched_plate_count", plates_count) or 0) if checked else int(plates_count or 0)
+        adoptable_images = int(compatibility.get("adoptable_matched", 0) or 0) if checked else 0
+        adoptable_plates = int(compatibility.get("adoptable_matched_plate_count", 0) or 0) if checked else 0
+        approved_overlap_images = int(compatibility.get("approved_overlap", 0) or 0) if checked else 0
+        approved_overlap_plates = int(compatibility.get("approved_overlap_plates", 0) or 0) if checked else 0
+        missing_images = int(compatibility.get("missing", 0) or 0) if checked else 0
+        incomplete_images = int(compatibility.get("incomplete", 0) or 0) if checked else 0
+        controlled_ready = bool(int(approved_overlap_plates or 0) >= int(required_min_plates or 0))
+
+        if run_dir is None or xml_file is None or not xml_file.exists():
+            validation_text = "Nie znaleziono pliku annotations.xml."
+            tone = "error"
+            contract_ready = False
+            requires_rematch = False
+        elif effective_dir is None or not effective_exists or effective_count <= 0:
+            validation_text = "Najpierw wskaż aktualny zbiór obrazów O."
+            tone = "warning"
+            contract_ready = False
+            requires_rematch = True
+        elif checked and int(compatibility.get("total", 0) or 0) <= 0:
+            validation_text = "XML nie zawiera anotacji tablic do importu."
+            tone = "warning"
+            contract_ready = False
+            requires_rematch = False
+        elif checked and bool(compatibility.get("ok")):
+            if source_mode == "approved":
+                contract_ready = bool(matched_plates >= required_min_plates)
+                tone = "success" if contract_ready else "warning"
+                validation_text = (
+                    f"AT zatwierdzone i zgodne z O | {matched_images} obrazów / {matched_plates} tablic."
+                    if contract_ready
+                    else f"AT zgodne z O, ale za mało tablic: {matched_plates}/{required_min_plates}."
+                )
+            else:
+                contract_ready = controlled_ready
+                tone = "success" if controlled_ready else "warning"
+                validation_text = (
+                    f"Kontrola AT spełnia minimum | [OK]: {approved_overlap_images} obrazów / "
+                    f"{approved_overlap_plates} tablic."
+                    if controlled_ready
+                    else (
+                        f"AT do kontroli | pasuje {matched_images} obrazów / {matched_plates} tablic. "
+                        f"[OK]: {approved_overlap_plates}/{required_min_plates} tablic."
+                    )
+                )
+            requires_rematch = False
+        elif checked and matched_images > 0:
+            contract_ready = controlled_ready
+            tone = "success" if controlled_ready else "warning"
+            validation_text = (
+                f"Kontrola AT spełnia minimum | [OK]: {approved_overlap_images} obrazów / "
+                f"{approved_overlap_plates} tablic. Część importu nadal wymaga dopasowania."
+                if controlled_ready
+                else (
+                    f"Komplet O-AT wymaga kontroli | pasuje {matched_images} obrazów / {matched_plates} tablic, "
+                    f"braki: {missing_images + incomplete_images}. [OK]: {approved_overlap_plates}/{required_min_plates} tablic."
+                )
+            )
+            requires_rematch = not controlled_ready
+        elif checked:
+            validation_text = (
+                f"Komplet O-AT nie pasuje do aktualnego zbioru O | brak {missing_images} "
+                f"z {int(compatibility.get('total', 0) or 0)} anotowanych obrazów."
+            )
+            tone = "error"
+            contract_ready = False
+            requires_rematch = True
+        elif source_mode == "approved":
+            contract_ready = bool(matched_plates >= required_min_plates)
+            tone = "success" if contract_ready else "warning"
+            validation_text = (
+                f"AT zatwierdzone | {matched_images} obrazów / {matched_plates} tablic."
+                if contract_ready
+                else f"AT zatwierdzone, ale za mało tablic: {matched_plates}/{required_min_plates}."
+            )
+            requires_rematch = False
+        else:
+            validation_text = (
+                f"AT do kontroli | {matched_images} obrazów / {matched_plates} tablic. "
+                "Sprawdź zgodność z aktualnym zbiorem O."
+            )
+            tone = "warning"
+            contract_ready = False
+            requires_rematch = bool(source_mode != "draft")
+
+        return CampaignResourceSnapshot(
+            key="plate_run",
+            canonical_key="plate_run",
+            code="AT",
+            label=campaign_resource_label("plate_run", fallback_label or campaign_resource_label("plate_run")),
+            requirement="optional",
+            source=source_text,
+            validation=validation_text,
+            tone=tone,
+            counter_text=(
+                f"{matched_images} obrazów / {matched_plates} tablic"
+                if matched_images > 0 or matched_plates > 0
+                else ""
+            ),
+            description=campaign_resource_description("plate_run"),
+            meta=build_resource_contract_meta(
+                "O->AT",
+                contract_ready=bool(contract_ready),
+                contract_enforced=True,
+                requires_rematch=bool(requires_rematch),
+                source_mode=source_mode,
+                source_run_path=run_path,
+                source_xml_path=xml_path,
+                source_input_path=images_path,
+                expected_images_dir=str(effective_dir or ""),
+                expected_images_count=int(effective_count or 0),
+                checked=bool(checked),
+                matched_images=int(matched_images or 0),
+                matched_plates=int(matched_plates or 0),
+                adoptable_images=int(adoptable_images or 0),
+                adoptable_plates=int(adoptable_plates or 0),
+                approved_overlap_images=int(approved_overlap_images or 0),
+                approved_overlap_plates=int(approved_overlap_plates or 0),
+                missing_images=int(missing_images or 0),
+                incomplete_images=int(incomplete_images or 0),
+                min_plates=int(required_min_plates or 0),
+                contract_message=validation_text,
+                review_required=bool(
+                    source_mode != "approved"
+                    and not contract_ready
+                    and not requires_rematch
+                    and (matched_images > 0 or matched_plates > 0)
+                ),
+                pending_compact_status="AT do kontroli",
+                pending_action_text=(
+                    "AT jest zaimportowane, ale wymaga kontroli. "
+                    "W polu Praca bramki T02 wybierz „Kontroluj import AT w Z2”, "
+                    "oznacz poprawne pozycje jako [OK], a potem wróć do T02."
+                ),
+            ),
+        )
+
     def _t06_exported_char_dataset_state() -> dict:
         missing = {
             "ok": False,
@@ -2673,9 +2975,12 @@ def _render_step1_route_actions(self, frame):
                 current = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_work_session") or session or {})
             except Exception:
                 current = dict(session or {})
-            if str(current.get("working_gate_id") or "").strip().upper() != "T06":
+            if str(current.get("working_gate_id") or "").strip().upper() not in CHAR_WORK_GATE_SESSION_IDS:
                 return
             if str(current.get("work_area") or "").strip().lower() != "z3":
+                return
+            current_substep = str(current.get("substep") or current.get("target_substep") or "").strip().lower()
+            if current_substep in {"2", "detect", "pz2", "z3_pz2"}:
                 return
             current_state = str(current.get("state") or "").strip().lower()
             if (
@@ -2684,15 +2989,19 @@ def _render_step1_route_actions(self, frame):
             ):
                 return
             now = datetime.now().isoformat(timespec="seconds")
+            previous_interrupted_at = str(current.pop("interrupted_at", "") or "").strip()
             current.update(
                 {
                     "active": False,
                     "state": "completed",
+                    "working_gate_id": CHAR_WORK_GATE_DISPLAY_ID,
                     "reason": str(reason or "pz3_dataset_ready").strip() or "pz3_dataset_ready",
                     "closed_at": now,
                     "updated_at": now,
                 }
             )
+            if previous_interrupted_at:
+                current.setdefault("resolved_interrupted_at", previous_interrupted_at)
             try:
                 CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": current})
                 session = dict(current)
@@ -2805,11 +3114,11 @@ def _render_step1_route_actions(self, frame):
             pz2_time
             and pz3_time
             and pz2_time > pz3_time + 0.001
-            and not (session_gate == "T06" and session_active and session_targets_pz2)
+            and not (session_gate in CHAR_WORK_GATE_SESSION_IDS and session_active and session_targets_pz2)
             and not pz2_marker_only
         )
         stale_after_session = bool(
-            session_gate == "T06"
+            session_gate in CHAR_WORK_GATE_SESSION_IDS
             and session_active
             and session_state not in {"resolved", "closed", "complete", "completed"}
             and not session_targets_pz2
@@ -2828,7 +3137,7 @@ def _render_step1_route_actions(self, frame):
                     session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
                     session_active = bool(session.get("active")) or session_state in {"active", "started", "interrupted", "dirty"}
                     stale_after_session = bool(
-                        session_gate == "T06"
+                        session_gate in CHAR_WORK_GATE_SESSION_IDS
                         and session_active
                         and session_state not in {"resolved", "closed", "complete", "completed"}
                         and not session_targets_pz2
@@ -3044,6 +3353,27 @@ def _render_step1_route_actions(self, frame):
             current_iter = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
         except Exception:
             current_iter = 1
+        try:
+            selected_iter = int(CAMPAIGN.get_master_pool_selected_iteration(active_project_name or None) or 0)
+        except Exception:
+            selected_iter = 0
+        if selected_iter == current_iter:
+            try:
+                master_pool = CAMPAIGN.get_master_pool_dir(active_project_name or None)
+            except Exception:
+                master_pool = None
+            try:
+                image_source = dict(self._get_project_start_effective_images_source() or {})
+            except Exception:
+                image_source = {}
+            effective_dir = image_source.get("effective_dir")
+            if master_pool is not None and effective_dir is not None:
+                try:
+                    if Path(master_pool).resolve() == Path(effective_dir).resolve():
+                        return max(1, current_iter)
+                except Exception:
+                    if str(master_pool or "").strip().lower() == str(effective_dir or "").strip().lower():
+                        return max(1, current_iter)
         try:
             current_manifest = dict(CAMPAIGN.load_ingest_manifest(current_iter, active_project_name or None) or {})
         except Exception:
@@ -3322,8 +3652,8 @@ def _render_step1_route_actions(self, frame):
                     session_payload = {
                         "active": True,
                         "state": "interrupted",
-                        "source_gate_id": "T05",
-                        "working_gate_id": "T05",
+                        "source_gate_id": "T04",
+                        "working_gate_id": "T04",
                         "edge_key": "e2_to_e4",
                         "run_dir": str(candidate_run.resolve()),
                         "approved_images": int(pending_images),
@@ -3353,11 +3683,14 @@ def _render_step1_route_actions(self, frame):
         if _t06_interrupted_work_cache is not None:
             return dict(_t06_interrupted_work_cache)
         _t06_interrupted_work_cache = {}
+        context_is_char_step = False
         try:
-            if int(current_step or 0) != 3 or str(current_target or "").strip().lower() != "char":
-                return {}
+            context_is_char_step = bool(
+                int(current_step or 0) == 3
+                and str(current_target or "").strip().lower() == "char"
+            )
         except Exception:
-            return {}
+            context_is_char_step = False
 
         session = {}
         session_state = ""
@@ -3378,6 +3711,37 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             session = {}
 
+        session_touched_t05_z3 = bool(
+            session_gate_id in CHAR_WORK_GATE_SESSION_IDS
+            and session_work_area == "z3"
+            and session_state not in {"resolved", "closed", "complete", "completed"}
+        )
+        session_substep_hint = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+        session_targets_pz2_hint = session_substep_hint in {"2", "detect", "pz2", "z3_pz2"}
+        session_reason_hint = str(session.get("reason") or "").strip().lower()
+        if (
+            session_gate_id in CHAR_WORK_GATE_SESSION_IDS
+            and session_work_area == "z3"
+            and session_targets_pz2_hint
+            and session_state in {"resolved", "closed", "complete", "completed"}
+            and session_reason_hint in {"pz3_dataset_ready", "pz3_summary_ready"}
+        ):
+            now = datetime.now().isoformat(timespec="seconds")
+            session["active"] = True
+            session["state"] = "interrupted"
+            session["reason"] = "pz2_closed_after_ready_export"
+            session["updated_at"] = now
+            session.setdefault("interrupted_at", now)
+            try:
+                CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
+            except Exception as exc:
+                logger.debug(f"Nie udało się przywrócić przerwanej sesji T05/PZ2: {exc}")
+            session_state = "interrupted"
+            session_active = True
+            session_touched_t05_z3 = True
+        if not context_is_char_step and not session_touched_t05_z3:
+            return {}
+
         missing_z3_export_interrupted = False
         try:
             iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
@@ -3396,17 +3760,21 @@ def _render_step1_route_actions(self, frame):
             session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
             if (
                 pz3_export_ready
-                and session_gate_id == "T06"
+                and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                 and session_work_area == "z3"
                 and session_targets_pz3
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             ):
                 now = datetime.now().isoformat(timespec="seconds")
+                previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
                 session["active"] = False
                 session["state"] = "completed"
+                session["working_gate_id"] = CHAR_WORK_GATE_DISPLAY_ID
                 session["reason"] = "pz3_dataset_ready"
                 session["closed_at"] = now
                 session["updated_at"] = now
+                if previous_interrupted_at:
+                    session.setdefault("resolved_interrupted_at", previous_interrupted_at)
                 try:
                     CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
                 except Exception as exc:
@@ -3416,7 +3784,7 @@ def _render_step1_route_actions(self, frame):
             if pz3_export_ready:
                 if (
                     session_active
-                    and session_gate_id == "T06"
+                    and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                     and session_work_area == "z3"
                     and session_targets_pz2
                     and session_state not in {"resolved", "closed", "complete", "completed"}
@@ -3442,7 +3810,7 @@ def _render_step1_route_actions(self, frame):
                 _t06_interrupted_work_cache = {}
                 return {}
             z3_session_touched = bool(
-                session_gate_id == "T06"
+                session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                 and (
                     session_work_area == "z3"
                     or str(session.get("substep") or "").strip() in {"2", "3", "pz2", "pz3"}
@@ -3481,7 +3849,7 @@ def _render_step1_route_actions(self, frame):
         session_is_interrupted_z3 = bool(
             (
                 session_active
-                and session_gate_id == "T06"
+                and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                 and session_work_area == "z3"
                 and session_state not in {"resolved", "closed", "complete", "completed", "paused"}
             )
@@ -3771,6 +4139,10 @@ def _render_step1_route_actions(self, frame):
                 prefer_success=True,
             )
 
+        project_start_plate_snapshot = _project_start_plate_run_contract_snapshot()
+        if project_start_plate_snapshot is not None:
+            snapshots[project_start_plate_snapshot.canonical_key] = project_start_plate_snapshot
+
         try:
             approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats(active_project_name or None) or {})
         except Exception:
@@ -3892,7 +4264,7 @@ def _render_step1_route_actions(self, frame):
         training_ready = bool(_current_t07_training_finish_ready())
         training_candidate = _current_t07_training_candidate_state()
         no_training_ready = bool(_current_step4_without_training_decision_ready())
-        step4_display_gate_id = campaign_visible_gate_id("T07") or "T06"
+        step4_display_gate_id = "T06"
         if training_ready:
             training_source = "Wynik treningu"
             training_validation = (
@@ -4091,15 +4463,7 @@ def _render_step1_route_actions(self, frame):
         return shorten(f"{prefix}{resource_effect or 'Brak historii'}", width=22, placeholder="...")
 
     def _visible_badge_id(badge_id: str | None) -> str:
-        """Keep internal gate ids stable while showing contiguous graph ids."""
-        normalized = str(badge_id or "").strip().upper()
-        return {
-            "T03": "T02",
-            "T04": "T03",
-            "T05": "T04",
-            "T06": "T05",
-            "T07": "T06",
-        }.get(normalized, normalized)
+        return campaign_visible_gate_id(badge_id)
 
     def _stage_history_event_label(stage_key: str) -> str:
         latest = _latest_history_entry_for_stage(stage_key)
@@ -4478,6 +4842,50 @@ def _render_step1_route_actions(self, frame):
             return transition_ready
         return False
 
+    def _edge_pending_resource_review(edge) -> bool:
+        specs = get_transition_specs_for_edge(getattr(edge, "key", ""))
+        if not specs:
+            return False
+        try:
+            report = build_transition_resource_report(
+                specs,
+                getattr(transition_eval_ctx, "resource_snapshots", None),
+                selected_path=selected_path,
+            )
+            return any(bool(getattr(row, "review_required", False)) for row in report.missing_required)
+        except Exception:
+            return False
+
+    def _edge_pending_resource_review_label(edge) -> str:
+        specs = get_transition_specs_for_edge(getattr(edge, "key", ""))
+        if not specs:
+            return ""
+        try:
+            report = build_transition_resource_report(
+                specs,
+                getattr(transition_eval_ctx, "resource_snapshots", None),
+                selected_path=selected_path,
+            )
+            for row in report.missing_required:
+                if bool(getattr(row, "review_required", False)):
+                    try:
+                        meta = resource_snapshot_meta(getattr(row, "snapshot", None))
+                    except Exception:
+                        meta = {}
+                    label = str(
+                        meta.get("pending_action_compact_status")
+                        or meta.get("pending_work_status")
+                        or ""
+                    ).strip()
+                    if label:
+                        return label
+                    if str(getattr(row, "canonical_key", "") or getattr(row, "key", "") or "").strip() == "plate_run":
+                        return "Kontroluj AT"
+                    return f"Kontroluj {row.compact_label}"
+        except Exception:
+            return ""
+        return ""
+
     def _edge_status(edge) -> tuple[str, str]:
         if not _edge_gate_active(edge):
             return "", muted_dim
@@ -4495,20 +4903,24 @@ def _render_step1_route_actions(self, frame):
                 return "PRZERWANE", warning
         if _is_t07_graph_edge(getattr(edge, "key", "")) and _current_step4_work_interruption_state():
             return "PRZERWANE", warning
+        if _is_t07_graph_edge(getattr(edge, "key", "")) and _current_t07_training_candidate_state():
+            return "WYBIERZ WYNIK", warning
         if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
             return "WYBIERZ", muted_dim
+        if _edge_pending_resource_review(edge):
+            return "DO KONTROLI", warning
         if _edge_ready(edge):
             return "OTWARTA", success
         return "ZAMKNIĘTA", warning
 
     def _edge_resource_compact_status(edge) -> str:
         if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
-            return "WYBIERZ"
-        if str(getattr(edge, "key", "") or "").strip() == "e1_to_e2" and normalize_iteration_path(explicit_selected_path) not in {"plate_training", "char_from_images"}:
             return ""
         if _is_t07_graph_edge(getattr(edge, "key", "")):
             if _current_step4_work_interruption_state():
                 return "PRZERWANE"
+            if _current_t07_training_candidate_state():
+                return "WYBIERZ WYNIK"
             pending_t07 = _get_t07_pending_repair_approved_state()
             if pending_t07:
                 try:
@@ -4533,6 +4945,8 @@ def _render_step1_route_actions(self, frame):
                 getattr(transition_eval_ctx, "resource_snapshots", None),
                 selected_path=selected_path,
             )
+            if any(bool(getattr(row, "review_required", False)) for row in report.missing_required):
+                return "KOMPLET O-AT"
             return report.compact_status()
         except Exception:
             return ""
@@ -4580,7 +4994,7 @@ def _render_step1_route_actions(self, frame):
     def _edge_actions_enabled(edge) -> bool:
         specs = get_transition_specs_for_edge(getattr(edge, "key", ""))
         if specs and all(str(getattr(spec, "source", "") or "").strip().upper() == "E1" for spec in specs):
-            return str(getattr(edge, "key", "") or "").strip() == "e1_to_e2" and bool(_edge_fields_enabled(edge))
+            return str(getattr(edge, "key", "") or "").strip() in {"e1_to_e2", "e1_to_e3"} and bool(_edge_fields_enabled(edge))
         return bool(_edge_fields_enabled(edge))
 
     def _select_path(path_key: str) -> None:
@@ -4598,6 +5012,11 @@ def _render_step1_route_actions(self, frame):
                 return False
             if str(CAMPAIGN.get_step1_status() or "").strip().lower() == "approved":
                 return False
+            try:
+                if bool(CAMPAIGN.is_t02_at_review_committed_current_iteration()):
+                    return False
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -4921,6 +5340,224 @@ def _render_step1_route_actions(self, frame):
             fg=fg,
             relief=tk.FLAT,
             padx=10,
+            pady=6,
+        ).pack(side=tk.RIGHT)
+        try:
+            dialog.transient(self.frame)
+            dialog.grab_set()
+        except Exception:
+            pass
+
+    def _open_t02_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
+        edge_key = "e1_to_e3"
+        edge = CAMPAIGN_TRANSITION_GRAPH.get_edge(edge_key)
+        spec = _edge_spec(edge) if edge is not None else None
+        visible_gate_id = _visible_badge_id(getattr(spec, "badge_id", "T02") if spec is not None else "T02") or "T02"
+        row_count = max(1, len(buttons or ()))
+        dialog_height = max(306, min(420, 218 + row_count * 88))
+        dialog = tk.Toplevel(self.frame)
+        try:
+            self.app.style_dialog_window(
+                dialog,
+                title=f"Praca {visible_gate_id}",
+                geometry=f"660x{dialog_height}",
+                parent=self.frame,
+            )
+        except Exception:
+            dialog.title(f"Praca {visible_gate_id}")
+        try:
+            dialog.minsize(620, min(260, dialog_height))
+        except Exception:
+            pass
+        build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
+        if callable(build_surface):
+            body = build_surface(dialog, tone="info")
+        else:
+            body = tk.Frame(dialog, bg=card_bg)
+            body.pack(fill=tk.BOTH, expand=True)
+        body_bg = str(body.cget("bg") or card_bg)
+
+        status_text, status_color = _edge_status(edge) if edge is not None else ("", muted)
+        review_label = _edge_pending_resource_review_label(edge) if edge is not None else ""
+
+        header = tk.Frame(body, bg=body_bg)
+        header.pack(fill=tk.X, padx=16, pady=(14, 6))
+        tk.Label(
+            header,
+            text=f"Praca bramki {visible_gate_id}",
+            fg=fg,
+            bg=body_bg,
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            header,
+            text=str(status_text or "WYBIERZ"),
+            fg=status_color,
+            bg=blend_hex_colors(body_bg, status_color, 0.10),
+            font=("Segoe UI", 8, "bold"),
+            padx=9,
+            pady=4,
+        ).pack(side=tk.RIGHT)
+
+        intro_text = (
+            "T02 nie tworzy nowej pracy od zera. Tutaj wracasz do kontroli AT, "
+            "czyli sprawdzenia importu anotacji tablic na aktualnym zbiorze obrazów."
+        )
+        tk.Label(
+            body,
+            text=campaign_ui_helpers._repair_polish_text(intro_text),
+            fg=muted,
+            bg=body_bg,
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=610,
+        ).pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        list_host = tk.Frame(body, bg=body_bg)
+        list_host.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _draw_control_icon(canvas: tk.Canvas, tone_color: str) -> None:
+            try:
+                canvas.delete("all")
+                bg = str(canvas.cget("bg") or field_bg)
+                ink = "#05070a"
+                icon_bg = blend_hex_colors(tone_color, "#ffffff", 0.28)
+                icon_outline = blend_hex_colors(ink, tone_color, 0.08)
+                check_color = palette.get("success", "#2ecc71")
+                canvas.create_rectangle(2, 2, 30, 30, fill=icon_bg, outline=icon_outline, width=2)
+                canvas.create_line(7, 9, 20, 9, fill=ink, width=2)
+                canvas.create_line(7, 15, 18, 15, fill=ink, width=2)
+                canvas.create_oval(15, 15, 25, 25, outline=ink, width=2)
+                canvas.create_line(23, 23, 29, 29, fill=ink, width=2)
+                canvas.create_line(7, 23, 11, 27, 17, 19, fill=check_color, width=3, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+            except Exception:
+                pass
+
+        def _action_suggestion(label: str, tone: str) -> dict:
+            label_lower = str(label or "").strip().lower()
+            if "kontrol" in label_lower or "import" in label_lower:
+                return {
+                    "title": "KONTROLA AT",
+                    "detail": review_label
+                    or "Sprawdź import w Z2 i oznacz poprawne pozycje jako [OK].",
+                    "tone": warning,
+                    "fill": 0.13,
+                }
+            return {
+                "title": "WYBÓR ŚCIEŻKI",
+                "detail": "Potwierdza pracę na istniejącym źródle tablic.",
+                "tone": accent if str(tone or "").strip() != "warning" else warning,
+                "fill": 0.10,
+            }
+
+        for index, (label, command, tone) in enumerate(buttons or (), start=1):
+            normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
+            tone_color = warning if str(tone or "").strip().lower() == "warning" else accent
+            suggestion = _action_suggestion(normalized_label, str(tone or "info"))
+            suggestion_tone = str(suggestion.get("tone") or tone_color)
+            row_bg = blend_hex_colors(field_bg, tone_color, 0.045)
+            row_border = blend_hex_colors(tone_color, field_bg, 0.20)
+            row = tk.Frame(
+                list_host,
+                bg=row_bg,
+                highlightthickness=1,
+                highlightbackground=row_border,
+                highlightcolor=row_border,
+            )
+            row.pack(fill=tk.X, pady=(0, 8))
+            row.columnconfigure(0, weight=1)
+            row.columnconfigure(1, weight=0, minsize=300)
+            row.columnconfigure(2, weight=0)
+
+            tk.Label(
+                row,
+                text=f"{index}. {normalized_label}",
+                fg=fg,
+                bg=row_bg,
+                font=("Segoe UI", 10, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=230,
+            ).grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=9)
+
+            suggestion_bg = blend_hex_colors(row_bg, suggestion_tone, float(suggestion.get("fill", 0.10) or 0.10))
+            suggestion_border = blend_hex_colors(suggestion_tone, row_bg, 0.32)
+            suggestion_shell = tk.Frame(
+                row,
+                bg=suggestion_bg,
+                highlightthickness=1,
+                highlightbackground=suggestion_border,
+                highlightcolor=suggestion_border,
+                padx=7,
+                pady=5,
+            )
+            suggestion_shell.grid(row=0, column=1, sticky="ew", padx=(4, 4), pady=8)
+            suggestion_shell.columnconfigure(1, weight=1)
+            icon = tk.Canvas(
+                suggestion_shell,
+                width=32,
+                height=32,
+                bg=suggestion_bg,
+                bd=0,
+                highlightthickness=0,
+            )
+            icon.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 8), pady=(1, 0))
+            _draw_control_icon(icon, suggestion_tone)
+            tk.Label(
+                suggestion_shell,
+                text=campaign_ui_helpers._repair_polish_text(str(suggestion.get("title") or "")),
+                fg=suggestion_tone,
+                bg=suggestion_bg,
+                font=("Segoe UI Semibold", 8),
+                anchor="w",
+                justify=tk.LEFT,
+            ).grid(row=0, column=1, sticky="ew")
+            tk.Label(
+                suggestion_shell,
+                text=_format_gate_work_suggestion_text(suggestion.get("detail")),
+                fg=fg,
+                bg=suggestion_bg,
+                font=("Segoe UI", 7),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=230,
+            ).grid(row=1, column=1, sticky="ew")
+
+            button_bg = blend_hex_colors(field_bg, tone_color, 0.18)
+            button_hover_bg = blend_hex_colors(field_bg, tone_color, 0.30)
+            choose_button = tk.Button(
+                row,
+                text="Wybierz",
+                command=lambda cmd=command: (dialog.destroy(), cmd() if callable(cmd) else None),
+                cursor="hand2",
+                bg=button_bg,
+                activebackground=button_hover_bg,
+                activeforeground=fg,
+                fg=fg,
+                relief=tk.FLAT,
+                padx=12,
+                pady=5,
+                width=10,
+            )
+            choose_button.grid(row=0, column=2, sticky="e", padx=(2, 10), pady=8)
+            try:
+                choose_button.bind("<Enter>", lambda _event, btn=choose_button, color=button_hover_bg: btn.config(bg=color), add="+")
+                choose_button.bind("<Leave>", lambda _event, btn=choose_button, color=button_bg: btn.config(bg=color), add="+")
+            except Exception:
+                pass
+
+        footer = tk.Frame(body, bg=body_bg)
+        footer.pack(fill=tk.X, padx=16, pady=(0, 12))
+        tk.Button(
+            footer,
+            text="Zamknij",
+            command=dialog.destroy,
+            cursor="hand2",
+            bg=field_bg,
+            fg=fg,
+            relief=tk.FLAT,
+            padx=12,
             pady=6,
         ).pack(side=tk.RIGHT)
         try:
@@ -5778,8 +6415,8 @@ def _render_step1_route_actions(self, frame):
             session = {
                 "active": True,
                 "state": "interrupted",
-                "source_gate_id": "T07",
-                "working_gate_id": "T05",
+                "source_gate_id": "T06",
+                "working_gate_id": "T04",
                 "edge_key": "e4_to_e1",
                 "run_dir": str(
                     ctx.get("run_dir")
@@ -5899,7 +6536,7 @@ def _render_step1_route_actions(self, frame):
         return True
 
     def _open_t07_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
-        display_gate_id = _visible_badge_id("T07") or "T06"
+        display_gate_id = "T06"
         dialog = tk.Toplevel(self.frame)
         try:
             self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="700x680", parent=self.frame)
@@ -5956,6 +6593,8 @@ def _render_step1_route_actions(self, frame):
             no_training_ready = bool(no_training_ready and _current_step4_without_training_decision_ready())
             if no_training_ready:
                 return (f"Gotowe: {_no_training_decision_summary()}. Użyj Zatwierdź.", "")
+            if _current_t07_training_candidate_state():
+                return ("Zalecane: wybierz nowy model jako wynik bramki w Historii treningów.", "Trenuj model")
             if _current_t07_training_failure_state():
                 return ("Ostatni trening nieudany. Powtórz trening albo zakończ iterację bez treningu.", "Trenuj model")
             if _t07_has_current_iteration_dataset():
@@ -6374,7 +7013,11 @@ def _render_step1_route_actions(self, frame):
                 )
             )
             disabled_reason = ""
-            if normalized_label == "Trenuj model" and _t07_blocks_training_before_dataset():
+            if (
+                normalized_label == "Trenuj model"
+                and _t07_blocks_training_before_dataset()
+                and not _current_t07_training_candidate_state()
+            ):
                 disabled_reason = "Najpierw utwórz wariant datasetu w tej iteracji"
                 is_recommended = False
             if pending_repair_images > 0 and not (is_repair_settlement or is_repair_resume):
@@ -7593,7 +8236,7 @@ def _render_step1_route_actions(self, frame):
             return "muted"
 
         def _status_badge_text(*, enabled: bool, required: bool, present: bool) -> str:
-            return "jest" if enabled and present else "-"
+            return "Jest" if enabled and present else "-"
 
         def _status_badge_tone(*, enabled: bool, required: bool, present: bool) -> str:
             if not enabled:
@@ -7643,7 +8286,7 @@ def _render_step1_route_actions(self, frame):
                     _source, state_text, state_tone, _counter = _format_char_dataset_resource_status(gate)
                     return (state_text, state_tone)
                 if key == "training_result":
-                    step4_display_gate_id = campaign_visible_gate_id("T07") or "T06"
+                    step4_display_gate_id = "T06"
                     try:
                         training_tab = self.app.tabs.get("training") if getattr(self.app, "tabs", None) else None
                         getter = getattr(training_tab, "get_campaign_step4_finish_state", None)
@@ -7884,7 +8527,7 @@ def _render_step1_route_actions(self, frame):
 
                 def _contract_badge(tone: str) -> str:
                     normalized_tone = str(tone or "").strip().lower()
-                    return "jest" if normalized_tone == "success" else "-"
+                    return "Jest" if normalized_tone == "success" else "-"
 
                 rows = [
                     (
@@ -8144,15 +8787,15 @@ def _render_step1_route_actions(self, frame):
             )
             return
 
-        try:
-            self._refresh_ingest_panel()
-        except Exception:
-            pass
-
         show_t02_resource_map = any(
             str(getattr(spec, "key", "") or "") == "e1_to_e3_char_from_ready_plates"
             for spec in active_specs
         )
+        if not show_t02_resource_map:
+            try:
+                self._refresh_ingest_panel()
+            except Exception:
+                pass
 
         def _resource_gate_display_id() -> str:
             if len(active_specs) == 1:
@@ -8166,20 +8809,250 @@ def _render_step1_route_actions(self, frame):
 
         resource_gate_id = _resource_gate_display_id()
         resource_modal_title = f"Zasoby bramki {resource_gate_id}" if resource_gate_id else "Zasoby bramki"
+        resource_modal_width = 1320
+        resource_modal_height = 820 if show_t02_resource_map else 640
+        try:
+            screen_w = int(self.frame.winfo_screenwidth() or resource_modal_width)
+            screen_h = int(self.frame.winfo_screenheight() or resource_modal_height)
+            resource_modal_width = min(resource_modal_width, max(1060, screen_w - 80))
+            resource_modal_height = min(resource_modal_height, max(560, screen_h - 96))
+        except Exception:
+            pass
+        resource_loader_width = 520
+        resource_loader_height = 188
+        resource_opening_loader: dict[str, object] = {
+            "dialog": None,
+            "progress": None,
+            "body_var": None,
+            "step_var": None,
+        }
+        loader_title_text = f"Ładuję zasoby bramki {resource_gate_id}"
+        loader_body_text = (
+            "Przygotowuję komplet O-AT, tabelę zasobów i schemat zależności. "
+            "Gotowy modal pojawi się dopiero po pełnym zbudowaniu widoku."
+        )
+        loader_eyebrow_text = "PRZYGOTOWANIE ZASOBÓW"
+
+        def _set_resource_opening_progress(progress: float, detail: str = "") -> None:
+            if not show_t02_resource_map:
+                return
+            value = max(0.0, min(99.0, float(progress or 0.0)))
+            body_text = str(detail or loader_body_text).strip()
+            try:
+                progress_var = resource_opening_loader.get("progress")
+                body_var = resource_opening_loader.get("body_var")
+                step_var = resource_opening_loader.get("step_var")
+                if progress_var is not None:
+                    progress_var.set(value)
+                if body_var is not None:
+                    body_var.set(campaign_ui_helpers._repair_polish_text(body_text))
+                if step_var is not None:
+                    step_var.set(campaign_ui_helpers._repair_polish_text(body_text))
+                loader_dialog = resource_opening_loader.get("dialog")
+                if loader_dialog is not None:
+                    try:
+                        loader_dialog.lift()
+                    except Exception:
+                        pass
+                    try:
+                        loader_dialog.update_idletasks()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _show_resource_opening_loader() -> None:
+            if not show_t02_resource_map:
+                return
+            try:
+                try:
+                    self._hide_project_loading_overlay()
+                except Exception:
+                    pass
+                loader = tk.Toplevel(self.frame)
+                loader.withdraw()
+                loader.title(campaign_ui_helpers._repair_polish_text(loader_title_text))
+                loader.configure(bg=card_bg)
+                loader.resizable(False, False)
+                try:
+                    loader.overrideredirect(True)
+                except Exception:
+                    pass
+                try:
+                    loader.attributes("-toolwindow", True)
+                except Exception:
+                    pass
+                try:
+                    loader.transient(self.frame)
+                except Exception:
+                    pass
+                try:
+                    loader.protocol("WM_DELETE_WINDOW", lambda: None)
+                except Exception:
+                    pass
+
+                loader_card_bg = blend_hex_colors(card_bg, accent, 0.045)
+                loader_border = blend_hex_colors(accent, border, 0.30)
+                loader_shell = tk.Frame(
+                    loader,
+                    bg=loader_card_bg,
+                    bd=0,
+                    highlightthickness=1,
+                    highlightbackground=loader_border,
+                    highlightcolor=loader_border,
+                )
+                loader_shell.pack(fill=tk.BOTH, expand=True)
+                loader_shell.grid_columnconfigure(1, weight=1)
+                loader_shell.grid_rowconfigure(0, weight=1)
+                tk.Frame(loader_shell, width=3, bg=accent, bd=0, highlightthickness=0).grid(row=0, column=0, sticky="nsw")
+                content = tk.Frame(loader_shell, bg=loader_card_bg, bd=0, highlightthickness=0, padx=24, pady=22)
+                content.grid(row=0, column=1, sticky="nsew")
+                content.grid_columnconfigure(0, weight=1)
+
+                body_var = tk.StringVar(
+                    master=loader,
+                    value=campaign_ui_helpers._repair_polish_text(loader_body_text),
+                )
+                step_var = tk.StringVar(
+                    master=loader,
+                    value=campaign_ui_helpers._repair_polish_text("Buduję widok zasobów."),
+                )
+                progress_var = tk.DoubleVar(master=loader, value=6.0)
+                tk.Label(
+                    content,
+                    text=campaign_ui_helpers._repair_polish_text(loader_eyebrow_text),
+                    bg=loader_card_bg,
+                    fg=blend_hex_colors(accent, fg, 0.10),
+                    font=("Segoe UI", 8, "bold"),
+                    anchor=tk.W,
+                ).grid(row=0, column=0, sticky="ew")
+                tk.Label(
+                    content,
+                    text=campaign_ui_helpers._repair_polish_text(loader_title_text),
+                    bg=loader_card_bg,
+                    fg=fg,
+                    font=("Segoe UI Semibold", 15),
+                    anchor=tk.W,
+                ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
+                ttk.Progressbar(
+                    content,
+                    mode="determinate",
+                    maximum=100.0,
+                    variable=progress_var,
+                    style="Horizontal.TProgressbar",
+                ).grid(row=2, column=0, sticky="ew", pady=(18, 0))
+                tk.Label(
+                    content,
+                    textvariable=step_var,
+                    bg=loader_card_bg,
+                    fg=blend_hex_colors(muted, fg, 0.18),
+                    font=("Segoe UI", 9),
+                    anchor=tk.W,
+                    wraplength=max(360, resource_loader_width - 78),
+                ).grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
+                loader.geometry(f"{resource_loader_width}x{resource_loader_height}")
+                center_dialog = getattr(self.app, "_center_dialog_window", None)
+                if callable(center_dialog):
+                    center_dialog(
+                        loader,
+                        parent=self.frame,
+                        width=resource_loader_width,
+                        height=resource_loader_height,
+                    )
+                resource_opening_loader.update(
+                    {
+                        "dialog": loader,
+                        "progress": progress_var,
+                        "body_var": body_var,
+                        "step_var": step_var,
+                    }
+                )
+                loader.deiconify()
+                loader.lift()
+                try:
+                    loader.grab_set()
+                except Exception:
+                    pass
+                try:
+                    loader.update()
+                except Exception:
+                    loader.update_idletasks()
+            except Exception:
+                pass
+
+        def _hide_resource_opening_loader() -> None:
+            loader_dialog = resource_opening_loader.get("dialog")
+            if loader_dialog is not None:
+                try:
+                    loader_dialog.grab_release()
+                except Exception:
+                    pass
+                try:
+                    loader_dialog.destroy()
+                except Exception:
+                    pass
+            resource_opening_loader.update(
+                {
+                    "dialog": None,
+                    "progress": None,
+                    "body_var": None,
+                    "step_var": None,
+                }
+            )
+
+        _show_resource_opening_loader()
 
         dialog = tk.Toplevel(self.frame)
         try:
-            geometry = "1320x720" if show_t02_resource_map else "1320x640"
+            dialog.withdraw()
+        except Exception:
+            pass
+        if show_t02_resource_map:
+            try:
+                dialog.attributes("-alpha", 0.0)
+            except Exception:
+                pass
+        try:
+            geometry = f"{resource_modal_width}x{resource_modal_height}"
             self.app.style_dialog_window(dialog, title=resource_modal_title, geometry=geometry, parent=self.frame)
         except Exception:
             dialog.title(resource_modal_title)
         try:
+            dialog.withdraw()
+            dialog.grab_release()
+        except Exception:
+            pass
+        try:
             dialog.resizable(True, True)
-            dialog.minsize(1060, 500)
+            dialog.minsize(min(1060, resource_modal_width), min(620 if show_t02_resource_map else 500, resource_modal_height))
             if str(dialog.tk.call("tk", "windowingsystem") or "") == "win32":
                 dialog.wm_transient("")
         except Exception:
             pass
+        if show_t02_resource_map:
+            loader_dialog = resource_opening_loader.get("dialog")
+            if loader_dialog is not None:
+                try:
+                    loader_dialog.lift()
+                    loader_dialog.grab_set()
+                except Exception:
+                    pass
+
+        def _restore_resource_dialog_after_child() -> None:
+            try:
+                if not dialog.winfo_exists():
+                    return
+                if str(dialog.state() or "") == "iconic":
+                    dialog.deiconify()
+                dialog.lift()
+                dialog.focus_force()
+                dialog.grab_set()
+            except Exception:
+                pass
+
+        # Do not bind modal minimize/restore to grab juggling. On Windows this
+        # caused the resource dialog and the graph window to fight for focus.
 
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
         if callable(build_surface):
@@ -8189,6 +9062,10 @@ def _render_step1_route_actions(self, frame):
             body.pack(fill=tk.BOTH, expand=True)
 
         body_bg = str(body.cget("bg") or card_bg)
+        try:
+            dialog.configure(bg=body_bg)
+        except Exception:
+            pass
         spec_title = active_specs[0].title if len(active_specs) == 1 else "E1"
         title_lbl = tk.Label(
             body,
@@ -8215,7 +9092,8 @@ def _render_step1_route_actions(self, frame):
             tk.Label(
                 body,
                 text=campaign_ui_helpers._repair_polish_text(
-                    f"{resource_gate_id}: wymagane są zgodne AT. Obrazy służą tylko do dopasowania importu i kontroli zgodności."
+                    f"{resource_gate_id}: wymagane są AT pasujące do aktualnego zbioru obrazów O. "
+                    "To obrazy O są bazą dopasowania; AT bez odpowiadającego obrazu nie wchodzi do tego skrótu."
                 ),
                 fg=warning,
                 bg=body_bg,
@@ -8437,8 +9315,12 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             pass
         _draw_scope_switch("project")
+        try:
+            preset_shell.pack_forget()
+        except Exception:
+            pass
 
-        dependency_map_state: dict[str, object] = {"canvas": None, "nodes": {}, "hover": ""}
+        dependency_map_state: dict[str, object] = {"canvas": None, "nodes": {}, "hover": "", "redraw_after_id": None}
         if show_t02_resource_map:
             map_shell = tk.Frame(
                 body,
@@ -8448,7 +9330,7 @@ def _render_step1_route_actions(self, frame):
                 highlightbackground=blend_hex_colors(border, success, 0.22),
                 highlightcolor=blend_hex_colors(border, success, 0.22),
             )
-            map_shell.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+            map_shell.pack(fill=tk.X, expand=False, padx=14, pady=(0, 10))
             tk.Label(
                 map_shell,
                 text="Jak zasoby T02 są ze sobą powiązane",
@@ -8459,13 +9341,13 @@ def _render_step1_route_actions(self, frame):
             ).pack(fill=tk.X, padx=10, pady=(8, 0))
             dependency_canvas = tk.Canvas(
                 map_shell,
-                height=260,
+                height=300,
                 bg=str(map_shell.cget("bg") or body_bg),
                 bd=0,
                 highlightthickness=0,
                 cursor="hand2",
             )
-            dependency_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
+            dependency_canvas.pack(fill=tk.X, expand=False, padx=8, pady=(2, 8))
             dependency_map_state["canvas"] = dependency_canvas
 
         table = tk.Frame(body, bg=body_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
@@ -8562,6 +9444,7 @@ def _render_step1_route_actions(self, frame):
             resource_tree.tag_configure("disabled", foreground=muted_dim)
             resource_tree.tag_configure("missing", foreground=warning)
             resource_tree.tag_configure("ready", foreground=success)
+            resource_tree.tag_configure("review_pending", foreground=warning)
             resource_tree.tag_configure("required_missing", foreground=palette.get("danger", palette.get("error", "#ff5a5f")))
             resource_tree.tag_configure("required_ready", foreground=success)
             resource_tree.tag_configure("active_resource", background=blend_hex_colors(field_bg, success, 0.12))
@@ -8938,11 +9821,143 @@ def _render_step1_route_actions(self, frame):
                 },
             )
 
+        def _plate_run_snapshot_from_campaign_state(fallback_label: str) -> CampaignResourceSnapshot | None:
+            snapshot = _project_start_plate_run_contract_snapshot(fallback_label)
+            if snapshot is not None:
+                meta = dict(snapshot.meta or {})
+                source_raw = str(meta.get("source_xml_path") or meta.get("source_run_path") or "").strip()
+                if source_raw:
+                    try:
+                        resource_cell_detail_overrides[("plate_run", "source")] = str(Path(source_raw).resolve())
+                    except Exception:
+                        resource_cell_detail_overrides[("plate_run", "source")] = source_raw
+                return snapshot
+            try:
+                source_info = dict(self._get_project_start_plate_source_info() or {})
+            except Exception:
+                source_info = {}
+            run_path = str(source_info.get("run_path") or "").strip()
+            xml_path = str(source_info.get("xml_path") or "").strip()
+            images_path = str(source_info.get("images_path") or "").strip()
+            source_mode = str(source_info.get("source_mode") or "").strip().lower()
+            if not (run_path or xml_path):
+                return None
+
+            run_dir = None
+            try:
+                if run_path:
+                    candidate = Path(run_path)
+                    if candidate.exists() and candidate.is_dir():
+                        run_dir = candidate
+                if run_dir is None and xml_path:
+                    candidate_xml = Path(xml_path)
+                    if candidate_xml.exists() and candidate_xml.is_file():
+                        run_dir = candidate_xml.parent
+            except Exception:
+                run_dir = None
+
+            images_count = 0
+            plates_count = 0
+            if run_dir is not None:
+                try:
+                    annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+                    counter = getattr(annotation_tab, "_get_run_plate_annotation_counts", None)
+                    if callable(counter):
+                        images_count, plates_count = counter(run_dir)
+                except Exception:
+                    images_count, plates_count = 0, 0
+
+            source_raw = xml_path or run_path
+            try:
+                source_text = self._format_project_start_asset_source(source_raw)
+            except Exception:
+                source_text = str(source_raw or "").strip() or "Nie wskazano"
+            try:
+                resource_cell_detail_overrides[("plate_run", "source")] = str(Path(source_raw).resolve())
+            except Exception:
+                resource_cell_detail_overrides[("plate_run", "source")] = str(source_raw or "").strip()
+
+            if run_dir is None or not (Path(xml_path) if xml_path else run_dir / "annotations.xml").exists():
+                validation_text = "Nie znaleziono pliku annotations.xml."
+                tone = "error"
+                contract_ready = False
+                requires_rematch = False
+            elif source_mode == "draft":
+                validation_text = (
+                    f"AT do kontroli | {int(images_count or 0)} obrazów / {int(plates_count or 0)} tablic. "
+                    "Sprawdź w Z2 i nadaj [OK] dopiero po kontroli."
+                )
+                tone = "warning"
+                contract_ready = False
+                requires_rematch = False
+            elif source_mode == "approved":
+                validation_text = (
+                    f"AT zatwierdzone | {int(images_count or 0)} obrazów / {int(plates_count or 0)} tablic."
+                )
+                tone = "success"
+                contract_ready = True
+                requires_rematch = False
+            else:
+                validation_text = (
+                    f"AT wskazane | {int(images_count or 0)} obrazów / {int(plates_count or 0)} tablic. "
+                    "Sprawdź zgodność z aktualnym zbiorem O."
+                )
+                tone = "warning"
+                contract_ready = False
+                requires_rematch = True
+
+            return CampaignResourceSnapshot(
+                key="plate_run",
+                canonical_key="plate_run",
+                code="AT",
+                label=campaign_resource_label("plate_run", fallback_label),
+                requirement=_resource_requirement("plate_run", "optional"),
+                source=source_text,
+                validation=validation_text,
+                tone=tone,
+                counter_text=(
+                    f"{int(images_count or 0)} obrazów / {int(plates_count or 0)} tablic"
+                    if int(images_count or 0) > 0 or int(plates_count or 0) > 0
+                    else ""
+                ),
+                description=campaign_resource_description("plate_run"),
+                meta={
+                    "contract_kind": "O->AT",
+                    "contract_ready": bool(contract_ready),
+                    "contract_enforced": bool(source_mode != "approved"),
+                    "requires_rematch": bool(requires_rematch),
+                    "source_mode": source_mode,
+                    "source_run_path": run_path,
+                    "source_xml_path": xml_path,
+                    "source_input_path": images_path,
+                    "matched_images": int(images_count or 0),
+                    "matched_plates": int(plates_count or 0),
+                    "contract_message": validation_text,
+                    "iteration_path": selected_path,
+                    "review_required": bool(
+                        source_mode != "approved"
+                        and not contract_ready
+                        and not requires_rematch
+                        and (int(images_count or 0) > 0 or int(plates_count or 0) > 0)
+                    ),
+                    "pending_compact_status": "AT do kontroli",
+                    "pending_action_text": (
+                        "AT jest zaimportowane, ale wymaga kontroli. "
+                        "W polu Praca bramki T02 wybierz „Kontroluj import AT w Z2”, "
+                        "oznacz poprawne pozycje jako [OK], a potem wróć do T02."
+                    ),
+                },
+            )
+
         def _snapshot_object(row_key: str, fallback_label: str):
             rows = getattr(self, "ingest_start_asset_row_widgets", {}) or {}
             row = rows.get(row_key, {}) if isinstance(rows, dict) else {}
             if row_key == "images":
                 direct_snapshot = _images_snapshot_from_campaign_state(fallback_label)
+                if direct_snapshot is not None:
+                    return direct_snapshot
+            if row_key == "plate_run":
+                direct_snapshot = _plate_run_snapshot_from_campaign_state(fallback_label)
                 if direct_snapshot is not None:
                     return direct_snapshot
             if row_key in {"plate_model", "char_model"}:
@@ -9201,10 +10216,13 @@ def _render_step1_route_actions(self, frame):
                 pass
             return True
 
-        def _annotation_candidate_roots(row_key: str) -> list[Path]:
+        def _annotation_candidate_roots(row_key: str, scope_override: str | None = None) -> list[Path]:
             key = str(row_key or "").strip()
             target = "char" if key == "char_run" else "plate"
-            scope = "freemode" if self._get_project_start_asset_scope(key) == "freemode" else "project"
+            scope_value = str(scope_override or "").strip().lower()
+            if scope_value not in {"project", "freemode"}:
+                scope_value = self._get_project_start_asset_scope(key)
+            scope = "freemode" if scope_value == "freemode" else "project"
             raw_roots: list[Path | None] = []
 
             if scope == "project":
@@ -9306,6 +10324,35 @@ def _render_step1_route_actions(self, frame):
             return package_names, source_label
 
         def _annotation_base_ready_for_import() -> tuple[bool, str, int]:
+            try:
+                image_source = dict(self._get_project_start_effective_images_source() or {})
+            except Exception:
+                image_source = {}
+            images_dir = (
+                image_source.get("effective_dir")
+                or CAMPAIGN.get_master_pool_dir()
+                or CAMPAIGN.get_iteration_image_source_dir()
+                or CAMPAIGN.get_iteration_raw_dir()
+            )
+            try:
+                images_path = Path(images_dir) if images_dir is not None else None
+            except Exception:
+                images_path = None
+            try:
+                source_label = self._format_project_start_asset_source(images_path) if images_path is not None else "Nie wskazano"
+            except Exception:
+                source_label = str(images_path or "Nie wskazano")
+            try:
+                count = int(
+                    image_source.get("effective_count")
+                    or image_source.get("master_count")
+                    or image_source.get("iteration_count")
+                    or 0
+                )
+            except Exception:
+                count = 0
+            if count > 0:
+                return True, str(source_label or "Nie wskazano"), int(count)
             try:
                 expected_names, source_label = _current_annotation_expected_names()
             except Exception:
@@ -9619,12 +10666,19 @@ def _render_step1_route_actions(self, frame):
             summary["model"] = model_label
             return summary
 
-        def _find_annotation_candidates(row_key: str) -> tuple[list[dict], set[str], str, list[Path]]:
+        def _find_annotation_candidates(
+            row_key: str,
+            *,
+            scope_override: str | None = None,
+        ) -> tuple[list[dict], set[str], str, list[Path]]:
             find_started = perf_counter()
+            scope_value = str(scope_override or "").strip().lower()
+            if scope_value not in {"project", "freemode"}:
+                scope_value = self._get_project_start_asset_scope(row_key)
             expected_names, adoptable_names, approved_names, image_source_label = _current_annotation_image_sets()
-            roots = _annotation_candidate_roots(row_key)
+            roots = _annotation_candidate_roots(row_key, scope_override=scope_value)
             project_manual_plate_counts: dict[str, int] = {}
-            if str(row_key or "").strip() == "plate_run" and self._get_project_start_asset_scope(row_key) != "freemode":
+            if str(row_key or "").strip() == "plate_run" and scope_value != "freemode":
                 project_manual_plate_counts = _project_approved_plate_manual_counts_by_image()
             candidates: list[dict] = []
             seen_xml: set[str] = set()
@@ -9755,7 +10809,20 @@ def _render_step1_route_actions(self, frame):
                     pass
                 return True
 
-            candidates, expected_names, image_source_label, roots = _find_annotation_candidates(row_key)
+            asset_scope_snapshot = "freemode" if self._get_project_start_asset_scope(row_key) == "freemode" else "project"
+            candidates: list[dict] = []
+            expected_names: set[str] = set()
+            image_source_label = str(_image_source_label or "ustalam...").strip() or "ustalam..."
+            try:
+                roots = _annotation_candidate_roots(row_key, scope_override=asset_scope_snapshot)
+            except Exception:
+                roots = []
+            candidate_load_state: dict[str, object] = {
+                "loading": True,
+                "error": "",
+                "elapsed_ms": 0,
+                "token": 0,
+            }
             browser = tk.Toplevel(dialog)
             try:
                 self.app.style_dialog_window(browser, title="Import anotacji tablic", geometry="1260x700", parent=dialog)
@@ -9778,7 +10845,7 @@ def _render_step1_route_actions(self, frame):
                 anchor="w",
             )
             title_lbl.pack(fill=tk.X, padx=16, pady=(14, 4))
-            scope_label = "Swobodny" if self._get_project_start_asset_scope(row_key) == "freemode" else "Projekt"
+            scope_label = "Swobodny" if asset_scope_snapshot == "freemode" else "Projekt"
             roots_text = ", ".join(str(root.name or root) for root in roots[:3]) or "brak katalogów"
             if len(roots) > 3:
                 roots_text += f" +{len(roots) - 3}"
@@ -9796,7 +10863,202 @@ def _render_step1_route_actions(self, frame):
                 wraplength=1180,
             ).pack(fill=tk.X, padx=16, pady=(0, 12))
 
+            def _switch_annotation_candidate_scope(next_scope: str) -> None:
+                normalized_scope = "freemode" if str(next_scope or "").strip().lower() == "freemode" else "project"
+                if normalized_scope == asset_scope_snapshot:
+                    return
+                try:
+                    self._set_project_start_asset_scope(row_key, normalized_scope, persist=True)
+                except Exception:
+                    pass
+                try:
+                    browser.grab_release()
+                except Exception:
+                    pass
+                try:
+                    browser.destroy()
+                except Exception:
+                    pass
+                try:
+                    dialog.grab_release()
+                except Exception:
+                    pass
+                try:
+                    dialog.after(40, lambda: _open_annotation_candidate_browser(row_key))
+                except Exception:
+                    try:
+                        _open_annotation_candidate_browser(row_key)
+                    except Exception:
+                        pass
+
+            at_scope_shell = tk.Frame(
+                browser_body,
+                bg=blend_hex_colors(browser_bg, success, 0.045),
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=blend_hex_colors(border, success, 0.18),
+                highlightcolor=blend_hex_colors(border, success, 0.18),
+            )
+            at_scope_shell.pack(fill=tk.X, padx=16, pady=(0, 12))
+            tk.Label(
+                at_scope_shell,
+                text="Zakres źródeł AT",
+                fg=fg,
+                bg=str(at_scope_shell.cget("bg") or browser_bg),
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(10, 12), pady=8)
+            for scope_value, scope_text in (("project", "Projekt"), ("freemode", "Swobodny")):
+                active_scope_button = scope_value == asset_scope_snapshot
+                tk.Button(
+                    at_scope_shell,
+                    text=scope_text,
+                    command=lambda value=scope_value: _switch_annotation_candidate_scope(value),
+                    cursor="hand2",
+                    bg=blend_hex_colors(field_bg, success, 0.24) if active_scope_button else field_bg,
+                    fg=fg if active_scope_button else muted,
+                    activebackground=blend_hex_colors(field_bg, success, 0.30),
+                    activeforeground=fg,
+                    relief=tk.FLAT,
+                    font=("Segoe UI", 8, "bold" if active_scope_button else "normal"),
+                    padx=12,
+                    pady=5,
+                ).pack(side=tk.LEFT, padx=(0, 6), pady=7)
+            tk.Label(
+                at_scope_shell,
+                text="Zmiana zakresu odświeża tylko tę listę kandydatów.",
+                fg=muted,
+                bg=str(at_scope_shell.cget("bg") or browser_bg),
+                font=("Segoe UI", 8),
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(8, 10), pady=8)
+
+            annotation_progress_state = {"visible": False, "running": False}
+            annotation_progress_var = tk.StringVar(value="")
+            annotation_progress_percent_var = tk.DoubleVar(value=0.0)
+            annotation_progress_shell = tk.Frame(
+                browser_body,
+                bg=blend_hex_colors(browser_bg, accent, 0.055),
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=blend_hex_colors(border, accent, 0.22),
+                highlightcolor=blend_hex_colors(border, accent, 0.22),
+            )
+            annotation_progress_label = tk.Label(
+                annotation_progress_shell,
+                textvariable=annotation_progress_var,
+                fg=accent,
+                bg=str(annotation_progress_shell.cget("bg") or browser_bg),
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            )
+            annotation_progress_label.pack(side=tk.LEFT, padx=(10, 12), pady=8)
+            annotation_progress_bar = ttk.Progressbar(
+                annotation_progress_shell,
+                mode="indeterminate",
+                maximum=100.0,
+                variable=annotation_progress_percent_var,
+                length=220,
+            )
+            annotation_progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(0, 10), pady=9)
+
+            def _set_annotation_loading_progress_legacy(visible: bool, text: str = "") -> None:
+                if visible:
+                    annotation_progress_var.set(
+                        campaign_ui_helpers._repair_polish_text(
+                            text or "Wczytuję źródła AT i liczę dopasowanie..."
+                        )
+                    )
+                    if not bool(annotation_progress_state.get("visible")):
+                        try:
+                            annotation_progress_shell.pack(fill=tk.X, padx=16, pady=(0, 12))
+                        except Exception:
+                            pass
+                        annotation_progress_state["visible"] = True
+                    if not bool(annotation_progress_state.get("running")):
+                        try:
+                            annotation_progress_bar.start(14)
+                        except Exception:
+                            pass
+                        annotation_progress_state["running"] = True
+                    return
+                if bool(annotation_progress_state.get("running")):
+                    try:
+                        annotation_progress_bar.stop()
+                    except Exception:
+                        pass
+                    annotation_progress_state["running"] = False
+                if bool(annotation_progress_state.get("visible")):
+                    try:
+                        annotation_progress_shell.pack_forget()
+                    except Exception:
+                        pass
+                    annotation_progress_state["visible"] = False
+
+            def _set_annotation_loading_progress(visible: bool, text: str = "", percent: float | None = None) -> None:
+                if visible:
+                    percent_prefix = ""
+                    if percent is not None:
+                        try:
+                            percent_value = max(0.0, min(100.0, float(percent or 0.0)))
+                        except Exception:
+                            percent_value = 0.0
+                        percent_prefix = f"{int(round(percent_value)):>3}% | "
+                        try:
+                            annotation_progress_percent_var.set(percent_value)
+                            annotation_progress_bar.configure(mode="determinate")
+                        except Exception:
+                            pass
+                        if bool(annotation_progress_state.get("running")):
+                            try:
+                                annotation_progress_bar.stop()
+                            except Exception:
+                                pass
+                            annotation_progress_state["running"] = False
+                    else:
+                        try:
+                            annotation_progress_bar.configure(mode="indeterminate")
+                        except Exception:
+                            pass
+                    annotation_progress_var.set(
+                        campaign_ui_helpers._repair_polish_text(
+                            f"{percent_prefix}{text or 'Wczytuję źródła AT i liczę dopasowanie...'}"
+                        )
+                    )
+                    if not bool(annotation_progress_state.get("visible")):
+                        try:
+                            annotation_progress_shell.pack(fill=tk.X, padx=16, pady=(0, 12))
+                        except Exception:
+                            pass
+                        annotation_progress_state["visible"] = True
+                    if percent is None and not bool(annotation_progress_state.get("running")):
+                        try:
+                            annotation_progress_bar.start(14)
+                        except Exception:
+                            pass
+                        annotation_progress_state["running"] = True
+                    return
+                if bool(annotation_progress_state.get("running")):
+                    try:
+                        annotation_progress_bar.stop()
+                    except Exception:
+                        pass
+                    annotation_progress_state["running"] = False
+                if bool(annotation_progress_state.get("visible")):
+                    try:
+                        annotation_progress_shell.pack_forget()
+                    except Exception:
+                        pass
+                    annotation_progress_state["visible"] = False
+                try:
+                    annotation_progress_percent_var.set(0.0)
+                except Exception:
+                    pass
+
+            _set_annotation_loading_progress(True)
+
             selected_candidate_state: dict[str, dict | None] = {"candidate": None}
+            annotation_import_state: dict[str, bool] = {"running": False}
             import_selected_button_ref: dict[str, tk.Button | None] = {"button": None}
             selected_status_label_ref: dict[str, tk.Label | None] = {"label": None}
             repaired_import_text_cache: dict[str, str] = {}
@@ -10137,30 +11399,120 @@ def _render_step1_route_actions(self, frame):
 
             def _import_candidate(candidate: dict) -> None:
                 xml_path = Path(candidate.get("xml_path"))
+                if bool(annotation_import_state.get("running")):
+                    return
+                annotation_import_state["running"] = True
+                _set_annotation_loading_progress(
+                    True,
+                    "Importuję pasujące AT do kontroli w Z2. Okno zostanie zamknięte dopiero po zakończeniu importu...",
+                )
+                _set_selected_status("Import trwa. Nie zamykam okna, dopóki AT nie zostaną zapisane do kontroli w Z2.", "success")
                 try:
-                    browser.grab_release()
+                    btn = import_selected_button_ref.get("button")
+                    if btn is not None:
+                        btn.config(state=tk.DISABLED, bg=field_bg, fg=muted)
                 except Exception:
                     pass
+                _set_annotation_loading_progress(True, "Start importu AT do kontroli w Z2...", percent=0)
                 try:
-                    browser.destroy()
+                    browser.config(cursor="watch")
+                    browser.update_idletasks()
                 except Exception:
                     pass
-                try:
-                    if dialog.winfo_exists():
-                        dialog.grab_release()
-                except Exception:
-                    pass
-                try:
-                    self._import_project_start_plate_run(selected_xml_path=xml_path)
-                finally:
+
+                def _update_import_progress(percent: float, message: str) -> None:
+                    _set_annotation_loading_progress(True, message, percent=percent)
                     try:
-                        if dialog.winfo_exists():
-                            _invalidate_graph_resource_snapshot()
-                            _refresh_rows()
-                            _schedule_resource_modal_refreshes()
-                            dialog.grab_set()
+                        browser.update_idletasks()
                     except Exception:
                         pass
+
+                def _finish_import() -> None:
+                    imported = False
+                    try:
+                        try:
+                            browser.grab_release()
+                        except Exception:
+                            pass
+                        try:
+                            if dialog.winfo_exists():
+                                dialog.grab_release()
+                        except Exception:
+                            pass
+                        try:
+                            imported = bool(
+                                self._import_project_start_plate_run(
+                                    selected_xml_path=xml_path,
+                                    progress_callback=_update_import_progress,
+                                    parent=browser,
+                                    refresh_dashboard_after_import=False,
+                                    confirm_import=False,
+                                )
+                            )
+                        except Exception as exc:
+                            try:
+                                logger.exception("Nie udało się zaimportować wybranego źródła AT")
+                            except Exception:
+                                pass
+                            try:
+                                self.app.themed_error(
+                                    "Import anotacji tablic",
+                                    f"Nie udało się zaimportować pasujących AT do kontroli w Z2.\n\n{exc}",
+                                    parent=browser,
+                                )
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            if dialog.winfo_exists():
+                                _invalidate_graph_resource_snapshot()
+                                _refresh_rows()
+                                _schedule_resource_modal_refreshes()
+                                _restore_resource_dialog_after_child()
+                        except Exception:
+                            pass
+                        try:
+                            browser.config(cursor="")
+                        except Exception:
+                            pass
+                        if imported:
+                            annotation_import_state["running"] = False
+                            try:
+                                _close_browser()
+                            except Exception:
+                                try:
+                                    browser.destroy()
+                                except Exception:
+                                    pass
+                            return
+                        annotation_import_state["running"] = False
+                        _set_annotation_loading_progress(False)
+                        try:
+                            if dialog.winfo_exists():
+                                dialog.grab_set()
+                        except Exception:
+                            pass
+                        try:
+                            if browser.winfo_exists():
+                                browser.grab_set()
+                        except Exception:
+                            pass
+                        try:
+                            _set_analysis_candidate(selected_candidate_state.get("candidate"))
+                        except Exception:
+                            pass
+                        try:
+                            _set_selected_status(
+                                "Import anulowany albo przerwany. Nic nie zapisano; możesz wybrać inne AT albo ponowić import.",
+                                "warning",
+                            )
+                        except Exception:
+                            pass
+
+                try:
+                    browser.after(60, _finish_import)
+                except Exception:
+                    _finish_import()
 
             def _select_candidate(candidate: dict, row_id: str = "") -> None:
                 _set_analysis_candidate(candidate)
@@ -10468,6 +11820,38 @@ def _render_step1_route_actions(self, frame):
                         tags=tags,
                     )
 
+                if bool(candidate_load_state.get("loading")) or str(candidate_load_state.get("error") or "").strip():
+                    error_text = str(candidate_load_state.get("error") or "").strip()
+                    message = (
+                        f"Nie udało się przygotować listy źródeł AT: {error_text}"
+                        if error_text
+                        else "Szukam źródeł AT i liczę zgodność z aktualnym zbiorem obrazów O..."
+                    )
+                    message_color = error if error_text else accent
+                    canvas.create_rectangle(
+                        0,
+                        header_h,
+                        table_width,
+                        header_h + 72,
+                        fill=browser_bg,
+                        outline=line_color,
+                        tags=("at_import_table",),
+                    )
+                    canvas.create_text(
+                        12,
+                        header_h + 36,
+                        text=_repair_import_text(message),
+                        fill=message_color,
+                        anchor="w",
+                        justify=tk.LEFT,
+                        font=("Segoe UI", 9, "bold"),
+                        width=max(400, table_width - 24),
+                        tags=("at_import_table",),
+                    )
+                    canvas.configure(scrollregion=(0, 0, table_width, header_h + 74))
+                    _log_import_table_canvas_render(0)
+                    return
+
                 sorted_candidates = _sorted_annotation_candidates()
                 if not sorted_candidates:
                     message = (
@@ -10569,9 +11953,94 @@ def _render_step1_route_actions(self, frame):
                 _refresh_canvas_selection()
                 _log_import_table_canvas_render(len(sorted_candidates))
 
+            def _start_annotation_candidate_loading() -> None:
+                load_token = int(candidate_load_state.get("token", 0) or 0) + 1
+                candidate_load_state["token"] = load_token
+                candidate_load_state["loading"] = True
+                candidate_load_state["error"] = ""
+                _set_annotation_loading_progress(True)
+
+                def _worker() -> None:
+                    nonlocal candidates, expected_names, image_source_label, roots
+                    started = perf_counter()
+                    result_candidates: list[dict] = []
+                    result_expected_names: set[str] = set()
+                    result_image_source_label = image_source_label
+                    result_roots: list[Path] = list(roots)
+                    error_text = ""
+                    try:
+                        (
+                            result_candidates,
+                            result_expected_names,
+                            result_image_source_label,
+                            result_roots,
+                        ) = _find_annotation_candidates(row_key, scope_override=asset_scope_snapshot)
+                    except Exception as exc:
+                        error_text = str(exc)
+                        try:
+                            logger.exception("Nie udało się przygotować listy źródeł AT")
+                        except Exception:
+                            pass
+                    elapsed_ms = int((perf_counter() - started) * 1000)
+
+                    def _finish() -> None:
+                        nonlocal candidates, expected_names, image_source_label, roots
+                        try:
+                            if not browser.winfo_exists():
+                                return
+                        except Exception:
+                            return
+                        if int(candidate_load_state.get("token", 0) or 0) != load_token:
+                            return
+                        candidates = list(result_candidates or [])
+                        expected_names = set(result_expected_names or set())
+                        image_source_label = str(result_image_source_label or image_source_label or "").strip()
+                        roots = list(result_roots or [])
+                        candidate_load_state["loading"] = False
+                        candidate_load_state["error"] = error_text
+                        candidate_load_state["elapsed_ms"] = elapsed_ms
+                        _set_annotation_loading_progress(False)
+                        candidate_tooltip_cache.clear()
+                        selected_annotation_key_state["key"] = ""
+                        selected_annotation_key_state["painted_key"] = ""
+                        annotation_sort_state["column"] = 3 if expected_names else 5
+                        annotation_sort_state["reverse"] = True
+                        _set_analysis_candidate(None)
+                        _render_annotation_table()
+
+                    try:
+                        browser.after(0, _finish)
+                    except Exception:
+                        pass
+
+                try:
+                    threading.Thread(
+                        target=_worker,
+                        daemon=True,
+                        name="campaign-at-import-candidates",
+                    ).start()
+                except Exception as exc:
+                    candidate_load_state["loading"] = False
+                    candidate_load_state["error"] = str(exc)
+                    _set_annotation_loading_progress(False)
+                    _render_annotation_table()
+
             _render_annotation_table()
+            try:
+                browser.after(80, _start_annotation_candidate_loading)
+            except Exception:
+                _start_annotation_candidate_loading()
 
             def _manual_choose() -> None:
+                if bool(annotation_import_state.get("running")):
+                    return
+                annotation_import_state["running"] = True
+                _set_annotation_loading_progress(
+                    True,
+                    "Wskaż plik annotations.xml. Okno importu pozostanie otwarte do zakończenia operacji...",
+                )
+                _set_selected_status("Czekam na wskazanie pliku AT. Po imporcie zamknę okno automatycznie.", "success")
+                _set_annotation_loading_progress(True, "Czekam na wskazanie pliku AT...", percent=0)
                 pending_render = annotation_render_state.get("after_id")
                 if pending_render is not None:
                     try:
@@ -10584,27 +12053,94 @@ def _render_step1_route_actions(self, frame):
                 except Exception:
                     pass
                 try:
-                    browser.destroy()
-                except Exception:
-                    pass
-                try:
                     if dialog.winfo_exists():
                         dialog.grab_release()
                 except Exception:
                     pass
-                try:
-                    self._import_project_start_plate_run()
-                finally:
+
+                def _update_manual_import_progress(percent: float, message: str) -> None:
+                    _set_annotation_loading_progress(True, message, percent=percent)
                     try:
-                        if dialog.winfo_exists():
-                            _invalidate_graph_resource_snapshot()
-                            _refresh_rows()
-                            _schedule_resource_modal_refreshes()
-                            dialog.grab_set()
+                        browser.update_idletasks()
                     except Exception:
                         pass
 
+                def _finish_manual_import() -> None:
+                    imported = False
+                    try:
+                        try:
+                            imported = bool(
+                                self._import_project_start_plate_run(
+                                    progress_callback=_update_manual_import_progress,
+                                    parent=browser,
+                                    refresh_dashboard_after_import=False,
+                                )
+                            )
+                        except Exception as exc:
+                            try:
+                                logger.exception("Nie udało się zaimportować ręcznie wskazanego źródła AT")
+                            except Exception:
+                                pass
+                            try:
+                                self.app.themed_error(
+                                    "Import anotacji tablic",
+                                    f"Nie udało się zaimportować wskazanych AT do kontroli w Z2.\n\n{exc}",
+                                    parent=browser,
+                                )
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            if dialog.winfo_exists():
+                                _invalidate_graph_resource_snapshot()
+                                _refresh_rows()
+                                _schedule_resource_modal_refreshes()
+                                _restore_resource_dialog_after_child()
+                        except Exception:
+                            pass
+                        if imported:
+                            annotation_import_state["running"] = False
+                            try:
+                                _close_browser()
+                            except Exception:
+                                try:
+                                    browser.destroy()
+                                except Exception:
+                                    pass
+                            return
+                        annotation_import_state["running"] = False
+                        _set_annotation_loading_progress(False)
+                        try:
+                            if dialog.winfo_exists():
+                                dialog.grab_set()
+                        except Exception:
+                            pass
+                        try:
+                            if browser.winfo_exists():
+                                browser.grab_set()
+                        except Exception:
+                            pass
+                        try:
+                            _set_analysis_candidate(selected_candidate_state.get("candidate"))
+                        except Exception:
+                            pass
+                        try:
+                            _set_selected_status(
+                                "Import anulowany albo przerwany. Nic nie zapisano; możesz wskazać plik ponownie albo zamknąć okno.",
+                                "warning",
+                            )
+                        except Exception:
+                            pass
+
+                try:
+                    browser.after(60, _finish_manual_import)
+                except Exception:
+                    _finish_manual_import()
+
             def _close_browser() -> None:
+                if bool(annotation_import_state.get("running")):
+                    return
+                _set_annotation_loading_progress(False)
                 pending_render = annotation_render_state.get("after_id")
                 if pending_render is not None:
                     try:
@@ -10690,6 +12226,7 @@ def _render_step1_route_actions(self, frame):
 
         def _run_action(row_key: str, action_kind: str) -> None:
             before_windows = _resource_modal_toplevels()
+            refresh_parent_rows = action_kind == "clear"
             if action_kind == "primary" and row_key in {"plate_run", "char_run"}:
                 base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
                 if not base_ready:
@@ -10710,13 +12247,16 @@ def _render_step1_route_actions(self, frame):
             try:
                 if action_kind == "primary":
                     if row_key == "images":
-                        self._choose_master_pool_dir()
+                        refresh_parent_rows = bool(self._choose_master_pool_dir(parent=dialog))
                     elif row_key == "plate_run":
                         _open_annotation_candidate_browser(row_key)
+                        refresh_parent_rows = False
                     elif row_key == "plate_model":
                         self._choose_project_start_model("plate", parent=dialog)
+                        refresh_parent_rows = True
                     elif row_key == "char_model":
                         self._choose_project_start_model("char", parent=dialog)
+                        refresh_parent_rows = True
                 elif action_kind == "more":
                     if row_key == "plate_run" and _show_plate_run_graph_details_if_ready():
                         pass
@@ -10727,9 +12267,10 @@ def _render_step1_route_actions(self, frame):
             finally:
                 try:
                     if dialog.winfo_exists():
-                        _invalidate_graph_resource_snapshot()
-                        _refresh_rows()
-                        _schedule_resource_modal_refreshes()
+                        if refresh_parent_rows:
+                            _invalidate_graph_resource_snapshot()
+                            _refresh_rows()
+                            _schedule_resource_modal_refreshes()
                         after_windows = _resource_modal_toplevels()
                         child_windows = [
                             window
@@ -10747,6 +12288,16 @@ def _render_step1_route_actions(self, frame):
                                 except Exception:
                                     pass
                         else:
+                            try:
+                                if str(dialog.state()) == "iconic":
+                                    dialog.deiconify()
+                            except Exception:
+                                pass
+                            try:
+                                dialog.lift()
+                                dialog.focus_force()
+                            except Exception:
+                                pass
                             dialog.grab_set()
                 except Exception:
                     pass
@@ -10967,6 +12518,14 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 pass
 
+        def _cached_resource_snapshot(row_key: str, fallback_label: str):
+            cache = resource_tree_state.get("snapshots")
+            if isinstance(cache, dict):
+                snapshot = cache.get(row_key)
+                if snapshot is not None:
+                    return snapshot
+            return _snapshot_object(row_key, fallback_label)
+
         def _set_active_resource_row(row_id: str) -> str:
             tree = resource_tree_state.get("tree")
             row_key = _row_key_from_resource_iid(row_id)
@@ -10988,7 +12547,7 @@ def _render_step1_route_actions(self, frame):
         def _t02_resource_snapshot_state(row_key: str) -> tuple[bool, bool, str, str]:
             try:
                 label = campaign_resource_label(row_key, row_key)
-                snapshot = _snapshot_object(row_key, label)
+                snapshot = _cached_resource_snapshot(row_key, label)
                 requirement = _resource_requirement(row_key, str(getattr(snapshot, "requirement", "") or ""))
                 required = str(requirement or "").strip().lower() in {
                     "required",
@@ -11003,16 +12562,52 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 return False, False, "muted", ""
 
+        def _t02_resource_physical_state(row_key: str) -> tuple[bool, dict, str, str]:
+            try:
+                label = campaign_resource_label(row_key, row_key)
+                snapshot = _cached_resource_snapshot(row_key, label)
+                meta = getattr(snapshot, "meta", {}) or {}
+                if not isinstance(meta, dict):
+                    meta = dict(meta) if meta else {}
+                has_source = bool(getattr(snapshot, "has_source", False))
+                try:
+                    has_source = bool(has_source or int(getattr(snapshot, "counter_value", 0) or 0) > 0)
+                except Exception:
+                    has_source = bool(has_source)
+                tone = str(getattr(snapshot, "tone", "") or "").strip().lower()
+                counter = str(getattr(snapshot, "counter_text", "") or "").strip()
+                return bool(has_source), meta, tone, counter
+            except Exception:
+                return False, {}, "muted", ""
+
+        def _t02_plate_run_map_detail(fallback_counter: str = "") -> str:
+            try:
+                _has_source, meta, _tone, source_counter = _t02_resource_physical_state("plate_run")
+                matched_images = int(meta.get("matched_images", 0) or 0)
+                matched_plates = int(meta.get("matched_plates", 0) or 0)
+                ok_images = int(meta.get("approved_overlap_images", 0) or 0)
+                ok_plates = int(meta.get("approved_overlap_plates", 0) or 0)
+                if matched_images > 0 or matched_plates > 0:
+                    if ok_images > 0 or ok_plates > 0:
+                        return f"Pasuje: {matched_images}/{matched_plates}\n[OK] dalej: {ok_images}/{ok_plates}"
+                    return f"Pasuje: {matched_images}/{matched_plates}"
+                counter = str(source_counter or fallback_counter or "").strip()
+                if counter:
+                    return f"Pasuje: {counter}"
+            except Exception:
+                pass
+            counter = str(fallback_counter or "").strip()
+            return f"Pasuje: {counter}" if counter else "tablice"
+
         def _t02_resource_map_text(row_key: str) -> str:
             return {
-                "input_bundle": "Komplet O + AT jest wymaganym wejściem T02: obrazy i zgodne anotacje tablic muszą pasować do siebie.",
-                "images": "O jest bazą dopasowania. AT musi odnosić się do obrazów projektu.",
-                "plate_run": "AT to część kompletu wymaganego. Bez zgodnych anotacji tablic T02 nie ma sensownego wejścia do znaków.",
-                "char_run": "AZ jest opcjonalnym przyspieszeniem: jeśli pasuje, można odtworzyć wcześniejsze boksy znaków.",
-                "plate_model": "MT nie jest częścią skrótu T02. Może być zasobem projektu, ale nie zastępuje kompletu O + AT.",
-                "char_model": "MZ może pomagać przy pracy nad znakami na wyodrębnionych tablicach, ale nie otwiera T02 bez O + AT.",
-                "plates": "Wyodrębnione tablice powstają z kompletu O + AT. To materiał wejściowy do pracy nad znakami.",
-                "dataset": "Dataset znaków powstaje później, po przygotowaniu lub imporcie anotacji znaków.",
+                "input_bundle": "Komplet O + AT jest wejściem T02: AT musi pasować do aktualnego zbioru obrazów O.",
+                "images": "O to aktualny zbiór obrazów. Do niego dopasowujemy AT po nazwach obrazów.",
+                "plate_run": "AT to anotacje tablic pasujące do aktualnego zbioru O. Po kontroli dalej przechodzą tylko pozycje [OK]; pozostałe pasujące AT zostają odrzucone.",
+                "char_run": "AZ to anotacje znaków na wyodrębnionych tablicach: wskazuje ramki i etykiety znaków tak jak AT wskazuje tablice na obrazach.",
+                "plate_model": "MT nie bierze udziału w skrócie T02. Nie zastępuje kompletu O + AT.",
+                "char_model": "MZ działa pomocniczo na wyodrębnionych tablicach: może wykrywać znaki i przyspieszyć przygotowanie AZ.",
+                "plates": "Wyodrębnione tablice powstają, bo AT wskazuje miejsca tablic w aktualnym zbiorze obrazów O.",
             }.get(str(row_key or ""), "")
 
         def _select_t02_resource_from_map(row_key: str) -> None:
@@ -11055,38 +12650,49 @@ def _render_step1_route_actions(self, frame):
                 bundle_h = node_h + 44
                 y_main = max(16, min(34, int(height * 0.08)))
                 bundle_w = max(276, min(368, int(width * 0.32)))
-                plate_w = node_w
-                az_w = node_w
-                dataset_w = node_w
-                available_gap = width - 44 - bundle_w - plate_w - az_w - dataset_w
-                gap = max(34, min(132, int(available_gap / 3)))
-                total_map_w = bundle_w + plate_w + az_w + dataset_w + gap * 3
+                plate_w = max(128, node_w + 54)
+                support_w = max(82, node_w + 8)
+                available_gap = width - 44 - bundle_w - plate_w
+                gap = max(92, min(260, int(available_gap)))
+                total_map_w = bundle_w + plate_w + gap
                 start_x = max(22, int((width - total_map_w) / 2))
-                bundle_x = start_x
+                scheme_shift_x = max(28, min(56, int(width * 0.045)))
+                bundle_x = max(12, start_x - scheme_shift_x)
                 plates_x = bundle_x + bundle_w + gap
-                az_x = plates_x + plate_w + gap
-                dataset_x = az_x + az_w + gap
+                plates_x_unshifted = start_x + bundle_w + gap
                 y_support = min(
-                    height - node_h - 10,
-                    max(y_main + bundle_h + 46, int(height * 0.78)),
+                    height - node_h - 20,
+                    max(y_main + bundle_h + 70, int(height * 0.76)),
                 )
 
                 def _state_for(key: str) -> tuple[str, str, str]:
-                    if key in {"plates", "dataset"}:
+                    if key == "plates":
                         at_present, _at_required, _at_tone, _at_counter = _t02_resource_snapshot_state("plate_run")
-                        az_present, _az_required, _az_tone, _az_counter = _t02_resource_snapshot_state("char_run")
-                        if key == "plates":
-                            return ("success" if at_present else "muted", "", "")
-                        return ("success" if az_present else "info", "", "")
+                        return ("success" if at_present else "muted", "", "")
                     if key == "input_bundle":
                         image_present, _image_required, _image_tone, _image_counter = _t02_resource_snapshot_state("images")
                         at_present, _at_required, _at_tone, _at_counter = _t02_resource_snapshot_state("plate_run")
                         if image_present and at_present:
                             return ("success", "komplet", "")
+                        at_has_source, at_meta, _at_source_tone, _at_source_counter = _t02_resource_physical_state("plate_run")
+                        if image_present and at_has_source:
+                            if bool(at_meta.get("requires_rematch")):
+                                return ("warning", "sprawdź", "")
+                            return ("warning", "do kontroli", "")
                         return ("error", "brakuje", "")
+                    if key == "plate_model":
+                        return ("muted", "Nie dotyczy", "")
                     present, required, tone, counter = _t02_resource_snapshot_state(key)
                     if present:
-                        return ("success", "jest", counter)
+                        if key == "plate_run":
+                            return ("success", "Pasujące", counter)
+                        return ("success", "Jest", counter)
+                    if key == "plate_run":
+                        at_has_source, at_meta, _at_source_tone, at_source_counter = _t02_resource_physical_state("plate_run")
+                        if at_has_source:
+                            if bool(at_meta.get("requires_rematch")):
+                                return ("warning", "Sprawdź", at_source_counter)
+                            return ("warning", "Do kontroli", at_source_counter)
                     if required:
                         return ("error", "brak", counter)
                     return ("info" if key in {"plate_model", "char_model", "char_run"} else "muted", "opcjonalne", counter)
@@ -11107,6 +12713,8 @@ def _render_step1_route_actions(self, frame):
                         base,
                     )
 
+                selected_outline = warning
+
                 def _node(
                     x: int,
                     y: int,
@@ -11120,7 +12728,7 @@ def _render_step1_route_actions(self, frame):
                     current_w = int(width_value or node_w)
                     tone_name, status_label, counter = _state_for(key)
                     fill, outline, label_color = _tone_colors(tone_name)
-                    is_selected = bool(selected_key == key or (key == "plates" and selected_key == "plate_run"))
+                    is_selected = bool(selected_key == key)
                     if virtual and tone_name == "muted":
                         label_color = muted
                     tag = f"t02_map:{key}"
@@ -11130,8 +12738,8 @@ def _render_step1_route_actions(self, frame):
                         x + current_w,
                         y + node_h,
                         fill=fill,
-                        outline=(success if is_selected else outline),
-                        width=2 if is_selected else 1,
+                        outline=(selected_outline if is_selected else outline),
+                        width=3 if is_selected else 1,
                         tags=("t02_resource_map", tag),
                     )
                     canvas.create_text(
@@ -11147,6 +12755,8 @@ def _render_step1_route_actions(self, frame):
                     detail = subtitle
                     if status_label:
                         detail = f"{status_label}{(' | ' + counter) if counter else ''}"
+                    if key == "plate_run":
+                        detail = _t02_plate_run_map_detail(counter)
                     canvas.create_text(
                         x + current_w / 2,
                         y + node_h / 2 + 12,
@@ -11173,8 +12783,8 @@ def _render_step1_route_actions(self, frame):
                         x + bundle_w,
                         y + bundle_h,
                         fill=fill,
-                        outline=(success if selected_bundle else outline),
-                        width=2 if selected_bundle else 1,
+                        outline=(selected_outline if selected_bundle else outline),
+                        width=3 if selected_bundle else 1,
                         tags=("t02_resource_map", tag),
                     )
                     canvas.create_text(
@@ -11217,35 +12827,181 @@ def _render_step1_route_actions(self, frame):
                     canvas.tag_bind(tag, "<Button-1>", lambda _event: self.app.update_status(tooltip, "info"))
                     canvas.tag_bind(tag, "<Enter>", lambda _event, value=tooltip: self.app.update_status(value, "info"))
 
-                def _arrow(x0: int, y0: int, x1: int, y1: int, *, active: bool = True) -> None:
-                    canvas.create_line(
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                        fill=line_color if active else disabled_line,
-                        width=2,
-                        arrow=tk.LAST,
-                        arrowshape=(8, 9, 3),
+                def _arrow(x0: int, y0: int, x1: int, y1: int, *, active: bool = True, dashed: bool = False) -> None:
+                    line_options = {
+                        "fill": line_color if active else disabled_line,
+                        "width": 2,
+                        "arrow": tk.LAST,
+                        "arrowshape": (8, 9, 3),
+                        "tags": ("t02_resource_map",),
+                    }
+                    if dashed:
+                        line_options["dash"] = (5, 4)
+                    canvas.create_line(x0, y0, x1, y1, **line_options)
+
+                def _arrow_badge(x0: int, x1: int, y: int, text: str, *, active: bool = True) -> None:
+                    mid_x = int((x0 + x1) / 2)
+                    badge_w = max(96, min(156, int(abs(x1 - x0) + 56)))
+                    badge_h = 20
+                    base = success if active else muted
+                    badge_bg = blend_hex_colors(field_bg, base, 0.18)
+                    badge_outline = blend_hex_colors(base, fg, 0.22)
+                    canvas.create_rectangle(
+                        mid_x - badge_w // 2,
+                        y - badge_h // 2,
+                        mid_x + badge_w // 2,
+                        y + badge_h // 2,
+                        fill=badge_bg,
+                        outline=badge_outline,
+                        width=1,
                         tags=("t02_resource_map",),
                     )
+                    canvas.create_text(
+                        mid_x,
+                        y,
+                        text=campaign_ui_helpers._repair_polish_text(text),
+                        fill=base,
+                        font=("Segoe UI", 7, "bold"),
+                        anchor=tk.CENTER,
+                        width=badge_w - 8,
+                        tags=("t02_resource_map",),
+                    )
+
+                def _relation_badge(x: int, y: int, text: str, *, active: bool = False, width_value: int = 126) -> None:
+                    badge_w = max(108, int(width_value or 126))
+                    badge_h = 22
+                    base = accent if active else muted
+                    badge_bg = blend_hex_colors(field_bg, base, 0.16)
+                    badge_outline = blend_hex_colors(base, fg, 0.18)
+                    canvas.create_rectangle(
+                        x - badge_w // 2,
+                        y - badge_h // 2,
+                        x + badge_w // 2,
+                        y + badge_h // 2,
+                        fill=badge_bg,
+                        outline=badge_outline,
+                        width=1,
+                        tags=("t02_resource_map",),
+                    )
+                    canvas.create_text(
+                        x,
+                        y,
+                        text=campaign_ui_helpers._repair_polish_text(text),
+                        fill=base,
+                        font=("Segoe UI", 7, "bold"),
+                        anchor=tk.CENTER,
+                        width=badge_w - 8,
+                        tags=("t02_resource_map",),
+                    )
+
+                def _draw_abbrev_legend() -> None:
+                    legend_w = 272
+                    legend_h = 112
+                    legend_x1 = width - 14
+                    legend_y1 = height - 12
+                    legend_x0 = max(12, legend_x1 - legend_w)
+                    legend_y0 = max(12, legend_y1 - legend_h)
+                    legend_bg = blend_hex_colors(bg, field_bg, 0.72)
+                    legend_outline = blend_hex_colors(border, accent, 0.20)
+                    canvas.create_rectangle(
+                        legend_x0,
+                        legend_y0,
+                        legend_x1,
+                        legend_y1,
+                        fill=legend_bg,
+                        outline=legend_outline,
+                        width=1,
+                        tags=("t02_resource_map",),
+                    )
+                    canvas.create_text(
+                        legend_x0 + 10,
+                        legend_y0 + 10,
+                        text=campaign_ui_helpers._repair_polish_text("Legenda skrótów"),
+                        fill=fg,
+                        font=("Segoe UI", 8, "bold"),
+                        anchor=tk.NW,
+                        tags=("t02_resource_map",),
+                    )
+                    rows = (
+                        ("O", "obrazy aktualnego zbioru"),
+                        ("AT", "anotacje tablic dopasowane do O"),
+                        ("MZ", "model znaków działający na tablicach"),
+                        ("AZ", "anotacje znaków na wyodrębnionych tablicach"),
+                        ("MT", "model tablic; w T02 nie jest wymagany"),
+                    )
+                    for idx, (code, description) in enumerate(rows):
+                        row_y = legend_y0 + 32 + idx * 15
+                        canvas.create_text(
+                            legend_x0 + 12,
+                            row_y,
+                            text=campaign_ui_helpers._repair_polish_text(code),
+                            fill=accent if code in {"MZ", "AZ"} else success if code in {"O", "AT"} else muted,
+                            font=("Segoe UI", 7, "bold"),
+                            anchor=tk.W,
+                            tags=("t02_resource_map",),
+                        )
+                        canvas.create_text(
+                            legend_x0 + 48,
+                            row_y,
+                            text=campaign_ui_helpers._repair_polish_text(description),
+                            fill=muted,
+                            font=("Segoe UI", 7),
+                            anchor=tk.W,
+                            width=legend_w - 60,
+                            tags=("t02_resource_map",),
+                        )
 
                 main_y = y_main
                 main_mid_y = main_y + bundle_h // 2
                 _input_bundle(bundle_x, main_y)
-                _arrow(bundle_x + bundle_w + 5, main_mid_y, plates_x - 5, main_mid_y)
-                _node(plates_x, main_mid_y - node_h // 2, "plates", "Tablice", "wyodr.", virtual=True, width_value=plate_w)
-                _arrow(plates_x + plate_w + 5, main_mid_y, az_x - 5, main_mid_y)
-                _node(az_x, main_mid_y - node_h // 2, "char_run", "AZ", "znaki", width_value=az_w)
-                _arrow(az_x + az_w + 5, main_mid_y, dataset_x - 5, main_mid_y)
-                _node(dataset_x, main_mid_y - node_h // 2, "dataset", "Dataset", "dalej", virtual=True, width_value=dataset_w)
+                first_arrow_x0 = bundle_x + bundle_w + 5
+                first_arrow_x1 = plates_x - 5
+                _arrow(first_arrow_x0, main_mid_y, first_arrow_x1, main_mid_y)
+                _arrow_badge(first_arrow_x0, first_arrow_x1, main_mid_y - 24, "AT wskazuje wycięcia")
+                _node(plates_x, main_mid_y - node_h // 2, "plates", "Tablice", "wyodrębnione", virtual=True, width_value=plate_w)
 
-                model_w = node_w
-                mz_x = max(12, min(width - model_w - 12, plates_x + int((plate_w - model_w) / 2)))
+                model_w = support_w
                 mt_x = max(12, min(width - model_w - 12, bundle_x + int((bundle_w - model_w) / 2)))
-                _node(mt_x, y_support, "plate_model", "MT", "poza T02", virtual=False, width_value=model_w)
-                _node(mz_x, y_support, "char_model", "MZ", "wsparcie", virtual=False, width_value=model_w)
-                _arrow(mz_x + model_w // 2, y_support, plates_x + plate_w // 2, main_y + bundle_h + 4, active=False)
+                az_x = max(12, plates_x_unshifted - model_w - 18)
+                mz_x = max(12, az_x - model_w - 18 - scheme_shift_x)
+                _node(mt_x, y_support, "plate_model", "MT", "nie dotyczy", virtual=False, width_value=model_w)
+                _node(mz_x, y_support, "char_model", "MZ", "opcjonalnie", virtual=False, width_value=model_w)
+                _node(az_x, y_support, "char_run", "AZ", "opcjonalne", width_value=model_w)
+
+                plates_bottom_y = main_mid_y + node_h // 2 + 5
+                _arrow(
+                    mz_x + model_w // 2,
+                    y_support - 6,
+                    plates_x + int(plate_w * 0.36),
+                    plates_bottom_y,
+                    active=False,
+                    dashed=True,
+                )
+                mz_present, _mz_required, _mz_tone, _mz_counter = _t02_resource_snapshot_state("char_model")
+                _relation_badge(
+                    int((mz_x + model_w // 2 + plates_x + int(plate_w * 0.36)) / 2) - 22,
+                    int((y_support - 6 + plates_bottom_y) / 2) - 12,
+                    "MZ analizuje tablice",
+                    active=bool(mz_present),
+                    width_value=134,
+                )
+                _arrow(
+                    az_x + model_w // 2,
+                    y_support - 6,
+                    plates_x + int(plate_w * 0.66),
+                    plates_bottom_y,
+                    active=False,
+                    dashed=True,
+                )
+                az_present, _az_required, _az_tone, _az_counter = _t02_resource_snapshot_state("char_run")
+                _relation_badge(
+                    int((az_x + model_w // 2 + plates_x + int(plate_w * 0.66)) / 2) + 24,
+                    int((y_support - 6 + plates_bottom_y) / 2) - 12,
+                    "AZ wskazuje znaki",
+                    active=bool(az_present),
+                    width_value=128,
+                )
+                _draw_abbrev_legend()
 
                 canvas.create_text(
                     width - 10,
@@ -11259,10 +13015,33 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 pass
 
+        def _schedule_t02_resource_map_redraw(_event=None) -> None:
+            if not show_t02_resource_map:
+                return
+            canvas = dependency_map_state.get("canvas")
+            if canvas is None:
+                return
+            try:
+                previous_after_id = dependency_map_state.get("redraw_after_id")
+                if previous_after_id:
+                    canvas.after_cancel(previous_after_id)
+            except Exception:
+                pass
+
+            def _run_redraw() -> None:
+                dependency_map_state["redraw_after_id"] = None
+                _draw_t02_resource_map()
+
+            try:
+                dependency_map_state["redraw_after_id"] = canvas.after(90, _run_redraw)
+            except Exception:
+                dependency_map_state["redraw_after_id"] = None
+                _draw_t02_resource_map()
+
         try:
             canvas = dependency_map_state.get("canvas")
             if canvas is not None:
-                canvas.bind("<Configure>", _draw_t02_resource_map, add="+")
+                canvas.bind("<Configure>", _schedule_t02_resource_map_redraw, add="+")
                 canvas.bind(
                     "<Leave>",
                     lambda _event: self.app.update_status("", "info") if hasattr(self.app, "update_status") else None,
@@ -11495,6 +13274,33 @@ def _render_step1_route_actions(self, frame):
         gate_status_lbl.pack(fill=tk.X, padx=14, pady=(0, 8))
         for row_idx, (row_key, label, primary_label) in enumerate(row_specs, start=1):
             widgets[row_key] = {"row_label": label, "primary_label": primary_label}
+        try:
+            tree_items = resource_tree_state.get("items")
+            if not isinstance(tree_items, dict):
+                tree_items = {}
+                resource_tree_state["items"] = tree_items
+            for row_key, label, _primary_label in row_specs:
+                iid = f"resource:{row_key}"
+                if iid in tree_items:
+                    continue
+                resource_tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=("-", label, "-", "Ładuję...", "Liczenie zasobów...", "-", "-", "-"),
+                    tags=("loading",),
+                )
+                tree_items[iid] = row_key
+            if row_specs and not str(resource_tree_state.get("selected_key") or "").strip():
+                first_key = str(row_specs[0][0] or "")
+                resource_tree_state["selected_key"] = first_key
+                resource_tree.focus(f"resource:{first_key}")
+            _clear_resource_tree_selection()
+            _refresh_resource_active_tree_tags()
+            gate_status_var.set("Ładuję zasoby bramki. Okno pozostaje aktywne, dane pojawią się za chwilę.")
+            gate_status_lbl.config(fg=muted)
+        except Exception:
+            pass
 
         def _refresh_rows(*, refresh_ingest: bool = True, refresh_gate: bool = True) -> None:
             if refresh_ingest:
@@ -11538,8 +13344,20 @@ def _render_step1_route_actions(self, frame):
                 tree_actions = {}
                 resource_tree_state["actions"] = tree_actions
             tree_actions.clear()
-            for row_key, label, primary_label in row_specs:
+            latest_snapshot_by_key: dict[str, object] = {}
+            row_count = max(1, len(row_specs))
+            for row_index, (row_key, label, primary_label) in enumerate(row_specs, start=1):
+                if show_t02_resource_map:
+                    _set_resource_opening_progress(
+                        30.0 + (float(row_index - 1) / float(row_count)) * 28.0,
+                        f"Sprawdzam zasób: {label}.",
+                    )
                 snap_obj = _snapshot_object(row_key, label)
+                latest_snapshot_by_key[row_key] = snap_obj
+                try:
+                    latest_snapshot_by_key[str(getattr(snap_obj, "canonical_key", "") or row_key)] = snap_obj
+                except Exception:
+                    pass
                 snap = snap_obj.as_dict()
                 row_widgets = widgets.setdefault(row_key, {"row_label": label, "primary_label": primary_label})
                 tone_color = tone_colors.get(str(snap.get("tone") or "muted"), muted)
@@ -11565,11 +13383,25 @@ def _render_step1_route_actions(self, frame):
                 fulfillment_color = tone_colors.get(_fulfillment_tone(fulfillment), muted)
                 counter = str(snap.get("counter") or "").strip()
                 display_label = f"{label} [{counter}]" if counter and campaign_resource_counted(row_key) else label
+                pending_contract_review = False
+                if show_t02_resource_map and row_key == "plate_run" and not present:
+                    try:
+                        at_has_source, at_meta, _at_source_tone, _at_source_counter = _t02_resource_physical_state("plate_run")
+                    except Exception:
+                        at_has_source, at_meta = False, {}
+                    if at_has_source and not bool((at_meta or {}).get("requires_rematch")):
+                        pending_contract_review = True
+                        status_badge = "Kontrola"
+                        status_tone = "warning"
+                        tone_color = tone_colors.get("warning", warning)
+                        fulfillment = "Do kontroli"
+                        fulfillment_color = tone_colors.get("warning", warning)
                 annotation_dependency_blocked = False
                 if row_key in {"plate_run", "char_run"}:
                     base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
                     annotation_dependency_blocked = not base_ready
                     if annotation_dependency_blocked:
+                        pending_contract_review = False
                         present = False
                         fulfillment = _fulfillment_text(
                             enabled=bool(spec_enabled),
@@ -11603,6 +13435,10 @@ def _render_step1_route_actions(self, frame):
                     if annotation_dependency_blocked:
                         validation_text = _annotation_dependency_message(row_key)
                         tone_color = tone_colors.get("warning", warning)
+                    elif pending_contract_review:
+                        guidance = str((at_meta or {}).get("pending_action_text") or "").strip()
+                        if guidance and guidance not in validation_text:
+                            validation_text = f"{validation_text}\n{guidance}" if validation_text else guidance
                     row_widgets["primary_label"] = primary_label
                     row_widgets["source_full_text"] = (
                         resource_cell_detail_overrides.get((row_key, "source"))
@@ -11643,6 +13479,8 @@ def _render_step1_route_actions(self, frame):
                         tags: tuple[str, ...] = ()
                         if not spec_enabled:
                             tags = ("disabled",)
+                        elif pending_contract_review:
+                            tags = ("review_pending",)
                         elif required and present:
                             tags = ("required_ready",)
                         elif required and not present:
@@ -11652,6 +13490,8 @@ def _render_step1_route_actions(self, frame):
                         tree.item(iid, tags=tags)
                 except Exception:
                     pass
+            if show_t02_resource_map:
+                resource_tree_state["snapshots"] = dict(latest_snapshot_by_key)
             if tree is not None:
                 try:
                     valid_iids = {f"resource:{row_key}" for row_key, _label, _primary_label in row_specs}
@@ -11687,7 +13527,9 @@ def _render_step1_route_actions(self, frame):
             try:
                 resource_snapshots = {}
                 for row_key, label, _primary_label in row_specs:
-                    snapshot_obj = _snapshot_object(row_key, label)
+                    snapshot_obj = latest_snapshot_by_key.get(row_key)
+                    if snapshot_obj is None:
+                        snapshot_obj = _snapshot_object(row_key, label)
                     resource_snapshots[snapshot_obj.canonical_key] = snapshot_obj
                 resource_report = build_transition_resource_report(
                     active_specs,
@@ -11702,21 +13544,57 @@ def _render_step1_route_actions(self, frame):
                     and normalize_iteration_path(getattr(edge_spec, "path_key", "")) == current_path
                 )
                 stage_status_for_gate = _get_graph_wizard_stage_status("step1") if path_match else None
+                review_pending = any(
+                    bool(getattr(report_row, "review_required", False))
+                    for report_row in resource_report.missing_required
+                )
                 ready = bool(
                     stage_status_for_gate is not None
                     and str(getattr(stage_status_for_gate, "badge_action_label", "") or "").strip()
                     and callable(getattr(stage_status_for_gate, "badge_action_command", None))
+                    and not review_pending
+                    and _edge_ready(edge)
                 )
+                gate_label = resource_gate_id or "E1"
                 if ready:
-                    gate_status_var.set("Bramka E1 jest otwarta. Zatwierdź przejście polem Zatwierdź na bramce grafu.")
+                    gate_status_var.set(f"Bramka {gate_label} jest otwarta. Zatwierdź przejście polem Zatwierdź na bramce grafu.")
                     gate_status_lbl.config(fg=success)
+                elif path_match and review_pending:
+                    review_text = resource_report.status_text()
+                    gate_status_var.set(f"Bramka {gate_label} wymaga pracy kontrolnej. {review_text}")
+                    gate_status_lbl.config(fg=warning)
                 else:
                     status_text = "zamknięta" if path_match else "nieaktywna"
                     report_text = resource_report.status_text() if path_match else "Najpierw wybierz tę ścieżkę na grafie."
-                    gate_status_var.set(f"Bramka E1 jest {status_text}. {report_text}")
+                    gate_status_var.set(f"Bramka {gate_label} jest {status_text}. {report_text}")
                     gate_status_lbl.config(fg=warning if path_match else muted_dim)
             except Exception:
                 pass
+
+        def _close_resource_dialog() -> None:
+            try:
+                after_id = dependency_map_state.get("redraw_after_id")
+                map_canvas = dependency_map_state.get("canvas")
+                if after_id and map_canvas is not None:
+                    map_canvas.after_cancel(after_id)
+                dependency_map_state["redraw_after_id"] = None
+            except Exception:
+                pass
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+            finally:
+                _hide_resource_opening_loader()
+
+        try:
+            dialog.protocol("WM_DELETE_WINDOW", _close_resource_dialog)
+        except Exception:
+            pass
 
         footer = tk.Frame(body, bg=body_bg)
         footer.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 14))
@@ -11734,7 +13612,7 @@ def _render_step1_route_actions(self, frame):
         tk.Button(
             footer,
             text="Zamknij",
-            command=dialog.destroy,
+            command=_close_resource_dialog,
             cursor="hand2",
             bg=field_bg,
             fg=fg,
@@ -11743,15 +13621,148 @@ def _render_step1_route_actions(self, frame):
             pady=6,
         ).pack(side=tk.RIGHT)
 
-        _refresh_rows()
+        def _show_final_resource_dialog() -> bool:
+            try:
+                _set_resource_opening_progress(72.0, "Układam gotowe okno zasobów i ustawiam jego geometrię.")
+                dialog.update_idletasks()
+                center_dialog = getattr(self.app, "_center_dialog_window", None)
+                if callable(center_dialog):
+                    center_dialog(
+                        dialog,
+                        parent=self.frame,
+                        width=resource_modal_width,
+                        height=resource_modal_height,
+                    )
+                if str(dialog.tk.call("tk", "windowingsystem") or "") != "win32":
+                    dialog.transient(self.frame)
+                else:
+                    dialog.wm_transient("")
+                if show_t02_resource_map:
+                    try:
+                        _set_resource_opening_progress(82.0, "Rysuję schemat zależności O-AT i tabelę zasobów.")
+                        _draw_t02_resource_map()
+                    except Exception:
+                        pass
+                if show_t02_resource_map:
+                    try:
+                        _set_resource_opening_progress(88.0, "Odświeżam akcje dostępne dla zaznaczonego zasobu.")
+                        _refresh_resource_action_bar()
+                    except Exception:
+                        pass
+                    try:
+                        resource_tree.update_idletasks()
+                    except Exception:
+                        pass
+                    try:
+                        map_canvas = dependency_map_state.get("canvas")
+                        if map_canvas is not None:
+                            map_canvas.update_idletasks()
+                    except Exception:
+                        pass
+                    try:
+                        _set_resource_opening_progress(94.0, "Stabilizuję pierwszy widok modala zasobów.")
+                        dialog.update_idletasks()
+                    except Exception:
+                        pass
+                dialog.deiconify()
+                dialog.lift()
+                loader_dialog = resource_opening_loader.get("dialog")
+                if loader_dialog is not None:
+                    try:
+                        loader_dialog.lift()
+                    except Exception:
+                        pass
+                try:
+                    dialog.update()
+                except Exception:
+                    try:
+                        dialog.update_idletasks()
+                    except Exception:
+                        pass
+                _set_resource_opening_progress(99.0, "Widok zasobów jest gotowy.")
+                if show_t02_resource_map and loader_dialog is not None:
+                    def _release_resource_loader_to_dialog() -> None:
+                        try:
+                            dialog.attributes("-alpha", 1.0)
+                        except Exception:
+                            pass
+                        _hide_resource_opening_loader()
+                        try:
+                            dialog.lift()
+                            dialog.focus_force()
+                            dialog.grab_set()
+                        except Exception:
+                            pass
+
+                    try:
+                        dialog.after(120, _release_resource_loader_to_dialog)
+                    except Exception:
+                        _release_resource_loader_to_dialog()
+                    return True
+                if show_t02_resource_map:
+                    try:
+                        dialog.attributes("-alpha", 1.0)
+                    except Exception:
+                        pass
+                dialog.focus_force()
+                dialog.grab_set()
+            except Exception:
+                try:
+                    dialog.attributes("-alpha", 1.0)
+                except Exception:
+                    pass
+                try:
+                    dialog.deiconify()
+                except Exception:
+                    pass
+            return False
+
+        def _prepare_hidden_resource_dialog_geometry() -> None:
+            try:
+                dialog.update_idletasks()
+                center_dialog = getattr(self.app, "_center_dialog_window", None)
+                if callable(center_dialog):
+                    center_dialog(
+                        dialog,
+                        parent=self.frame,
+                        width=resource_modal_width,
+                        height=resource_modal_height,
+                    )
+                if str(dialog.tk.call("tk", "windowingsystem") or "") != "win32":
+                    dialog.transient(self.frame)
+                else:
+                    dialog.wm_transient("")
+            except Exception:
+                pass
+
+        if show_t02_resource_map:
+            _prepare_hidden_resource_dialog_geometry()
+        else:
+            _show_final_resource_dialog()
+
+        def _finish_initial_resource_load() -> None:
+            reveal_deferred = False
+            try:
+                if dialog.winfo_exists():
+                    _set_resource_opening_progress(28.0, "Buduję tabelę zasobów bramki.")
+                    _refresh_rows(refresh_ingest=False)
+                    _set_resource_opening_progress(62.0, "Zasoby są policzone. Przygotowuję schemat i akcje.")
+            except Exception:
+                pass
+            finally:
+                if show_t02_resource_map:
+                    try:
+                        if dialog.winfo_exists():
+                            reveal_deferred = bool(_show_final_resource_dialog())
+                    except Exception:
+                        pass
+                if not reveal_deferred:
+                    _hide_resource_opening_loader()
+
         try:
-            if str(dialog.tk.call("tk", "windowingsystem") or "") != "win32":
-                dialog.transient(self.frame)
-            else:
-                dialog.wm_transient("")
-            dialog.grab_set()
+            dialog.after(45, _finish_initial_resource_load)
         except Exception:
-            pass
+            _finish_initial_resource_load()
 
     def _get_graph_wizard_stage_status(stage_key: str):
         normalized_key = str(stage_key or "").strip().lower()
@@ -11812,7 +13823,10 @@ def _render_step1_route_actions(self, frame):
             visual_path = str(getattr(spec, "path_key", "") or "").strip()
             if not visual_path and graph_edge is not None and tuple(getattr(graph_edge, "paths", ()) or ()):
                 visual_path = str(selected_path or "").strip()
-            raw_gate_id = str(getattr(spec, "badge_id", "") or "").strip()
+            raw_gate_id = campaign_gate_id_for_edge(
+                current_edge_key,
+                getattr(spec, "badge_id", ""),
+            )
             visible_gate_id = campaign_visible_gate_id(raw_gate_id) if raw_gate_id else ""
             return {
                 "source": "campaign_graph",
@@ -11836,6 +13850,35 @@ def _render_step1_route_actions(self, frame):
             context = dict(enriched.get("context") or enriched.get("preferred_source_context") or {})
             context.update(_build_graph_gate_entry_context(current_edge_key))
             if (
+                str(current_edge_key or "").strip() == "e1_to_e3"
+                and str(graph_action or "").strip() == "open_z2_campaign_context"
+            ):
+                context.update(
+                    {
+                        "z2_work_mode": "t02_at_review",
+                        "restore_project_start_plate_source": "1",
+                        "return_edge_key": "e1_to_e3",
+                        "return_gate_id": "T02",
+                    }
+                )
+                try:
+                    start_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
+                except Exception:
+                    start_source = {}
+                source_run = str(start_source.get("source_run_path") or "").strip()
+                source_input = str(start_source.get("source_input_path") or "").strip()
+                source_xml = str(start_source.get("source_xml_path") or "").strip()
+                if source_run:
+                    context.setdefault("restore_run_dir", source_run)
+                elif source_xml:
+                    try:
+                        context.setdefault("restore_run_dir", str(Path(source_xml).parent))
+                    except Exception:
+                        pass
+                if source_input:
+                    context.setdefault("input_dir", source_input)
+                context.setdefault("input_source", "t02_at_review")
+            if (
                 _is_t07_graph_edge(current_edge_key)
                 and str(graph_action or "").strip() == "open_z2_step3_repair"
             ):
@@ -11846,16 +13889,16 @@ def _render_step1_route_actions(self, frame):
                         "source_graph_gate_id": str(original_context.get("graph_gate_id") or "").strip(),
                         "source_graph_gate_label": str(original_context.get("graph_gate_label") or "").strip(),
                         "source_graph_transition_title": str(original_context.get("graph_transition_title") or "").strip(),
-                        "repair_origin_gate_id": "T07",
+                        "repair_origin_gate_id": "T06",
                         "repair_origin_edge_key": "e4_to_e1",
                         "z2_repair_mode": "1",
-                        # Final-gate repair is operationally a fresh T05 pass: already
+                        # Final-gate repair is operationally a fresh T04 pass: already
                         # approved plates stay in the YOLO pool, while Z2 shows
-                        # only the still-open material that can feed T05 again.
+                        # only the still-open material that can feed T04 again.
                         "graph_edge_key": "e2_to_e4",
-                        "graph_gate_id": "T05",
-                        "graph_visible_gate_id": campaign_visible_gate_id("T05"),
-                        "graph_display_gate_id": campaign_visible_gate_id("T05") or "T05",
+                        "graph_gate_id": "T04",
+                        "graph_visible_gate_id": "T04",
+                        "graph_display_gate_id": "T04",
                         "graph_gate_label": "Trening modelu tablic",
                         "graph_transition_title": "Uzupełnij anotacje tablic",
                         "graph_transition_source": "E2",
@@ -12432,6 +14475,9 @@ def _render_step1_route_actions(self, frame):
 
         if spec_buttons:
             body_text = _action_modal_body_text()
+            if str(edge_key or "").strip() == "e1_to_e3":
+                _open_t02_actions_modal(body_text, spec_buttons)
+                return
             if str(edge_key or "").strip() == "e2_to_e4":
                 _open_t05_actions_modal(body_text, spec_buttons)
                 return
@@ -12590,6 +14636,7 @@ def _render_step1_route_actions(self, frame):
             pass
 
     def _draw() -> None:
+        nonlocal _t06_interrupted_work_cache
         try:
             if not canvas.winfo_exists():
                 return
@@ -12610,6 +14657,11 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             previous_frame_tag = ""
         graph_wizard_stage_status_cache.clear()
+        # T05/Z3 interruption state can change while the same graph canvas stays
+        # alive (for example: PZ3 export resolves a session that was marked as
+        # interrupted after app close). Recompute it on every graph paint instead
+        # of reusing a stale modal/field cache.
+        _t06_interrupted_work_cache = None
         gate_geometry.clear()
         gate_field_geometry.clear()
         gate_selector_geometry.clear()
@@ -15355,7 +17407,8 @@ def _render_step1_route_actions(self, frame):
                 if edge.key == "e1_to_e3":
                     x_shift = -92
                 elif edge.key == "e2_to_e4":
-                    x_shift = 92
+                    y = anchor_y - mini_h - 82
+                    x_shift = 28
                     post_clear_x_shift = -(mini_w / 2.0)
                 else:
                     x_shift = 92
@@ -15368,17 +17421,12 @@ def _render_step1_route_actions(self, frame):
                     else:
                         y = anchor_y + 64
                 elif _is_t07_graph_edge(edge.key):
-                    t04_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e2_to_e4")
-                    if t04_edge is not None:
-                        _t04_anchor_x, t04_anchor_y = _edge_anchor_point(t04_edge)
-                        forced_y_after_clear = t04_anchor_y + 64
-                        y = forced_y_after_clear
-                    else:
-                        y = anchor_y + 64
+                    y = anchor_y - mini_h - 28
                 else:
                     y = max(8, anchor_y - mini_h - 72)
                 if _is_t07_graph_edge(edge.key):
-                    x_shift = 58
+                    y -= 32.0
+                    x_shift = float(anchor_x) - float(center_x) + 148.0
                 elif edge.key == "e3_to_e4":
                     x_shift = -74
                 else:
@@ -15521,8 +17569,8 @@ def _render_step1_route_actions(self, frame):
                 default_y = anchor_y + 74
                 default_x_shift = -104
             elif edge.key == "e2_to_e4":
-                default_y = anchor_y + 74
-                default_x_shift = 104
+                default_y = anchor_y - gate_h - 92
+                default_x_shift = 36
                 post_clear_x_shift = -(gate_w / 2.0)
             elif edge.key == "e3_to_e4":
                 t02_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e1_to_e3")
@@ -15532,14 +17580,8 @@ def _render_step1_route_actions(self, frame):
                 else:
                     default_y = anchor_y + 74
             elif _is_t07_graph_edge(edge.key):
-                t04_edge = CAMPAIGN_TRANSITION_GRAPH.get_edge("e2_to_e4")
-                if t04_edge is not None:
-                    _t04_anchor_x, t04_anchor_y = _edge_anchor_point(t04_edge)
-                    forced_y_after_clear = t04_anchor_y + 74
-                    default_y = forced_y_after_clear
-                else:
-                    default_y = anchor_y + 78
-                default_x_shift = 72
+                default_y = anchor_y - gate_h - 64
+                default_x_shift = float(anchor_x) - float(center_x) + 148.0
             else:
                 default_y = anchor_y - gate_h - 76
 
@@ -15756,10 +17798,11 @@ def _render_step1_route_actions(self, frame):
                     "local_zoom": float(local_zoom),
                 }
 
+            work_status_value = _edge_pending_resource_review_label(edge) if _edge_fields_enabled(edge) else ""
             rows = (
                 ("BRAMKA", status_text, None, False),
                 ("ZASOBY", resource_status_value, f"gate:{edge.key}:resources", _edge_resources_enabled(edge)),
-                ("PRACA", "", f"gate:{edge.key}:actions", _edge_actions_enabled(edge)),
+                ("PRACA", work_status_value, f"gate:{edge.key}:actions", _edge_actions_enabled(edge)),
                 ("ZATWIERDŹ", "", f"gate:{edge.key}:approve", _edge_approve_enabled(edge)),
             )
             row_y = y + title_h
@@ -15790,10 +17833,19 @@ def _render_step1_route_actions(self, frame):
                     and _current_step4_work_interruption_state()
                     and not _current_t07_training_finish_state()
                 )
+                step4_training_candidate_action = bool(
+                    _is_t07_graph_edge(edge.key)
+                    and str(tag or "").endswith(":actions")
+                    and _current_t07_training_candidate_state()
+                    and not _current_t07_training_finish_state()
+                )
+                resource_review_action = bool(
+                    str(tag or "").endswith(":actions")
+                    and str(work_status_value or "").strip()
+                )
                 t06_work_interrupted = bool(
                     edge.key == "e3_to_e4"
                     and str(tag or "").endswith(":actions")
-                    and not _edge_ready(edge)
                     and _t06_interrupted_work_state()
                 )
                 if work_interrupted or t06_work_interrupted or step4_work_interrupted:
@@ -15807,6 +17859,15 @@ def _render_step1_route_actions(self, frame):
                     except Exception:
                         pending_images = 0
                     value = f"PRZERWANE +{pending_images} OK" if pending_images > 0 else "PRZERWANE"
+                elif step4_training_candidate_action:
+                    value = "WYBIERZ WYNIK"
+                    row_fill = blend_hex_colors(fill, warning, 0.10)
+                    row_outline = blend_hex_colors(warning, card_bg, 0.30)
+                    row_width = 1
+                elif resource_review_action:
+                    row_fill = blend_hex_colors(fill, warning, 0.08)
+                    row_outline = blend_hex_colors(warning, card_bg, 0.26)
+                    row_width = 1
                 row_tags = (group_tag,)
                 if tag and enabled:
                     row_tags = (group_tag, tag, "gate_button")
@@ -15843,6 +17904,10 @@ def _render_step1_route_actions(self, frame):
                     row_color = success
                 elif work_interrupted or t06_work_interrupted or step4_work_interrupted:
                     row_color = accent if tag and enabled else (muted if operable else muted_dim)
+                elif step4_training_candidate_action:
+                    row_color = warning if tag and enabled else (muted if operable else muted_dim)
+                elif resource_review_action:
+                    row_color = warning if tag and enabled else (muted if operable else muted_dim)
                 elif is_approve_row and tag and enabled:
                     row_color = success
                 elif tag and enabled:
@@ -15854,6 +17919,10 @@ def _render_step1_route_actions(self, frame):
                     value_color = success if str(value or "").strip().upper() == "OK" else warning
                 if work_interrupted or t06_work_interrupted or step4_work_interrupted:
                     value_color = error
+                if step4_training_candidate_action:
+                    value_color = warning
+                if resource_review_action:
+                    value_color = warning
                 if str(value or "").strip().upper().startswith("PRZERWANE"):
                     value_color = error
                 resource_detail_layout = bool(
@@ -15900,7 +17969,7 @@ def _render_step1_route_actions(self, frame):
                     approve_title, approve_detail = display_label.split("\n", 1)
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 10 * local_zoom,
+                        y0 + 9 * local_zoom,
                         text=approve_title.strip(),
                         fill=row_color,
                         anchor="w",
@@ -15911,11 +17980,11 @@ def _render_step1_route_actions(self, frame):
                     )
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 24 * local_zoom,
+                        y0 + 24.5 * local_zoom,
                         text=approve_detail.strip(),
                         fill=blend_hex_colors(row_color, muted, 0.18),
                         anchor="w",
-                        font=_gate_font(5, local_zoom, "bold"),
+                        font=_gate_font(6, local_zoom, "bold"),
                         width=max(1, gate_w - 22 * local_zoom),
                         justify=tk.LEFT,
                         tags=text_tags,
@@ -16232,20 +18301,10 @@ def _render_step1_route_actions(self, frame):
             )
 
         def _attention_path_for_edge(edge) -> list[tuple[float, float]]:
-            source_geom = node_geometry.get(str(edge.source))
-            target_geom = node_geometry.get(str(edge.target))
             gate_geom = gate_geometry.get(str(edge.key))
-            if not source_geom or not target_geom or not gate_geom:
+            if not gate_geom:
                 return []
 
-            source_x = float(source_geom.get("x", 0.0) or 0.0)
-            source_y = float(source_geom.get("y", 0.0) or 0.0)
-            target_x = float(target_geom.get("x", 0.0) or 0.0)
-            target_y = float(target_geom.get("y", 0.0) or 0.0)
-            source_w = float(source_geom.get("node_w", node_w) or node_w)
-            source_h = float(source_geom.get("node_h", node_h) or node_h)
-            target_w = float(target_geom.get("node_w", node_w) or node_w)
-            target_h = float(target_geom.get("node_h", node_h) or node_h)
             gate_x = float(gate_geom.get("x", 0.0) or 0.0)
             gate_y = float(gate_geom.get("y", 0.0) or 0.0)
             gate_w = float(gate_geom.get("gate_w", 0.0) or 0.0)
@@ -16253,135 +18312,59 @@ def _render_step1_route_actions(self, frame):
             if gate_w <= 0 or gate_h <= 0:
                 return []
 
-            if _is_t07_graph_edge(edge.key):
-                branch = _edge_render_world_points_for(edge)
-                trunk = _return_edge_trunk_render_world_points()
-                full_route = _dedupe_route_points([*branch, *trunk[1:]]) if branch and trunk else branch
-                edge_polyline = [
-                    (_screen_x(point_x, width), _screen_y(point_y, height))
-                    for point_x, point_y in full_route
-                ]
-            else:
-                edge_polyline = _canvas_polyline_points(edge_line_items.get(str(edge.key)))
+            edge_key = str(getattr(edge, "key", "") or "").strip()
+            edge_polyline = _canvas_polyline_points(edge_line_items.get(edge_key))
+            if _is_t07_graph_edge(edge_key):
+                trunk_polyline: list[tuple[float, float]] = []
+                try:
+                    for trunk_id in canvas.find_withtag("graph_return_trunk"):
+                        trunk_polyline = _canvas_polyline_points(int(trunk_id))
+                        if len(trunk_polyline) >= 2:
+                            break
+                except Exception:
+                    trunk_polyline = []
+                if edge_polyline and trunk_polyline:
+                    edge_polyline = _dedupe_route_points([*edge_polyline, *trunk_polyline[1:]])
             if not edge_polyline:
+                if _is_t07_graph_edge(edge_key):
+                    branch = _edge_render_world_points_for(edge)
+                    trunk = _return_edge_trunk_render_world_points()
+                    fallback_route = _dedupe_route_points([*branch, *trunk[1:]]) if branch and trunk else branch
+                else:
+                    fallback_route = _edge_render_world_points_for(edge)
                 edge_polyline = [
                     (_screen_x(point_x, width), _screen_y(point_y, height))
-                    for point_x, point_y in _edge_render_world_points_for(edge)
+                    for point_x, point_y in fallback_route
                 ]
             if len(edge_polyline) < 2:
                 return []
-            source_exit = edge_polyline[0]
-            target_entry = edge_polyline[-1]
             connector_polyline = _canvas_polyline_points(gate_connector_items.get(str(edge.key)))
             if len(connector_polyline) >= 2:
                 connector_anchor = connector_polyline[0]
+                gate_contact_from_edge = connector_polyline[-1]
             else:
                 anchor = _edge_anchor_point(edge)
                 connector_anchor = (_screen_x(anchor[0], width), _screen_y(anchor[1], height))
-            edge_to_anchor, anchor_to_target, anchor_on_edge = _split_world_polyline_at_point(edge_polyline, connector_anchor)
-            gate_x0, gate_y0, gate_x1, gate_y1 = _screen_rect_from_world(gate_x, gate_y, gate_x + gate_w, gate_y + gate_h)
-            gate_contact_from_edge = _rect_contact_from_external_point(
-                gate_x0,
-                gate_y0,
-                gate_x1,
-                gate_y1,
-                anchor_on_edge[0],
-                anchor_on_edge[1],
-            )
-            source_x0, source_y0, source_x1, source_y1 = _screen_rect_from_world(
-                source_x - source_w / 2,
-                source_y - source_h / 2,
-                source_x + source_w / 2,
-                source_y + source_h / 2,
-            )
-            target_x0, target_y0, target_x1, target_y1 = _screen_rect_from_world(
-                target_x - target_w / 2,
-                target_y - target_h / 2,
-                target_x + target_w / 2,
-                target_y + target_h / 2,
-            )
-            points: list[tuple[float, float]] = []
-            points.extend(
-                _rect_perimeter_points_from_contact(
-                    source_x0,
-                    source_y0,
-                    source_x1,
-                    source_y1,
-                    source_exit[0],
-                    source_exit[1],
-                    inset=1.0,
-                )
-            )
-            points.extend(edge_to_anchor)
-            points.extend([
-                anchor_on_edge,
-                gate_contact_from_edge,
-            ])
-            points.extend(
-                _rect_perimeter_points_from_contact(
+                gate_x0, gate_y0, gate_x1, gate_y1 = _screen_rect_from_world(gate_x, gate_y, gate_x + gate_w, gate_y + gate_h)
+                gate_contact_from_edge = _rect_contact_from_external_point(
                     gate_x0,
                     gate_y0,
                     gate_x1,
                     gate_y1,
-                    gate_contact_from_edge[0],
-                    gate_contact_from_edge[1],
-                    inset=1.0,
+                    connector_anchor[0],
+                    connector_anchor[1],
                 )
-            )
-
-            selector_geom = gate_selector_geometry.get(f"gate:{edge.key}:select")
-            if selector_geom:
-                selector_x0, selector_y0, selector_x1, selector_y1 = _screen_rect_from_world(
-                    float(selector_geom.get("x0", 0.0) or 0.0),
-                    float(selector_geom.get("y0", 0.0) or 0.0),
-                    float(selector_geom.get("x1", 0.0) or 0.0),
-                    float(selector_geom.get("y1", 0.0) or 0.0),
-                )
-                selector_contact = _rect_contact_from_external_point(
-                    selector_x0,
-                    selector_y0,
-                    selector_x1,
-                    selector_y1,
-                    gate_contact_from_edge[0],
-                    gate_contact_from_edge[1],
-                )
-                points.extend([
-                    gate_contact_from_edge,
-                    selector_contact,
-                ])
-                points.extend(
-                    _rect_perimeter_points_from_contact(
-                        selector_x0,
-                        selector_y0,
-                        selector_x1,
-                        selector_y1,
-                        selector_contact[0],
-                        selector_contact[1],
-                        inset=0.5,
-                    )
-                )
-                points.extend([
-                    selector_contact,
-                    gate_contact_from_edge,
-                ])
-
+            edge_to_anchor, anchor_to_target, anchor_on_edge = _split_world_polyline_at_point(edge_polyline, connector_anchor)
+            points: list[tuple[float, float]] = []
+            points.extend(edge_to_anchor)
             points.extend([
+                anchor_on_edge,
+                gate_contact_from_edge,
                 gate_contact_from_edge,
                 anchor_on_edge,
-                *anchor_to_target,
             ])
-            points.extend(
-                _rect_perimeter_points_from_contact(
-                    target_x0,
-                    target_y0,
-                    target_x1,
-                    target_y1,
-                    target_entry[0],
-                    target_entry[1],
-                    inset=1.0,
-                )
-            )
-            return points
+            points.extend(anchor_to_target)
+            return _dedupe_route_points(points)
 
         def _draw_attention_particles(
             points: list[tuple[float, float]],

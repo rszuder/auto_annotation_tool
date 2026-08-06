@@ -83,6 +83,8 @@ _SESSION_INSTANCE_METHODS = (
     "_bind_free_mode_session_observers",
     "_on_free_mode_session_var_changed",
     "_queue_free_mode_session_save",
+    "_mark_preview_user_interaction",
+    "_preview_user_interaction_quiet_remaining_ms",
     "_cancel_campaign_char_effective_source_refresh",
     "_campaign_char_effective_source_refresh_needed",
     "_schedule_campaign_char_effective_source_refresh",

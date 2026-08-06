@@ -20,6 +20,8 @@ class DetectionMethod(Enum):
     YOLO = "yolo"
     BOTH = "both"
     YOLO_OCR = "yolo_ocr"
+    YOLO_BOX = "yolo_box"
+    YOLO_SYMBOL = "yolo_symbol"
 
 
 @dataclass
@@ -66,6 +68,8 @@ class CharacterDetector:
         yolo_model = None,
         yolo_device = None,
         yolo_confidence: float = 0.25,
+        yolo_box_confidence: float | None = None,
+        yolo_symbol_confidence: float | None = None,
         yolo_iou: float = 0.45,
         yolo_agnostic_nms: bool = False,
         yolo_overlap_threshold: float = 0.70,
@@ -82,6 +86,8 @@ class CharacterDetector:
         self.yolo_model = yolo_model
         self.yolo_device = yolo_device
         self.yolo_confidence = float(yolo_confidence)
+        self.yolo_box_confidence = float(yolo_box_confidence if yolo_box_confidence is not None else yolo_confidence)
+        self.yolo_symbol_confidence = float(yolo_symbol_confidence if yolo_symbol_confidence is not None else yolo_confidence)
         self.yolo_iou = float(yolo_iou)
         self.yolo_agnostic_nms = bool(yolo_agnostic_nms)
         self.yolo_overlap_threshold = float(yolo_overlap_threshold)
@@ -102,6 +108,7 @@ class CharacterDetector:
         self.last_yolo_ocr_detections: List[CharacterDetection] = []
         self.last_yolo_requested_device = yolo_device
         self.last_yolo_runtime_device = ""
+        self.expected_character_count = 0
         self._cuda_runtime_broken = False
         self._cuda_runtime_break_reason = ""
         self._cuda_runtime_fallback_logged = False
@@ -117,7 +124,13 @@ class CharacterDetector:
         if self.method in [DetectionMethod.OCR, DetectionMethod.BOTH]:
             self.last_ocr_detections = self._detect_with_ocr(plate_image)
             detections.extend(self.last_ocr_detections)
-        if self.method in [DetectionMethod.YOLO, DetectionMethod.BOTH, DetectionMethod.YOLO_OCR]:
+        if self.method in [
+            DetectionMethod.YOLO,
+            DetectionMethod.BOTH,
+            DetectionMethod.YOLO_OCR,
+            DetectionMethod.YOLO_BOX,
+            DetectionMethod.YOLO_SYMBOL,
+        ]:
             self.last_yolo_detections = self._detect_with_yolo(plate_image)
             if self.method == DetectionMethod.YOLO_OCR:
                 yolo_boxes_for_ocr = (
@@ -135,6 +148,12 @@ class CharacterDetector:
                     # Jeśli YOLO padło na GPU, nie zostawiaj reszty paczki bez żadnego wyniku.
                     self.last_ocr_detections = self._detect_with_ocr(plate_image)
                     detections.extend(self.last_ocr_detections)
+            elif self.method == DetectionMethod.YOLO_BOX:
+                detections.extend(
+                    list(self.last_yolo_nms_detections)
+                    or list(self.last_yolo_detections)
+                    or list(self.last_yolo_raw_detections)
+                )
             else:
                 detections.extend(self.last_yolo_detections)
             
@@ -463,7 +482,11 @@ class CharacterDetector:
         if self.yolo_model is None:
             return []
         try:
-            conf = max(0.0, min(float(self.yolo_confidence), 1.0))
+            box_conf = max(0.00001, min(float(getattr(self, "yolo_box_confidence", self.yolo_confidence)), 1.0))
+            symbol_conf = max(0.00001, min(float(getattr(self, "yolo_symbol_confidence", self.yolo_confidence)), 1.0))
+            final_conf = symbol_conf
+            conf = max(0.00001, min(float(getattr(self, "yolo_confidence", min(box_conf, symbol_conf))), 1.0))
+            conf = min(conf, box_conf, symbol_conf)
             iou = max(0.01, min(float(self.yolo_iou), 0.99))
             predict_kwargs = {
                 "conf": conf,
@@ -495,13 +518,54 @@ class CharacterDetector:
                 det = CharacterDetection(character=class_name.upper(), bbox=(x1, y1, x2, y2), confidence=float(conf), method="yolo")
                 detections.append(det)
             self.last_yolo_raw_detections = list(detections)
-            deduplicated = self._suppress_overlapping_yolo_detections(detections)
-            self.last_yolo_nms_detections = list(deduplicated)
-            return self._filter_yolo_sequence_consistency(deduplicated)
+            box_candidates = [det for det in detections if float(getattr(det, "confidence", 0.0) or 0.0) >= box_conf]
+            symbol_candidates = [det for det in detections if float(getattr(det, "confidence", 0.0) or 0.0) >= final_conf]
+            box_deduplicated = self._suppress_overlapping_yolo_detections(box_candidates)
+            symbol_deduplicated = self._suppress_overlapping_yolo_detections(symbol_candidates)
+            self.last_yolo_nms_detections = list(box_deduplicated)
+            return self._filter_yolo_sequence_consistency(symbol_deduplicated)
         except Exception as e:
             logger.error(f"Błąd YOLO detection na znakach: {e}")
             self._handle_cuda_runtime_failure("yolo", e)
             return []
+
+    def detect_yolo_candidate_pass(
+        self,
+        plate_image: np.ndarray,
+        *,
+        confidence: float,
+    ) -> dict:
+        previous_confidence = self.yolo_confidence
+        previous_box_confidence = getattr(self, "yolo_box_confidence", previous_confidence)
+        previous_symbol_confidence = getattr(self, "yolo_symbol_confidence", previous_confidence)
+        previous_raw = list(self.last_yolo_raw_detections or [])
+        previous_nms = list(self.last_yolo_nms_detections or [])
+        previous_filtered = list(self.last_yolo_detections or [])
+        previous_requested_device = self.last_yolo_requested_device
+        previous_runtime_device = self.last_yolo_runtime_device
+
+        try:
+            self.yolo_confidence = float(confidence)
+            self.yolo_box_confidence = float(confidence)
+            self.yolo_symbol_confidence = float(confidence)
+            filtered = self._detect_with_yolo(plate_image)
+            return {
+                "raw": list(self.last_yolo_raw_detections or []),
+                "nms": list(self.last_yolo_nms_detections or []),
+                "filtered": list(filtered or []),
+                "requested_device": self.last_yolo_requested_device,
+                "runtime_device": self.last_yolo_runtime_device,
+                "confidence": float(confidence),
+            }
+        finally:
+            self.yolo_confidence = previous_confidence
+            self.yolo_box_confidence = previous_box_confidence
+            self.yolo_symbol_confidence = previous_symbol_confidence
+            self.last_yolo_raw_detections = previous_raw
+            self.last_yolo_nms_detections = previous_nms
+            self.last_yolo_detections = previous_filtered
+            self.last_yolo_requested_device = previous_requested_device
+            self.last_yolo_runtime_device = previous_runtime_device
 
     def _expand_crop_bbox(
         self,
@@ -756,6 +820,37 @@ class CharacterDetector:
         confidence_sum = sum(max(0.0, float(det.confidence)) for det in detections)
         return (float(len(detections)) * median_height) + (0.35 * confidence_sum)
 
+    def _get_expected_character_count(self) -> int:
+        try:
+            return max(0, int(getattr(self, "expected_character_count", 0) or 0))
+        except Exception:
+            return 0
+
+    def _select_sequence_best_count_candidates(
+        self,
+        detections: List[CharacterDetection],
+        target_count: int,
+        stats: dict | None = None,
+    ) -> List[CharacterDetection]:
+        ordered = sorted(list(detections or []), key=lambda det: float(det.bbox[0]))
+        try:
+            target = int(target_count)
+        except Exception:
+            target = 0
+        if target <= 0 or len(ordered) <= target:
+            return sort_records_reading_order(ordered)
+
+        reference_stats = stats if isinstance(stats, dict) else self._build_sequence_reference_stats(ordered)
+        ranked = sorted(
+            enumerate(ordered),
+            key=lambda item: (
+                -self._sequence_candidate_score(item[1], reference_stats),
+                float(item[1].bbox[0]),
+            ),
+        )
+        selected_indices = sorted(idx for idx, _det in ranked[:target])
+        return sort_records_reading_order([ordered[idx] for idx in selected_indices])
+
     def _collect_sequence_reference_cluster(
         self,
         anchor: CharacterDetection,
@@ -921,12 +1016,19 @@ class CharacterDetector:
             return detections
 
         ordered = sorted(detections, key=lambda det: float(det.bbox[0]))
+        expected_count = self._get_expected_character_count()
         initial_stats = self._build_sequence_reference_stats(ordered)
 
         geometry_filtered = [
             det for det in ordered
             if not self._is_sequence_geometry_outlier(det, initial_stats)
         ]
+        if 0 < expected_count <= len(ordered) and len(geometry_filtered) < expected_count:
+            geometry_filtered = self._select_sequence_best_count_candidates(
+                ordered,
+                expected_count,
+                initial_stats,
+            )
 
         if len(geometry_filtered) <= 1:
             return geometry_filtered
@@ -952,11 +1054,18 @@ class CharacterDetector:
             if candidate_kept:
                 filtered.append(candidate)
 
+        if 0 < expected_count <= len(geometry_filtered) and len(filtered) < expected_count:
+            return self._select_sequence_best_count_candidates(
+                geometry_filtered,
+                expected_count,
+                stats,
+            )
         return filtered
 
     def _filter_yolo_sequence_consistency(self, detections: List[CharacterDetection]) -> List[CharacterDetection]:
         if len(detections) <= 1:
             return detections
+        expected_count = self._get_expected_character_count()
 
         rows = group_records_into_reading_rows(detections)
         if len(rows) <= 1:
@@ -965,4 +1074,9 @@ class CharacterDetector:
         filtered: List[CharacterDetection] = []
         for row in rows:
             filtered.extend(self._filter_yolo_sequence_consistency_single_row(list(row)))
+        if 0 < expected_count <= len(detections) and len(filtered) < expected_count:
+            return self._select_sequence_best_count_candidates(
+                sort_records_reading_order(list(detections)),
+                expected_count,
+            )
         return sort_records_reading_order(filtered)

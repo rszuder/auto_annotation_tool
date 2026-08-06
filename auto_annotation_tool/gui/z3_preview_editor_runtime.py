@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import tkinter as tk
+import time
 from pathlib import Path
 from tkinter import messagebox
+
+from ..config import logger
 
 
 def _get_preview_selected_char_record(self):
@@ -612,6 +615,7 @@ def _edit_preview_source_filename(self, event=None):
     return "break"
 
 def _delete_selected_preview_char_box(self, event=None):
+    perf_start = time.perf_counter()
     idx, rec = self._get_preview_selected_char_record()
     chars = self._get_preview_active_character_records(create=False)
     if rec is None or not isinstance(chars, list):
@@ -628,10 +632,27 @@ def _delete_selected_preview_char_box(self, event=None):
     self._preview_char_selected_index = min(idx, len(chars) - 1) if chars else None
     self._preview_char_label_active_index = None
     self._preview_char_hover_label_index = None
+    self._preview_char_hover_index = None
+    self._preview_char_hover_grip = None
     self._persist_active_preview_characters(
         selected_record=(chars[self._preview_char_selected_index] if self._preview_char_selected_index is not None and chars else None),
+        render_preview=False,
+        save_immediately=False,
+        save_delay_ms=350,
+        refresh_row=True,
         success_message="Usunięto box znaku i zapisano zmianę do metadata.json.",
     )
+    try:
+        elapsed_ms = (time.perf_counter() - perf_start) * 1000.0
+        if elapsed_ms >= 80.0:
+            logger.info(
+                "[Z3/PZ2 PERF] delete_selected_box idx=%s remaining=%s total=%.1fms",
+                idx,
+                len(chars),
+                elapsed_ms,
+            )
+    except Exception:
+        pass
     return "break"
 
 def _on_preview_prev_shortcut(self, event=None):
@@ -640,9 +661,10 @@ def _on_preview_prev_shortcut(self, event=None):
         and not bool(getattr(self, "_preview_char_label_mode", False))
     ):
         return None
+    self._preview_keyboard_crop_navigation_active = True
     if self._select_preview_relative(-1):
-        self._update_preview_edit_status()
         return "break"
+    self._preview_keyboard_crop_navigation_active = False
     return None
 
 def _on_preview_next_shortcut(self, event=None):
@@ -651,9 +673,10 @@ def _on_preview_next_shortcut(self, event=None):
         and not bool(getattr(self, "_preview_char_label_mode", False))
     ):
         return None
+    self._preview_keyboard_crop_navigation_active = True
     if self._select_preview_relative(1):
-        self._update_preview_edit_status()
         return "break"
+    self._preview_keyboard_crop_navigation_active = False
     return None
 
 def _on_preview_fit_shortcut(self, event=None):
@@ -668,6 +691,10 @@ def _on_preview_enter_fullscreen_shortcut(self, event=None):
     return "break"
 
 def _on_preview_escape_shortcut(self, event=None):
+    if bool(getattr(self, "_preview_fullscreen_active", False)):
+        self._set_preview_fullscreen(False)
+        return "break"
+
     if bool(getattr(self, "_preview_char_label_mode", False)):
         previous_active_label_idx = getattr(self, "_preview_char_label_active_index", None)
         previous_hover_label_idx = getattr(self, "_preview_char_hover_label_index", None)

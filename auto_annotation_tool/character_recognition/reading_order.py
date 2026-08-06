@@ -93,8 +93,7 @@ def group_records_by_separator(
                 key=lambda item: (float(item[1]), int(item[2])),
             )
         ]
-        if row:
-            rows.append(row)
+        rows.append(row)
     if unpositioned:
         if not rows:
             rows.append([])

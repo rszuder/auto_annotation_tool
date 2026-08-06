@@ -80,14 +80,14 @@ def _event_title(entry: dict) -> str:
 
 
 def _event_gate(entry: dict) -> str:
-    gate = str(entry.get("gate_id") or "").strip().upper()
-    if gate.startswith("T"):
-        return campaign_visible_gate_id(gate) or gate
     spec = _event_transition_spec(entry)
     if spec is not None:
         badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
         if badge:
             return campaign_visible_gate_id(badge) or badge
+    gate = str(entry.get("gate_id") or "").strip().upper()
+    if gate.startswith("T"):
+        return campaign_visible_gate_id(gate) or gate
     return str(entry.get("transition_id") or "").strip() or "-"
 
 
@@ -210,13 +210,13 @@ def _load_project_training_runs(project_name: str, *, limit: int = 3) -> list[di
 
 
 def _event_badge_id(entry: dict) -> str:
-    gate = str(entry.get("gate_id") or "").strip().upper()
-    if gate.startswith("T"):
-        return campaign_visible_gate_id(gate) or gate
     spec = _event_transition_spec(entry)
     if spec is not None:
         badge = str(getattr(spec, "badge_id", "") or "").strip().upper()
         return campaign_visible_gate_id(badge) or badge
+    gate = str(entry.get("gate_id") or "").strip().upper()
+    if gate.startswith("T"):
+        return campaign_visible_gate_id(gate) or gate
     return gate
 
 
@@ -665,7 +665,7 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
     seen: set[tuple[str, int, str]] = set()
     path_by_iteration = _iteration_path_map(entries)
     target_by_iteration = _iteration_target_map(entries)
-    step4_gate_id = campaign_visible_gate_id("T07") or "T06"
+    step4_gate_id = "T06"
 
     def _add_row(
         *,
@@ -841,12 +841,15 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
 
 
 def _event_transition_spec(entry: dict):
-    gate = str(entry.get("gate_id") or "").strip().upper()
-    if gate in _TRANSITION_SPEC_BY_BADGE:
-        return _TRANSITION_SPEC_BY_BADGE[gate]
     transition = str(entry.get("transition_id") or "").strip()
     if transition in _TRANSITION_SPEC_BY_KEY:
         return _TRANSITION_SPEC_BY_KEY[transition]
+    # The edge key is the stable source of truth for historical entries. Gate
+    # ids were renumbered during graph stabilization, so older rows can carry a
+    # stale badge while still having the correct transition_id.
+    gate = str(entry.get("gate_id") or "").strip().upper()
+    if gate in _TRANSITION_SPEC_BY_BADGE:
+        return _TRANSITION_SPEC_BY_BADGE[gate]
     details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
     path = str(details.get("path") or "").strip()
     if path in _TRANSITION_SPEC_BY_KEY:
@@ -918,10 +921,35 @@ def _transition_accepts_current_stage(spec, current_stage: str | None) -> bool:
     return bool(campaign_stage_step(normalized_current) == campaign_stage_step(source))
 
 
+def _history_bridge_specs(current_stage: str | None, spec, path_key: str | None = None) -> list:
+    """Recover obvious missing graph steps from old/incomplete history rows."""
+    normalized_current = str(current_stage or "").strip().upper()
+    source = str(getattr(spec, "source", "") or "").strip().upper()
+    target = str(getattr(spec, "target", "") or "").strip().upper()
+    path_target = iteration_path_target(str(path_key or "").strip())
+    if normalized_current == "E2" and source == "E3":
+        bridge = _TRANSITION_SPEC_BY_KEY.get("e2_to_e3")
+        return [bridge] if bridge is not None else []
+    if normalized_current == "E2" and source == "E4":
+        if path_target == "plate":
+            bridge = _TRANSITION_SPEC_BY_KEY.get("e2_to_e4")
+            return [bridge] if bridge is not None else []
+        if path_target == "char":
+            first = _TRANSITION_SPEC_BY_KEY.get("e2_to_e3")
+            second = _TRANSITION_SPEC_BY_KEY.get("e3_to_e4")
+            return [item for item in (first, second) if item is not None]
+    if normalized_current == "E3" and source == "E4":
+        bridge = _TRANSITION_SPEC_BY_KEY.get("e3_to_e4")
+        if bridge is not None and (target == "E1" or path_target == "char"):
+            return [bridge]
+    return []
+
+
 def _build_history_path_tokens(entries: list[dict], *, max_tokens: int = 34) -> list[tuple[str, str]]:
     tokens: list[tuple[str, str]] = []
     current_iteration = None
     current_stage: str | None = None
+    path_by_iteration = _iteration_path_map(entries)
     for raw_entry in entries:
         entry = dict(raw_entry or {})
         if str(entry.get("status") or "ok").strip().lower() == "error":
@@ -936,12 +964,31 @@ def _build_history_path_tokens(entries: list[dict], *, max_tokens: int = 34) -> 
         if iteration > 0 and iteration != current_iteration:
             current_iteration = iteration
             if tokens:
-                _append_path_token(tokens, f"IT{iteration}")
-                current_stage = None
+                iteration_token = f"IT{iteration}"
+                already_at_iteration_start = bool(
+                    len(tokens) >= 2
+                    and tokens[-2][1] == iteration_token
+                    and tokens[-1][1] == "E1"
+                )
+                if not already_at_iteration_start:
+                    _append_path_token(tokens, iteration_token)
+                    current_stage = None
+                else:
+                    current_stage = "E1"
         spec = _event_transition_spec(entry)
         if spec is not None:
+            path_key = _event_path_key(entry) or path_by_iteration.get(iteration, "")
             if not _transition_accepts_current_stage(spec, current_stage):
-                continue
+                bridge_specs = _history_bridge_specs(current_stage, spec, path_key)
+                for bridge_spec in bridge_specs:
+                    current_stage = _append_transition_tokens(
+                        tokens,
+                        bridge_spec,
+                        include_target=True,
+                        current_stage=current_stage,
+                    )
+                if not _transition_accepts_current_stage(spec, current_stage):
+                    continue
             approve_action = str(getattr(spec, "approve_action", "") or "").strip()
             include_target = bool(
                 action
@@ -957,7 +1004,6 @@ def _build_history_path_tokens(entries: list[dict], *, max_tokens: int = 34) -> 
                 _append_path_token(tokens, f"IT{iteration + 1}")
                 _append_path_token(tokens, "E1")
                 current_stage = "E1"
-                current_iteration = iteration + 1
             else:
                 current_stage = _append_transition_tokens(
                     tokens,
@@ -1023,25 +1069,14 @@ def _append_transition_segments(
 def _normalize_iteration_start_segments(
     segments: list[tuple[str, str, str]]
 ) -> list[tuple[str, str, str]]:
-    normalized: list[tuple[str, str, str]] = []
-    for index, (kind, token, iteration_label) in enumerate(segments):
-        token_text = str(token or "").strip().upper()
-        label_text = str(iteration_label or "").strip()
-        if kind == "stage" and token_text == "E1" and index > 0:
-            try:
-                previous_iteration = int(label_text or 0)
-            except Exception:
-                previous_iteration = 0
-            if previous_iteration > 0:
-                label_text = str(previous_iteration + 1)
-        normalized.append((kind, token, label_text))
-    return normalized
+    return list(segments or [])
 
 
 def _build_history_path_segments(entries: list[dict], *, max_tokens: int = 34) -> list[tuple[str, str, str]]:
     segments: list[tuple[str, str, str]] = []
     current_iteration = None
     current_stage: str | None = None
+    path_by_iteration = _iteration_path_map(entries)
     for raw_entry in entries:
         entry = dict(raw_entry or {})
         if str(entry.get("status") or "ok").strip().lower() == "error":
@@ -1058,8 +1093,19 @@ def _build_history_path_segments(entries: list[dict], *, max_tokens: int = 34) -
             current_stage = None
         spec = _event_transition_spec(entry)
         if spec is not None:
+            path_key = _event_path_key(entry) or path_by_iteration.get(iteration, "")
             if not _transition_accepts_current_stage(spec, current_stage):
-                continue
+                bridge_specs = _history_bridge_specs(current_stage, spec, path_key)
+                for bridge_spec in bridge_specs:
+                    current_stage = _append_transition_segments(
+                        segments,
+                        bridge_spec,
+                        include_target=True,
+                        iteration=iteration,
+                        current_stage=current_stage,
+                    )
+                if not _transition_accepts_current_stage(spec, current_stage):
+                    continue
             approve_action = str(getattr(spec, "approve_action", "") or "").strip()
             include_target = bool(
                 action
@@ -1069,6 +1115,18 @@ def _build_history_path_segments(entries: list[dict], *, max_tokens: int = 34) -
                     or action == "start_next_iteration"
                 )
             )
+            target = str(getattr(spec, "target", "") or "").strip().upper()
+            if include_target and target == "E1" and iteration > 0:
+                _append_transition_segments(
+                    segments,
+                    spec,
+                    include_target=False,
+                    iteration=iteration,
+                    current_stage=current_stage,
+                )
+                _append_path_segment(segments, "E1", iteration + 1)
+                current_stage = "E1"
+                continue
             current_stage = _append_transition_segments(
                 segments,
                 spec,

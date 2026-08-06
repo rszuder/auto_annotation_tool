@@ -85,6 +85,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -932,14 +933,17 @@ def _prompt_campaign_return_to_wizard_ok_modal(
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    repair_origin_gate_id = str(
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    repair_origin_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("repair_origin_edge_key"),
         graph_context.get("repair_origin_gate_id")
-        or graph_context.get("source_graph_gate_id")
-        or ""
-    ).strip().upper()
-    is_t06_context = bool(graph_gate_id == "T06")
-    is_t07_repair_context = bool(graph_gate_id == "T05" and repair_origin_gate_id == "T07")
+        or graph_context.get("source_graph_gate_id"),
+    )
+    is_t06_context = bool(graph_gate_id == "T05")
+    is_t07_repair_context = bool(graph_gate_id == "T04" and repair_origin_gate_id == "T06")
     if is_t06_context:
         dialog_title = "Przekazanie zdjęć [OK] do Z3"
         lead_title = "Przekaż zatwierdzone zdjęcia albo zostań w Z2"
@@ -1094,6 +1098,10 @@ def _prompt_campaign_return_to_wizard_ok_modal(
             "i wybierz „Oznacz zaznaczone jako OK”.\n\n"
             "Obrazy bez [OK] pozostaną w zestawie roboczym do dalszej korekty."
         )
+    if is_t06_context:
+        message_text = message_text.replace("T06", "T05")
+    if is_t07_repair_context:
+        message_text = message_text.replace("T07", "T06")
     tk.Label(
         body,
         text=message_text,

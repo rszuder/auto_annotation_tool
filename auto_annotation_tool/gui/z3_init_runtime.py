@@ -14,6 +14,7 @@ from ..config import CONFIG
 from ..campaign_manager import CAMPAIGN
 from ..icons import IconManager
 from ..training.dataset_splitter import DatasetSplitter
+from .z3_detection_pipeline_ui import compile_detection_pipeline_blocks, normalize_detection_pipeline_blocks
 from .inertial_scroll import InertialScrollController
 
 PREVIEW_BOX_MODE_OPTIONS = [
@@ -43,6 +44,24 @@ DETECTION_METHOD_OPTIONS = [
 ]
 
 DETECTION_METHOD_LABELS = {key: label for key, label in DETECTION_METHOD_OPTIONS}
+
+
+def _ensure_ocr_presets_dir_with_legacy_copy() -> tuple[Path, Path]:
+    primary = CONFIG.get_presets_dir("ocr")
+    legacy = CONFIG.get_legacy_ocr_presets_dir()
+    primary.mkdir(parents=True, exist_ok=True)
+
+    if legacy.exists() and legacy.is_dir() and legacy.resolve() != primary.resolve():
+        for source in legacy.glob("*.json"):
+            target = primary / source.name
+            if target.exists():
+                continue
+            try:
+                target.write_bytes(source.read_bytes())
+            except OSError:
+                continue
+
+    return primary, legacy
 
 
 def __init__(self, parent, app):
@@ -212,9 +231,9 @@ def __init__(self, parent, app):
     self._detect_tab_built = False
     self._dataset_tab_built = False
 
-    # presets (global; later can be project-scoped)
-    self.presets_dir = Path(CONFIG.WORKSPACE_DIR) / "8_ocr_presets"
-    self.presets_dir.mkdir(parents=True, exist_ok=True)
+    # Presets live in Workspace/8_presets/<module>; old OCR presets are copied lazily.
+    self.presets_dir, self.legacy_presets_dir = _ensure_ocr_presets_dir_with_legacy_copy()
+    self.presets_search_dirs = CONFIG.get_preset_search_dirs("ocr")
 
     # local session
     self.session_file = Path.home() / ".auto_annotation_tool" / "char_tab_session.json"
@@ -236,7 +255,24 @@ def __init__(self, parent, app):
         get_val("char_preview_layout_filter", "ALL")
     )
     saved_detection_method = self._normalize_detection_method_key(get_val("char_det_method", "OCR"))
-    saved_hybrid_rescue_max_chars = max(0, min(5, int(get_val("char_hybrid_rescue_max_chars", 2) or 2)))
+    saved_pipeline_blocks = normalize_detection_pipeline_blocks(
+        self.local_session.get("char_detection_pipeline_blocks", [])
+    )
+    saved_pipeline_compiled = compile_detection_pipeline_blocks(saved_pipeline_blocks)
+    if bool(saved_pipeline_compiled.get("valid")):
+        self._detection_pipeline_last_blocks = list(saved_pipeline_blocks)
+        saved_detection_method = self._normalize_detection_method_key(
+            saved_pipeline_compiled.get("method_key") or saved_detection_method
+        )
+    else:
+        self._detection_pipeline_last_blocks = []
+    try:
+        saved_hybrid_rescue_raw = int(get_val("char_hybrid_rescue_max_chars", 1) or 1)
+    except Exception:
+        saved_hybrid_rescue_raw = 1
+    saved_hybrid_rescue_max_chars = 1 if saved_hybrid_rescue_raw > 0 else 0
+    if bool(saved_pipeline_compiled.get("valid")) and saved_detection_method == "BOTH":
+        saved_hybrid_rescue_max_chars = 1 if bool(saved_pipeline_compiled.get("rescue_enabled")) else 0
     saved_hybrid_yolo_box_backend = bool(get_val("char_hybrid_yolo_box_backend", True))
     saved_detect_protect_manual = bool(get_val("char_detect_protect_manual", True))
     saved_detect_protect_perfect = bool(get_val("char_detect_protect_perfect", True))
@@ -265,7 +301,12 @@ def __init__(self, parent, app):
     except Exception:
         pass
     self.yolo_device_var = tk.StringVar(value=initial_yolo_device)
-    self.yolo_conf_var = tk.DoubleVar(value=float(get_val("char_yolo_conf", 0.25)))
+    saved_yolo_conf = float(get_val("char_yolo_conf", 0.25))
+    saved_yolo_box_conf = float(get_val("char_yolo_box_conf", saved_yolo_conf))
+    saved_yolo_symbol_conf = float(get_val("char_yolo_symbol_conf", saved_yolo_conf))
+    self.yolo_box_conf_var = tk.DoubleVar(value=saved_yolo_box_conf)
+    self.yolo_symbol_conf_var = tk.DoubleVar(value=saved_yolo_symbol_conf)
+    self.yolo_conf_var = tk.DoubleVar(value=min(saved_yolo_box_conf, saved_yolo_symbol_conf))
     self.yolo_iou_var = tk.DoubleVar(value=float(get_val("char_yolo_iou", 0.45)))
     self.yolo_overlap_var = tk.DoubleVar(value=float(get_val("char_yolo_overlap", 0.70)))
     self.yolo_agnostic_nms_var = tk.BooleanVar(value=bool(get_val("char_yolo_agnostic_nms", False)))
@@ -320,6 +361,8 @@ def __init__(self, parent, app):
     self.interpolation_var = tk.StringVar(value=get_val("char_interpolation", "lanczos4"))
     self.preview_dir_var.trace_add("write", self._on_preview_dir_var_write)
     self.preview_box_mode_var.trace_add("write", self._on_preview_box_mode_var_write)
+    self.yolo_box_conf_var.trace_add("write", self._on_yolo_option_var_write)
+    self.yolo_symbol_conf_var.trace_add("write", self._on_yolo_option_var_write)
     self.yolo_agnostic_nms_var.trace_add("write", self._on_yolo_option_var_write)
     self.hybrid_yolo_box_backend_var.trace_add("write", self._on_yolo_option_var_write)
     for filter_var in (

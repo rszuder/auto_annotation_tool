@@ -107,7 +107,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
             "Ta bramka nie wykonuje pracy; tylko potwierdza źródło i pozwala przejść dalej bez ponownego oznaczania tablic w Z2."
         ),
         route_label="E1 -> E3",
-        badge_id="T03",
+        badge_id="T02",
         badge_label="Znaki: istniejący zbiór wyodrębnionych tablic",
         kind="shortcut",
         path_key="char_from_ready_plates",
@@ -126,6 +126,18 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
                 payload={"path_key": "char_from_ready_plates"},
                 tone="warning",
             ),
+            TransitionActionSpec(
+                key="review_imported_plate_annotations",
+                label="Kontroluj import AT w Z2",
+                graph_action="open_z2_campaign_context",
+                payload={
+                    "context": {
+                        "z2_work_mode": "t02_at_review",
+                        "restore_project_start_plate_source": "1",
+                    }
+                },
+                tone="info",
+            ),
         ),
         approve_action="approve_step1_ready_plates",
     ),
@@ -137,7 +149,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         title="Przekaż zatwierdzone anotacje tablic do pracy nad znakami",
         summary="Po przygotowaniu tablic przejdź do Z3: najpierw wyodrębnij tablice, potem przygotuj anotacje i dataset znaków.",
         route_label="E2 -> E3",
-        badge_id="T04",
+        badge_id="T03",
         badge_label="Przekazanie tablic do pracy nad znakami",
         path_key="char_from_images",
         resources=(TransitionResourceSpec("approved_plates", campaign_resource_label("approved_plates"), "required"),),
@@ -165,7 +177,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         title="Przygotuj dataset i trening modelu tablic",
         summary="Po E2 przejdź do Z4: z zatwierdzonych anotacji tablic przygotujesz wariant datasetu, a następnie trening modelu tablic.",
         route_label="E2 -> E4T",
-        badge_id="T05",
+        badge_id="T04",
         badge_label="Dataset i trening modelu tablic",
         kind="shortcut",
         path_key="plate_training",
@@ -197,7 +209,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
             "czyli treningu modelu znaków."
         ),
         route_label="E3 -> E4Z",
-        badge_id="T06",
+        badge_id="T05",
         badge_label="Dataset znaków",
         path_key="",
         resources=(TransitionResourceSpec("char_dataset", campaign_resource_label("char_dataset"), "required"),),
@@ -215,7 +227,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         title="Zamknij iterację po treningu",
         summary="Po treningu albo świadomym pominięciu treningu przejdź z E4T/E4Z do E1 kolejnej iteracji.",
         route_label="E4T/E4Z -> E1",
-        badge_id="T07",
+        badge_id="T06",
         badge_label="Zamknij iterację",
         resources=(TransitionResourceSpec("training_result", campaign_resource_label("training_result"), "required"),),
         actions=(

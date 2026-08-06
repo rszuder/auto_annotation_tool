@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import datetime
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def _char_dataset_gate_display_id() -> str:
-    return "T06"
+    return "T05"
 
 
 def _training_finish_gate_display_id() -> str:
@@ -83,7 +84,7 @@ def build_step4_dataset_workflow_view_model(
 
     creator_summary = ""
     split_intro = (
-        "PZ1 tworzy wariant splitu train / val / test. "
+        "PZ1 tworzy wariant treningowy train / val / test. "
         "PZ2 wybiera ten wariant z listy i uruchamia na nim trening."
     )
     split_summary = ""
@@ -148,9 +149,12 @@ def build_step4_dataset_workflow_view_model(
                 target_hint="char",
                 counts=split_counts,
             )
-            split_intro = "Wariant treningowy znaków jest już gotowy. Możesz przejść do PZ2 i trenować model."
+            split_intro = (
+                "Wariant treningowy znaków jest już gotowy. PZ1 nie eksportuje źródłowego datasetu znaków; "
+                "pokazuje split, który PZ2 może wykorzystać do treningu."
+            )
             split_summary = (
-                f"Źródłowy dataset znaków z {char_dataset_gate_id} ma już przygotowany wariant train/val/test.\n"
+                f"Źródłowy dataset znaków pochodzi z {char_dataset_gate_id}/PZ3.\n"
                 f"Gotowy wariant: {split_ready_value}\n"
                 f"Split: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}\n"
                 "Nie musisz przygotowywać wariantu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
@@ -159,18 +163,19 @@ def build_step4_dataset_workflow_view_model(
             show_split_toggle = True
             show_split_details = bool(getattr(host, "_step4_char_split_details_visible", False))
             split_toggle_label = "Ukryj opcje splitu" if show_split_details else "Popraw split"
-            split_action_label = "Przebuduj wariant treningowy"
+            split_action_label = "Przebuduj wariant treningowy znaków"
         else:
             split_src_raw = str(host.split_src_var.get() or "").strip()
             split_src_value = _dataset_summary_id(split_src_raw, target_hint="char") if split_src_raw else "brak wskazanego datasetu"
             split_intro = (
-                f"Źródłowy dataset znaków został już wyeksportowany w {char_dataset_gate_id}. "
-                "Teraz przygotuj z niego wariant treningowy train/val/test, aby odblokować PZ2."
+                f"PZ1 przygotowuje wariant treningowy znaków ze źródła utworzonego w {char_dataset_gate_id}/PZ3. "
+                "To jest split pod trening, a nie ponowny eksport datasetu znaków."
             )
             split_summary = (
-                f"To nie jest ponowny eksport datasetu z {char_dataset_gate_id}, tylko przygotowanie wariantu pod trening.\n"
-                f"Źródłowy dataset z {char_dataset_gate_id}: {split_src_value}"
+                f"Źródło {char_dataset_gate_id}/PZ3: {split_src_value}\n"
+                "Po utworzeniu wariantu PZ2 będzie mogło uruchomić trening modelu znaków."
             )
+            split_action_label = "Utwórz wariant treningowy znaków"
 
     if campaign_active and not route_selected:
         return Step4DatasetWorkflowViewModel(
@@ -197,7 +202,7 @@ def build_step4_dataset_workflow_view_model(
             )
         else:
             description = (
-                "PZ1 przygotowuje wariant splitu datasetu tablic. PZ2 wybierze ten wariant do treningu modelu."
+                "PZ1 przygotowuje wariant treningowy tablic. PZ2 wybierze ten wariant do treningu modelu."
             )
         if route_locked:
             campaign_plate_stats = {}
@@ -221,7 +226,7 @@ def build_step4_dataset_workflow_view_model(
             )
         else:
             description = (
-                "PZ1 przygotowuje wariant splitu datasetu znaków. PZ2 wybierze ten wariant do treningu modelu."
+                "PZ1 przygotowuje wariant treningowy znaków. PZ2 wybierze ten wariant do treningu modelu."
             )
         if route_locked:
             if char_ready_dataset:
@@ -232,8 +237,8 @@ def build_step4_dataset_workflow_view_model(
                 )
             else:
                 description = (
-                    f"Ten etap korzysta z gotowego źródłowego datasetu znaków z {_char_dataset_gate_display_id()}. "
-                    "PZ1 przygotuje z niego wariant treningowy train/val/test, a PZ2 uruchomi trening."
+                    f"Ten etap korzysta ze źródłowego datasetu znaków z {_char_dataset_gate_display_id()}/PZ3. "
+                    "W PZ1 przygotowujesz tylko wariant train/val/test; PZ2 uruchamia trening."
                 )
 
     if route_locked:
@@ -474,6 +479,30 @@ def open_campaign_step4_entry(
     if preferred_subtab not in {"dataset", "train"}:
         preferred_subtab = ""
 
+    perf_started = time.perf_counter()
+    perf_last = perf_started
+    perf_phases: list[str] = []
+
+    def _perf_mark(name: str) -> None:
+        nonlocal perf_last
+        now = time.perf_counter()
+        perf_phases.append(f"{name}={int((now - perf_last) * 1000)}ms")
+        perf_last = now
+
+    def _perf_log(reason: str = "ok") -> None:
+        total_ms = int((time.perf_counter() - perf_started) * 1000)
+        if total_ms < 300:
+            return
+        try:
+            logger.info(
+                f"[Z4/PZ1 PERF] open_campaign_step4_entry total={total_ms}ms "
+                f"target={target} preferred={preferred_subtab or '-'} reason={reason} "
+                f"train_unlocked={int(bool(getattr(host, '_step4_train_unlocked', False)))} "
+                f"phases=[{', '.join(perf_phases) or 'no_slow_phase'}]"
+            )
+        except Exception:
+            pass
+
     datasets_dir = CAMPAIGN.get_dir("datasets")
     runs_dir = CAMPAIGN.get_dir("runs")
     if datasets_dir is None:
@@ -485,10 +514,24 @@ def open_campaign_step4_entry(
     except Exception:
         pass
 
-    host.set_campaign_context(
-        runs_dir=str(runs_dir) if runs_dir is not None else None,
-        datasets_dir=str(datasets_dir),
+    runs_dir_text = str(Path(runs_dir)) if runs_dir is not None else None
+    datasets_dir_text = str(Path(datasets_dir))
+    context_matches = bool(
+        runs_dir_text
+        and str(getattr(host, "_campaign_runs_dir", "") or "") == runs_dir_text
+        and str(getattr(host, "_campaign_datasets_dir", "") or "") == datasets_dir_text
     )
+    if context_matches:
+        host._campaign_datasets_dir = datasets_dir_text
+    else:
+        host.set_campaign_context(
+            runs_dir=runs_dir_text,
+            datasets_dir=datasets_dir_text,
+        )
+    host._step4_dataset_mode = target
+    host._step4_route_selected = True
+    host._step4_dataset_tab_visible = True
+    _perf_mark("context_reuse" if context_matches else "context_restore")
 
     datasets_dir = Path(datasets_dir)
     source_candidates = []
@@ -503,10 +546,12 @@ def open_campaign_step4_entry(
             source_candidates.append(path)
     except Exception:
         source_candidates = []
+    _perf_mark("source_scan")
 
     latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
 
     readiness = host.get_campaign_step4_readiness(iteration_target=target)
+    _perf_mark("readiness")
     readiness_reason = str(readiness.get("reason") or "").strip().lower()
     ready_dataset_text = str(readiness.get("ready_dataset") or "").strip()
     source_dataset_text = str(readiness.get("source_dataset") or "").strip()
@@ -542,6 +587,7 @@ def open_campaign_step4_entry(
         and readiness_reason != "stale_plate_dataset"
         and not allow_dataset_source_entry
     ):
+        _perf_log(readiness_reason or "not_ready")
         return readiness
 
     host._step4_train_unlocked = bool(has_training_ready_dataset)
@@ -576,15 +622,7 @@ def open_campaign_step4_entry(
                     host.base_custom_var.set("")
     finally:
         host._step4_suppress_base_model_state_save = False
-
-    try:
-        host._refresh_training_start_state()
-    except Exception:
-        pass
-    try:
-        host._schedule_step4_deferred_model_refresh()
-    except Exception:
-        pass
+    _perf_mark("model_selection")
 
     try:
         if preferred_subtab == "dataset":
@@ -601,11 +639,29 @@ def open_campaign_step4_entry(
             host.main_nb.select(host.tab_dataset)
     except Exception:
         pass
+    _perf_mark("tab_select")
+
+    try:
+        selected_tab = str(host.main_nb.select())
+    except Exception:
+        selected_tab = ""
+    if bool(getattr(host, "_step4_train_tab_built", False)) and selected_tab == str(getattr(host, "tab_train", "")):
+        try:
+            host._refresh_training_start_state()
+        except Exception:
+            pass
+        try:
+            host._schedule_step4_deferred_model_refresh()
+        except Exception:
+            pass
+        _perf_mark("train_ui")
 
     try:
         host._refresh_step4_campaign_navigation_ui()
     except Exception:
         pass
+    _perf_mark("navigation")
+    _perf_log("ok")
 
     dataset_hint = str(host.dataset_var.get() or "").strip()
     return {
@@ -621,6 +677,30 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
     """
     Odtwarza stan z4 dla aktywnego projektu.
     """
+    perf_started = time.perf_counter()
+    perf_last = perf_started
+    perf_phases: list[str] = []
+
+    def _perf_mark(name: str) -> None:
+        nonlocal perf_last
+        now = time.perf_counter()
+        perf_phases.append(f"{name}={int((now - perf_last) * 1000)}ms")
+        perf_last = now
+
+    def _perf_log(reason: str = "ok") -> None:
+        total_ms = int((time.perf_counter() - perf_started) * 1000)
+        if total_ms < 300:
+            return
+        try:
+            logger.info(
+                f"[Z4/PZ1 PERF] restore_step4_campaign_project_state total={total_ms}ms "
+                f"reason={reason} target={str(getattr(host, '_step4_dataset_mode', '') or '-')} "
+                f"train_unlocked={int(bool(getattr(host, '_step4_train_unlocked', False)))} "
+                f"phases=[{', '.join(perf_phases) or 'no_slow_phase'}]"
+            )
+        except Exception:
+            pass
+
     datasets_dir = Path(host._campaign_datasets_dir) if host._campaign_datasets_dir else None
 
     try:
@@ -680,6 +760,7 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
                 ready_dataset, ready_target, _ = max(preferred, key=lambda rec: rec[2])
             elif ready_candidates:
                 ready_dataset, ready_target, _ = max(ready_candidates, key=lambda rec: rec[2])
+    _perf_mark("dataset_scan")
 
     if remembered_target != "plate":
         try:
@@ -701,6 +782,7 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
         except Exception:
             latest_xml = ""
             latest_xml_images = ""
+    _perf_mark("xml_scan")
 
     try:
         raw_dir = CAMPAIGN.get_dir("raw")
@@ -820,11 +902,15 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
         host._refresh_step4_dataset_mode_ui()
     except Exception:
         pass
+    _perf_mark("dataset_ui")
 
-    try:
-        host._refresh_base_model_choices()
-    except Exception:
-        pass
+    should_refresh_train_ui_now = bool(getattr(host, "_step4_train_tab_built", False))
+    if should_refresh_train_ui_now:
+        try:
+            host._refresh_base_model_choices()
+        except Exception:
+            pass
+        _perf_mark("base_models")
 
     try:
         host._step4_suppress_base_model_state_save = True
@@ -840,20 +926,24 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
         pass
     finally:
         host._step4_suppress_base_model_state_save = False
+    _perf_mark("model_selection")
 
-    try:
-        host._refresh_training_start_state()
-    except Exception:
-        pass
-    try:
-        host._schedule_step4_deferred_model_refresh()
-    except Exception:
-        pass
+    if should_refresh_train_ui_now:
+        try:
+            host._refresh_training_start_state()
+        except Exception:
+            pass
+        try:
+            host._schedule_step4_deferred_model_refresh()
+        except Exception:
+            pass
+        _perf_mark("train_ui")
 
     try:
         host._refresh_step4_campaign_navigation_ui()
     except Exception:
         pass
+    _perf_mark("navigation")
 
     try:
         campaign_active = bool(CAMPAIGN.get_active_project_name())
@@ -865,12 +955,14 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
         host.main_nb.select(target_tab)
     except Exception:
         pass
+    _perf_mark("tab_select")
 
     try:
         if bool(CAMPAIGN.get_active_project_name()) and bool(getattr(host, "_step4_train_unlocked", False)):
             host._select_step4_analysis_tab(host.hist_tab)
     except Exception:
         pass
+    _perf_mark("analysis_select")
 
     try:
         if host._step4_route_selected:
@@ -879,6 +971,8 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
             host._guide_step4_route_selection()
     except Exception:
         pass
+    _perf_mark("guidance")
+    _perf_log("ok")
 
 
 def return_to_campaign_from_step4(host: "TrainingTab"):
@@ -1149,7 +1243,7 @@ def promote_trained_model_to_campaign_if_needed(host: "TrainingTab"):
         label = "znakow" if target == "char" else "tablic"
         host._append_train_log(
             f"[MODEL] Trening utworzyl kandydata modelu {label}: {best_model}. "
-            "Model projektu nie zostal podmieniony automatycznie."
+            f"Wynik bramki {_training_finish_gate_display_id()} nie zostal podpięty automatycznie."
         )
     except Exception:
         pass
@@ -1252,13 +1346,13 @@ def show_training_completion_summary(host: "TrainingTab", *, promoted: bool, can
     if can_finish_step4:
         if promoted:
             lines.append("")
-            lines.append(f"Nowy aktywny model {target_label} został zapisany w projekcie.")
+            lines.append(f"Model {target_label} został podpięty jako wynik bramki {_training_finish_gate_display_id()}.")
         else:
             lines.append("")
-            lines.append(f"Aktywny model {target_label} projektu nie został podmieniony.")
+            lines.append(f"Ukończony model {target_label} jest kandydatem. Wynik bramki {_training_finish_gate_display_id()} nie został jeszcze podpięty.")
         if not promoted:
             lines.append(
-                "Dalej: wybierz jawnie model projektu w historii treningow albo w rankingu. "
+                f"Dalej: wybierz jawnie wynik bramki {_training_finish_gate_display_id()} w historii treningow albo w rankingu. "
                 f"Dopiero po takim wyborze bramka {_training_finish_gate_display_id()} bedzie gotowa do zatwierdzenia."
             )
         if promoted and str(target or "").strip().lower() == "char":
@@ -1422,6 +1516,10 @@ def poll_training_completion(host: "TrainingTab"):
             except Exception:
                 pass
             if run_status == TrainingStatus.COMPLETED.value:
+                try:
+                    host._preferred_campaign_training_result_run_id = str(host.current_run_id or "").strip()
+                except Exception:
+                    pass
                 host._set_training_ui_idle_state(
                     (
                         "Trening zakończony. Run jest kandydatem: wybierz go jako wynik bramki "
@@ -1431,6 +1529,11 @@ def poll_training_completion(host: "TrainingTab"):
                 )
             else:
                 host._set_training_ui_idle_state("Trening zakończony lub zatrzymany.", "#2c3e50")
+
+        try:
+            host._refresh_campaign_training_result_selector()
+        except Exception:
+            pass
 
         try:
             host._refresh_step4_campaign_navigation_ui()

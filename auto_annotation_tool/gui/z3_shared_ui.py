@@ -1598,16 +1598,16 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
     in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
 
     host._set_grid_visibility(getattr(host, "preview_source_lf", None), (not in_campaign))
-    host._set_grid_visibility(getattr(host, "preview_counts_frame", None), (not in_campaign))
-    host._set_grid_visibility(getattr(host, "preview_layout_summary_lbl", None), (not in_campaign))
+    host._set_grid_visibility(getattr(host, "preview_counts_frame", None), True)
+    host._set_grid_visibility(getattr(host, "preview_layout_summary_lbl", None), True)
     host._set_grid_visibility(getattr(host, "preview_fusion_info_lbl", None), False)
     host._set_grid_visibility(getattr(host, "preview_box_mode_info_lbl", None), False)
     for attr_name in (
         "preview_repair_progress_title_lbl",
         "preview_repair_progress",
-        "preview_repair_progress_status_lbl",
     ):
-        host._set_grid_visibility(getattr(host, attr_name, None), (not in_campaign))
+        host._set_grid_visibility(getattr(host, attr_name, None), True)
+    host._set_grid_visibility(getattr(host, "preview_repair_progress_status_lbl", None), False)
 
     try:
         title = getattr(host, "preview_status_title_lbl", None)
@@ -1620,7 +1620,7 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
         note = getattr(host, "preview_load_note_lbl", None)
         if note is not None:
             note_text = (
-                "Stan bramki i jakość zbioru pokazuje szuflada na canvasie. Szczegóły pozycji sprawdzisz na liście tablic."
+                "Status pracy, liczniki i jakość zbioru są widoczne tutaj. Szuflada na canvasie służy jako szybki skrót w trakcie edycji."
                 if in_campaign
                 else (
                     "Poniżej zostaje krótkie podsumowanie listy. Do rysowania i korekty boxów najlepiej użyj pełnego canvasu."
@@ -1635,7 +1635,7 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
     except Exception:
         pass
 
-    host._set_grid_visibility(getattr(host, "test_progress_row", None), (not in_campaign))
+    host._set_grid_visibility(getattr(host, "test_progress_row", None), False)
 
     try:
         refresh = getattr(host, "_refresh_pz3_dataset_mode_ui", None)

@@ -92,6 +92,8 @@ def force_save_all(host):
         always_saved = [
             ("char_yolo_device", host.yolo_device_var),
             ("char_yolo_conf", host.yolo_conf_var),
+            ("char_yolo_box_conf", host.yolo_box_conf_var),
+            ("char_yolo_symbol_conf", host.yolo_symbol_conf_var),
             ("char_yolo_iou", host.yolo_iou_var),
             ("char_yolo_overlap", host.yolo_overlap_var),
             ("char_yolo_agnostic_nms", host.yolo_agnostic_nms_var),
@@ -141,6 +143,22 @@ def force_save_all(host):
             host._save_local_setting(key, var.get())
 
         host._save_local_setting("char_det_method", host._get_detection_method_key())
+        try:
+            pipeline_blocks = []
+            try:
+                pipeline_blocks = list(getattr(host, "_detection_pipeline_last_blocks", []) or [])
+            except Exception:
+                pipeline_blocks = []
+            if not pipeline_blocks:
+                try:
+                    pipeline_blocks = host._get_saved_detection_pipeline_blocks()
+                except Exception:
+                    pipeline_blocks = []
+            if not pipeline_blocks:
+                pipeline_blocks = host._get_detection_pipeline_blocks(host._get_detection_method_key())
+            host._save_detection_pipeline_blocks(pipeline_blocks)
+        except Exception:
+            pass
 
         host._prune_legacy_yolo_arch_session_keys()
 

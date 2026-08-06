@@ -451,27 +451,11 @@ def _build_train_tab(self):
     )
     self.dataset_variant_combo.pack(fill=tk.X, padx=8, pady=(0, 6))
     self.dataset_variant_combo.bind("<<ComboboxSelected>>", self._on_dataset_variant_selected)
-    self.train_dataset_selected_path_lbl = tk.Label(
-        self.dataset_variant_row,
-        text="Brak wybranego wariantu.",
-        font=("Segoe UI", 8),
-        anchor=tk.W,
-        justify=tk.LEFT,
-        bd=0,
-        highlightthickness=0,
-        padx=8,
-        pady=5,
-        bg=variant_card_bg,
-        fg=palette.get("muted_dim", palette.get("muted", "#9a9a9a")),
-        wraplength=360,
-    )
-    self.train_dataset_selected_path_lbl.pack(anchor=tk.W, fill=tk.X)
-    self._register_train_left_wrap_target(
-        self.train_dataset_selected_path_lbl,
-        container=self.dataset_variant_row,
-        padding=24,
-        min_wrap=180,
-    )
+    try:
+        self._refresh_dataset_variant_choices()
+    except Exception:
+        pass
+    self.train_dataset_selected_path_lbl = None
     self.train_dataset_hint_lbl = ttk.Label(
         self.train_dataset_section_frame,
         text="",
@@ -566,7 +550,7 @@ def _build_train_tab(self):
 
     self.train_base_title_lbl = tk.Label(
         self.train_base_shell,
-        text="Punkt startowy treningu",
+        text="Model startowy treningu",
         font=("Segoe UI Semibold", 12),
         anchor="w",
         bd=0,
@@ -630,8 +614,8 @@ def _build_train_tab(self):
     self.train_base_caption_lbl = ttk.Label(
         self.train_base_shell,
         text=(
-            "Wagi startowe określają, od czego zacznie się trening tej iteracji. "
-            "Wynik bramki wybierzesz dopiero po zakończeniu runu."
+            "To wagi startowe nowego runu. Ukończone modele projektu znajdziesz obok "
+            "w Historii treningów; tam wybierzesz wynik bramki albo punkt dotrenowania."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -640,12 +624,6 @@ def _build_train_tab(self):
     )
     self.train_base_caption_lbl.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 7))
     self._register_train_left_wrap_target(self.train_base_caption_lbl, container=self.train_base_shell, padding=24, min_wrap=220)
-    self.train_base_caption_lbl.configure(
-        text=(
-            "Wybierz model, od którego zacznie się nowy run. "
-            "To nie jest jeszcze wynik bramki."
-        )
-    )
 
     self.train_base_combo_lbl = ttk.Label(
         self.train_base_shell,
@@ -699,7 +677,7 @@ def _build_train_tab(self):
     self.train_base_summary_values = {}
     self.train_base_summary_cells = []
     for row_index, (row_key, row_label) in enumerate((
-        ("selected", "Wybrano"),
+        ("selected", "Wybrano model"),
         ("origin", "Pochodzenie"),
         ("state", "Stan"),
     )):
@@ -1472,12 +1450,12 @@ def _build_train_tab(self):
     result_bg = blend_hex_colors(
         palette.get("success", "#2ecc71"),
         palette.get("panel", "#252526"),
-        0.90,
+        0.82,
     )
     result_border = blend_hex_colors(
         palette.get("success", "#2ecc71"),
         palette.get("panel_border", palette.get("border", "#3c3c3c")),
-        0.48,
+        0.24,
     )
     self.campaign_training_result_var = getattr(self, "campaign_training_result_var", tk.StringVar())
     self._campaign_training_result_choices = {}
@@ -1486,22 +1464,23 @@ def _build_train_tab(self):
         self.campaign_training_result_host,
         bg=result_bg,
         bd=0,
-        highlightthickness=1,
+        highlightthickness=2,
         highlightbackground=result_border,
         highlightcolor=result_border,
     )
-    self.campaign_training_result_shell.pack(fill=tk.X, pady=(0, 5))
+    self.campaign_training_result_shell.pack(fill=tk.X, pady=(0, 9))
     result_title_row = tk.Frame(self.campaign_training_result_shell, bg=result_bg, bd=0, highlightthickness=0)
-    result_title_row.pack(fill=tk.X, padx=9, pady=(6, 2))
+    self.campaign_training_result_title_row = result_title_row
+    result_title_row.pack(fill=tk.X, padx=12, pady=(9, 3))
     result_title_row.grid_columnconfigure(0, weight=1)
     self.campaign_training_result_title_lbl = tk.Label(
         result_title_row,
-        text=f"Wybór wyniku bramki {finish_gate_id}",
-        font=("Segoe UI Semibold", 10),
+        text=f"Wynik bramki {finish_gate_id}",
+        font=("Segoe UI Semibold", 12),
         anchor=tk.W,
         justify=tk.LEFT,
         bg=result_bg,
-        fg=palette.get("fg", "#f3f3f3"),
+        fg=palette.get("success", "#2ecc71"),
         bd=0,
         padx=0,
         pady=0,
@@ -1519,24 +1498,28 @@ def _build_train_tab(self):
         highlightthickness=1,
         highlightbackground=result_border,
         highlightcolor=result_border,
-        padx=7,
-        pady=2,
+        padx=9,
+        pady=3,
     )
     self.campaign_training_result_status_lbl.grid(row=0, column=1, sticky="e", padx=(8, 0))
-    self.campaign_training_result_copy_lbl = ttk.Label(
+    self.campaign_training_result_copy_lbl = tk.Label(
         self.campaign_training_result_shell,
-        text=(
-            f"Wybierz ukończony run jako wynik bramki {finish_gate_id}. To wybór artefaktu, "
-            "nie zamknięcie bramki; formalne zatwierdzenie wykonasz w grafie."
-        ),
-        style="PanelMuted.TLabel",
+        text="Tu podpinasz model wynikowy bramki. To osobna decyzja od wyboru modelu startowego treningu.",
+        font=("Segoe UI", 8),
         anchor=tk.W,
         justify=tk.LEFT,
+        bg=result_bg,
+        fg=palette.get("muted", "#c7c7c7"),
+        bd=0,
+        padx=0,
+        pady=0,
         wraplength=760,
     )
+    self.campaign_training_result_copy_lbl.pack(anchor=tk.W, fill=tk.X, padx=12, pady=(0, 7))
     # Keep the global selector compact so it does not steal vertical space from Ranking.
-    result_pick_row = ttk.Frame(self.campaign_training_result_shell, style="Panel.TFrame")
-    result_pick_row.pack(fill=tk.X, padx=9, pady=(0, 6))
+    result_pick_row = tk.Frame(self.campaign_training_result_shell, bg=result_bg, bd=0, highlightthickness=0)
+    self.campaign_training_result_pick_row = result_pick_row
+    result_pick_row.pack(fill=tk.X, padx=12, pady=(0, 9))
     result_pick_row.columnconfigure(0, weight=1)
     result_field_bg = palette.get("field", "#1f1f1f")
     result_field_fg = palette.get("fg", "#f3f3f3")
@@ -1654,9 +1637,9 @@ def _build_train_tab(self):
     self.campaign_training_result_entry.bind("<FocusIn>", _show_campaign_result_start, add="+")
     self.btn_use_campaign_training_result = ttk.Button(
         result_pick_row,
-        text=f"Wybierz ten model jako wynik {finish_gate_id}",
+        text=f"Podepnij jako wynik bramki {finish_gate_id}",
         command=self._use_campaign_training_result_choice,
-        width=34,
+        width=38,
     )
     self.btn_use_campaign_training_result.grid(row=0, column=1, sticky="e", padx=(8, 0))
     self.campaign_training_result_detail_lbl = ttk.Label(
@@ -1694,12 +1677,17 @@ def _build_train_tab(self):
     hist_tree_shell.grid(row=1, column=0, sticky="nsew")
     columns = ("Tor", "Model", "Dataset", "Run", "Start", "Status", "Epoki", "mAP50-95")
     self.tree = ttk.Treeview(hist_tree_shell, columns=columns, show="headings", height=5, selectmode="extended")
+    history_heading_labels = {
+        "Model": "Model <- Z4/PZ2",
+        "Dataset": "Dataset <- Z4/PZ1",
+        "Run": "Run <- Z4/PZ2",
+    }
     for c in columns:
-        self.tree.heading(c, text=c)
+        self.tree.heading(c, text=history_heading_labels.get(c, c))
     self.tree.column("Tor", width=62, stretch=False, anchor=tk.CENTER)
-    self.tree.column("Model", width=122, minwidth=96, stretch=True, anchor=tk.W)
-    self.tree.column("Dataset", width=118, minwidth=96, stretch=True, anchor=tk.W)
-    self.tree.column("Run", width=118, minwidth=96, stretch=True, anchor=tk.W)
+    self.tree.column("Model", width=136, minwidth=116, stretch=True, anchor=tk.W)
+    self.tree.column("Dataset", width=148, minwidth=126, stretch=True, anchor=tk.W)
+    self.tree.column("Run", width=132, minwidth=112, stretch=True, anchor=tk.W)
     self.tree.column("Start", width=90, stretch=False, anchor=tk.CENTER)
     self.tree.column("Status", width=104, stretch=False)
     self.tree.column("Epoki", width=54, stretch=False, anchor=tk.CENTER)
@@ -1724,7 +1712,7 @@ def _build_train_tab(self):
         command=self._export_selected_run_model_to_free_mode,
     )
     self.history_context_menu.add_command(
-        label="Użyj best.pt jako model projektu",
+        label=f"Podepnij jako wynik bramki {finish_gate_id}",
         command=self._promote_selected_run_model_to_campaign,
     )
     self.history_context_menu.add_command(label="Usun", command=self._delete_selected)
@@ -1859,13 +1847,13 @@ def _build_train_tab(self):
 
     self.btn_step4_finish = ttk.Button(
         self.btn_step4_finish_frame,
-        text="Ustaw inny split",
+        text="Stwórz inny wariant datasetu",
         command=self._open_step4_dataset_stage,
         style="Accent.TButton",
         state=tk.DISABLED
     )
     self.btn_step4_finish.pack(side=tk.LEFT)
-    self.btn_step4_finish.configure(text="Ustaw inny split", width=22)
+    self.btn_step4_finish.configure(text="Stwórz inny wariant datasetu", width=28)
 
     self._refresh_step4_campaign_navigation_ui()
 

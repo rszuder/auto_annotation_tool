@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     campaign_visible_gate_id,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
@@ -145,7 +146,7 @@ def _format_t06_signed_pair(images: int, plates: int) -> str:
 
 T06_STATUS_OPEN = "OTWARTA"
 T06_STATUS_CLOSED = "ZAMKNIĘTA"
-T06_LABEL_STATUS = "Status T06"
+T06_LABEL_STATUS = "Status bramki"
 T06_LABEL_SOURCE = "Już przekazane do puli YOLO"
 T06_LABEL_SESSION = "Czeka na przekazanie"
 T06_LABEL_TOTAL = "Po przekazaniu do grafu"
@@ -153,6 +154,23 @@ T06_LABEL_MISSING = "Do otwarcia bramki brakuje"
 T06_LABEL_QUALITY = "Jakość źródła tablic"
 T06_DEFAULT_QUALITY = "SŁABY"
 T06_TOP_QUALITY_TEXT = "Osiągnięto najwyższy próg jakości"
+
+
+def _resolve_campaign_graph_gate_context(self) -> tuple[str, str, dict]:
+    try:
+        graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    origin_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("repair_origin_edge_key"),
+        graph_context.get("repair_origin_gate_id")
+        or graph_context.get("source_graph_gate_id"),
+    )
+    return gate_id, origin_gate_id, graph_context
 
 
 def _build_t06_counter_rows(
@@ -405,29 +423,14 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
     approval change the row layout is already stable, so we only touch cached
     value labels.
     """
-    try:
-        graph_gate_id = str(
-            dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-            or ""
-        ).strip().upper()
-    except Exception:
-        graph_gate_id = ""
-    try:
-        graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-    except Exception:
-        graph_context = {}
-    repair_origin_gate_id = str(
-        graph_context.get("repair_origin_gate_id")
-        or graph_context.get("source_graph_gate_id")
-        or ""
-    ).strip().upper()
-    is_t07_repair = bool(graph_gate_id == "T05" and repair_origin_gate_id == "T07")
-    if graph_gate_id not in {"T04", "T05", "T06"} and not is_t07_repair:
+    graph_gate_id, repair_origin_gate_id, graph_context = _resolve_campaign_graph_gate_context(self)
+    is_t07_repair = bool(graph_gate_id == "T04" and repair_origin_gate_id == "T06")
+    if graph_gate_id not in {"T03", "T04", "T05"} and not is_t07_repair:
         return False
 
     host = getattr(self, "approve_hint_table_frame", None)
     cache = getattr(host, "_compact_table_cache", None) if host is not None else None
-    if graph_gate_id in {"T04", "T05"} and not is_t07_repair:
+    if graph_gate_id in {"T03", "T04"} and not is_t07_repair:
         cache_labels = tuple(cache.get("labels") or ()) if isinstance(cache, dict) else ()
         if not isinstance(cache, dict) or len(cache_labels) < 4:
             return False
@@ -468,7 +471,7 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
                 iteration_target = ""
             required_plates = (
                 int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
-                if iteration_target == "char" or graph_gate_id == "T04"
+                if iteration_target == "char" or graph_gate_id == "T03"
                 else int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
             )
         try:
@@ -717,9 +720,9 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
                 "visible": True,
                 "ready": bool(ready),
                 "tone": "success" if ready else "warning",
-                "title": "NAPRAWA T07",
-                "gate_id": "T07",
-                "source_gate_id": "T05",
+                "title": "NAPRAWA T06",
+                "gate_id": "T06",
+                "source_gate_id": "T04",
                 "status": "OTWARTA" if ready else "ZAMKNIĘTA",
                 "approved_images": int(effective_images or 0),
                 "approved_plates": int(effective_plates or 0),
@@ -873,8 +876,14 @@ def _try_update_t06_right_panel_counts_after_approval(self) -> bool:
 
 
 def _update_preview_approval_badge_fast(self, approved: bool) -> None:
-    """Update approval badges without rebuilding Z2 overlays."""
+    """Update approval badges from the actual current annotation state."""
     try:
+        try:
+            ann = self._get_preview_annotation()
+            if ann is not None:
+                approved = bool(self._preview_annotation_is_explicitly_approved(ann))
+        except Exception:
+            approved = bool(approved)
         theme = self._get_preview_overlay_dock_theme()
         palette = getattr(getattr(self, "app", None), "palette", {}) or {}
         success = str(theme.get("active") or palette.get("success", "#27ae60"))
@@ -901,20 +910,33 @@ def _update_preview_approval_badge_fast(self, approved: bool) -> None:
                 fg=text_fill,
                 text="ZDJĘCIE\nZATWIERDZONE [OK]" if bool(approved) else "ZDJĘCIE\nNIEZATWIERDZONE",
             )
-        outline_updated = False
-        if bool(approved):
-            try:
-                canvas = getattr(self, "preview_canvas", None)
-                if canvas is not None:
-                    items = canvas.find_withtag("preview_plate_outline")
-                    if items:
-                        canvas.itemconfigure("preview_plate_outline", outline=success)
-                        outline_updated = True
-            except Exception:
-                outline_updated = False
         try:
-            if not outline_updated:
-                self._refresh_preview_canvas_light()
+            ann = self._get_preview_annotation()
+            render_cache = getattr(self, "_preview_list_render_state_cache", None)
+            if ann is not None and isinstance(render_cache, dict):
+                render_cache.pop(id(ann), None)
+        except Exception:
+            pass
+        try:
+            canvas = getattr(self, "preview_canvas", None)
+            if canvas is not None:
+                items = canvas.find_withtag("preview_plate_outline")
+                if items:
+                    canvas.itemconfigure("preview_plate_outline", outline=fill)
+        except Exception:
+            pass
+        try:
+            current_index = getattr(self, "current_preview_index", None)
+            if current_index is not None:
+                self._refresh_preview_list_row_for_actual_index(
+                    int(current_index),
+                    refresh_summary=False,
+                    lightweight=True,
+                )
+        except Exception:
+            pass
+        try:
+            self._refresh_preview_canvas_light()
         except Exception:
             pass
     except Exception:
@@ -922,6 +944,13 @@ def _update_preview_approval_badge_fast(self, approved: bool) -> None:
 
 
 def _schedule_campaign_post_approval_refresh(self) -> None:
+    pending = getattr(self, "_preview_campaign_post_approval_after_id", None)
+    if pending:
+        try:
+            self.frame.after_cancel(pending)
+        except Exception:
+            pass
+    self._preview_campaign_post_approval_after_id = None
     if bool(getattr(self, "_preview_fullscreen_active", False)):
         self._preview_campaign_counter_refresh_pending_after_fullscreen = True
         try:
@@ -931,6 +960,21 @@ def _schedule_campaign_post_approval_refresh(self) -> None:
         return
 
     def _refresh_deferred_counts() -> None:
+        self._preview_campaign_post_approval_after_id = None
+        try:
+            quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=350)
+        except Exception:
+            quiet_remaining = 0
+        if quiet_remaining > 0:
+            try:
+                self._preview_campaign_post_approval_after_id = self.frame.after(
+                    int(quiet_remaining),
+                    _refresh_deferred_counts,
+                )
+            except Exception:
+                self._preview_campaign_post_approval_after_id = None
+                pass
+            return
         try:
             if not _try_update_campaign_right_panel_counts_after_approval(self):
                 self._schedule_preview_approval_followup_refresh(delay_ms=1600)
@@ -938,13 +982,19 @@ def _schedule_campaign_post_approval_refresh(self) -> None:
             self._schedule_preview_approval_followup_refresh(delay_ms=1600)
 
     try:
-        self.frame.after(80, _refresh_deferred_counts)
+        delay_ms = 850
+        try:
+            delay_ms = max(delay_ms, self._preview_user_interaction_quiet_remaining_ms(padding_ms=350))
+        except Exception:
+            pass
+        self._preview_campaign_post_approval_after_id = self.frame.after(int(delay_ms), _refresh_deferred_counts)
     except Exception:
+        self._preview_campaign_post_approval_after_id = None
         _refresh_deferred_counts()
 
 
 def _schedule_campaign_char_source_refresh_after_approval(self, graph_gate_id: str) -> None:
-    if str(graph_gate_id or "").strip().upper() == "T06":
+    if str(graph_gate_id or "").strip().upper() == "T05":
         return
     if bool(getattr(self, "_preview_fullscreen_active", False)):
         self._campaign_char_effective_source_refresh_pending_after_fullscreen = True
@@ -964,6 +1014,10 @@ def _apply_preview_approval_fast(
     approval_started: float,
 ) -> bool:
     """Minimal single-action OK toggle path used by keyboard shortcuts."""
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     annotations = list(getattr(self, "current_annotations", []) or [])
     if not selected_actual_indices or not annotations:
         return False
@@ -1080,18 +1134,11 @@ def _apply_preview_approval_fast(
                 int(getattr(self, "_preview_approval_version", 0) or 0),
             )
             self._current_preview_plate_count_cache = plate_cache
-        self._schedule_preview_approved_persist()
+        self._schedule_preview_approved_persist(delay_ms=2600)
 
-    graph_gate_id = ""
     if not self._is_free_mode_session_context():
-        try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
-        except Exception:
-            graph_gate_id = ""
-        if approval_state_changed and graph_gate_id in {"T04", "T05", "T06"} and changed_dirty_filenames:
+        graph_gate_id, _repair_origin_gate_id, _graph_context = _resolve_campaign_graph_gate_context(self)
+        if approval_state_changed and graph_gate_id in {"T03", "T04", "T05"} and changed_dirty_filenames:
             try:
                 self._schedule_preview_autosave(
                     delay_ms=6500,
@@ -1155,7 +1202,7 @@ def _apply_preview_approval_fast(
         except Exception:
             pass
     _update_preview_approval_badge_fast(self, approved)
-    self._queue_free_mode_session_save()
+    self._queue_free_mode_session_save(include_preview_approved=False, delay_ms=2400)
 
     if approval_state_changed:
         _schedule_campaign_post_approval_refresh(self)
@@ -1186,6 +1233,10 @@ def _set_selected_preview_images_approved(
     schedule_followup_refresh: bool = False,
 ) -> None:
     approval_started = time.perf_counter()
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     selected_actual_indices = (
         [int(idx) for idx in list(actual_indices or [])]
         if actual_indices is not None
@@ -1224,13 +1275,10 @@ def _set_selected_preview_images_approved(
         approved_names = set(self._get_preview_approved_filenames_base())
     campaign_overlay_bundle = dict(getattr(self, "_campaign_auto_manual_overlay_bundle", {}) or {})
     try:
-        initial_graph_gate_id = str(
-            dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-            or ""
-        ).strip().upper()
+        initial_graph_gate_id, _initial_origin_gate_id, _initial_graph_context = _resolve_campaign_graph_gate_context(self)
     except Exception:
         initial_graph_gate_id = ""
-    if not self._is_free_mode_session_context() and initial_graph_gate_id == "T06":
+    if not self._is_free_mode_session_context() and initial_graph_gate_id == "T05":
         run_dir = getattr(self, "current_annotation_run_dir", None)
         try:
             t06_token = f"{Path(run_dir).resolve() if run_dir else ''}|T06"
@@ -1416,17 +1464,14 @@ def _set_selected_preview_images_approved(
         if persist_immediately:
             self._persist_preview_approved_filenames()
         else:
-            self._schedule_preview_approved_persist()
+            self._schedule_preview_approved_persist(delay_ms=2600)
     if not self._is_free_mode_session_context() and approval_state_changed:
         try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
+            graph_gate_id, _repair_origin_gate_id, _graph_context = _resolve_campaign_graph_gate_context(self)
         except Exception:
             graph_gate_id = ""
         changed_filename_set = set(approved_changed_filenames) | set(unapproved_changed_filenames)
-        if graph_gate_id in {"T04", "T05", "T06"} and changed_filename_set:
+        if graph_gate_id in {"T03", "T04", "T05"} and changed_filename_set:
             dirty_names = {
                 str(name or "").strip().lower()
                 for name in set(getattr(self, "_preview_dirty_images", set()) or set())
@@ -1442,7 +1487,7 @@ def _set_selected_preview_images_approved(
                     )
                 except Exception as exc:
                     logger.debug(f"Nie udalo sie odroczyc zapisu XML po zmianie OK: {exc}")
-        if graph_gate_id == "T06" and approved_changed_filenames:
+        if graph_gate_id == "T05" and approved_changed_filenames:
             run_dir = getattr(self, "current_annotation_run_dir", None)
             try:
                 self._append_z2_trace(
@@ -1454,7 +1499,7 @@ def _set_selected_preview_images_approved(
                 )
             except Exception:
                 pass
-        if graph_gate_id == "T06" and unapproved_changed_filenames:
+        if graph_gate_id == "T05" and unapproved_changed_filenames:
             run_dir = getattr(self, "current_annotation_run_dir", None)
             try:
                 self._append_z2_trace(
@@ -1508,7 +1553,7 @@ def _set_selected_preview_images_approved(
                 except Exception:
                     pass
         _update_preview_approval_badge_fast(self, approved)
-        self._queue_free_mode_session_save()
+        self._queue_free_mode_session_save(include_preview_approved=False, delay_ms=2400)
         if approval_state_changed:
             if bool(getattr(self, "_preview_fullscreen_active", False)):
                 self._preview_campaign_counter_refresh_pending_after_fullscreen = True
@@ -1558,20 +1603,17 @@ def _set_selected_preview_images_approved(
     self._refresh_preview_list_summary(lightweight=True)
     self._update_preview_toolbar_state(refresh_summary=False)
     _update_preview_approval_badge_fast(self, approved)
-    self._queue_free_mode_session_save()
+    self._queue_free_mode_session_save(include_preview_approved=False, delay_ms=2400)
     if approval_state_changed and refresh_export_sources:
         try:
             try:
-                graph_gate_id = str(
-                    dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                    or ""
-                ).strip().upper()
+                graph_gate_id, _repair_origin_gate_id, _graph_context = _resolve_campaign_graph_gate_context(self)
             except Exception:
                 graph_gate_id = ""
-            graph_gate_has_fast_counter = bool(graph_gate_id in {"T04", "T05", "T06"})
+            graph_gate_has_fast_counter = bool(graph_gate_id in {"T03", "T04", "T05"})
             skip_export_refresh = bool(
                 not self._is_free_mode_session_context()
-                and graph_gate_id in {"T04", "T05", "T06"}
+                and graph_gate_id in {"T03", "T04", "T05"}
             )
             if not skip_export_refresh:
                 active_run_dir = self._get_active_annotation_run_dir(require_xml=True)
@@ -1594,13 +1636,10 @@ def _set_selected_preview_images_approved(
                 pass
     elif approval_state_changed and schedule_followup_refresh:
         try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
+            graph_gate_id, _repair_origin_gate_id, _graph_context = _resolve_campaign_graph_gate_context(self)
         except Exception:
             graph_gate_id = ""
-        graph_gate_has_fast_counter = bool(graph_gate_id in {"T04", "T05", "T06"})
+        graph_gate_has_fast_counter = bool(graph_gate_id in {"T03", "T04", "T05"})
         if not (graph_gate_has_fast_counter and _try_update_campaign_right_panel_counts_after_approval(self)):
             self._schedule_preview_approval_followup_refresh()
     if approved and skipped_without_plate > 0:
@@ -1669,10 +1708,7 @@ def _set_selected_preview_images_approved(
     elapsed_ms = (time.perf_counter() - approval_started) * 1000.0
     if elapsed_ms >= 400.0:
         try:
-            graph_gate_id = str(
-                dict(getattr(self, "_campaign_graph_entry_context", {}) or {}).get("graph_gate_id", "")
-                or ""
-            ).strip().upper()
+            graph_gate_id, _repair_origin_gate_id, _graph_context = _resolve_campaign_graph_gate_context(self)
         except Exception:
             graph_gate_id = ""
         try:
@@ -2122,8 +2158,15 @@ def _populate_preview_list_async(
             self._preview_list_render_state_cache = None
 
     entries = self._get_preview_list_entries()
-    if len(entries) >= 3000 and int(batch_size or 0) < 900:
-        batch_size = 900
+    try:
+        batch_size = max(1, int(batch_size or 200))
+    except Exception:
+        batch_size = 200
+    if len(entries) >= 3000:
+        batch_size = min(batch_size, 240)
+    elif len(entries) >= 1200:
+        batch_size = min(batch_size, 320)
+    batch_delay_ms = 8 if len(entries) >= 3000 else 4 if len(entries) >= 1200 else 1
     self._preview_list_display_indices = [actual_idx for actual_idx, _ann in entries]
     self._preview_list_display_index_map = {
         int(actual_idx): int(display_idx)
@@ -2305,6 +2348,20 @@ def _populate_preview_list_async(
         ):
             apply_selection()
 
+        if start_index == 0:
+            try:
+                first_batch_ms = (time.perf_counter() - populate_started) * 1000.0
+                if first_batch_ms >= 100.0:
+                    logger.info(
+                        "[Z2 PERF] preview_list_first_batch total=%.0fms entries=%s batch=%s ready=%s",
+                        first_batch_ms,
+                        len(entries),
+                        int(batch_size),
+                        int(bool(selection_applied)),
+                    )
+            except Exception:
+                pass
+
         if callable(on_progress):
             try:
                 on_progress(end_index, len(entries))
@@ -2314,7 +2371,7 @@ def _populate_preview_list_async(
         if end_index < len(entries):
             try:
                 self._preview_list_populate_after_id = self.frame.after(
-                    1,
+                    batch_delay_ms,
                     lambda next_index=end_index: insert_batch(next_index),
                 )
             except Exception:
@@ -3451,6 +3508,13 @@ def _save_preview_edits(
     refresh_workflow: bool = True,
     refresh_export_sources: bool = True,
 ):
+    save_started_at = time.perf_counter()
+    export_elapsed_ms = 0.0
+    manifest_elapsed_ms = 0.0
+    list_elapsed_ms = 0.0
+    source_elapsed_ms = 0.0
+    workflow_elapsed_ms = 0.0
+    dirty_count_at_start = len(getattr(self, "_preview_dirty_images", set()) or set())
     self._cancel_preview_autosave()
 
     if self._preview_draw_mode and self._preview_draw_points:
@@ -3477,12 +3541,14 @@ def _save_preview_edits(
     except Exception:
         pass
 
+    phase_started_at = time.perf_counter()
     success = CVATExporter().export(
         self.current_annotations,
         xml_path,
         include_confidence=True,
         only_successful=False,
     )
+    export_elapsed_ms = max(0.0, (time.perf_counter() - phase_started_at) * 1000.0)
     if not success:
         if interactive:
             messagebox.showerror("Błąd zapisu", f"Nie udało się zapisać poprawek do:\n{xml_path}")
@@ -3491,6 +3557,7 @@ def _save_preview_edits(
     self.current_annotation_xml_path = xml_path
     self.current_annotation_run_dir = xml_path.parent
     self.last_staging_run_dir = xml_path.parent
+    phase_started_at = time.perf_counter()
     try:
         self._update_annotation_run_manifest(
             xml_path.parent,
@@ -3503,6 +3570,7 @@ def _save_preview_edits(
         )
     except Exception:
         pass
+    manifest_elapsed_ms = max(0.0, (time.perf_counter() - phase_started_at) * 1000.0)
     try:
         self._remember_campaign_manual_plate_source(
             run_dir=xml_path.parent,
@@ -3536,6 +3604,7 @@ def _save_preview_edits(
 
     saved_preview_index = self.current_preview_index
     self._preview_dirty_images.clear()
+    phase_started_at = time.perf_counter()
     if refresh_list:
         self._refresh_preview_list(preserve_selection=True, render_current=False)
     else:
@@ -3545,10 +3614,14 @@ def _save_preview_edits(
             lightweight=True,
         )
         self._update_preview_toolbar_state(refresh_summary=False)
+    list_elapsed_ms = max(0.0, (time.perf_counter() - phase_started_at) * 1000.0)
 
     if refresh_export_sources:
+        phase_started_at = time.perf_counter()
         self._refresh_plate_dataset_export_sources()
+        source_elapsed_ms = max(0.0, (time.perf_counter() - phase_started_at) * 1000.0)
     if refresh_workflow:
+        phase_started_at = time.perf_counter()
         self._refresh_step2_action_states()
         if self._is_free_mode_session_context():
             try:
@@ -3560,11 +3633,30 @@ def _save_preview_edits(
             except Exception:
                 pass
         self._refresh_free_mode_workflow_ui()
+        workflow_elapsed_ms = max(0.0, (time.perf_counter() - phase_started_at) * 1000.0)
     self._push_preview_debug_event("save", f"xml={xml_path.name}")
     self._update_preview_edit_status(
         status_message or "Zapisano poprawki polygonow do annotations.xml. Kolejny etap zobaczy juz nowe rogi."
     )
-    self._queue_free_mode_session_save()
+    if self._is_free_mode_session_context():
+        self._queue_free_mode_session_save()
+    total_elapsed_ms = max(0.0, (time.perf_counter() - save_started_at) * 1000.0)
+    if total_elapsed_ms >= 180.0:
+        try:
+            logger.info(
+                "[Z2 PERF] preview_save_edits total=%.0fms dirty=%s anns=%s export=%.0fms manifest=%.0fms list=%.0fms sources=%.0fms workflow=%.0fms interactive=%s",
+                total_elapsed_ms,
+                int(dirty_count_at_start),
+                len(getattr(self, "current_annotations", []) or []),
+                export_elapsed_ms,
+                manifest_elapsed_ms,
+                list_elapsed_ms,
+                source_elapsed_ms,
+                workflow_elapsed_ms,
+                int(bool(interactive)),
+            )
+        except Exception:
+            pass
     return True
 
 def _clear_selected_preview_auto_plates(self) -> None:

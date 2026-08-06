@@ -367,6 +367,98 @@ def _set_campaign_paths_lock_state(self, locked: bool):
         self.project_paths_info_var.set("")
         self.project_paths_rel_var.set("")
 
+def _draw_campaign_step2_splash_bar(
+    self,
+    *,
+    progress_value: float | None,
+    accent: str,
+    trough_color: str,
+    border_color: str,
+) -> None:
+    progress_widget = getattr(self, "_campaign_step2_splash_progress", None)
+    if progress_widget is None:
+        return
+    try:
+        progress_widget.update_idletasks()
+        canvas_width = int(progress_widget.winfo_width() or progress_widget.winfo_reqwidth() or 520)
+    except Exception:
+        canvas_width = 520
+    canvas_width = max(180, int(canvas_width or 520))
+    try:
+        canvas_height = int(progress_widget.winfo_height() or progress_widget.winfo_reqheight() or 16)
+    except Exception:
+        canvas_height = 16
+    canvas_height = max(12, int(canvas_height or 16))
+    bar_top = max(3, int((canvas_height - 8) / 2))
+    bar_bottom = min(canvas_height - 2, bar_top + 8)
+    left = 1
+    right = max(left + 20, canvas_width - 1)
+    try:
+        progress_widget.delete("all")
+        progress_widget.create_rectangle(
+            left,
+            bar_top,
+            right,
+            bar_bottom,
+            fill=trough_color,
+            outline=border_color,
+            width=1,
+        )
+        if progress_value is None:
+            fill_width = max(52, int(float(right - left) * 0.24))
+            travel = max(1, int(right - left - fill_width))
+            try:
+                phase = (time.perf_counter() * 0.82) % 1.0
+            except Exception:
+                phase = 0.0
+            fill_x0 = left + int(float(travel) * float(phase))
+        else:
+            fill_width = max(
+                0,
+                min(right - left, int((float(progress_value) / 100.0) * float(right - left))),
+            )
+            fill_x0 = left
+        if fill_width > 0:
+            progress_widget.create_rectangle(
+                fill_x0,
+                bar_top + 1,
+                min(right, fill_x0 + fill_width),
+                bar_bottom - 1,
+                fill=accent,
+                outline="",
+            )
+    except Exception:
+        pass
+
+
+def _schedule_campaign_step2_splash_animation(self) -> None:
+    try:
+        pending = getattr(self, "_campaign_step2_splash_anim_after_id", None)
+        if pending:
+            self.frame.after_cancel(pending)
+    except Exception:
+        pass
+    self._campaign_step2_splash_anim_after_id = None
+    if not bool(getattr(self, "_campaign_step2_splash_visible", False)):
+        return
+    if not bool(getattr(self, "_campaign_step2_splash_indeterminate", False)):
+        return
+    style = dict(getattr(self, "_campaign_step2_splash_bar_style", {}) or {})
+    _draw_campaign_step2_splash_bar(
+        self,
+        progress_value=None,
+        accent=str(style.get("accent") or "#4f8de3"),
+        trough_color=str(style.get("trough_color") or "#1d1d1d"),
+        border_color=str(style.get("border_color") or "#3c3c3c"),
+    )
+    try:
+        self._campaign_step2_splash_anim_after_id = self.frame.after(
+            70,
+            lambda: _schedule_campaign_step2_splash_animation(self),
+        )
+    except Exception:
+        self._campaign_step2_splash_anim_after_id = None
+
 
 def _show_campaign_step2_splash(
     self,
@@ -404,30 +496,41 @@ def _show_campaign_step2_splash(
     panel_bg = palette.get("panel", "#252526")
     fg = palette.get("fg", "#f3f3f3")
     tone_key = str(tone or "info").strip().lower()
-    if tone_key == "success":
-        accent = palette.get("success", "#2ecc71")
-    elif tone_key == "error":
+    # Splash is a loading surface, not a final status badge. Keep success in
+    # the status text; do not repaint the whole overlay green.
+    visual_tone_key = "info" if tone_key == "success" else tone_key
+    if visual_tone_key == "error":
         accent = palette.get("error", "#e74c3c")
+    elif visual_tone_key == "warning":
+        accent = palette.get("warning", palette.get("accent", "#4f8de3"))
     else:
         accent = palette.get("accent", "#4f8de3")
 
-    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.24)
-    card_bg = blend_hex_colors(panel_bg, accent, 0.10)
-    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.48)
-    trough_color = blend_hex_colors(panel_bg, "#000000", 0.16)
+    muted = palette.get("muted", "#c7c7c7")
+    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.18)
+    card_bg = blend_hex_colors(panel_bg, accent, 0.045)
+    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.28)
+    trough_color = blend_hex_colors(panel_bg, "#000000", 0.12)
 
     try:
         overlay.configure(bg=overlay_bg, highlightbackground=overlay_bg, highlightcolor=overlay_bg)
         card.configure(bg=card_bg, highlightbackground=border_color, highlightcolor=border_color)
-        title_lbl.configure(text=str(title or "").strip(), bg=card_bg, fg=accent)
+        title_lbl.configure(text=str(title or "").strip(), bg=card_bg, fg=blend_hex_colors(accent, fg, 0.06))
         body_lbl.configure(text=str(body or "").strip(), bg=card_bg, fg=fg)
         progress_widget.configure(bg=card_bg)
         if progress_pct_lbl is not None:
             progress_pct_lbl.configure(
                 bg=card_bg,
-                fg=fg,
-                text=f"{int(round(progress_value or 0.0))}%",
+                fg=muted,
+                text=("" if progress_value is None else f"{int(round(progress_value))}%"),
             )
+            try:
+                if progress_value is None:
+                    progress_pct_lbl.grid_remove()
+                else:
+                    progress_pct_lbl.grid(row=3, column=0, sticky="e", pady=(5, 0))
+            except Exception:
+                pass
         if hasattr(self.app, "ensure_adaptive_wrap"):
             self.app.ensure_adaptive_wrap(body_lbl, container=card, padding=44, min_wrap=240)
     except Exception:
@@ -439,31 +542,24 @@ def _show_campaign_step2_splash(
     except Exception:
         pass
     try:
-        card.update_idletasks()
-        canvas_width = int(progress_widget.winfo_width() or progress_widget.winfo_reqwidth() or 520)
-    except Exception:
-        canvas_width = 520
-    try:
-        progress_widget.delete("all")
-        progress_widget.create_rectangle(
-            0,
-            2,
-            canvas_width,
-            14,
-            fill=trough_color,
-            outline=border_color,
-            width=1,
+        self._campaign_step2_splash_bar_style = {
+            "accent": accent,
+            "trough_color": trough_color,
+            "border_color": border_color,
+        }
+        self._campaign_step2_splash_indeterminate = bool(progress_value is None)
+        _draw_campaign_step2_splash_bar(
+            self,
+            progress_value=progress_value,
+            accent=accent,
+            trough_color=trough_color,
+            border_color=border_color,
         )
-        fill_width = max(0, min(canvas_width, int((float(progress_value or 0.0) / 100.0) * float(canvas_width))))
-        if fill_width > 0:
-            progress_widget.create_rectangle(
-                0,
-                2,
-                fill_width,
-                14,
-                fill=accent,
-                outline="",
-            )
+        if progress_value is not None:
+            pending = getattr(self, "_campaign_step2_splash_anim_after_id", None)
+            if pending:
+                self.frame.after_cancel(pending)
+            self._campaign_step2_splash_anim_after_id = None
     except Exception:
         pass
     try:
@@ -475,6 +571,11 @@ def _show_campaign_step2_splash(
     self._campaign_step2_splash_visible = True
     if not was_visible:
         self._campaign_step2_splash_token = int(getattr(self, "_campaign_step2_splash_token", 0) or 0) + 1
+    if progress_value is None:
+        try:
+            _schedule_campaign_step2_splash_animation(self)
+        except Exception:
+            pass
     try:
         self.frame.update_idletasks()
     except Exception:
@@ -493,6 +594,14 @@ def _hide_campaign_step2_splash(self, *, token: int | None = None) -> None:
 
     overlay = getattr(self, "_campaign_step2_splash_overlay", None)
     progress = getattr(self, "_campaign_step2_splash_progress", None)
+    try:
+        pending = getattr(self, "_campaign_step2_splash_anim_after_id", None)
+        if pending:
+            self.frame.after_cancel(pending)
+    except Exception:
+        pass
+    self._campaign_step2_splash_anim_after_id = None
+    self._campaign_step2_splash_indeterminate = False
     try:
         if progress is not None:
             progress.stop()
@@ -545,6 +654,21 @@ def _end_campaign_step2_transition(self) -> None:
     self._campaign_step2_transition_refresh_pending = False
     skip_heavy_finalize = bool(getattr(self, "_campaign_step2_transition_skip_heavy_finalize", False))
     self._campaign_step2_transition_skip_heavy_finalize = False
+    try:
+        graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    t02_at_review = bool(
+        str(graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or str(graph_context.get("graph_gate_id") or "").strip().upper() == "T02"
+    )
+    if t02_at_review and bool(getattr(self, "_campaign_deferred_run_restore_in_progress", False)):
+        _mark_finalize_phase("defer_t02_action_states_until_payload")
+        try:
+            self.frame.after(120, self._sync_right_panel_scrollregion)
+        except Exception:
+            pass
+        return
     if skip_heavy_finalize:
         # A large existing run may still be restored asynchronously. If the
         # payload has already landed while the transition flag was active, the

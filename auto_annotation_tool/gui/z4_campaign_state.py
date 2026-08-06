@@ -551,7 +551,10 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
         return result
 
     if target == "char":
+        current_step4_record: dict = {}
+
         def _current_iteration_step4_dataset_path() -> Path | None:
+            nonlocal current_step4_record
             try:
                 iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
             except Exception:
@@ -589,6 +592,7 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
                     record = {}
             if not record:
                 return None
+            current_step4_record = dict(record)
             record.setdefault("iteration", iteration_num)
             record_target = str(record.get("target", "") or "").strip().lower()
             if record_target and record_target != target:
@@ -644,6 +648,21 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
             result["val_images"] = int(validation_stats.get("val_images", 0) or 0)
             result["test_images"] = int(validation_stats.get("test_images", 0) or 0)
             result["validation_message"] = str(validation_msg or "").strip()
+            source_dataset = str(current_step4_record.get("source_dataset", "") or "").strip()
+            source_yaml = str(current_step4_record.get("source_yaml", "") or "").strip()
+            if source_dataset or source_yaml:
+                try:
+                    source_root = Path(source_yaml or source_dataset)
+                    if source_root.is_file() and source_root.name.lower() == "data.yaml":
+                        source_yaml = str(source_root)
+                        source_root = source_root.parent
+                    elif source_root:
+                        source_yaml = source_yaml or str(source_root / "data.yaml")
+                    source_dataset = str(source_root.resolve()) if source_root.exists() else str(source_root)
+                except Exception:
+                    pass
+                result["source_dataset"] = source_dataset
+                result["source_yaml"] = source_yaml
 
             if not is_valid_dataset:
                 invalid_ready_result = {

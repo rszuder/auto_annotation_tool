@@ -593,16 +593,16 @@ def _on_main_pane_configure(self, event=None):
 
 
 def _on_main_pane_button_press(self, event=None):
-    return "break"
+    return None
 
 
 def _on_main_pane_drag_motion(self, event=None):
-    return "break"
+    return None
 
 
 def _on_main_pane_drag_release(self, event=None):
     self._schedule_main_pane_layout_refresh(force_defaults=False)
-    return "break"
+    return None
 
 
 def _sync_approve_hint_wraplength(self, event=None):

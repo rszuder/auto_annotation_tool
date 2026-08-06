@@ -236,7 +236,7 @@ class ZoomableCanvas(tk.Canvas):
         self.pan_data = {'x': 0, 'y': 0, 'press_x': None, 'press_y': None}
         self._update_display()
 
-    def set_image_fit_to_view(self, pil_image):
+    def set_image_fit_to_view(self, pil_image, *, interaction_fast: bool = False):
         """Set a new image and render it already fitted to the canvas."""
         self._cancel_zoom_animation()
         self._cancel_deferred_display()
@@ -252,7 +252,9 @@ class ZoomableCanvas(tk.Canvas):
                 pass
             return
 
-        self._update_display()
+        self._update_display(interaction_fast=bool(interaction_fast))
+        if interaction_fast:
+            self._schedule_final_quality_display(delay_ms=500)
 
     def clear_image(self):
         """Wyczysc aktualny obraz i zresetuj stan widoku."""
@@ -308,6 +310,20 @@ class ZoomableCanvas(tk.Canvas):
             return bool(method(self, event))
         except Exception:
             return False
+
+    def _delegate_final_quality_delay_ms(self) -> int:
+        delegate = getattr(self, "interaction_delegate", None)
+        if delegate is None:
+            return 0
+
+        method = getattr(delegate, "on_zoomable_canvas_final_quality_delay_ms", None)
+        if not callable(method):
+            return 0
+
+        try:
+            return max(0, int(method(self) or 0))
+        except Exception:
+            return 0
 
     def _delegate_blocks_pan(self, event) -> bool:
         return self._delegate_interaction("should_block_pan", event)
@@ -452,6 +468,13 @@ class ZoomableCanvas(tk.Canvas):
                     threshold_ms=0.0 if probe_active else 120.0,
                     delay=max(0, int(delay_ms)),
                 )
+            defer_ms = self._delegate_final_quality_delay_ms()
+            if defer_ms > 0:
+                try:
+                    self._final_quality_after_id = self.after(max(80, int(defer_ms)), _run)
+                except Exception:
+                    self._final_quality_after_id = None
+                return
             self._update_display(interaction_fast=False)
             elapsed_ms = max(0.0, (time.perf_counter() - run_started_at) * 1000.0)
             self._log_perf(

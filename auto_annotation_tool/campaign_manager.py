@@ -898,6 +898,11 @@ class CampaignManager:
         project_data["project_start_plate_source_input"] = ""
         project_data["project_start_plate_source_mode"] = ""
         project_data["project_start_plate_source_iteration"] = 0
+        project_data["t02_at_review_committed_iteration"] = 0
+        project_data["t02_at_review_committed_at"] = ""
+        project_data["t02_at_review_committed_run"] = ""
+        project_data["t02_at_review_committed_images"] = 0
+        project_data["t02_at_review_committed_plates"] = 0
         project_data["project_start_scope_plate_run"] = ""
 
         if current_target in {"plate", "char"}:
@@ -2496,7 +2501,12 @@ class CampaignManager:
             "runs": root / "5_training_runs",
             "models": root / "6_models",
             "rankings": root / "7_rankings",
-            "presets": root / "8_ocr_presets",
+            "presets": root / "8_presets",
+            "ocr_presets": root / "8_presets" / "ocr",
+            "detection_pipeline_presets": root / "8_presets" / "detection_pipeline",
+            "augmentation_presets": root / "8_presets" / "augmentation",
+            "training_presets": root / "8_presets" / "training",
+            "legacy_ocr_presets": root / "8_ocr_presets",
         }
         return mapping.get(key) 
 
@@ -2540,11 +2550,32 @@ class CampaignManager:
         )
         if not resolved_target:
             return False
-        self.state["projects"][project_name]["master_pool_dir"] = str(resolved_target)
-        self.state["projects"][project_name]["step1_source_manual_clear_iteration"] = 0
-        self.state["projects"][project_name]["step1_restored_image_source_dir"] = ""
+        project_data = self.state["projects"][project_name]
+        project_data["master_pool_dir"] = str(resolved_target)
+        try:
+            project_data["master_pool_selected_iteration"] = int(project_data.get("current_iteration", 1) or 1)
+        except Exception:
+            project_data["master_pool_selected_iteration"] = 1
+        project_data["step1_source_manual_clear_iteration"] = 0
+        project_data["step1_restored_image_source_dir"] = ""
+        try:
+            self._latest_ingest_plan_summary_cache.clear()
+            self._latest_ingest_plan_summary_runtime_cache.clear()
+            self._iteration_image_count_cache.clear()
+            self._iteration_image_source_dir_cache.clear()
+        except Exception:
+            pass
         self.save_state()
         return True
+
+    def get_master_pool_selected_iteration(self, project_name: str = None) -> int:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return 0
+        try:
+            return int(self.state["projects"][project_name].get("master_pool_selected_iteration", 0) or 0)
+        except Exception:
+            return 0
 
     def clear_master_pool_dir(self, project_name: str = None) -> bool:
         project_name = self._resolve_project_name(project_name)
@@ -2552,11 +2583,19 @@ class CampaignManager:
             return False
         project_data = self.state["projects"][project_name]
         project_data["master_pool_dir"] = ""
+        project_data["master_pool_selected_iteration"] = 0
         project_data["step1_restored_image_source_dir"] = ""
         try:
             project_data["step1_source_manual_clear_iteration"] = int(project_data.get("current_iteration", 1) or 1)
         except Exception:
             project_data["step1_source_manual_clear_iteration"] = 0
+        try:
+            self._latest_ingest_plan_summary_cache.clear()
+            self._latest_ingest_plan_summary_runtime_cache.clear()
+            self._iteration_image_count_cache.clear()
+            self._iteration_image_source_dir_cache.clear()
+        except Exception:
+            pass
         self.save_state()
         return True
 

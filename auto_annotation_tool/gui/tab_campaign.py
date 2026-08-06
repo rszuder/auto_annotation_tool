@@ -723,7 +723,7 @@ class CampaignTab:
                 pass
             return None
         return campaign_step1_ingest._refresh_ingest_panel(self, *args, **kwargs)
-    def _choose_master_pool_dir(self) -> bool:
+    def _choose_master_pool_dir(self, parent=None) -> bool:
         if not CAMPAIGN.get_active_project_name():
             return False
 
@@ -733,8 +733,8 @@ class CampaignTab:
             try:
                 current_path = Path(current)
                 if current_path.exists() and current_path.is_dir():
-                    parent = current_path.parent
-                    initial = parent if parent.exists() and parent.is_dir() else current_path
+                    initial_parent = current_path.parent
+                    initial = initial_parent if initial_parent.exists() and initial_parent.is_dir() else current_path
                 elif current_path.parent.exists() and current_path.parent.is_dir():
                     initial = current_path.parent
             except Exception:
@@ -745,6 +745,7 @@ class CampaignTab:
         selected = filedialog.askdirectory(
             initialdir=str(initial),
             title=dialog_title,
+            parent=parent or self.frame,
         )
         if not selected:
             return False
@@ -1585,6 +1586,9 @@ class CampaignTab:
 
     def _get_step1_manifest_context(self, *args, **kwargs):
         return campaign_stage_ui._get_step1_manifest_context(self, *args, **kwargs)
+
+    def _get_step1_manifest_context_lightweight(self, *args, **kwargs):
+        return campaign_stage_ui._get_step1_manifest_context_lightweight(self, *args, **kwargs)
 
     def _build_step1_summary_payload(self, *args, **kwargs):
         return campaign_stage_ui._build_step1_summary_payload(self, *args, **kwargs)

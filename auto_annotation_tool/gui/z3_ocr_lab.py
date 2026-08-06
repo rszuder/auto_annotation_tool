@@ -57,27 +57,36 @@ def get_true_texts_from_filename(filename: str) -> list:
         "PLIK",
         "CROP",
     }
-    parts = re.findall(r"[A-Z0-9]+", stem)
-    strict_candidates = []
-    numeric_fallback = []
+    parts = [
+        str(raw_part or "").strip().upper()
+        for raw_part in re.findall(r"[A-Z0-9]+", stem)
+        if str(raw_part or "").strip()
+    ]
+    filtered_parts = [part for part in parts if part not in ignore_tokens]
+    if len(filtered_parts) > 1 and filtered_parts[-1].isdigit():
+        previous_plate_like = any(
+            3 <= len(part) <= 12
+            and (any(ch.isalpha() for ch in part) or part.isdigit())
+            for part in filtered_parts[:-1]
+        )
+        if previous_plate_like:
+            filtered_parts = filtered_parts[:-1]
+
+    candidates = []
     seen = set()
-    for raw_part in parts:
-        part = str(raw_part or "").strip().upper()
-        if not part or part in seen or part in ignore_tokens:
+    for part in filtered_parts:
+        if not part or part in seen:
             continue
-        if len(part) < 4 or len(part) > 12:
+        if len(part) < 3 or len(part) > 12:
             continue
         has_letter = any(ch.isalpha() for ch in part)
         has_digit = any(ch.isdigit() for ch in part)
-        seen.add(part)
-        if has_letter and has_digit:
-            strict_candidates.append(part)
+        if not (has_letter or has_digit):
             continue
-        if part.isdigit():
-            numeric_fallback.append(part)
+        seen.add(part)
+        candidates.append(part)
 
-    # Prefer classic alphanumeric plates, but keep numeric-only names usable.
-    return strict_candidates if strict_candidates else numeric_fallback
+    return candidates
 
 
 def get_current_prep_params(host) -> dict:
@@ -642,6 +651,10 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
     existing = getattr(self, "_ocr_ranking_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
+            try:
+                existing.grab_release()
+            except Exception:
+                pass
             existing.destroy()
     except Exception:
         self._ocr_ranking_modal = None
@@ -657,14 +670,30 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
     panel_bg = palette.get("panel", palette.get("bg", "#252526"))
     panel_alt = palette.get("panel_alt", "#2d2d30")
     border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    fg = self._get_readable_text_color(panel_bg, preferred=palette.get("fg", "#f3f3f3"))
+    panel_fg = self._get_readable_text_color(panel_alt, preferred=palette.get("fg", "#f3f3f3"))
+    muted = self._get_readable_text_color(panel_bg, preferred=palette.get("muted", "#c7c7c7"))
+    panel_muted = self._get_readable_text_color(panel_alt, preferred=palette.get("muted", "#c7c7c7"))
 
-    win = tk.Toplevel(self.frame)
+    parent_modal = getattr(self, "_detection_pipeline_modal", None)
+    try:
+        if parent_modal is not None and not parent_modal.winfo_exists():
+            parent_modal = None
+    except Exception:
+        parent_modal = None
+    parent_window = parent_modal or self.frame.winfo_toplevel()
+
+    win = tk.Toplevel(parent_window)
     self._ocr_ranking_modal = win
     win.title("Ranking presetów OCR")
     win.resizable(False, False)
+    try:
+        win.configure(bg=panel_bg)
+    except Exception:
+        pass
 
     try:
-        win.transient(self.frame.winfo_toplevel())
+        win.transient(parent_window)
     except Exception:
         pass
     try:
@@ -683,6 +712,14 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
             pass
         if getattr(self, "_ocr_ranking_modal", None) is win:
             self._ocr_ranking_modal = None
+        if parent_modal is not None:
+            try:
+                if parent_modal.winfo_exists():
+                    parent_modal.grab_set()
+                    parent_modal.lift()
+                    parent_modal.focus_force()
+            except Exception:
+                pass
         return "break"
 
     win.protocol("WM_DELETE_WINDOW", _close)
@@ -698,7 +735,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
         host_frame,
         text="Tutaj uruchomisz turniej presetów OCR na aktualnym katalogu wyodrębnionych tablic. Próbki demo zostają tylko w Laboratorium OCR i nie biorą udziału w rankingu.",
         bg=panel_bg,
-        fg=palette.get("muted", "#c7c7c7"),
+        fg=muted,
         justify=tk.LEFT,
         wraplength=430,
         anchor="w",
@@ -721,6 +758,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
         control_card,
         text="",
         bg=panel_alt,
+        fg=panel_muted,
         anchor="w",
         justify=tk.LEFT,
         wraplength=420,
@@ -733,6 +771,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
         control_card,
         text="",
         bg=panel_alt,
+        fg=panel_muted,
         anchor="w",
         justify=tk.LEFT,
         wraplength=420,
@@ -761,6 +800,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
         progress_row,
         text="",
         bg=panel_alt,
+        fg=panel_muted,
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -772,7 +812,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
     results_host.pack(fill=tk.X, pady=(12, 0))
     self._ocr_ranking_modal_results_host = results_host
 
-    footer = ttk.Frame(host_frame)
+    footer = tk.Frame(host_frame, bg=panel_bg, bd=0, highlightthickness=0)
     footer.pack(fill=tk.X, pady=(12, 0))
 
     self._ocr_ranking_modal_start_btn = ttk.Button(
@@ -830,7 +870,7 @@ def open_ocr_ranking_modal(host, progress_bar_cls):
 
     try:
         win.update_idletasks()
-        root = self.frame.winfo_toplevel()
+        root = parent_window
         x = root.winfo_rootx() + max(40, int((root.winfo_width() - win.winfo_reqwidth()) / 2))
         y = root.winfo_rooty() + max(40, int((root.winfo_height() - win.winfo_reqheight()) / 2))
         win.geometry(f"+{x}+{y}")
@@ -988,12 +1028,19 @@ def populate_ocr_ranking_results_host(host_tab, results_host, *, panel_alt: str,
             pass
 
     last_results = list(getattr(self, "_ocr_ranking_last_results", []) or [])
+    try:
+        results_bg = str(results_host.cget("bg") or palette.get("panel", "#252526"))
+    except Exception:
+        results_bg = palette.get("panel", "#252526")
+    results_muted = self._get_readable_text_color(results_bg, preferred=palette.get("muted", "#c7c7c7"))
+    panel_fg = self._get_readable_text_color(panel_alt, preferred=fg)
+    panel_muted = self._get_readable_text_color(panel_alt, preferred=palette.get("muted", "#c7c7c7"))
     if not last_results:
         empty_lbl = tk.Label(
             results_host,
             text="Brak zapisanych wyników rankingu OCR.",
-            bg=results_host.cget("bg"),
-            fg=palette.get("muted", "#c7c7c7"),
+            bg=results_bg,
+            fg=results_muted,
             anchor="w",
             justify=tk.LEFT,
             wraplength=420,
@@ -1019,7 +1066,7 @@ def populate_ocr_ranking_results_host(host_tab, results_host, *, panel_alt: str,
         ranking_card,
         text="Ostatni ranking presetów OCR",
         bg=panel_alt,
-        fg=fg,
+        fg=panel_fg,
         font=("Segoe UI", 9, "bold"),
         anchor="w",
         justify=tk.LEFT,
@@ -1034,7 +1081,7 @@ def populate_ocr_ranking_results_host(host_tab, results_host, *, panel_alt: str,
             getattr(self, "_ocr_ranking_last_mode", ""),
         ),
         bg=panel_alt,
-        fg=palette.get("muted", "#c7c7c7"),
+        fg=panel_muted,
         font=("Segoe UI", 9),
         anchor="w",
         justify=tk.LEFT,
@@ -1053,7 +1100,7 @@ def populate_ocr_ranking_results_host(host_tab, results_host, *, panel_alt: str,
             ranking_card,
             text=row_text,
             bg=panel_alt,
-            fg=fg,
+            fg=panel_fg,
             font=("Consolas", 9),
             anchor="w",
             justify=tk.LEFT,
@@ -1920,7 +1967,22 @@ def open_filter_lab(host):
     add_slider(ocr_f, "Min. wysokość boxa OCR:", self.ocr_min_height_ratio_var, 0.20, 1.00, 2, "char_ocr_min_height_ratio", "lab_conf")
 
     def load_preset():
-        p = filedialog.askopenfilename(initialdir=self.presets_dir, filetypes=[("JSON", "*.json")], parent=lab_win)
+        preset_dir = Path(getattr(self, "presets_dir", CONFIG.get_presets_dir("ocr")))
+        try:
+            preset_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            preset_dir = preset_dir.resolve()
+        except Exception:
+            preset_dir = preset_dir.absolute()
+        p = filedialog.askopenfilename(
+            title="Wczytaj preset OCR",
+            initialdir=str(preset_dir),
+            initialfile="",
+            filetypes=[("JSON", "*.json")],
+            parent=lab_win,
+        )
         if not p:
             return
         try:

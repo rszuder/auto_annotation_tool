@@ -473,7 +473,11 @@ class HelpTab:
             "|-- 5_training_runs/\n"
             "|-- 6_models/\n"
             "|-- 7_rankings/\n"
-            "|-- 8_ocr_presets/\n"
+            "|-- 8_presets/\n"
+            "|   |-- ocr/\n"
+            "|   |-- detection_pipeline/\n"
+            "|   |-- augmentation/\n"
+            "|   `-- training/\n"
             "`-- 9_projects/\n",
         )
         self._paragraph(
@@ -491,6 +495,9 @@ class HelpTab:
             "|-- 3_cropped_characters/\n"
             "|-- 4_training_datasets/\n"
             "|-- 5_training_runs/\n"
+            "|-- 6_models/\n"
+            "|-- 7_rankings/\n"
+            "|-- 8_presets/\n"
             "|-- _campaign_state/\n"
             "`-- _staging/\n",
         )

@@ -13,13 +13,17 @@ from .z2_flow_models import (
     Z2LayoutState,
     Z2LeftPanelCopyContext,
 )
-from .z2_shared_ui import campaign_visible_gate_id
+from .z2_shared_ui import (
+    campaign_gate_id_for_edge,
+    campaign_visible_gate_id,
+    is_campaign_t02_at_review_context,
+)
 
 if TYPE_CHECKING:
     from .tab_annotation import AnnotationTab
 
 
-CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+CHAR_WORK_GATE_DISPLAY_ID = "T05"
 
 
 def apply_campaign_step2_workflow_preset(
@@ -204,11 +208,19 @@ def open_campaign_step2_entry(
         from ..campaign_manager import CAMPAIGN
 
         active_project = CAMPAIGN.get_active_project_name()
-        if not active_project or int(CAMPAIGN.get_current_step() or 0) < 2:
+        incoming_context = dict(source_context or {})
+        t02_at_review = bool(
+            str(incoming_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+            or (
+                str(incoming_context.get("graph_edge_key") or "").strip() == "e1_to_e3"
+                and str(incoming_context.get("graph_gate_id") or "").strip().upper() == "T02"
+            )
+        )
+        if not active_project or (int(CAMPAIGN.get_current_step() or 0) < 2 and not t02_at_review):
             return {"ok": False, "reason": "campaign_inactive"}
 
         host._campaign_context_project_name = str(active_project or "").strip()
-        host._campaign_graph_entry_context = dict(source_context or {})
+        host._campaign_graph_entry_context = dict(incoming_context or {})
 
         try:
             host.app.campaign_free_mode = False
@@ -227,7 +239,12 @@ def open_campaign_step2_entry(
             current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
         except Exception:
             current_iteration_path = ""
-        if target == "char" and current_iteration_path == "char_from_ready_plates" and current_step_for_graph < 3:
+        if (
+            target == "char"
+            and current_iteration_path == "char_from_ready_plates"
+            and current_step_for_graph < 3
+            and not t02_at_review
+        ):
             try:
                 logger.warning(
                     "[Z2 GRAPH] blocked entry for char_from_ready_plates path; this gate skips Z2 "
@@ -245,9 +262,9 @@ def open_campaign_step2_entry(
                     {
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e3_to_e4",
-                        "graph_gate_id": "T06",
-                        "graph_visible_gate_id": campaign_visible_gate_id("T06"),
-                        "graph_display_gate_id": campaign_visible_gate_id("T06") or "T06",
+                        "graph_gate_id": "T05",
+                        "graph_visible_gate_id": "T05",
+                        "graph_display_gate_id": "T05",
                         "graph_gate_label": "Dataset znaków",
                         "graph_transition_title": "Bramka datasetu znaków do treningu",
                         "graph_transition_source": "E3",
@@ -260,9 +277,9 @@ def open_campaign_step2_entry(
                     {
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e2_to_e3",
-                        "graph_gate_id": "T04",
-                        "graph_visible_gate_id": campaign_visible_gate_id("T04"),
-                        "graph_display_gate_id": campaign_visible_gate_id("T04") or "T04",
+                        "graph_gate_id": "T03",
+                        "graph_visible_gate_id": "T03",
+                        "graph_display_gate_id": "T03",
                         "graph_gate_label": "Przekazanie tablic do pracy nad znakami",
                         "graph_transition_title": "Przekazanie tablic do pracy nad znakami",
                         "graph_transition_source": "E2",
@@ -275,9 +292,9 @@ def open_campaign_step2_entry(
                     {
                         "source": "campaign_graph_inferred",
                         "graph_edge_key": "e2_to_e4",
-                        "graph_gate_id": "T05",
-                        "graph_visible_gate_id": campaign_visible_gate_id("T05"),
-                        "graph_display_gate_id": campaign_visible_gate_id("T05") or "T05",
+                        "graph_gate_id": "T04",
+                        "graph_visible_gate_id": "T04",
+                        "graph_display_gate_id": "T04",
                         "graph_gate_label": "Trening modelu tablic",
                         "graph_transition_title": "Trenuj model tablic",
                         "graph_transition_source": "E2",
@@ -292,6 +309,105 @@ def open_campaign_step2_entry(
                         "[Z2 GRAPH] inferred gate=%s edge=%s target=%s step=%s",
                         str(graph_context.get("graph_gate_id") or "-"),
                         str(graph_context.get("graph_edge_key") or "-"),
+                        target,
+                        current_step_for_graph,
+                    )
+                except Exception:
+                    pass
+        try:
+            context_edge_key = str(graph_context.get("graph_edge_key") or "").strip()
+            context_gate_id = campaign_gate_id_for_edge(
+                context_edge_key,
+                graph_context.get("graph_gate_id"),
+            )
+            repair_origin_edge_key = str(
+                graph_context.get("repair_origin_edge_key")
+                or graph_context.get("source_graph_edge_key")
+                or ""
+            ).strip()
+            repair_origin_gate_id = str(
+                graph_context.get("repair_origin_gate_id")
+                or graph_context.get("source_graph_gate_id")
+                or ""
+            ).strip().upper()
+            repair_origin_gate_id = campaign_gate_id_for_edge(
+                repair_origin_edge_key,
+                repair_origin_gate_id,
+            )
+        except Exception:
+            context_gate_id = ""
+            context_edge_key = ""
+            repair_origin_gate_id = ""
+        expected_context: dict[str, Any] = {}
+        if t02_at_review:
+            expected_context = {
+                "source": str(graph_context.get("source") or "campaign_graph_t02_at_review"),
+                "graph_edge_key": "e1_to_e3",
+                "graph_gate_id": "T02",
+                "graph_visible_gate_id": "T02",
+                "graph_display_gate_id": "T02",
+                "graph_gate_label": "Kontrola importu AT",
+                "graph_transition_title": "Kontroluj import anotacji tablic",
+                "graph_transition_source": "E1",
+                "graph_transition_target": "E3",
+                "graph_path_key": "char_from_ready_plates",
+                "input_source": "t02_at_review",
+                "z2_work_mode": "t02_at_review",
+            }
+        elif repair_origin_gate_id == "T06":
+            expected_context = {}
+        elif target == "char" and current_step_for_graph == 2:
+            expected_context = {
+                "source": str(graph_context.get("source") or "campaign_graph_canonicalized"),
+                "graph_edge_key": "e2_to_e3",
+                "graph_gate_id": "T03",
+                "graph_visible_gate_id": "T03",
+                "graph_display_gate_id": "T03",
+                "graph_gate_label": "Przekazanie tablic do pracy nad znakami",
+                "graph_transition_title": "Przekazanie tablic do pracy nad znakami",
+                "graph_transition_source": "E2",
+                "graph_transition_target": "E3",
+                "graph_path_key": "char_from_images",
+            }
+        elif target == "plate" and current_step_for_graph == 2:
+            expected_context = {
+                "source": str(graph_context.get("source") or "campaign_graph_canonicalized"),
+                "graph_edge_key": "e2_to_e4",
+                "graph_gate_id": "T04",
+                "graph_visible_gate_id": "T04",
+                "graph_display_gate_id": "T04",
+                "graph_gate_label": "Dataset i trening modelu tablic",
+                "graph_transition_title": "Przygotuj dataset i trening modelu tablic",
+                "graph_transition_source": "E2",
+                "graph_transition_target": "E4T",
+                "graph_path_key": "plate_training",
+            }
+        elif target == "char" and current_step_for_graph >= 3:
+            expected_context = {
+                "source": str(graph_context.get("source") or "campaign_graph_canonicalized"),
+                "graph_edge_key": "e3_to_e4",
+                "graph_gate_id": "T05",
+                "graph_visible_gate_id": "T05",
+                "graph_display_gate_id": "T05",
+                "graph_gate_label": "Dataset znaków",
+                "graph_transition_title": "Bramka datasetu znaków do treningu",
+                "graph_transition_source": "E3",
+                "graph_transition_target": "E4Z",
+                "graph_path_key": "",
+            }
+        if expected_context:
+            expected_gate_id = str(expected_context.get("graph_gate_id") or "").strip().upper()
+            expected_edge_key = str(expected_context.get("graph_edge_key") or "").strip()
+            if context_gate_id != expected_gate_id or context_edge_key != expected_edge_key:
+                graph_context.update(expected_context)
+                host._campaign_graph_entry_context = graph_context
+                try:
+                    logger.info(
+                        "[Z2 GRAPH] canonicalized stale gate context old_gate=%s old_edge=%s new_gate=%s new_edge=%s target=%s step=%s",
+                        context_gate_id or "-",
+                        context_edge_key or "-",
+                        expected_gate_id or "-",
+                        expected_edge_key or "-",
                         target,
                         current_step_for_graph,
                     )
@@ -520,16 +636,40 @@ def open_campaign_step2_entry(
                 bootstrap = {}
         _mark_phase("bootstrap")
 
+        if t02_at_review:
+            try:
+                start_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
+            except Exception:
+                start_source = {}
+            source_run = str(start_source.get("source_run_path") or "").strip()
+            source_xml = str(start_source.get("source_xml_path") or "").strip()
+            source_input = str(start_source.get("source_input_path") or "").strip()
+            if source_run:
+                graph_context.setdefault("restore_run_dir", source_run)
+            elif source_xml:
+                try:
+                    graph_context.setdefault("restore_run_dir", str(Path(source_xml).parent))
+                except Exception:
+                    pass
+            if source_input:
+                graph_context.setdefault("input_dir", source_input)
+            graph_context.setdefault("input_source", "t02_at_review")
+            graph_context.setdefault("z2_work_mode", "t02_at_review")
+            host._campaign_graph_entry_context = graph_context
+
         context_restore_run = None
         try:
             context_restore_run = graph_context.get("restore_run_dir")
         except Exception:
             context_restore_run = None
         try:
-            context_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+            context_gate_id = campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
         except Exception:
             context_gate_id = ""
-        if context_restore_run is not None and (target == "plate" or context_gate_id == "T06"):
+        if context_restore_run is not None and (target == "plate" or context_gate_id in {"T02", "T05"} or t02_at_review):
             try:
                 context_run_dir = host._resolve_safe_annotation_run_dir(
                     context_restore_run,
@@ -671,19 +811,113 @@ def open_campaign_step2_entry(
             or open_detected_run
             or not restore_preview_during_context
         )
+        reused_loaded_t02_run = False
+        repopulate_loaded_t02_list = False
+        if t02_at_review and restore_run_dir is not None:
+            try:
+                safe_restore_run = host._resolve_safe_annotation_run_dir(
+                    restore_run_dir,
+                    require_xml=True,
+                )
+            except Exception:
+                safe_restore_run = None
+            try:
+                safe_current_run = host._resolve_safe_annotation_run_dir(
+                    getattr(host, "current_annotation_run_dir", None),
+                    require_xml=True,
+                )
+            except Exception:
+                safe_current_run = None
+            same_loaded_run = False
+            if safe_restore_run is not None and safe_current_run is not None:
+                try:
+                    same_loaded_run = host._paths_equivalent(safe_restore_run, safe_current_run)
+                except Exception:
+                    same_loaded_run = bool(Path(safe_restore_run).resolve() == Path(safe_current_run).resolve())
+            if (
+                same_loaded_run
+                and bool(getattr(host, "current_annotations", None))
+                and not bool(getattr(host, "_campaign_deferred_run_restore_in_progress", False))
+            ):
+                try:
+                    host.current_input_dir = Path(input_dir)
+                    host.input_dir_var.set(str(input_dir))
+                    host.plate_dataset_images_var.set(str(input_dir))
+                    host.current_annotation_run_dir = safe_current_run
+                    host.current_annotation_xml_path = Path(safe_current_run) / "annotations.xml"
+                    host.last_staging_run_dir = safe_current_run
+                    host.plate_dataset_run_var.set(str(safe_current_run))
+                except Exception:
+                    pass
+                try:
+                    visible_rows = int(getattr(host, "preview_listbox", None).size() or 0)
+                except Exception:
+                    visible_rows = 0
+                try:
+                    expected_rows = int(len(getattr(host, "current_annotations", []) or []))
+                except Exception:
+                    expected_rows = 0
+                reused_loaded_t02_run = True
+                repopulate_loaded_t02_list = bool(expected_rows > 0 and visible_rows < expected_rows)
+                opened_existing_run = True
+                open_detected_run = False
+                defer_existing_run_ui_restore = False
+                skip_project_state_restore = True
+                defer_initial_preview_load = False
+                try:
+                    apply_campaign_step2_workflow_preset(
+                        host,
+                        iteration_target=target,
+                        manual_template=manual_template,
+                    )
+                except Exception:
+                    pass
+                try:
+                    host._refresh_free_mode_workflow_ui()
+                except Exception:
+                    pass
+                try:
+                    host._reset_main_pane_left_width_for_z2()
+                except Exception:
+                    pass
+                try:
+                    logger.info(
+                        "[Z2 PERF] reuse_loaded_t02_run annotations=%s listbox=%s run=%s",
+                        expected_rows,
+                        visible_rows,
+                        safe_current_run,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    logger.info(
+                        "[Z2 PERF] reuse_loaded_t02_run skipped same=%s annotations=%s deferred=%s restore=%s current=%s",
+                        bool(same_loaded_run),
+                        int(len(getattr(host, "current_annotations", []) or [])),
+                        bool(getattr(host, "_campaign_deferred_run_restore_in_progress", False)),
+                        safe_restore_run,
+                        safe_current_run,
+                    )
+                except Exception:
+                    pass
 
-        restored_snapshot = host.apply_campaign_context(
-            input_dir,
-            Path(auto_out),
-            manual_template=effective_manual_template,
-            mode_text=campaign_mode_text,
-            restore_project_state=bool(not skip_project_state_restore),
-            restore_preview=restore_preview_during_context,
-            defer_preview_load=defer_context_source_preview,
-            refresh_export_sources=False,
-            refresh_character_models=False,
-        )
-        _mark_phase("apply_context")
+        if reused_loaded_t02_run:
+            restored_snapshot = False
+            _mark_phase("reuse_loaded_t02_run")
+        else:
+            restored_snapshot = host.apply_campaign_context(
+                input_dir,
+                Path(auto_out),
+                manual_template=effective_manual_template,
+                mode_text=campaign_mode_text,
+                restore_project_state=bool(not skip_project_state_restore),
+                restore_preview=restore_preview_during_context,
+                defer_preview_load=defer_context_source_preview,
+                refresh_export_sources=False,
+                refresh_character_models=False,
+            )
+            _mark_phase("apply_context")
 
         if skip_project_state_restore and isinstance(snapshot_state, dict):
             try:
@@ -699,7 +933,7 @@ def open_campaign_step2_entry(
             open_detected_run = False
             defer_existing_run_ui_restore = False
 
-        if not restored_snapshot and not open_detected_run:
+        if not restored_snapshot and not open_detected_run and not reused_loaded_t02_run:
             if vehicle_model_path and Path(vehicle_model_path).exists():
                 host.vehicle_model_var.set("Custom")
                 host.vehicle_custom_var.set(vehicle_model_path)
@@ -764,7 +998,8 @@ def open_campaign_step2_entry(
             current_route = ""
 
         force_campaign_preset = bool(
-            not opened_existing_run
+            not reused_loaded_t02_run
+            and not opened_existing_run
             and target in {"plate", "char"}
             and effective_manual_template
             and current_route != "manual"
@@ -783,29 +1018,35 @@ def open_campaign_step2_entry(
                 manual_template=effective_manual_template,
             )
 
-        try:
-            host._refresh_free_mode_workflow_ui()
-        except Exception:
-            pass
+        if reused_loaded_t02_run:
+            try:
+                host.frame.after_idle(host._sync_right_panel_scrollregion)
+            except Exception:
+                pass
+        else:
+            try:
+                host._refresh_free_mode_workflow_ui()
+            except Exception:
+                pass
 
-        try:
-            host._reset_main_pane_left_width_for_z2()
-        except Exception:
-            pass
+            try:
+                host._reset_main_pane_left_width_for_z2()
+            except Exception:
+                pass
 
-        try:
-            host._scroll_left_panel_to_widget(
-                getattr(host, "workflow_start_section", None)
-                or getattr(host, "source_section", None)
-                or getattr(host, "actions_section", None)
-            )
-        except Exception:
-            pass
+            try:
+                host._scroll_left_panel_to_widget(
+                    getattr(host, "workflow_start_section", None)
+                    or getattr(host, "source_section", None)
+                    or getattr(host, "actions_section", None)
+                )
+            except Exception:
+                pass
 
-        try:
-            host._refresh_step2_action_states()
-        except Exception:
-            pass
+            try:
+                host._refresh_step2_action_states()
+            except Exception:
+                pass
 
         if (
             effective_manual_template
@@ -853,6 +1094,8 @@ def open_campaign_step2_entry(
             "deferred_existing_run_restore": bool(
                 defer_existing_run_ui_restore and opened_existing_run
             ),
+            "reused_loaded_run": bool(reused_loaded_t02_run),
+            "repopulate_preview_list": bool(repopulate_loaded_t02_list),
         }
     except Exception as e:
         logger.error(f"Nie udalo sie otworzyc punktu startowego Z2: {e}")
@@ -896,6 +1139,7 @@ def build_z2_layout_state_campaign(
     has_existing_run: bool,
 ) -> dict[str, Any]:
     campaign_stage2 = int(campaign_stage or 0) == 2
+    t02_at_review_context = bool(is_campaign_t02_at_review_context(host))
     show_export_followup = bool(host._manual_review_export_ready)
     show_auto_followup = bool(
         auto_completed
@@ -944,7 +1188,13 @@ def build_z2_layout_state_campaign(
     show_campaign_context_header = bool(
         True
         and not show_workflow_steps
-        and bool(route or manual_review_active or has_existing_run or campaign_stage >= 3)
+        and bool(
+            route
+            or manual_review_active
+            or has_existing_run
+            or campaign_stage >= 3
+            or t02_at_review_context
+        )
     )
     return Z2LayoutState(
         show_export_followup=show_export_followup,
@@ -962,6 +1212,7 @@ def build_z2_layout_state_campaign(
             (
                 int(campaign_stage or 0) == 2
                 or int(campaign_stage or 0) == 3
+                or t02_at_review_context
                 or host._is_campaign_char_repair_return_mode()
                 or host._is_campaign_plate_step4_repair_return_mode()
             )
@@ -1220,12 +1471,15 @@ def _get_campaign_graph_entry_context(host: "AnnotationTab") -> dict[str, Any]:
 
 def _is_campaign_graph_t05_repair_from_t07(host: "AnnotationTab", graph_context: dict[str, Any] | None = None) -> bool:
     context = dict(graph_context or _get_campaign_graph_entry_context(host))
-    gate_id = str(context.get("graph_gate_id") or "").strip().upper()
-    origin_gate_id = str(context.get("repair_origin_gate_id") or context.get("source_graph_gate_id") or "").strip().upper()
-    if gate_id == "T05" and origin_gate_id == "T07":
+    gate_id = campaign_gate_id_for_edge(context.get("graph_edge_key"), context.get("graph_gate_id"))
+    origin_gate_id = campaign_gate_id_for_edge(
+        context.get("repair_origin_edge_key") or context.get("source_graph_edge_key"),
+        context.get("repair_origin_gate_id") or context.get("source_graph_gate_id"),
+    )
+    if gate_id == "T04" and origin_gate_id == "T06":
         return True
     try:
-        return bool(gate_id == "T05" and host._is_campaign_plate_step4_repair_return_mode())
+        return bool(gate_id == "T04" and host._is_campaign_plate_step4_repair_return_mode())
     except Exception:
         return False
 
@@ -1236,29 +1490,29 @@ def _apply_campaign_graph_gate_copy_payload(
     payload: Z2CopyPayload,
 ) -> Z2CopyPayload:
     graph_context = _get_campaign_graph_entry_context(host)
-    gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    if gate_id not in {"T04", "T05", "T06"}:
+    gate_id = campaign_gate_id_for_edge(graph_context.get("graph_edge_key"), graph_context.get("graph_gate_id"))
+    if gate_id not in {"T03", "T04", "T05"}:
         return payload
     display_gate_id = campaign_visible_gate_id(gate_id) or gate_id
 
     default_gate_label = {
-        "T04": "Przekazanie tablic do pracy nad znakami",
-        "T05": "Dataset i trening modelu tablic",
-        "T06": "Uzupełnienie tablic dla znaków",
+        "T03": "Przekazanie tablic do pracy nad znakami",
+        "T04": "Dataset i trening modelu tablic",
+        "T05": "Uzupełnienie tablic dla znaków",
     }.get(gate_id, "Praca w Z2")
     gate_label = str(graph_context.get("graph_gate_label") or default_gate_label).strip()
-    target_label = "E3" if gate_id in {"T04", "T06"} else "E4T"
+    target_label = "E3" if gate_id in {"T03", "T05"} else "E4T"
     try:
         target_label = (
             str(graph_context.get("graph_transition_target") or target_label).strip().upper()
             or target_label
         )
     except Exception:
-        target_label = "E3" if gate_id in {"T04", "T06"} else "E4T"
+            target_label = "E3" if gate_id in {"T03", "T05"} else "E4T"
 
-    if gate_id == "T05" and _is_campaign_graph_t05_repair_from_t07(host, graph_context):
-        payload["run_title"] = "Naprawa tablic przed decyzją T07"
-        payload["badge_text"] = "Tryb naprawczy: powrót z T07 do Z2"
+    if gate_id == "T04" and _is_campaign_graph_t05_repair_from_t07(host, graph_context):
+        payload["run_title"] = "Naprawa tablic przed decyzją T06"
+        payload["badge_text"] = "Tryb naprawczy: powrót z T06 do Z2"
         payload["badge_tone"] = "warning"
         payload["route_tone"] = "muted"
         payload["run_intro_text"] = (
@@ -1267,19 +1521,19 @@ def _apply_campaign_graph_gate_copy_payload(
         )
         payload["route_text"] = (
             "Dodaj brakujące ramki tablic albo popraw istniejące. Poprawne obrazy oznaczaj statusem [OK]; "
-            "po wyjściu wrócisz bezpośrednio do bramki T07."
+            "po wyjściu wrócisz bezpośrednio do bramki T06."
         )
         payload["action_text"] = (
-            "Po zakończeniu pracy wróć do grafu i podejmij decyzję na T07."
+            "Po zakończeniu pracy wróć do grafu i podejmij decyzję na T06."
         )
         payload["workflow_start_title"] = "Napraw lub dopisz tablice"
         payload["workflow_start_intro"] = (
             "Pracuj ręcznie na podglądzie albo uruchom autoanotację jako wsparcie. "
             "Nowe poprawne obrazy oznacz [OK], żeby mogły zasilić dalszy krok projektu."
         )
-        payload["followup_title"] = "Powrót do T07"
+        payload["followup_title"] = "Powrót do T06"
         payload["followup_text"] = (
-            "Po zapisaniu zmian wróć do grafu. T07 zdecyduje, czy przejść do treningu, czy zakończyć etap bez treningu."
+            "Po zapisaniu zmian wróć do grafu. T06 zdecyduje, czy przejść do treningu, czy zakończyć etap bez treningu."
         )
         payload["export_title"] = "Materiał tablic do dalszej pracy"
         payload["export_text"] = (
@@ -1291,7 +1545,7 @@ def _apply_campaign_graph_gate_copy_payload(
         payload["auto_plate_model_hint_tone"] = "muted"
         return payload
 
-    if gate_id == "T06":
+    if gate_id == "T05":
         payload["run_title"] = f"Praca nad otwarciem bramki {CHAR_WORK_GATE_DISPLAY_ID}"
         payload["badge_text"] = f"Aktywna bramka: {CHAR_WORK_GATE_DISPLAY_ID} - {gate_label}"
         payload["badge_tone"] = "success"
@@ -1330,37 +1584,37 @@ def _apply_campaign_graph_gate_copy_payload(
         payload["auto_plate_model_hint_tone"] = "muted"
         return payload
 
-    if gate_id == "T04":
-        payload["run_title"] = "Praca nad otwarciem bramki T04"
-        payload["badge_text"] = f"Aktywna bramka: T04 - {gate_label}"
+    if gate_id == "T03":
+        payload["run_title"] = "Praca nad otwarciem bramki T03"
+        payload["badge_text"] = f"Aktywna bramka: T03 - {gate_label}"
         payload["badge_tone"] = "success"
         payload["route_tone"] = "muted"
         payload["run_intro_text"] = (
-            "Z2 zostało otwarte z bramki T04. Celem jest przygotowanie zatwierdzonych "
+            "Z2 zostało otwarte z bramki T03. Celem jest przygotowanie zatwierdzonych "
             "anotacji tablic, z których Z3 wyodrębni tablice do pracy nad znakami."
         )
         payload["route_text"] = (
             "Rysuj lub poprawiaj ramki tablic, a poprawne obrazy oznaczaj statusem [OK] "
-            "na liście wyników. To status [OK] zasila licznik bramki T04."
+            "na liście wyników. To status [OK] zasila licznik bramki T03."
         )
         payload["action_text"] = (
-            "Gdy bramka T04 będzie otwarta, wróć do mapy kampanii i użyj pola Zatwierdź "
-            "na bramce T04. Jeśli chcesz powiększyć źródło znaków, pracuj dalej w tym samym Z2."
+            "Gdy bramka T03 będzie otwarta, wróć do mapy kampanii i użyj pola Zatwierdź "
+            "na bramce T03. Jeśli chcesz powiększyć źródło znaków, pracuj dalej w tym samym Z2."
         )
-        payload["workflow_start_title"] = "Praca nad otwarciem bramki T04"
+        payload["workflow_start_title"] = "Praca nad otwarciem bramki T03"
         payload["workflow_start_intro"] = (
             "Możesz pracować ręcznie albo uruchomić autoanotację jako wsparcie. "
             "Autoanotacja nie zamyka bramki samodzielnie: wynik trzeba sprawdzić i oznaczyć "
             "poprawne obrazy statusem [OK]."
         )
-        payload["followup_title"] = "Domknięcie bramki T04"
+        payload["followup_title"] = "Domknięcie bramki T03"
         payload["followup_text"] = (
             "Po osiągnięciu wymaganego minimum wróć do mapy kampanii. "
-            f"Pole Zatwierdź na T04 przenosi dalej do {target_label} i pracy nad znakami."
+            f"Pole Zatwierdź na T03 przenosi dalej do {target_label} i pracy nad znakami."
         )
         payload["export_title"] = "Źródło tablic dla znaków"
         payload["export_text"] = (
-            "Eksport datasetu tablic nie jest wymagany do przejścia przez T04. "
+            "Eksport datasetu tablic nie jest wymagany do przejścia przez T03. "
             "Najważniejsze są zatwierdzone obrazy [OK] z poprawnymi anotacjami tablic, "
             "bo z nich Z3 przygotuje tablice do oznaczania znaków."
         )
@@ -1371,35 +1625,35 @@ def _apply_campaign_graph_gate_copy_payload(
         payload["auto_plate_model_hint_tone"] = "muted"
         return payload
 
-    payload["run_title"] = "Bramka T05: trening modelu tablic"
-    payload["badge_text"] = f"Aktywna bramka: T05 - {gate_label}"
+    payload["run_title"] = "Bramka T04: trening modelu tablic"
+    payload["badge_text"] = f"Aktywna bramka: T04 - {gate_label}"
     payload["badge_tone"] = "success"
     payload["route_tone"] = "muted"
     payload["run_intro_text"] = (
-        "Z2 zostało otwarte z bramki T05. Celem tej pracy jest przygotowanie zatwierdzonych anotacji tablic, "
+        "Z2 zostało otwarte z bramki T04. Celem tej pracy jest przygotowanie zatwierdzonych anotacji tablic, "
         f"z których w {target_label} powstanie dataset do treningu modelu tablic."
     )
     payload["route_text"] = (
         "Rysuj lub poprawiaj ramki tablic, a poprawne obrazy oznaczaj statusem [OK] na liście wyników. "
-        "To status [OK] zasila licznik bramki T05."
+        "To status [OK] zasila licznik bramki T04."
     )
     payload["action_text"] = (
-        "Gdy bramka T05 będzie otwarta, wróć do mapy kampanii i użyj pola Zatwierdź na bramce T05. "
+        "Gdy bramka T04 będzie otwarta, wróć do mapy kampanii i użyj pola Zatwierdź na bramce T04. "
         "Jeżeli chcesz tylko dopisać kolejne anotacje, pracuj dalej w tym samym widoku Z2."
     )
-    payload["workflow_start_title"] = "Praca nad otwarciem bramki T05"
+    payload["workflow_start_title"] = "Praca nad otwarciem bramki T04"
     payload["workflow_start_intro"] = (
         "Możesz pracować ręcznie albo uruchomić autoanotację jako wsparcie. "
         "Autoanotacja nie zamyka bramki samodzielnie: wynik trzeba sprawdzić i oznaczyć poprawne obrazy statusem [OK]."
     )
-    payload["followup_title"] = "Domknięcie bramki T05"
+    payload["followup_title"] = "Domknięcie bramki T04"
     payload["followup_text"] = (
         "Po osiągnięciu wymaganego minimum wróć do mapy kampanii. "
-        "Pole Zatwierdź na T05 przenosi dalej do przygotowania treningu modelu tablic."
+        "Pole Zatwierdź na T04 przenosi dalej do przygotowania treningu modelu tablic."
     )
     payload["export_title"] = "Dataset tablic dla treningu"
     payload["export_text"] = (
-        "Eksport datasetu YOLO Pose jest możliwy dopiero wtedy, gdy bramka T05 ma wystarczającą liczbę "
+        "Eksport datasetu YOLO Pose jest możliwy dopiero wtedy, gdy bramka T04 ma wystarczającą liczbę "
         "zatwierdzonych obrazów z anotacjami tablic."
     )
     payload["auto_plate_model_hint_text"] = (
@@ -1419,7 +1673,7 @@ def _apply_campaign_graph_gate_copy_payload(
         )
         payload["action_text"] = (
             "Rysuj ramki tablic i oznacz poprawne obrazy statusem [OK]. "
-            "Te zatwierdzone obrazy zasilą bramkę T05 i późniejszy trening modelu tablic."
+            "Te zatwierdzone obrazy zasilą bramkę T04 i późniejszy trening modelu tablic."
         )
         payload["manual_hint"] = (
             "XML jest technicznym plikiem roboczym tej bramki. Program zapisuje go w obszarze projektu, "
@@ -1457,6 +1711,18 @@ def build_z2_left_panel_copy_payload_campaign(
     manual_review_active = bool(ctx.manual_review_active)
     has_manual_history = bool(ctx.has_manual_history)
     auto_completed = bool(ctx.auto_completed)
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    t02_at_review = bool(
+        str(graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or graph_gate_id == "T02"
+    )
     if not route and campaign_stage == 2 and campaign_iteration_target == "char":
         payload["run_title"] = "Anotacja i korekta tablic"
         payload["badge_text"] = "Aktywny tor: przygotowanie źródła dla znaków"
@@ -1743,5 +2009,26 @@ def build_z2_left_panel_copy_payload_campaign(
                 "Na katalogu zdjęć tej iteracji ręcznie ustawiasz rogi tablic i budujesz startowy run Z2, "
                 "który później zatwierdzi E2 i posłuży do dalszego treningu."
             )
+
+    if t02_at_review:
+        payload["run_title"] = "Kontrola importu AT w Z2"
+        payload["run_intro_text"] = (
+            "To jest robocza kontrola anotacji tablic zaimportowanych do zasobów bramki T02."
+        )
+        payload["badge_text"] = "Bramka T02: kontrola AT względem aktualnego zbioru O"
+        payload["badge_tone"] = "warning"
+        payload["route_text"] = (
+            "Z2 pokazuje run importu AT. Sprawdź ramki tablic tylko dla pasujących obrazów "
+            "i oznacz [OK] pozycje, które mają zasilić projektowe źródło tablic."
+        )
+        payload["action_text"] = (
+            "Po zakończeniu wróć do T02. Bramka nie zostanie zatwierdzona automatycznie; "
+            "dopiero decyzja na grafie zamyka ten skrót i prowadzi do pracy nad znakami."
+        )
+        payload["workflow_start_title"] = "Kontroluj import AT"
+        payload["workflow_start_intro"] = (
+            "Popraw lub zaakceptuj ramki tablic, a poprawnym obrazom nadaj status [OK]. "
+            "Te [OK] są realnym wynikiem kontroli T02."
+        )
 
     return _apply_campaign_graph_gate_copy_payload(host, ctx, payload)
