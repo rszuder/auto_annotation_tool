@@ -1127,6 +1127,23 @@ def _get_run_plate_approved_counts(self, run_dir: Path | None) -> tuple[int, int
         except Exception:
             return 0, 0
         approved_filenames = self._load_annotation_run_approved_filenames(run_dir)
+        if not approved_filenames:
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                state_dir = CAMPAIGN.get_project_state_dir()
+                state_path = Path(state_dir) / "annotation_ui_state.json" if state_dir is not None else None
+                if state_path is not None and state_path.exists():
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    state_run = str(state.get("plate_dataset_run") or state.get("last_preview_run_dir") or "").strip()
+                    if state_run and self._paths_equivalent(Path(state_run), run_dir):
+                        approved_filenames = {
+                            str(name or "").strip().lower()
+                            for name in list(state.get("preview_approved_filenames") or [])
+                            if str(name or "").strip()
+                        }
+            except Exception:
+                approved_filenames = set()
 
     if not annotations:
         return 0, 0
@@ -1200,6 +1217,23 @@ def _get_run_plate_strict_approved_state(self, run_dir: Path | None) -> dict:
         except Exception:
             annotations = []
         approved_filenames = self._load_annotation_run_approved_filenames(safe_run_dir)
+        if not approved_filenames:
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                state_dir = CAMPAIGN.get_project_state_dir()
+                state_path = Path(state_dir) / "annotation_ui_state.json" if state_dir is not None else None
+                if state_path is not None and state_path.exists():
+                    ui_state = json.loads(state_path.read_text(encoding="utf-8"))
+                    state_run = str(ui_state.get("plate_dataset_run") or ui_state.get("last_preview_run_dir") or "").strip()
+                    if state_run and self._paths_equivalent(Path(state_run), safe_run_dir):
+                        approved_filenames = {
+                            str(name or "").strip().lower()
+                            for name in list(ui_state.get("preview_approved_filenames") or [])
+                            if str(name or "").strip()
+                        }
+            except Exception:
+                approved_filenames = set()
 
     total_images = len(annotations)
     _images_with_plates, total_plates = self._count_plate_annotations(annotations)
@@ -1348,25 +1382,46 @@ def _get_campaign_step2_approval_context(self) -> dict:
     ):
         return context
 
-    staging_candidate = self._resolve_existing_run_dir(CAMPAIGN.get_step2_staging_run())
-    if staging_candidate is not None and (staging_candidate / "annotations.xml").exists():
-        context["run_dir"] = staging_candidate
-        context["source_kind"] = "staging"
-        return context
-
+    staging_root = None
+    auto_root = None
     allowed_roots = []
     try:
         staging_root = CAMPAIGN.get_staging_dir("auto_ann")
         if staging_root is not None:
-            allowed_roots.append(Path(staging_root))
+            staging_root = Path(staging_root)
+            allowed_roots.append(staging_root)
     except Exception:
-        pass
+        staging_root = None
     try:
         auto_root = CAMPAIGN.get_dir("auto_ann")
         if auto_root is not None:
-            allowed_roots.append(Path(auto_root))
+            auto_root = Path(auto_root)
+            allowed_roots.append(auto_root)
     except Exception:
-        pass
+        auto_root = None
+
+    def _classify_campaign_annotation_run(candidate: Path | None) -> str:
+        if candidate is None:
+            return ""
+        try:
+            if staging_root is not None and self._path_is_within(candidate, staging_root):
+                return "staging"
+        except Exception:
+            pass
+        try:
+            if auto_root is not None and self._path_is_within(candidate, auto_root):
+                return "existing"
+        except Exception:
+            pass
+        return ""
+
+    staging_candidate = self._resolve_existing_run_dir(CAMPAIGN.get_step2_staging_run())
+    if staging_candidate is not None and (staging_candidate / "annotations.xml").exists():
+        source_kind = _classify_campaign_annotation_run(staging_candidate)
+        if source_kind:
+            context["run_dir"] = staging_candidate
+            context["source_kind"] = source_kind
+            return context
 
     if context["iteration_target"] == "plate":
         try:

@@ -161,7 +161,7 @@ def _start_training(self):
         pinned_state = {}
     if pinned_state:
         return messagebox.showinfo(
-            "Model przypięty",
+            "Wynik bramki przypięty",
             (
                 "Ta bramka ma już przypięty model wynikowy.\n\n"
                 "Aby uruchomić nowy trening albo zmienić konfigurację, najpierw użyj `Odepnij wynik`."
@@ -684,6 +684,11 @@ def _bind_trainer_callbacks(self):
             pass
 
         status_text, status_color = self._resolve_training_end_feedback(success, safe_msg)
+        if success and CAMPAIGN.get_active_project_name():
+            try:
+                self._preferred_campaign_training_result_run_id = str(getattr(self, "current_run_id", "") or "").strip()
+            except Exception:
+                pass
 
         self._ui(lambda: self.btn_start_train.configure(state=tk.NORMAL))
         self._ui(lambda: self.btn_pause_train.configure(state=tk.DISABLED))
@@ -771,6 +776,89 @@ def _reload_history_snapshot_from_disk(self) -> bool:
 
     return True
 
+def _configure_history_tree_tags(self):
+    tree = getattr(self, "tree", None)
+    if tree is None:
+        return
+    palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+    success = palette.get("success", "#2ecc71")
+    panel = palette.get("panel", "#252526")
+    pinned_bg = palette.get("surface_success", blend_hex_colors(success, panel, 0.88))
+    try:
+        tree.tag_configure("pinned_result", foreground=success, background=pinned_bg, font=("Segoe UI", 9, "bold"))
+    except Exception:
+        try:
+            tree.tag_configure("pinned_result", foreground=success, background=pinned_bg)
+        except Exception:
+            pass
+
+def _history_model_path_key(path_like) -> str:
+    raw = str(path_like or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).resolve()).casefold()
+    except Exception:
+        return raw.casefold()
+
+def _get_pinned_history_result_keys(self) -> tuple[set[str], set[str]]:
+    run_ids: set[str] = set()
+    model_keys: set[str] = set()
+
+    try:
+        active_target = str(_campaign_training_result_target(self) or "").strip().lower()
+    except Exception:
+        active_target = ""
+
+    def _target_matches(value: str) -> bool:
+        raw = str(value or "").strip().lower()
+        return bool(not active_target or not raw or raw == active_target)
+
+    try:
+        stored = dict(CAMPAIGN.get_step4_finish_state() or {})
+    except Exception:
+        stored = {}
+    if bool(stored.get("selection_confirmed")) and _target_matches(str(stored.get("target", "") or "")):
+        run_id = str(stored.get("run_id", "") or "").strip()
+        if run_id:
+            run_ids.add(run_id)
+        model_key = _history_model_path_key(stored.get("model_path", ""))
+        if model_key:
+            model_keys.add(model_key)
+
+    try:
+        project_name = CAMPAIGN.get_active_project_name()
+        project_data = (CAMPAIGN.state.get("projects", {}) or {}).get(project_name, {}) if project_name else {}
+    except Exception:
+        project_data = {}
+    if bool(project_data.get("step4_model_choice_confirmed", False)) and _target_matches(str(project_data.get("step4_last_target", "") or "")):
+        run_id = str(project_data.get("step4_last_run_id", "") or "").strip()
+        if run_id:
+            run_ids.add(run_id)
+        model_key = _history_model_path_key(project_data.get("step4_selected_model_path", ""))
+        if model_key:
+            model_keys.add(model_key)
+
+    candidate_targets = [active_target] if active_target in {"char", "plate"} else ["char", "plate"]
+    for target in candidate_targets:
+        try:
+            global_model = str(CAMPAIGN.get_global_model(target) or "").strip()
+        except Exception:
+            global_model = ""
+        model_key = _history_model_path_key(global_model)
+        if model_key:
+            model_keys.add(model_key)
+        if global_model:
+            try:
+                source_run = self._resolve_training_run_from_model_path(Path(global_model))
+            except Exception:
+                source_run = None
+            source_run_id = str(getattr(source_run, "id", "") or "").strip() if source_run is not None else ""
+            if source_run_id:
+                run_ids.add(source_run_id)
+
+    return run_ids, model_keys
+
 def _set_training_running_ui_state(self, run_id: str | None = None, *, status_text: str | None = None):
     resolved_run_id = str(run_id or getattr(self, "current_run_id", "") or "").strip()
 
@@ -839,6 +927,12 @@ def _load_history(self):
         except Exception:
             return raw.replace("T", " ")[:16] or fallback
 
+    _configure_history_tree_tags(self)
+    try:
+        pinned_run_ids, pinned_model_keys = _get_pinned_history_result_keys(self)
+    except Exception:
+        pinned_run_ids, pinned_model_keys = set(), set()
+
     self.tree.delete(*self.tree.get_children())
     for run in self.history.get_all_runs():
         if CAMPAIGN.get_active_project_name():
@@ -893,6 +987,13 @@ def _load_history(self):
             getattr(run, "started_at", None),
             fallback=_format_history_datetime(getattr(run, "created_at", None)),
         )
+        run_id = str(getattr(run, "id", "") or "").strip()
+        best_model_key = _history_model_path_key(best_weights)
+        row_is_pinned = bool(
+            (run_id and run_id in pinned_run_ids)
+            or (best_model_key and best_model_key in pinned_model_keys)
+        )
+        row_tags = ("pinned_result",) if row_is_pinned else ()
 
         self.tree.insert("", tk.END, iid=str(run.id), values=(
             target_label,
@@ -903,7 +1004,7 @@ def _load_history(self):
             self._format_history_run_status_label(run),
             f"{run.current_epoch}/{run.epochs}",
             f"{float(best_map):.3f}",
-        ))
+        ), tags=row_tags)
 
     if selected_run_id:
         for item_id in self.tree.get_children():
@@ -1120,6 +1221,10 @@ def _refresh_campaign_training_result_selector(self):
 
     def _select_campaign_result_label(label: str) -> None:
         try:
+            self._preferred_campaign_training_result_run_id = ""
+        except Exception:
+            pass
+        try:
             self.campaign_training_result_var.set(str(label or ""))
         except Exception:
             pass
@@ -1159,7 +1264,7 @@ def _refresh_campaign_training_result_selector(self):
         if action_btn is not None:
             action_btn.configure(
                 state=tk.DISABLED,
-                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                text=f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
                 command=self._use_campaign_training_result_choice,
             )
         _set_status("POZA KAMPANIĄ", "muted")
@@ -1194,9 +1299,15 @@ def _refresh_campaign_training_result_selector(self):
         selected_label = str(self.campaign_training_result_var.get() or "").strip()
     except Exception:
         selected_label = ""
+    preferred_run_id = str(getattr(self, "_preferred_campaign_training_result_run_id", "") or "").strip()
     if selected_label not in choices and finish_run_id and finish_run_id in set(choices.values()):
         for label, run_id in choices.items():
             if run_id == finish_run_id:
+                selected_label = label
+                break
+    elif not finish_run_id and preferred_run_id and preferred_run_id in set(choices.values()):
+        for label, run_id in choices.items():
+            if run_id == preferred_run_id:
                 selected_label = label
                 break
     elif selected_label not in choices and labels:
@@ -1225,7 +1336,7 @@ def _refresh_campaign_training_result_selector(self):
         if action_btn is not None:
             action_btn.configure(
                 state=tk.DISABLED,
-                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                text=f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
                 command=self._use_campaign_training_result_choice,
             )
         _set_status("BRAK KANDYDATA", "warning")
@@ -1254,7 +1365,7 @@ def _refresh_campaign_training_result_selector(self):
         if action_btn is not None:
             action_btn.configure(
                 state=tk.NORMAL,
-                text=f"Wybierz ten model jako wynik {_step4_finish_gate_display_id()}",
+                text=f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
                 command=self._use_campaign_training_result_choice,
             )
         _set_status("DO WYBORU", "warning")
@@ -1267,6 +1378,10 @@ def _refresh_campaign_training_result_selector(self):
         detail_lbl.configure(text=detail_text)
 
 def _on_campaign_training_result_choice(self, event=None):
+    try:
+        self._preferred_campaign_training_result_run_id = ""
+    except Exception:
+        pass
     _refresh_campaign_training_result_selector(self)
 
 def _use_campaign_training_result_choice(self):
@@ -1310,14 +1425,14 @@ def _promote_selected_run_model_to_campaign(self):
     if not CAMPAIGN.get_active_project_name():
         return messagebox.showwarning(
             "Brak projektu",
-            "Model projektu można wskazać tylko w aktywnej kampanii."
+            f"Wynik bramki {_step4_finish_gate_display_id()} można wskazać tylko w aktywnej kampanii."
         )
 
     status_value = str(getattr(run, "status", "") or "").strip().lower()
     if status_value != TrainingStatus.COMPLETED.value:
         return messagebox.showwarning(
             "Run nie jest gotowy",
-            "Jako model projektu można wskazać tylko trening zakończony sukcesem."
+            f"Jako wynik bramki {_step4_finish_gate_display_id()} można wskazać tylko trening zakończony sukcesem."
         )
     if not self._does_history_run_match_active_campaign_target(run):
         active_target = str(self.get_campaign_training_target() or CAMPAIGN.get_iteration_target() or "").strip().lower()
@@ -1357,7 +1472,7 @@ def _promote_selected_run_model_to_campaign(self):
     pinned_run_id = str(pinned_state.get("run_id", "") or "").strip()
     if pinned_run_id and pinned_run_id != run_id:
         return messagebox.showwarning(
-            "Model jest przypięty",
+            "Wynik bramki jest przypięty",
             (
                 "Ta bramka ma już przypięty model wynikowy.\n\n"
                 "Najpierw użyj `Odepnij wynik` w sekcji wyboru wyniku bramki, "
@@ -1396,6 +1511,10 @@ def _promote_selected_run_model_to_campaign(self):
     except Exception:
         pass
     try:
+        self._load_history()
+    except Exception:
+        pass
+    try:
         campaign_tab = self.app.tabs.get("campaign")
         if campaign_tab:
             campaign_tab._refresh_dashboard()
@@ -1405,7 +1524,7 @@ def _promote_selected_run_model_to_campaign(self):
     target_label = "znaków" if target == "char" else "tablic"
     try:
         self._append_train_log(
-            f"[MODEL] Jawnie wybrano model {target_label} projektu: {best_weights}"
+            f"[MODEL] Jawnie podpięto model {target_label} jako wynik bramki {_step4_finish_gate_display_id()}: {best_weights}"
         )
     except Exception:
         pass
@@ -1631,7 +1750,7 @@ def _show_history_context_menu(self, event=None):
         pass
     try:
         menu.entryconfigure(
-            "Użyj best.pt jako model projektu",
+            f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
             state=(tk.NORMAL if promotable else tk.DISABLED),
         )
     except Exception:
@@ -1883,7 +2002,7 @@ def _show_ranking_context_menu(self, event=None):
     try:
         menu = tk.Menu(tree, tearoff=0)
         menu.add_command(
-            label=f"Użyj jako wynik bramki {_step4_finish_gate_display_id()}",
+            label=f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
             command=self._use_selected_ranking_model_as_campaign_result,
             state=(tk.NORMAL if promotable else tk.DISABLED),
         )

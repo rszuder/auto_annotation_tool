@@ -111,6 +111,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -1036,6 +1037,7 @@ def _save_campaign_project_snapshot(self) -> bool:
 
 
 def _save_campaign_project_snapshot_with_options(self, *, include_preview_approved: bool = True) -> bool:
+    started_at = time.perf_counter()
     snapshot_path = self._get_campaign_annotation_state_path()
     if snapshot_path is None:
         return False
@@ -1053,6 +1055,16 @@ def _save_campaign_project_snapshot_with_options(self, *, include_preview_approv
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+        if elapsed_ms >= 180.0:
+            try:
+                logger.info(
+                    "[Z2 PERF] campaign_project_snapshot_save total=%.0fms include_ok=%s",
+                    elapsed_ms,
+                    int(bool(include_preview_approved)),
+                )
+            except Exception:
+                pass
         return True
     except Exception as e:
         logger.debug(f"Nie udalo sie zapisac projektowego stanu Z2: {e}")
@@ -1383,13 +1395,16 @@ def _is_campaign_plate_step4_repair_return_mode(self) -> bool:
             graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
         except Exception:
             graph_context = {}
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-        repair_origin_gate_id = str(
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+        repair_origin_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("repair_origin_edge_key"),
             graph_context.get("repair_origin_gate_id")
-            or graph_context.get("source_graph_gate_id")
-            or ""
-        ).strip().upper()
-        if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+            or graph_context.get("source_graph_gate_id"),
+        )
+        if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
             return True
 
         approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
@@ -2319,6 +2334,36 @@ def _queue_free_mode_session_save(self, *, include_preview_approved: bool = True
         self.flush_free_mode_session_state()
 
 
+def _mark_preview_user_interaction(self, *, quiet_ms: int = 1200) -> None:
+    try:
+        quiet_until = time.perf_counter() + (max(120, int(quiet_ms or 1200)) / 1000.0)
+    except Exception:
+        quiet_until = time.perf_counter() + 1.2
+    try:
+        self._preview_user_interaction_quiet_until = max(
+            float(getattr(self, "_preview_user_interaction_quiet_until", 0.0) or 0.0),
+            float(quiet_until),
+        )
+    except Exception:
+        self._preview_user_interaction_quiet_until = float(quiet_until)
+
+
+def _preview_user_interaction_quiet_remaining_ms(self, *, padding_ms: int = 180) -> int:
+    try:
+        quiet_until = float(getattr(self, "_preview_user_interaction_quiet_until", 0.0) or 0.0)
+    except Exception:
+        quiet_until = 0.0
+    if quiet_until <= 0.0:
+        return 0
+    try:
+        remaining = int(max(0.0, quiet_until - time.perf_counter()) * 1000.0)
+    except Exception:
+        remaining = 0
+    if remaining <= 0:
+        return 0
+    return max(80, remaining + max(0, int(padding_ms or 0)))
+
+
 def _cancel_campaign_char_effective_source_refresh(self) -> None:
     pending = getattr(self, "_campaign_char_effective_refresh_after_id", None)
     if pending:
@@ -2341,17 +2386,23 @@ def _campaign_char_effective_source_refresh_needed(self) -> bool:
         return False
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-        repair_origin_gate_id = str(
+        graph_edge_key = str(graph_context.get("graph_edge_key") or "").strip()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_edge_key,
+            graph_context.get("graph_gate_id"),
+        )
+        repair_origin_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("repair_origin_edge_key"),
             graph_context.get("repair_origin_gate_id")
-            or graph_context.get("source_graph_gate_id")
-            or ""
-        ).strip().upper()
-        if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+            or graph_context.get("source_graph_gate_id"),
+        )
+        if graph_gate_id == "T03" or graph_edge_key == "e2_to_e3":
+            return False
+        if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
             return False
     except Exception:
         pass
-    return bool(iteration_target == "char" or current_step >= 3)
+    return bool((iteration_target == "char" and current_step >= 3) or current_step >= 3)
 
 
 def _schedule_campaign_char_effective_source_refresh(self, *, delay_ms: int = 1800) -> None:
@@ -2362,6 +2413,10 @@ def _schedule_campaign_char_effective_source_refresh(self, *, delay_ms: int = 18
 
     def _run() -> None:
         self._campaign_char_effective_refresh_after_id = None
+        quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=350)
+        if quiet_remaining > 0:
+            self._schedule_campaign_char_effective_source_refresh(delay_ms=quiet_remaining)
+            return
         self._refresh_campaign_char_effective_source_after_approval()
 
     try:
@@ -2386,6 +2441,10 @@ def _schedule_preview_approved_persist(self, *, delay_ms: int = 6500) -> None:
 
     def _run() -> None:
         self._preview_approved_persist_after_id = None
+        quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=250)
+        if quiet_remaining > 0:
+            self._schedule_preview_approved_persist(delay_ms=quiet_remaining)
+            return
         self._persist_preview_approved_filenames()
 
     try:
@@ -2421,6 +2480,10 @@ def _schedule_preview_approval_followup_refresh(self, *, delay_ms: int = 650) ->
 
     def _run() -> None:
         self._preview_approval_followup_after_id = None
+        quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=350)
+        if quiet_remaining > 0:
+            self._schedule_preview_approval_followup_refresh(delay_ms=quiet_remaining)
+            return
         try:
             active_run_dir = self._get_active_annotation_run_dir(require_xml=True)
             if active_run_dir is not None:
@@ -2526,11 +2589,19 @@ def _schedule_preview_resume_persist(
 
     def _flush():
         self._preview_resume_persist_after_id = None
+        quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=220)
+        if quiet_remaining > 0:
+            self._schedule_preview_resume_persist(
+                include_preview_approved=include_preview_approved,
+                delay_ms=quiet_remaining,
+            )
+            return
         try:
             self._remember_annotation_run_resume_state()
         except Exception:
             pass
-        self._queue_free_mode_session_save(include_preview_approved=include_preview_approved)
+        if self._is_free_mode_session_context() or bool(include_preview_approved):
+            self._queue_free_mode_session_save(include_preview_approved=include_preview_approved)
 
     try:
         self._preview_resume_persist_after_id = self.frame.after(max(0, int(delay_ms)), _flush)
@@ -2549,6 +2620,7 @@ def _invalidate_preview_runtime_caches(self) -> None:
 
 
 def flush_free_mode_session_state(self):
+    flush_started_at = time.perf_counter()
     pending = getattr(self, "_free_mode_session_save_after_id", None)
     if pending:
         try:
@@ -2556,6 +2628,16 @@ def flush_free_mode_session_state(self):
         except Exception:
             pass
     self._free_mode_session_save_after_id = None
+    quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=350)
+    if quiet_remaining > 0:
+        try:
+            self._free_mode_session_save_after_id = self.frame.after(
+                int(quiet_remaining),
+                self.flush_free_mode_session_state,
+            )
+        except Exception:
+            self._free_mode_session_save_after_id = None
+        return
     include_preview_approved = bool(
         getattr(self, "_pending_session_save_include_preview_approved", True)
     )
@@ -2590,6 +2672,17 @@ def flush_free_mode_session_state(self):
     self._save_campaign_project_snapshot_with_options(
         include_preview_approved=include_preview_approved,
     )
+    elapsed_ms = max(0.0, (time.perf_counter() - flush_started_at) * 1000.0)
+    if elapsed_ms >= 180.0:
+        try:
+            logger.info(
+                "[Z2 PERF] session_flush total=%.0fms include_ok=%s campaign=%s",
+                elapsed_ms,
+                int(bool(include_preview_approved)),
+                int(not self._is_free_mode_session_context()),
+            )
+        except Exception:
+            pass
 
 
 def _apply_free_mode_session_snapshot(self, *args, **kwargs):

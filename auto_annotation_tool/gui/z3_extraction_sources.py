@@ -464,11 +464,54 @@ def get_extract_preview_ready_count(host: "CharacterAnnotationTab", preview_dir=
 
 def extract_source_plate_tokens_from_filename(filename: str) -> list[str]:
     stem = Path(str(filename or "")).stem.upper()
-    return [
-        match.group(0).strip().upper()
-        for match in re.finditer(r"[A-Z0-9]{4,}", stem)
-        if match.group(0).strip()
+    if not stem:
+        return []
+
+    ignore_tokens = {
+        "PLATE",
+        "PLATES",
+        "TABLICA",
+        "TABLICE",
+        "IMG",
+        "IMAGE",
+        "PHOTO",
+        "RAW",
+        "SOURCE",
+        "RUN",
+        "SAMPLE",
+        "SAMPLES",
+        "FRAME",
+        "CAPTURE",
+        "PREVIEW",
+        "FILE",
+        "PLIK",
+        "CROP",
+    }
+    parts = [
+        str(match.group(0) or "").strip().upper()
+        for match in re.finditer(r"[A-Z0-9]+", stem)
+        if str(match.group(0) or "").strip()
     ]
+    parts = [part for part in parts if part not in ignore_tokens]
+    if len(parts) > 1 and parts[-1].isdigit():
+        previous_plate_like = any(
+            3 <= len(part) <= 12
+            and (any(ch.isalpha() for ch in part) or part.isdigit())
+            for part in parts[:-1]
+        )
+        if previous_plate_like:
+            parts = parts[:-1]
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen or len(part) < 3 or len(part) > 12:
+            continue
+        if not any(ch.isalpha() for ch in part) and not part.isdigit():
+            continue
+        seen.add(part)
+        tokens.append(part)
+    return tokens
 
 
 def plate_cut_reading_order_key(index_and_detection):
@@ -865,7 +908,7 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
     )
     ordered_plates = [detection for _, detection in ordered_pairs]
     expected_tokens = host._extract_source_plate_tokens_from_filename(image_name)
-    has_direct_mapping = bool(expected_tokens and len(expected_tokens) == len(ordered_plates))
+    has_direct_mapping = bool(len(expected_tokens) == 1 and len(ordered_plates) == 1)
     expected_tokens_json = json.dumps(expected_tokens, ensure_ascii=False) if expected_tokens else "[]"
 
     for sorted_index, detection in enumerate(ordered_plates):
@@ -877,6 +920,7 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
             attributes["source_expected_text"] = expected_tokens[sorted_index]
             attributes["source_expected_text_source"] = "filename_order"
         elif expected_tokens:
+            attributes.pop("source_expected_text", None)
             attributes["source_expected_text_source"] = "ambiguous_filename_tokens"
         detection.attributes = attributes
 
@@ -917,7 +961,7 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
                 )
             ),
         )
-        direct_mapping = bool(len(expected_tokens) == len(ordered_items))
+        direct_mapping = bool(len(expected_tokens) == 1 and len(ordered_items) == 1)
         for sorted_index, (_plate_id, data) in enumerate(ordered_items):
             if data.get("source_plate_index") != sorted_index:
                 data["source_plate_index"] = sorted_index
@@ -933,9 +977,13 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
                 data["source_expected_text"] = expected_tokens[sorted_index]
                 data["source_expected_text_source"] = "filename_order_backfill"
                 changed = True
-            elif not direct_mapping and not str(data.get("source_expected_text_source") or "").strip():
-                data["source_expected_text_source"] = "ambiguous_filename_tokens"
-                changed = True
+            elif not direct_mapping:
+                if str(data.get("source_expected_text_source") or "").strip() != "ambiguous_filename_tokens":
+                    data["source_expected_text_source"] = "ambiguous_filename_tokens"
+                    changed = True
+                if str(data.get("source_expected_text") or "").strip():
+                    data["source_expected_text"] = None
+                    changed = True
 
             attrs = data.get("plate_attributes")
             if isinstance(attrs, dict):
@@ -946,5 +994,12 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
                     attrs["source_expected_text"] = expected_tokens[sorted_index]
                     attrs["source_expected_text_source"] = "filename_order_backfill"
                     changed = True
+                elif not direct_mapping:
+                    if str(attrs.get("source_expected_text_source") or "").strip() != "ambiguous_filename_tokens":
+                        attrs["source_expected_text_source"] = "ambiguous_filename_tokens"
+                        changed = True
+                    if str(attrs.get("source_expected_text") or "").strip():
+                        attrs.pop("source_expected_text", None)
+                        changed = True
 
     return changed

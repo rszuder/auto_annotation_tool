@@ -112,6 +112,8 @@ from .z4_view_models import (
 )
 
 NAV_BUTTON_WIDTH = 18
+STEP4_PZ1_SECTION_TITLE_FONT = ("Segoe UI Semibold", 10)
+STEP4_PZ1_SECTION_TITLE_PADY = (8, 7)
 
 if PIL_AVAILABLE:
     from PIL import Image, ImageDraw, ImageFont
@@ -140,6 +142,45 @@ def _get_step4_table_colors(self):
     }
 
 
+def _ensure_step4_pz1_section_styles(self):
+    colors = _get_step4_table_colors(self)
+    palette = getattr(self.app, "palette", {})
+    try:
+        style = ttk.Style()
+        style.configure(
+            "Step4PZ1Section.TLabelframe",
+            background=palette.get("panel", "#252526"),
+            foreground=colors["fg"],
+        )
+        style.configure(
+            "Step4PZ1Section.TLabelframe.Label",
+            font=STEP4_PZ1_SECTION_TITLE_FONT,
+            foreground=colors["accent"],
+            background=palette.get("panel", "#252526"),
+        )
+    except Exception:
+        pass
+
+
+def _make_step4_pz1_section_title(self, parent, text: str):
+    colors = _get_step4_table_colors(self)
+    palette = getattr(self.app, "palette", {})
+    label = tk.Label(
+        parent,
+        text=text,
+        font=STEP4_PZ1_SECTION_TITLE_FONT,
+        padx=2,
+        pady=0,
+        anchor="w",
+        bd=0,
+        highlightthickness=0,
+        bg=palette.get("panel", "#252526"),
+        fg=colors["accent"],
+    )
+    label.pack(fill=tk.X, pady=STEP4_PZ1_SECTION_TITLE_PADY)
+    return label
+
+
 def _make_step4_action_shell(self, parent, *, title: str, description: str):
     palette = getattr(self.app, "palette", {})
     panel = palette.get("panel", "#252526")
@@ -159,7 +200,7 @@ def _make_step4_action_shell(self, parent, *, title: str, description: str):
     tk.Label(
         inner,
         text=title,
-        font=("Segoe UI Semibold", 10),
+        font=STEP4_PZ1_SECTION_TITLE_FONT,
         fg=success,
         bg=bg,
         anchor="w",
@@ -303,15 +344,18 @@ def _make_step4_decision_table(self, parent, *, prefix: str, bg: str):
 
 
 def _build_step4_augmentation_controls(self, parent, *, target: str):
+    _ensure_step4_pz1_section_styles(self)
     normalized_target = CONFIG.normalize_task_target(target)
     prefix = "creator" if normalized_target == "plate" else "split"
     target_label = "tablic" if normalized_target == "plate" else "znaków"
 
-    frame = ttk.LabelFrame(parent, text=" Syntetyczne zwiększanie datasetu ", padding=8)
-    frame.configure(text=f" 3. Syntetyczne powiększenie train ({target_label}) ")
-    frame.pack(fill=tk.X, pady=(6, 6))
-    target_label = "tablic" if normalized_target == "plate" else "znak\u00f3w"
-    frame.configure(text=f" 3. Syntetyczne powi\u0119kszenie train ({target_label}) ")
+    frame = ttk.LabelFrame(
+        parent,
+        text=f" 3. Syntetyczne powiększenie liczby {target_label} zbioru train ",
+        padding=10,
+        style="Step4PZ1Section.TLabelframe",
+    )
+    frame.pack(fill=tk.X, pady=(12, 8))
     setattr(self, f"{prefix}_augmentation_frame", frame)
 
     try:
@@ -460,6 +504,7 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
 
 
 def _build_creator_ui(self):
+    _ensure_step4_pz1_section_styles(self)
     f = self.ds_creator_frame
     palette = getattr(self.app, "palette", {})
     self.creator_intro_lbl = ttk.Label(
@@ -481,19 +526,7 @@ def _build_creator_ui(self):
     self.creator_flow_strip = _make_step4_flow_strip(self, f)
 
     summary_colors = _get_step4_table_colors(self)
-    self.creator_campaign_summary_title = tk.Label(
-        f,
-        text="1. Materia\u0142 projektu",
-        font=("Segoe UI Semibold", 9),
-        padx=2,
-        pady=2,
-        anchor="w",
-        bd=0,
-        highlightthickness=0,
-        bg=palette.get("panel", "#252526"),
-        fg=summary_colors["fg"],
-    )
-    self.creator_campaign_summary_title.pack(fill=tk.X, pady=(0, 4))
+    self.creator_campaign_summary_title = _make_step4_pz1_section_title(self, f, "1. Materiał projektu")
     self.creator_campaign_summary_frame = tk.Frame(
         f,
         bd=0,
@@ -502,7 +535,7 @@ def _build_creator_ui(self):
         bg=summary_colors["border"],
         highlightthickness=0,
     )
-    self.creator_campaign_summary_frame.pack(fill=tk.X, pady=(0, 10))
+    self.creator_campaign_summary_frame.pack(fill=tk.X, pady=(0, 12))
     self.creator_campaign_summary_grid = tk.Frame(
         self.creator_campaign_summary_frame,
         bd=0,
@@ -671,9 +704,14 @@ def _build_creator_ui(self):
     self.ds_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "Plates_CVAT_[DATA_I_CZAS]"))
     ttk.Entry(row3, textvariable=self.ds_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-    creator_ratios = ttk.LabelFrame(f, text=" 2. Podział tworzonego wariantu ", padding=8)
+    creator_ratios = ttk.LabelFrame(
+        f,
+        text=" 2. Podział tworzonego wariantu ",
+        padding=10,
+        style="Step4PZ1Section.TLabelframe",
+    )
     self.creator_ratios_frame = creator_ratios
-    creator_ratios.pack(fill=tk.X, pady=(8, 6))
+    creator_ratios.pack(fill=tk.X, pady=(12, 8))
     ttk.Label(
         creator_ratios,
         text="Ustal proporcje wariantu: train uczy, val kontroluje, test zostaje do oceny.",
@@ -799,6 +837,7 @@ def _build_creator_ui(self):
     HELP.bind_help(self.btn_step4_create, "tr_cvat_btn")
 
 def _build_splitter_ui(self):
+    _ensure_step4_pz1_section_styles(self)
     f = self.ds_split_frame
     palette = getattr(self.app, "palette", {})
     self.split_intro_lbl = ttk.Label(
@@ -853,6 +892,7 @@ def _build_splitter_ui(self):
         wraplength=720
     )
     summary_colors = _get_step4_table_colors(self)
+    self.split_campaign_summary_title = _make_step4_pz1_section_title(self, f, "1. Źródło i wariant treningowy")
     self.split_campaign_summary_frame = tk.Frame(
         f,
         bd=0,
@@ -868,11 +908,12 @@ def _build_splitter_ui(self):
         bg=summary_colors["border"],
     )
     self.split_campaign_summary_grid.pack(fill=tk.X)
-    self.split_campaign_summary_grid.grid_columnconfigure(0, weight=0, minsize=150)
-    self.split_campaign_summary_grid.grid_columnconfigure(1, weight=1)
+    self.split_campaign_summary_grid.grid_columnconfigure(0, weight=0, minsize=132)
+    self.split_campaign_summary_grid.grid_columnconfigure(1, weight=1, minsize=180)
+    self.split_campaign_summary_grid.grid_columnconfigure(2, weight=2, minsize=260)
     self._split_campaign_summary_header_widgets = []
     self._split_campaign_summary_rows = {}
-    for column, text in enumerate(("Krok", "Stan")):
+    for column, text in enumerate(("Element", "Identyfikator", "Szczegóły")):
         header_cell = tk.Label(
             self.split_campaign_summary_grid,
             text=text,
@@ -891,9 +932,9 @@ def _build_splitter_ui(self):
         self._split_campaign_summary_header_widgets.append(header_cell)
     for row_index, (key, label_text) in enumerate(
         (
-            ("source", "\u0179r\u00f3d\u0142o znak\u00f3w"),
+            ("source", "Źródłowy dataset"),
             ("variant", "Wariant treningowy"),
-            ("split", "Podzia\u0142"),
+            ("split", "Podział wariantu"),
         ),
         start=1,
     ):
@@ -913,16 +954,7 @@ def _build_splitter_ui(self):
             highlightcolor=summary_colors["border"],
         )
         label_cell.grid(row=row_index, column=0, sticky="nsew")
-        value_cell = tk.Frame(
-            self.split_campaign_summary_grid,
-            padx=9,
-            pady=4,
-            bd=0,
-            highlightthickness=1,
-            bg=row_bg,
-            highlightbackground=summary_colors["border"],
-            highlightcolor=summary_colors["border"],
-        ) if key == "split" else tk.Label(
+        id_cell = tk.Label(
             self.split_campaign_summary_grid,
             text="-",
             font=("Segoe UI", 8),
@@ -937,8 +969,24 @@ def _build_splitter_ui(self):
             highlightbackground=summary_colors["border"],
             highlightcolor=summary_colors["border"],
         )
-        value_cell.grid(row=row_index, column=1, sticky="nsew")
-        self._split_campaign_summary_rows[key] = (label_cell, value_cell)
+        id_cell.grid(row=row_index, column=1, sticky="nsew")
+        details_cell = tk.Label(
+            self.split_campaign_summary_grid,
+            text="-",
+            font=("Segoe UI", 8),
+            padx=9,
+            pady=5,
+            anchor="w",
+            justify=tk.LEFT,
+            bd=0,
+            highlightthickness=1,
+            bg=row_bg,
+            fg=summary_colors["fg"],
+            highlightbackground=summary_colors["border"],
+            highlightcolor=summary_colors["border"],
+        )
+        details_cell.grid(row=row_index, column=2, sticky="nsew")
+        self._split_campaign_summary_rows[key] = (label_cell, id_cell, details_cell)
 
     row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
     self.split_output_row = row2
@@ -947,8 +995,13 @@ def _build_splitter_ui(self):
     self.split_out_var = tk.StringVar(value=str(self._get_datasets_base_dir() / "[NAZWA_ZRODLA]_Split_[DATA_I_CZAS]"))
     ttk.Entry(row2, textvariable=self.split_out_var, state="readonly", foreground="gray").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-    ratios = ttk.LabelFrame(f, text=" Split train / val / test ", padding=8)
-    ratios.pack(fill=tk.X, pady=(8, 6))
+    ratios = ttk.LabelFrame(
+        f,
+        text=" 2. Podział wariantu train / val / test ",
+        padding=10,
+        style="Step4PZ1Section.TLabelframe",
+    )
+    ratios.pack(fill=tk.X, pady=(12, 8))
     self.split_ratios_frame = ratios
     ttk.Label(ratios, text="Train %").grid(row=0, column=0, sticky=tk.W)
     ttk.Scale(ratios, from_=50, to=90, variable=self.train_pct, command=lambda e: self._update_ratio_labels()).grid(row=0, column=1, sticky=tk.EW, padx=5)
@@ -968,9 +1021,9 @@ def _build_splitter_ui(self):
     split_shell, split_inner, split_bg = _make_step4_action_shell(
         self,
         f,
-        title="Budowa wariantu datasetu znaków",
+        title="4. Utwórz wariant treningowy znaków",
         description=(
-            "Tworzy wariant train / val / test dla YOLO Detect."
+            "Zapisuje wariant train / val / test, który PZ2 wykorzysta do treningu modelu znaków."
         ),
     )
     self.btn_step4_split_frame = split_shell

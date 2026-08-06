@@ -369,7 +369,7 @@ def _assign_character_to_active_preview_label(self, symbol: str):
         return True
     self._push_preview_history_snapshot()
     rec["character"] = symbol
-    self._mark_preview_char_record_manual(rec)
+    self._mark_preview_char_record_manual(rec, box=False, sign=True)
     self._preview_char_selected_index = int(idx)
     self._preview_char_label_active_index = int(idx)
     self._preview_char_hover_label_index = int(idx)

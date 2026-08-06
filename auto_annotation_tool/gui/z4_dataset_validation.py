@@ -234,6 +234,42 @@ def _count_yolo_image_label_pairs(self, source_dir: Path) -> dict:
         "test": 0,
         "images_without_labels": 0,
     }
+
+    started_at = time.perf_counter()
+    signature_parts: list[str] = []
+    for rel_image_dir, rel_label_dir in (
+        (Path("images") / "train", Path("labels") / "train"),
+        (Path("images") / "val", Path("labels") / "val"),
+        (Path("images") / "test", Path("labels") / "test"),
+        (Path("train") / "images", Path("train") / "labels"),
+        (Path("val") / "images", Path("val") / "labels"),
+        (Path("test") / "images", Path("test") / "labels"),
+        (Path("images"), Path("labels")),
+    ):
+        for rel_dir in (rel_image_dir, rel_label_dir):
+            path = source_dir / rel_dir
+            try:
+                mtime_ns = int(path.stat().st_mtime_ns) if path.exists() else 0
+            except Exception:
+                mtime_ns = 0
+            signature_parts.append(f"{rel_dir.as_posix()}:{mtime_ns}")
+
+    try:
+        cache_root = str(source_dir.resolve())
+    except Exception:
+        cache_root = str(source_dir)
+    cache_key = f"{cache_root}|{'|'.join(signature_parts)}"
+    cache = getattr(self, "_char_yolo_pair_counts_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            self._char_yolo_pair_counts_cache = cache
+        except Exception:
+            pass
+    cached_stats = cache.get(cache_key) if isinstance(cache, dict) else None
+    if isinstance(cached_stats, dict):
+        return dict(cached_stats)
+
     seen_images: set[str] = set()
 
     for split in ("train", "val", "test", ""):
@@ -256,7 +292,7 @@ def _count_yolo_image_label_pairs(self, source_dir: Path) -> dict:
                 if image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
                     continue
                 try:
-                    image_key = str(image_path.resolve())
+                    image_key = os.path.normcase(os.path.abspath(os.fspath(image_path)))
                 except Exception:
                     image_key = str(image_path)
                 if image_key in seen_images:
@@ -270,6 +306,21 @@ def _count_yolo_image_label_pairs(self, source_dir: Path) -> dict:
                 else:
                     stats["images_without_labels"] += 1
 
+    try:
+        if len(cache) > 256:
+            cache.clear()
+        cache[cache_key] = dict(stats)
+    except Exception:
+        pass
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    if elapsed_ms >= 250:
+        try:
+            logger.info(
+                f"[Z4/PZ1 PERF] char_pair_counts total={elapsed_ms}ms "
+                f"pairs={int(stats.get('total', 0) or 0)} path={source_dir}"
+            )
+        except Exception:
+            pass
     return stats
 
 

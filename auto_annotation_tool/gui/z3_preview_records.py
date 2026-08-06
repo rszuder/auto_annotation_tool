@@ -32,9 +32,26 @@ def normalize_character_source_kind(host, rec, data=None, plate_source_bucket: s
         raw_tag = getattr(rec, "source_tag", None)
         method_name = str(getattr(rec, "method", "") or "").strip().lower()
 
+    explicit_box = _normalized_record_text(rec, "box_source")
+    explicit_sign = _normalized_record_text(rec, "sign_source")
+    if explicit_box or explicit_sign:
+        if explicit_box == "manual_box" or explicit_sign == "manual_sign":
+            if str(plate_source_bucket or "").strip().lower() == "cvat_manual":
+                return "cvat_manual"
+            return "local_manual"
+        if explicit_box == "yolo_box" and explicit_sign == "yolo_symbol":
+            return "yolo"
+        if explicit_box == "yolo_box" and explicit_sign == "ocr_symbol":
+            return "yolo_box_ocr"
+        if explicit_box == "yolo_box":
+            return "yolo_box"
+        if explicit_sign == "yolo_symbol":
+            return "yolo_symbol"
+        return "ocr"
+
     if raw_kind == "ocr" and host._character_record_uses_yolo_box_backend(rec):
         return "yolo_box_ocr"
-    if raw_kind in {"cvat_manual", "local_manual", "yolo_box_ocr", "yolo_rescue", "yolo", "ocr"}:
+    if raw_kind in {"cvat_manual", "local_manual", "yolo_box", "yolo_symbol", "yolo_box_ocr", "yolo_rescue", "yolo", "ocr"}:
         return raw_kind
 
     if method_name == "cvat_manual":
@@ -55,8 +72,141 @@ def normalize_character_source_kind(host, rec, data=None, plate_source_bucket: s
         return "local_manual"
     if normalized_tag == "ocr" and host._character_record_uses_yolo_box_backend(rec):
         return "yolo_box_ocr"
-    if normalized_tag in {"yolo_box_ocr", "yolo_rescue", "yolo", "ocr"}:
+    if normalized_tag in {"yolo_box", "yolo_symbol", "yolo_box_ocr", "yolo_rescue", "yolo", "ocr"}:
         return normalized_tag
+    return "ocr"
+
+
+def _record_text_value(rec, key: str) -> str:
+    try:
+        value = rec.get(key) if isinstance(rec, dict) else getattr(rec, key, "")
+    except Exception:
+        value = ""
+    return str(value or "").strip()
+
+
+def _normalized_record_text(rec, key: str) -> str:
+    return _record_text_value(rec, key).lower().replace("-", "_")
+
+
+def _record_has_symbol(host, rec) -> bool:
+    try:
+        value = rec.get("character", "") if isinstance(rec, dict) else getattr(rec, "character", "")
+        return bool(host._sanitize_preview_char_symbol(value))
+    except Exception:
+        return bool(_record_text_value(rec, "character"))
+
+
+def normalize_character_box_source(host, rec, data=None, fallback_index: int = 0) -> str:
+    explicit = _normalized_record_text(rec, "box_source")
+    explicit_sign = _normalized_record_text(rec, "sign_source")
+    if explicit in {"manual_box", "manual", "local_manual", "cvat_manual", "preview_editor"}:
+        return "manual_box"
+    if explicit in {"yolo_box", "yolo", "yolo_backend", "yolo_filtered", "yolo_box_only", "yolo_box_ocr"}:
+        return "yolo_box"
+    if explicit in {"generated_box", "generated", "ocr", "segment", "segmented", "ocr_segment"}:
+        return "generated_box"
+
+    geometry_values = {
+        _normalized_record_text(rec, "bbox_source"),
+        _normalized_record_text(rec, "geometry_source"),
+        _normalized_record_text(rec, "geometry_method"),
+        _normalized_record_text(rec, "box_backend"),
+        _normalized_record_text(rec, "box_backend_source"),
+    }
+    if geometry_values.intersection({"manual", "manual_box", "local_manual", "cvat_manual", "preview_editor"}):
+        return "manual_box"
+    if geometry_values.intersection({"yolo", "yolo_box", "yolo_backend", "yolo_filtered", "yolo_box_only", "yolo_box_ocr"}):
+        return "yolo_box"
+    if geometry_values.intersection({"generated", "generated_box", "ocr", "segment", "segmented", "ocr_segment"}):
+        return "generated_box"
+
+    method_name = _normalized_record_text(rec, "method")
+    source_kind = _normalized_record_text(rec, "source_kind")
+    if explicit_sign and not explicit:
+        source_tag = host._normalize_character_source_tag(
+            raw_tag=_record_text_value(rec, "source_tag"),
+            method=method_name,
+        )
+    else:
+        source_tag = get_character_source_tag(host, rec, data=data, fallback_index=fallback_index)
+        source_tag = str(source_tag or "").strip().lower().replace("-", "_")
+
+    if source_kind in {"local_manual", "cvat_manual"} or source_tag == "manual" or method_name in {"manual", "cvat_manual"}:
+        return "manual_box"
+    if (
+        host._character_record_uses_yolo_box_backend(rec)
+        or source_tag in {"yolo", "yolo_box", "yolo_box_ocr", "yolo_rescue"}
+        or source_kind in {"yolo", "yolo_box", "yolo_box_ocr", "yolo_rescue"}
+        or method_name in {"yolo", "yolo_box", "yolo_ocr"}
+    ):
+        return "yolo_box"
+    return "generated_box"
+
+
+def normalize_character_sign_source(host, rec, data=None, fallback_index: int = 0) -> str:
+    if not _record_has_symbol(host, rec):
+        return ""
+
+    explicit = _normalized_record_text(rec, "sign_source")
+    if explicit in {"manual_sign", "manual", "local_manual", "cvat_manual", "preview_editor"}:
+        return "manual_sign"
+    if explicit in {"yolo_symbol", "yolo", "ys", "yolo_rescue"}:
+        return "yolo_symbol"
+    if explicit in {"ocr_symbol", "ocr", "os", "yolo_box_ocr"}:
+        return "ocr_symbol"
+
+    symbol_values = {
+        _normalized_record_text(rec, "symbol_source"),
+        _normalized_record_text(rec, "symbol_method"),
+        _normalized_record_text(rec, "text_source"),
+        _normalized_record_text(rec, "character_source"),
+    }
+    if symbol_values.intersection({"manual", "manual_sign", "local_manual", "cvat_manual", "preview_editor"}):
+        return "manual_sign"
+    if symbol_values.intersection({"yolo", "yolo_symbol", "ys", "yolo_rescue"}):
+        return "yolo_symbol"
+    if symbol_values.intersection({"ocr", "ocr_symbol", "os", "yolo_box_ocr"}):
+        return "ocr_symbol"
+
+    method_name = _normalized_record_text(rec, "method")
+    source_kind = _normalized_record_text(rec, "source_kind")
+    explicit_box = _normalized_record_text(rec, "box_source")
+    if explicit_box and not explicit:
+        source_tag = host._normalize_character_source_tag(
+            raw_tag=_record_text_value(rec, "source_tag"),
+            method=method_name,
+        )
+    else:
+        source_tag = get_character_source_tag(host, rec, data=data, fallback_index=fallback_index)
+        source_tag = str(source_tag or "").strip().lower().replace("-", "_")
+
+    if source_kind in {"local_manual", "cvat_manual"} or source_tag == "manual" or method_name in {"manual", "cvat_manual"}:
+        return "manual_sign"
+    if source_tag in {"yolo", "yolo_symbol", "yolo_rescue"} or source_kind in {"yolo", "yolo_symbol", "yolo_rescue"} or method_name in {"yolo", "yolo_symbol"}:
+        return "yolo_symbol"
+    if source_tag in {"ocr", "yolo_box_ocr"} or source_kind in {"ocr", "yolo_box_ocr"} or method_name in {"ocr", "yolo_ocr"}:
+        return "ocr_symbol"
+    return "ocr_symbol"
+
+
+def compose_character_source_tag(box_source: str = "", sign_source: str = "") -> str:
+    box = str(box_source or "").strip().lower().replace("-", "_")
+    sign = str(sign_source or "").strip().lower().replace("-", "_")
+    if box == "manual_box" and sign == "manual_sign":
+        return "manual"
+    if box == "manual_box":
+        return "manual"
+    if sign == "manual_sign":
+        return "manual"
+    if box == "yolo_box" and sign == "yolo_symbol":
+        return "yolo"
+    if box == "yolo_box" and sign == "ocr_symbol":
+        return "yolo_box_ocr"
+    if box == "yolo_box":
+        return "yolo_box"
+    if sign == "yolo_symbol":
+        return "yolo_symbol"
     return "ocr"
 
 
@@ -137,7 +287,15 @@ def build_character_source_tags(host, chars, fusion_strategy="", fusion_details=
             raw_tag = getattr(rec, "source_tag", None)
             method_name = getattr(rec, "method", "")
 
-        normalized = host._normalize_character_source_tag(raw_tag=raw_tag, method=method_name)
+        explicit_box = _normalized_record_text(rec, "box_source")
+        explicit_sign = _normalized_record_text(rec, "sign_source")
+        if explicit_box or explicit_sign:
+            normalized = compose_character_source_tag(
+                normalize_character_box_source(host, rec, fallback_index=idx),
+                normalize_character_sign_source(host, rec, fallback_index=idx),
+            )
+        else:
+            normalized = host._normalize_character_source_tag(raw_tag=raw_tag, method=method_name)
         if idx in rescue_positions:
             normalized = "yolo_rescue"
         elif normalized == "ocr" and (
@@ -160,6 +318,14 @@ def get_character_source_tag(host, rec, data=None, fallback_index: int = 0) -> s
     else:
         raw_tag = getattr(rec, "source_tag", None)
         method_name = getattr(rec, "method", "")
+
+    explicit_box = _normalized_record_text(rec, "box_source")
+    explicit_sign = _normalized_record_text(rec, "sign_source")
+    if explicit_box or explicit_sign:
+        return compose_character_source_tag(
+            normalize_character_box_source(host, rec, data=data, fallback_index=fallback_index),
+            normalize_character_sign_source(host, rec, data=data, fallback_index=fallback_index),
+        )
 
     normalized = host._normalize_character_source_tag(raw_tag=raw_tag, method=method_name)
     if normalized == "ocr" and host._character_record_uses_yolo_box_backend(rec):
@@ -296,22 +462,20 @@ def character_record_collides_with_manual(host, rec, manual_records) -> bool:
         union_area = max(1.0, area + manual_area - inter_area)
         iou = inter_area / union_area
         min_coverage = inter_area / max(1.0, min(area, manual_area))
+        auto_coverage = inter_area / max(1.0, area)
+        manual_coverage = inter_area / max(1.0, manual_area)
+        horizontal_overlap = inter_w / max(1.0, min(width, mw))
+        vertical_overlap = inter_h / max(1.0, min(height, mh))
         center_dx = abs(cx - ((mx1 + mx2) / 2.0)) / max(width, mw)
         center_dy = abs(cy - ((my1 + my2) / 2.0)) / max(height, mh)
 
-        try:
-            auto_symbol = host._sanitize_preview_char_symbol((rec or {}).get("character", ""))
-            manual_symbol = host._sanitize_preview_char_symbol((manual_rec or {}).get("character", ""))
-        except Exception:
-            auto_symbol = manual_symbol = ""
-        if auto_symbol and manual_symbol and auto_symbol != manual_symbol:
-            continue
-
-        if iou >= 0.55:
+        if iou >= 0.28:
             return True
-        if min_coverage >= 0.82 and center_dx <= 0.22 and center_dy <= 0.35:
+        if min_coverage >= 0.62 and horizontal_overlap >= 0.50 and vertical_overlap >= 0.45:
             return True
-        if auto_symbol and manual_symbol and min_coverage >= 0.68 and center_dx <= 0.30 and center_dy <= 0.42:
+        if auto_coverage >= 0.42 and center_dx <= 0.42 and center_dy <= 0.52:
+            return True
+        if manual_coverage >= 0.42 and center_dx <= 0.42 and center_dy <= 0.52:
             return True
 
     return False

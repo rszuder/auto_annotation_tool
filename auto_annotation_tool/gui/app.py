@@ -1197,7 +1197,7 @@ class AutoAnnotationApp:
         if not gate_id and tab_key == "training":
             # Z4 jest obecnie pracą domykającą iterację: wynik treningu/decyzja
             # wraca do ostatniej bramki grafu.
-            gate_id = "T07"
+            gate_id = "T06"
 
         return self._format_campaign_gate_badge_label(gate_id)
 

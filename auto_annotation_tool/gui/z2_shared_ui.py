@@ -10,18 +10,38 @@ if TYPE_CHECKING:
     from .tab_annotation import AnnotationTab
 
 
-CAMPAIGN_VISIBLE_GATE_IDS = {
-    "T03": "T02",
-    "T04": "T03",
-    "T05": "T04",
-    "T06": "T05",
-    "T07": "T06",
+CAMPAIGN_GATE_ID_BY_EDGE = {
+    "e1_to_e2": "T01",
+    "e1_to_e2_plate_training": "T01",
+    "e1_to_e2_char_from_images": "T01",
+    "e1_to_e3": "T02",
+    "e2_to_e3": "T03",
+    "e2_to_e4": "T04",
+    "e3_to_e4": "T05",
+    "e4_to_e1": "T06",
+    "e4t_to_e1": "T06",
+    "e4z_to_e1": "T06",
 }
 
 
 def campaign_visible_gate_id(gate_id: str | None) -> str:
+    """Return the canonical gate id used by the current graph.
+
+    The old UI translated bare ids like T04 -> T03. That is unsafe now,
+    because T03/T04/T05 are real, current ids. If a stale context needs
+    repair, use the edge-aware helper below.
+    """
     normalized = str(gate_id or "").strip().upper()
-    return CAMPAIGN_VISIBLE_GATE_IDS.get(normalized, normalized)
+    return normalized
+
+
+def campaign_gate_id_for_edge(edge_key: str | None, fallback_gate_id: str | None = None) -> str:
+    normalized_edge = str(edge_key or "").strip()
+    if normalized_edge:
+        resolved = CAMPAIGN_GATE_ID_BY_EDGE.get(normalized_edge)
+        if resolved:
+            return resolved
+    return campaign_visible_gate_id(fallback_gate_id)
 
 
 def get_campaign_display_gate_id(host: "AnnotationTab") -> str:
@@ -29,39 +49,65 @@ def get_campaign_display_gate_id(host: "AnnotationTab") -> str:
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    return campaign_visible_gate_id(graph_context.get("graph_gate_id"))
+    return campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
 
 
-def is_campaign_t07_plate_repair_context(host: "AnnotationTab") -> bool:
+def is_campaign_t06_plate_repair_context(host: "AnnotationTab") -> bool:
     try:
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    repair_origin_gate_id = str(
-        graph_context.get("repair_origin_gate_id")
-        or graph_context.get("source_graph_gate_id")
-        or ""
-    ).strip().upper()
-    return bool(graph_gate_id == "T05" and repair_origin_gate_id == "T07")
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    repair_origin_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("repair_origin_edge_key") or graph_context.get("source_graph_edge_key"),
+        graph_context.get("repair_origin_gate_id") or graph_context.get("source_graph_gate_id"),
+    )
+    return bool(graph_gate_id == "T04" and repair_origin_gate_id == "T06")
 
 
-def is_campaign_t06_char_source_context(host: "AnnotationTab") -> bool:
+def is_campaign_t05_char_source_context(host: "AnnotationTab") -> bool:
     try:
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    return graph_gate_id == "T06"
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    return graph_gate_id == "T05"
 
 
-def is_campaign_t04_char_route_context(host: "AnnotationTab") -> bool:
+def is_campaign_t03_char_route_context(host: "AnnotationTab") -> bool:
     try:
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
-    return graph_gate_id == "T04"
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    return graph_gate_id == "T03"
+
+
+def is_campaign_t02_at_review_context(host: "AnnotationTab") -> bool:
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    return bool(
+        str(graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or graph_gate_id == "T02"
+    )
 
 
 def get_campaign_return_to_graph_copy(host: "AnnotationTab") -> dict[str, object]:
@@ -69,27 +115,36 @@ def get_campaign_return_to_graph_copy(host: "AnnotationTab") -> dict[str, object
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
     display_gate_id = campaign_visible_gate_id(graph_gate_id)
-    if is_campaign_t07_plate_repair_context(host):
+    if is_campaign_t02_at_review_context(host):
+        return {
+            "section": " Kontrola importu AT ",
+            "button": "Zapisz kontrolę AT i wróć do bramki T02",
+            "width": 42,
+        }
+    if is_campaign_t06_plate_repair_context(host):
         return {
             "section": " Przekazanie do puli YOLO ",
             "button": "Przekaż [OK] do puli YOLO i wróć do grafu",
             "width": 32,
         }
-    if is_campaign_t06_char_source_context(host):
+    if is_campaign_t05_char_source_context(host):
         return {
             "section": " Przekazanie do źródła Z3 ",
             "button": "Przekaż [OK] do Z3 i wróć do grafu",
             "width": 34,
         }
-    if is_campaign_t04_char_route_context(host):
+    if is_campaign_t03_char_route_context(host):
         return {
-            "section": " Przekazanie [OK] do pracy nad znakami ",
-            "button": "Przekaż [OK] do pracy nad znakami i wróć do grafu",
-            "width": 42,
+            "section": " Powrót do bramki T03 ",
+            "button": "Zapisz [OK] i wróć do bramki T03",
+            "width": 38,
         }
-    if graph_gate_id == "T05":
+    if graph_gate_id == "T04":
         return {
             "section": f" Przekazanie [OK] do bramki {display_gate_id or 'T04'} ",
             "button": f"Przekaż [OK] do puli YOLO tablic i wróć do bramki {display_gate_id or 'T04'}",
@@ -100,6 +155,11 @@ def get_campaign_return_to_graph_copy(host: "AnnotationTab") -> dict[str, object
         "button": "Wróć do grafu",
         "width": 18,
     }
+
+
+is_campaign_t07_plate_repair_context = is_campaign_t06_plate_repair_context
+is_campaign_t06_char_source_context = is_campaign_t05_char_source_context
+is_campaign_t04_char_route_context = is_campaign_t03_char_route_context
 
 
 def build_z2_workflow_base_context(host: "AnnotationTab", preferred_run_dir) -> Z2WorkflowBaseContext:
@@ -572,7 +632,8 @@ def apply_z2_workflow_left_layout(
         host._set_widget_packed(host.route_badge_lbl, False)
         host._set_widget_packed(host.route_summary_lbl, False)
         host._set_widget_packed(host.workflow_action_hint_lbl, False)
-    if campaign_context and campaign_stage >= 3:
+    t02_at_review_context = bool(campaign_context and is_campaign_t02_at_review_context(host))
+    if campaign_context and (campaign_stage >= 3 or t02_at_review_context):
         try:
             return_copy = get_campaign_return_to_graph_copy(host)
             return_label = str(return_copy.get("button") or "Wróć do grafu")

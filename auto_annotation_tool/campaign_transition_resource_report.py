@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
 from .campaign_iteration_paths import normalize_iteration_path
-from .campaign_resource_contracts import resource_contract_ready
+from .campaign_resource_contracts import resource_contract_ready, resource_snapshot_meta
 from .campaign_resource_catalog import campaign_resource_label, normalize_campaign_resource_key
 from .campaign_resource_state import CampaignResourceSnapshot
 from .campaign_transition_specs import CampaignTransitionSpec, TransitionResourceSpec
@@ -49,6 +49,27 @@ class TransitionResourceReportRow:
     def blocking_missing(self) -> bool:
         return bool(self.enabled and self.required and not self.present)
 
+    @property
+    def review_required(self) -> bool:
+        if not self.blocking_missing:
+            return False
+        meta = resource_snapshot_meta(self.snapshot)
+        return bool(meta.get("review_required") or meta.get("pending_review"))
+
+    @property
+    def compact_label(self) -> str:
+        label = str(self.label or self.canonical_key or self.key or "").strip()
+        if " - " in label:
+            label = label.split(" - ", 1)[1].strip()
+        return label or "zasób"
+
+    def review_status_text(self) -> str:
+        meta = resource_snapshot_meta(self.snapshot)
+        text = str(meta.get("pending_action_text") or meta.get("review_action_text") or "").strip()
+        if text:
+            return text
+        return f"Zasób {self.compact_label} wymaga kontroli przed zatwierdzeniem bramki."
+
 
 @dataclass(frozen=True)
 class TransitionResourceReport:
@@ -67,22 +88,30 @@ class TransitionResourceReport:
         return not self.missing_required
 
     def status_text(self) -> str:
-        missing = self.missing_required_labels
-        if not missing:
+        missing_rows = self.missing_required
+        if not missing_rows:
             return "Wymagane zasoby tej bramki są dostępne."
-        return "Brakuje: " + ", ".join(missing) + "."
+        review_rows = tuple(row for row in missing_rows if row.review_required)
+        hard_missing = tuple(row for row in missing_rows if not row.review_required)
+        parts: list[str] = []
+        if review_rows:
+            parts.extend(row.review_status_text() for row in review_rows)
+        if hard_missing:
+            parts.append("Brakuje: " + ", ".join(row.label for row in hard_missing) + ".")
+        return " ".join(parts).strip()
 
     def compact_status(self) -> str:
         missing = self.missing_required
         missing_count = len(missing)
         if missing_count <= 0:
             return "OK"
-        labels = []
-        for row in missing:
-            label = str(row.label or row.canonical_key or row.key or "").strip()
-            if " - " in label:
-                label = label.split(" - ", 1)[1].strip()
-            labels.append(label or "zasób")
+        labels = [row.compact_label for row in missing]
+        if missing_count == 1 and missing[0].review_required:
+            meta = resource_snapshot_meta(missing[0].snapshot)
+            return str(meta.get("pending_compact_status") or f"KONTROLA: {labels[0]}").strip()
+        review_labels = [row.compact_label for row in missing if row.review_required]
+        if review_labels:
+            return "KONTROLA: " + ", ".join(review_labels[:2])
         if missing_count == 1:
             return f"BRAK: {labels[0]}"
         visible = ", ".join(labels[:2])

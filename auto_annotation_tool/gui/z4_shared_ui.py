@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..campaign_manager import CAMPAIGN
+from ..config import CONFIG
 from .z4_campaign_flow import return_to_campaign_from_step4
 from .web_slim_scrollbar import blend_hex_colors
 from .dataset_display import build_dataset_display_ref
@@ -71,6 +72,134 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 return Path(raw).name
             except Exception:
                 return raw
+
+    def _char_yolo_dataset_brief(path_like) -> dict:
+        raw = str(path_like or "").strip()
+        result = {
+            "ok": False,
+            "created_at": "-",
+            "plates": 0,
+            "chars": 0,
+            "missing_labels": 0,
+        }
+        if not raw:
+            return result
+        try:
+            root = Path(raw)
+        except Exception:
+            return result
+        if root.is_file() and root.name.lower() == "data.yaml":
+            root = root.parent
+        if not root.exists() or not root.is_dir():
+            return result
+
+        try:
+            root_key = str(root.resolve())
+        except Exception:
+            root_key = str(root)
+
+        layouts: list[tuple[Path, Path]] = []
+        for split_name in ("train", "val", "test"):
+            layouts.append((root / "images" / split_name, root / "labels" / split_name))
+            layouts.append((root / split_name / "images", root / split_name / "labels"))
+        layouts.append((root / "images", root / "labels"))
+
+        layout_tokens: list[str] = []
+        for image_dir, label_dir in layouts:
+            for probe in (image_dir, label_dir):
+                try:
+                    layout_tokens.append(f"{probe}:{int(probe.stat().st_mtime) if probe.exists() else 0}")
+                except Exception:
+                    layout_tokens.append(f"{probe}:0")
+        cache_key = f"{root_key}|" + "|".join(layout_tokens)
+        cache = getattr(host, "_step4_char_dataset_brief_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                setattr(host, "_step4_char_dataset_brief_cache", cache)
+            except Exception:
+                pass
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
+        created_timestamp = 0.0
+        try:
+            created_timestamp = float(root.stat().st_ctime or root.stat().st_mtime or 0)
+        except Exception:
+            created_timestamp = 0.0
+        if created_timestamp <= 0:
+            try:
+                yaml_path = root / "data.yaml"
+                created_timestamp = float(yaml_path.stat().st_ctime or yaml_path.stat().st_mtime or 0) if yaml_path.exists() else 0.0
+            except Exception:
+                created_timestamp = 0.0
+        if created_timestamp > 0:
+            try:
+                result["created_at"] = datetime.fromtimestamp(created_timestamp).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                result["created_at"] = "-"
+
+        image_exts = {str(ext or "").lower() for ext in getattr(CONFIG, "IMAGE_EXTENSIONS", ())}
+        seen_images: set[str] = set()
+        plate_count = 0
+        char_count = 0
+        missing_labels = 0
+
+        for image_dir, label_dir in layouts:
+            if not image_dir.exists() or not image_dir.is_dir():
+                continue
+            try:
+                image_paths = [path for path in image_dir.iterdir() if path.is_file() and path.suffix.lower() in image_exts]
+            except Exception:
+                image_paths = []
+            for image_path in image_paths:
+                try:
+                    image_key = str(image_path.resolve())
+                except Exception:
+                    image_key = str(image_path)
+                if image_key in seen_images:
+                    continue
+                seen_images.add(image_key)
+                plate_count += 1
+                label_path = label_dir / f"{image_path.stem}.txt"
+                if not label_path.exists():
+                    missing_labels += 1
+                    continue
+                try:
+                    with open(label_path, "r", encoding="utf-8", errors="ignore") as handle:
+                        char_count += sum(1 for line in handle if str(line or "").strip())
+                except Exception:
+                    continue
+
+        result.update(
+            {
+                "ok": bool(plate_count > 0),
+                "plates": int(plate_count),
+                "chars": int(char_count),
+                "missing_labels": int(missing_labels),
+            }
+        )
+        try:
+            if len(cache) > 24:
+                cache.clear()
+            cache[cache_key] = dict(result)
+        except Exception:
+            pass
+        return result
+
+    def _format_char_dataset_brief(brief: dict, *, empty_text: str) -> str:
+        if not bool(brief.get("ok")):
+            return empty_text
+        parts = [
+            f"utworzono: {brief.get('created_at') or '-'}",
+            f"tablice: {int(brief.get('plates', 0) or 0)}",
+            f"znaki: {int(brief.get('chars', 0) or 0)}",
+        ]
+        missing = int(brief.get("missing_labels", 0) or 0)
+        if missing > 0:
+            parts.append(f"bez etykiet: {missing}")
+        return " | ".join(parts)
 
     def _refresh_creator_campaign_summary_table() -> None:
         frame = getattr(host, "creator_campaign_summary_frame", None)
@@ -223,6 +352,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             return
         if not bool(getattr(vm, "in_campaign", False)) or str(getattr(vm, "mode", "") or "") != "char":
             _set_pack_visible(frame, False)
+            _set_pack_visible(getattr(host, "split_campaign_summary_title", None), False)
             return
 
         palette = getattr(host.app, "palette", {})
@@ -261,18 +391,47 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             "total": train_count + val_count + test_count,
         }
         has_ready_variant = bool(ready_dataset and train_count > 0 and val_count > 0)
+        source_brief = _char_yolo_dataset_brief(source_dataset)
+        variant_brief = _char_yolo_dataset_brief(ready_dataset) if has_ready_variant else {}
         values = {
-            "source": _dataset_ref_id(source_dataset, target_hint="char"),
+            "source": (
+                _dataset_ref_id(source_dataset, target_hint="char"),
+                _format_char_dataset_brief(
+                    source_brief,
+                    empty_text="Brak źródłowego datasetu znaków z T05/PZ3.",
+                ),
+            ),
             "variant": (
-                _dataset_ref_id(ready_dataset, target_hint="char", counts=counts)
-                if has_ready_variant
-                else "Jeszcze nie utworzono wariantu"
+                (
+                    _dataset_ref_id(ready_dataset, target_hint="char", counts=counts)
+                    if has_ready_variant
+                    else "Jeszcze nie utworzono wariantu"
+                ),
+                (
+                    _format_char_dataset_brief(
+                        variant_brief,
+                        empty_text="Utwórz wariant, aby odblokować trening w PZ2.",
+                    )
+                    if has_ready_variant
+                    else "Utwórz wariant, aby odblokować trening w PZ2."
+                ),
+            ),
+            "split": (
+                "train / val / test",
+                (
+                    f"train {train_count} | val {val_count} | test {test_count}"
+                    if has_ready_variant
+                    else "Podział zostanie zapisany w tworzonym wariancie."
+                ),
             ),
         }
 
         try:
             frame.configure(bg=border, highlightbackground=border, highlightcolor=border)
             getattr(host, "split_campaign_summary_grid", frame).configure(bg=border)
+            title = getattr(host, "split_campaign_summary_title", None)
+            if title is not None:
+                title.configure(bg=panel, fg=fg)
         except Exception:
             pass
         for widget in getattr(host, "_split_campaign_summary_header_widgets", ()) or ():
@@ -282,58 +441,40 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 pass
 
         for index, (key, widgets) in enumerate(rows.items()):
-            label_widget, value_widget = widgets
+            try:
+                label_widget, id_widget, details_widget = widgets
+            except Exception:
+                continue
             bg = field if index % 2 == 0 else row_alt
             try:
                 label_widget.configure(bg=bg, fg=muted, highlightbackground=border, highlightcolor=border)
-                if key == "split" and isinstance(value_widget, tk.Frame):
-                    value_widget.configure(bg=bg, highlightbackground=border, highlightcolor=border)
-                    for child in value_widget.winfo_children():
-                        child.destroy()
-                    line = tk.Frame(value_widget, bd=0, highlightthickness=0, bg=bg)
-                    line.pack(anchor=tk.W, fill=tk.X)
-
-                    def add_count(label: str, count: int, color: str, suffix: str = ""):
-                        tk.Label(
-                            line,
-                            text=label,
-                            font=("Segoe UI", 8),
-                            bg=bg,
-                            fg=fg,
-                            bd=0,
-                            highlightthickness=0,
-                        ).pack(side=tk.LEFT)
-                        tk.Label(
-                            line,
-                            text=str(max(0, int(count or 0))),
-                            font=("Segoe UI Semibold", 10),
-                            bg=bg,
-                            fg=color,
-                            bd=0,
-                            highlightthickness=0,
-                        ).pack(side=tk.LEFT)
-                        if suffix:
-                            tk.Label(
-                                line,
-                                text=suffix,
-                                font=("Segoe UI", 8),
-                                bg=bg,
-                                fg=fg,
-                                bd=0,
-                                highlightthickness=0,
-                            ).pack(side=tk.LEFT)
-
-                    add_count("train ", train_count, success, "  ")
-                    add_count("val ", val_count, warning, "  ")
-                    add_count("test ", test_count, accent, "")
-                    continue
-                value_widget.configure(
-                    text=str(values.get(key, "-") or "-"),
+                id_text, details_text = values.get(key, ("-", "-"))
+                id_fg = fg
+                details_fg = fg
+                if key == "source":
+                    id_fg = success if bool(source_brief.get("ok")) else warning
+                    details_fg = success if bool(source_brief.get("ok")) else warning
+                elif key == "variant":
+                    id_fg = success if has_ready_variant else warning
+                    details_fg = success if has_ready_variant else warning
+                elif key == "split":
+                    id_fg = accent
+                    details_fg = success if has_ready_variant else muted
+                id_widget.configure(
+                    text=str(id_text or "-"),
                     bg=bg,
-                    fg=(success if key == "variant" and has_ready_variant else fg if key != "variant" else warning),
+                    fg=id_fg,
                     highlightbackground=border,
                     highlightcolor=border,
-                    wraplength=680,
+                    wraplength=260,
+                )
+                details_widget.configure(
+                    text=str(details_text or "-"),
+                    bg=bg,
+                    fg=details_fg,
+                    highlightbackground=border,
+                    highlightcolor=border,
+                    wraplength=420,
                 )
             except Exception:
                 pass
@@ -419,14 +560,14 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                     getattr(host, "creator_campaign_summary_title", None),
                     True,
                     fill=tk.X,
-                    pady=(0, 4),
+                    pady=(8, 7),
                     after=getattr(host, "creator_flow_strip", None),
                 )
                 _set_pack_visible(
                     getattr(host, "creator_campaign_summary_frame", None),
                     True,
                     fill=tk.X,
-                    pady=(0, 10),
+                    pady=(0, 12),
                     after=getattr(host, "creator_campaign_summary_title", None),
                 )
                 if source_summary is not None:
@@ -437,10 +578,10 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                     ratios_frame,
                     True,
                     fill=tk.X,
-                    pady=(8, 6),
+                    pady=(12, 8),
                     after=getattr(host, "creator_campaign_summary_frame", None),
                 )
-                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(0, 10), after=ratios_frame)
+                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(12, 8), after=ratios_frame)
                 _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
                 if getattr(progress, "master", None) is not getattr(host, "step4_creator_action_inner", None):
                     _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
@@ -464,8 +605,8 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 _set_pack_visible(auto_match_hint, True, anchor=tk.W, fill=tk.X, pady=(2, 6), after=xml_row)
                 _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=auto_match_hint)
                 _set_pack_visible(output_row, False)
-                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=(8, 6), after=images_row)
-                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(0, 10), after=ratios_frame)
+                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=(12, 8), after=images_row)
+                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(12, 8), after=ratios_frame)
                 _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
                 if getattr(progress, "master", None) is not getattr(host, "step4_creator_action_inner", None):
                     _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
@@ -504,19 +645,35 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             host._set_training_widget_text(host.split_source_summary_lbl, str(vm.split_summary or ""))
             _refresh_split_campaign_summary_table()
             _set_pack_visible(host.split_source_summary_lbl, False)
+            try:
+                split_title_anchor = (
+                    host.btn_step4_split_toggle
+                    if bool(vm.show_split_toggle)
+                    and str(host.btn_step4_split_toggle.winfo_manager()) == "pack"
+                    else host.split_intro_lbl
+                )
+            except Exception:
+                split_title_anchor = host.split_intro_lbl
+            _set_pack_visible(
+                getattr(host, "split_campaign_summary_title", None),
+                True,
+                fill=tk.X,
+                pady=(8, 7),
+                after=split_title_anchor,
+            )
             _set_pack_visible(
                 getattr(host, "split_campaign_summary_frame", None),
                 True,
                 fill=tk.X,
-                pady=(0, 8),
-                after=host.split_intro_lbl,
+                pady=(0, 12),
+                after=(getattr(host, "split_campaign_summary_title", None) or host.split_intro_lbl),
             )
             split_aug_frame = getattr(host, "split_augmentation_frame", None)
             try:
                 split_summary_table = getattr(host, "split_campaign_summary_frame", None)
                 if bool(vm.show_split_details):
-                    _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=split_summary_table)
-                    _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(0, 10), after=host.split_ratios_frame)
+                    _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(12, 8), after=split_summary_table)
+                    _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(12, 8), after=host.split_ratios_frame)
                     _set_pack_visible(host.btn_step4_split_frame, True, fill=tk.X, pady=(12, 10), after=(split_aug_frame or host.split_ratios_frame))
                 else:
                     _set_pack_visible(host.split_ratios_frame, False)
@@ -537,7 +694,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             host._set_training_widget_text(
                 host.split_intro_lbl,
                 (
-                    "Wskaż dataset znaków. PZ1 przygotuje wariant train / val / test dla YOLO Detect."
+                    "Wskaż źródłowy dataset znaków. PZ1 przygotuje z niego wariant train / val / test dla YOLO Detect."
                 ),
             )
             host._set_training_widget_text(host.btn_step4_split, "Utwórz split treningowy")
@@ -546,6 +703,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             except Exception:
                 pass
             _set_pack_visible(getattr(host, "split_campaign_summary_frame", None), False)
+            _set_pack_visible(getattr(host, "split_campaign_summary_title", None), False)
             try:
                 host._step4_char_split_details_visible = False
                 if str(host.btn_step4_split_toggle.winfo_manager()) == "pack":
@@ -570,8 +728,8 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 pass
             split_aug_frame = getattr(host, "split_augmentation_frame", None)
             try:
-                _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(8, 6), after=host.split_source_row)
-                _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(0, 10), after=host.split_ratios_frame)
+                _set_pack_visible(host.split_ratios_frame, True, fill=tk.X, pady=(12, 8), after=host.split_source_row)
+                _set_pack_visible(split_aug_frame, True, fill=tk.X, pady=(12, 8), after=host.split_ratios_frame)
                 _set_pack_visible(host.btn_step4_split_frame, True, fill=tk.X, pady=(12, 10), after=(split_aug_frame or host.split_ratios_frame))
             except Exception:
                 pass
@@ -725,11 +883,11 @@ def _step4_route_panel_copy(campaign_active: bool) -> dict[str, str]:
         return {
             "panel_title": " Wybór toru treningowego ",
             "header_title": " Aktywny tor ",
-            "intro": "Wybierz tor pracy tej iteracji. PZ1 przygotuje split, a PZ2 uruchomi trening.",
+            "intro": "Wybierz tor pracy tej iteracji. PZ1 przygotuje wariant treningowy, a PZ2 uruchomi trening.",
             "plate_title": "Tor tablic",
-            "plate_desc": "YOLO Pose. PZ1 tworzy split dla modelu detekcji tablic.",
+            "plate_desc": "YOLO Pose. PZ1 tworzy wariant treningowy z zatwierdzonych anotacji tablic.",
             "char_title": "Tor znaków",
-            "char_desc": "YOLO Detect. PZ1 tworzy split dla modelu detekcji znaków.",
+            "char_desc": "YOLO Detect. Źródło pochodzi z T05/PZ3; PZ1 tworzy z niego wariant treningowy.",
         }
 
     return {
@@ -1098,9 +1256,9 @@ def refresh_step4_campaign_navigation_ui(host: "TrainingTab"):
         )
         if show_dataset_adjust_cta:
             host.btn_step4_finish.configure(
-                text="Ustaw inny split",
+                text="Stwórz inny wariant datasetu",
                 command=host._open_step4_dataset_stage,
-                width=22,
+                width=28,
                 state=(tk.DISABLED if host._step4_has_active_operation() else tk.NORMAL),
             )
             if not str(host.btn_step4_finish.winfo_manager()):
@@ -1299,6 +1457,38 @@ def mark_step4_dataset_ready(
                 "source_stage": "Z4/PZ1",
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
+            if target == "char":
+                source_dataset = ""
+                source_yaml = ""
+                source_stage = ""
+                try:
+                    source = getattr(host, "_pending_step4_input_training_source", None)
+                    source_dataset = str(getattr(source, "dataset_dir", "") or "").strip()
+                    source_yaml = str(getattr(source, "yaml_path", "") or "").strip()
+                    source_stage = str(getattr(source, "source_stage", "") or "").strip()
+                except Exception:
+                    source_dataset = ""
+                    source_yaml = ""
+                    source_stage = ""
+                if not source_dataset and not source_yaml:
+                    try:
+                        source_dataset = str(host.split_src_var.get() or "").strip()
+                    except Exception:
+                        source_dataset = ""
+                if source_dataset or source_yaml:
+                    try:
+                        source_root = Path(source_yaml or source_dataset)
+                        if source_root.is_file() and source_root.name.lower() == "data.yaml":
+                            source_yaml = str(source_root)
+                            source_root = source_root.parent
+                        elif source_root:
+                            source_yaml = source_yaml or str(source_root / "data.yaml")
+                        source_dataset = str(source_root.resolve()) if source_root.exists() else str(source_root)
+                    except Exception:
+                        pass
+                    payload["source_dataset"] = source_dataset
+                    payload["source_yaml"] = source_yaml
+                    payload["source_dataset_stage"] = source_stage or "Z3/PZ3"
             if target == "plate":
                 try:
                     manifest_loader = getattr(host, "_load_plate_dataset_source_manifest", None)

@@ -233,8 +233,9 @@ def _show_wizard_transition_graph(self):
     except Exception:
         pass
     try:
-        self.frame.after_idle(self._refresh_wizard_transition_graph)
-        self.frame.after(120, self._refresh_wizard_transition_graph)
+        if not bool(getattr(self, "_project_open_lightweight_refresh", False)):
+            self.frame.after_idle(self._refresh_wizard_transition_graph)
+            self.frame.after(120, self._refresh_wizard_transition_graph)
         self.frame.after_idle(self._sync_right_panel_scrollregion)
         self.frame.after_idle(self._sync_right_panel_canvas_width)
     except Exception:
@@ -529,6 +530,10 @@ def _format_step1_selection_mode_label(*args, **kwargs):
 
 def _get_step1_manifest_context(self, *args, **kwargs):
     return campaign_step1_ingest._get_step1_manifest_context(self, *args, **kwargs)
+
+
+def _get_step1_manifest_context_lightweight(self, *args, **kwargs):
+    return campaign_step1_ingest._get_step1_manifest_context_lightweight(self, *args, **kwargs)
 
 
 def _build_step1_summary_payload(self, *args, **kwargs):

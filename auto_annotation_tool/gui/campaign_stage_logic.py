@@ -137,7 +137,39 @@ def _get_step2_disk_approval_fallback(
         except Exception:
             return 0, 0
 
+    staging_root = None
+    auto_root = None
+    try:
+        staging_root = CAMPAIGN.get_staging_dir("auto_ann")
+        staging_root = Path(staging_root) if staging_root is not None else None
+    except Exception:
+        staging_root = None
+    try:
+        auto_root = CAMPAIGN.get_dir("auto_ann")
+        auto_root = Path(auto_root) if auto_root is not None else None
+    except Exception:
+        auto_root = None
+
+    def path_is_within(candidate: Path | None, root: Path | None) -> bool:
+        if candidate is None or root is None:
+            return False
+        try:
+            Path(candidate).resolve().relative_to(Path(root).resolve())
+            return True
+        except Exception:
+            return False
+
+    def classify_run_source(run_dir: Path | None) -> str:
+        if run_dir is None:
+            return ""
+        if path_is_within(run_dir, staging_root):
+            return "staging"
+        if path_is_within(run_dir, auto_root):
+            return "existing"
+        return ""
+
     resolved_run = None
+    resolved_source_kind = ""
     run_images = 0
     run_plates = 0
     min_char_plates = int(getattr(self, "STEP3_CHAR_MIN_PLATES", 10) or 10)
@@ -146,6 +178,9 @@ def _get_step2_disk_approval_fallback(
     for candidate_index, raw_candidate in enumerate(candidates):
         candidate = resolve_run(raw_candidate)
         if candidate is None:
+            continue
+        candidate_source_kind = classify_run_source(candidate)
+        if not candidate_source_kind:
             continue
         try:
             key = str(candidate.resolve()).lower()
@@ -157,10 +192,12 @@ def _get_step2_disk_approval_fallback(
         images, plates = count_run_approved(candidate)
         if images > run_images or plates > run_plates or resolved_run is None:
             resolved_run = candidate
+            resolved_source_kind = candidate_source_kind
             run_images = int(images or 0)
             run_plates = int(plates or 0)
         if candidate_index < preferred_candidate_count and (images > 0 or plates > 0):
             resolved_run = candidate
+            resolved_source_kind = candidate_source_kind
             run_images = int(images or 0)
             run_plates = int(plates or 0)
             break
@@ -249,6 +286,7 @@ def _get_step2_disk_approval_fallback(
         "iteration_target": target,
         "action": action,
         "run_dir": resolved_run,
+        "source_kind": resolved_source_kind,
         "run_approved_images": int(run_images or 0),
         "run_approved_plates": int(run_plates or 0),
         "unpromoted_approved_images": int(unpromoted_images or 0),
@@ -531,7 +569,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
         if approval_run_dir is None and disk_fallback.get("run_dir") is not None:
             approval_run_dir = disk_fallback.get("run_dir")
             approval_context["run_dir"] = approval_run_dir
-            approval_context["source_kind"] = "staging"
+            approval_context["source_kind"] = str(disk_fallback.get("source_kind") or "staging")
 
     if approval_iteration_target in {"plate", "char"}:
         try:
@@ -547,7 +585,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
     ):
         approval_run_dir = disk_fallback.get("run_dir")
         approval_context["run_dir"] = approval_run_dir
-        approval_context["source_kind"] = "staging"
+        approval_context["source_kind"] = str(disk_fallback.get("source_kind") or "staging")
         try:
             self.app.update_status(
                 (
@@ -1723,7 +1761,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
         "ok": False,
         "reason": "missing_char_dataset",
         "message": (
-            "Brakuje eksportu datasetu znaków z PZ3. Sama anotacja boxów w PZ2 nie otwiera T06: "
+            "Brakuje eksportu datasetu znaków z PZ3. Sama anotacja boxów w PZ2 nie otwiera T05: "
             "po oznaczeniu znaków i uzyskaniu tablic perfect przejdź do PZ3 i wyeksportuj dataset znaków YOLO Detect."
         ),
         "ready_dataset": "",
@@ -1814,6 +1852,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
         session_time = _contract_time(session)
         session_state = str(session.get("state") or "").strip().lower()
         session_gate = str(session.get("working_gate_id") or "").strip().upper()
+        char_work_gate_session_ids = {"T05", "T06"}
         session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
         session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
         session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
@@ -1835,11 +1874,11 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
             pz2_time
             and pz3_time
             and pz2_time > pz3_time + 0.001
-            and not (session_gate == "T06" and session_active and session_targets_pz2)
+            and not (session_gate in char_work_gate_session_ids and session_active and session_targets_pz2)
             and not pz2_marker_only
         )
         stale_after_session = bool(
-            session_gate == "T06"
+            session_gate in char_work_gate_session_ids
             and session_active
             and session_state not in {"resolved", "closed", "complete", "completed"}
             and not session_targets_pz2
@@ -1854,14 +1893,18 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                     dataset_path_raw = str(pz3_contract.get("dataset_path") or "").strip()
                     dataset_path = Path(dataset_path_raw) if dataset_path_raw else None
                     try:
+                        previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
                         session.update(
                             {
                                 "active": False,
                                 "state": "completed",
+                                "working_gate_id": "T05",
                                 "closed_at": datetime.now().isoformat(timespec="seconds"),
                                 "reason": "pz3_summary_ready",
                             }
                         )
+                        if previous_interrupted_at:
+                            session.setdefault("resolved_interrupted_at", previous_interrupted_at)
                         CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
                     except Exception as exc:
                         logger.debug(f"Nie udalo sie domknac sesji T06/Z3 po summary: {exc}")
@@ -1870,7 +1913,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
             result.update(
                 reason="stale_char_dataset",
                 message=(
-                    "Eksport datasetu znaków nie obejmuje najnowszej pracy T06. "
+                    "Eksport datasetu znaków nie obejmuje najnowszej pracy T05. "
                     "Wróć do pracy bramki i ponownie utwórz dataset znaków w PZ3."
                 ),
                 ready_dataset=dataset_path_raw,
@@ -1884,21 +1927,25 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
             and self._looks_like_campaign_char_dataset_dir(dataset_path)
         ):
             if (
-                session_gate == "T06"
+                session_gate in char_work_gate_session_ids
                 and session_active
                 and str(session.get("work_area") or "").strip().lower() == "z3"
                 and not session_targets_pz2
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             ):
                 try:
+                    previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
                     session.update(
                         {
                             "active": False,
                             "state": "completed",
+                            "working_gate_id": "T05",
                             "closed_at": datetime.now().isoformat(timespec="seconds"),
                             "reason": "pz3_dataset_ready",
                         }
                     )
+                    if previous_interrupted_at:
+                        session.setdefault("resolved_interrupted_at", previous_interrupted_at)
                     CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
                 except Exception as exc:
                     logger.debug(f"Nie udalo sie domknac gotowej sesji T06/Z3: {exc}")
@@ -1917,7 +1964,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                     )
                     or 0
                 ),
-                validation_message="Kontrakt PZ3 T06 potwierdza wyeksportowany dataset znaków.",
+                validation_message="Kontrakt PZ3 T05 potwierdza wyeksportowany dataset znaków.",
             )
             return result
     except Exception as e:
@@ -2200,6 +2247,15 @@ def _iteration_target_button_label(self, route: str, *, current_target: str = ""
 
 
 def _get_iteration_target_lock_reason(self) -> str:
+    try:
+        if bool(CAMPAIGN.is_t02_at_review_committed_current_iteration()):
+            return (
+                "Ta iteracja ma już zapisaną kontrolę AT w T02. "
+                "Drugi tor będzie dostępny dopiero w kolejnej iteracji albo po osobnym cofnięciu tej kontroli."
+            )
+    except Exception:
+        pass
+
     current_target = self._get_iteration_target()
     if current_target not in {"plate", "char"}:
         return ""

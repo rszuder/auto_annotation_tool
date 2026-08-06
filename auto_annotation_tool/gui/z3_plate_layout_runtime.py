@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
+from ..config import logger
 from ..character_recognition.reading_order import (
     annotate_records_reading_order,
     group_records_into_reading_rows,
@@ -18,16 +21,36 @@ from ..character_recognition.reading_order import (
     sort_records_reading_order,
 )
 from .z3_goldpack_ui import ensure_plate_source_metadata
+from .z3_detection_runtime import clear_detection_review_snapshot_after_manual_edit
 from .z3_preview_records import (
     build_character_source_tags,
     build_plate_layout_export_metadata,
+    compose_character_source_tag,
     fusion_details_yolo_box_backend_positions,
+    normalize_character_box_source,
     get_character_source_tag,
     normalize_character_source_kind,
+    normalize_character_sign_source,
     normalize_plate_source_bucket,
     normalize_plate_source_origin,
 )
 from .z3_preview_ui import serialize_character_records
+
+_VALID_PREVIEW_LAYOUT_OVERRIDES = {"single_row", "two_row"}
+
+
+def _preview_manual_layout_record_key(data) -> str:
+    if not isinstance(data, dict):
+        return ""
+    source_image = str(data.get("source_image", "") or "").strip().lower().replace("\\", "/")
+    bbox = data.get("source_bbox")
+    if not source_image or not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
+        return ""
+    try:
+        bbox_key = ",".join(f"{float(value):.2f}" for value in bbox[:4])
+    except Exception:
+        return ""
+    return f"{source_image}|{bbox_key}"
 
 
 def _sort_character_records_by_x(self, chars, data=None):
@@ -180,6 +203,178 @@ def _get_preview_layout_separator_for_reading(self, data=None):
         separator = self._ensure_preview_layout_separator(data, data.get("characters", []))
     return separator
 
+
+def _normalize_preview_manual_layout_override(self, data) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    override = str(data.get("plate_layout_override", "") or "").strip().lower()
+    if override in _VALID_PREVIEW_LAYOUT_OVERRIDES:
+        return override
+
+    source = str(data.get("layout_source", "") or "").strip().lower()
+    if source != "manual_override":
+        return ""
+
+    layout = str(data.get("plate_layout", "") or "").strip().lower()
+    try:
+        row_count = int(data.get("layout_row_count", 0) or 0)
+    except Exception:
+        row_count = 0
+
+    if layout == "two_row" or row_count == 2:
+        data["plate_layout_override"] = "two_row"
+        return "two_row"
+    if layout == "single_row" or row_count == 1:
+        data["plate_layout_override"] = "single_row"
+        return "single_row"
+    return ""
+
+
+def _capture_preview_manual_layout_state(self, data) -> dict:
+    if not isinstance(data, dict):
+        return {}
+
+    override = self._normalize_preview_manual_layout_override(data)
+    if override not in _VALID_PREVIEW_LAYOUT_OVERRIDES:
+        return {}
+
+    state = {"plate_layout_override": override}
+    separator = data.get("layout_separator")
+    if override == "two_row" and isinstance(separator, dict):
+        state["layout_separator"] = copy.deepcopy(separator)
+    for key in ("layout_override_source", "layout_override_updated_at"):
+        if key in data:
+            state[key] = copy.deepcopy(data.get(key))
+    return state
+
+
+def _restore_preview_manual_layout_state(self, data, state) -> bool:
+    if not isinstance(data, dict) or not isinstance(state, dict):
+        return False
+
+    override = str(state.get("plate_layout_override", "") or "").strip().lower()
+    if override not in _VALID_PREVIEW_LAYOUT_OVERRIDES:
+        return False
+
+    data["plate_layout_override"] = override
+    for key in ("layout_override_source", "layout_override_updated_at"):
+        if key in state:
+            data[key] = copy.deepcopy(state.get(key))
+
+    if override == "single_row":
+        data.pop("layout_separator", None)
+    elif isinstance(state.get("layout_separator"), dict):
+        data["layout_separator"] = copy.deepcopy(state.get("layout_separator"))
+
+    chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
+    self._update_preview_plate_layout_metadata(data, chars)
+    ordered_chars = self._sort_character_records_by_x(chars, data=data)
+    ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
+    data["characters"] = ordered_chars
+    data["status"] = self._derive_preview_status_from_data(data, ordered_chars)
+    return True
+
+
+def _backfill_preview_manual_layout_from_related_runs(self, metadata):
+    if not isinstance(metadata, dict):
+        return metadata
+
+    try:
+        current_meta_path = self._get_preview_metadata_path()
+    except Exception:
+        current_meta_path = None
+    if current_meta_path is None:
+        return metadata
+
+    try:
+        current_meta_path = Path(current_meta_path)
+        runs_root = current_meta_path.parent.parent
+    except Exception:
+        return metadata
+    if not runs_root.exists():
+        return metadata
+
+    cache_key = str(current_meta_path.resolve() if current_meta_path.exists() else current_meta_path)
+    if getattr(self, "_preview_manual_layout_backfill_done_for", "") == cache_key:
+        return metadata
+
+    target_keys = {}
+    for plate_id, raw_data in metadata.items():
+        if not isinstance(raw_data, dict):
+            continue
+        if self._normalize_preview_manual_layout_override(raw_data):
+            continue
+        key = _preview_manual_layout_record_key(raw_data)
+        if key:
+            target_keys[key] = str(plate_id or "")
+    if not target_keys:
+        self._preview_manual_layout_backfill_done_for = cache_key
+        return metadata
+
+    recovered = {}
+    try:
+        sibling_meta_paths = sorted(
+            path for path in runs_root.glob("run_*/metadata.json")
+            if path != current_meta_path
+        )
+    except Exception:
+        sibling_meta_paths = []
+
+    for meta_path in sibling_meta_paths:
+        try:
+            source_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(source_meta, dict):
+            continue
+        for source_data in source_meta.values():
+            if not isinstance(source_data, dict):
+                continue
+            key = _preview_manual_layout_record_key(source_data)
+            if key not in target_keys:
+                continue
+            override = self._normalize_preview_manual_layout_override(source_data)
+            if override not in _VALID_PREVIEW_LAYOUT_OVERRIDES:
+                continue
+            payload = {
+                "plate_layout_override": override,
+                "layout_backfilled_from": meta_path.parent.name,
+            }
+            for field_name in (
+                "layout_separator",
+                "layout_override_source",
+                "layout_override_updated_at",
+                "plate_layout",
+                "layout_row_count",
+                "layout_confidence",
+                "layout_source",
+            ):
+                if field_name in source_data:
+                    payload[field_name] = copy.deepcopy(source_data.get(field_name))
+            recovered[key] = payload
+
+    applied = 0
+    for raw_data in metadata.values():
+        if not isinstance(raw_data, dict):
+            continue
+        if self._normalize_preview_manual_layout_override(raw_data):
+            continue
+        payload = recovered.get(_preview_manual_layout_record_key(raw_data))
+        if not isinstance(payload, dict):
+            continue
+        raw_data.update(copy.deepcopy(payload))
+        applied += 1
+
+    self._preview_manual_layout_backfill_done_for = cache_key
+    if applied > 0:
+        try:
+            logger.info("[Z3/PZ2] Przywrócono ręczny układ tablic z poprzednich runów: %s", applied)
+        except Exception:
+            pass
+    return metadata
+
+
 def _capture_preview_two_row_layout_state(self, data, chars=None) -> None:
     if not isinstance(data, dict):
         return
@@ -306,30 +501,26 @@ def _find_preview_layout_separator_handle_hit(self, canvas_x: float, canvas_y: f
         if (dx * dx) + (dy * dy) <= radius * radius:
             return handle
 
-    left_point = runtime.get("left_point")
-    right_point = runtime.get("right_point")
-    if (
-        isinstance(left_point, (list, tuple))
-        and len(left_point) >= 2
-        and isinstance(right_point, (list, tuple))
-        and len(right_point) >= 2
-    ):
+    line_points = runtime.get("line_points")
+    if isinstance(line_points, (list, tuple)) and len(line_points) >= 4:
         try:
-            x1, y1 = float(left_point[0]), float(left_point[1])
-            x2, y2 = float(right_point[0]), float(right_point[1])
             px, py = float(canvas_x), float(canvas_y)
-            vx, vy = x2 - x1, y2 - y1
-            length_sq = (vx * vx) + (vy * vy)
-            if length_sq <= 0.0001:
-                distance = ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
-            else:
-                t = max(0.0, min(1.0, (((px - x1) * vx) + ((py - y1) * vy)) / length_sq))
-                nearest_x = x1 + (t * vx)
-                nearest_y = y1 + (t * vy)
-                distance = ((px - nearest_x) ** 2 + (py - nearest_y) ** 2) ** 0.5
             line_hit_radius = max(7.0, float(runtime.get("line_hit_radius", 9.0) or 9.0))
-            if distance <= line_hit_radius:
-                return "line"
+            values = [float(value) for value in line_points]
+            for idx in range(0, len(values) - 3, 2):
+                x1, y1 = values[idx], values[idx + 1]
+                x2, y2 = values[idx + 2], values[idx + 3]
+                vx, vy = x2 - x1, y2 - y1
+                length_sq = (vx * vx) + (vy * vy)
+                if length_sq <= 0.0001:
+                    distance = ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+                else:
+                    t = max(0.0, min(1.0, (((px - x1) * vx) + ((py - y1) * vy)) / length_sq))
+                    nearest_x = x1 + (t * vx)
+                    nearest_y = y1 + (t * vy)
+                    distance = ((px - nearest_x) ** 2 + (py - nearest_y) ** 2) ** 0.5
+                if distance <= line_hit_radius:
+                    return "line"
         except Exception:
             pass
     return None
@@ -340,6 +531,8 @@ def _set_preview_layout_separator_handle_y_from_canvas(self, handle: str, canvas
         return None
     if str(data.get("plate_layout_override", "") or "").strip().lower() != "two_row":
         data["plate_layout_override"] = "two_row"
+    data["layout_override_source"] = "separator"
+    data["layout_override_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     state = getattr(self, "_preview_render_state", None) or {}
     try:
         image_w = max(1.0, float(state.get("orig_w", data.get("plate_image_width", 1.0)) or 1.0))
@@ -388,6 +581,8 @@ def _move_preview_layout_separator_from_canvas_delta(
         return None
     if str(data.get("plate_layout_override", "") or "").strip().lower() != "two_row":
         data["plate_layout_override"] = "two_row"
+    data["layout_override_source"] = "separator"
+    data["layout_override_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     if not isinstance(start_separator, dict):
         return self._set_preview_layout_separator_handle_y_from_canvas("line", current_canvas_x, current_canvas_y)
 
@@ -419,6 +614,68 @@ def _move_preview_layout_separator_from_canvas_delta(
     data["layout_separator"] = prepared
     data["plate_image_width"] = float(image_w)
     data["plate_image_height"] = float(image_h)
+    return prepared
+
+def _build_preview_layout_separator_drag_preview(self, drag_state, canvas_x: float, canvas_y: float):
+    if not isinstance(drag_state, dict):
+        return None
+    data = self._get_preview_active_data(create=False)
+    if not isinstance(data, dict):
+        return None
+    state = getattr(self, "_preview_render_state", None) or {}
+    try:
+        image_w = max(1.0, float(state.get("orig_w", data.get("plate_image_width", 1.0)) or 1.0))
+        image_h = max(1.0, float(state.get("orig_h", data.get("plate_image_height", 1.0)) or 1.0))
+    except Exception:
+        image_w = 1.0
+        image_h = 1.0
+
+    start_separator = self._normalize_preview_layout_separator(
+        drag_state.get("start_separator"),
+        image_w=image_w,
+        image_h=image_h,
+    )
+    if not isinstance(start_separator, dict):
+        start_separator = {
+            "x1": 0.0,
+            "y1": image_h * 0.5,
+            "x2": float(image_w),
+            "y2": image_h * 0.5,
+            "source": "manual",
+        }
+
+    prepared = dict(start_separator)
+    prepared["x1"] = 0.0
+    prepared["x2"] = float(image_w)
+    handle_key = str(drag_state.get("handle", "line") or "line").strip().lower()
+
+    try:
+        _current_x, current_img_y = self._preview_canvas_to_image_point(canvas_x, canvas_y)
+    except Exception:
+        current_img_y = float(prepared.get("y1", image_h * 0.5) or image_h * 0.5)
+    current_img_y = max(0.0, min(float(image_h), float(current_img_y)))
+
+    if handle_key == "line":
+        try:
+            _start_x, start_img_y = self._preview_canvas_to_image_point(
+                float(drag_state.get("start_canvas_x", canvas_x) or canvas_x),
+                float(drag_state.get("start_canvas_y", canvas_y) or canvas_y),
+            )
+            delta_y = float(current_img_y) - float(start_img_y)
+        except Exception:
+            delta_y = 0.0
+        for key in ("y1", "y2"):
+            try:
+                base_y = float(start_separator.get(key, image_h * 0.5) or image_h * 0.5)
+            except Exception:
+                base_y = image_h * 0.5
+            prepared[key] = max(0.0, min(float(image_h), base_y + delta_y))
+    elif handle_key == "right":
+        prepared["y2"] = current_img_y
+    else:
+        prepared["y1"] = current_img_y
+
+    prepared["source"] = "manual"
     return prepared
 
 def _clamp_preview_layout_separator_to_existing_rows(self, data, separator):
@@ -477,37 +734,12 @@ def _clamp_preview_layout_separator_to_existing_rows(self, data, separator):
     return prepared
 
 def _apply_preview_layout_separator_constraints_to_chars(self, data, chars=None):
-    if not isinstance(data, dict) or not self._should_preview_use_two_row_layers(data):
-        return list(chars or []) if isinstance(chars, list) else []
-    source_chars = chars if isinstance(chars, list) else data.get("characters", [])
+    source_chars = chars if isinstance(chars, list) else (data.get("characters", []) if isinstance(data, dict) else [])
     if not isinstance(source_chars, list):
         return []
-    constrained = []
-    changed = False
-    for rec in source_chars:
-        if not isinstance(rec, dict):
-            continue
-        bbox = rec.get("bbox")
-        if not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
-            constrained.append(rec)
-            continue
-        try:
-            row = int(rec.get("reading_row", 0) or 0) or self._get_preview_row_for_bbox(bbox, data)
-        except Exception:
-            row = self._get_preview_row_for_bbox(bbox, data)
-        new_bbox = self._constrain_preview_char_bbox_to_layout_separator(bbox, data=data, row=row, min_size=4.0)
-        try:
-            if any(abs(float(new_bbox[idx]) - float(bbox[idx])) >= 0.25 for idx in range(4)):
-                changed = True
-                self._mark_preview_char_record_manual(rec)
-        except Exception:
-            changed = True
-            self._mark_preview_char_record_manual(rec)
-        rec["bbox"] = [float(value) for value in new_bbox[:4]]
-        constrained.append(rec)
-    if changed:
-        data["characters"] = constrained
-    return constrained
+    # Separator rzędów jest narzędziem semantycznym: zmienia kolejność
+    # czytania (1.x/2.x), ale nie może przesuwać ani przycinać wykrytych boxów.
+    return list(source_chars)
 
 def _preview_layout_separator_conflicts_with_chars(self, data, chars=None) -> bool:
     if not isinstance(data, dict) or not self._should_preview_use_two_row_layers(data):
@@ -570,8 +802,8 @@ def _update_preview_plate_layout_metadata(self, data, chars=None):
     data["layout_inferred_confidence"] = float(layout_meta.get("layout_confidence", 0.0) or 0.0)
     data["layout_inferred_source"] = str(layout_meta.get("layout_source", "none") or "none")
 
-    override = str(data.get("plate_layout_override", "") or "").strip().lower()
-    if override in {"single_row", "two_row"}:
+    override = self._normalize_preview_manual_layout_override(data)
+    if override in _VALID_PREVIEW_LAYOUT_OVERRIDES:
         layout_meta = {
             "plate_layout": override,
             "layout_row_count": 2 if override == "two_row" else 1,
@@ -666,6 +898,8 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
     chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
     if next_override:
         data["plate_layout_override"] = next_override
+        data["layout_override_source"] = str(source or "manual")
+        data["layout_override_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         if next_override == "single_row":
             data.pop("layout_separator", None)
         elif next_override == "two_row":
@@ -675,6 +909,8 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
                 pass
     else:
         data.pop("plate_layout_override", None)
+        data.pop("layout_override_source", None)
+        data.pop("layout_override_updated_at", None)
 
     self._update_preview_plate_layout_metadata(data, chars)
     ordered_chars = self._sort_character_records_by_x(chars, data=data)
@@ -684,6 +920,10 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
 
     try:
         self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        try:
+            clear_detection_review_snapshot_after_manual_edit(self)
+        except Exception:
+            pass
         try:
             self._schedule_preview_info_refresh(delay_ms=900)
         except Exception:
@@ -777,6 +1017,10 @@ def _normalize_character_source_tag(self, raw_tag=None, method=None) -> str:
         return "manual"
     if tag in ("yolo_box_ocr", "yolo_ocr", "yolo_box_plus_ocr"):
         return "yolo_box_ocr"
+    if tag in ("yolo_box", "yb"):
+        return "yolo_box"
+    if tag in ("yolo_symbol", "ys"):
+        return "yolo_symbol"
     if tag in ("yolo_rescue", "rescue", "yolorescue"):
         return "yolo_rescue"
     if tag == "yolo":
@@ -788,6 +1032,10 @@ def _normalize_character_source_tag(self, raw_tag=None, method=None) -> str:
         return "manual"
     if method_name in {"yolo_ocr"}:
         return "yolo_box_ocr"
+    if method_name in {"yolo_box"}:
+        return "yolo_box"
+    if method_name in {"yolo_symbol"}:
+        return "yolo_symbol"
     if method_name == "yolo":
         return "yolo"
     return "ocr"
@@ -795,6 +1043,7 @@ def _normalize_character_source_tag(self, raw_tag=None, method=None) -> str:
 def _character_record_uses_yolo_box_backend(rec) -> bool:
     if isinstance(rec, dict):
         values = [
+            rec.get("box_source"),
             rec.get("box_backend"),
             rec.get("box_backend_source"),
             rec.get("geometry_source"),
@@ -803,6 +1052,7 @@ def _character_record_uses_yolo_box_backend(rec) -> bool:
         ]
     else:
         values = [
+            getattr(rec, "box_source", None),
             getattr(rec, "box_backend", None),
             getattr(rec, "box_backend_source", None),
             getattr(rec, "geometry_source", None),
@@ -883,16 +1133,26 @@ def _build_character_source_tags(self, chars, fusion_strategy="", fusion_details
         fusion_details=fusion_details,
     )
 
-def _serialize_character_records(self, chars, fusion_strategy="", fusion_details=None):
+def _serialize_character_records(self, chars, fusion_strategy="", fusion_details=None, data=None):
     return serialize_character_records(
         self,
         chars,
         fusion_strategy=fusion_strategy,
         fusion_details=fusion_details,
+        data=data,
     )
 
 def _get_character_source_tag(self, rec, data=None, fallback_index: int = 0) -> str:
     return get_character_source_tag(self, rec, data=data, fallback_index=fallback_index)
+
+def _get_character_box_source_tag(self, rec, data=None, fallback_index: int = 0) -> str:
+    return normalize_character_box_source(self, rec, data=data, fallback_index=fallback_index)
+
+def _get_character_sign_source_tag(self, rec, data=None, fallback_index: int = 0) -> str:
+    return normalize_character_sign_source(self, rec, data=data, fallback_index=fallback_index)
+
+def _compose_character_source_tag(self, box_source: str = "", sign_source: str = "") -> str:
+    return compose_character_source_tag(box_source, sign_source)
 
 def _get_character_source_kind(self, rec, data=None) -> str:
     plate_bucket = self._get_plate_source_bucket(data) if isinstance(data, dict) else ""
@@ -957,8 +1217,26 @@ def _confirm_export_with_uncertain_layouts(self, plate_entries, *, export_label:
     return bool(messagebox.askyesno("Niepewny układ tablic", message, parent=parent))
 
 def _count_character_sources(self, chars, data=None):
-    counts = {"ocr": 0, "yolo": 0, "yolo_box_ocr": 0, "yolo_rescue": 0, "manual": 0}
+    counts = {
+        "ocr": 0,
+        "yolo": 0,
+        "yolo_box": 0,
+        "yolo_symbol": 0,
+        "yolo_box_ocr": 0,
+        "yolo_rescue": 0,
+        "manual": 0,
+        "manual_box": 0,
+        "manual_sign": 0,
+        "generated_box": 0,
+        "ocr_symbol": 0,
+    }
     for idx, rec in enumerate(list(chars or [])):
+        box_source = self._get_character_box_source_tag(rec, data=data, fallback_index=idx)
+        sign_source = self._get_character_sign_source_tag(rec, data=data, fallback_index=idx)
+        if box_source in counts:
+            counts[box_source] += 1
+        if sign_source in counts:
+            counts[sign_source] += 1
         tag = self._get_character_source_tag(rec, data=data, fallback_index=idx)
         if tag not in counts:
             continue

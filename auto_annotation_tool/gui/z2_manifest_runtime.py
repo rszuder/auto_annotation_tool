@@ -869,6 +869,7 @@ def _get_campaign_manual_touched_filenames(self) -> set[str]:
 
 
 def _remember_annotation_run_resume_state(self, run_dir: Path | None = None) -> bool:
+    started_at = time.perf_counter()
     candidate = run_dir
     if candidate is None:
         candidate = getattr(self, "current_annotation_run_dir", None)
@@ -885,10 +886,17 @@ def _remember_annotation_run_resume_state(self, run_dir: Path | None = None) -> 
     if candidate is None:
         return False
 
-    return self._update_annotation_run_manifest(
+    result = self._update_annotation_run_manifest(
         candidate,
         **self._collect_preview_resume_manifest_fields(),
     )
+    elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+    if elapsed_ms >= 120.0:
+        try:
+            logger.info("[Z2 PERF] resume_manifest_save total=%.0fms", elapsed_ms)
+        except Exception:
+            pass
+    return result
 
 
 def _mark_annotation_run_completed(

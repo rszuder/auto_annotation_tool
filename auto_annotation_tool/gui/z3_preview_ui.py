@@ -117,6 +117,8 @@ from .z3_preview_badges import (
     measure_preview_overlay_text_width,
     measure_preview_text_badge,
 )
+from .z3_detection_runtime import clear_detection_review_snapshot_after_manual_edit
+from .z2_shared_ui import campaign_gate_id_for_edge
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -194,6 +196,30 @@ def _preview_char_record_trace_fields(host: "CharacterAnnotationTab", rec, *, da
         "rowcol": f"{row}.{col}" if row or col else "-",
         "bbox": _preview_char_bbox_text(host, rec),
     }
+
+
+def _preview_character_source_parts(host: "CharacterAnnotationTab", rec, *, data=None, fallback_index: int = 0) -> tuple[str, str]:
+    try:
+        box_source = host._get_character_box_source_tag(rec, data=data, fallback_index=fallback_index)
+    except Exception:
+        box_source = ""
+    try:
+        sign_source = host._get_character_sign_source_tag(rec, data=data, fallback_index=fallback_index)
+    except Exception:
+        sign_source = ""
+    return (
+        str(box_source or "").strip().lower().replace("-", "_"),
+        str(sign_source or "").strip().lower().replace("-", "_"),
+    )
+
+
+def _preview_visual_tag_for_box_source(host: "CharacterAnnotationTab", box_source: str, sign_source: str = "") -> str:
+    normalized_box = str(box_source or "").strip().lower().replace("-", "_")
+    if normalized_box == "manual_box":
+        return "manual"
+    if normalized_box == "yolo_box":
+        return "yolo_box"
+    return "ocr"
 
 
 def log_preview_edit_flow(host: "CharacterAnnotationTab", event: str, **fields) -> None:
@@ -587,14 +613,26 @@ def select_preview_character_box(
     host._refresh_preview_editor_toolbar()
     toolbar_ms = (time.perf_counter() - phase_start) * 1000.0
     phase_start = time.perf_counter()
-    host._update_preview_edit_status(
-        status_message or (
-            "Tryb wpisywania znaków jest aktywny. Kliknij kolejny box LPM albo użyj strzałek lewo/prawo, a potem wpisz znak."
-            if label_mode_active else
-            "Box znaku jest aktywny. Środkowy okrąg przesuwa ramkę, narożniki zmieniają rozmiar, PPM usuwa box, a Alt+W włącza wpisywanie znaków."
-        ),
-        tone="info",
-    )
+    if status_message or label_target_active:
+        host._update_preview_edit_status(
+            status_message or "Tryb wpisywania znaków jest aktywny. Kliknij kolejny box LPM albo użyj strzałek lewo/prawo, a potem wpisz znak.",
+            tone="info",
+        )
+    else:
+        # Hot path: selecting boxes must only update selection visuals, not reflow the instruction overlay.
+        quick_message = "Box znaku jest aktywny. Chwyć środek albo narożnik."
+        try:
+            if hasattr(host, "preview_edit_status_var") and str(host.preview_edit_status_var.get() or "") != quick_message:
+                host.preview_edit_status_var.set(quick_message)
+        except Exception:
+            pass
+        try:
+            overlay = getattr(host, "preview_typing_overlay", None)
+            if overlay is not None:
+                overlay.place_forget()
+            host._preview_typing_overlay_text = ""
+        except Exception:
+            pass
     status_ms = (time.perf_counter() - phase_start) * 1000.0
     host._focus_preview_canvas()
     affected_indices = {
@@ -651,9 +689,10 @@ def select_preview_character_box(
     return "break"
 
 
-def serialize_character_records(host, chars, fusion_strategy="", fusion_details=None):
+def serialize_character_records(host, chars, fusion_strategy="", fusion_details=None, data=None):
     ordered = host._annotate_preview_character_reading_positions(
-        host._sort_character_records_by_x(list(chars or []))
+        host._sort_character_records_by_x(list(chars or []), data=data),
+        data=data,
     )
     source_tags = host._build_character_source_tags(
         ordered,
@@ -663,10 +702,17 @@ def serialize_character_records(host, chars, fusion_strategy="", fusion_details=
     clean = []
 
     for idx, char in enumerate(ordered):
-        source_tag = source_tags[idx] if idx < len(source_tags) else host._normalize_character_source_tag(
+        legacy_source_tag = source_tags[idx] if idx < len(source_tags) else host._normalize_character_source_tag(
             method=(char.get("method", "") if isinstance(char, dict) else getattr(char, "method", ""))
         )
+        box_source, sign_source = _preview_character_source_parts(host, char, data=data, fallback_index=idx)
+        source_tag = host._compose_character_source_tag(box_source, sign_source)
         source_kind = host._normalize_character_source_kind(char)
+        if source_tag != legacy_source_tag:
+            if source_tag == "manual":
+                source_kind = "local_manual"
+            elif source_tag in {"yolo", "yolo_box", "yolo_symbol", "yolo_box_ocr", "yolo_rescue", "ocr"}:
+                source_kind = source_tag
         record = {
             "character": str(char["character"] if isinstance(char, dict) else char.character),
             "bbox": [float(x) for x in (char["bbox"] if isinstance(char, dict) else char.bbox)],
@@ -674,6 +720,8 @@ def serialize_character_records(host, chars, fusion_strategy="", fusion_details=
             "method": str(char["method"] if isinstance(char, dict) else char.method),
             "source_tag": str(source_tag),
             "source_kind": str(source_kind),
+            "box_source": str(box_source),
+            "sign_source": str(sign_source),
             "source_batch_id": str((char.get("source_batch_id", "") if isinstance(char, dict) else getattr(char, "source_batch_id", "")) or ""),
         }
         for field_name in ("reading_row", "reading_col", "reading_index"):
@@ -684,7 +732,8 @@ def serialize_character_records(host, chars, fusion_strategy="", fusion_details=
             except Exception:
                 pass
         if (
-            host._character_record_uses_yolo_box_backend(char)
+            box_source == "yolo_box"
+            or host._character_record_uses_yolo_box_backend(char)
             or (
                 str(source_tag) == "yolo_box_ocr"
                 and idx in host._fusion_details_yolo_box_backend_positions(fusion_details)
@@ -715,12 +764,27 @@ def get_plate_listbox_source_flags(host, data: dict | None) -> list[str]:
         flags.add("M")
 
     for idx, rec in enumerate(list(data.get("characters", []) or [])):
+        box_source, sign_source = _preview_character_source_parts(host, rec, data=data, fallback_index=idx)
         source_kind = host._get_character_source_kind(rec, data=data)
         source_tag = host._get_character_source_tag(rec, data=data, fallback_index=idx)
         method_name = str(
             rec.get("method", "") if isinstance(rec, dict) else getattr(rec, "method", "")
         ).strip().lower()
         uses_yolo_box_backend = host._character_record_uses_yolo_box_backend(rec)
+
+        if box_source == "manual_box":
+            flags.add("MB")
+        elif box_source == "yolo_box":
+            flags.add("YB")
+        elif box_source == "generated_box":
+            flags.add("GB")
+
+        if sign_source == "manual_sign":
+            flags.add("MS")
+        elif sign_source == "yolo_symbol":
+            flags.add("YS")
+        elif sign_source == "ocr_symbol":
+            flags.add("OS")
 
         if source_kind in {"local_manual", "cvat_manual"} or source_tag == "manual" or method_name in {"manual", "cvat_manual"}:
             flags.add("M")
@@ -734,24 +798,30 @@ def get_plate_listbox_source_flags(host, data: dict | None) -> list[str]:
 
         if (
             uses_yolo_box_backend
-            or source_tag in {"yolo", "yolo_box_ocr"}
-            or source_kind in {"yolo", "yolo_box_ocr"}
+            or source_tag in {"yolo", "yolo_box", "yolo_box_ocr"}
+            or source_kind in {"yolo", "yolo_box", "yolo_box_ocr"}
             or method_name in {"yolo_ocr"}
         ):
             flags.add("YB")
 
         if (
-            source_tag in {"yolo", "yolo_rescue"}
-            or source_kind in {"yolo", "yolo_rescue"}
+            source_tag in {"yolo", "yolo_symbol", "yolo_rescue"}
+            or source_kind in {"yolo", "yolo_symbol", "yolo_rescue"}
             or (
                 method_name == "yolo"
-                and source_tag not in {"yolo_box_ocr"}
-                and source_kind not in {"yolo_box_ocr"}
+                and source_tag not in {"yolo_box", "yolo_box_ocr"}
+                and source_kind not in {"yolo_box", "yolo_box_ocr"}
             )
+            or method_name == "yolo_symbol"
         ):
             flags.add("YS")
 
-    return [flag for flag in ("M", "O", "YB", "YS") if flag in flags]
+    if "MB" in flags or "MS" in flags:
+        flags.discard("M")
+    if "OS" in flags:
+        flags.discard("O")
+    preferred_order = ("MB", "MS", "GB", "OS", "YB", "YS", "M", "O")
+    return [flag for flag in preferred_order if flag in flags]
 
 
 def rebuild_preview_listbox(
@@ -798,8 +868,8 @@ def rebuild_preview_listbox(
         defer_row_styles = len(host._listbox_pid_by_index) > 80
         for idx, pid in enumerate(host._listbox_pid_by_index):
             data = host.preview_metadata.get(pid, {})
-            status = str(data.get("status", "unknown")).strip().lower()
             label = host._format_plate_listbox_label(pid, data)
+            status = str(data.get("status", "unknown")).strip().lower()
 
             host.plates_listbox.insert(tk.END, label)
             if defer_row_styles:
@@ -874,11 +944,12 @@ def rebuild_preview_listbox(
 def format_preview_source_counts_line(host: "CharacterAnnotationTab", source_counts: dict | None) -> str:
     counts = source_counts if isinstance(source_counts, dict) else {}
     return (
-        f"Ramki M={int(counts.get('manual', 0))} | "
-        f"O={int(counts.get('ocr', 0))} | "
-        f"YB+YS={int(counts.get('yolo', 0))} | "
-        f"YB+O={int(counts.get('yolo_box_ocr', 0))} | "
-        f"O+YS={int(counts.get('yolo_rescue', 0))}"
+        f"Ramki MB={int(counts.get('manual_box', 0) or 0)} | "
+        f"GB={int(counts.get('generated_box', 0) or 0)} | "
+        f"YB={int(counts.get('yolo_box', 0) or 0)} | "
+        f"Znaki MS={int(counts.get('manual_sign', 0) or 0)} | "
+        f"OS={int(counts.get('ocr_symbol', 0) or 0)} | "
+        f"YS={int(counts.get('yolo_symbol', 0) or 0)}"
     )
 
 
@@ -904,7 +975,18 @@ def get_preview_status_presentation(
         source_data.get("characters", []) if isinstance(source_data, dict) else []
     )
     status = host._get_preview_live_status(data=source_data, chars=source_chars, plate_id=plate_id)
-    expected_texts = host._get_preview_expected_texts(source_data if isinstance(source_data, dict) else None)
+    expected_resolution = host._resolve_preview_expected_text_for_crop(
+        source_data if isinstance(source_data, dict) else None,
+        source_chars,
+    )
+    expected_texts = list(expected_resolution.get("expected_texts", []) or [])
+    target_len = int(expected_resolution.get("target_length", 0) or 0)
+    target_lengths = [
+        int(value)
+        for value in list(expected_resolution.get("target_lengths", []) or [])
+        if int(value or 0) > 0
+    ]
+    count_resolved = bool(expected_resolution.get("count_resolved"))
 
     total_boxes = len(source_chars) if isinstance(source_chars, list) else 0
     filled_boxes = 0
@@ -936,9 +1018,7 @@ def get_preview_status_presentation(
         canvas_text = f"Znaki {filled_boxes}/{total_boxes}"
         info_text = f"status: wpisane znaki {filled_boxes}/{total_boxes}"
     elif expected_texts:
-        expected_lengths = [len(str(text or "").strip().upper()) for text in expected_texts if str(text or "").strip()]
-        target_len = min(expected_lengths, key=lambda value: abs(int(value) - int(total_boxes))) if expected_lengths else None
-        if target_len is not None and int(total_boxes) != int(target_len):
+        if target_len > 0 and int(total_boxes) != int(target_len):
             severity = "warning"
             canvas_text = f"Ramki {total_boxes}/{int(target_len)}"
             info_text = f"status: liczba ramek znaków {total_boxes}/{int(target_len)}"
@@ -946,6 +1026,11 @@ def get_preview_status_presentation(
             severity = "error"
             canvas_text = "Do korekty"
             info_text = "status: wymaga korekty"
+        elif not count_resolved and target_lengths:
+            target_label = " lub ".join(str(value) for value in target_lengths)
+            severity = "warning"
+            canvas_text = f"Ramki {total_boxes}/{target_label}"
+            info_text = f"status: oczekiwane ramki {target_label}"
         else:
             severity = "warning"
             canvas_text = "Brak znaków"
@@ -962,6 +1047,10 @@ def get_preview_status_presentation(
         "info_text": info_text,
         "candidate_text": candidate_text,
         "expected_texts": list(expected_texts or []),
+        "expected_resolution": dict(expected_resolution or {}),
+        "target_length": int(target_len or 0),
+        "target_lengths": list(target_lengths or []),
+        "count_resolved": bool(count_resolved),
         "filled_boxes": int(filled_boxes),
         "total_boxes": int(total_boxes),
     }
@@ -976,6 +1065,8 @@ def _build_preview_canvas_status_badge_specs(
 ) -> dict:
     palette = getattr(host.app, "palette", {})
     panel_bg = palette.get("panel", "#252526")
+    panel_border = palette.get("border", "#3c3c3c")
+    muted_fg = palette.get("muted", "#8b949e")
     success_fg = palette.get("success", "#2ecc71")
     error_fg = palette.get("error", "#e74c3c")
 
@@ -1022,20 +1113,8 @@ def _build_preview_canvas_status_badge_specs(
         return int(count)
 
     frame_count = _valid_frame_count(source_chars)
-    expected_lengths = sorted({
-        len(text)
-        for text in expected_texts
-        if text
-    })
-    target_frame_count = 0
-    if expected_lengths:
-        anchor_count = frame_count if frame_count > 0 else int(status_meta.get("total_boxes", 0) or 0)
-        target_frame_count = min(expected_lengths, key=lambda value: abs(int(value) - int(anchor_count)))
-    elif frame_count > 0:
-        target_frame_count = frame_count
 
     reading_ok = bool(live_status == "perfect" or (candidate_text and expected_texts and candidate_text in expected_texts))
-    frames_ok = bool(target_frame_count > 0 and int(frame_count) == int(target_frame_count))
     status_ok = bool(live_status == "perfect")
 
     try:
@@ -1055,58 +1134,74 @@ def _build_preview_canvas_status_badge_specs(
     layout_ok = bool(status_ok or (not layout_uncertain and not layout_conflict))
 
     status_text = "kompletne" if status_ok else "do korekty"
-    frame_target_text = str(int(target_frame_count)) if int(target_frame_count) > 0 else "?"
-
     states = [
         {
             "text": f"Odczyt: [{reading_text}]",
             "ok": reading_ok,
-            "width": max(128.0, min(196.0, float(canvas_width) * 0.24)),
+            "width": max(156.0, min(232.0, float(canvas_width) * 0.26)),
             "tags": ("preview_overlay",),
         },
         {
             "text": f"Układ: {layout_text}",
             "ok": layout_ok,
-            "width": max(104.0, min(142.0, float(canvas_width) * 0.16)),
+            "width": max(124.0, min(174.0, float(canvas_width) * 0.17)),
             "tags": ("preview_overlay", "preview_overlay_action", "preview_action::toggle_plate_layout"),
         },
         {
             "text": f"Status tablicy: {status_text}",
             "ok": status_ok,
-            "width": max(156.0, min(214.0, float(canvas_width) * 0.25)),
+            "width": max(184.0, min(252.0, float(canvas_width) * 0.25)),
             "tags": ("preview_overlay",),
         },
         {
-            "text": f"Ramki: {int(frame_count)}/{frame_target_text}",
-            "ok": frames_ok,
-            "width": max(96.0, min(126.0, float(canvas_width) * 0.14)),
+            "text": f"Ramki: {int(frame_count)}",
+            "ok": None,
+            "neutral": True,
+            "width": max(124.0, min(168.0, float(canvas_width) * 0.16)),
             "tags": ("preview_overlay",),
         },
     ]
-    pulse_red = bool(any(bool(item["ok"]) for item in states) and not all(bool(item["ok"]) for item in states))
+    evaluated_states = [item for item in states if not bool(item.get("neutral"))]
+    pulse_red = bool(
+        evaluated_states
+        and any(bool(item["ok"]) for item in evaluated_states)
+        and not all(bool(item["ok"]) for item in evaluated_states)
+    )
     pulse_on = bool(int(time.time() * 2.0) % 2 == 0)
 
     badges = []
+    neutral_badges = []
     for item in states:
+        is_neutral = bool(item.get("neutral"))
         is_ok = bool(item["ok"])
-        base_color = success_fg if is_ok else error_fg
-        if is_ok:
+        if is_neutral:
+            base_color = muted_fg
+            fill = blend_hex_colors(panel_border, panel_bg, 0.28)
+        elif is_ok:
+            base_color = success_fg
             fill = blend_hex_colors(base_color, panel_bg, 0.26)
         elif pulse_red:
+            base_color = error_fg
             fill = blend_hex_colors(base_color, panel_bg, 0.10 if pulse_on else 0.34)
         else:
+            base_color = error_fg
             fill = blend_hex_colors(base_color, panel_bg, 0.24)
-        badges.append({
+        badge_spec = {
             "text": str(item["text"]),
             "fill": fill,
             "outline": base_color,
             "width": float(item["width"]),
             "tags": item.get("tags", ("preview_overlay",)),
-            "pulse": bool((not is_ok) and pulse_red),
-        })
+            "pulse": bool((not is_neutral) and (not is_ok) and pulse_red),
+        }
+        if is_neutral:
+            neutral_badges.append(badge_spec)
+        else:
+            badges.append(badge_spec)
 
     return {
         "badges": badges,
+        "neutral_badges": neutral_badges,
         "pulse": any(bool(item.get("pulse")) for item in badges),
         "two_row_display": bool(two_row_display),
     }
@@ -1162,14 +1257,17 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
     if not graph_gate_id:
-        graph_gate_id = "T06"
+        graph_gate_id = "T05"
     graph_gate_label = str(graph_context.get("graph_gate_label") or "").strip()
 
     annotation_ready = bool(readiness.get("ok"))
     dataset_gate = {}
-    if graph_gate_id == "T06":
+    if graph_gate_id == "T05":
         try:
             campaign_tab = getattr(getattr(host, "app", None), "tabs", {}).get("campaign")
             getter = getattr(campaign_tab, "_detect_campaign_char_ready_dataset_state", None)
@@ -1177,8 +1275,8 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
                 dataset_gate = dict(getter() or {})
         except Exception:
             dataset_gate = {}
-    dataset_ready = bool(dataset_gate.get("ok")) if graph_gate_id == "T06" else False
-    ready = dataset_ready if graph_gate_id == "T06" else annotation_ready
+    dataset_ready = bool(dataset_gate.get("ok")) if graph_gate_id == "T05" else False
+    ready = dataset_ready if graph_gate_id == "T05" else annotation_ready
     try:
         perfect_count = int(readiness.get("perfect_count", 0) or 0)
     except Exception:
@@ -1207,7 +1305,7 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
         missing_exportable_plate_count = max(0, int(min_exportable_plate_count) - int(exportable_plate_count or 0))
 
     quality_plate_count = max(0, int(perfect_count), int(exportable_plate_count))
-    if graph_gate_id == "T06":
+    if graph_gate_id == "T05":
         quality_plate_count = max(0, int(exportable_plate_count))
     quality_info = CONFIG.describe_yolo_char_dataset_quality(
         perfect_plates=quality_plate_count,
@@ -1225,7 +1323,7 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
     pz2_base_tone = "success" if annotation_ready else "error"
     pz3_dataset_text = "GOTOWY" if dataset_ready else ("UTWÓRZ" if annotation_ready else "PO PZ2")
     pz3_dataset_tone = "success" if dataset_ready else ("warning" if annotation_ready else "muted")
-    if graph_gate_id == "T06" and not annotation_ready:
+    if graph_gate_id == "T05" and not annotation_ready:
         quality_text = "PONIŻEJ MINIMUM"
         quality_tone = "error"
         quality_missing_plates = max(0, int(missing_exportable_plate_count))
@@ -1250,7 +1348,7 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
             else:
                 gate_missing_text = "zakres PZ3"
             gate_missing_tone = "error"
-        elif graph_gate_id == "T06":
+        elif graph_gate_id == "T05":
             gate_missing_text = "dataset PZ3"
             gate_missing_tone = "warning"
         else:
@@ -1264,8 +1362,8 @@ def get_preview_step3_gate_overlay_state(host: "CharacterAnnotationTab") -> dict
         "ready": ready,
         "gate_text": "OTWARTA" if ready else "ZAMKNIĘTA",
         "gate_tone": "success" if ready else "error",
-        "export_condition_text": pz2_base_text if graph_gate_id == "T06" else ("OK" if annotation_ready else "BRAK"),
-        "export_condition_tone": pz2_base_tone if graph_gate_id == "T06" else ("success" if annotation_ready else "error"),
+        "export_condition_text": pz2_base_text if graph_gate_id == "T05" else ("OK" if annotation_ready else "BRAK"),
+        "export_condition_tone": pz2_base_tone if graph_gate_id == "T05" else ("success" if annotation_ready else "error"),
         "quality_text": quality_text,
         "quality_tone": quality_tone,
         "quality_have": quality_have_text,
@@ -1295,14 +1393,14 @@ def _estimate_preview_canvas_info_badges_bottom(
 ) -> float:
     canvas_w = max(40.0, float(canvas_width or 0.0))
     row_start_x = 10.0
-    row_gap_x = 6.0
-    row_gap_y = 24.0
+    row_gap_x = 8.0
+    row_gap_y = 30.0
     row_right_limit = max(row_start_x + 80.0, canvas_w - 10.0)
-    row_y = 32.0
+    row_y = 40.0
 
     widths = [
-        72.0,
-        max(120.0, min(180.0, canvas_w * 0.23)),
+        88.0,
+        max(160.0, min(240.0, canvas_w * 0.25)),
     ]
     try:
         status_layout = _build_preview_canvas_status_badge_specs(
@@ -1311,14 +1409,15 @@ def _estimate_preview_canvas_info_badges_bottom(
             data=data,
             box_chars=box_chars,
         )
+        widths.extend(float(item.get("width", 100.0)) for item in status_layout.get("neutral_badges", []))
         widths.extend(float(item.get("width", 100.0)) for item in status_layout.get("badges", []))
     except Exception:
         widths.extend(
             [
-                max(128.0, min(196.0, canvas_w * 0.24)),
-                max(104.0, min(142.0, canvas_w * 0.16)),
-                max(156.0, min(214.0, canvas_w * 0.25)),
-                max(96.0, min(126.0, canvas_w * 0.14)),
+                max(124.0, min(168.0, canvas_w * 0.16)),
+                max(156.0, min(232.0, canvas_w * 0.26)),
+                max(124.0, min(174.0, canvas_w * 0.17)),
+                max(184.0, min(252.0, canvas_w * 0.25)),
             ]
         )
 
@@ -1331,7 +1430,7 @@ def _estimate_preview_canvas_info_badges_bottom(
             badge_y += row_gap_y
         badge_x += width + row_gap_x
 
-    badge_height = max(18.0, host._measure_preview_overlay_font_height(("Segoe UI", 7, "bold")) + 6.0)
+    badge_height = max(24.0, host._measure_preview_overlay_font_height(("Segoe UI", 9, "bold")) + 8.0)
     bottom = badge_y + badge_height
 
     try:
@@ -1359,10 +1458,10 @@ def plan_preview_canvas_info_overlay_layout(
     box_chars=None,
 ):
     canvas_w = max(40.0, float(canvas_width or 0.0))
-    reset_width = host._measure_preview_overlay_text_width("Reset widoku", ("Segoe UI", 8, "bold")) + 12.0
-    title_x = 10.0 + reset_width + 12.0
-    result_slot_width = max(150.0, min(220.0, canvas_w * 0.20))
-    file_slot_width = max(150.0, min(220.0, canvas_w * 0.20))
+    reset_width = host._measure_preview_overlay_text_width("Reset widoku", ("Segoe UI", 9, "bold")) + 14.0
+    title_x = 10.0 + reset_width + 14.0
+    result_slot_width = max(170.0, min(240.0, canvas_w * 0.21))
+    file_slot_width = max(170.0, min(250.0, canvas_w * 0.22))
     badge_end_x = title_x + result_slot_width + 12.0 + file_slot_width + 6.0 + 78.0 + 6.0 + 84.0 + 6.0
     legend_x = badge_end_x + 8.0
 
@@ -1375,7 +1474,7 @@ def plan_preview_canvas_info_overlay_layout(
 
     legend_width = host._estimate_preview_source_legend_width()
     legend_height = host._estimate_preview_source_legend_height()
-    info_text_height = host._measure_preview_overlay_font_height(("Segoe UI", 9, "bold"))
+    info_text_height = host._measure_preview_overlay_font_height(("Segoe UI", 10, "bold"))
     stack_right_info = bool(status_left <= (badge_end_x + 14.0))
     available_legend_right = (canvas_w - 12.0) if stack_right_info else (status_left - 12.0)
     stack_legend = bool((legend_x + legend_width) > available_legend_right)
@@ -1385,7 +1484,7 @@ def plan_preview_canvas_info_overlay_layout(
     status_y = float(44.0 if stack_right_info else 16.0)
     legend_bottom = legend_y + float(legend_height)
     right_info_bottom = max(source_y + info_text_height, status_y + info_text_height)
-    min_bar_height = 60.0 if (stack_legend or stack_right_info) else 34.0
+    min_bar_height = 78.0 if (stack_legend or stack_right_info) else 74.0
     badges_bottom = _estimate_preview_canvas_info_badges_bottom(
         host,
         canvas_width,
@@ -1565,9 +1664,6 @@ def _build_preview_compact_char_meta_text(badge_layers, reading_label: str | Non
         token = str(layer.get("text", "") or "").strip().split(" ")[0].strip()
         if token and token not in parts:
             parts.append(token)
-    reading = str(reading_label or "").strip()
-    if reading and reading not in parts:
-        parts.append(reading)
     return " | ".join(parts)
 
 
@@ -1649,18 +1745,22 @@ def _draw_preview_compact_character_signature(
     line_width = max(22.0, char_width + 12.0, meta_width + 4.0)
 
     if normalized_side == "bottom":
-        char_y = max(float(image_bottom) + 18.0, min(float(canvas_height) - 36.0, float(image_bottom) + 24.0))
-        min_char_y = float(image_bottom) + 24.0
+        try:
+            handle_radius = float(host._get_preview_char_handle_radius())
+        except Exception:
+            handle_radius = 9.0
+        status_frame_pad = max(20.0, min(30.0, handle_radius + 12.0))
+        min_char_y = float(image_bottom) + status_frame_pad + 22.0
         max_char_y = float(canvas_height) - 38.0
         if max_char_y >= min_char_y:
-            char_y = max(min_char_y, min(max_char_y, char_y + _get_preview_signature_stagger_offset(stagger_index)))
+            char_y = max(min_char_y, min(max_char_y, min_char_y + 14.0))
         else:
-            char_y = max(min_char_y, float(char_y))
+            char_y = min_char_y
         rule_y = char_y + 15.0
         meta_y = rule_y + 9.0
         if meta_y + 8.0 > float(canvas_height) - 6.0:
             shift = (meta_y + 8.0) - (float(canvas_height) - 6.0)
-            char_y = max(float(image_bottom) + 24.0, char_y - shift)
+            char_y = max(min_char_y, char_y - shift)
             rule_y = char_y + 15.0
             meta_y = rule_y + 9.0
         line_start_y = float(box_anchor_y)
@@ -1993,8 +2093,9 @@ def update_preview_character_selection_items_fast(host: "CharacterAnnotationTab"
             continue
 
         try:
-            source_tag = host._get_character_source_tag(rec, data=data, fallback_index=idx)
-            box_color = host._get_preview_source_visual_style(source_tag)["outline"]
+            box_source, sign_source = _preview_character_source_parts(host, rec, data=data, fallback_index=idx)
+            visual_tag = _preview_visual_tag_for_box_source(host, box_source, sign_source)
+            box_color = host._get_preview_source_visual_style(visual_tag)["outline"]
             canvas.itemconfigure(
                 runtime.get("box_id"),
                 outline=(selected_box_color if is_selected else box_color),
@@ -2113,7 +2214,9 @@ def redraw_preview_character_overlay_only(
     center_x = cx1 + (cx2 - cx1) / 2.0
 
     source_tag = host._get_character_source_tag(char_record, data=data, fallback_index=char_idx)
-    source_style = host._get_preview_source_visual_style(source_tag)
+    box_source, sign_source = _preview_character_source_parts(host, char_record, data=data, fallback_index=char_idx)
+    visual_tag = _preview_visual_tag_for_box_source(host, box_source, sign_source)
+    source_style = host._get_preview_source_visual_style(visual_tag)
     box_color = source_style["outline"]
     guide_color = source_style["guide"]
     char_fill = box_color
@@ -2195,6 +2298,8 @@ def redraw_preview_character_overlay_only(
                     include_confidence=False,
                     has_symbol=host._preview_record_has_symbol(char_record),
                     uses_yolo_box_backend=host._character_record_uses_yolo_box_backend(char_record),
+                    box_source=box_source,
+                    sign_source=sign_source,
                 ),
                 reading_label=reading_label,
                 tags=tags,
@@ -2400,6 +2505,13 @@ def draw_preview_top_badges(
         group_badge_height = max(item["height"] for item in group_specs)
         badge_to_plate_gap = max(12.0, float(row_gap) + 8.0)
         normalized_side = str(side or "top").strip().lower()
+        if normalized_side == "bottom":
+            try:
+                handle_radius = float(host._get_preview_char_handle_radius())
+            except Exception:
+                handle_radius = 9.0
+            status_frame_pad = max(20.0, min(30.0, handle_radius + 12.0))
+            badge_to_plate_gap = max(badge_to_plate_gap, status_frame_pad + max(10.0, float(row_gap) + 6.0))
         row_tops = []
         if normalized_side == "bottom":
             lower_bound = float(bottom_limit) if bottom_limit is not None else float(canvas.winfo_height() or 0) - 8.0
@@ -2585,15 +2697,16 @@ def draw_preview_canvas_info_overlay(
             box_chars=box_chars,
         )
     except Exception:
-        status_layout = {"badges": [], "pulse": False, "two_row_display": False}
+        status_layout = {"badges": [], "neutral_badges": [], "pulse": False, "two_row_display": False}
+    neutral_status_badges = list(status_layout.get("neutral_badges", []) or [])
     status_badges = list(status_layout.get("badges", []) or [])
     two_row_display = bool(status_layout.get("two_row_display", False))
     source_image = str((data or {}).get("source_image", "") or "").strip()
-    source_name = host._truncate_preview_filename(Path(source_image).name if source_image else "Brak pliku", max_chars=24)
+    source_name = host._truncate_preview_filename(Path(source_image).name if source_image else "Brak pliku", max_chars=28)
     current_idx = host._get_current_preview_list_index()
     total = len(getattr(host, "_listbox_pid_by_index", []))
     current_no = (int(current_idx) + 1) if current_idx is not None and total > 0 else 0
-    bar_height = 54.0 if bool(getattr(host, "_preview_fullscreen_active", False)) else 68.0
+    bar_height = 74.0 if bool(getattr(host, "_preview_fullscreen_active", False)) else 80.0
     if two_row_display:
         bar_height += 18.0
     bar_height = max(
@@ -2620,15 +2733,15 @@ def draw_preview_canvas_info_overlay(
     reset_text_id, reset_bg_id = host._draw_preview_text_badge(
         canvas,
         10,
-        6,
+        8,
         "Reset widoku",
         fill_color=panel_border,
         outline_color=panel_border,
         text_color=host._get_readable_text_color(panel_border, preferred=title_fg),
-        font=("Segoe UI", 8, "bold"),
+        font=("Segoe UI", 9, "bold"),
         anchor=tk.NW,
-        pad_x=6,
-        pad_y=2,
+        pad_x=7,
+        pad_y=3,
         tags=("preview_overlay_action", "preview_action::reset_view"),
     )
     reset_bbox = None
@@ -2685,27 +2798,28 @@ def draw_preview_canvas_info_overlay(
         canvas.create_line(inner_x1, inner_y2 - corner_len, inner_x1, inner_y2, inner_x1 + corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
         canvas.create_line(inner_x2, inner_y2 - corner_len, inner_x2, inner_y2, inner_x2 - corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
 
-    row2_y = 32.0
+    row2_y = 40.0
     row2_badges = [
         {
             "text": f"LP: {current_no}/{total}",
             "fill": blend_hex_colors(muted_fg, panel_bg, 0.84),
             "outline": muted_fg,
-            "width": 72.0,
+            "width": 88.0,
             "tags": ("preview_overlay",),
         },
         {
             "text": f"Plik: {source_name}",
             "fill": blend_hex_colors(panel_border, panel_bg, 0.84),
             "outline": panel_border,
-            "width": max(120.0, min(180.0, float(canvas_width) * 0.23)),
+            "width": max(160.0, min(240.0, float(canvas_width) * 0.25)),
             "tags": ("preview_overlay", "preview_overlay_action", "preview_action::edit_source_filename"),
         },
+        *neutral_status_badges,
         *status_badges,
     ]
     row_start_x = 10.0
-    row_gap_x = 6.0
-    row_gap_y = 24.0
+    row_gap_x = 8.0
+    row_gap_y = 30.0
     row_right_limit = max(row_start_x + 80.0, float(canvas_width) - 10.0)
     badge_x = row_start_x
     badge_y = row2_y
@@ -2723,9 +2837,9 @@ def draw_preview_canvas_info_overlay(
             fill_color=badge_spec["fill"],
             outline_color=badge_spec["outline"],
             text_color=host._get_readable_text_color(badge_spec["fill"], preferred=title_fg),
-            font=("Segoe UI", 7, "bold"),
-            pad_x=5,
-            pad_y=2,
+            font=("Segoe UI", 9, "bold"),
+            pad_x=7,
+            pad_y=3,
             tags=badge_spec.get("tags"),
         )
         badge_x += badge_width + row_gap_x
@@ -3419,6 +3533,32 @@ def persist_active_preview_characters(
     live_message = f"{success_message} {status_suffix}".strip()
     live_tone = "success" if status_now == "perfect" else "info"
     row_refresh_needed = bool(refresh_row) or (status_now != previous_status)
+
+    status_frame_needed = status_now in {"perfect", "bad", "needs_fix"} or previous_status in {
+        "perfect",
+        "bad",
+        "needs_fix",
+    }
+    if status_frame_needed:
+        phase_start = time.perf_counter()
+        try:
+            host._draw_preview_plate_status_frame(data)
+            canvas = getattr(host, "preview_canvas", None)
+            if canvas is not None:
+                canvas.update_idletasks()
+        except Exception:
+            pass
+        status_frame_ms = (time.perf_counter() - phase_start) * 1000.0
+        if status_frame_ms >= 40.0:
+            try:
+                logger.info(
+                    "[Z3/PZ2 PERF] immediate_status_frame status=%s ms=%.1f",
+                    status_now,
+                    status_frame_ms,
+                )
+            except Exception:
+                pass
+
     phase_start = time.perf_counter()
     host._refresh_preview_live_metadata_ui(
         status_message=live_message,
@@ -3498,6 +3638,10 @@ def persist_active_preview_characters(
             pass
     else:
         host._schedule_preview_metadata_save(delay_ms=save_delay_ms)
+    try:
+        clear_detection_review_snapshot_after_manual_edit(host)
+    except Exception:
+        pass
     save_ms = (time.perf_counter() - phase_start) * 1000.0
     _log_preview_perf(
         "persist_active_preview_chars",
@@ -3998,7 +4142,7 @@ def on_preview_select(host, event=None):
 
         if fast_select_render:
             # First frame: reserve a stable top area, but defer expensive status/HUD work.
-            info_bar_height = 54 if bool(getattr(self, "_preview_fullscreen", False)) else 68
+            info_bar_height = 74 if bool(getattr(self, "_preview_fullscreen_active", False)) else 80
         else:
             status_meta = self._get_preview_status_presentation(
                 data=data,
@@ -4037,12 +4181,17 @@ def on_preview_select(host, event=None):
                 x1, y1, x2, y2 = bbox[:4]
                 center_ratio = ((float(x1) + float(x2)) * 0.5) / max(1.0, float(orig_w))
                 source_tag = self._get_character_source_tag(c, data=data, fallback_index=box_idx)
-                source_style = self._get_preview_source_visual_style(source_tag)
+                char_box_source, char_sign_source = _preview_character_source_parts(self, c, data=data, fallback_index=box_idx)
+                source_style = self._get_preview_source_visual_style(
+                    _preview_visual_tag_for_box_source(self, char_box_source, char_sign_source)
+                )
                 uses_yolo_box_backend = self._character_record_uses_yolo_box_backend(c)
                 is_yolo_box = (
                     uses_yolo_box_backend
-                    or source_tag in ("yolo", "yolo_box_ocr", "yolo_rescue")
-                    or str(c.get("method", "")).strip().lower() == "yolo"
+                    or char_box_source == "yolo_box"
+                    or char_sign_source == "yolo_symbol"
+                    or source_tag in ("yolo", "yolo_box", "yolo_symbol", "yolo_box_ocr", "yolo_rescue")
+                    or str(c.get("method", "")).strip().lower() in {"yolo", "yolo_box", "yolo_symbol"}
                 )
                 try:
                     badge_confidence = float(c.get("confidence", 0.0)) if is_yolo_box else None
@@ -4056,6 +4205,8 @@ def on_preview_select(host, event=None):
                     include_confidence=bool(is_yolo_box),
                     has_symbol=self._preview_record_has_symbol(c),
                     uses_yolo_box_backend=uses_yolo_box_backend,
+                    box_source=char_box_source,
+                    sign_source=char_sign_source,
                 )
                 badge_text = str((badge_layers[0] if badge_layers else {}).get("text", source_style["label"]) or source_style["label"])
 
@@ -4115,6 +4266,20 @@ def on_preview_select(host, event=None):
         fit_new_w = int(orig_w * fit_scale)
         fit_new_h = int(orig_h * fit_scale)
         fit_x_off = (c_w - fit_new_w) / 2.0
+        if bool(getattr(self, "_preview_fullscreen_active", False)):
+            # Keep the plate visually clear of the fullscreen drawer without changing
+            # the image/box transform relationship.
+            drawer_bias = 72.0
+            try:
+                dock = getattr(self, "preview_overlay_dock", None)
+                if dock is not None and str(dock.winfo_manager()):
+                    dock_width = float(dock.winfo_width() or dock.winfo_reqwidth() or 0.0)
+                    if dock_width > 0.0:
+                        drawer_bias = min(132.0, max(56.0, dock_width * 0.42))
+            except Exception:
+                drawer_bias = 72.0
+            available_left_margin = max(0.0, float(fit_x_off) - 16.0)
+            fit_x_off -= min(float(drawer_bias), available_left_margin)
         fit_y_off = (c_h - fit_new_h - margin_y_bottom + margin_y_top) / 2.0
         fit_y_off = max(float(info_bar_height + box_label_clearance), fit_y_off)
 
@@ -4221,6 +4386,7 @@ def on_preview_select(host, event=None):
         image_bottom_y = y_off + new_h
         if not fast_select_render:
             self._draw_preview_plate_status_frame(data)
+        if not fast_select_render:
             self._draw_preview_canvas_info_overlay(
                 self.preview_canvas,
                 c_w,
@@ -4289,12 +4455,17 @@ def on_preview_select(host, event=None):
                 row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
             badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
             source_tag = self._get_character_source_tag(c, data=data, fallback_index=runtime_idx)
-            source_style = self._get_preview_source_visual_style(source_tag)
+            char_box_source, char_sign_source = _preview_character_source_parts(self, c, data=data, fallback_index=runtime_idx)
+            source_style = self._get_preview_source_visual_style(
+                _preview_visual_tag_for_box_source(self, char_box_source, char_sign_source)
+            )
             uses_yolo_box_backend = self._character_record_uses_yolo_box_backend(c)
             is_yolo_box = (
                 uses_yolo_box_backend
-                or source_tag in ("yolo", "yolo_box_ocr", "yolo_rescue")
-                or str(c.get("method", "")).strip().lower() == "yolo"
+                or char_box_source == "yolo_box"
+                or char_sign_source == "yolo_symbol"
+                or source_tag in ("yolo", "yolo_box", "yolo_symbol", "yolo_box_ocr", "yolo_rescue")
+                or str(c.get("method", "")).strip().lower() in {"yolo", "yolo_box", "yolo_symbol"}
             )
             box_color = source_style["outline"]
             guide_color = source_style["guide"]
@@ -4353,6 +4524,8 @@ def on_preview_select(host, event=None):
                 include_confidence=bool(is_yolo_box),
                 has_symbol=self._preview_record_has_symbol(c),
                 uses_yolo_box_backend=uses_yolo_box_backend,
+                box_source=char_box_source,
+                sign_source=char_sign_source,
             )
             badge_text = str((badge_layers[0] if badge_layers else {}).get("text", source_style["label"]) or source_style["label"])
             char_text = str(c.get("character", ""))
@@ -4567,10 +4740,15 @@ def on_preview_select(host, event=None):
                     pass
 
             try:
-                self._preview_detail_render_after_id = self.frame.after(120, _render_preview_hud_once)
+                keyboard_navigation = bool(getattr(self, "_preview_keyboard_crop_navigation_active", False))
+                detail_delay = 320 if keyboard_navigation else 180
+                self._preview_detail_render_after_id = self.frame.after(detail_delay, _render_preview_hud_once)
+                if keyboard_navigation:
+                    self._preview_keyboard_crop_navigation_active = False
             except Exception:
                 self._preview_detail_render_after_id = None
-        _schedule_preview_neighbor_prefetch(self, pid, delay_ms=850)
+                self._preview_keyboard_crop_navigation_active = False
+        _schedule_preview_neighbor_prefetch(self, pid, delay_ms=180 if fast_select_render else 650)
 
         total_ms = (time.perf_counter() - render_profile_start) * 1000.0
         if total_ms >= 80.0:
@@ -4629,9 +4807,27 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
     except Exception:
         return False
 
+    try:
+        detail_generation = int(getattr(self, "_preview_select_generation", 0) or 0)
+    except Exception:
+        detail_generation = 0
+
     def _schedule_fast_hud_refresh() -> None:
+        try:
+            pending_after = getattr(self, "_preview_fast_hud_refresh_after_id", None)
+            if pending_after:
+                self.frame.after_cancel(pending_after)
+        except Exception:
+            pass
+
         def _refresh_hud_once():
+            self._preview_fast_hud_refresh_after_id = None
             if str(getattr(self, "_preview_active_pid", "") or "").strip() != current_pid:
+                return
+            try:
+                if int(getattr(self, "_preview_select_generation", 0) or 0) != int(detail_generation):
+                    return
+            except Exception:
                 return
             if getattr(self, "_preview_list_select_after_id", None):
                 return
@@ -4685,8 +4881,9 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                 pass
 
         try:
-            self.frame.after(35, _refresh_hud_once)
+            self._preview_fast_hud_refresh_after_id = self.frame.after(120, _refresh_hud_once)
         except Exception:
+            self._preview_fast_hud_refresh_after_id = None
             _refresh_hud_once()
 
     if not chars:
@@ -4700,43 +4897,9 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             two_row_layout_active = bool(self._is_preview_two_row_layout_active(data))
         except Exception:
             two_row_layout_active = False
-    reading_meta_by_index: dict[int, tuple[int, int]] = {}
-    try:
-        annotated_chars = self._annotate_preview_character_reading_positions(chars, data=data)
-        pending_by_bbox: dict[tuple[float, float, float, float], list[int]] = {}
-
-        def _reading_bbox_key(record: dict) -> tuple[float, float, float, float] | None:
-            bbox_value = self._char_record_bbox(record)
-            if not bbox_value:
-                return None
-            try:
-                return tuple(round(float(value), 3) for value in bbox_value[:4])
-            except Exception:
-                return None
-
-        for original_idx, original_rec in enumerate(chars):
-            if not isinstance(original_rec, dict):
-                continue
-            original_key = _reading_bbox_key(original_rec)
-            if original_key is None:
-                continue
-            pending_by_bbox.setdefault(original_key, []).append(int(original_idx))
-        for annotated_rec in (annotated_chars if isinstance(annotated_chars, list) else []):
-            if not isinstance(annotated_rec, dict):
-                continue
-            annotated_key = _reading_bbox_key(annotated_rec)
-            if annotated_key is None:
-                continue
-            pending = pending_by_bbox.get(annotated_key) or []
-            if not pending:
-                continue
-            target_idx = pending.pop(0)
-            reading_meta_by_index[target_idx] = (
-                int(annotated_rec.get("reading_row", 0) or 0),
-                int(annotated_rec.get("reading_col", 0) or 0),
-            )
-    except Exception:
-        reading_meta_by_index = {}
+    # The fast pass runs after keyboard navigation. Keep it cheap: coordinates are
+    # no longer shown on badges, so reading-order recomputation can wait for a
+    # normal/full render instead of blocking rapid Q/E navigation.
 
     selection_color = getattr(self.app, "palette", {}).get("accent", "#ffd166")
     label_focus_color = getattr(self.app, "palette", {}).get("warning", "#f59e0b")
@@ -4763,30 +4926,20 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             row_no = int(c.get("reading_row", 0) or 0)
         except Exception:
             row_no = 0
-        display_rec = c
-        if box_idx in reading_meta_by_index:
-            try:
-                display_rec = dict(c)
-                display_rec["reading_row"], display_rec["reading_col"] = reading_meta_by_index[box_idx]
-            except Exception:
-                display_rec = c
-            try:
-                if not row_no:
-                    row_no = int(display_rec.get("reading_row", 0) or 0)
-            except Exception:
-                pass
         if row_no not in (1, 2):
             row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
         badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
         source_tag = self._get_character_source_tag(c, data=data, fallback_index=box_idx)
-        source_style = self._get_preview_source_visual_style(source_tag)
+        char_box_source, char_sign_source = _preview_character_source_parts(self, c, data=data, fallback_index=box_idx)
+        source_style = self._get_preview_source_visual_style(
+            _preview_visual_tag_for_box_source(self, char_box_source, char_sign_source)
+        )
         # Fast detail signatures are part of the same visual object as the box.
         # Keep the record/index tags so drag/redraw cleanup does not leave stale
         # badges and leader lines behind after a manual correction.
         char_canvas_tag = self._get_preview_character_canvas_tag("FINAL", int(box_idx))
         char_record_tag = self._get_preview_character_record_canvas_tag(c)
         tags = ("preview_fast_detail", char_canvas_tag, char_record_tag)
-        reading_label = self._get_preview_character_reading_position_label(display_rec, data=data)
         _draw_preview_compact_character_signature(
             self,
             canvas,
@@ -4807,10 +4960,12 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                 include_confidence=False,
                 has_symbol=self._preview_record_has_symbol(c),
                 uses_yolo_box_backend=self._character_record_uses_yolo_box_backend(c),
+                box_source=char_box_source,
+                sign_source=char_sign_source,
             ),
-            reading_label=reading_label,
+            reading_label=None,
             tags=tags,
-            stagger_index=_get_preview_signature_stagger_index(display_rec, box_idx),
+            stagger_index=_get_preview_signature_stagger_index(c, box_idx),
         )
 
         is_selected_box = bool(selected_record is c or (selected_idx is not None and int(selected_idx) == int(box_idx)))
@@ -5193,6 +5348,102 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
         return False
 
 
+def get_preview_layout_separator_canvas_geometry(host, separator: dict, data: dict | None = None) -> dict | None:
+    self = host
+    canvas = getattr(self, "preview_canvas", None)
+    state = getattr(self, "_preview_render_state", None) or {}
+    if canvas is None or not state or not isinstance(separator, dict):
+        return None
+
+    try:
+        image_left = float(state.get("image_left", 0.0) or 0.0)
+        image_right = float(state.get("image_right", image_left) or image_left)
+        canvas_width = float(canvas.winfo_width() or 0.0)
+        x1 = float(separator.get("x1", 0.0) or 0.0)
+        y1 = float(separator.get("y1", 0.0) or 0.0)
+        x2 = float(separator.get("x2", 0.0) or 0.0)
+        y2 = float(separator.get("y2", y1) or y1)
+    except Exception:
+        return None
+
+    cx1, cy1 = self._preview_image_to_canvas_point(x1, y1)
+    cx2, cy2 = self._preview_image_to_canvas_point(x2, y2)
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    interactive = bool(self._is_preview_layout_separator_interactive(source_data, ignore_active_char=True))
+    handle_radius = 11.0 if interactive else 6.0
+    try:
+        char_handle_radius = float(self._get_preview_char_handle_radius())
+    except Exception:
+        char_handle_radius = 9.0
+    frame_pad = max(20.0, min(30.0, char_handle_radius + 12.0))
+    handle_gap = frame_pad + handle_radius + 12.0
+    left_handle_x = image_left - handle_gap
+    right_handle_x = image_right + handle_gap
+
+    if canvas_width > 1.0:
+        left_handle_x = max(handle_radius + 6.0, left_handle_x)
+        right_handle_x = min(canvas_width - handle_radius - 6.0, right_handle_x)
+
+    line_points = (
+        float(left_handle_x),
+        float(cy1),
+        float(cx1),
+        float(cy1),
+        float(cx2),
+        float(cy2),
+        float(right_handle_x),
+        float(cy2),
+    )
+    return {
+        "left_point": (float(left_handle_x), float(cy1)),
+        "right_point": (float(right_handle_x), float(cy2)),
+        "left_handle_bbox": (
+            float(left_handle_x) - handle_radius,
+            float(cy1) - handle_radius,
+            float(left_handle_x) + handle_radius,
+            float(cy1) + handle_radius,
+        ),
+        "right_handle_bbox": (
+            float(right_handle_x) - handle_radius,
+            float(cy2) - handle_radius,
+            float(right_handle_x) + handle_radius,
+            float(cy2) + handle_radius,
+        ),
+        "line_points": line_points,
+        "handle_radius": float(handle_radius),
+        "interactive": bool(interactive),
+    }
+
+
+def update_preview_layout_separator_visual(host, separator: dict, data: dict | None = None) -> bool:
+    self = host
+    canvas = getattr(self, "preview_canvas", None)
+    runtime = getattr(self, "_preview_layout_separator_runtime", None)
+    if canvas is None or not isinstance(runtime, dict) or not isinstance(separator, dict):
+        return False
+
+    geometry = get_preview_layout_separator_canvas_geometry(self, separator, data)
+    if not isinstance(geometry, dict):
+        return False
+
+    try:
+        line_points = geometry["line_points"]
+        canvas.coords(runtime["shadow_id"], *line_points)
+        canvas.coords(runtime["line_id"], *line_points)
+        canvas.coords(runtime["left_handle_id"], *geometry["left_handle_bbox"])
+        canvas.coords(runtime["right_handle_id"], *geometry["right_handle_bbox"])
+        runtime["separator"] = dict(separator)
+        runtime["left_point"] = geometry["left_point"]
+        runtime["right_point"] = geometry["right_point"]
+        runtime["handle_radius"] = float(geometry.get("handle_radius", runtime.get("handle_radius", 7.0)) or 7.0)
+        runtime["line_points"] = tuple(line_points)
+        runtime["interactive"] = bool(geometry.get("interactive", runtime.get("interactive", True)))
+        canvas.tag_raise("preview_layout_separator")
+        return True
+    except Exception:
+        return False
+
+
 def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
     self = host
     canvas = getattr(self, "preview_canvas", None)
@@ -5229,16 +5480,6 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
     if not isinstance(separator, dict):
         return False
 
-    try:
-        x1 = float(separator.get("x1", 0.0) or 0.0)
-        y1 = float(separator.get("y1", 0.0) or 0.0)
-        x2 = float(separator.get("x2", image_w) or image_w)
-        y2 = float(separator.get("y2", y1) or y1)
-    except Exception:
-        return False
-
-    cx1, cy1 = self._preview_image_to_canvas_point(x1, y1)
-    cx2, cy2 = self._preview_image_to_canvas_point(x2, y2)
     palette = getattr(self.app, "palette", {})
     panel = palette.get("panel", "#101010")
     accent = palette.get("accent", "#ffd166")
@@ -5248,7 +5489,10 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
     separator_color = accent if interactive and str(separator.get("source", "")).startswith("manual") else blend_hex_colors(muted, border, 0.42)
     shadow = blend_hex_colors(separator_color, panel, 0.16)
     handle_fill = blend_hex_colors(panel, separator_color, 0.12)
-    handle_radius = 5.5 if interactive else 3.5
+    geometry = get_preview_layout_separator_canvas_geometry(self, separator, source_data)
+    if not isinstance(geometry, dict):
+        return False
+    handle_radius = float(geometry.get("handle_radius", 5.5 if interactive else 3.5) or 5.5)
     tags = ("preview_layout_separator",)
     line_tags = tags + ("preview_layout_separator_line",) if interactive else tags
     left_handle_tags = tags + ("preview_layout_separator_handle", "preview_layout_separator_handle::left") if interactive else tags
@@ -5256,20 +5500,14 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
 
     try:
         shadow_id = canvas.create_line(
-            cx1,
-            cy1,
-            cx2,
-            cy2,
+            *geometry["line_points"],
             fill=shadow,
             width=3,
             capstyle="round",
             tags=tags,
         )
         line_id = canvas.create_line(
-            cx1,
-            cy1,
-            cx2,
-            cy2,
+            *geometry["line_points"],
             fill=separator_color,
             width=1.25,
             dash=(7, 6),
@@ -5277,20 +5515,14 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             tags=line_tags,
         )
         left_handle_id = canvas.create_oval(
-            cx1 - handle_radius,
-            cy1 - handle_radius,
-            cx1 + handle_radius,
-            cy1 + handle_radius,
+            *geometry["left_handle_bbox"],
             fill=handle_fill,
             outline=separator_color,
             width=1,
             tags=left_handle_tags,
         )
         right_handle_id = canvas.create_oval(
-            cx2 - handle_radius,
-            cy2 - handle_radius,
-            cx2 + handle_radius,
-            cy2 + handle_radius,
+            *geometry["right_handle_bbox"],
             fill=handle_fill,
             outline=separator_color,
             width=1,
@@ -5302,9 +5534,10 @@ def draw_preview_layout_separator(host, data: dict | None = None) -> bool:
             "line_id": line_id,
             "left_handle_id": left_handle_id,
             "right_handle_id": right_handle_id,
-            "left_point": (float(cx1), float(cy1)),
-            "right_point": (float(cx2), float(cy2)),
+            "left_point": geometry["left_point"],
+            "right_point": geometry["right_point"],
             "handle_radius": float(handle_radius),
+            "line_points": tuple(geometry["line_points"]),
             "line_hit_radius": 11.0,
             "interactive": bool(interactive),
         }

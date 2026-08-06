@@ -335,7 +335,7 @@ def _apply_preview_char_geometry_inheritance(host, drag_state: dict) -> set[int]
         except Exception:
             pass
         rec["bbox"] = normalized_bbox
-        host._mark_preview_char_record_manual(rec)
+        host._mark_preview_char_record_manual(rec, box=True, sign=False)
         affected.add(int(idx))
 
     return affected
@@ -684,6 +684,23 @@ def on_preview_canvas_keypress(host, event=None):
         )
     if keysym == "d":
         if active_label_idx is None:
+            click_add_state = getattr(self, "_preview_char_add_state", None)
+            if bool(getattr(self, "_preview_char_add_click_armed", False)) or (
+                isinstance(click_add_state, dict) and bool(click_add_state.get("click_draw"))
+            ):
+                self._preview_char_add_click_armed = False
+                self._preview_char_add_modifier_down = False
+                self._preview_char_add_mode = False
+                self._preview_char_add_state = None
+                self._preview_char_hover_grip = None
+                try:
+                    self.preview_canvas.delete("preview_char_add_preview")
+                except Exception:
+                    pass
+                self._refresh_preview_editor_toolbar()
+                self._apply_preview_canvas_cursor()
+                self._update_preview_edit_status("D: wylaczono uzbrojenie rysowania boxa.", tone="muted")
+                return "break"
             if self._get_preview_active_data(create=False) is None:
                 self._set_preview_box_info("Najpierw wybierz tablicę z listy.", "warning")
                 return "break"
@@ -1043,6 +1060,7 @@ def on_preview_canvas_drag(host, event):
     self = host
     separator_drag_state = getattr(self, "_preview_layout_separator_drag_state", None)
     if isinstance(separator_drag_state, dict):
+        _mark_preview_char_edit_interaction(self)
         if not self._is_preview_layout_separator_interactive(ignore_active_char=True):
             self._preview_layout_separator_drag_state = None
             try:
@@ -1050,24 +1068,19 @@ def on_preview_canvas_drag(host, event):
             except Exception:
                 pass
             return "break"
-        separator_handle = str(separator_drag_state.get("handle", "left") or "left").strip().lower()
-        if separator_handle == "line":
-            separator = self._move_preview_layout_separator_from_canvas_delta(
-                separator_drag_state.get("start_separator", {}),
-                float(separator_drag_state.get("start_canvas_x", event.x) or event.x),
-                float(separator_drag_state.get("start_canvas_y", event.y) or event.y),
-                event.x,
-                event.y,
-            )
-        else:
-            separator = self._set_preview_layout_separator_handle_y_from_canvas(
-                separator_handle,
-                event.x,
-                event.y,
-            )
+        separator = self._build_preview_layout_separator_drag_preview(separator_drag_state, event.x, event.y)
         if isinstance(separator, dict):
             separator_drag_state["dirty"] = True
-            self._draw_preview_layout_separator(self._get_preview_active_data(create=False))
+            separator_drag_state["preview_separator"] = separator
+            active_data = self._get_preview_active_data(create=False)
+            if not self._update_preview_layout_separator_visual(separator, active_data):
+                if isinstance(active_data, dict):
+                    preview_data = dict(active_data)
+                    preview_data["layout_separator"] = dict(separator)
+                    preview_data["plate_layout_override"] = "two_row"
+                    preview_data["layout_override_source"] = "separator"
+                    self._draw_preview_layout_separator(preview_data)
+                    self._update_preview_layout_separator_visual(separator, preview_data)
         return "break"
 
     drag_state = self._preview_badge_drag_state
@@ -1140,7 +1153,7 @@ def on_preview_canvas_drag(host, event):
                     pass
                 rec["bbox"] = normalized_bbox
                 if not bool(char_drag_state.get("manual_marked")):
-                    self._mark_preview_char_record_manual(rec)
+                    self._mark_preview_char_record_manual(rec, box=True, sign=False)
                     char_drag_state["manual_marked"] = True
                 char_drag_state["dirty"] = True
                 if not bool(char_drag_state.get("motion_flow_logged")):
@@ -1305,28 +1318,81 @@ def on_preview_canvas_release(host, event):
         except Exception:
             pass
         if bool(separator_drag_state.get("dirty")):
+            _mark_preview_char_edit_interaction(self)
+            release_perf_start = time.perf_counter()
             data = self._get_preview_active_data(create=True)
             if isinstance(data, dict):
+                separator = separator_drag_state.get("preview_separator")
+                if isinstance(separator, dict):
+                    state = getattr(self, "_preview_render_state", None) or {}
+                    try:
+                        image_w = max(1.0, float(state.get("orig_w", data.get("plate_image_width", 1.0)) or 1.0))
+                        image_h = max(1.0, float(state.get("orig_h", data.get("plate_image_height", 1.0)) or 1.0))
+                    except Exception:
+                        image_w = max(1.0, float(data.get("plate_image_width", 1.0) or 1.0))
+                        image_h = max(1.0, float(data.get("plate_image_height", 1.0) or 1.0))
+                    data["layout_separator"] = dict(separator)
+                    data["plate_image_width"] = float(image_w)
+                    data["plate_image_height"] = float(image_h)
+                    data["plate_layout_override"] = "two_row"
+                    data["layout_override_source"] = "separator"
+                    data["manual_layout"] = True
+                    data["layout_manual"] = True
+                    data["layout_override_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    data["plate_layout"] = "two_row"
+                    data["layout_row_count"] = 2
+                    data["layout_confidence"] = 1.0
+                    data["layout_source"] = "manual_override"
                 chars = list(data.get("characters", []) or []) if isinstance(data.get("characters"), list) else []
-                chars = self._apply_preview_layout_separator_constraints_to_chars(data, chars)
                 ordered_chars = self._sort_character_records_by_x(chars, data=data)
-                self._update_preview_plate_layout_metadata(data, ordered_chars)
                 ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
                 data["characters"] = ordered_chars
-                data["status"] = self._derive_preview_status_from_data(data, ordered_chars)
+                separator_conflict = False
                 try:
-                    self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+                    separator_conflict = bool(self._preview_layout_separator_conflicts_with_chars(data, ordered_chars))
+                except Exception:
+                    separator_conflict = False
+                status_now = self._derive_preview_status_from_characters(ordered_chars)
+                if status_now == "perfect" and separator_conflict:
+                    status_now = "needs_fix"
+                elif status_now == "perfect":
                     try:
-                        self._schedule_preview_info_refresh(delay_ms=900)
+                        expected_resolution = self._resolve_preview_expected_text_for_crop(data, ordered_chars)
+                        expected_texts = list(expected_resolution.get("expected_texts", []) or [])
+                        if expected_texts:
+                            status_now = "perfect" if bool(expected_resolution.get("text_resolved")) else "needs_fix"
+                        elif self._preview_has_reference_text_source(data):
+                            status_now = "needs_fix"
                     except Exception:
                         pass
+                data["status"] = status_now
+                try:
+                    self._schedule_preview_metadata_save(delay_ms=650)
                 except Exception:
-                    self._schedule_preview_metadata_save(delay_ms=450)
+                    pass
+                try:
+                    self._draw_preview_plate_status_frame(data)
+                    if not (isinstance(separator, dict) and self._update_preview_layout_separator_visual(separator, data)):
+                        self._draw_preview_layout_separator(data)
+                except Exception:
+                    pass
                 self._refresh_preview_live_metadata_ui(
-                    status_message="Zaktualizowano linię podziału rzędów tablicy.",
-                    status_tone="info",
-                    render_preview=True,
+                    status_message=(
+                        "Belka rzędów ustawiona. Box nachodzący na belkę wymaga korekty."
+                        if separator_conflict
+                        else "Zaktualizowano belkę podziału rzędów tablicy."
+                    ),
+                    status_tone="warning" if separator_conflict else "info",
+                    render_preview=False,
                 )
+                total_ms = (time.perf_counter() - release_perf_start) * 1000.0
+                if total_ms >= 80.0:
+                    logger.info(
+                        "[Z3/PZ2 PERF] separator_release total=%.1fms chars=%s conflict=%s",
+                        total_ms,
+                        len(ordered_chars),
+                        int(bool(separator_conflict)),
+                    )
         else:
             self._on_preview_select(None)
         return "break"
@@ -2130,10 +2196,13 @@ def finalize_preview_char_add_state(host) -> str:
         "bbox": bbox,
         "confidence": 1.0,
         "method": "manual",
-        "source_tag": "ocr",
+        "source_tag": "manual",
+        "source_kind": "local_manual",
+        "box_source": "manual_box",
+        "sign_source": "",
     }
     chars.append(new_record)
-    self._mark_preview_char_record_manual(new_record)
+    self._mark_preview_char_record_manual(new_record, box=True, sign=False)
     self._preview_char_edit_mode = True
     self._preview_char_label_active_index = None
     self._preview_char_hover_label_index = None

@@ -128,7 +128,7 @@ def _build_ui(self):
     self.tab_val = None
     self.tab_ranking = None
 
-    self.main_nb.add(self.tab_dataset, text="[PZ1] Budowa datasetu")
+    self.main_nb.add(self.tab_dataset, text="[PZ1] Wariant treningowy")
     self.main_nb.add(self.tab_train, text="[PZ2] Trening i wyniki")
     self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
     self._step4_dataset_tab_visible = True
@@ -198,7 +198,7 @@ def get_free_mode_assistant_context(self) -> dict:
 
     if selected_tab == str(getattr(self, "tab_dataset", "")):
         return {
-            "location": "[Z4] Trening i analiza / [PZ1] Budowa datasetu",
+            "location": "[Z4] Trening i analiza / [PZ1] Wariant treningowy",
             "goal": (
                 "PZ1 zamienia źródło danych w gotowy wariant treningowy YOLO: układa train / val / test "
                 "i zapisuje data.yaml. Ten wariant wybierzesz później w PZ2."
@@ -207,12 +207,12 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Wybierz typ datasetu: tablice albo znaki.",
                 "Dla tablic wskaż gotowy dataset albo parę: XML anotacji + zgodny katalog zdjęć.",
                 "Po wskazaniu XML system spróbuje znaleźć pasujący katalog zdjęć i poprosi o potwierdzenie.",
-                "Dla znaków wskaż dataset wyprodukowany wcześniej w Z3/PZ2.",
+                "Dla znaków użyj datasetu źródłowego wyeksportowanego wcześniej w Z3/PZ3.",
                 "Opcjonalnie ustaw syntetyczne zwiększanie tylko części train.",
                 "Kliknij „Utwórz split treningowy”; po sukcesie możesz pozostać w PZ1 albo przejść do PZ2.",
             ),
             "glossary": (
-                "źródło = dane wejściowe, z których PZ1 buduje dataset",
+                "źródło = dane wejściowe, z których PZ1 buduje wariant treningowy",
                 "źródło bez splitu = katalog images/labels, który PZ1 dopiero podzieli na train / val / test",
                 "wariant treningowy = konkretny folder datasetu z images, labels i data.yaml",
                 "split = podział na train / val / test",
@@ -246,10 +246,10 @@ def get_free_mode_assistant_context(self) -> dict:
         "location": "[Z4] Trening i analiza",
         "goal": "Z4 prowadzi prostym przepływem: PZ1 przygotowuje wariant splitu, PZ2 trenuje model na wybranym wariancie.",
         "workflow": (
-            "PZ1 buduje wariant splitu zgodny z typem datasetu.",
+            "PZ1 buduje wariant treningowy zgodny z typem datasetu.",
             "PZ2 używa wybranego wariantu do treningu, walidacji i porównania modeli.",
             "Jeśli chcesz testować inny split, wróć do PZ1 i utwórz kolejny wariant.",
         ),
-        "glossary": ("PZ1 = budowa datasetu", "PZ2 = trening i wyniki", "ranking = porównanie modeli"),
+        "glossary": ("PZ1 = wariant treningowy", "PZ2 = trening i wyniki", "ranking = porównanie modeli"),
         "caution": "PZ2 trenuje na splicie wybranym z listy. Nowe splity przygotowuje PZ1.",
     }

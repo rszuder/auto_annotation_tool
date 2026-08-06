@@ -109,6 +109,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
@@ -1840,6 +1841,27 @@ def _return_to_campaign_wizard(self):
         return
 
     try:
+        early_graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        early_graph_context = {}
+    early_graph_edge_key = str(early_graph_context.get("graph_edge_key") or "").strip()
+    try:
+        early_graph_gate_id = campaign_gate_id_for_edge(
+            early_graph_edge_key,
+            early_graph_context.get("graph_gate_id"),
+        )
+    except Exception:
+        early_graph_gate_id = ""
+    if (
+        str(early_graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or early_graph_gate_id == "T02"
+        or early_graph_edge_key == "e1_to_e3"
+    ):
+        if not _return_to_campaign_t02_at_review(self, CAMPAIGN, early_graph_context):
+            return
+        return
+
+    try:
         warning_ctx = self._get_campaign_return_to_wizard_ok_warning_context()
     except Exception:
         warning_ctx = {}
@@ -1867,16 +1889,44 @@ def _return_to_campaign_wizard(self):
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context = {}
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_edge_key = str(graph_context.get("graph_edge_key") or "").strip()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_edge_key,
+        graph_context.get("graph_gate_id"),
+    )
+    graph_visible_gate_id = str(
+        graph_context.get("graph_visible_gate_id")
+        or graph_context.get("graph_display_gate_id")
+        or ""
+    ).strip().upper()
+    graph_visible_gate_id = campaign_gate_id_for_edge(graph_edge_key, graph_visible_gate_id)
+    repair_origin_edge_key = str(
+        graph_context.get("repair_origin_edge_key")
+        or graph_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
-    if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+    repair_origin_gate_id = campaign_gate_id_for_edge(repair_origin_edge_key, repair_origin_gate_id)
+    if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
         stage_num = 4
-        stage_label = "E4T / T07"
+        stage_label = "E4T / T06"
         return_edge_key = "e4_to_e1"
+    is_t02_at_review_return = bool(
+        str(graph_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or graph_gate_id == "T02"
+        or graph_edge_key == "e1_to_e3"
+    )
+    is_step2_char_gate_return = bool(
+        (
+            graph_gate_id == "T03"
+            or graph_edge_key == "e2_to_e3"
+        )
+        and repair_origin_gate_id != "T06"
+    )
 
     try:
         current_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
@@ -1896,13 +1946,36 @@ def _return_to_campaign_wizard(self):
         except Exception:
             pass
 
+    if is_t02_at_review_return:
+        if not _return_to_campaign_t02_at_review(self, CAMPAIGN, graph_context):
+            return
+        return
+
+    if is_step2_char_gate_return:
+        if current_target != "char":
+            old_target = current_target
+            try:
+                CAMPAIGN.set_iteration_target("char")
+                current_target = "char"
+                logger.info(
+                    "[Z2 GRAPH] corrected target for T03 return old_target=%s edge=%s gate=%s display=%s",
+                    old_target or "-",
+                    graph_edge_key or "-",
+                    graph_gate_id or "-",
+                    graph_visible_gate_id or "-",
+                )
+            except Exception:
+                pass
+        if not _return_to_campaign_step2_char_gate(self, CAMPAIGN, graph_context):
+            return
+        return
     promotion_result = self._promote_campaign_char_repair_ok_to_approved_pool_before_return()
     if bool(promotion_result.get("abort")):
         return
     t05_promotion_result = z2_workflow_methods._promote_campaign_t05_ok_to_approved_pool_before_return(self)
     if bool(t05_promotion_result.get("abort")):
         return
-    if graph_gate_id == "T05" and repair_origin_gate_id == "T07":
+    if graph_gate_id == "T04" and repair_origin_gate_id == "T06":
         try:
             from datetime import datetime as _datetime
             now = _datetime.now().isoformat(timespec="seconds")
@@ -1918,8 +1991,9 @@ def _return_to_campaign_wizard(self):
                 }
             )
         except Exception as exc:
-            logger.debug(f"Nie udało się domknąć znacznika naprawy T07: {exc}")
+            logger.debug(f"Nie udało się domknąć znacznika naprawy T06: {exc}")
 
+    campaign_tab = None
     try:
         campaign_tab = self.app.tabs.get("campaign")
         if campaign_tab is not None:
@@ -1947,6 +2021,443 @@ def _return_to_campaign_wizard(self):
         logger.debug(f"Nie udalo sie wrocic do grafu kampanii: {e}")
 
 
+def _prompt_t02_at_review_commit_choice(self, *, approved_images: int, approved_plates: int) -> bool:
+    parent = self.frame.winfo_toplevel()
+    result = {"ok": False}
+    palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+    panel_bg = palette.get("panel", "#252526")
+    card_bg = palette.get("card", "#2d2d30")
+    fg = palette.get("fg", "#f3f4f6")
+    muted = palette.get("muted", "#c7c7c7")
+    warning = palette.get("warning", "#f39c12")
+    border = palette.get("border", "#3f3f46")
+
+    dialog = tk.Toplevel(parent)
+    dialog.withdraw()
+    try:
+        self.app.style_dialog_window(
+            dialog,
+            title="Kontrola AT wybierze T02",
+            geometry="640x360",
+            parent=parent,
+        )
+    except Exception:
+        dialog.title("Kontrola AT wybierze T02")
+        dialog.configure(bg=panel_bg)
+    dialog.resizable(False, False)
+    try:
+        dialog.transient(parent)
+    except Exception:
+        pass
+
+    try:
+        body = self.app._build_themed_dialog_surface(dialog, tone="warning")
+    except Exception:
+        body = tk.Frame(dialog, bg=panel_bg, padx=18, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+
+    shell = tk.Frame(body, bg=panel_bg)
+    shell.pack(fill=tk.BOTH, expand=True)
+    tk.Label(
+        shell,
+        text="Zapis kontroli AT zamknie wybór toru tej iteracji",
+        bg=panel_bg,
+        fg=fg,
+        font=("Segoe UI Semibold", 13),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(0, 8))
+    tk.Label(
+        shell,
+        text=(
+            "Masz oznaczone pozycje [OK] w kontroli importu AT. "
+            "Jeśli je zapiszesz, bieżąca iteracja zostanie przypisana do bramki T02 "
+            "i nie przełączymy jej później na T01 bez osobnego cofnięcia tej kontroli."
+        ),
+        bg=panel_bg,
+        fg=muted,
+        font=("Segoe UI", 9),
+        justify=tk.LEFT,
+        anchor="w",
+        wraplength=580,
+    ).pack(fill=tk.X, pady=(0, 12))
+
+    summary = tk.Frame(shell, bg=card_bg, highlightthickness=1, highlightbackground=border, padx=12, pady=10)
+    summary.pack(fill=tk.X, pady=(0, 12))
+    tk.Label(
+        summary,
+        text=f"Do zapisania: {int(approved_images or 0)} obrazów [OK] / {int(approved_plates or 0)} tablic",
+        bg=card_bg,
+        fg=warning,
+        font=("Segoe UI", 10, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X)
+    tk.Label(
+        summary,
+        text="To jest pierwszy realny wkład T02 w tej iteracji.",
+        bg=card_bg,
+        fg=muted,
+        font=("Segoe UI", 9),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(4, 0))
+
+    buttons = tk.Frame(shell, bg=panel_bg)
+    buttons.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
+
+    def choose(ok: bool) -> None:
+        result["ok"] = bool(ok)
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    ttk.Button(
+        buttons,
+        text="Zapisz i wybierz T02",
+        style="Accent.TButton",
+        command=lambda: choose(True),
+    ).pack(side=tk.RIGHT)
+    ttk.Button(
+        buttons,
+        text="Wróć do kontroli",
+        command=lambda: choose(False),
+    ).pack(side=tk.RIGHT, padx=(0, 8))
+
+    try:
+        dialog.update_idletasks()
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
+        dialog.grab_set()
+    except Exception:
+        pass
+    dialog.bind("<Escape>", lambda _event: choose(False))
+    dialog.wait_window()
+    return bool(result.get("ok"))
+
+
+def _return_to_campaign_t02_at_review(self, CAMPAIGN, graph_context: dict) -> bool:
+    """Return from Z2 opened as the T02 AT review without approving the gate."""
+    return_started = time.perf_counter()
+    phase_started = return_started
+    slow_phases: list[str] = []
+
+    def _mark_return_phase(name: str, *, threshold_ms: float = 150.0) -> None:
+        nonlocal phase_started
+        try:
+            now = time.perf_counter()
+            elapsed_ms = (now - phase_started) * 1000.0
+            if elapsed_ms >= float(threshold_ms):
+                slow_phases.append(f"{name}={elapsed_ms:.0f}ms")
+            phase_started = now
+        except Exception:
+            pass
+
+    if not self._ensure_preview_edits_saved("powrót z kontroli AT do bramki T02"):
+        return False
+
+    _mark_return_phase("save_preview")
+    run_dir = None
+    for raw_candidate in (
+        getattr(self, "current_annotation_run_dir", None),
+        graph_context.get("restore_run_dir") if isinstance(graph_context, dict) else None,
+        getattr(self, "last_staging_run_dir", None),
+    ):
+        try:
+            run_dir = self._resolve_safe_annotation_run_dir(raw_candidate, require_xml=True)
+        except Exception:
+            run_dir = None
+        if run_dir is not None:
+            break
+
+    _mark_return_phase("resolve_initial_run")
+    if run_dir is None:
+        try:
+            source_info = dict(CAMPAIGN.get_project_start_plate_source() or {})
+        except Exception:
+            source_info = {}
+        for raw_candidate in (
+            source_info.get("source_run_path"),
+            source_info.get("source_xml_path"),
+        ):
+            if not str(raw_candidate or "").strip():
+                continue
+            try:
+                candidate = Path(str(raw_candidate))
+                if candidate.suffix.lower() == ".xml":
+                    candidate = candidate.parent
+                run_dir = self._resolve_safe_annotation_run_dir(candidate, require_xml=True)
+            except Exception:
+                run_dir = None
+            if run_dir is not None:
+                break
+
+    _mark_return_phase("resolve_fallback_run")
+    if run_dir is not None:
+        try:
+            self._persist_preview_approved_filenames()
+        except Exception:
+            pass
+        try:
+            approved_payload = set(self._get_preview_approved_filenames() or set())
+            if not self._is_free_mode_session_context():
+                approved_payload |= {
+                    str(name or "").strip().lower()
+                    for name in set(getattr(self, "_campaign_hidden_project_approved_filenames", set()) or set())
+                    if str(name or "").strip()
+                }
+            self._update_annotation_run_manifest(
+                run_dir,
+                approved_filenames=sorted(approved_payload),
+                **self._collect_preview_resume_manifest_fields(),
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udalo sie jawnie zapisac statusow OK kontroli T02: {exc}")
+
+    _mark_return_phase("persist_approved")
+    approved_images = 0
+    approved_plates = 0
+    if run_dir is not None:
+        try:
+            approved_images, approved_plates = self._get_run_plate_approved_counts(run_dir)
+        except Exception:
+            approved_images, approved_plates = 0, 0
+
+    _mark_return_phase("count_approved")
+    promotion_result = {"ok": True, "reason": "no_ok_images"}
+    if run_dir is not None and int(approved_images or 0) > 0 and int(approved_plates or 0) > 0:
+        try:
+            t02_already_committed = bool(CAMPAIGN.is_t02_at_review_committed_current_iteration())
+        except Exception:
+            t02_already_committed = False
+        if not t02_already_committed:
+            try:
+                proceed_with_t02 = _prompt_t02_at_review_commit_choice(
+                    self,
+                    approved_images=int(approved_images or 0),
+                    approved_plates=int(approved_plates or 0),
+                )
+            except Exception:
+                proceed_with_t02 = True
+            if not proceed_with_t02:
+                return False
+        try:
+            promotion_result = dict(
+                self._promote_run_to_campaign_plate_approved_set(
+                    run_dir,
+                    force_parse_xml=False,
+                    project_name=str(CAMPAIGN.get_active_project_name() or "").strip() or None,
+                )
+                or {}
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udało się zapisać [OK] z kontroli T02 do puli projektu: {exc}")
+            promotion_result = {"ok": False, "reason": "promotion_exception"}
+        if not bool(promotion_result.get("ok")):
+            try:
+                messagebox.showwarning(
+                    "Nie zapisano kontroli AT",
+                    (
+                        "Z2 ma zaznaczone pozycje [OK], ale nie udało się dopisać ich do projektowej "
+                        "puli zatwierdzonych tablic.\n\n"
+                        "Pozostań w Z2 i spróbuj ponownie wrócić do T02, żeby nie zgubić wyniku kontroli."
+                    ),
+                    parent=self.frame.winfo_toplevel(),
+                )
+            except Exception:
+                pass
+            return False
+        try:
+            CAMPAIGN.mark_t02_at_review_committed(
+                run_dir=str(run_dir or ""),
+                approved_images=int(approved_images or 0),
+                approved_plates=int(approved_plates or 0),
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udalo sie zapisac znacznika wyboru T02 po kontroli AT: {exc}")
+
+    _mark_return_phase("promote_approved")
+    try:
+        CAMPAIGN.set_iteration_path("char_from_ready_plates")
+        CAMPAIGN.set_current_step(1)
+        if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
+            CAMPAIGN.set_graph_selected_edge_key("e1_to_e3")
+        if hasattr(CAMPAIGN, "invalidate_step3_char_source_state_cache"):
+            CAMPAIGN.invalidate_step3_char_source_state_cache()
+    except Exception as exc:
+        logger.debug(f"Nie udało się przywrócić fokusu T02 po kontroli AT: {exc}")
+
+    try:
+        campaign_tab = self.app.tabs.get("campaign")
+        if campaign_tab is not None:
+            try:
+                campaign_tab._campaign_graph_selected_edge_key = "e1_to_e3"
+            except Exception:
+                pass
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=1)
+            except Exception:
+                pass
+    except Exception:
+        campaign_tab = None
+
+    _mark_return_phase("prepare_campaign_tab")
+
+    try:
+        promotion_ok = bool((promotion_result or {}).get("ok"))
+        promotion_reason = str(
+            (promotion_result or {}).get("reason")
+            or ("ok" if promotion_ok else "failed")
+        )
+        logger.info(
+            "[Z2 GRAPH] return_to_t02_at_review run=%s ok_images=%s ok_plates=%s promotion=%s",
+            str(run_dir or "-"),
+            int(approved_images or 0),
+            int(approved_plates or 0),
+            promotion_reason,
+        )
+    except Exception:
+        pass
+
+    try:
+        if int(approved_plates or 0) > 0:
+            status_message = (
+                f"Zapisano kontrolę AT: {approved_images} obrazów [OK] / "
+                f"{approved_plates} tablic. Wrócono do bramki T02."
+            )
+            tone = "success"
+        else:
+            status_message = "Wrócono do bramki T02 bez nowych pozycji [OK]. Zasób AT pozostaje do kontroli."
+            tone = "warning"
+        self.app.open_controlled_tab("campaign")
+        self.app.update_status(status_message, tone)
+        if campaign_tab is not None:
+            def _refresh_t02_dashboard_after_return(tab=campaign_tab) -> None:
+                previous_lightweight_refresh = bool(getattr(tab, "_project_open_lightweight_refresh", False))
+                try:
+                    tab._project_open_lightweight_refresh = True
+                    refresh_active_only = getattr(tab, "_refresh_active_project_wizard_only", None)
+                    if callable(refresh_active_only):
+                        refresh_active_only()
+                    else:
+                        tab._refresh_dashboard()
+                except Exception as exc:
+                    logger.debug(f"Nie udało się lekko odświeżyć grafu po kontroli T02: {exc}")
+                finally:
+                    try:
+                        tab._project_open_lightweight_refresh = previous_lightweight_refresh
+                    except Exception:
+                        pass
+
+            try:
+                self.frame.after(180, _refresh_t02_dashboard_after_return)
+            except Exception:
+                _refresh_t02_dashboard_after_return()
+    except Exception as e:
+        logger.debug(f"Nie udalo sie wrocic do bramki T02 po kontroli AT: {e}")
+    _mark_return_phase("open_campaign")
+
+    try:
+        elapsed_ms = (time.perf_counter() - return_started) * 1000.0
+        if elapsed_ms >= 250.0 or slow_phases:
+            logger.info(
+                "[Z2 PERF] return_to_t02_at_review total=%.0fms phases=[%s] run=%s ok=%s/%s",
+                elapsed_ms,
+                ", ".join(slow_phases) if slow_phases else "no_slow_phase",
+                str(run_dir or "-"),
+                int(approved_images or 0),
+                int(approved_plates or 0),
+            )
+    except Exception:
+        pass
+    return True
+
+
+def _return_to_campaign_step2_char_gate(self, CAMPAIGN, graph_context: dict) -> bool:
+    """Return from Z2 opened by the E2->E3 gate without closing that gate."""
+    if not self._ensure_preview_edits_saved("powrót z Z2 do bramki pracy nad znakami"):
+        return False
+
+    try:
+        current_run_dir = self._resolve_safe_annotation_run_dir(
+            getattr(self, "current_annotation_run_dir", None),
+            require_xml=True,
+        )
+    except Exception:
+        current_run_dir = None
+    if current_run_dir is not None:
+        try:
+            self._persist_preview_approved_filenames()
+        except Exception:
+            pass
+
+    edge_key = str(graph_context.get("graph_edge_key") or "e2_to_e3").strip() or "e2_to_e3"
+    graph_gate_id = campaign_gate_id_for_edge(edge_key, graph_context.get("graph_gate_id"))
+    graph_visible_gate_id = str(
+        graph_context.get("graph_visible_gate_id")
+        or graph_context.get("graph_display_gate_id")
+        or ""
+    ).strip().upper()
+    graph_visible_gate_id = campaign_gate_id_for_edge(edge_key, graph_visible_gate_id)
+    if graph_gate_id == "T03" or graph_visible_gate_id == "T03":
+        edge_key = "e2_to_e3"
+    try:
+        if current_run_dir is not None:
+            CAMPAIGN.set_step2_generated(str(current_run_dir))
+        else:
+            existing_step2_run = str(CAMPAIGN.get_step2_staging_run() or "").strip()
+            if existing_step2_run:
+                CAMPAIGN.set_step2_generated(existing_step2_run)
+    except Exception as exc:
+        logger.debug(f"Nie udało się przywrócić T03 jako pracy oczekującej na zatwierdzenie: {exc}")
+    try:
+        CAMPAIGN.reset_step3()
+    except Exception as exc:
+        logger.debug(f"Nie udało się wyczyścić roboczego stanu E3 przy powrocie do T03: {exc}")
+    try:
+        CAMPAIGN.set_current_step(2)
+    except Exception:
+        pass
+    try:
+        if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
+            CAMPAIGN.set_graph_selected_edge_key(edge_key)
+    except Exception:
+        pass
+
+    try:
+        campaign_tab = self.app.tabs.get("campaign")
+        if campaign_tab is not None:
+            try:
+                campaign_tab._campaign_graph_selected_edge_key = edge_key
+            except Exception:
+                pass
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=2)
+            except Exception:
+                pass
+            try:
+                campaign_tab._clear_dashboard_perf_cache()
+            except Exception:
+                pass
+            campaign_tab._refresh_dashboard()
+    except Exception:
+        pass
+
+    try:
+        logger.info("[Z2 GRAPH] return_to_step2_char_gate edge=%s gate=T03", edge_key)
+    except Exception:
+        pass
+    try:
+        self.app.open_controlled_tab("campaign")
+        self.app.update_campaign_tab_access()
+        self.app.update_status(
+            "Wrócono do bramki T03. Zapisane [OK] są dostępne dla pracy nad znakami; przejście dalej wymaga jawnego zatwierdzenia bramki na grafie.",
+            "info",
+        )
+    except Exception as e:
+        logger.debug(f"Nie udalo sie wrocic do bramki T03 po Z2: {e}")
+    return True
+
+
 def _promote_campaign_char_repair_ok_to_approved_pool_before_return(self, *args, **kwargs):
     return z2_workflow_methods._promote_campaign_char_repair_ok_to_approved_pool_before_return(self, *args, **kwargs)
 
@@ -1959,8 +2470,10 @@ def _get_campaign_return_to_wizard_ok_warning_context(self) -> dict:
         return {"show": False, "images_with_plates": 0, "approved_images": 0, "approved_plates": 0, "required_images": 0, "required_plates": 0, "total_plates": 0, "xml_required": False, "xml_exists": False}
 
     annotations = list(getattr(self, "current_annotations", []) or [])
+    campaign_manager_obj = None
     try:
         from ..campaign_manager import CAMPAIGN
+        campaign_manager_obj = CAMPAIGN
         current_step = int(CAMPAIGN.get_current_step() or 0)
         iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
         iteration_num = int(CAMPAIGN.get_current_iteration_num() or 1)
@@ -1969,21 +2482,37 @@ def _get_campaign_return_to_wizard_ok_warning_context(self) -> dict:
         iteration_target = ""
         iteration_num = 1
     required_images = 0
-    required_plates = (
-        int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
-        if current_step == 2 and iteration_target in {"plate", "char"}
-        else 0
-    )
+    if current_step == 2 and iteration_target == "char":
+        required_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
+    elif current_step == 2 and iteration_target == "plate":
+        required_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
+    else:
+        required_plates = 0
     xml_required = bool(current_step == 2 and iteration_target == "plate" and int(iteration_num or 1) <= 1)
     approval_context = self._get_campaign_step2_approval_context()
     approval_run_dir = approval_context.get("run_dir")
     xml_exists = bool(approval_run_dir and Path(approval_run_dir) and (Path(approval_run_dir) / "annotations.xml").exists())
+    project_approved_images = 0
+    project_approved_plates = 0
+    if current_step == 2 and iteration_target in {"plate", "char"} and campaign_manager_obj is not None:
+        try:
+            approved_stats = dict(campaign_manager_obj.get_plate_approved_set_stats() or {})
+            project_approved_images = int(approved_stats.get("images", 0) or 0)
+            project_approved_plates = int(approved_stats.get("plates", 0) or 0)
+        except Exception:
+            project_approved_images = 0
+            project_approved_plates = 0
     if not annotations:
+        effective_approved_images = int(project_approved_images or 0)
+        effective_approved_plates = int(project_approved_plates or 0)
         return {
-            "show": bool(required_plates > 0 or (xml_required and not xml_exists)),
+            "show": bool(
+                (required_plates > 0 and effective_approved_plates < int(required_plates or 0))
+                or (xml_required and not xml_exists)
+            ),
             "images_with_plates": 0,
-            "approved_images": 0,
-            "approved_plates": 0,
+            "approved_images": effective_approved_images,
+            "approved_plates": effective_approved_plates,
             "required_images": required_images,
             "required_plates": required_plates,
             "total_plates": 0,
@@ -2013,16 +2542,19 @@ def _get_campaign_return_to_wizard_ok_warning_context(self) -> dict:
         except Exception:
             pass
 
+    effective_approved_images = int(project_approved_images or 0) + int(approved_images or 0)
+    effective_approved_plates = int(project_approved_plates or 0) + int(approved_plates or 0)
+
     show = bool(images_with_plates > 0 and approved_images < images_with_plates)
     if required_plates > 0:
-        show = bool(show or approved_plates < required_plates)
+        show = bool(show or effective_approved_plates < required_plates)
     if xml_required and not xml_exists:
         show = True
     return {
         "show": show,
         "images_with_plates": int(images_with_plates),
-        "approved_images": int(approved_images),
-        "approved_plates": int(approved_plates),
+        "approved_images": int(effective_approved_images),
+        "approved_plates": int(effective_approved_plates),
         "required_images": int(required_images),
         "required_plates": int(required_plates),
         "total_plates": int(total_plates),

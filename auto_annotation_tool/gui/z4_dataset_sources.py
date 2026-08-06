@@ -271,6 +271,51 @@ def _refresh_dataset_variant_choices(self):
         return
 
     variants = self._get_free_dataset_variant_choices()
+    try:
+        current = str(getattr(self, "dataset_var", tk.StringVar()).get() or "").strip()
+    except Exception:
+        current = ""
+    if current:
+        try:
+            current_root = Path(current)
+            if current_root.is_file() and current_root.name.lower() == "data.yaml":
+                current_root = current_root.parent
+            current_yaml = current_root / "data.yaml"
+            current_key = str(current_root.resolve())
+            known_keys = {
+                self._normalize_dataset_variant_root(item.get("path"))
+                for item in list(variants or [])
+                if str(item.get("path") or "").strip()
+            }
+            current_target = self._infer_dataset_target(str(current_root)) or self._get_selected_training_target()
+            if (
+                current_yaml.exists()
+                and current_key not in known_keys
+                and current_target == self._get_selected_training_target()
+            ):
+                counts = self._get_dataset_split_image_counts(current_root)
+                display_ref = build_dataset_display_ref(current_root, target_hint=current_target, counts=counts)
+                try:
+                    stamp = float(current_root.stat().st_mtime)
+                except Exception:
+                    stamp = time.time()
+                try:
+                    label_path = self._format_workspace_relative_path(current_root)
+                except Exception:
+                    label_path = str(current_root)
+                variants.insert(
+                    0,
+                    {
+                        "label": display_ref.combo_label,
+                        "path": str(current_root),
+                        "display_path": label_path,
+                        "dataset_id": display_ref.id,
+                        "dataset_label": display_ref.detail_label,
+                        "stamp": stamp,
+                    },
+                )
+        except Exception:
+            pass
     self._dataset_variant_choices = variants
     labels = [str(item.get("label") or "") for item in variants]
 
@@ -386,19 +431,69 @@ def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> di
     if not images_root.exists() or not images_root.is_dir():
         return counts
 
-    total = 0
+    started_at = time.perf_counter()
+    signature_parts: list[str] = []
+    split_dirs: list[tuple[str, Path, bool]] = []
     for split_name in ("train", "val", "test"):
         split_dir = images_root / split_name
-        if not split_dir.exists() or not split_dir.is_dir():
+        exists = False
+        mtime_ns = 0
+        try:
+            exists = split_dir.exists() and split_dir.is_dir()
+            if exists:
+                mtime_ns = int(split_dir.stat().st_mtime_ns)
+        except Exception:
+            exists = False
+            mtime_ns = 0
+        split_dirs.append((split_name, split_dir, exists))
+        signature_parts.append(f"{split_name}:{mtime_ns}")
+
+    try:
+        cache_root = str(root.resolve())
+    except Exception:
+        cache_root = str(root)
+    cache_key = f"{cache_root}|{'|'.join(signature_parts)}"
+    cache = getattr(self, "_dataset_split_image_counts_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            self._dataset_split_image_counts_cache = cache
+        except Exception:
+            pass
+    cached_counts = cache.get(cache_key) if isinstance(cache, dict) else None
+    if isinstance(cached_counts, dict):
+        return dict(cached_counts)
+
+    total = 0
+    for split_name, split_dir, exists in split_dirs:
+        if not exists:
             continue
         try:
-            split_count = len(get_image_files(split_dir))
+            split_count = sum(
+                1 for path in split_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
+            )
         except Exception:
             split_count = 0
         counts[split_name] = int(split_count)
         total += int(split_count)
 
     counts["total"] = int(total)
+    try:
+        if len(cache) > 256:
+            cache.clear()
+        cache[cache_key] = dict(counts)
+    except Exception:
+        pass
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    if elapsed_ms >= 250:
+        try:
+            logger.info(
+                f"[Z4/PZ1 PERF] split_counts total={elapsed_ms}ms "
+                f"images={int(counts.get('total', 0) or 0)} path={root}"
+            )
+        except Exception:
+            pass
     return counts
 
 def _format_training_source_provenance(provenance: str | None) -> str:

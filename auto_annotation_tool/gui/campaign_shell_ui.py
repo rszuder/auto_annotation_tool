@@ -58,36 +58,74 @@ def _build_ui(self):
         self.project_loading_overlay,
         bd=0,
         highlightthickness=1,
-        padx=22,
-        pady=20,
+        padx=0,
+        pady=0,
     )
-    self.project_loading_card.place(relx=0.5, rely=0.18, anchor="n")
-    self.project_loading_card.grid_columnconfigure(0, weight=1)
-    self.project_loading_title_lbl = tk.Label(
+    self.project_loading_card.place(relx=0.5, rely=0.17, anchor="n", width=560, height=188)
+    self.project_loading_card.grid_columnconfigure(1, weight=1)
+    self.project_loading_card.grid_rowconfigure(0, weight=1)
+    self.project_loading_accent_bar = tk.Frame(
         self.project_loading_card,
+        width=2,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.project_loading_accent_bar.grid(row=0, column=0, sticky="nsw")
+    self.project_loading_content = tk.Frame(
+        self.project_loading_card,
+        bd=0,
+        highlightthickness=0,
+        padx=18,
+        pady=14,
+    )
+    self.project_loading_content.grid(row=0, column=1, sticky="nsew")
+    self.project_loading_content.grid_columnconfigure(0, weight=1)
+    self.project_loading_eyebrow_lbl = tk.Label(
+        self.project_loading_content,
+        text="ODTWARZANIE PROJEKTU",
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 7, "bold"),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.project_loading_eyebrow_lbl.grid(row=0, column=0, sticky="ew")
+    self.project_loading_title_lbl = tk.Label(
+        self.project_loading_content,
         text="Ładuję projekt",
         anchor="w",
         justify=tk.LEFT,
-        font=("Segoe UI Semibold", 13),
+        font=("Segoe UI Semibold", 12),
         bd=0,
         highlightthickness=0,
     )
-    self.project_loading_title_lbl.grid(row=0, column=0, sticky="ew")
+    self.project_loading_title_lbl.grid(row=1, column=0, sticky="ew", pady=(3, 0))
     self.project_loading_body_lbl = tk.Label(
-        self.project_loading_card,
+        self.project_loading_content,
         text="Odtwarzam stan bramek i kontekst roboczy projektu.",
         anchor="w",
         justify=tk.LEFT,
-        wraplength=560,
+        wraplength=520,
         bd=0,
         highlightthickness=0,
     )
-    self.project_loading_body_lbl.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    self.project_loading_body_lbl.grid(row=2, column=0, sticky="ew", pady=(6, 0))
     self.project_loading_progress = ttk.Progressbar(
-        self.project_loading_card,
+        self.project_loading_content,
         mode="indeterminate",
+        style="Horizontal.TProgressbar",
     )
-    self.project_loading_progress.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+    self.project_loading_progress.grid(row=3, column=0, sticky="ew", pady=(9, 0))
+    self.project_loading_step_lbl = tk.Label(
+        self.project_loading_content,
+        text="Proszę chwilę poczekać...",
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 8),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.project_loading_step_lbl.grid(row=4, column=0, sticky="ew", pady=(5, 0))
     self.project_loading_overlay.place_forget()
 
     # Stały układ dwukolumnowy.
@@ -567,4 +605,3 @@ def _sync_right_panel_canvas_width(self, event=None):
         self.right_panel_canvas.itemconfigure(self.right_content_window, width=width)
     except Exception:
         pass
-

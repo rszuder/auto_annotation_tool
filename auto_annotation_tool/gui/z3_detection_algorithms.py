@@ -5,6 +5,19 @@ import copy
 from ..character_recognition import DetectionMethod
 from .z3_character_box_refiner import refine_perfect_character_box
 
+DETECTION_CONF_MIN = 0.00001
+DETECTION_CONF_DIGITS = 5
+
+
+def _normalize_detection_conf(value, default: float = 0.25) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        number = float(default)
+    if number != number:
+        number = float(default)
+    return round(max(DETECTION_CONF_MIN, min(1.0, number)), DETECTION_CONF_DIGITS)
+
 
 def levenshtein_distance(left: str, right: str) -> int:
     left = str(left or "")
@@ -102,35 +115,78 @@ def fit_detection_count_to_truths(host, detections, true_texts):
     return list(best_window), best_details
 
 
-def apply_final_truth_count_guard(host, characters, true_texts, fusion_details: dict | None = None):
-    ordered_chars = host._sort_character_records_by_x(list(characters or []))
+def apply_final_truth_count_guard(host, characters, true_texts, fusion_details: dict | None = None, data=None):
+    ordered_chars = host._sort_character_records_by_x(list(characters or []), data=data)
     fitted_chars, trim_details = host._fit_detection_count_to_truths(ordered_chars, true_texts)
     if not isinstance(trim_details, dict) or not trim_details:
         return ordered_chars, fusion_details
 
+    expected_len = int(trim_details.get("trimmed_box_count", 0) or len(fitted_chars or []) or 0)
     manual_ids = {
         id(rec)
         for rec in ordered_chars
-        if isinstance(rec, dict) and host._is_manual_character_record(rec)
+        if isinstance(rec, dict) and host._is_manual_character_record(rec, data=data)
     }
     if manual_ids:
+        manual_records = [
+            rec for rec in ordered_chars
+            if isinstance(rec, dict) and id(rec) in manual_ids
+        ]
         fitted_ids = {id(rec) for rec in list(fitted_chars or [])}
         if not manual_ids.issubset(fitted_ids):
+            selected_records = []
+            selected_ids = set()
+
+            def add_record(rec) -> None:
+                if rec is None:
+                    return
+                rec_id = id(rec)
+                if rec_id in selected_ids:
+                    return
+                selected_records.append(rec)
+                selected_ids.add(rec_id)
+
+            for rec in manual_records:
+                add_record(rec)
+                if expected_len > 0 and len(selected_records) >= expected_len:
+                    break
+
+            if expected_len <= 0 or len(manual_records) <= expected_len:
+                for candidate_source in (list(fitted_chars or []), ordered_chars):
+                    for rec in candidate_source:
+                        if expected_len > 0 and len(selected_records) >= expected_len:
+                            break
+                        if not isinstance(rec, dict) or id(rec) in manual_ids:
+                            continue
+                        try:
+                            if host._character_record_collides_with_manual(rec, manual_records):
+                                continue
+                        except Exception:
+                            pass
+                        add_record(rec)
+                        if expected_len > 0 and len(selected_records) >= expected_len:
+                            break
+                    if expected_len > 0 and len(selected_records) >= expected_len:
+                        break
+
             merged_details = dict(fusion_details or {})
-            merged_details["gt_count_guard_applied"] = False
+            merged_details.update(trim_details)
+            merged_details["gt_count_guard_applied"] = True
             merged_details["gt_count_guard_stage"] = "final_characters"
             merged_details["gt_count_guard_manual_protected"] = True
             merged_details["gt_count_guard_manual_count"] = int(len(manual_ids))
-            merged_details["gt_count_guard_skipped_trimmed_extra_boxes"] = int(
-                trim_details.get("trimmed_extra_boxes", 0) or 0
-            )
-            return ordered_chars, merged_details
+            merged_details["gt_count_guard_manual_safe_trim"] = True
+            merged_details["gt_count_guard_manual_over_limit"] = bool(expected_len > 0 and len(manual_records) > expected_len)
+            merged_details["original_box_count"] = int(len(ordered_chars))
+            merged_details["trimmed_box_count"] = int(len(selected_records))
+            merged_details["trimmed_extra_boxes"] = max(0, int(len(ordered_chars) - len(selected_records)))
+            return host._sort_character_records_by_x(list(selected_records), data=data), merged_details
 
     merged_details = dict(fusion_details or {})
     merged_details.update(trim_details)
     merged_details["gt_count_guard_applied"] = True
     merged_details["gt_count_guard_stage"] = "final_characters"
-    return host._sort_character_records_by_x(list(fitted_chars or [])), merged_details
+    return host._sort_character_records_by_x(list(fitted_chars or []), data=data), merged_details
 
 
 def pick_best_true_text(host, candidate_text: str, true_texts, same_length_only: bool = False) -> str:
@@ -162,14 +218,17 @@ def get_text_mismatch_positions(candidate_text: str, expected_text: str):
     return [idx for idx, (left, right) in enumerate(zip(candidate, expected)) if left != right]
 
 
-def repair_ocr_with_yolo_boxes(host, ocr_detections, yolo_detections, true_texts, max_mismatch_count: int = 2):
+def repair_ocr_with_yolo_boxes(host, ocr_detections, yolo_detections, true_texts, max_mismatch_count: int = 999):
     ordered_ocr = host._sort_character_records_by_x(list(ocr_detections or []))
     ordered_yolo = host._sort_character_records_by_x(list(yolo_detections or []))
 
     if not ordered_ocr or not ordered_yolo:
         return None, None
 
-    max_mismatch_count = max(1, min(5, int(max_mismatch_count or 2)))
+    try:
+        requested_mismatch_limit = int(max_mismatch_count or 0)
+    except Exception:
+        requested_mismatch_limit = 0
 
     ocr_text = host._characters_to_text(ordered_ocr)
     expected_text = host._pick_best_true_text(ocr_text, true_texts, same_length_only=True)
@@ -177,7 +236,13 @@ def repair_ocr_with_yolo_boxes(host, ocr_detections, yolo_detections, true_texts
         return None, None
 
     mismatch_positions = host._get_text_mismatch_positions(ocr_text, expected_text)
-    if not mismatch_positions or len(mismatch_positions) > max_mismatch_count:
+    if not mismatch_positions:
+        return None, None
+
+    expected_box_count = max(1, len(expected_text))
+    auto_limit = requested_mismatch_limit <= 0 or requested_mismatch_limit >= expected_box_count
+    max_mismatch_count = expected_box_count if auto_limit else max(1, requested_mismatch_limit)
+    if len(mismatch_positions) > max_mismatch_count:
         return None, None
 
     repaired = [host._clone_character_detection(det) for det in ordered_ocr]
@@ -212,12 +277,23 @@ def repair_ocr_with_yolo_boxes(host, ocr_detections, yolo_detections, true_texts
         "expected_text": expected_text,
         "mismatch_positions": list(mismatch_positions),
         "max_mismatch_count": int(max_mismatch_count),
+        "rescue_limit_mode": "auto" if auto_limit else "manual",
+        "expected_box_count": int(expected_box_count),
     }
     return repaired, details
 
 
 def get_yolo_runtime_settings(host):
-    conf = float(host.yolo_conf_var.get())
+    fallback_conf = _normalize_detection_conf(host.yolo_conf_var.get())
+    try:
+        box_conf = _normalize_detection_conf(host.yolo_box_conf_var.get(), fallback_conf)
+    except Exception:
+        box_conf = fallback_conf
+    try:
+        symbol_conf = _normalize_detection_conf(host.yolo_symbol_conf_var.get(), fallback_conf)
+    except Exception:
+        symbol_conf = fallback_conf
+    conf = _normalize_detection_conf(min(float(box_conf), float(symbol_conf)), fallback_conf)
     iou = float(host.yolo_iou_var.get())
     overlap = float(host.yolo_overlap_var.get())
     seq_center_y = float(host.yolo_seq_center_y_var.get())
@@ -227,8 +303,12 @@ def get_yolo_runtime_settings(host):
     seq_soft_overlap = float(host.yolo_seq_soft_overlap_var.get())
     seq_hard_overlap = float(host.yolo_seq_hard_overlap_var.get())
 
-    if not (0.0 <= conf <= 1.0):
-        raise ValueError("Próg confidence YOLO musi być w zakresie 0.00-1.00.")
+    if not (DETECTION_CONF_MIN <= box_conf <= 1.0):
+        raise ValueError("Prog confidence YB musi byc w zakresie 0.00001-1.00.")
+    if not (DETECTION_CONF_MIN <= symbol_conf <= 1.0):
+        raise ValueError("Prog confidence YS musi byc w zakresie 0.00001-1.00.")
+    if not (DETECTION_CONF_MIN <= conf <= 1.0):
+        raise ValueError("Prog confidence YOLO musi byc w zakresie 0.00001-1.00.")
     if not (0.01 <= iou <= 0.99):
         raise ValueError("Próg NMS IoU musi być w zakresie 0.01-0.99.")
     if not (0.0 <= overlap <= 1.0):
@@ -252,6 +332,8 @@ def get_yolo_runtime_settings(host):
 
     return {
         "conf": conf,
+        "box_conf": box_conf,
+        "symbol_conf": symbol_conf,
         "iou": iou,
         "overlap": overlap,
         "agnostic_nms": bool(host.yolo_agnostic_nms_var.get()),
@@ -1018,7 +1100,7 @@ def resolve_canonical_detections(
     ocr_detections,
     yolo_detections,
     true_texts,
-    hybrid_rescue_max_chars: int = 2,
+    hybrid_rescue_max_chars: int = 999,
     prefer_yolo_box_positions: bool = False,
     yolo_box_backend_detections=None,
     plate_image=None,

@@ -67,6 +67,7 @@ from .z3_campaign_flow import (
     go_to_substep_2_campaign,
     go_to_substep_3_campaign,
     has_any_step3_export_outputs,
+    mark_step3_work_interrupted_on_app_close,
     open_campaign_step3_entry,
     persist_step3_progress,
     refresh_campaign_step3_navigation_visibility,
@@ -198,6 +199,7 @@ from .z3_preview_ui import (
     redraw_preview_character_overlays_light,
     draw_preview_plate_status_frame,
     draw_preview_layout_separator,
+    update_preview_layout_separator_visual,
     update_preview_character_drag_visual,
     redraw_preview_add_box_overlay_only,
     render_preview_overlay_dock,
@@ -406,6 +408,7 @@ from .z3_detection_tab_ui import (
     close_detection_pipeline_builder,
     compile_detection_pipeline_blocks,
     compose_detection_method_status,
+    confirm_last_detection_result,
     commit_detection_pipeline_builder,
     format_last_detection_summary_line,
     format_plate_last_detection_line,
@@ -421,12 +424,15 @@ from .z3_detection_tab_ui import (
     get_detection_pipeline_builder_blocks,
     get_detection_pipeline_blocks,
     get_detection_pipeline_short_label,
+    get_saved_detection_pipeline_blocks,
     get_detection_method_status_label,
     get_detection_workflow_text,
     get_hybrid_detection_status_text,
     get_hybrid_rescue_max_chars,
+    get_yolo_rescue_enabled,
     get_yolo_runtime_settings,
     get_available_devices,
+    get_campaign_detection_yolo_model_path,
     get_campaign_char_model_path,
     get_effective_detection_device_choice,
     get_effective_yolo_model_path,
@@ -438,6 +444,7 @@ from .z3_detection_tab_ui import (
     handle_detect_mode_selection,
     has_configured_yolo_detection_model,
     move_detection_pipeline_builder_selected_block,
+    open_detection_pipeline_advanced_modal,
     open_detection_pipeline_builder,
     pick_detection_pipeline_yolo_model,
     on_yolo_option_var_write,
@@ -449,6 +456,7 @@ from .z3_detection_tab_ui import (
     refresh_detection_pipeline_builder,
     refresh_detection_pipeline_model_row,
     refresh_detection_pipeline_builder_property_panel,
+    refresh_detection_review_controls,
     refresh_detection_workflow_info_label,
     refresh_detect_mode_cards,
     refresh_last_detection_status_label,
@@ -464,6 +472,7 @@ from .z3_detection_tab_ui import (
     set_detection_pipeline_builder_preset,
     set_detection_method_key,
     save_last_detection_summary,
+    save_detection_pipeline_blocks,
     show_detection_pipeline_model_details,
     show_last_detection_details,
     set_test_progress_counter,
@@ -473,6 +482,7 @@ from .z3_detection_tab_ui import (
     sync_yolo_model_binding,
     toggle_detection_advanced_panel,
     toggle_detection_process_log,
+    undo_last_detection_result,
     update_device_hint,
     update_detection_progress_ui,
     update_yolo_visibility,
@@ -623,6 +633,7 @@ PREVIEW_SORT_OPTIONS = [
     ("M", "Po M"),
     ("YOLO", "Po YOLO"),
     ("OCR", "Po OCR"),
+    ("BOXES", "Po boxach"),
 ]
 PREVIEW_SORT_LABELS = {key: label for key, label in PREVIEW_SORT_OPTIONS}
 PREVIEW_SORT_COLOR_KEYS = {
@@ -633,6 +644,7 @@ PREVIEW_SORT_COLOR_KEYS = {
     "M": "warning",
     "YOLO": "info",
     "OCR": "success",
+    "BOXES": "info",
 }
 PREVIEW_LAYOUT_FILTER_OPTIONS = []
 PREVIEW_LAYOUT_FILTER_LABELS = {key: label for key, label in PREVIEW_LAYOUT_FILTER_OPTIONS}
@@ -657,6 +669,8 @@ CHAR_CLASS_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DETECTION_METHOD_OPTIONS = [
     ("OCR", "OCR: odczyt znaków"),
     ("YOLO", "YOLO: odczyt i ramki"),
+    ("YOLO_BOX", "YOLO boxy: tylko ramki"),
+    ("YOLO_SYMBOL", "YOLO znaki: tylko symbole"),
     ("BOTH", "Hybryda: OCR odczyt + YOLO ramki"),
     ("YOLO_OCR", "Hybryda: YOLO boxy + OCR odczyt"),
 ]
@@ -665,6 +679,14 @@ DETECTION_METHOD_KEY_BY_LABEL = {label: key for key, label in DETECTION_METHOD_O
 DETECTION_METHOD_KEY_BY_LABEL.update({
     "OCR": "OCR",
     "YOLO": "YOLO",
+    "YB": "YOLO_BOX",
+    "YOLO box": "YOLO_BOX",
+    "YOLO boxy": "YOLO_BOX",
+    "YOLO_BOX": "YOLO_BOX",
+    "YS": "YOLO_SYMBOL",
+    "YOLO znak": "YOLO_SYMBOL",
+    "YOLO znaki": "YOLO_SYMBOL",
+    "YOLO_SYMBOL": "YOLO_SYMBOL",
     "Hybryda OCR/YOLO": "BOTH",
     "OCR + YOLO": "BOTH",
     "OCR+YOLO": "BOTH",
@@ -682,6 +704,14 @@ DETECTION_METHOD_CARD_META = {
     "YOLO": {
         "title": "YOLO",
         "desc": "Model detekcji YOLO wykrywa ramki znaków i proponuje klasy. Nie jest to wybór modelu do treningu.",
+    },
+    "YOLO_BOX": {
+        "title": "YB",
+        "desc": "YOLO wyznacza tylko ramki znakow. Tekst zostaje pusty do OCR, YS albo recznej korekty.",
+    },
+    "YOLO_SYMBOL": {
+        "title": "YS",
+        "desc": "YOLO wpisuje symbole w istniejace ramki. Nie tworzy nowych boxow.",
     },
     "BOTH": {
         "title": "OCR + YOLO",
@@ -723,6 +753,14 @@ DETECTION_PIPELINE_PRESET_META = {
     "YOLO": {
         "label": "YOLO",
         "desc": "Model detekcji YOLO daje box i znak z klas modelu.",
+    },
+    "YOLO_BOX": {
+        "label": "YB",
+        "desc": "YOLO tworzy tylko ramki znakow.",
+    },
+    "YOLO_SYMBOL": {
+        "label": "YS",
+        "desc": "YOLO wpisuje symbole w istniejace ramki.",
     },
     "BOTH": {
         "label": "OCR + YOLO",
@@ -1186,12 +1224,28 @@ class CharacterAnnotationTab:
 
     _normalize_preview_char_bbox = normalize_preview_char_bbox
 
-    def _mark_preview_char_record_manual(self, rec: dict):
+    def _mark_preview_char_record_manual(self, rec: dict, *, box: bool = True, sign: bool = True):
         if not isinstance(rec, dict):
             return
-        rec["method"] = "manual"
-        rec["source_tag"] = "manual"
-        rec["source_kind"] = "local_manual"
+        if box:
+            rec["box_source"] = "manual_box"
+            rec["bbox_source"] = "manual"
+            rec["geometry_source"] = "manual"
+            rec["geometry_method"] = "manual"
+        if sign:
+            rec["sign_source"] = "manual_sign"
+            rec["symbol_source"] = "manual"
+            rec["symbol_method"] = "manual"
+        if box and sign:
+            rec["method"] = "manual"
+            rec["source_tag"] = "manual"
+            rec["source_kind"] = "local_manual"
+        elif box:
+            rec["method"] = "manual"
+            rec["source_tag"] = "manual"
+            rec["source_kind"] = "local_manual"
+        elif sign:
+            rec["source_kind"] = "local_manual"
         try:
             rec["confidence"] = float(rec.get("confidence", 1.0) or 1.0)
         except Exception:
@@ -1200,7 +1254,9 @@ class CharacterAnnotationTab:
     _derive_preview_status_from_characters = z3_preview_metadata_runtime._derive_preview_status_from_characters
     _preview_has_reference_text_source = z3_preview_metadata_runtime._preview_has_reference_text_source
     _get_preview_reference_text_values = z3_preview_metadata_runtime._get_preview_reference_text_values
+    _get_preview_filename_expected_texts = z3_preview_metadata_runtime._get_preview_filename_expected_texts
     _get_preview_expected_texts = z3_preview_metadata_runtime._get_preview_expected_texts
+    _resolve_preview_expected_text_for_crop = z3_preview_metadata_runtime._resolve_preview_expected_text_for_crop
     _derive_preview_status_from_data = z3_preview_metadata_runtime._derive_preview_status_from_data
     _get_preview_live_status = z3_preview_metadata_runtime._get_preview_live_status
 
@@ -1288,6 +1344,13 @@ class CharacterAnnotationTab:
         except Exception:
             pass
         try:
+            pending_fast_hud_after = getattr(self, "_preview_fast_hud_refresh_after_id", None)
+            if pending_fast_hud_after:
+                self.frame.after_cancel(pending_fast_hud_after)
+                self._preview_fast_hud_refresh_after_id = None
+        except Exception:
+            pass
+        try:
             pending_prefetch_after = getattr(self, "_preview_neighbor_prefetch_after_id", None)
             if pending_prefetch_after:
                 self.frame.after_cancel(pending_prefetch_after)
@@ -1309,6 +1372,8 @@ class CharacterAnnotationTab:
                 self._on_preview_select(None)
             except Exception:
                 self._suppress_preview_reload_on_list_select = False
+            finally:
+                self._preview_keyboard_crop_navigation_active = False
 
         try:
             delay = max(1, int(delay_ms))
@@ -1553,6 +1618,7 @@ class CharacterAnnotationTab:
     _update_preview_character_drag_visual = update_preview_character_drag_visual
     _draw_preview_plate_status_frame = draw_preview_plate_status_frame
     _draw_preview_layout_separator = draw_preview_layout_separator
+    _update_preview_layout_separator_visual = update_preview_layout_separator_visual
     _redraw_preview_character_overlay_only = redraw_preview_character_overlay_only
     _redraw_preview_character_overlays_light = redraw_preview_character_overlays_light
 
@@ -1982,6 +2048,10 @@ class CharacterAnnotationTab:
     _build_auto_preview_layout_separator = z3_plate_layout_runtime._build_auto_preview_layout_separator
     _ensure_preview_layout_separator = z3_plate_layout_runtime._ensure_preview_layout_separator
     _get_preview_layout_separator_for_reading = z3_plate_layout_runtime._get_preview_layout_separator_for_reading
+    _normalize_preview_manual_layout_override = z3_plate_layout_runtime._normalize_preview_manual_layout_override
+    _capture_preview_manual_layout_state = z3_plate_layout_runtime._capture_preview_manual_layout_state
+    _restore_preview_manual_layout_state = z3_plate_layout_runtime._restore_preview_manual_layout_state
+    _backfill_preview_manual_layout_from_related_runs = z3_plate_layout_runtime._backfill_preview_manual_layout_from_related_runs
     _capture_preview_two_row_layout_state = z3_plate_layout_runtime._capture_preview_two_row_layout_state
     _restore_preview_two_row_layout_state = z3_plate_layout_runtime._restore_preview_two_row_layout_state
     _preview_separator_y_at_x = z3_plate_layout_runtime._preview_separator_y_at_x
@@ -1990,6 +2060,7 @@ class CharacterAnnotationTab:
     _find_preview_layout_separator_handle_hit = z3_plate_layout_runtime._find_preview_layout_separator_handle_hit
     _set_preview_layout_separator_handle_y_from_canvas = z3_plate_layout_runtime._set_preview_layout_separator_handle_y_from_canvas
     _move_preview_layout_separator_from_canvas_delta = z3_plate_layout_runtime._move_preview_layout_separator_from_canvas_delta
+    _build_preview_layout_separator_drag_preview = z3_plate_layout_runtime._build_preview_layout_separator_drag_preview
     _clamp_preview_layout_separator_to_existing_rows = z3_plate_layout_runtime._clamp_preview_layout_separator_to_existing_rows
     _apply_preview_layout_separator_constraints_to_chars = z3_plate_layout_runtime._apply_preview_layout_separator_constraints_to_chars
     _preview_layout_separator_conflicts_with_chars = z3_plate_layout_runtime._preview_layout_separator_conflicts_with_chars
@@ -2016,6 +2087,9 @@ class CharacterAnnotationTab:
     _build_character_source_tags = z3_plate_layout_runtime._build_character_source_tags
     _serialize_character_records = z3_plate_layout_runtime._serialize_character_records
     _get_character_source_tag = z3_plate_layout_runtime._get_character_source_tag
+    _get_character_box_source_tag = z3_plate_layout_runtime._get_character_box_source_tag
+    _get_character_sign_source_tag = z3_plate_layout_runtime._get_character_sign_source_tag
+    _compose_character_source_tag = z3_plate_layout_runtime._compose_character_source_tag
     _get_character_source_kind = z3_plate_layout_runtime._get_character_source_kind
 
     _get_plate_listbox_source_flags = get_plate_listbox_source_flags
@@ -2060,6 +2134,15 @@ class CharacterAnnotationTab:
             pass
 
     def _is_manual_character_record(self, rec, data=None) -> bool:
+        try:
+            box_source = str(self._get_character_box_source_tag(rec, data=data) or "").strip().lower()
+            sign_source = str(self._get_character_sign_source_tag(rec, data=data) or "").strip().lower()
+        except Exception:
+            box_source = ""
+            sign_source = ""
+        if box_source == "manual_box" or sign_source == "manual_sign":
+            return True
+
         try:
             source_kind = str(self._get_character_source_kind(rec, data=data) or "").strip().lower()
         except Exception:
@@ -2121,6 +2204,7 @@ class CharacterAnnotationTab:
             final_chars,
             fusion_strategy=fusion_strategy,
             fusion_details=fusion_details if isinstance(fusion_details, dict) else None,
+            data=data,
         )
         return serialized, backend_details
 
@@ -2254,7 +2338,7 @@ class CharacterAnnotationTab:
         ocr_detections,
         yolo_detections,
         true_texts,
-        hybrid_rescue_max_chars: int = 2,
+        hybrid_rescue_max_chars: int = 999,
         prefer_yolo_box_positions: bool = False,
         yolo_box_backend_detections=None,
         plate_image=None,
@@ -2290,6 +2374,7 @@ class CharacterAnnotationTab:
         return get_detection_method_key(self, DETECTION_METHOD_LABELS, DETECTION_METHOD_KEY_BY_LABEL)
 
     _get_hybrid_rescue_max_chars = get_hybrid_rescue_max_chars
+    _get_yolo_rescue_enabled = get_yolo_rescue_enabled
     _use_hybrid_yolo_box_backend = use_hybrid_yolo_box_backend
     _get_hybrid_detection_status_text = get_hybrid_detection_status_text
     _get_yolo_box_ocr_status_text = staticmethod(get_yolo_box_ocr_status_text)
@@ -2572,6 +2657,8 @@ class CharacterAnnotationTab:
 
     _get_detection_pipeline_block_style = get_detection_pipeline_block_style
     _get_detection_pipeline_builder_blocks = get_detection_pipeline_builder_blocks
+    _get_saved_detection_pipeline_blocks = get_saved_detection_pipeline_blocks
+    _save_detection_pipeline_blocks = save_detection_pipeline_blocks
     _set_detection_pipeline_builder_blocks = set_detection_pipeline_builder_blocks
     _select_detection_pipeline_builder_block = select_detection_pipeline_builder_block
     _set_detection_pipeline_builder_preset = set_detection_pipeline_builder_preset
@@ -2585,6 +2672,7 @@ class CharacterAnnotationTab:
     _refresh_detection_pipeline_model_row = refresh_detection_pipeline_model_row
     _pick_detection_pipeline_yolo_model = pick_detection_pipeline_yolo_model
     _show_detection_pipeline_model_details = show_detection_pipeline_model_details
+    _open_detection_pipeline_advanced_modal = open_detection_pipeline_advanced_modal
     _draw_detection_pipeline_builder_canvas = draw_detection_pipeline_builder_canvas
     _refresh_detection_pipeline_builder_property_panel = refresh_detection_pipeline_builder_property_panel
 
@@ -2718,6 +2806,10 @@ class CharacterAnnotationTab:
 
         phase_started = time.perf_counter()
         if recalculate_statuses:
+            try:
+                new_meta = self._backfill_preview_manual_layout_from_related_runs(new_meta)
+            except Exception:
+                pass
             self.preview_metadata = self._recalculate_preview_statuses_in_metadata(new_meta)
         else:
             self.preview_metadata = new_meta if isinstance(new_meta, dict) else {}
@@ -3110,6 +3202,9 @@ class CharacterAnnotationTab:
     def _get_campaign_char_model_path(self) -> str:
         return get_campaign_char_model_path(self)
 
+    def _get_campaign_detection_yolo_model_path(self) -> str:
+        return get_campaign_detection_yolo_model_path(self)
+
     def _get_effective_yolo_model_path(self) -> str:
         return get_effective_yolo_model_path(self)
 
@@ -3416,6 +3511,10 @@ class CharacterAnnotationTab:
         event_widget = getattr(event, "widget", None)
         if event is None or str(event_widget) == str(self.app.root):
             self._force_save_all()
+            try:
+                mark_step3_work_interrupted_on_app_close(self)
+            except Exception as exc:
+                logger.debug(f"Nie udało się oznaczyć przerwanej pracy Z3 przy zamykaniu: {exc}")
 
     _update_yolo_visibility = update_yolo_visibility
     _auto_device_label = staticmethod(auto_device_label)
@@ -3515,6 +3614,9 @@ class CharacterAnnotationTab:
     _build_pz2_detection_guard_counts = build_pz2_detection_guard_counts
     _prompt_pz2_detection_guard_options = prompt_pz2_detection_guard_options
     _run_detection_stage = run_detection_stage
+    _undo_last_detection_result = undo_last_detection_result
+    _confirm_last_detection_result = confirm_last_detection_result
+    _refresh_detection_review_controls = refresh_detection_review_controls
     _update_winner_label = update_winner_label
 
     # =========================================================
@@ -3577,7 +3679,13 @@ class CharacterAnnotationTab:
         self.is_processing = True
 
         # główne akcje
-        for attr_name in ("btn_run_detection", "btn_rank_presets", "btn_ocr_lab"):
+        for attr_name in (
+            "btn_run_detection",
+            "btn_rank_presets",
+            "btn_ocr_lab",
+            "btn_undo_detection_result",
+            "btn_confirm_detection_result",
+        ):
             widget = getattr(self, attr_name, None)
             if widget is not None:
                 try:

@@ -56,6 +56,18 @@ def _execute_set_iteration_path(host: Any, payload: Mapping[str, Any]) -> Campai
         or payload.get("path")
     )
     target = iteration_path_target(normalized_path)
+    if normalized_path and normalized_path != "char_from_ready_plates":
+        try:
+            t02_committed = bool(CAMPAIGN.is_t02_at_review_committed_current_iteration())
+        except Exception:
+            t02_committed = False
+        if t02_committed:
+            message = (
+                "Ta iteracja ma juz zapisana kontrole AT w T02. "
+                "Zeby nie rozjechac kontraktu O-AT, biezacy cykl pozostaje na sciezce T02."
+            )
+            _safe_update_status(host, message, "warning")
+            return CampaignGraphActionResult(False, "set_iteration_path", message)
     if not normalized_path or target not in {"plate", "char"}:
         return CampaignGraphActionResult(False, "set_iteration_path", "Nieznana ścieżka E1.")
 

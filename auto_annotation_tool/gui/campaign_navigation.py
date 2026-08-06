@@ -38,7 +38,7 @@ from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
 
 
-def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int) -> None:
+def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int, lightweight: bool = False) -> None:
     for raw_delay in delays_ms or (350,):
         try:
             delay = max(1, int(raw_delay or 1))
@@ -46,10 +46,11 @@ def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int) -> None:
             delay = 350
 
         def _refresh(tab=tab_ann) -> None:
-            try:
-                tab._refresh_step2_action_states(lightweight=False)
-            except Exception:
-                pass
+            if not lightweight:
+                try:
+                    tab._refresh_step2_action_states(lightweight=False)
+                except Exception:
+                    pass
             try:
                 tab._sync_right_panel_scrollregion()
             except Exception:
@@ -153,9 +154,57 @@ def _step_goto_auto_annotation(
     open_existing_run: bool = True,
     preferred_source_context=None,
 ):
-    if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 2:
+    source_context = dict(preferred_source_context or {})
+    t02_at_review = bool(
+        str(source_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
+        or (
+            str(source_context.get("graph_edge_key") or "").strip() == "e1_to_e3"
+            and str(source_context.get("graph_gate_id") or "").strip().upper() == "T02"
+        )
+    )
+    if not CAMPAIGN.get_active_project_name() or (CAMPAIGN.get_current_step() < 2 and not t02_at_review):
         return
-    if str(CAMPAIGN.get_step1_status() or "").strip().lower() != "approved":
+    if t02_at_review:
+        try:
+            CAMPAIGN.set_iteration_path("char_from_ready_plates")
+            if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
+                CAMPAIGN.set_graph_selected_edge_key("e1_to_e3")
+        except Exception:
+            pass
+        try:
+            plate_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
+        except Exception:
+            plate_source = {}
+        source_run = str(plate_source.get("source_run_path") or "").strip()
+        source_xml = str(plate_source.get("source_xml_path") or "").strip()
+        source_input = str(plate_source.get("source_input_path") or "").strip()
+        if source_run:
+            source_context.setdefault("restore_run_dir", source_run)
+        elif source_xml:
+            try:
+                source_context.setdefault("restore_run_dir", str(Path(source_xml).parent))
+            except Exception:
+                pass
+        if source_input:
+            source_context.setdefault("input_dir", source_input)
+        source_context.setdefault("input_source", "t02_at_review")
+        source_context.setdefault("graph_edge_key", "e1_to_e3")
+        source_context.setdefault("graph_gate_id", "T02")
+        source_context.setdefault("graph_visible_gate_id", "T02")
+        source_context.setdefault("graph_display_gate_id", "T02")
+        source_context.setdefault("graph_transition_source", "E1")
+        source_context.setdefault("graph_transition_target", "E3")
+        source_context.setdefault("graph_path_key", "char_from_ready_plates")
+        if not str(source_context.get("restore_run_dir") or "").strip():
+            try:
+                self.app.update_status(
+                    "T02 nie ma jeszcze importu AT do kontroli. Najpierw wskaż pasujące anotacje tablic w zasobach bramki.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+    if str(CAMPAIGN.get_step1_status() or "").strip().lower() != "approved" and not t02_at_review:
         try:
             self.step1_panel_expanded = True
             self.request_wizard_stage_focus(step_num=1)
@@ -185,7 +234,12 @@ def _step_goto_auto_annotation(
         current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
     except Exception:
         current_iteration_path = ""
-    if iteration_target == "char" and current_iteration_path == "char_from_ready_plates" and int(CAMPAIGN.get_current_step() or 0) < 3:
+    if (
+        iteration_target == "char"
+        and current_iteration_path == "char_from_ready_plates"
+        and int(CAMPAIGN.get_current_step() or 0) < 3
+        and not t02_at_review
+    ):
         try:
             self.app.update_status(
                 "Ten tor korzysta z istniejącego źródła tablic i pomija Z2. Zatwierdź bramkę T03, aby przejść do pracy nad znakami.",
@@ -280,6 +334,21 @@ def _step_goto_auto_annotation(
 
     defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")
     splash_token = 0
+    splash_title = "Ładuję kontrolę AT w Z2" if t02_at_review else "Ładuję pracę Z2"
+    splash_body = (
+        "Wczytuję import anotacji tablic do kontroli. Lista i podgląd pojawią się po nałożeniu runu."
+        if t02_at_review
+        else "Przygotowuję kontekst pracy bramki i listę obrazów."
+    )
+    try:
+        splash_token = tab_ann._show_campaign_step2_splash(
+            title=splash_title,
+            body=splash_body,
+            tone="info",
+            progress=None,
+        )
+    except Exception:
+        splash_token = 0
 
     try:
         self.app.campaign_free_mode = False
@@ -296,10 +365,10 @@ def _step_goto_auto_annotation(
             result = tab_ann.open_campaign_step2_entry(
                 iteration_target=iteration_target,
                 entry_strategy=entry_strategy,
-                restore_preview=bool(not force_annotation_tab and not char_has_existing_source),
+                restore_preview=bool(not t02_at_review and not force_annotation_tab and not char_has_existing_source),
                 open_existing_run=open_existing_run,
                 defer_preview_load=defer_preview_load,
-                source_context=dict(preferred_source_context or {}),
+                source_context=dict(source_context or {}),
             )
             entry_elapsed_ms = (perf_counter() - entry_started) * 1000.0
         except Exception as e:
@@ -337,6 +406,16 @@ def _step_goto_auto_annotation(
                 self.app.root.update_idletasks()
             except Exception:
                 pass
+            if splash_token:
+                try:
+                    tab_ann._show_campaign_step2_splash(
+                        title=splash_title,
+                        body=splash_body,
+                        tone="info",
+                        progress=None,
+                    )
+                except Exception:
+                    pass
             switch_elapsed_ms = (perf_counter() - switch_started) * 1000.0
         except Exception as e:
             logger.error(f"Nie udało się przelaczyc na Z2 po przygotowaniu wejscia: {e}")
@@ -366,9 +445,9 @@ def _step_goto_auto_annotation(
                         run_name = ""
                     self.app.update_status(
                         (
-                            f"Otworzono Z2 bezposrednio w korekcie runu {run_name}."
+                            f"Otworzono Z2 bezpośrednio w korekcie runu {run_name}."
                             if run_name
-                            else "Otworzono Z2 bezposrednio w aktywnej korekcie wykrytego runu."
+                            else "Otworzono Z2 bezpośrednio w aktywnej korekcie wykrytego runu."
                         ),
                         "info"
                     )
@@ -441,9 +520,9 @@ def _step_goto_auto_annotation(
                         run_name = ""
                     self.app.update_status(
                         (
-                            f"Otworzono Z2 bezposrednio w korekcie runu {run_name} dla toru znaków."
+                            f"Otworzono Z2 bezpośrednio w korekcie runu {run_name} dla toru znaków."
                             if run_name
-                            else "Otworzono Z2 bezposrednio w korekcie istniejących tablic dla toru znaków."
+                            else "Otworzono Z2 bezpośrednio w korekcie istniejących tablic dla toru znaków."
                         ),
                         "info"
                     )
@@ -466,6 +545,26 @@ def _step_goto_auto_annotation(
                     self.app.update_status(message, "info")
         except Exception:
             pass
+        if bool(result.get("reused_loaded_run")):
+            try:
+                tab_ann._hide_campaign_step2_splash(token=splash_token)
+            except Exception:
+                pass
+            if bool(result.get("repopulate_preview_list")):
+                try:
+                    tab_ann._populate_preview_list_async(
+                        preserve_selection=True,
+                        render_current=False,
+                        batch_size=220,
+                        lightweight_summary=True,
+                    )
+                except Exception:
+                    pass
+            try:
+                _schedule_z2_right_panel_refresh(tab_ann, 120, lightweight=True)
+            except Exception:
+                pass
+            return
         if bool(result.get("deferred_existing_run_restore")):
             try:
                 scheduled = tab_ann._schedule_deferred_campaign_run_restore(
@@ -501,7 +600,7 @@ def _step_goto_auto_annotation(
                 try:
                     tab_ann._schedule_deferred_campaign_source_preview_load(
                         deferred_input_dir,
-                        status_message="Otworzono Z2. Wczytuje liste obrazow tego katalogu...",
+                        status_message="Otworzono Z2. Wczytuję listę obrazów tego katalogu...",
                         splash_token=splash_token,
                     )
                 except Exception as e:
@@ -518,7 +617,7 @@ def _step_goto_auto_annotation(
                     pass
         elif not bool(result.get("deferred_existing_run_restore")):
             try:
-                pass
+                tab_ann._hide_campaign_step2_splash(token=splash_token)
             except Exception:
                 pass
         total_elapsed_ms = (perf_counter() - finish_started) * 1000.0

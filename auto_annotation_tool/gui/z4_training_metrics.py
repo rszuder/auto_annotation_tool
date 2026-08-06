@@ -1050,8 +1050,15 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         model_state = {}
     model_hint = str(model_state.get("detail") or "Model startowy tego treningu.").strip()
     try:
-        _model_path, model_info = self._resolve_selected_training_base_model_info()
-        model_value = self._build_training_model_summary_value(base_display, model_info)
+        base_key = str(getattr(self, "base_model_var", tk.StringVar()).get() or "").strip()
+        custom_model = str(getattr(self, "base_custom_var", tk.StringVar()).get() or "").strip()
+        model_value = _format_training_base_model_summary_value(
+            self,
+            base_display,
+            base_key=base_key,
+            base_model=custom_model or base_key,
+            context=_training_base_model_context(self),
+        )
     except Exception:
         model_value = base_display
     if not str(model_value or "").strip():
@@ -1918,6 +1925,10 @@ def _clear_pinned_step4_result(self):
     except Exception:
         pass
     try:
+        self._load_history()
+    except Exception:
+        pass
+    try:
         self._refresh_training_base_model_selection_ui()
     except Exception:
         pass
@@ -2423,9 +2434,21 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
         status_value = str(getattr(source_run, "status", "") or "").strip().lower()
         run_label = self._format_training_model_run_label(source_run)
         if status_value == TrainingStatus.COMPLETED.value:
+            try:
+                model_id = build_model_display_ref(
+                    model_path,
+                    run=source_run,
+                    target_hint=context.get("target"),
+                    source_run_label=run_label,
+                ).id
+            except Exception:
+                try:
+                    model_id = Path(model_path).stem
+                except Exception:
+                    model_id = "model"
             return {
-                "label": "MODEL PO TRENINGU",
-                "detail": f"{prefix}. Ukończony run jako punkt startu: {run_label}.",
+                "label": "GOTOWY MODEL",
+                "detail": f"{prefix}. Ukończony model {model_id} z runu {run_label}.",
                 "tone": "success",
             }
         return {
@@ -2439,6 +2462,76 @@ def _resolve_selected_training_base_model_training_state(self) -> dict:
         "detail": f"{prefix}. Zewnętrzne wagi startowe; aplikacja nie zna historii treningu tego pliku.",
         "tone": "info",
     }
+
+
+def _format_training_base_model_summary_value(
+    self,
+    model_label: str,
+    *,
+    base_key: str = "",
+    base_model: str = "",
+    context: dict | None = None,
+) -> str:
+    label = str(model_label or "").strip() or "-"
+    target_hint = str((context or {}).get("target") or self._get_selected_training_target() or "").strip().lower()
+    try:
+        if self._is_custom_base_model_key(str(base_key or "")):
+            model_path = self._resolve_selected_training_base_model_path()
+            if model_path is not None:
+                source_run = None
+                try:
+                    source_run = _resolve_step4_fine_tune_parent_run(self)
+                except Exception:
+                    source_run = None
+                if source_run is None:
+                    try:
+                        source_run = self._resolve_training_run_from_model_path(model_path)
+                    except Exception:
+                        source_run = None
+                source_run_label = ""
+                if source_run is not None:
+                    try:
+                        source_run_label = self._format_training_model_run_label(source_run)
+                    except Exception:
+                        source_run_label = ""
+                label = build_model_display_ref(
+                    model_path,
+                    run=source_run,
+                    target_hint=target_hint,
+                    source_run_label=source_run_label,
+                ).id
+    except Exception:
+        pass
+    if label.lower().endswith(".pt"):
+        try:
+            label = Path(label).stem
+        except Exception:
+            label = label[:-3].rstrip(".") or label
+
+    task_label = ""
+    try:
+        _model_path, info = self._resolve_selected_training_base_model_info()
+    except Exception:
+        info = {}
+    if isinstance(info, dict):
+        task = str(info.get("task") or info.get("type") or "").strip().lower()
+        architecture = str(info.get("architecture_label") or "").strip().lower()
+        if task == "pose" or "pose" in architecture:
+            task_label = "Pose"
+        elif task or "detect" in architecture:
+            task_label = "Detect"
+
+    if not task_label:
+        try:
+            is_pose = bool(self._is_pose_base_model(str(base_key or ""), str(base_model or "")))
+        except Exception:
+            is_pose = False
+        if is_pose:
+            task_label = "Pose"
+        else:
+            task_label = "Pose" if target_hint == "plate" else "Detect"
+
+    return f"{label} | {task_label}" if task_label and label != "-" else label
 
 
 def _refresh_training_base_model_identity_ui(self):
@@ -2463,7 +2556,7 @@ def _refresh_training_base_model_identity_ui(self):
 
     try:
         if title_label is not None:
-            title_label.configure(text=f"Model startowy: {context.get('target_label', 'model')}")
+            title_label.configure(text="Model startowy treningu")
     except Exception:
         pass
     try:
@@ -2471,23 +2564,8 @@ def _refresh_training_base_model_identity_ui(self):
             caption_label.configure(
                 text=(
                     f"{context.get('iteration_label', 'IT')} • trenujesz {context.get('target_detail', 'model')}. "
-                    "To tylko punkt startu runu; wynik bramki wybierzesz po zakończeniu treningu."
-                )
-            )
-    except Exception:
-        pass
-
-    try:
-        if title_label is not None:
-            title_label.configure(text="Punkt startowy treningu")
-    except Exception:
-        pass
-    try:
-        if caption_label is not None:
-            caption_label.configure(
-                text=(
-                    "Wybierz model, od którego zacznie się nowy run. "
-                    "To nie jest jeszcze wynik bramki."
+                    "To wagi startowe nowego runu. Ukończone modele projektu znajdziesz obok "
+                    "w Historii treningów; tam wybierzesz wynik bramki albo punkt dotrenowania."
                 )
             )
     except Exception:
@@ -2555,9 +2633,21 @@ def _refresh_training_base_model_identity_ui(self):
                     source_run_label=run_label,
                 ).id
                 status_value = str(getattr(source_run, "status", "") or "").strip().lower()
-                origin_text = f"Run {run_label}" if status_value == TrainingStatus.COMPLETED.value else f"Checkpoint {run_label}"
+                if status_value == TrainingStatus.COMPLETED.value:
+                    origin_text = f"Historia treningów: {run_label}"
+                    state_text = "Gotowy do użycia"
+                else:
+                    origin_text = f"Checkpoint {run_label}"
             elif custom_model:
                 origin_text = "Zewnętrzny plik .pt"
+
+        selected_text = _format_training_base_model_summary_value(
+            self,
+            selected_text,
+            base_key=base_key,
+            base_model=custom_model or base_key,
+            context=context,
+        )
 
         summary_payload = {
             "selected": selected_text,
@@ -2693,20 +2783,6 @@ def _build_selected_training_base_model_identity_lines(self) -> list[str]:
         status_value = str(getattr(nonfinal_run, "status", "") or "").strip().lower()
         lines.append(f"Checkpoint niedokończonego treningu: {run_id or '-'} ({status_value or '-'})")
         lines.append("Do kontynuacji użyj `Wznów trening`; to nie jest finalny model startowy.")
-
-    identity_label = format_yolo_model_identity(info)
-    if identity_label:
-        lines.append(f"Wykryto z pliku .pt: {identity_label}")
-
-    source_architecture = str(info.get("source_architecture_label") or "").strip()
-    source_model_name = str(info.get("source_model_name") or "").strip()
-    source_display = source_architecture or source_model_name
-    is_checkpoint_like = (
-        model_path.name.lower() == "best.pt"
-        or model_path.stem.lower().startswith("epoch")
-    )
-    if is_checkpoint_like and source_display and source_model_name:
-        lines.append(f"Model po wcześniejszym treningu: {source_display}")
 
     return lines
 

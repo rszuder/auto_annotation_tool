@@ -322,9 +322,21 @@ def _focus_preview_plate(
             canvas.refresh_overlay_only(skip_info=True)
         mark_phase("fast_render")
     else:
-        if not canvas.set_view_state(view_state, redraw=True):
+        try:
+            canvas._cancel_zoom_animation()
+            canvas._cancel_deferred_display()
+        except Exception:
+            pass
+        mark_phase("cancel")
+        if not canvas.set_view_state(view_state, redraw=False):
             return False
-        mark_phase("render")
+        mark_phase("set_view")
+        try:
+            canvas._update_display(interaction_fast=True)
+            canvas._schedule_final_quality_display(delay_ms=500)
+        except Exception:
+            canvas.refresh_overlay_only(skip_info=True)
+        mark_phase("fast_render")
 
     self._set_preview_focus_target("plate", int(safe_idx))
     self._refresh_preview_plate_context_overlays()
@@ -341,13 +353,13 @@ def _focus_preview_plate(
     if status_message:
         self._update_preview_edit_status(
             status_message,
-            refresh_toolbar=not super_mode,
-            refresh_debug=False if super_mode else True,
+            refresh_toolbar=False,
+            refresh_debug=False,
         )
     else:
         self._update_preview_edit_status(
-            refresh_toolbar=not super_mode,
-            refresh_debug=False if super_mode else True,
+            refresh_toolbar=False,
+            refresh_debug=False,
         )
     mark_phase("status")
     try:
@@ -1079,6 +1091,10 @@ def _on_preview_cycle_plate_shortcut(self, event=None):
         return None
     if self._preview_shortcut_is_duplicate(event, "preview-cycle-plate"):
         return "break"
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     if self._preview_draw_mode:
         self._update_preview_edit_status(
             "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem A."
@@ -1874,7 +1890,7 @@ def _set_preview_fullscreen(self, active: bool):
             self._campaign_char_effective_source_refresh_pending_after_fullscreen = False
             if pending_counter_refresh:
                 try:
-                    self._refresh_step2_action_states()
+                    self._schedule_preview_approval_followup_refresh(delay_ms=700)
                 except Exception:
                     pass
             if pending_char_refresh:
@@ -2273,11 +2289,25 @@ def on_zoomable_canvas_should_block_pan(self, canvas: ZoomableCanvas, event):
 def on_zoomable_canvas_zoom(self, canvas: ZoomableCanvas, event):
     if canvas is not self.preview_canvas:
         return False
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     self._push_preview_debug_event(
         "zoom",
         f"level={float(getattr(canvas, 'zoom_level', 0.0) or 0.0):.3f} at=({float(getattr(event, 'x', 0.0)):.1f},{float(getattr(event, 'y', 0.0)):.1f})"
     )
     return False
+
+
+def on_zoomable_canvas_final_quality_delay_ms(self, canvas: ZoomableCanvas) -> int:
+    if canvas is not self.preview_canvas:
+        return 0
+    try:
+        return self._preview_user_interaction_quiet_remaining_ms(padding_ms=260)
+    except Exception:
+        return 0
+
 
 def _get_preview_canvas_cursor(self) -> str:
     if isinstance(getattr(self, "_preview_super_correction_drag_state", None), dict):

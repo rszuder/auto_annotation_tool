@@ -379,6 +379,31 @@ def _open_selected_project(self):
     active_before = str(CAMPAIGN.get_active_project_name() or "").strip()
 
     open_started = perf_counter()
+    selected_label = str(selected or "").strip()
+    self._project_switch_in_progress = True
+
+    def _show_open_overlay(message: str, *, progress: float | None = None, tone: str = "info") -> None:
+        try:
+            self._show_project_loading_overlay(
+                title=f"Ładuję projekt {selected_label}" if selected_label else "Ładuję projekt",
+                body=message,
+                tone=tone,
+                progress=progress,
+            )
+            try:
+                self.frame.update()
+            except Exception:
+                try:
+                    self.frame.update_idletasks()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    _show_open_overlay(
+        "Przygotowuję przełączenie projektu i zabezpieczam bieżący kontekst.",
+        progress=None,
+    )
 
     try:
         annotation_tab = self.app.tabs.get("annotation")
@@ -387,13 +412,16 @@ def _open_selected_project(self):
     except Exception as e:
         logger.debug(f"Nie udało się zapisać migawki free mode przed otwarciem projektu: {e}")
 
-    self._project_switch_in_progress = True
     self._cancel_deferred_project_open_tasks()
     if active_before and active_before != str(selected or "").strip():
         try:
             self._release_active_project_resources_before_switch(active_before)
         except Exception as e:
             logger.debug(f"Nie udało się zwolnić zasobów projektu '{active_before}' przed przełączeniem: {e}")
+        _show_open_overlay(
+            "Zwolniono poprzedni projekt. Odtwarzam stan wybranego projektu.",
+            progress=18.0,
+        )
     def _log_project_open_part(label: str, started_at: float, *, threshold_ms: float = 250.0) -> None:
         try:
             elapsed_ms = (perf_counter() - float(started_at)) * 1000.0
@@ -403,6 +431,10 @@ def _open_selected_project(self):
             logger.info(f"[PROJECT PERF] {label}: {elapsed_ms:.0f} ms")
 
     part_started = perf_counter()
+    _show_open_overlay(
+        "Wczytuję stan projektu, iterację i aktywną bramkę.",
+        progress=28.0,
+    )
     CAMPAIGN.set_active_project(selected)
     try:
         self._reset_campaign_graph_runtime_state()
@@ -411,26 +443,41 @@ def _open_selected_project(self):
     _log_project_open_part("set_active_project", part_started)
     self.app.campaign_free_mode = False
     part_started = perf_counter()
+    _show_open_overlay(
+        "Przełączam aplikację w tryb kampanii.",
+        progress=38.0,
+    )
     self.app.set_campaign_mode(True)
     _log_project_open_part("set_campaign_mode", part_started)
     self._project_open_lightweight_refresh = True
     part_started = perf_counter()
+    _show_open_overlay(
+        "Przygotowuję układ grafu i paneli projektu.",
+        progress=46.0,
+    )
     self._ensure_wizard_stage_ui_ready()
     _log_project_open_part("ensure_wizard_stage_ui_ready", part_started)
-    try:
-        self._hide_project_loading_overlay()
-    except Exception:
-        pass
 
     def _finish_project_open_refresh():
         self._project_open_refresh_after_id = None
+        refresh_failed = False
         try:
             if str(CAMPAIGN.get_active_project_name() or "").strip() != str(selected or "").strip():
                 return
             try:
+                _show_open_overlay(
+                    "Buduję graf, zasoby i statusy bramek. Przy większym projekcie może to chwilę potrwać.",
+                    progress=58.0,
+                )
                 self._refresh_dashboard()
             except Exception as e:
+                refresh_failed = True
                 logger.debug(f"Nie udało się odświeżyć dashboardu po otwarciu projektu: {e}")
+                _show_open_overlay(
+                    "Projekt został wybrany, ale nie udało się odświeżyć widoku grafu. Sprawdź log błędu i spróbuj odświeżyć widok.",
+                    progress=100.0,
+                    tone="error",
+                )
             try:
                 self._schedule_project_open_post_refresh(str(selected or "").strip())
             except Exception as e:
@@ -444,6 +491,11 @@ def _open_selected_project(self):
         finally:
             self._project_open_lightweight_refresh = False
             self._project_switch_in_progress = False
+            if refresh_failed:
+                try:
+                    self.frame.after(2600, self._hide_project_loading_overlay)
+                except Exception:
+                    pass
 
     try:
         self._project_open_refresh_after_id = self.frame.after(15, _finish_project_open_refresh)
@@ -475,10 +527,9 @@ def _schedule_project_open_post_refresh(self, expected_project: str) -> None:
         if str(CAMPAIGN.get_active_project_name() or "").strip() != str(expected_project or "").strip():
             return
         try:
-            self._show_wizard_transition_graph()
-            self.frame.after_idle(self._refresh_wizard_transition_graph)
+            self.frame.after_idle(self._sync_right_panel_scrollregion)
         except Exception as e:
-            logger.debug(f"Nie udalo sie wymusic renderu grafu po otwarciu projektu: {e}")
+            logger.debug(f"Nie udalo sie zsynchronizowac panelu po otwarciu projektu: {e}")
         # Po _refresh_dashboard() graf i panele są już zbudowane. Nie wolno tu
         # stabilizować badge'y pełnym przeliczeniem, bo duże projekty (NEON)
         # płaciły wtedy za kolejną rekonstrukcję bramek, zasobów i zakładek.
@@ -491,7 +542,7 @@ def _schedule_project_open_post_refresh(self, expected_project: str) -> None:
             if str(CAMPAIGN.get_active_project_name() or "").strip() != str(expected_project or "").strip():
                 return
             try:
-                self._show_wizard_transition_graph()
+                self._sync_right_panel_scrollregion()
             except Exception as exc:
                 logger.debug(f"Nie udalo sie wykonac poznego renderu grafu kampanii: {exc}")
             try:
@@ -1021,4 +1072,3 @@ def _build_projects_browser(self, parent):
     for lbl in self.project_list_status_labels:
         HELP.bind_help(lbl, "camp_open_project")
     HELP.bind_help(self.project_listbox, "camp_open_project")
-

@@ -1184,6 +1184,43 @@ Wymaganie dla przyszlego importu boxow tablic:
 
 Ocena: to nie jest tylko detal importu. To zasada tozsamosci danych w calym przeplywie `E1 -> Z2 -> Z3/PZ1 -> PZ2`. Po stabilizacji warto wrocic do tego przed pelnoprawnym importem boxow tablic.
 
+### Stabilizacja - wielorejestracyjne obrazy i status `perfect` w PZ2 - 2026-07-25
+
+Nowy problem odkryty na projekcie `pisto`: jeden obraz moze zawierac kilka tablic, a nazwa pliku niesie kilka prawidlowych rejestracji, np.:
+
+- `2TT0978_WI905PW_001.jpg`;
+- przypadek z rejestracjami `365` oraz `WF3799Y`.
+
+Proces `Z3/PZ1` poprawnie wycina z takiego obrazu kilka cropow tablic. Problem pojawia sie pozniej w `Z3/PZ2`, przy ocenie statusu tablicy jako `perfect` albo `do korekty`.
+
+Dotychczasowe zalozenie bylo zbyt mocne:
+
+- skoro mamy kilka rejestracji w nazwie pliku i kilka cropow, to mozna przypisac cropowi konkretny `source_expected_text` po kolejnosci;
+- z tego pojedynczego tekstu mozna wyprowadzic oczekiwana liczbe znakow/boxow dla danego cropa.
+
+To zalozenie rozsypuje sie, gdy kolejnosc cropow nie odpowiada kolejnosci rejestracji w nazwie albo gdy geometria wycinania zmieni kolejnosc. Wtedy np. crop tablicy `365` moze dostac oczekiwana liczbe znakow z `WF3799Y`, a crop `WF3799Y` liczbe z `365`. Program moze wtedy nieslusznie uznac prawidlowy odczyt za blad.
+
+Ustalenie projektowe:
+
+- zrodlem prawdy dla obrazu wielorejestracyjnego jest lista tokenow z nazwy pliku: `source_expected_texts`;
+- pojedynczy `source_expected_text` moze byc tylko podpowiedzia wynikajaca z aktualnej kolejnosci, ale nie moze byc twardym warunkiem `perfect`;
+- crop tablicy jest `perfect`, jezeli jego odczyt pasuje do dowolnego tokenu z `source_expected_texts` i wszystkie boxy sa eksportowalne;
+- oczekiwana liczba boxow dla cropa powinna wynikac z dopasowanego odczytu, np. odczyt `365` oznacza oczekiwanie `3`, a odczyt `WF3799Y` oznacza oczekiwanie `7`;
+- jezeli odczyt nie pozwala jednoznacznie dopasowac cropa do tokenu z nazwy, UI nie powinien udawac, ze zna liczbe znakow. Powinien pokazac stan nierozstrzygniety albo zakres mozliwych dlugosci, np. `3 lub 7`.
+
+Koncept docelowego rozwiazania:
+
+- dodac jeden helper kontraktu odczytu cropa, np. `resolve_expected_text_for_crop(data, chars)`;
+- helper powinien zwracac dopasowany token, zrodlo dopasowania i status pewnosci;
+- walidacja `perfect`, licznik oczekiwanych ramek, overlay statusu i `detector.expected_character_count` powinny korzystac z tego helpera, zamiast z indeksu cropa albo pojedynczego `source_expected_text`;
+- `source_expected_texts` ma byc czytane przed `source_expected_text`;
+- `source_expected_text` zostaje jako informacja pomocnicza, przydatna do diagnostyki i ewentualnego tie-breaku, ale nie jako nadrzedne ground truth;
+- w przypadkach wieloznacznych program ma byc bezpieczny: nie nadawac falszywego `bad/needs_fix` tylko dlatego, ze przypisanie po kolejnosci cropow bylo nietrafione.
+
+Wniosek:
+
+Ground truth w torze znakow nie moze byc modelem `crop -> pojedynczy tekst po indeksie`. Musi byc modelem `source image -> zestaw dopuszczalnych rejestracji`, a przypisanie konkretnego cropa do konkretnej rejestracji powinno wynikac z faktycznego odczytu i geometrii, nie z samej kolejnosci wycinania.
+
 Ujednolicenie progow bramek tablic - 2026-05-21:
 
 - prog `2 oznaczone obrazy` zostal uznany za zbyt liberalny i historyczny;

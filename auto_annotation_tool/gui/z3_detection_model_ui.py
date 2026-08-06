@@ -17,7 +17,7 @@ from .web_slim_scrollbar import blend_hex_colors
 
 def get_detection_active_model_status(host) -> tuple[str, str]:
     method_key = host._get_detection_method_key()
-    uses_yolo = method_key in ("YOLO", "BOTH", "YOLO_OCR")
+    uses_yolo = method_key in ("YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL")
     model_path = str(host._get_effective_yolo_model_path() or "").strip()
     path_locked = bool(getattr(host, "_step3_linear_mode", False))
 
@@ -88,8 +88,26 @@ def get_campaign_char_model_path(host) -> str:
     return ""
 
 
+def get_campaign_detection_yolo_model_path(host) -> str:
+    try:
+        model_path = str(CAMPAIGN.get_step3_detection_yolo_model() or "").strip()
+    except Exception:
+        model_path = ""
+    if model_path:
+        try:
+            path = Path(model_path)
+            if path.exists() and path.is_file():
+                return str(path)
+        except Exception:
+            pass
+    return ""
+
+
 def get_effective_yolo_model_path(host) -> str:
     if getattr(host, "_step3_linear_mode", False):
+        configured_model = host._get_campaign_detection_yolo_model_path()
+        if configured_model:
+            return configured_model
         return host._get_campaign_char_model_path()
 
     raw = (host.yolo_model_path_var.get() or "").strip()
@@ -100,7 +118,7 @@ def get_effective_yolo_model_path(host) -> str:
 
 def sync_yolo_model_binding(host) -> None:
     if getattr(host, "_step3_linear_mode", False):
-        project_model = host._get_campaign_char_model_path()
+        project_model = host._get_campaign_detection_yolo_model_path() or host._get_campaign_char_model_path()
         if project_model:
             host.yolo_model_path_var.set(project_model)
         else:
@@ -803,9 +821,9 @@ def _apply_detection_yolo_model_selection(host, chosen: Path) -> str:
 
     if getattr(host, "_step3_linear_mode", False):
         try:
-            CAMPAIGN.set_global_model("char", str(chosen))
+            CAMPAIGN.set_step3_detection_yolo_model(str(chosen))
         except Exception as exc:
-            logger.debug(f"Nie udało się zapisać modelu znaków w projekcie: {exc}")
+            logger.debug(f"Nie udalo sie zapisac modelu detekcji PZ2 w projekcie: {exc}")
 
     host.yolo_model_path_var.set(str(chosen))
     try:
@@ -1287,7 +1305,7 @@ def update_yolo_visibility(host):
 
     method = self._get_detection_method_key()
     has_yolo_model = self._has_configured_yolo_detection_model()
-    if method in ("YOLO", "BOTH", "YOLO_OCR") and not has_yolo_model:
+    if method in ("YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL") and not has_yolo_model:
         method = "OCR"
         try:
             self.detection_method_var.set(method)
@@ -1296,14 +1314,35 @@ def update_yolo_visibility(host):
 
     is_ocr = method == "OCR"
     is_yolo = method == "YOLO"
+    is_yolo_box = method == "YOLO_BOX"
+    is_yolo_symbol = method == "YOLO_SYMBOL"
     is_hybrid = method == "BOTH"
     is_yolo_ocr = method == "YOLO_OCR"
+    uses_yolo = is_yolo or is_yolo_box or is_yolo_symbol or is_hybrid or is_yolo_ocr
 
     if hasattr(self, "hybrid_rescue_frame"):
-        if is_hybrid:
+        if is_hybrid or is_yolo:
             self.hybrid_rescue_frame.pack(fill=tk.X, pady=(0, 8))
         else:
             self.hybrid_rescue_frame.pack_forget()
+
+    hybrid_backend_widgets = (
+        ("hybrid_box_backend_stage_lbl", {"fill": tk.X, "pady": (0, 4)}),
+        ("hybrid_box_backend_stage_divider", {"fill": tk.X, "pady": (0, 8)}),
+        ("hybrid_yolo_box_backend_row", {"fill": tk.X, "pady": (0, 4)}),
+        ("hybrid_box_backend_info_lbl", {"anchor": tk.W, "fill": tk.X, "pady": (0, 6)}),
+    )
+    for attr_name, pack_options in hybrid_backend_widgets:
+        widget = getattr(self, attr_name, None)
+        if widget is None:
+            continue
+        try:
+            if is_hybrid:
+                widget.pack(**pack_options)
+            else:
+                widget.pack_forget()
+        except Exception:
+            pass
 
     if not str(self.yolo_panel.winfo_manager()):
         self.yolo_panel.pack(fill=tk.X, pady=(5, 0))
@@ -1323,10 +1362,9 @@ def update_yolo_visibility(host):
         if widget is not None:
             self._set_widget_state(widget, "normal")
 
-    for attr_name in ("hybrid_rescue_scale",):
-        widget = getattr(self, attr_name, None)
-        if widget is not None:
-            self._set_widget_state(widget, "normal" if is_hybrid else "disabled")
+    if hasattr(self, "hybrid_rescue_row_info"):
+        self.hybrid_rescue_row_info["enabled"] = bool(is_hybrid or is_yolo)
+        self._refresh_selection_row(self.hybrid_rescue_row_info)
 
     if hasattr(self, "hybrid_yolo_box_backend_row_info"):
         self.hybrid_yolo_box_backend_row_info["enabled"] = bool(is_hybrid)
@@ -1348,7 +1386,7 @@ def update_yolo_visibility(host):
         pass
 
     if hasattr(self, "btn_ocr_lab"):
-        self._set_widget_state(self.btn_ocr_lab, "disabled" if is_yolo else "normal")
+        self._set_widget_state(self.btn_ocr_lab, "disabled" if uses_yolo and not is_hybrid and not is_yolo_ocr else "normal")
 
     if hasattr(self, "btn_rank_presets"):
         self._set_widget_state(self.btn_rank_presets, "normal" if is_ocr else "disabled")
@@ -1356,7 +1394,7 @@ def update_yolo_visibility(host):
     if hasattr(self, "winner_name_lbl") and hasattr(self, "winner_acc_lbl"):
         if is_ocr:
             self._update_winner_label()
-        elif is_yolo:
+        elif is_yolo or is_yolo_box or is_yolo_symbol:
             self._set_winner_name("Brak rankingu OCR", "neutral")
             self._set_winner_acc("Tryb YOLO nie bierze udziału w turnieju OCR", "muted")
         elif is_yolo_ocr:
@@ -1372,6 +1410,16 @@ def update_yolo_visibility(host):
                 self._compose_detection_method_status(
                     "wskaż wytrenowany model znaków .pt i uruchom detekcję"
                 ),
+                "muted",
+            )
+        elif is_yolo_box:
+            self._set_test_status(
+                self._compose_detection_method_status("YB: gotowe do wykrywania samych ramek"),
+                "muted",
+            )
+        elif is_yolo_symbol:
+            self._set_test_status(
+                self._compose_detection_method_status("YS: gotowe do wpisywania znakow w istniejace ramki"),
                 "muted",
             )
         elif is_yolo_ocr:
@@ -1454,9 +1502,9 @@ def refresh_yolo_model_picker_state(host):
         except Exception:
             pass
         try:
-            browse_btn.grid()
+            browse_btn.grid_remove()
         except Exception:
             pass
-        self._set_widget_state(browse_btn, "normal")
+        self._set_widget_state(browse_btn, "disabled")
 
 

@@ -92,18 +92,38 @@ def _draw_annotations(image, label_rows: list[list[float]], class_names: dict[in
     draw = ImageDraw.Draw(image)
     width, height = image.size
 
+    def clamp(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, float(value)))
+
     for row in label_rows:
         class_id = int(row[0])
         cx, cy, bw, bh = row[1:5]
-        x1 = (cx - bw / 2.0) * width
-        y1 = (cy - bh / 2.0) * height
-        x2 = (cx + bw / 2.0) * width
-        y2 = (cy + bh / 2.0) * height
+        x1 = clamp((cx - bw / 2.0) * width, 0.0, float(max(0, width - 1)))
+        y1 = clamp((cy - bh / 2.0) * height, 0.0, float(max(0, height - 1)))
+        x2 = clamp((cx + bw / 2.0) * width, 0.0, float(max(0, width - 1)))
+        y2 = clamp((cy + bh / 2.0) * height, 0.0, float(max(0, height - 1)))
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        if x2 <= x1 or y2 <= y1:
+            continue
         draw.rectangle((x1, y1, x2, y2), outline="#2ecc71", width=max(2, width // 320))
 
         label = class_names.get(class_id, str(class_id))
-        draw.rectangle((x1, max(0, y1 - 18), x1 + max(42, len(label) * 7 + 10), y1), fill="#102418")
-        draw.text((x1 + 4, max(0, y1 - 16)), label, fill="#c8ffd7")
+        label_w = max(42, len(label) * 7 + 10)
+        label_h = 18
+        label_x1 = clamp(x1, 0.0, float(max(0, width - 1)))
+        label_x2 = clamp(label_x1 + label_w, 1.0, float(max(1, width)))
+        if y1 >= label_h:
+            label_y1 = y1 - label_h
+            label_y2 = y1
+        else:
+            label_y1 = min(float(max(0, height - label_h)), y2)
+            label_y2 = min(float(height), label_y1 + label_h)
+        if label_y2 > label_y1 and label_x2 > label_x1:
+            draw.rectangle((label_x1, label_y1, label_x2, label_y2), fill="#102418")
+            draw.text((label_x1 + 4, label_y1 + 2), label, fill="#c8ffd7")
 
         keypoints = row[5:]
         points: list[tuple[float, float]] = []
@@ -152,7 +172,7 @@ def open_yolo_dataset_preview(host, dataset_path: str | Path | None):
         pass
 
     class_names = _load_class_names(dataset_root)
-    state = {"index": 0, "photo": None}
+    state = {"index": 0, "photo": None, "syncing_list": False}
 
     outer = ttk.Frame(window, padding=10)
     outer.pack(fill=tk.BOTH, expand=True)
@@ -223,10 +243,16 @@ def open_yolo_dataset_preview(host, dataset_path: str | Path | None):
         )
         try:
             if item_list.curselection() != (idx,):
-                item_list.selection_clear(0, tk.END)
-                item_list.selection_set(idx)
-                item_list.see(idx)
+                state["syncing_list"] = True
+                try:
+                    item_list.selection_clear(0, tk.END)
+                    item_list.selection_set(idx)
+                    item_list.activate(idx)
+                    item_list.see(idx)
+                finally:
+                    state["syncing_list"] = False
         except Exception:
+            state["syncing_list"] = False
             pass
 
     def select_index(idx: int):
@@ -234,9 +260,13 @@ def open_yolo_dataset_preview(host, dataset_path: str | Path | None):
         render_current()
 
     def on_list_select(_event=None):
+        if bool(state.get("syncing_list")):
+            return "break"
         selection = item_list.curselection()
         if selection:
             select_index(selection[0])
+            return "break"
+        return None
 
     def on_key(event=None):
         key = str(getattr(event, "keysym", "") or "").lower()
@@ -257,6 +287,30 @@ def open_yolo_dataset_preview(host, dataset_path: str | Path | None):
             return "break"
         return None
 
+    def bind_navigation(widget, *, replace: bool = False):
+        sequences = (
+            "<q>",
+            "<Q>",
+            "<e>",
+            "<E>",
+            "<Left>",
+            "<Right>",
+            "<Up>",
+            "<Down>",
+            "<Prior>",
+            "<Next>",
+            "<space>",
+            "<Home>",
+            "<End>",
+            "<Escape>",
+        )
+        add = None if replace else "+"
+        for sequence in sequences:
+            try:
+                widget.bind(sequence, on_key, add=add)
+            except Exception:
+                pass
+
     controls = ttk.Frame(outer)
     controls.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(10, 0))
     ttk.Label(
@@ -268,11 +322,11 @@ def open_yolo_dataset_preview(host, dataset_path: str | Path | None):
     ttk.Button(controls, text="Zamknij", command=window.destroy).pack(side=tk.RIGHT)
 
     item_list.bind("<<ListboxSelect>>", on_list_select)
-    for widget in (window, canvas, item_list):
-        try:
-            widget.bind("<KeyPress>", on_key, add="+")
-        except Exception:
-            pass
+    # The listbox has native Up/Down class bindings. Replace them on the
+    # widget so one source of truth drives both selection and preview.
+    bind_navigation(item_list, replace=True)
+    bind_navigation(window)
+    bind_navigation(canvas)
     canvas.bind("<Configure>", lambda _event: render_current(), add="+")
     item_list.selection_set(0)
     render_current()

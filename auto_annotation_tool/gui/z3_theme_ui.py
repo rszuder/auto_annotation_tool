@@ -874,6 +874,49 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
             pass
 
     try:
+        pipeline_shell_border = blend_hex_colors(
+            palette.get("success", "#2ecc71"),
+            palette.get("panel", "#252526"),
+            0.74,
+        )
+        pipeline_shell_fill = blend_hex_colors(
+            palette.get("success", "#2ecc71"),
+            palette.get("panel", "#252526"),
+            0.90,
+        )
+        shell = getattr(self, "detect_pipeline_summary_shell", None)
+        if shell is not None:
+            shell.configure(
+                bg=pipeline_shell_border,
+                highlightbackground=pipeline_shell_border,
+                highlightcolor=pipeline_shell_border,
+            )
+        for frame_name in (
+            "detect_pipeline_summary_inner",
+            "yolo_model_row",
+        ):
+            frame = getattr(self, frame_name, None)
+            if frame is not None:
+                frame.configure(bg=pipeline_shell_fill)
+        title = getattr(self, "detect_pipeline_summary_title_lbl", None)
+        if title is not None:
+            title.configure(
+                bg=pipeline_shell_fill,
+                fg=palette.get("fg", "#f3f3f3"),
+            )
+        run_label = getattr(self, "detect_run_model_info_lbl", None)
+        if run_label is not None:
+            run_label._inline_status_bg = pipeline_shell_fill
+            self._set_inline_status_label_state(
+                run_label,
+                text=run_label.cget("text"),
+                tone=getattr(run_label, "_inline_status_tone", "success"),
+                emphasis=bool(getattr(run_label, "_inline_status_emphasis", False)),
+            )
+    except Exception:
+        pass
+
+    try:
         export_shell_fill = blend_hex_colors(
             palette.get("surface_info", palette.get("panel", "#252526")),
             palette.get("panel", "#252526"),
@@ -905,7 +948,7 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
 
     inline_label_defaults = {
         "ext_status": ("neutral", True),
-        "detect_run_model_info_lbl": ("muted", False),
+        "detect_run_model_info_lbl": ("success", False),
         "test_status_lbl": ("neutral", False),
         "test_progress_count_lbl": ("muted", True),
         "winner_name_lbl": ("neutral", True),

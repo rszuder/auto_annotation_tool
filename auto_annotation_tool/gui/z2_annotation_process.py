@@ -83,6 +83,7 @@ from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
+    campaign_gate_id_for_edge,
     campaign_visible_gate_id,
     get_campaign_return_to_graph_copy as dispatch_get_campaign_return_to_graph_copy,
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
@@ -158,7 +159,7 @@ from .z2_export_workflow import (
     _refresh_plate_dataset_export_sources,
 )
 
-CHAR_WORK_GATE_DISPLAY_ID = campaign_visible_gate_id("T06") or "T05"
+CHAR_WORK_GATE_DISPLAY_ID = "T05"
 NAV_BUTTON_WIDTH = 18
 YOLO = None
 
@@ -193,7 +194,7 @@ def _ensure_campaign_graph_context_for_z2(self) -> dict:
         context = {
             "source": "campaign_graph_inferred_refresh",
             "graph_edge_key": "e3_to_e4",
-            "graph_gate_id": "T06",
+            "graph_gate_id": "T05",
             "graph_gate_label": "Dataset znaków",
             "graph_transition_title": "Bramka datasetu znaków do treningu",
             "graph_transition_source": "E3",
@@ -204,7 +205,7 @@ def _ensure_campaign_graph_context_for_z2(self) -> dict:
         context = {
             "source": "campaign_graph_inferred_refresh",
             "graph_edge_key": "e2_to_e3",
-            "graph_gate_id": "T04",
+            "graph_gate_id": "T03",
             "graph_gate_label": "Przekazanie tablic do pracy nad znakami",
             "graph_transition_title": "Przekazanie tablic do pracy nad znakami",
             "graph_transition_source": "E2",
@@ -215,7 +216,7 @@ def _ensure_campaign_graph_context_for_z2(self) -> dict:
         context = {
             "source": "campaign_graph_inferred_refresh",
             "graph_edge_key": "e2_to_e4",
-            "graph_gate_id": "T05",
+            "graph_gate_id": "T04",
             "graph_gate_label": "Trening modelu tablic",
             "graph_transition_title": "Trenuj model tablic",
             "graph_transition_source": "E2",
@@ -771,15 +772,24 @@ def _force_render_campaign_graph_t06_right_panel(
 
 def _force_render_campaign_graph_right_panel(self) -> bool:
     graph_context = _ensure_campaign_graph_context_for_z2(self)
-    gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
     if not gate_id:
         return False
+    repair_origin_edge_key = str(
+        graph_context.get("repair_origin_edge_key")
+        or graph_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     repair_origin_gate_id = str(
         graph_context.get("repair_origin_gate_id")
         or graph_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
-    repair_from_t07 = bool(gate_id == "T05" and repair_origin_gate_id == "T07")
+    repair_origin_gate_id = campaign_gate_id_for_edge(repair_origin_edge_key, repair_origin_gate_id)
+    repair_from_t07 = bool(gate_id == "T04" and repair_origin_gate_id == "T06")
 
     current_run_dir = str(getattr(self, "current_annotation_run_dir", "") or "").strip()
     render_signature = (
@@ -807,7 +817,7 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
     ):
         return True
 
-    if gate_id == "T06":
+    if gate_id == "T05":
         return _force_render_campaign_graph_t06_right_panel(
             self,
             graph_context=graph_context,
@@ -860,7 +870,7 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
     if required_plates <= 0:
         required_plates = (
             int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10) or 10)
-            if gate_id in {"T04", "T06"}
+            if gate_id in {"T02", "T03", "T05"}
             else int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
         )
     try:
@@ -871,10 +881,31 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         effective_approved_images = int(gate_state.get("approved_images", approved_images) or 0)
     except Exception:
         effective_approved_images = int(approved_images or 0)
+    t02_project_images = 0
+    t02_project_plates = 0
+    t02_session_images = int(approved_images or 0)
+    t02_session_plates = int(approved_plates or 0)
+    if gate_id == "T02":
+        try:
+            project_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+            t02_project_images = int(project_stats.get("images", 0) or 0)
+            t02_project_plates = int(project_stats.get("plates", 0) or 0)
+        except Exception:
+            t02_project_images = 0
+            t02_project_plates = 0
+        effective_approved_images = max(0, int(t02_project_images or 0) + int(t02_session_images or 0))
+        effective_approved_plates = max(0, int(t02_project_plates or 0) + int(t02_session_plates or 0))
+        gate_state = {
+            **dict(gate_state or {}),
+            "approved_images": int(effective_approved_images or 0),
+            "approved_plates": int(effective_approved_plates or 0),
+        }
     missing_plates = max(0, int(required_plates) - int(effective_approved_plates))
     ready = bool(gate_state.get("ready", missing_plates <= 0 and xml_exists))
+    if gate_id == "T02":
+        ready = bool(missing_plates <= 0)
     tone = "success" if ready else "warning"
-    status_text = "OTWARTA" if ready else "W TRAKCIE"
+    status_text = "OTWARTA" if ready else ("DO KONTROLI" if gate_id == "T02" else "W TRAKCIE")
     missing_focus_row_label = str(gate_state.get("missing_focus_row_label") or "").strip()
     missing_focus_text = str(gate_state.get("missing_focus_text") or "").strip()
     missing_focus_tone = str(gate_state.get("missing_focus_tone") or "").strip().lower()
@@ -890,10 +921,10 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
     ).strip()
     display_gate_id = campaign_visible_gate_id(gate_id) or gate_id
     if repair_from_t07:
-        display_gate_title = "Naprawa T07"
+        display_gate_title = "Naprawa T06"
         display_row_label = "Status naprawy"
         intro = (
-            "Pracujesz w Z2 w trybie naprawczym bramki T07. "
+            "Pracujesz w Z2 w trybie naprawczym bramki T06. "
             "Dodajesz albo poprawiasz ramki tablic; po powrocie decyzję podejmujesz na T07."
         )
     else:
@@ -903,10 +934,18 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
             f"Pracujesz w Z2 dla bramki {display_gate_id}: {gate_label}. "
             "Prawy panel pokazuje stan aktywnego pliku anotacji i pozycji oznaczonych jako [OK]."
         )
-    if gate_id == "T06":
+        if gate_id == "T02":
+            intro = (
+                "Kontrolujesz import AT dla bramki T02. Panel pokazuje, ile materiału jest już w puli projektu "
+                "oraz ile nowych pozycji [OK] dojdzie po zapisaniu tej kontroli."
+            )
+    if repair_from_t07:
+        intro = intro.replace("T07", "T06")
+
+    if gate_id == "T05":
         intro += " Ta ścieżka pozwala dodać lub poprawić tablice przed dalszą pracą nad znakami."
 
-    if gate_id == "T06":
+    if gate_id == "T05":
         rows = _build_t06_right_panel_rows_from_campaign_state(
             self,
             required_plates=required_plates,
@@ -920,6 +959,47 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
                 session_delta_plates=0,
                 required_plates=required_plates,
             )
+    elif gate_id == "T02":
+        if ready and t02_session_plates <= 0 and t02_project_plates >= required_plates:
+            t02_focus_label = "Spełnienie T02"
+            t02_focus_text = "Spełnione przez wcześniejszą pulę projektu"
+            t02_focus_tone = "success"
+        elif ready:
+            t02_focus_label = "Po zapisie kontroli"
+            t02_focus_text = "T02 będzie gotowa do zatwierdzenia"
+            t02_focus_tone = "success"
+        else:
+            t02_focus_label = "Do wejścia do E3 brakuje"
+            t02_focus_text = f"{missing_plates} tablic zatwierdzonych [OK]"
+            t02_focus_tone = "warning"
+        rows = [
+            (display_row_label, status_text, tone),
+            (
+                "AT do kontroli",
+                f"{total_images} obrazów / {total_plates} tablic",
+                "success" if total_plates > 0 else "warning",
+            ),
+            (
+                "Pula projektu [OK]",
+                f"{t02_project_images} obrazów / {t02_project_plates} tablic",
+                "success" if t02_project_plates > 0 else "muted",
+            ),
+            (
+                "Nowe [OK] w kontroli",
+                f"+{t02_session_images} obrazów / +{t02_session_plates} tablic",
+                "success" if t02_session_plates > 0 else "muted",
+            ),
+            (
+                "Razem po zapisie",
+                f"{effective_approved_images} obrazów / {effective_approved_plates} tablic",
+                "success" if effective_approved_plates > 0 else "warning",
+            ),
+            (
+                t02_focus_label,
+                t02_focus_text,
+                t02_focus_tone,
+            ),
+        ]
     else:
         rows = [
             (display_row_label, status_text, tone),
@@ -1134,10 +1214,13 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
     if not self._is_free_mode_session_context():
         try:
             graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
-            graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+            graph_gate_id = campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
         except Exception:
             graph_gate_id = ""
-        if graph_gate_id in {"T04", "T05", "T06"}:
+        if not lightweight and graph_gate_id in {"T02", "T03", "T04", "T05"}:
             try:
                 if _force_render_campaign_graph_right_panel(self):
                     return
@@ -1267,7 +1350,10 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         graph_context_for_sync = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_context_for_sync = {}
-    graph_gate_for_sync = str(graph_context_for_sync.get("graph_gate_id") or "").strip().upper()
+    graph_gate_for_sync = campaign_gate_id_for_edge(
+        graph_context_for_sync.get("graph_edge_key"),
+        graph_context_for_sync.get("graph_gate_id"),
+    )
 
     approval_xml_exists = bool(approval_run_dir and (approval_run_dir / "annotations.xml").exists())
     approval_images_with_plates, approval_total_plates = self._get_run_plate_annotation_counts(approval_run_dir)
@@ -1356,7 +1442,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
     project_approved_base_plates = int(project_approved_plates or 0)
     if (
         approval_iteration_target == "char"
-        and (current_step >= 3 or repair_mode or graph_gate_for_sync == "T06")
+        and (current_step >= 3 or repair_mode or graph_gate_for_sync == "T05")
         and int(char_effective_plates or 0) > int(project_approved_plates or 0)
         and int(char_effective_images or 0) >= int(project_approved_images or 0)
         and hidden_t06_approved
@@ -1472,18 +1558,30 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         graph_entry_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:
         graph_entry_context = {}
-    graph_gate_id = str(graph_entry_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_entry_context.get("graph_edge_key"),
+        graph_entry_context.get("graph_gate_id"),
+    )
     graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
     graph_display_gate_id = graph_display_gate_id or graph_gate_id
+    graph_repair_origin_edge_key = str(
+        graph_entry_context.get("repair_origin_edge_key")
+        or graph_entry_context.get("source_graph_edge_key")
+        or ""
+    ).strip()
     graph_repair_origin_gate_id = str(
         graph_entry_context.get("repair_origin_gate_id")
         or graph_entry_context.get("source_graph_gate_id")
         or ""
     ).strip().upper()
-    graph_gate_is_t04 = bool(graph_gate_id == "T04")
-    graph_gate_is_t05 = bool(graph_gate_id == "T05")
-    graph_gate_is_t06 = bool(graph_gate_id == "T06")
-    graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T07")
+    graph_repair_origin_gate_id = campaign_gate_id_for_edge(
+        graph_repair_origin_edge_key,
+        graph_repair_origin_gate_id,
+    )
+    graph_gate_is_t04 = bool(graph_gate_id == "T03")
+    graph_gate_is_t05 = bool(graph_gate_id == "T04")
+    graph_gate_is_t06 = bool(graph_gate_id == "T05")
+    graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T06")
     graph_gate_known = bool(graph_gate_id)
     if graph_gate_known and not lightweight:
         try:
@@ -1948,6 +2046,43 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
     elif campaign_context and str(approve_hint_text or "").strip():
         approve_hint_title_text = "Status bieżącego etapu"
 
+    if graph_gate_id == "T03":
+        approve_context_text = approve_context_text.replace("T04", "T03")
+        approve_hint_text = approve_hint_text.replace("T04", "T03")
+        approve_hint_title_text = approve_hint_title_text.replace("T04", "T03")
+        approve_breakdown_title_text = approve_breakdown_title_text.replace("T04", "T03")
+        approve_hint_table_rows = [
+            (str(label).replace("T04", "T03"), str(value).replace("T04", "T03"), tone)
+            for label, value, tone in approve_hint_table_rows
+        ]
+    if graph_gate_id == "T04":
+        approve_context_text = approve_context_text.replace("T05", "T04")
+        approve_hint_text = approve_hint_text.replace("T05", "T04")
+        approve_hint_title_text = approve_hint_title_text.replace("T05", "T04")
+        approve_breakdown_title_text = approve_breakdown_title_text.replace("T05", "T04")
+        approve_hint_table_rows = [
+            (str(label).replace("T05", "T04"), str(value).replace("T05", "T04"), tone)
+            for label, value, tone in approve_hint_table_rows
+        ]
+    if graph_gate_id == "T05":
+        approve_context_text = approve_context_text.replace("T06", "T05")
+        approve_hint_text = approve_hint_text.replace("T06", "T05")
+        approve_hint_title_text = approve_hint_title_text.replace("T06", "T05")
+        approve_breakdown_title_text = approve_breakdown_title_text.replace("T06", "T05")
+        approve_hint_table_rows = [
+            (str(label).replace("T06", "T05"), str(value).replace("T06", "T05"), tone)
+            for label, value, tone in approve_hint_table_rows
+        ]
+    if graph_gate_is_t05_repair_from_t07:
+        approve_context_text = approve_context_text.replace("T07", "T06")
+        approve_hint_text = approve_hint_text.replace("T07", "T06")
+        approve_hint_title_text = approve_hint_title_text.replace("T07", "T06")
+        approve_breakdown_title_text = approve_breakdown_title_text.replace("T07", "T06")
+        approve_hint_table_rows = [
+            (str(label).replace("T07", "T06"), str(value).replace("T07", "T06"), tone)
+            for label, value, tone in approve_hint_table_rows
+        ]
+
     if graph_gate_id and graph_display_gate_id and graph_display_gate_id != graph_gate_id:
         approve_context_text = approve_context_text.replace(graph_gate_id, graph_display_gate_id)
         approve_hint_text = approve_hint_text.replace(graph_gate_id, graph_display_gate_id)
@@ -2034,7 +2169,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                     pass
             fallback_required = (
                 int(min_char_approval_plates)
-                if approval_iteration_target == "char" or graph_gate_id in {"T04", "T06"}
+                if approval_iteration_target == "char" or graph_gate_id in {"T03", "T05"}
                 else int(min_plate_approval_plates)
             )
             fallback_missing = max(0, int(fallback_required) - int(fallback_approved_plates))
@@ -2073,7 +2208,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 pass
         if gate_state or graph_gate_known:
             fallback_gate_id = str(gate_state.get("gate_id") or graph_gate_id or "").strip().upper()
-            fallback_display_gate_id = campaign_visible_gate_id(fallback_gate_id) if fallback_gate_id == "T05" else fallback_gate_id
+            fallback_display_gate_id = campaign_visible_gate_id(fallback_gate_id)
             if fallback_gate_id and fallback_display_gate_id and fallback_display_gate_id != fallback_gate_id:
                 for key in ("title", "message", "detail", "instruction"):
                     try:
@@ -2095,7 +2230,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             approve_hint_title_text = fallback_title
             approve_hint_tone = fallback_tone or "info"
             approve_hint_text = ""
-            if fallback_gate_id == "T06":
+            if fallback_gate_id == "T05":
                 fallback_approved_images = int(gate_state.get("approved_images", 0) or 0)
                 fallback_approved_plates = int(gate_state.get("approved_plates", 0) or 0)
                 fallback_required_plates = int(gate_state.get("required_plates", 0) or 0)
@@ -2928,6 +3063,224 @@ def _start_annotation(self):
         logger.error(f"Nie można wystartować: {e}")
         messagebox.showerror("Błąd Startu", str(e))
 
+def _show_t02_approval_project_pool_summary(
+    self,
+    *,
+    gate_label: str,
+    target_dir: Path,
+    iteration_num: int,
+    previous_images: int,
+    previous_plates: int,
+    run_ok_images: int,
+    run_ok_plates: int,
+    added_images: int,
+    added_plates: int,
+    total_images: int,
+    total_plates: int,
+) -> None:
+    """Show T02 as previous project pool + current control contribution."""
+    palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+    parent = getattr(self, "frame", None)
+    panel_bg = palette.get("panel", "#252526")
+    card_bg = palette.get("card", "#2d2d30")
+    border = palette.get("border", "#3f3f46")
+    fg = palette.get("fg", "#f3f4f6")
+    muted = palette.get("muted", "#a1a1aa")
+    success = palette.get("success", "#27ae60")
+    warning = palette.get("warning", "#f39c12")
+    accent = palette.get("accent", "#0e639c")
+    try:
+        added_images = max(0, int(added_images or 0))
+        added_plates = max(0, int(added_plates or 0))
+        total_images = max(0, int(total_images or 0))
+        total_plates = max(0, int(total_plates or 0))
+        previous_images = max(0, int(previous_images or 0))
+        previous_plates = max(0, int(previous_plates or 0))
+        run_ok_images = max(0, int(run_ok_images or 0))
+        run_ok_plates = max(0, int(run_ok_plates or 0))
+        iteration_num = max(1, int(iteration_num or 1))
+    except Exception:
+        pass
+    skipped_images = max(0, int(run_ok_images or 0) - int(added_images or 0))
+    skipped_plates = max(0, int(run_ok_plates or 0) - int(added_plates or 0))
+
+    dialog = tk.Toplevel(parent)
+    try:
+        self.app.style_dialog_window(
+            dialog,
+            title=f"{gate_label} zatwierdzona",
+            geometry="760x500",
+            parent=parent,
+        )
+    except Exception:
+        dialog.title(f"{gate_label} zatwierdzona")
+        dialog.configure(bg=panel_bg)
+    dialog.resizable(False, False)
+
+    try:
+        body = self.app._build_themed_dialog_surface(dialog, tone="success")
+    except Exception:
+        body = tk.Frame(dialog, bg=panel_bg, padx=18, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+
+    shell = tk.Frame(body, bg=panel_bg)
+    shell.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+
+    tk.Label(
+        shell,
+        text=f"{gate_label}: kontrola AT zapisana do puli projektu",
+        bg=panel_bg,
+        fg=fg,
+        font=("Segoe UI", 13, "bold"),
+        anchor="w",
+    ).pack(fill=tk.X, pady=(0, 6))
+    tk.Label(
+        shell,
+        text=(
+            "Do projektu trafiaja tylko obrazy zatwierdzone w kontroli Z2 jako [OK]. "
+            "Duplikaty nie zwiekszaja puli."
+        ),
+        bg=panel_bg,
+        fg=muted,
+        font=("Segoe UI", 9),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=700,
+    ).pack(fill=tk.X, pady=(0, 14))
+
+    table = tk.Frame(shell, bg=border, bd=0, highlightthickness=1, highlightbackground=border)
+    table.pack(fill=tk.X, pady=(0, 12))
+    columns = [
+        ("Zakres", 24),
+        ("Iteracja", 11),
+        ("Obrazy [OK]", 13),
+        ("Tablice", 10),
+        ("Znaczenie", 25),
+    ]
+    for col, (_label, _width) in enumerate(columns):
+        table.columnconfigure(col, weight=1 if col in {0, 4} else 0)
+
+    def _cell(row: int, col: int, text: str, *, bg: str, color: str = fg, bold: bool = False, width: int = 12):
+        label = tk.Label(
+            table,
+            text=str(text),
+            bg=bg,
+            fg=color,
+            font=("Segoe UI", 9, "bold" if bold else "normal"),
+            padx=10,
+            pady=8,
+            anchor="w" if col in {0, 4} else "center",
+            width=width,
+        )
+        label.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
+        return label
+
+    header_bg = blend_hex_colors(accent, panel_bg, 0.30)
+    row_bg = card_bg
+    alt_bg = blend_hex_colors(card_bg, panel_bg, 0.20)
+    for col, (label, width) in enumerate(columns):
+        _cell(0, col, label, bg=header_bg, color=fg, bold=True, width=width)
+
+    rows = [
+        (
+            "W projekcie przed T02",
+            f"do it{iteration_num - 1}" if iteration_num > 1 else "start",
+            str(previous_images),
+            str(previous_plates),
+            "wczesniejsza pula projektu",
+            muted,
+        ),
+        (
+            "Dodane po kontroli T02",
+            f"it{iteration_num}",
+            f"+{added_images}",
+            f"+{added_plates}",
+            "nowy wklad po kontroli",
+            success if added_images > 0 or added_plates > 0 else warning,
+        ),
+        (
+            "Razem po zatwierdzeniu",
+            "projekt",
+            str(total_images),
+            str(total_plates),
+            "aktualna pula do dalszej pracy",
+            success,
+        ),
+    ]
+    for idx, row in enumerate(rows, start=1):
+        bg = row_bg if idx % 2 else alt_bg
+        tone = row[5]
+        for col, value in enumerate(row[:5]):
+            color = tone if col in {2, 3} else fg
+            _cell(idx, col, value, bg=bg, color=color, bold=col in {0, 2, 3}, width=columns[col][1])
+
+    note_text = (
+        f"W kontroli Z2 zaznaczono {run_ok_images} obrazow [OK] / {run_ok_plates} tablic. "
+        f"Do puli projektu dopisano {added_images} nowych obrazow / {added_plates} tablic."
+    )
+    if skipped_images > 0 or skipped_plates > 0:
+        note_text += (
+            f" Odsiano lub zaktualizowano istniejace pozycje: {skipped_images} obrazow / {skipped_plates} tablic."
+        )
+    tk.Label(
+        shell,
+        text=note_text,
+        bg=blend_hex_colors(card_bg, panel_bg, 0.12),
+        fg=fg,
+        font=("Segoe UI", 9),
+        padx=12,
+        pady=10,
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=700,
+        highlightthickness=1,
+        highlightbackground=border,
+    ).pack(fill=tk.X, pady=(0, 10))
+
+    tk.Label(
+        shell,
+        text=f"Run zrodlowy: {target_dir}",
+        bg=panel_bg,
+        fg=muted,
+        font=("Segoe UI", 8),
+        anchor="w",
+        wraplength=700,
+        justify=tk.LEFT,
+    ).pack(fill=tk.X, pady=(0, 12))
+
+    footer = tk.Frame(shell, bg=panel_bg)
+    footer.pack(fill=tk.X)
+    tk.Button(
+        footer,
+        text="Zamknij podsumowanie",
+        command=dialog.destroy,
+        bg=blend_hex_colors(success, panel_bg, 0.20),
+        fg=fg,
+        activebackground=blend_hex_colors(success, panel_bg, 0.35),
+        activeforeground=fg,
+        relief=tk.FLAT,
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    ).pack(side=tk.RIGHT)
+
+    try:
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        center = getattr(self.app, "_center_dialog_window", None)
+        if callable(center):
+            center(dialog, parent=parent, width=760, height=500)
+        dialog.lift()
+        dialog.focus_force()
+        dialog.wait_window()
+    except Exception:
+        try:
+            dialog.wait_window()
+        except Exception:
+            pass
+
+
 def _approve_annotation_stage(self, *, _run_deferred: bool = False):
     """
     Domyka etap E2 i przenosi staging runu anotacji do katalogu docelowego projektu.
@@ -3031,11 +3384,14 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
             graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
         except Exception:
             graph_context = {}
-        graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
         graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id
         graph_display_gate_id = graph_display_gate_id or graph_gate_id
-        graph_close_gate_display_id = campaign_visible_gate_id("T07") or "T07"
-        graph_gate_is_t05 = bool(graph_gate_id == "T05")
+        graph_close_gate_display_id = "T06"
+        graph_gate_is_t05 = bool(graph_gate_id == "T04")
 
         if staging_run is None:
             try:
@@ -3056,9 +3412,37 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
         staging_run = Path(staging_run)
         if not staging_run.exists():
             return messagebox.showerror("Brak folderu", f"Folder stagingu nie istnieje:\n{staging_run}")
+        try:
+            current_run_dir = self._resolve_safe_annotation_run_dir(
+                getattr(self, "current_annotation_run_dir", None),
+                require_xml=True,
+            )
+        except Exception:
+            current_run_dir = None
+        if current_run_dir is not None and self._paths_equivalent(current_run_dir, staging_run):
+            try:
+                approved_payload = set(self._get_preview_approved_filenames() or set())
+                if not self._is_free_mode_session_context():
+                    approved_payload |= {
+                        str(name or "").strip().lower()
+                        for name in set(getattr(self, "_campaign_hidden_project_approved_filenames", set()) or set())
+                        if str(name or "").strip()
+                    }
+                self._update_annotation_run_manifest(
+                    staging_run,
+                    approved_filenames=sorted(approved_payload),
+                    **self._collect_preview_resume_manifest_fields(),
+                )
+            except Exception as exc:
+                logger.debug(f"Nie udalo sie jawnie zapisac statusow OK przed zatwierdzeniem bramki Z2: {exc}")
         if approval_source_kind == "staging":
             staging_root = CAMPAIGN.get_staging_dir("auto_ann")
-            if staging_root is None or not self._path_is_within(staging_run, staging_root):
+            auto_root = CAMPAIGN.get_dir("auto_ann")
+            in_project_staging = bool(staging_root and self._path_is_within(staging_run, staging_root))
+            in_project_auto = bool(auto_root and self._path_is_within(staging_run, auto_root))
+            if in_project_auto and not in_project_staging:
+                approval_source_kind = "existing"
+            elif not in_project_staging:
                 return messagebox.showerror(
                 "Błędny staging",
                 "Run anotacji do zatwierdzenia leży poza projektowym workspace stagingu.",
@@ -3239,6 +3623,22 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
 
         _approval_mark("promote_approved_set")
 
+        approved_pool_total_images = int(project_approved_images or 0)
+        approved_pool_total_plates = int(project_approved_plates or 0)
+        approved_pool_added_images = 0
+        approved_pool_added_plates = 0
+        try:
+            approved_after_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+            approved_pool_total_images = int(approved_after_stats.get("images", approved_pool_total_images) or 0)
+            approved_pool_total_plates = int(approved_after_stats.get("plates", approved_pool_total_plates) or 0)
+            approved_pool_added_images = max(0, int(approved_pool_total_images) - int(project_approved_images or 0))
+            approved_pool_added_plates = max(0, int(approved_pool_total_plates) - int(project_approved_plates or 0))
+        except Exception:
+            approved_pool_total_images = int(project_approved_images or 0) + int(run_approved_images or 0)
+            approved_pool_total_plates = int(project_approved_plates or 0) + int(run_approved_plates or 0)
+            approved_pool_added_images = int(run_approved_images or 0)
+            approved_pool_added_plates = int(run_approved_plates or 0)
+
         if (
             approval_iteration_target == "plate"
             and graph_gate_is_t05
@@ -3340,6 +3740,49 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
                 except Exception:
                     pass
             _approval_mark("campaign_refresh_initial")
+            if next_step == 3 and (graph_display_gate_id == "T02" or graph_gate_id == "T02"):
+                if repair_mode:
+                    try:
+                        CAMPAIGN.reset_step3_progress()
+                        CAMPAIGN.set_step3_needs_rework()
+                        CAMPAIGN.set_current_step(3)
+                    except Exception as e:
+                        logger.debug(f"Nie udalo sie zresetowac E3 po zatwierdzeniu T02: {e}")
+                try:
+                    self.app.update_status(
+                        f"Bramka {graph_display_gate_id or 'T02'} zostala zatwierdzona. "
+                        "Skontrolowane pozycje [OK] dopisano do puli projektu.",
+                        "success",
+                    )
+                except Exception:
+                    pass
+                _show_t02_approval_project_pool_summary(
+                    self,
+                    gate_label=graph_display_gate_id or "T02",
+                    target_dir=target_dir,
+                    iteration_num=int(CAMPAIGN.get_current_iteration_num() or 1),
+                    previous_images=project_approved_images,
+                    previous_plates=project_approved_plates,
+                    run_ok_images=run_approved_images,
+                    run_ok_plates=run_approved_plates,
+                    added_images=approved_pool_added_images,
+                    added_plates=approved_pool_added_plates,
+                    total_images=approved_pool_total_images,
+                    total_plates=approved_pool_total_plates,
+                )
+                try:
+                    campaign_tab = self.app.tabs.get("campaign")
+                    if campaign_tab is not None:
+                        try:
+                            campaign_tab.request_wizard_stage_focus(step_num=3)
+                        except Exception:
+                            pass
+                        campaign_tab._refresh_dashboard()
+                    self.app.open_controlled_tab("campaign")
+                    self.app.update_campaign_tab_access()
+                except Exception as e:
+                    logger.debug(f"Nie udalo sie wrocic do grafu po zatwierdzeniu T02: {e}")
+                return
             if next_step == 3:
                 if repair_mode:
                     try:

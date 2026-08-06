@@ -234,6 +234,18 @@ class Config:
     DIR_7_RANKINGS_CHARS: Path = DIR_7_RANKINGS / "chars"
     DIR_7_RANKINGS_VEHICLES: Path = DIR_7_RANKINGS / "vehicles"
 
+    DIR_8_PRESETS: Path = WORKSPACE_DIR / "8_presets"
+    DIR_8_PRESETS_OCR: Path = DIR_8_PRESETS / "ocr"
+    DIR_8_PRESETS_DETECTION_PIPELINE: Path = DIR_8_PRESETS / "detection_pipeline"
+    DIR_8_PRESETS_AUGMENTATION: Path = DIR_8_PRESETS / "augmentation"
+    DIR_8_PRESETS_AUGMENTATION_PLATES: Path = DIR_8_PRESETS_AUGMENTATION / "plate"
+    DIR_8_PRESETS_AUGMENTATION_CHARS: Path = DIR_8_PRESETS_AUGMENTATION / "char"
+    DIR_8_PRESETS_TRAINING: Path = DIR_8_PRESETS / "training"
+    DIR_8_PRESETS_TRAINING_PLATES: Path = DIR_8_PRESETS_TRAINING / "plate"
+    DIR_8_PRESETS_TRAINING_CHARS: Path = DIR_8_PRESETS_TRAINING / "char"
+    DIR_8_PRESETS_RANKING_SCENARIOS: Path = DIR_8_PRESETS / "ranking_scenarios"
+    DIR_8_LEGACY_OCR_PRESETS: Path = WORKSPACE_DIR / "8_ocr_presets"
+
     # Aliasy używane przez warstwę GUI.
     @property
     def DEFAULT_OUTPUT_DIR(self) -> str: return str(self.DIR_2_AUTO_ANN)
@@ -292,6 +304,58 @@ class Config:
         if normalized == "vehicle":
             return self.DIR_7_RANKINGS_VEHICLES
         return self.DIR_7_RANKINGS_CHARS
+
+    def normalize_preset_module(self, module: str | None = None) -> str:
+        raw = str(module or "").strip().lower()
+        if raw in {"", "root", "preset", "presets"}:
+            return ""
+        if raw in {"ocr", "char_ocr", "ocr_presets"}:
+            return "ocr"
+        if raw in {"pipeline", "detection", "detection_pipeline", "detekcja"}:
+            return "detection_pipeline"
+        if raw in {"augmentation", "augmentacja", "aug"}:
+            return "augmentation"
+        if raw in {"training", "train", "trening"}:
+            return "training"
+        if raw in {"ranking", "rank", "ranking_scenarios"}:
+            return "ranking_scenarios"
+
+        safe_chars: list[str] = []
+        for char in raw:
+            if ("a" <= char <= "z") or ("0" <= char <= "9") or char in {"_", "-"}:
+                safe_chars.append(char)
+            else:
+                safe_chars.append("_")
+        return "".join(safe_chars).strip("_-") or "misc"
+
+    def get_presets_dir(self, module: str | None = None, target: str | None = None) -> Path:
+        normalized = self.normalize_preset_module(module)
+        if not normalized:
+            return self.DIR_8_PRESETS
+
+        base = self.DIR_8_PRESETS / normalized
+        if normalized in {"augmentation", "training"} and target:
+            return base / self.normalize_task_target(target)
+        return base
+
+    def get_legacy_ocr_presets_dir(self) -> Path:
+        return self.DIR_8_LEGACY_OCR_PRESETS
+
+    def get_preset_search_dirs(self, module: str | None = None, target: str | None = None) -> list[Path]:
+        normalized = self.normalize_preset_module(module)
+        candidates = [self.get_presets_dir(normalized, target)]
+        if normalized == "ocr":
+            candidates.append(self.get_legacy_ocr_presets_dir())
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
 
     def get_trained_models_dir(self, target: str | None = None) -> Path:
         normalized = self.normalize_task_target(target)
@@ -458,6 +522,16 @@ class Config:
             self.DIR_5_RUNS, 
             self.DIR_6_MODELS, 
             self.DIR_7_RANKINGS, 
+            self.DIR_8_PRESETS,
+            self.DIR_8_PRESETS_OCR,
+            self.DIR_8_PRESETS_DETECTION_PIPELINE,
+            self.DIR_8_PRESETS_AUGMENTATION,
+            self.DIR_8_PRESETS_AUGMENTATION_PLATES,
+            self.DIR_8_PRESETS_AUGMENTATION_CHARS,
+            self.DIR_8_PRESETS_TRAINING,
+            self.DIR_8_PRESETS_TRAINING_PLATES,
+            self.DIR_8_PRESETS_TRAINING_CHARS,
+            self.DIR_8_PRESETS_RANKING_SCENARIOS,
             self.DIR_9_PROJECTS,
         ]
         
@@ -477,6 +551,7 @@ class Config:
                 "5_training_runs      : Logi i artefakty treningu, także rozdzielone na plates/, chars/ i vehicles/.\n"
                 "6_models             : Modele bazowe w base/, wytrenowane w trained/, dodatkowo rozdzielone według toru.\n"
                 "7_rankings           : Raporty z testów i walidacji, rozdzielone według typu modelu.\n"
+                "8_presets            : Presety modułów: ocr/, detection_pipeline/, augmentation/, training/.\n"
             )
             readme_path.write_text(readme_text, encoding="utf-8")
 

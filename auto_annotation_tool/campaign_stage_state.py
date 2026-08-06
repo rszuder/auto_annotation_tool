@@ -305,6 +305,77 @@ def get_graph_selected_edge_key(self) -> str:
 def clear_graph_selected_edge_key(self):
     self.set_graph_selected_edge_key("")
 
+
+def mark_t02_at_review_committed(
+    self,
+    *,
+    run_dir: str | None = "",
+    approved_images: int = 0,
+    approved_plates: int = 0,
+    project_name: str = None,
+) -> bool:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return False
+
+    project_data = self.state["projects"][project_name]
+    try:
+        current_iteration = int(project_data.get("current_iteration", 1) or 1)
+    except Exception:
+        current_iteration = 1
+    project_data["t02_at_review_committed_iteration"] = int(current_iteration)
+    project_data["t02_at_review_committed_at"] = datetime.now().isoformat(timespec="seconds")
+    project_data["t02_at_review_committed_run"] = str(run_dir or "").strip()
+    try:
+        project_data["t02_at_review_committed_images"] = max(0, int(approved_images or 0))
+    except Exception:
+        project_data["t02_at_review_committed_images"] = 0
+    try:
+        project_data["t02_at_review_committed_plates"] = max(0, int(approved_plates or 0))
+    except Exception:
+        project_data["t02_at_review_committed_plates"] = 0
+    self.save_state()
+    return True
+
+
+def get_t02_at_review_commit_state(self, project_name: str = None) -> Dict[str, Any]:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return {"committed": False}
+
+    project_data = self.state["projects"].get(project_name, {})
+    try:
+        current_iteration = int(project_data.get("current_iteration", 1) or 1)
+    except Exception:
+        current_iteration = 1
+    try:
+        committed_iteration = int(project_data.get("t02_at_review_committed_iteration", 0) or 0)
+    except Exception:
+        committed_iteration = 0
+    committed = bool(committed_iteration > 0 and committed_iteration == current_iteration)
+    try:
+        approved_images = max(0, int(project_data.get("t02_at_review_committed_images", 0) or 0))
+    except Exception:
+        approved_images = 0
+    try:
+        approved_plates = max(0, int(project_data.get("t02_at_review_committed_plates", 0) or 0))
+    except Exception:
+        approved_plates = 0
+    return {
+        "committed": committed,
+        "iteration": int(committed_iteration or 0),
+        "current_iteration": int(current_iteration or 0),
+        "committed_at": str(project_data.get("t02_at_review_committed_at", "") or "").strip(),
+        "run_dir": str(project_data.get("t02_at_review_committed_run", "") or "").strip(),
+        "approved_images": approved_images,
+        "approved_plates": approved_plates,
+    }
+
+
+def is_t02_at_review_committed_current_iteration(self, project_name: str = None) -> bool:
+    return bool(self.get_t02_at_review_commit_state(project_name).get("committed"))
+
+
 def get_last_iteration_target(self) -> str:
     act = self.get_active_project_name()
     if not act:
@@ -473,6 +544,38 @@ def get_step3_status(self) -> str:
         return "pending"
     return self.state["projects"][act].get("step3_status", "pending")
 
+def get_step4_status(self) -> str:
+    act = self.get_active_project_name()
+    if not act:
+        return "pending"
+
+    project_data = self.state["projects"].get(act, {})
+    try:
+        current_step = int(project_data.get("current_step", 1) or 1)
+    except Exception:
+        current_step = 1
+    project_status = str(project_data.get("project_status", "active") or "active").strip().lower()
+    if project_status == "completed" or current_step > 4:
+        return "approved"
+
+    finish_ready = False
+    try:
+        finish_state = dict(self.get_step4_finish_state() or {})
+        finish_ready = bool(finish_state.get("ready"))
+    except Exception:
+        finish_ready = bool(project_data.get("step4_finish_ready", False))
+
+    without_training_ready = False
+    try:
+        no_training_state = dict(self.get_step4_without_training_decision() or {})
+        without_training_ready = bool(no_training_state.get("ready"))
+    except Exception:
+        without_training_ready = bool(project_data.get("step4_without_training_ready", False))
+
+    if finish_ready or without_training_ready:
+        return "ready"
+    return "pending"
+
 def get_step3_substep(self) -> int:
     act = self.get_active_project_name()
     if not act:
@@ -594,6 +697,19 @@ def set_step3_preview_dir(self, preview_dir: str | None) -> None:
     self.state["projects"][act]["step3_preview_dir"] = str(preview_dir or "").strip()
     self.save_state()
 
+def get_step3_detection_yolo_model(self) -> str:
+    act = self.get_active_project_name()
+    if not act:
+        return ""
+    return str(self.state["projects"][act].get("step3_detection_yolo_model", "") or "").strip()
+
+def set_step3_detection_yolo_model(self, model_path: str | None) -> None:
+    act = self.get_active_project_name()
+    if not act:
+        return
+    self.state["projects"][act]["step3_detection_yolo_model"] = str(model_path or "").strip()
+    self.save_state()
+
 def set_step3_extract_state(
     self,
     *,
@@ -623,7 +739,7 @@ def set_step3_extract_state(
     self.save_state()
 
 
-_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'get_explicit_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'set_step3_extract_state')
+_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'get_explicit_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'mark_t02_at_review_committed', 'get_t02_at_review_commit_state', 'is_t02_at_review_committed_current_iteration', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step4_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'get_step3_detection_yolo_model', 'set_step3_detection_yolo_model', 'set_step3_extract_state')
 
 
 _STATIC_METHODS = ('_normalize_project_start_mode', '_normalize_project_start_asset_scope', '_project_start_asset_scope_state_key', '_normalize_iteration_target', '_normalize_iteration_path')

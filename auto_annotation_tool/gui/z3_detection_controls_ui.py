@@ -10,7 +10,90 @@ from tkinter import messagebox
 
 from .web_slim_scrollbar import blend_hex_colors
 
+HYBRID_RESCUE_AUTO_LIMIT = 999
+DETECTION_SETTING_FLOAT_MIN = 0.00001
+DETECTION_SETTING_FLOAT_MAX = 1.0
+DETECTION_SETTING_FLOAT_DIGITS = 5
+
+
+def normalize_detection_float(
+    value,
+    default: float = 0.25,
+    *,
+    minimum: float = DETECTION_SETTING_FLOAT_MIN,
+    maximum: float = DETECTION_SETTING_FLOAT_MAX,
+) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        number = float(default)
+    if number != number:
+        number = float(default)
+    number = max(float(minimum), min(float(maximum), number))
+    return round(number, DETECTION_SETTING_FLOAT_DIGITS)
+
+
+def _set_numeric_var_if_changed(variable, value) -> None:
+    try:
+        current = float(variable.get())
+    except Exception:
+        current = None
+    if current is None or round(current, DETECTION_SETTING_FLOAT_DIGITS) != float(value):
+        try:
+            variable.set(value)
+        except Exception:
+            pass
+
+
+def _restore_grid_if_hidden(widget, fallback: dict | None = None) -> None:
+    if widget is None:
+        return
+    try:
+        if str(widget.winfo_manager()):
+            return
+    except Exception:
+        return
+    try:
+        widget.grid()
+        return
+    except Exception:
+        pass
+    if fallback:
+        try:
+            widget.grid(**fallback)
+        except Exception:
+            pass
+
+
+def ensure_detection_status_visible(host) -> None:
+    _restore_grid_if_hidden(
+        getattr(host, "detect_right_pinned_status_host", None),
+        {"row": 0, "column": 0, "sticky": "ew", "pady": (0, 8)},
+    )
+    _restore_grid_if_hidden(
+        getattr(host, "preview_status_lf", None),
+        {"row": 0, "column": 0, "sticky": "ew"},
+    )
+    _restore_grid_if_hidden(
+        getattr(host, "preview_counts_frame", None),
+        {"row": 2, "column": 0, "sticky": "w", "pady": (4, 0)},
+    )
+    _restore_grid_if_hidden(
+        getattr(host, "preview_layout_summary_lbl", None),
+        {"row": 3, "column": 0, "sticky": "ew", "pady": (6, 0)},
+    )
+    _restore_grid_if_hidden(
+        getattr(host, "preview_repair_progress_title_lbl", None),
+        {"row": 4, "column": 0, "sticky": "ew", "pady": (6, 0)},
+    )
+    _restore_grid_if_hidden(
+        getattr(host, "preview_repair_progress", None),
+        {"row": 5, "column": 0, "sticky": "ew", "pady": (4, 0)},
+    )
+
+
 def set_test_status(host, text: str, tone: str = "neutral") -> None:
+    ensure_detection_status_visible(host)
     label = getattr(host, "test_status_lbl", None)
     fixed_tone = "neutral"
     if not host._set_inline_status_label_state(label, text=text, tone=fixed_tone, emphasis=False):
@@ -21,6 +104,10 @@ def get_detection_method_status_label(host) -> str:
     method_key = str(host._get_detection_method_key() or "OCR").strip().upper()
     if method_key == "YOLO":
         return "YOLO"
+    if method_key == "YOLO_BOX":
+        return "YOLO boxy"
+    if method_key == "YOLO_SYMBOL":
+        return "YOLO znaki"
     if method_key == "BOTH":
         return "Hybryda OCR+YOLO"
     if method_key == "YOLO_OCR":
@@ -38,14 +125,14 @@ def compose_detection_method_status(host, detail: str | None = None) -> str:
 
 def compose_detection_run_model_info(host) -> tuple[str, str]:
     method_key = str(host._get_detection_method_key() or "OCR").strip().upper()
-    uses_yolo = method_key in ("YOLO", "BOTH", "YOLO_OCR")
+    uses_yolo = method_key in ("YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL")
     method_label = host._get_detection_method_status_label()
     pipeline_label = host._get_detection_pipeline_short_label(method_key)
     model_path = str(host._get_effective_yolo_model_path() or "").strip()
 
-    detector_label = "nieużywany w pipeline OCR"
+    detector_label = "bez YOLO"
     map_label = "-"
-    tone = "muted"
+    tone = "success"
 
     if model_path and Path(model_path).exists():
         stats = {}
@@ -74,13 +161,7 @@ def compose_detection_run_model_info(host) -> tuple[str, str]:
         detector_label = "brak wybranego modelu .pt"
         tone = "warning"
 
-    text = "\n".join(
-        (
-            f"Pipeline: {method_label} ({pipeline_label})",
-            f"Detektor YOLO: {detector_label}",
-            f"mAP50-95: {map_label}",
-        )
-    )
+    text = f"{method_label} ({pipeline_label}) | YOLO: {detector_label} | mAP50-95: {map_label}"
     return text, tone
 
 
@@ -213,18 +294,20 @@ def get_current_detection_status_text(host) -> str:
         return "Tryb pracy: gotowa do uruchomienia"
 
 
-def show_last_detection_details(host) -> None:
+def _show_last_detection_details_legacy(host) -> None:
     summary = host._load_last_detection_summary()
 
     rows = [
         ("Tryb pracy", get_current_detection_status_text(host)),
+        ("Aktualny pipeline", str(host._get_detection_workflow_text())),
+        ("Status modelu", str(compose_detection_run_model_info(host)[0])),
     ]
 
     if summary:
         rows.extend(
             [
-                ("Zakończono", format_detection_datetime(summary.get("finished_at") or summary.get("started_at"))),
-                ("Pipeline", str(summary.get("pipeline") or summary.get("method_label") or "OCR")),
+                ("Ostatni przebieg", format_detection_datetime(summary.get("finished_at") or summary.get("started_at"))),
+                ("Pipeline przebiegu", str(summary.get("pipeline") or summary.get("method_label") or "OCR")),
                 (
                     "Tablice",
                     f"{int(summary.get('processed_plates', summary.get('plates', 0)) or 0)}/{int(summary.get('plates', 0) or 0)}",
@@ -264,6 +347,14 @@ def normalize_detection_method_key(raw_value=None, method_labels: dict | None = 
         "OCRYOLO": "BOTH",
         "HYBRYDAOCRYOLO": "BOTH",
         "HYBRYDAOCRODCZYTYOLORAMKI": "BOTH",
+        "YB": "YOLO_BOX",
+        "YOLOBOX": "YOLO_BOX",
+        "YOLOBOXY": "YOLO_BOX",
+        "YOLOBOXES": "YOLO_BOX",
+        "YS": "YOLO_SYMBOL",
+        "YOLOSYMBOL": "YOLO_SYMBOL",
+        "YOLOZNAK": "YOLO_SYMBOL",
+        "YOLOZNAKI": "YOLO_SYMBOL",
         "YOLOBOXYOCR": "YOLO_OCR",
         "YOLOOCR": "YOLO_OCR",
         "HYBRYDAYOLOBOXYOCRODCZYT": "YOLO_OCR",
@@ -284,8 +375,15 @@ def get_hybrid_rescue_max_chars(host) -> int:
     try:
         value = int(host.hybrid_rescue_max_chars_var.get())
     except Exception:
-        value = 2
-    return max(0, min(5, value))
+        value = 1
+    return HYBRID_RESCUE_AUTO_LIMIT if value > 0 else 0
+
+
+def get_yolo_rescue_enabled(host) -> bool:
+    try:
+        return int(host._get_hybrid_rescue_max_chars() or 0) > 0
+    except Exception:
+        return False
 
 
 def use_hybrid_yolo_box_backend(host) -> bool:
@@ -298,7 +396,7 @@ def use_hybrid_yolo_box_backend(host) -> bool:
 def get_hybrid_detection_status_text(host) -> str:
     rescue_chars = host._get_hybrid_rescue_max_chars()
     backend_state = "ON" if host._use_hybrid_yolo_box_backend() else "OFF"
-    rescue_text = "OFF" if rescue_chars <= 0 else f"YOLO rescue <= {rescue_chars}"
+    rescue_text = "OFF" if rescue_chars <= 0 else "AUTO"
     return (
         f"odczyt: OCR | dopasowanie pozycji: YOLO | rescue: {rescue_text} | "
         f"końcowe ramki z YOLO: {backend_state}"
@@ -339,8 +437,13 @@ def refresh_detection_active_model_label(host) -> None:
 
 def get_detection_refiner_guard_status(host) -> tuple[str, str]:
     method_key = str(host._get_detection_method_key() or "OCR").strip().upper()
-    method_has_yolo = method_key in {"YOLO", "BOTH", "YOLO_OCR"}
-    if not method_has_yolo:
+    method_has_yolo_geometry = method_key in {"YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX"}
+    if method_key == "YOLO_SYMBOL":
+        return (
+            "Refiner perfect: niedostepny w pipeline YS, bo ten tryb wpisuje znaki w istniejace ramki.",
+            "muted",
+        )
+    if not method_has_yolo_geometry:
         return (
             "Refiner perfect: niedostępny w pipeline OCR. Poprawki boxów wymagają modelu YOLO.",
             "muted",
@@ -400,9 +503,66 @@ def refresh_detection_refiner_guard_label(host) -> None:
 
 
 def on_yolo_option_var_write(host, *_args) -> None:
+    if getattr(host, "_yolo_option_var_write_guard", False):
+        return
+    host._yolo_option_var_write_guard = True
+    try:
+        fallback_conf = normalize_detection_float(
+            getattr(host, "yolo_conf_var", None).get() if getattr(host, "yolo_conf_var", None) is not None else 0.25
+        )
+    except Exception:
+        fallback_conf = normalize_detection_float(0.25)
+    try:
+        box_conf = normalize_detection_float(host.yolo_box_conf_var.get(), fallback_conf)
+    except Exception:
+        box_conf = fallback_conf
+    try:
+        symbol_conf = normalize_detection_float(host.yolo_symbol_conf_var.get(), fallback_conf)
+    except Exception:
+        symbol_conf = fallback_conf
+    unified_conf = normalize_detection_float(min(box_conf, symbol_conf), fallback_conf)
+    try:
+        _set_numeric_var_if_changed(host.yolo_box_conf_var, box_conf)
+        _set_numeric_var_if_changed(host.yolo_symbol_conf_var, symbol_conf)
+        _set_numeric_var_if_changed(host.yolo_conf_var, unified_conf)
+    except Exception:
+        pass
+    finally:
+        host._yolo_option_var_write_guard = False
+
     host._apply_yolo_option_check_style()
     try:
+        host._save_local_setting("char_yolo_conf", unified_conf)
+    except Exception:
+        pass
+    try:
+        host._save_local_setting("char_yolo_box_conf", box_conf)
+    except Exception:
+        pass
+    try:
+        host._save_local_setting("char_yolo_symbol_conf", symbol_conf)
+    except Exception:
+        pass
+    try:
         host._save_local_setting("char_yolo_agnostic_nms", bool(host.yolo_agnostic_nms_var.get()))
+    except Exception:
+        pass
+    for key, attr_name in (
+        ("char_yolo_iou", "yolo_iou_var"),
+        ("char_yolo_overlap", "yolo_overlap_var"),
+        ("char_yolo_seq_center_y", "yolo_seq_center_y_var"),
+        ("char_yolo_seq_min_h_ratio", "yolo_seq_min_h_ratio_var"),
+        ("char_yolo_seq_max_h_ratio", "yolo_seq_max_h_ratio_var"),
+        ("char_yolo_seq_max_w_ratio", "yolo_seq_max_w_ratio_var"),
+        ("char_yolo_seq_soft_overlap", "yolo_seq_soft_overlap_var"),
+        ("char_yolo_seq_hard_overlap", "yolo_seq_hard_overlap_var"),
+    ):
+        try:
+            host._save_local_setting(key, getattr(host, attr_name).get())
+        except Exception:
+            pass
+    try:
+        host._save_local_setting("char_hybrid_rescue_max_chars", 1 if host._get_hybrid_rescue_max_chars() > 0 else 0)
     except Exception:
         pass
     try:
@@ -612,10 +772,6 @@ def bind_detect_mode_card(host, widget, mode_key: str):
     self = host
     widgets = self._detect_mode_cards.get(mode_key, {})
 
-    def _select(_event=None, target_mode=mode_key):
-        self._handle_detect_mode_selection(target_mode)
-        return "break"
-
     def _hover(enabled: bool):
         if bool(getattr(self, "_selection_hover_suppressed", False)):
             self._detect_mode_hover_key = None
@@ -627,23 +783,15 @@ def bind_detect_mode_card(host, widget, mode_key: str):
         self._detect_mode_hover_key = next_hover
         self._refresh_detect_mode_cards()
 
-    enabled = bool(widgets.get("enabled", True))
-    cursor = "hand2" if enabled else "arrow"
     try:
-        widget.configure(cursor=cursor)
+        widget.configure(cursor="arrow")
     except Exception:
         pass
 
-    if enabled:
-        try:
-            widget.bind("<Button-1>", _select)
-        except Exception:
-            pass
-    else:
-        try:
-            widget.unbind("<Button-1>")
-        except Exception:
-            pass
+    try:
+        widget.unbind("<Button-1>")
+    except Exception:
+        pass
 
     try:
         widget.bind("<Enter>", lambda _event: _hover(True))
@@ -656,12 +804,12 @@ def bind_detect_mode_card(host, widget, mode_key: str):
 
 
 def handle_detect_mode_selection(host, mode_key: str, method_labels: dict):
-    self = host
     normalized_mode = str(mode_key or "").strip().upper()
     if normalized_mode not in method_labels:
         return
-
-    self._open_detection_pipeline_builder(initial_method=normalized_mode)
+    # Presety nie są już wybierane bezpośrednio w prawym panelu. Zmiana
+    # pipeline przechodzi przez budowniczego i przycisk "Zatwierdź pipeline".
+    return
 
 
 def refresh_detect_mode_cards(host, card_meta: dict):
@@ -686,7 +834,7 @@ def refresh_detect_mode_cards(host, card_meta: dict):
     for mode_key, widgets in cards.items():
         meta = card_meta.get(mode_key, {})
         is_selected = mode_key == current_method
-        requires_yolo = mode_key in ("YOLO", "BOTH", "YOLO_OCR")
+        requires_yolo = mode_key in ("YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL")
         is_enabled = not (requires_yolo and getattr(self, "_step3_linear_mode", False) and not yolo_ready)
         is_hovered = hover_key == mode_key
         card_bg = selected_bg if is_selected else (hover_bg if is_hovered else panel_alt)
@@ -698,17 +846,21 @@ def refresh_detect_mode_cards(host, card_meta: dict):
         if requires_yolo:
             if yolo_ready:
                 if mode_key == "YOLO":
-                    description = "YOLO sam wykrywa boxy i przypisuje klasy znaków. Kliknij kartę, aby otworzyć builder pipeline."
+                    description = "Preset w budowniczym: YOLO sam wykrywa boxy i przypisuje klasy znaków."
+                elif mode_key == "YOLO_BOX":
+                    description = "Preset w budowniczym: YB wykrywa tylko ramki znakow."
+                elif mode_key == "YOLO_SYMBOL":
+                    description = "Preset w budowniczym: YS wpisuje znaki w istniejace ramki."
                 elif mode_key == "BOTH":
-                    description = "OCR pilnuje tekstu, a YOLO dopasowuje pozycje i może przejąć końcowe ramki. Kliknij kartę, aby otworzyć builder pipeline."
+                    description = "Preset w budowniczym: OCR pilnuje tekstu, a YOLO dopasowuje pozycje."
                 else:
-                    description = "YOLO wyznacza boxy znaków, a OCR czyta już pojedyncze cropy. Kliknij kartę, aby otworzyć builder pipeline."
+                    description = "Preset w budowniczym: YOLO wyznacza boxy, a OCR czyta pojedyncze cropy."
             elif getattr(self, "_step3_linear_mode", False):
                 description = "Tryb odblokuje się po przypięciu modelu YOLO znaków do projektu."
             else:
-                description = "Kliknij, aby otworzyć builder pipeline i wskazać wytrenowany model YOLO znaków (.pt)."
+                description = "Preset dostępny w budowniczym pipeline po wskazaniu modelu YOLO znaków (.pt)."
         elif mode_key == "OCR":
-            description = "OCR odczytuje cały napis i dzieli go na techniczne segmenty znaków. Kliknij kartę, aby otworzyć builder pipeline."
+            description = "Preset w budowniczym: OCR odczytuje napis i dzieli go na segmenty znaków."
 
         widgets["enabled"] = is_enabled
 
@@ -747,32 +899,26 @@ def refresh_detect_mode_cards(host, card_meta: dict):
 
 
 def toggle_detection_advanced_panel(host):
-    host._detection_advanced_expanded = not bool(getattr(host, "_detection_advanced_expanded", False))
+    host._detection_advanced_expanded = False
     host._refresh_detection_advanced_sections()
 
 
 def get_detection_advanced_toggle_label(host, visible_icon, hidden_icon) -> str:
-    expanded = bool(getattr(host, "_detection_advanced_expanded", False))
-    icon = visible_icon if expanded else hidden_icon
-    return f"Zaawansowane YOLO i OCR  {icon}"
+    return f"Ustawienia zaawansowane są w budowniczym pipeline  {hidden_icon}"
 
 
 def refresh_detection_advanced_sections(host, visible_icon, hidden_icon):
-    advanced_expanded = bool(getattr(host, "_detection_advanced_expanded", False))
-
     advanced_toggle = getattr(host, "detection_advanced_toggle_btn", None)
     if advanced_toggle is not None:
         try:
-            advanced_toggle.configure(text=get_detection_advanced_toggle_label(host, visible_icon, hidden_icon))
+            advanced_toggle.grid_remove()
         except Exception:
             pass
 
     yolo_section = getattr(host, "yolo_advanced_shell", None)
     if yolo_section is not None:
         try:
-            if advanced_expanded:
-                yolo_section.grid(row=3, column=0, sticky="ew", pady=(0, 10), padx=(12, 12))
-            elif str(yolo_section.winfo_manager()):
+            if str(yolo_section.winfo_manager()):
                 yolo_section.grid_remove()
         except Exception:
             pass
@@ -780,11 +926,84 @@ def refresh_detection_advanced_sections(host, visible_icon, hidden_icon):
     ocr_section = getattr(host, "actions_lf", None)
     if ocr_section is not None:
         try:
-            if advanced_expanded:
-                ocr_section.grid()
-            else:
+            if str(ocr_section.winfo_manager()):
                 ocr_section.grid_remove()
         except Exception:
             pass
+
+
+def show_last_detection_details(host) -> None:
+    summary = host._load_last_detection_summary()
+
+    def _count_line(value, suffix: str) -> str:
+        try:
+            return f"{int(value or 0)} {suffix}"
+        except Exception:
+            return f"0 {suffix}"
+
+    current_pipeline = str(host._get_detection_workflow_text() or "").strip()
+    model_info = str(compose_detection_run_model_info(host)[0] or "").strip()
+    current_rows = [
+        ("Pipeline", current_pipeline or "brak ustawionego pipeline"),
+        ("Model detekcji", model_info or "brak modelu YOLO"),
+    ]
+
+    summary_rows = []
+    technical_rows = []
+    if isinstance(summary, dict) and summary:
+        processed = int(summary.get("processed_plates", summary.get("plates", 0)) or 0)
+        scope = int(summary.get("plates", processed) or processed)
+        full_source = int(summary.get("source_plates", 0) or 0)
+        scope_text = f"{processed}/{scope} tablic" if scope and scope != processed else _count_line(processed, "tablic")
+        if full_source and full_source != scope:
+            scope_text = f"{scope_text} z wybranego zakresu ({full_source} w katalogu)"
+
+        summary_rows.extend(
+            [
+                ("Zakonczono", format_detection_datetime(summary.get("finished_at") or summary.get("started_at"))),
+                ("Zakres", scope_text),
+                ("Efekt", f"{_count_line(summary.get('perfect', 0), 'perfect')} | {_count_line(summary.get('characters', 0), 'znakow')}"),
+                ("Pipeline przebiegu", str(summary.get("pipeline") or summary.get("method_label") or "OCR")),
+            ]
+        )
+        model = str(summary.get("model") or "").strip()
+        if model:
+            summary_rows.append(("Model przebiegu", Path(model).name))
+
+        device = str(summary.get("device") or "").strip()
+        yolo_raw = int(summary.get("yolo_raw", 0) or 0)
+        yolo_nms = int(summary.get("yolo_nms", 0) or 0)
+        yolo_filtered = int(summary.get("yolo_filtered", 0) or 0)
+        if device:
+            technical_rows.append(("Urzadzenie", device))
+        if yolo_raw or yolo_nms or yolo_filtered:
+            technical_rows.append(("YOLO", f"kandydaci {yolo_raw} -> NMS {yolo_nms} -> uzyte {yolo_filtered}"))
+        if "yolo_box_conf" in summary or "yolo_symbol_conf" in summary:
+            try:
+                yb_conf = float(summary.get("yolo_box_conf", 0.0) or 0.0)
+                ys_conf = float(summary.get("yolo_symbol_conf", 0.0) or 0.0)
+                technical_rows.append(("Progi YOLO", f"YB {yb_conf:.5g} | YS {ys_conf:.5g}"))
+            except Exception:
+                pass
+    else:
+        summary_rows.append(("Ostatni przebieg", "brak zapisanego przebiegu"))
+
+    def _section(title: str, rows: list[tuple[str, str]]) -> list[str]:
+        lines = [title]
+        for label, value in rows:
+            text = str(value or "").strip()
+            if text:
+                lines.append(f"  {label}: {text}")
+        return lines
+
+    body_lines = []
+    body_lines.extend(_section("Gotowosc teraz", current_rows))
+    body_lines.append("")
+    body_lines.extend(_section("Ostatni przebieg", summary_rows))
+    if technical_rows:
+        body_lines.append("")
+        body_lines.extend(_section("Diagnostyka", technical_rows))
+
+    return messagebox.showinfo("Szczegoly detekcji", "\n".join(body_lines))
 
 

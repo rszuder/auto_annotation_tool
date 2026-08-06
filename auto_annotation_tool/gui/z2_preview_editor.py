@@ -126,6 +126,8 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .canvas_progress_overlay import CanvasProgressOverlay
 
 NAV_BUTTON_WIDTH = 18
+PREVIEW_CORRECTION_AUTOSAVE_DELAY_MS = 45000
+PREVIEW_IMAGE_CACHE_LIMIT = 24
 SUPER_CORRECTION_AUTOSAVE_DELAY_MS = 12000
 
 def _preview_super_perf_active(self) -> bool:
@@ -481,6 +483,7 @@ def _render_preview_image(
             self._preview_render_image_cache = image_cache
         preview_image = image_cache.get(cache_key)
         if preview_image is None:
+            load_started_at = time.perf_counter()
             img = cv2.imread(str(img_path))
             if img is None:
                 raise ValueError("Nie można załadować obrazu do podglądu.")
@@ -488,7 +491,18 @@ def _render_preview_image(
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             preview_image = Image.fromarray(img_rgb)
             image_cache[cache_key] = preview_image
-            while len(image_cache) > 5:
+            load_elapsed_ms = max(0.0, (time.perf_counter() - load_started_at) * 1000.0)
+            if load_elapsed_ms >= 120.0:
+                try:
+                    logger.info(
+                        "[Z2 PERF] preview_image_load total=%.0fms cache=%s file=%s",
+                        load_elapsed_ms,
+                        len(image_cache),
+                        Path(img_path).name,
+                    )
+                except Exception:
+                    pass
+            while len(image_cache) > PREVIEW_IMAGE_CACHE_LIMIT:
                 try:
                     image_cache.pop(next(iter(image_cache)))
                 except Exception:
@@ -504,9 +518,21 @@ def _render_preview_image(
                 ann.height = image_height
         except Exception:
             pass
+        render_interaction_fast = bool(fast_fullscreen)
         if reset_view:
             if hasattr(self.preview_canvas, "set_image_fit_to_view"):
-                self.preview_canvas.set_image_fit_to_view(preview_image)
+                if not render_interaction_fast:
+                    try:
+                        render_interaction_fast = self._preview_user_interaction_quiet_remaining_ms(padding_ms=0) > 0
+                    except Exception:
+                        render_interaction_fast = False
+                try:
+                    self.preview_canvas.set_image_fit_to_view(
+                        preview_image,
+                        interaction_fast=bool(render_interaction_fast),
+                    )
+                except TypeError:
+                    self.preview_canvas.set_image_fit_to_view(preview_image)
             else:
                 self.preview_canvas.set_image(preview_image)
                 self.preview_canvas.fit_to_view()
@@ -526,12 +552,13 @@ def _render_preview_image(
         else:
             self._refresh_preview_legend_backdrop()
             self._update_preview_canvas_metrics_overlay()
-            try:
-                self.preview_canvas.after_idle(
-                    lambda: self._update_preview_canvas_metrics_overlay(force_render=True)
-                )
-            except Exception:
-                pass
+            if not render_interaction_fast:
+                try:
+                    self.preview_canvas.after_idle(
+                        lambda: self._update_preview_canvas_metrics_overlay(force_render=True)
+                    )
+                except Exception:
+                    pass
             self._place_preview_overlay_dock()
             self._place_preview_campaign_gate_overlay()
     except Exception as e:
@@ -597,7 +624,19 @@ def _schedule_preview_post_interaction_refresh(self, delay_ms: int = 360) -> Non
             return
         if getattr(self, "_preview_super_correction_drag_state", None) is not None:
             return
+        try:
+            quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=260)
+        except Exception:
+            quiet_remaining = 0
+        if quiet_remaining > 0:
+            self._schedule_preview_post_interaction_refresh(delay_ms=quiet_remaining)
+            return
+
+        started_at = time.perf_counter()
         self._refresh_preview_canvas()
+        elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
+        if elapsed_ms >= 120.0:
+            logger.info("[Z2 PERF] post_interaction_refresh total=%.1fms", elapsed_ms)
 
     try:
         self._preview_post_interaction_refresh_after_id = self.frame.after(
@@ -1135,8 +1174,12 @@ def _draw_preview_plate_combo_overlay(
         accent = str(theme.get("shell_outline", "#2fbf71"))
         warning = "#f1c40f"
         error = "#ff5b5b"
-        value_fill = accent if bool(image_approved) and total > 0 else (warning if total > 0 else error)
+        is_ok = bool(image_approved) and total > 0
+        value_fill = accent if is_ok else (warning if total > 0 else error)
         outline = value_fill
+        status_text = "OK" if is_ok else "NOK"
+        status_fill = "#21a765" if is_ok else "#d64545"
+        status_outline = "#8ff0b8" if is_ok else "#ff9a9a"
         font_cache = getattr(self, "_preview_plate_combo_font_cache", None)
         if not isinstance(font_cache, dict):
             font_cache = {}
@@ -1152,8 +1195,10 @@ def _draw_preview_plate_combo_overlay(
 
         label_font = _combo_font(8, "bold", "Segoe UI")
         value_font = _combo_font(24, "bold", "Bahnschrift SemiBold")
+        status_font = _combo_font(18, "bold", "Bahnschrift SemiBold")
         title_w = float(label_font.measure(title_text))
         value_w = float(value_font.measure(value_text))
+        status_w = float(status_font.measure(status_text))
         title_h = max(12.0, float(label_font.metrics("linespace") or 12))
         value_h = max(28.0, float(value_font.metrics("linespace") or 28))
         pad_x = 10.0
@@ -1161,7 +1206,8 @@ def _draw_preview_plate_combo_overlay(
         gap = 8.0
         title_box_w = max(72.0, title_w + (pad_x * 2.0))
         value_box_w = max(88.0, value_w + (pad_x * 2.0))
-        combo_w = title_box_w + gap + value_box_w
+        status_box_w = max(70.0, status_w + (pad_x * 2.0))
+        combo_w = title_box_w + gap + value_box_w + gap + status_box_w
         combo_h = max(34.0, value_h + (pad_y * 2.0))
         x1 = (canvas_width - combo_w) / 2.0
         y1 = 12.0
@@ -1171,6 +1217,8 @@ def _draw_preview_plate_combo_overlay(
         y2 = y1 + combo_h
         title_x2 = x1 + title_box_w
         value_x1 = title_x2 + gap
+        value_x2 = value_x1 + value_box_w
+        status_x1 = value_x2 + gap
 
         shadow_offset = 2.0
         canvas.create_rectangle(
@@ -1195,10 +1243,20 @@ def _draw_preview_plate_combo_overlay(
         canvas.create_rectangle(
             value_x1,
             y1,
-            x2,
+            value_x2,
             y2,
             outline=outline,
             fill=panel_fill,
+            width=2,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_rectangle(
+            status_x1,
+            y1,
+            x2,
+            y2,
+            outline=status_outline,
+            fill=status_fill,
             width=2,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
@@ -1218,6 +1276,15 @@ def _draw_preview_plate_combo_overlay(
             fill=value_fill,
             anchor="center",
             font=value_font,
+            tags=("preview_overlay", "preview_plate_combo_overlay"),
+        )
+        canvas.create_text(
+            status_x1 + (status_box_w / 2.0),
+            y1 + (combo_h / 2.0) - 1.0,
+            text=status_text,
+            fill="#f7fff9",
+            anchor="center",
+            font=status_font,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
         canvas.tag_raise("preview_plate_combo_overlay")
@@ -2084,6 +2151,7 @@ def _schedule_preview_autosave(
         requested_delay_ms = int(delay_ms)
     except Exception:
         requested_delay_ms = 900
+    requested_delay_ms = max(requested_delay_ms, PREVIEW_CORRECTION_AUTOSAVE_DELAY_MS)
     if bool(getattr(self, "_preview_super_correction_active", False)):
         # In super correction the user often moves from corner to corner and
         # plate to plate very quickly.  Saving the whole CVAT XML for a 9k-image
@@ -2099,16 +2167,34 @@ def _schedule_preview_autosave(
         except Exception:
             pass
     self._cancel_preview_autosave()
+
+    def _flush_autosave() -> None:
+        self._preview_autosave_after_id = None
+        quiet_remaining = 0
+        try:
+            quiet_remaining = self._preview_user_interaction_quiet_remaining_ms(padding_ms=350)
+        except Exception:
+            quiet_remaining = 0
+        if quiet_remaining > 0:
+            self._schedule_preview_autosave(
+                delay_ms=quiet_remaining,
+                status_message=status_message,
+                refresh_workflow=bool(refresh_workflow),
+                refresh_export_sources=bool(refresh_export_sources),
+            )
+            return
+        self._save_preview_edits(
+            interactive=False,
+            status_message=status_message or "Zapisano korekte polygonu do annotations.xml.",
+            refresh_list=False,
+            refresh_workflow=bool(refresh_workflow),
+            refresh_export_sources=bool(refresh_export_sources),
+        )
+
     try:
         self._preview_autosave_after_id = self.frame.after(
             int(requested_delay_ms),
-            lambda: self._save_preview_edits(
-                interactive=False,
-                status_message=status_message or "Zapisano korekte polygonu do annotations.xml.",
-                refresh_list=False,
-                refresh_workflow=bool(refresh_workflow),
-                refresh_export_sources=bool(refresh_export_sources),
-            ),
+            _flush_autosave,
         )
     except Exception:
         self._preview_autosave_after_id = None
@@ -2119,6 +2205,7 @@ def _defer_preview_autosave_for_navigation(self, delay_ms: int = 4500):
         return
     if not self._preview_dirty_images:
         return
+    delay_ms = max(int(delay_ms), PREVIEW_CORRECTION_AUTOSAVE_DELAY_MS)
     if bool(getattr(self, "_preview_super_correction_active", False)):
         delay_ms = max(int(delay_ms), SUPER_CORRECTION_AUTOSAVE_DELAY_MS)
     self._schedule_preview_autosave(delay_ms=max(2500, int(delay_ms)))
@@ -2411,6 +2498,10 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
 
     if canvas is not self.preview_canvas:
         return False
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
 
     ann = self._get_preview_annotation()
     if ann is None or canvas.original_image is None:
@@ -2652,6 +2743,10 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
 def on_zoomable_canvas_drag(self, canvas: ZoomableCanvas, event):
     if canvas is not self.preview_canvas:
         return False
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
 
     canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
@@ -2771,6 +2866,10 @@ def on_zoomable_canvas_drag(self, canvas: ZoomableCanvas, event):
 def on_zoomable_canvas_release(self, canvas: ZoomableCanvas, event):
     if canvas is not self.preview_canvas:
         return False
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
 
     if isinstance(getattr(self, "_preview_super_correction_drag_state", None), dict):
         self._preview_super_correction_drag_state = None
@@ -3159,6 +3258,10 @@ def _on_preview_list_mouse_secondary(self, event):
 
 def _on_preview_select(self, event, *, defer_render: bool = True):
     select_started = time.perf_counter()
+    try:
+        self._mark_preview_user_interaction(quiet_ms=1400)
+    except Exception:
+        pass
     if getattr(self, "_suppress_preview_reload_on_list_select", False):
         self._suppress_preview_reload_on_list_select = False
         _refresh_preview_group_selection_anchor_style(self)

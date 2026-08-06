@@ -368,6 +368,8 @@ class AnnotationTab:
         self._campaign_char_effective_refresh_after_id = None
         self._preview_approved_persist_after_id = None
         self._preview_approval_followup_after_id = None
+        self._preview_campaign_post_approval_after_id = None
+        self._preview_user_interaction_quiet_until = 0.0
         self._preview_resume_persist_after_id = None
         self._preview_any_auto_in_run_cache = None
         self._preview_list_summary_cache = None
@@ -2746,6 +2748,8 @@ class AnnotationTab:
         return z2_canvas_interaction.on_zoomable_canvas_should_block_pan(self, *args, **kwargs)
     def on_zoomable_canvas_zoom(self, *args, **kwargs):
         return z2_canvas_interaction.on_zoomable_canvas_zoom(self, *args, **kwargs)
+    def on_zoomable_canvas_final_quality_delay_ms(self, *args, **kwargs):
+        return z2_canvas_interaction.on_zoomable_canvas_final_quality_delay_ms(self, *args, **kwargs)
     def _get_preview_canvas_cursor(self, *args, **kwargs):
         return z2_canvas_interaction._get_preview_canvas_cursor(self, *args, **kwargs)
     def _undo_preview_edit(self, *args, **kwargs):
