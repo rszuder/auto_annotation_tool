@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from datetime import datetime
 
 from ..campaign_manager import CAMPAIGN
 
@@ -34,6 +35,10 @@ def build_step3_export_summary(
     gold_exists = bool(gold_dataset_path and Path(gold_dataset_path).exists())
     review_exists = bool(review_pack_path and Path(review_pack_path).exists())
     retry_exists = bool(retry_pack_path and Path(retry_pack_path).exists())
+    try:
+        campaign_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+    except Exception:
+        campaign_iteration = 0
 
     return {
         "gold_dataset_created": gold_exists,
@@ -51,6 +56,10 @@ def build_step3_export_summary(
         "perfect_strategy_counts": counts.get("strategy_counts", host._empty_perfect_strategy_counts()),
         "perfect_strategy_char_counts": counts.get("strategy_char_counts", host._empty_perfect_strategy_counts()),
         "selected_gold_export_strategies": sorted(host._get_selected_gold_export_strategy_buckets()),
+        "iteration": int(campaign_iteration or 0),
+        "source_iteration": int(campaign_iteration or 0),
+        "created_iteration": int(campaign_iteration or 0),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
         "note": note,
     }
 

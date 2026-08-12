@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from tkinter import messagebox
 
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
@@ -26,6 +27,13 @@ class CampaignGraphActionResult:
     ok: bool
     action: str
     message: str = ""
+
+
+_E1_RESOURCE_CONTRACT_PATH_GROUPS = {
+    "plate_training": "T01",
+    "char_from_images": "T01",
+    "char_from_ready_plates": "T02",
+}
 
 
 def _safe_update_status(host: Any, message: str, tone: str = "info") -> None:
@@ -49,6 +57,110 @@ def _safe_refresh_wizard(host: Any) -> None:
         pass
 
 
+def _e1_resource_contract_group(path: str | None) -> str:
+    return _E1_RESOURCE_CONTRACT_PATH_GROUPS.get(normalize_iteration_path(path), "")
+
+
+def _e1_resource_contract_path_label(path: str | None) -> str:
+    normalized = normalize_iteration_path(path)
+    if normalized in {"plate_training", "char_from_images"}:
+        return "T01"
+    if normalized == "char_from_ready_plates":
+        return "T02"
+    return "E1"
+
+
+def _confirm_e1_resource_contract_rollback(host: Any, previous_path: str, next_path: str) -> bool:
+    previous_label = _e1_resource_contract_path_label(previous_path)
+    next_label = _e1_resource_contract_path_label(next_path)
+    parent = None
+    try:
+        frame = getattr(host, "frame", None)
+        if frame is not None:
+            parent = frame.winfo_toplevel()
+    except Exception:
+        parent = None
+    try:
+        return bool(
+            messagebox.askyesno(
+                "Porzucić roboczy wybór?",
+                (
+                    f"Masz roboczo zmienione zasoby w {previous_label}.\n\n"
+                    f"Przejście do {next_label} przywróci aktywny stan zasobów do początku bieżącej iteracji. "
+                    "Pliki robocze nie zostaną skasowane, ale nie będą użyte przez wybraną teraz bramkę.\n\n"
+                    f"Czy przejść do {next_label} i porzucić szkic {previous_label}?"
+                ),
+                parent=parent,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _prepare_e1_resource_contract_switch(host: Any, normalized_path: str) -> CampaignGraphActionResult | None:
+    next_group = _e1_resource_contract_group(normalized_path)
+    if not next_group:
+        return None
+
+    try:
+        previous_path = normalize_iteration_path(CAMPAIGN.get_explicit_iteration_path())
+    except Exception:
+        previous_path = ""
+    previous_group = _e1_resource_contract_group(previous_path)
+    if not previous_group:
+        try:
+            CAMPAIGN.ensure_e1_resource_contract_baseline()
+        except Exception:
+            pass
+        return None
+    if previous_path == normalized_path or previous_group == next_group:
+        try:
+            CAMPAIGN.ensure_e1_resource_contract_baseline()
+        except Exception:
+            pass
+        return None
+
+    try:
+        contract_state = dict(CAMPAIGN.get_e1_resource_contract_state() or {})
+    except Exception:
+        contract_state = {}
+    if not bool(contract_state.get("baseline_ready")):
+        try:
+            CAMPAIGN.ensure_e1_resource_contract_baseline()
+        except Exception:
+            pass
+        return None
+    if not bool(contract_state.get("has_draft")):
+        return None
+
+    if not _confirm_e1_resource_contract_rollback(host, previous_path, normalized_path):
+        message = "Pozostawiono bieżący szkic zasobów E1 bez zmian."
+        _safe_update_status(host, message, "info")
+        return CampaignGraphActionResult(False, "set_iteration_path", message)
+
+    try:
+        restored = bool(
+            CAMPAIGN.restore_e1_resource_contract_baseline(
+                from_path=previous_path,
+                to_path=normalized_path,
+            )
+        )
+    except Exception as exc:
+        logger.error(f"Nie udało się przywrócić bazowego kontraktu E1: {exc}")
+        restored = False
+    if not restored:
+        message = "Nie udało się przywrócić bazowego stanu zasobów E1. Przełączanie bramki przerwano."
+        _safe_update_status(host, message, "warning")
+        return CampaignGraphActionResult(False, "set_iteration_path", message)
+
+    _safe_update_status(
+        host,
+        f"Porzucono szkic {_e1_resource_contract_path_label(previous_path)} i przywrócono zasoby do początku iteracji.",
+        "info",
+    )
+    return None
+
+
 def _execute_set_iteration_path(host: Any, payload: Mapping[str, Any]) -> CampaignGraphActionResult:
     normalized_path = normalize_iteration_path(
         payload.get("path_key")
@@ -56,6 +168,21 @@ def _execute_set_iteration_path(host: Any, payload: Mapping[str, Any]) -> Campai
         or payload.get("path")
     )
     target = iteration_path_target(normalized_path)
+    try:
+        t01_state = dict(CAMPAIGN.get_t01_entry_commit_state() or {})
+        t01_committed = bool(t01_state.get("committed"))
+    except Exception:
+        t01_state = {}
+        t01_committed = False
+    if t01_committed:
+        locked_path = normalize_iteration_path(t01_state.get("path") or "")
+        if normalized_path != locked_path:
+            message = (
+                "Ta iteracja ma juz zatwierdzona sciezke T01. "
+                "Zmiana wyboru bedzie dostepna dopiero w kolejnej iteracji albo po osobnym cofnieciu T01."
+            )
+            _safe_update_status(host, message, "warning")
+            return CampaignGraphActionResult(False, "set_iteration_path", message)
     if normalized_path and normalized_path != "char_from_ready_plates":
         try:
             t02_committed = bool(CAMPAIGN.is_t02_at_review_committed_current_iteration())
@@ -70,6 +197,10 @@ def _execute_set_iteration_path(host: Any, payload: Mapping[str, Any]) -> Campai
             return CampaignGraphActionResult(False, "set_iteration_path", message)
     if not normalized_path or target not in {"plate", "char"}:
         return CampaignGraphActionResult(False, "set_iteration_path", "Nieznana ścieżka E1.")
+
+    contract_switch_result = _prepare_e1_resource_contract_switch(host, normalized_path)
+    if contract_switch_result is not None:
+        return contract_switch_result
 
     try:
         previous_target = str(host._get_iteration_target() or "").strip().lower()

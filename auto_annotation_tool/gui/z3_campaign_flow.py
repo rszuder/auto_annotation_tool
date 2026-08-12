@@ -261,6 +261,16 @@ def _mark_t06_pz3_contract(
     valid = bool(data.get("gold_dataset_created")) and bool(data.get("gold_dataset_valid", True)) and bool(dataset_path)
     if not valid:
         return
+    try:
+        source_iteration = int(
+            data.get("source_iteration")
+            or data.get("created_iteration")
+            or data.get("iteration")
+            or CAMPAIGN.get_current_iteration_num()
+            or 1
+        )
+    except Exception:
+        source_iteration = 1
     _mark_t06_contract(
         host,
         "pz3_char_dataset",
@@ -276,6 +286,9 @@ def _mark_t06_pz3_contract(
             "gold_dataset_valid": bool(data.get("gold_dataset_valid", True)),
             "summary_path": str(data.get("_summary_path") or data.get("summary_path") or ""),
             "summary_dir": str(data.get("_summary_dir") or data.get("summary_dir") or ""),
+            "iteration": int(source_iteration or 0),
+            "source_iteration": int(source_iteration or 0),
+            "created_iteration": int(source_iteration or 0),
             "fulfilled_at": datetime.now().isoformat(timespec="seconds"),
         },
     )

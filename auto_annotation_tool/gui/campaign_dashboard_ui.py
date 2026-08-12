@@ -7,6 +7,7 @@ import os
 import re
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 from pathlib import Path
 from textwrap import shorten
 from collections import Counter
@@ -275,9 +276,27 @@ def _format_char_dataset_resource_status(char_gate: dict | None) -> tuple[str, s
     except Exception:
         perfect_count = 0
     counter = str(char_count) if ok and char_count > 0 else ""
+    try:
+        source_iteration = int(gate.get("source_iteration") or gate.get("pz3_iteration") or gate.get("iteration") or 0)
+    except Exception:
+        source_iteration = 0
+    try:
+        current_iteration = int(gate.get("current_iteration") or 0)
+    except Exception:
+        current_iteration = 0
+    origin_text = ""
+    if source_iteration > 0:
+        if current_iteration > 0 and source_iteration == current_iteration:
+            origin_text = f"IT{source_iteration} | bieżąca iteracja"
+        elif current_iteration > 0 and source_iteration < current_iteration:
+            origin_text = f"IT{source_iteration} | wcześniejsza iteracja"
+        else:
+            origin_text = f"IT{source_iteration}"
 
     if ok:
         source = _campaign_dataset_display_id(ready_dataset, target_hint="char") if ready_dataset else "Dataset znaków YOLO"
+        if origin_text:
+            source = f"{source} | {origin_text}"
         if reason == "source_dataset_ready_for_split":
             detail = (
                 "Gotowe: praca „Przygotuj dataset znaków w Z3” utworzyła źródłowy dataset znaków YOLO Detect. "
@@ -292,6 +311,8 @@ def _format_char_dataset_resource_status(char_gate: dict | None) -> tuple[str, s
             detail += f" Etykiety znaków: {char_count}."
         if perfect_count > 0:
             detail += f" Tablice perfect: {perfect_count}."
+        if origin_text:
+            detail += f" Pochodzenie gotowości: {origin_text}."
         return source, detail, "success", counter
 
     if reason == "missing_char_boxes":
@@ -1404,6 +1425,14 @@ def _render_step1_route_actions(self, frame):
             if current_target == "char" and material_ready
             else default_iteration_path_for_target(current_target)
         )
+    try:
+        t02_review_committed_current_iteration = bool(CAMPAIGN.is_t02_at_review_committed_current_iteration())
+    except Exception:
+        t02_review_committed_current_iteration = False
+    try:
+        t01_entry_committed_current_iteration = bool(CAMPAIGN.is_t01_entry_committed_current_iteration())
+    except Exception:
+        t01_entry_committed_current_iteration = False
 
     def _current_t07_graph_edge_key() -> str:
         normalized_path = normalize_iteration_path(selected_path)
@@ -1664,6 +1693,10 @@ def _render_step1_route_actions(self, frame):
     if not isinstance(gate_offsets, dict):
         gate_offsets = {}
         self._campaign_graph_gate_offsets = gate_offsets
+    auto_gate_positions = getattr(self, "_campaign_graph_auto_gate_positions", None)
+    if not isinstance(auto_gate_positions, dict):
+        auto_gate_positions = {}
+        self._campaign_graph_auto_gate_positions = auto_gate_positions
     node_offsets = getattr(self, "_campaign_graph_node_offsets", None)
     if not isinstance(node_offsets, dict):
         node_offsets = {}
@@ -1687,6 +1720,7 @@ def _render_step1_route_actions(self, frame):
         "anchor_world_y": None,
     }
     node_drag_state = {"stage_key": "", "start_x": 0, "start_y": 0, "orig_x": 0.0, "orig_y": 0.0}
+    graph_focus_state = {"kind": "", "key": ""}
     graph_pan_state = {
         "active": False,
         "start_x": 0,
@@ -1700,8 +1734,9 @@ def _render_step1_route_actions(self, frame):
     graph_redraw_state = {"after_id": None}
     graph_drag_redraw_state = {"after_id": None}
     graph_zoom_preview_state = {"after_id": None, "factor": 1.0, "x": 0.0, "y": 0.0}
-    graph_zoom_preview_delay_ms = 10
-    graph_zoom_redraw_delay_ms = 180
+    graph_zoom_text_preview_cache: dict[int, dict[str, object]] = {}
+    graph_zoom_preview_delay_ms = 8
+    graph_zoom_redraw_delay_ms = 120
     gate_geometry: dict[str, dict[str, float]] = {}
     gate_field_geometry: dict[str, dict[str, float | str]] = {}
     gate_selector_geometry: dict[str, dict[str, float | str | bool]] = {}
@@ -1875,12 +1910,14 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             pass
         try:
+            card_success = "#126f3f"
+            card_surface = "#edf0f2"
             canvas.itemconfigure(
                 "gate_approve_blink_rect",
-                fill=blend_hex_colors(card_bg, success, 0.10),
-                outline=blend_hex_colors(success, card_bg, 0.30),
+                fill=blend_hex_colors(card_surface, card_success, 0.16),
+                outline=blend_hex_colors(card_success, card_bg, 0.18),
             )
-            canvas.itemconfigure("gate_approve_blink_text", fill=success)
+            canvas.itemconfigure("gate_approve_blink_text", fill="#101316")
         except Exception:
             pass
         self._campaign_graph_approve_blink_after_id = None
@@ -1922,14 +1959,16 @@ def _render_step1_route_actions(self, frame):
                 return
             phase = not bool(getattr(self, "_campaign_graph_approve_blink_phase", False))
             self._campaign_graph_approve_blink_phase = phase
+            card_success = "#126f3f"
+            card_surface = "#edf0f2"
             if phase:
-                rect_fill = blend_hex_colors(success, card_bg, 0.42)
-                rect_outline = blend_hex_colors(success, "#ffffff", 0.36)
+                rect_fill = blend_hex_colors(card_surface, card_success, 0.34)
+                rect_outline = blend_hex_colors(card_success, "#101316", 0.10)
                 text_fill = "#ffffff"
             else:
-                rect_fill = blend_hex_colors(card_bg, success, 0.13)
-                rect_outline = blend_hex_colors(success, card_bg, 0.28)
-                text_fill = success
+                rect_fill = blend_hex_colors(card_surface, card_success, 0.16)
+                rect_outline = blend_hex_colors(card_success, card_bg, 0.18)
+                text_fill = "#101316"
             canvas.itemconfigure("gate_approve_blink_rect", fill=rect_fill, outline=rect_outline)
             canvas.itemconfigure("gate_approve_blink_text", fill=text_fill)
             self._campaign_graph_approve_blink_after_id = canvas.after(520, _pulse_gate_approve_fields)
@@ -1951,6 +1990,86 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             _stop_gate_approve_blink()
 
+    def _raise_graph_overlay_layers() -> None:
+        try:
+            if not canvas.find_withtag("graph_toolbar_overlay") or not canvas.find_withtag("graph_layout_reset"):
+                canvas.delete("graph_overlay_fixed")
+                _draw_graph_toolbar_overlay()
+                _draw_graph_legend()
+        except NameError:
+            pass
+        except Exception:
+            pass
+        for tag in (
+            "gate_selector_arc_anim",
+            "gate_approve_blink_rect",
+            "gate_approve_blink_text",
+            "gate_field_hover",
+            "gate_selector_tooltip",
+            "graph_attention_flow",
+            "graph_overlay_fixed",
+        ):
+            try:
+                canvas.tag_raise(tag)
+            except Exception:
+                pass
+
+    def _raise_graph_gate_bundle(edge_key: str) -> None:
+        normalized_key = str(edge_key or "").strip()
+        if not normalized_key:
+            return
+        for tag in (
+            f"gate-connector:{normalized_key}",
+            f"gate-group:{normalized_key}",
+            f"gate_selector_arc_anim:{normalized_key}",
+        ):
+            try:
+                canvas.tag_raise(tag)
+            except Exception:
+                pass
+
+    def _raise_graph_stage_bundle(stage_key: str) -> None:
+        normalized_stage_key = str(stage_key or "").strip().upper()
+        if not normalized_stage_key:
+            return
+        try:
+            for graph_edge in CAMPAIGN_TRANSITION_GRAPH.edges:
+                edge_key = str(getattr(graph_edge, "key", "") or "").strip()
+                if not edge_key:
+                    continue
+                source_key = str(getattr(graph_edge, "source", "") or "").strip().upper()
+                target_key = str(getattr(graph_edge, "target", "") or "").strip().upper()
+                if source_key != normalized_stage_key and target_key != normalized_stage_key:
+                    continue
+                for tag in (
+                    f"edge-line:{edge_key}",
+                    f"graph_edge_arrow:{edge_key}",
+                    f"gate-connector:{edge_key}",
+                ):
+                    try:
+                        canvas.tag_raise(tag)
+                    except Exception:
+                        pass
+            if normalized_stage_key in {"E1", "E4T", "E4Z"}:
+                for tag in ("graph_return_trunk", "graph_edge_arrow:return_trunk", "graph_return_junction"):
+                    try:
+                        canvas.tag_raise(tag)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        for tag in (f"node-output-connector:{normalized_stage_key}", f"node-group:{normalized_stage_key}"):
+            try:
+                canvas.tag_raise(tag)
+            except Exception:
+                pass
+
+    def _raise_drag_target_layers() -> None:
+        """The element grabbed by the user must visually sit above the graph."""
+
+        _raise_graph_stage_bundle(str(node_drag_state.get("stage_key") or ""))
+        _raise_graph_gate_bundle(str(gate_drag_state.get("edge_key") or ""))
+
     def _raise_graph_interactive_layers() -> None:
         """Keep graph controls clickable after overlays and timer animations repaint."""
 
@@ -1970,26 +2089,35 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 pass
         try:
-            for graph_edge in CAMPAIGN_TRANSITION_GRAPH.edges:
-                edge_key = str(getattr(graph_edge, "key", "") or "").strip()
-                if edge_key:
-                    canvas.tag_raise(f"gate-group:{edge_key}")
+            for stage_key in CAMPAIGN_GRAPH_STAGE_ORDER:
+                canvas.tag_raise(f"node-group:{stage_key}")
         except Exception:
             pass
-        for tag in (
-            "gate_button",
-            "gate_selector_arc_anim",
-            "gate_approve_blink_rect",
-            "gate_approve_blink_text",
-            "gate_field_hover",
-            "gate_selector_tooltip",
-            "graph_attention_flow",
-            "graph_overlay_fixed",
-        ):
-            try:
-                canvas.tag_raise(tag)
-            except Exception:
-                pass
+        placeholder_gate_keys: list[str] = []
+        expanded_gate_keys: list[str] = []
+        try:
+            for graph_edge in CAMPAIGN_TRANSITION_GRAPH.edges:
+                edge_key = str(getattr(graph_edge, "key", "") or "").strip()
+                if not edge_key:
+                    continue
+                if _edge_gate_active(graph_edge):
+                    expanded_gate_keys.append(edge_key)
+                else:
+                    placeholder_gate_keys.append(edge_key)
+            for edge_key in placeholder_gate_keys:
+                canvas.tag_raise(f"gate-group:{edge_key}")
+            for edge_key in expanded_gate_keys:
+                canvas.tag_raise(f"gate-group:{edge_key}")
+        except Exception:
+            pass
+        focus_kind = str(graph_focus_state.get("kind") or "").strip().lower()
+        focus_key = str(graph_focus_state.get("key") or "").strip()
+        if focus_kind == "node":
+            _raise_graph_stage_bundle(focus_key)
+        elif focus_kind == "gate":
+            _raise_graph_gate_bundle(focus_key)
+        _raise_drag_target_layers()
+        _raise_graph_overlay_layers()
 
     def _stop_gate_selector_arc_animation(*, clear_items: bool = True) -> None:
         try:
@@ -2969,6 +3097,83 @@ def _render_step1_route_actions(self, frame):
                 return None
             return None
 
+        def _positive_int(value) -> int:
+            try:
+                number = int(value or 0)
+            except Exception:
+                number = 0
+            return number if number > 0 else 0
+
+        def _summary_iteration(summary: dict | None) -> int:
+            data = dict(summary or {})
+            for field in ("source_iteration", "created_iteration", "produced_iteration", "iteration"):
+                number = _positive_int(data.get(field))
+                if number > 0:
+                    return number
+            return 0
+
+        def _path_token(path_like) -> str:
+            raw = str(path_like or "").strip()
+            if not raw:
+                return ""
+            try:
+                return str(Path(raw).resolve()).casefold()
+            except Exception:
+                try:
+                    return str(Path(raw)).replace("\\", "/").casefold()
+                except Exception:
+                    return raw.replace("\\", "/").casefold()
+
+        def _contract_path_matches(payload: dict, dataset_path: Path | str | None, summary_path: str | None) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            dataset_token = _path_token(dataset_path)
+            summary_token = _path_token(summary_path)
+            payload_dataset = _path_token(payload.get("dataset_path") or payload.get("gold_dataset_path"))
+            payload_summary = _path_token(payload.get("summary_path"))
+            return bool(
+                (dataset_token and payload_dataset and dataset_token == payload_dataset)
+                or (summary_token and payload_summary and summary_token == payload_summary)
+            )
+
+        def _infer_pz3_source_iteration(
+            payload: dict | None,
+            dataset_path: Path | str | None,
+            summary: dict | None = None,
+        ) -> int:
+            summary_data = dict(summary or {})
+            direct = _summary_iteration(summary_data)
+            if direct > 0:
+                return direct
+
+            summary_path = str(
+                summary_data.get("_summary_path")
+                or summary_data.get("summary_path")
+                or (payload or {}).get("summary_path")
+                or ""
+            ).strip()
+            candidates: list[int] = []
+            try:
+                registry = CAMPAIGN.load_artifact_registry(active_project_name or None)
+            except Exception:
+                registry = {}
+            for state_key, entry in dict((registry or {}).get("iteration_state") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                contract = dict((entry.get("t06_contracts") or {}).get("pz3_char_dataset") or {})
+                if not _contract_path_matches(contract, dataset_path, summary_path):
+                    continue
+                found = _summary_iteration(contract)
+                if found <= 0:
+                    found = _positive_int(contract.get("iteration"))
+                if found <= 0:
+                    found = _positive_int(state_key)
+                if found > 0:
+                    candidates.append(found)
+            if candidates:
+                return min(candidates)
+            return 0
+
         def _close_t06_z3_session_from_graph(reason: str) -> None:
             nonlocal session
             try:
@@ -3026,6 +3231,7 @@ def _render_step1_route_actions(self, frame):
             if dataset_path is None:
                 return {}
             now = datetime.now().isoformat(timespec="seconds")
+            source_iteration = _infer_pz3_source_iteration({}, dataset_path, summary)
             contract = {
                 "fulfilled": True,
                 "product": "char_yolo_dataset",
@@ -3038,7 +3244,9 @@ def _render_step1_route_actions(self, frame):
                 "gold_dataset_valid": True,
                 "summary_path": str(summary.get("_summary_path") or ""),
                 "summary_dir": str(summary.get("_summary_dir") or ""),
-                "iteration": int(CAMPAIGN.get_current_iteration_num() or 1),
+                "iteration": int(source_iteration or 0),
+                "source_iteration": int(source_iteration or 0),
+                "created_iteration": int(source_iteration or 0),
                 "fulfilled_at": now,
                 "updated_at": now,
             }
@@ -3103,6 +3311,18 @@ def _render_step1_route_actions(self, frame):
                 return int((payload or {}).get(key, 0) or 0)
             except Exception:
                 return 0
+
+        def _contract_iteration(payload: dict) -> int:
+            if not isinstance(payload, dict):
+                return 0
+            for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                try:
+                    iteration_num = int(payload.get(field, 0) or 0)
+                except Exception:
+                    iteration_num = 0
+                if iteration_num > 0:
+                    return iteration_num
+            return 0
 
         pz2_reason = str(pz2_contract.get("reason") or "").strip().lower()
         pz2_marker_only = pz2_reason in {"enter_pz3", "return_ready_to_graph", "dataset_exported"}
@@ -3186,12 +3406,22 @@ def _render_step1_route_actions(self, frame):
             )
             return invalid
         _close_t06_z3_session_from_graph("pz3_dataset_ready")
+        try:
+            current_iter_for_origin = int(CAMPAIGN.get_current_iteration_num() or current_iteration or 1)
+        except Exception:
+            current_iter_for_origin = 1
+        pz3_iteration = _infer_pz3_source_iteration(pz3_contract, dataset_path) or _contract_iteration(pz3_contract)
+        pz2_iteration = _contract_iteration(pz2_contract) or pz3_iteration
         return {
             "ok": True,
             "reason": "source_dataset_ready_for_split",
             "message": "",
             "ready_dataset": str(dataset_path),
             "dataset_hint": str(dataset_path),
+            "source_iteration": int(pz3_iteration or 0),
+            "current_iteration": int(current_iter_for_origin or 0),
+            "pz2_iteration": int(pz2_iteration or 0),
+            "pz3_iteration": int(pz3_iteration or 0),
             "exportable_plate_count": int(pz3_contract.get("exportable_plate_count", 0) or 0),
             "exportable_char_count": int(pz3_contract.get("exportable_char_count", 0) or 0),
             "perfect_count": int(
@@ -3460,6 +3690,14 @@ def _render_step1_route_actions(self, frame):
         if key == "char_dataset":
             snapshot = _transition_resource_snapshot("char_dataset")
             if snapshot is not None:
+                meta = resource_snapshot_meta(snapshot)
+                for field in ("source_iteration", "pz3_iteration", "iteration"):
+                    try:
+                        iteration_num = int(meta.get(field, 0) or 0)
+                    except Exception:
+                        iteration_num = 0
+                    if iteration_num > 0:
+                        return iteration_num
                 parsed = _extract_iteration_number_from_text(snapshot.source, snapshot.validation)
                 if parsed > 0:
                     return parsed
@@ -3755,6 +3993,15 @@ def _render_step1_route_actions(self, frame):
             exported_gate = _t06_exported_char_dataset_state()
             ready_dataset = str(exported_gate.get("ready_dataset") or exported_gate.get("dataset_hint") or "").strip()
             pz3_export_ready = bool(exported_gate.get("ok") and ready_dataset)
+            try:
+                exported_gate_iteration = int(
+                    exported_gate.get("source_iteration")
+                    or exported_gate.get("pz3_iteration")
+                    or exported_gate.get("iteration")
+                    or 0
+                )
+            except Exception:
+                exported_gate_iteration = 0
             session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
             session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
             session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
@@ -3797,6 +4044,9 @@ def _render_step1_route_actions(self, frame):
                         "valid_export_exists": True,
                         "ready_dataset": ready_dataset,
                         "dataset_hint": ready_dataset,
+                        "source_iteration": int(exported_gate_iteration or 0),
+                        "pz3_iteration": int(exported_gate_iteration or 0),
+                        "current_iteration": int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1),
                         "t06_work_session": dict(session or {}),
                         "unpromoted_approved_images": 0,
                         "unpromoted_approved_plates": 0,
@@ -4244,6 +4494,25 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 char_gate = {}
         char_source, char_validation, char_tone, char_counter = _format_char_dataset_resource_status(char_gate)
+        try:
+            char_source_iteration = int(char_gate.get("source_iteration", char_gate.get("iteration", 0)) or 0)
+        except Exception:
+            char_source_iteration = 0
+        try:
+            char_current_iteration = int(char_gate.get("current_iteration", current_iteration or 0) or 0)
+        except Exception:
+            try:
+                char_current_iteration = int(current_iteration or 0)
+            except Exception:
+                char_current_iteration = 0
+        try:
+            char_pz2_iteration = int(char_gate.get("pz2_iteration", 0) or 0)
+        except Exception:
+            char_pz2_iteration = 0
+        try:
+            char_pz3_iteration = int(char_gate.get("pz3_iteration", 0) or 0)
+        except Exception:
+            char_pz3_iteration = 0
         snapshots["char_dataset"] = CampaignResourceSnapshot(
             key="char_dataset",
             canonical_key="char_dataset",
@@ -4258,6 +4527,16 @@ def _render_step1_route_actions(self, frame):
                 "contract_kind": "AT->AZ",
                 "contract_ready": bool(str(char_tone or "").strip().lower() == "success"),
                 "dataset_state": dict(char_gate or {}),
+                "source_iteration": int(char_source_iteration or 0),
+                "current_iteration": int(char_current_iteration or 0),
+                "pz2_iteration": int(char_pz2_iteration or 0),
+                "pz3_iteration": int(char_pz3_iteration or 0),
+                "origin_scope": (
+                    "current"
+                    if int(char_source_iteration or 0) > 0
+                    and int(char_source_iteration or 0) == int(char_current_iteration or 0)
+                    else "previous"
+                ),
             },
         )
 
@@ -4460,7 +4739,7 @@ def _render_step1_route_actions(self, frame):
         resource_effect = _stage_resource_effect(stage_key)
         latest = _latest_history_entry_for_stage(stage_key)
         prefix = "H | " if latest else ""
-        return shorten(f"{prefix}{resource_effect or 'Brak historii'}", width=22, placeholder="...")
+        return shorten(f"{prefix}{resource_effect or 'Brak historii'}", width=30, placeholder="...")
 
     def _visible_badge_id(badge_id: str | None) -> str:
         return campaign_visible_gate_id(badge_id)
@@ -4708,6 +4987,13 @@ def _render_step1_route_actions(self, frame):
         return bool(selected_path and selected_path in edge.paths)
 
     def _edge_gate_active(edge) -> bool:
+        try:
+            if t02_review_committed_current_iteration and str(getattr(edge, "key", "") or "").strip() == "e1_to_e2":
+                return False
+            if t01_entry_committed_current_iteration and str(getattr(edge, "key", "") or "").strip() == "e1_to_e3":
+                return False
+        except Exception:
+            pass
         if current_step != _stage_num(edge.source):
             return False
         edge_paths = tuple(getattr(edge, "paths", ()) or ())
@@ -4741,12 +5027,21 @@ def _render_step1_route_actions(self, frame):
         return bool(_edge_gate_active(edge) and selected_path and selected_path in edge_paths)
 
     def _edge_select_enabled(edge) -> bool:
+        try:
+            if t02_review_committed_current_iteration and str(getattr(edge, "key", "") or "").strip() == "e1_to_e2":
+                return False
+            if t01_entry_committed_current_iteration and str(getattr(edge, "key", "") or "").strip() == "e1_to_e3":
+                return False
+        except Exception:
+            pass
         return bool(_edge_gate_active(edge))
 
     def _edge_dimmed_by_selection(edge) -> bool:
         if not _edge_gate_active(edge):
             return False
         current_key = str(getattr(edge, "key", "") or "").strip()
+        if t02_review_committed_current_iteration and current_key == "e1_to_e2":
+            return True
         selected_key = str(selected_edge_key or "").strip()
         if selected_key and selected_key != current_key:
             try:
@@ -4916,6 +5211,90 @@ def _render_step1_route_actions(self, frame):
     def _edge_resource_compact_status(edge) -> str:
         if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
             return ""
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key == "e3_to_e4":
+            try:
+                gate = dict(_t06_exported_char_dataset_state() or {})
+            except Exception:
+                gate = {}
+            ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+            if not (bool(gate.get("ok")) and ready_dataset):
+                try:
+                    contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+                    pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
+                    ready_dataset = str(pz3_contract.get("dataset_path") or "").strip()
+                    if bool(pz3_contract.get("fulfilled")) and ready_dataset:
+                        dataset_path = Path(ready_dataset)
+                        if (
+                            dataset_path.exists()
+                            and dataset_path.is_dir()
+                            and self._looks_like_campaign_char_dataset_dir(dataset_path)
+                        ):
+                            gate = {
+                                "ok": True,
+                                "ready_dataset": ready_dataset,
+                                "source_iteration": int(
+                                    pz3_contract.get("source_iteration")
+                                    or pz3_contract.get("created_iteration")
+                                    or pz3_contract.get("iteration")
+                                    or 0
+                                ),
+                            }
+                except Exception:
+                    pass
+            if bool(gate.get("ok")) and ready_dataset:
+                def _infer_badge_dataset_iteration(dataset_value: str) -> int:
+                    dataset_token = ""
+                    try:
+                        dataset_token = str(Path(dataset_value).resolve()).casefold()
+                    except Exception:
+                        dataset_token = str(dataset_value or "").replace("\\", "/").casefold()
+                    if not dataset_token:
+                        return 0
+                    found_iterations: list[int] = []
+                    try:
+                        registry = CAMPAIGN.load_artifact_registry(active_project_name or None)
+                    except Exception:
+                        registry = {}
+                    for state_key, entry in dict((registry or {}).get("iteration_state") or {}).items():
+                        if not isinstance(entry, dict):
+                            continue
+                        contract = dict((entry.get("t06_contracts") or {}).get("pz3_char_dataset") or {})
+                        contract_dataset = str(contract.get("dataset_path") or "").strip()
+                        if not contract_dataset:
+                            continue
+                        try:
+                            contract_token = str(Path(contract_dataset).resolve()).casefold()
+                        except Exception:
+                            contract_token = contract_dataset.replace("\\", "/").casefold()
+                        if contract_token != dataset_token:
+                            continue
+                        try:
+                            found_iterations.append(int(state_key or contract.get("iteration") or 0))
+                        except Exception:
+                            continue
+                    return min(found_iterations) if found_iterations else 0
+
+                try:
+                    source_iteration = int(
+                        gate.get("source_iteration")
+                        or gate.get("pz3_iteration")
+                        or gate.get("iteration")
+                        or 0
+                    )
+                except Exception:
+                    source_iteration = 0
+                try:
+                    current_iter = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+                except Exception:
+                    current_iter = 1
+                inferred_iteration = _infer_badge_dataset_iteration(ready_dataset)
+                if inferred_iteration > 0 and (source_iteration <= 0 or inferred_iteration < source_iteration):
+                    source_iteration = inferred_iteration
+                if source_iteration > 0:
+                    suffix = "z poprzednich iteracji" if source_iteration < current_iter else "z bieżącej iteracji"
+                    return f"OK: AZ z IT{source_iteration} ({suffix})"
+                return "OK: AZ gotowy"
         if _is_t07_graph_edge(getattr(edge, "key", "")):
             if _current_step4_work_interruption_state():
                 return "PRZERWANE"
@@ -6115,7 +6494,7 @@ def _render_step1_route_actions(self, frame):
                 action_status_color = warning
             elif t05_pool_images > 0 or t05_pool_plates > 0:
                 action_status = (
-                    f"WYKONANE: {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic w puli YOLO\n"
+                    f"Pula YOLO: {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic\n"
                     f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                 )
                 action_status_color = success
@@ -6139,9 +6518,9 @@ def _render_step1_route_actions(self, frame):
                         f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                     )
             elif t05_pool_images > 0 or t05_pool_plates > 0:
-                action_title = "WYKONANE"
+                action_title = "PULA YOLO"
                 action_detail = (
-                    f"W tej iteracji: {t05_pool_images} zdj\u0119\u0107 [OK] / {t05_pool_plates} tablic.\n"
+                    f"W tej iteracji w puli: {t05_pool_images} zdj\u0119\u0107 [OK] / {t05_pool_plates} tablic.\n"
                     f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                 )
             else:
@@ -7227,6 +7606,108 @@ def _render_step1_route_actions(self, frame):
                 t06_contracts_cache = {}
             return dict(t06_contracts_cache)
 
+        def _t06_current_iteration_number() -> int:
+            try:
+                return max(1, int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1))
+            except Exception:
+                return 1
+
+        def _t06_contract_iteration(payload: dict) -> int:
+            if not isinstance(payload, dict):
+                return 0
+            for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                try:
+                    iteration_num = int(payload.get(field, 0) or 0)
+                except Exception:
+                    iteration_num = 0
+                if iteration_num > 0:
+                    return iteration_num
+            return 0
+
+        def _t06_contract_path_token(path_like) -> str:
+            raw = str(path_like or "").strip()
+            if not raw:
+                return ""
+            try:
+                return str(Path(raw).resolve()).casefold()
+            except Exception:
+                return raw.replace("\\", "/").casefold()
+
+        def _t06_contract_artifact_origin_iteration(payload: dict) -> int:
+            direct_iteration = _t06_contract_iteration(payload)
+            dataset_token = _t06_contract_path_token(
+                (payload or {}).get("dataset_path") or (payload or {}).get("gold_dataset_path")
+            )
+            summary_token = _t06_contract_path_token((payload or {}).get("summary_path"))
+            if not dataset_token and not summary_token:
+                return direct_iteration
+            candidates: list[int] = []
+            try:
+                registry = CAMPAIGN.load_artifact_registry(active_project_name or None)
+            except Exception:
+                registry = {}
+            for state_key, state_entry in dict((registry or {}).get("iteration_state") or {}).items():
+                if not isinstance(state_entry, dict):
+                    continue
+                contract = dict((state_entry.get("t06_contracts") or {}).get("pz3_char_dataset") or {})
+                if not contract:
+                    continue
+                other_dataset = _t06_contract_path_token(contract.get("dataset_path") or contract.get("gold_dataset_path"))
+                other_summary = _t06_contract_path_token(contract.get("summary_path"))
+                if not (
+                    (dataset_token and other_dataset and dataset_token == other_dataset)
+                    or (summary_token and other_summary and summary_token == other_summary)
+                ):
+                    continue
+                found = _t06_contract_iteration(contract)
+                if found <= 0:
+                    try:
+                        found = int(state_key or 0)
+                    except Exception:
+                        found = 0
+                if found > 0:
+                    candidates.append(found)
+            if candidates:
+                return min(candidates)
+            return direct_iteration
+
+        def _t06_contract_is_current_iteration(payload: dict) -> bool:
+            iteration_num = _t06_contract_iteration(payload)
+            return bool(iteration_num > 0 and iteration_num == _t06_current_iteration_number())
+
+        def _t06_contract_is_current_user_work(payload: dict) -> bool:
+            """Backfills restore readiness, but they are not CTA work done now."""
+
+            if not _t06_contract_is_current_iteration(payload):
+                return False
+            reason = str((payload or {}).get("reason") or "").strip().lower()
+            if reason in {
+                "approve_step3_backfill",
+                "graph_backfill_from_pz3_summary",
+                "summary_backfill",
+                "summary_backfill_after_pz3_session",
+                "replace_approve_backfill_with_pz3_export",
+            }:
+                return False
+            if reason.startswith("graph_backfill") or reason.startswith("summary_backfill"):
+                return False
+            if str((payload or {}).get("product") or "").strip().lower() == "char_yolo_dataset":
+                origin_iteration = _t06_contract_artifact_origin_iteration(payload)
+                if origin_iteration > 0 and origin_iteration != _t06_current_iteration_number():
+                    return False
+            return True
+
+        def _t06_contract_origin_label(contract_key: str) -> str:
+            try:
+                contract = dict(_t06_contracts().get(str(contract_key or "").strip()) or {})
+            except Exception:
+                contract = {}
+            if str(contract_key or "").strip() == "pz3_char_dataset":
+                iteration_num = _t06_contract_artifact_origin_iteration(contract)
+            else:
+                iteration_num = _t06_contract_iteration(contract)
+            return _t06_origin_label(iteration_num) if iteration_num > 0 else ""
+
         def _t06_pz2_contract_ready() -> bool:
             contracts = _t06_contracts()
             pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
@@ -7235,6 +7716,11 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 legacy_pz2_done = False
             return bool(pz2_contract.get("fulfilled") or legacy_pz2_done)
+
+        def _t06_pz2_contract_ready_current() -> bool:
+            contracts = _t06_contracts()
+            pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+            return bool(pz2_contract.get("fulfilled") and _t06_contract_is_current_user_work(pz2_contract))
 
         def _t06_pz3_contract_ready() -> bool:
             try:
@@ -7267,6 +7753,59 @@ def _render_step1_route_actions(self, frame):
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             return bool(gate.get("ok") and ready_dataset)
 
+        def _t06_pz3_contract_ready_current() -> bool:
+            contracts = _t06_contracts()
+            pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
+            pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+            dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
+            if (
+                bool(pz3_contract.get("fulfilled"))
+                and dataset_raw
+                and pz3_reason != "approve_step3_backfill"
+                and _t06_contract_is_current_user_work(pz3_contract)
+            ):
+                try:
+                    dataset_path = Path(dataset_raw)
+                    if dataset_path.exists() and dataset_path.is_dir() and self._looks_like_campaign_char_dataset_dir(dataset_path):
+                        return True
+                except Exception:
+                    return True
+            gate = _t06_char_gate()
+            ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+            try:
+                gate_iteration = int(gate.get("source_iteration") or gate.get("pz3_iteration") or gate.get("iteration") or 0)
+            except Exception:
+                gate_iteration = 0
+            return bool(gate.get("ok") and ready_dataset and gate_iteration == _t06_current_iteration_number())
+
+        def _t06_origin_label(iteration_num: int) -> str:
+            try:
+                origin_iter = int(iteration_num or 0)
+            except Exception:
+                origin_iter = 0
+            if origin_iter <= 0:
+                return "nieustalona iteracja"
+            try:
+                current_iter = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+            except Exception:
+                current_iter = 1
+            if origin_iter == current_iter:
+                return f"IT{origin_iter}, bieżąca iteracja"
+            if origin_iter < current_iter:
+                return f"IT{origin_iter}, wcześniejsza iteracja"
+            return f"IT{origin_iter}"
+
+        def _t06_char_dataset_origin_label() -> str:
+            gate = _t06_char_gate()
+            for field in ("source_iteration", "pz3_iteration", "iteration"):
+                try:
+                    iteration_num = int(gate.get(field, 0) or 0)
+                except Exception:
+                    iteration_num = 0
+                if iteration_num > 0:
+                    return _t06_origin_label(iteration_num)
+            return ""
+
         def _t06_pending_z3_targets_pz3() -> bool:
             if not pending_z3_work:
                 return False
@@ -7274,7 +7813,7 @@ def _render_step1_route_actions(self, frame):
                 return False
             if pending_substep in t06_pz3_substep_hints:
                 return True
-            return _t06_pz2_contract_ready()
+            return _t06_pz2_contract_ready_current()
 
         def _t06_pending_z3_targets_pz2() -> bool:
             if not pending_z3_work:
@@ -7287,13 +7826,26 @@ def _render_step1_route_actions(self, frame):
             if not (pending_z3_work and _t06_pending_z3_targets_pz2()):
                 return False
             try:
-                if bool((pending_t06 or {}).get("valid_export_exists")):
+                pending_iteration = int(
+                    (pending_t06 or {}).get("source_iteration")
+                    or (pending_t06 or {}).get("pz3_iteration")
+                    or (pending_t06 or {}).get("iteration")
+                    or 0
+                )
+            except Exception:
+                pending_iteration = 0
+            pending_is_current = bool(pending_iteration > 0 and pending_iteration == _t06_current_iteration_number())
+            try:
+                if bool((pending_t06 or {}).get("valid_export_exists")) and pending_is_current:
                     return True
-                if str((pending_t06 or {}).get("ready_dataset") or (pending_t06 or {}).get("dataset_hint") or "").strip():
+                if (
+                    str((pending_t06 or {}).get("ready_dataset") or (pending_t06 or {}).get("dataset_hint") or "").strip()
+                    and pending_is_current
+                ):
                     return True
             except Exception:
                 pass
-            return bool(_t06_pz3_contract_ready())
+            return bool(_t06_pz3_contract_ready_current())
 
         def _t06_plate_pool_summary() -> tuple[int, int]:
             nonlocal t06_pool_stats_cache
@@ -7502,8 +8054,27 @@ def _render_step1_route_actions(self, frame):
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             if bool(gate.get("ok")) and ready_dataset:
-                return ("Bramka gotowa. Użyj Zatwierdź na grafie.", "")
-            if not _t06_pz2_contract_ready() and pz2_label:
+                origin = _t06_char_dataset_origin_label()
+                if _t06_pz3_contract_ready_current():
+                    if origin:
+                        return (
+                            f"Bramka gotowa dzięki AZ z {origin}. Użyj Zatwierdź, jeśli chcesz przejść dalej.",
+                            "",
+                        )
+                    return ("Bramka gotowa. Użyj Zatwierdź na grafie.", "")
+                if not _t06_pz2_contract_ready_current() and pz2_label:
+                    return (
+                        f"Bramka może być zatwierdzona na podstawie AZ z {origin or 'poprzedniej iteracji'}, "
+                        "ale praca bieżącej iteracji startuje od kroku 1.",
+                        pz2_label,
+                    )
+                if z3_label:
+                    return (
+                        f"Bramka może być zatwierdzona na podstawie AZ z {origin or 'poprzedniej iteracji'}, "
+                        "ale w bieżącej iteracji brakuje nowego eksportu AZ.",
+                        z3_label,
+                    )
+            if not _t06_pz2_contract_ready_current() and pz2_label:
                 return _t06_recommendation_for(pz2_label)
             if z3_label:
                 return _t06_recommendation_for(z3_label)
@@ -7696,14 +8267,15 @@ def _render_step1_route_actions(self, frame):
                     "tone": warning,
                     "fill": 0.12,
                 }
-            pz2_ready = _t06_pz2_contract_ready()
-            pz3_ready = _t06_pz3_contract_ready()
+            pz2_ready = _t06_pz2_contract_ready_current()
+            pz3_ready = _t06_pz3_contract_ready_current()
             pool_images, pool_plates = _t06_plate_pool_summary()
             if is_char_pz2 and pz2_ready:
+                origin = _t06_contract_origin_label("pz2_char_boxes")
                 return {
                     "mark": "✓",
                     "title": "WYKONANE: PZ2",
-                    "detail": "anotacje znaków są przygotowane",
+                    "detail": f"anotacje znaków przygotowane | {origin}" if origin else "anotacje znaków są przygotowane",
                     "tone": success,
                     "fill": 0.14,
                 }
@@ -7716,13 +8288,23 @@ def _render_step1_route_actions(self, frame):
                     "fill": 0.12,
                 }
             if is_z3_action and pz3_ready:
-                gate = _t06_char_gate()
-                ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+                try:
+                    current_pz3_contract = dict(_t06_contracts().get("pz3_char_dataset") or {})
+                except Exception:
+                    current_pz3_contract = {}
+                ready_dataset = str(current_pz3_contract.get("dataset_path") or "").strip()
+                if not ready_dataset:
+                    gate = _t06_char_gate()
+                    ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
                 dataset_id = _campaign_dataset_display_id(ready_dataset, target_hint="char") if ready_dataset else ""
+                origin = _t06_contract_origin_label("pz3_char_dataset") or _t06_char_dataset_origin_label()
+                dataset_detail = f"dataset znaków gotowy: {dataset_id}" if dataset_id else "dataset znaków gotowy"
+                if origin:
+                    dataset_detail = f"{dataset_detail} | {origin}"
                 return {
                     "mark": "✓",
                     "title": "WYKONANE: AZ",
-                    "detail": f"dataset znaków gotowy: {dataset_id}" if dataset_id else "dataset znaków gotowy",
+                    "detail": dataset_detail,
                     "tone": success,
                     "fill": 0.14,
                 }
@@ -7744,9 +8326,9 @@ def _render_step1_route_actions(self, frame):
                 }
             if is_resume and (pool_images > 0 or pool_plates > 0):
                 return {
-                    "mark": "✓",
-                    "title": "WYKONANE: PULA",
-                    "detail": f"{pool_images} [OK] / {pool_plates} tablic w źródle Z3",
+                    "mark": "+",
+                    "title": "PULA DOSTĘPNA",
+                    "detail": f"{pool_images} [OK] / {pool_plates} tablic jest już w źródle Z3",
                     "tone": success,
                     "fill": 0.12,
                 }
@@ -8061,8 +8643,8 @@ def _render_step1_route_actions(self, frame):
                 is_z3_action
                 and not is_char_pz2
                 and not draft_after_ready_export
-                and not _t06_pz2_contract_ready()
-                and not _t06_pz3_contract_ready()
+                and not _t06_pz2_contract_ready_current()
+                and not _t06_pz3_contract_ready_current()
                 and not _t06_pending_z3_targets_pz3()
             ):
                 disabled_reason = "Najpierw przygotuj anotacje znaków w PZ2."
@@ -8423,6 +9005,24 @@ def _render_step1_route_actions(self, frame):
                 pz2_contract_ok = bool(pz2_contract.get("fulfilled") or legacy_pz2_done)
                 pz3_contract_ok = bool(pz3_contract.get("fulfilled"))
 
+                def _contract_iteration(payload: dict) -> int:
+                    if not isinstance(payload, dict):
+                        return 0
+                    for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                        try:
+                            iteration_num = int(payload.get(field, 0) or 0)
+                        except Exception:
+                            iteration_num = 0
+                        if iteration_num > 0:
+                            return iteration_num
+                    return 0
+
+                def _contract_int(payload: dict, key: str) -> int:
+                    try:
+                        return int((payload or {}).get(key, 0) or 0)
+                    except Exception:
+                        return 0
+
                 reason = str(gate.get("reason") or "").strip().lower()
                 annotation_reason = str(annotation_gate.get("reason") or "").strip().lower()
                 ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
@@ -8438,13 +9038,28 @@ def _render_step1_route_actions(self, frame):
                     _safe_counter(annotation_gate.get("exportable_char_count")),
                     _safe_counter(gate.get("exportable_char_count")),
                 )
-                min_plates = max(1, _safe_counter(
-                    annotation_gate.get("min_exportable_plate_count") or gate.get("min_exportable_plate_count"),
-                    getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10),
-                ))
+                min_plates = max(
+                    1,
+                    _safe_counter(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10), 10),
+                    _safe_counter(annotation_gate.get("min_exportable_plate_count") or gate.get("min_exportable_plate_count")),
+                )
                 pz2_plate_count = max(exportable_plates, perfect_plates)
                 missing_pz2 = max(0, min_plates - pz2_plate_count)
-                pz3_ready = bool(gate.get("ok") and ready_dataset)
+                pz3_dataset_path = str(pz3_contract.get("dataset_path") or ready_dataset or "").strip()
+                pz3_contract_dataset_ok = False
+                if pz3_contract_ok and pz3_dataset_path:
+                    try:
+                        pz3_contract_path = Path(pz3_dataset_path)
+                        pz3_contract_dataset_ok = bool(
+                            pz3_contract_path.exists()
+                            and pz3_contract_path.is_dir()
+                            and self._looks_like_campaign_char_dataset_dir(pz3_contract_path)
+                        )
+                    except Exception:
+                        pz3_contract_dataset_ok = False
+                if not ready_dataset and pz3_contract_dataset_ok:
+                    ready_dataset = pz3_dataset_path
+                pz3_ready = bool((gate.get("ok") and ready_dataset) or pz3_contract_dataset_ok)
                 pz2_minimum_ready = bool(
                     pz3_ready
                     or (
@@ -8459,11 +9074,135 @@ def _render_step1_route_actions(self, frame):
                     )
                 )
                 pz2_ready = bool(pz3_ready or pz2_contract_ok)
+                pz3_origin_iteration = (
+                    _safe_counter(gate.get("source_iteration"))
+                    or _safe_counter(gate.get("pz3_iteration"))
+                    or _contract_iteration(pz3_contract)
+                )
+                pz2_origin_iteration = (
+                    _safe_counter(gate.get("pz2_iteration"))
+                    or _contract_iteration(pz2_contract)
+                    or pz3_origin_iteration
+                )
+
+                try:
+                    current_iter_num = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+                except Exception:
+                    current_iter_num = 1
+
+                def _previous_t06_contract_totals(contract_key: str, before_iteration: int) -> tuple[int, int]:
+                    try:
+                        before_iter = int(before_iteration or 0)
+                    except Exception:
+                        before_iter = 0
+                    if before_iter <= 1:
+                        return 0, 0
+                    try:
+                        registry = CAMPAIGN.load_artifact_registry(active_project_name or None)
+                    except Exception:
+                        registry = {}
+                    best_iteration = 0
+                    best_counts = (0, 0)
+                    for state_key, entry in dict((registry or {}).get("iteration_state") or {}).items():
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            state_iteration = int((entry.get("iteration") or state_key or 0) or 0)
+                        except Exception:
+                            state_iteration = 0
+                        if state_iteration <= 0 or state_iteration >= before_iter:
+                            continue
+                        contract = dict((entry.get("t06_contracts") or {}).get(contract_key) or {})
+                        if not bool(contract.get("fulfilled")):
+                            continue
+                        if state_iteration <= best_iteration:
+                            continue
+                        best_iteration = state_iteration
+                        best_counts = (
+                            _contract_int(contract, "exportable_plate_count"),
+                            _contract_int(contract, "exportable_char_count"),
+                        )
+                    return best_counts
+
+                def _balance_counts(total_value: int, origin_iteration: int) -> tuple[str, str, str]:
+                    total = max(0, int(total_value or 0))
+                    try:
+                        origin_iter = int(origin_iteration or 0)
+                    except Exception:
+                        origin_iter = 0
+                    if total <= 0:
+                        return "0", "+0", "0"
+                    if origin_iter <= 0:
+                        return "?", "?", str(total)
+                    if origin_iter == current_iter_num:
+                        return "0", f"+{total}", str(total)
+                    return str(total), "+0", str(total)
+
+                def _balance_text(
+                    *,
+                    contract_key: str,
+                    total_plates: int,
+                    total_units: int,
+                    unit_label: str,
+                    origin_iteration: int,
+                ) -> str:
+                    try:
+                        origin_iter = int(origin_iteration or 0)
+                    except Exception:
+                        origin_iter = 0
+                    if origin_iter == current_iter_num:
+                        previous_plate_count, previous_unit_count = _previous_t06_contract_totals(contract_key, origin_iter)
+                        previous_plates = str(max(0, previous_plate_count))
+                        previous_units = str(max(0, previous_unit_count))
+                        current_plates = f"+{max(0, int(total_plates or 0) - previous_plate_count)}"
+                        current_units = f"+{max(0, int(total_units or 0) - previous_unit_count)}"
+                        all_plates = str(max(0, int(total_plates or 0)))
+                        all_units = str(max(0, int(total_units or 0)))
+                    else:
+                        previous_plates, current_plates, all_plates = _balance_counts(total_plates, origin_iteration)
+                        previous_units, current_units, all_units = _balance_counts(total_units, origin_iteration)
+                    return (
+                        f"Z poprzednich iteracji: {previous_plates} tablic / {previous_units} {unit_label}\n"
+                        f"Przyrost aktualnej iteracji (IT{current_iter_num}): {current_plates} tablic / {current_units} {unit_label}\n"
+                        f"Łącznie: {all_plates} tablic / {all_units} {unit_label}"
+                    )
+
+                pz2_total_plates = max(
+                    _contract_int(pz2_contract, "exportable_plate_count"),
+                    pz2_plate_count,
+                )
+                pz2_total_chars = max(
+                    _contract_int(pz2_contract, "exportable_char_count"),
+                    char_boxes,
+                )
+                pz3_total_plates = max(
+                    _contract_int(pz3_contract, "exportable_plate_count"),
+                    _safe_counter(gate.get("exportable_plate_count")),
+                )
+                pz3_total_chars = max(
+                    _contract_int(pz3_contract, "exportable_char_count"),
+                    _safe_counter(gate.get("exportable_char_count")),
+                )
+                pz2_balance = _balance_text(
+                    contract_key="pz2_char_boxes",
+                    total_plates=pz2_total_plates,
+                    total_units=pz2_total_chars,
+                    unit_label="ramek",
+                    origin_iteration=pz2_origin_iteration,
+                )
+                pz3_balance = _balance_text(
+                    contract_key="pz3_char_dataset",
+                    total_plates=pz3_total_plates,
+                    total_units=pz3_total_chars,
+                    unit_label="znaków",
+                    origin_iteration=pz3_origin_iteration,
+                )
 
                 if pz2_ready:
                     if pz2_plate_count > 0:
                         pz2_state = (
-                            f"Kontrakt PZ2 spełniony: {pz2_plate_count}/{min_plates} tablic z ramkami znaków, "
+                            f"Kontrakt PZ2 spełniony: {pz2_plate_count} tablic z ramkami znaków "
+                            f"(minimum: {min_plates}). "
                             f"ramek znaków: {char_boxes}."
                         )
                     else:
@@ -8475,7 +9214,8 @@ def _render_step1_route_actions(self, frame):
                     pz2_fulfillment = "Spełnione"
                 elif pz2_minimum_ready:
                     pz2_state = (
-                        f"Minimum PZ2 jest spełnione: {pz2_plate_count}/{min_plates} tablic z ramkami znaków, "
+                        f"Minimum PZ2 jest spełnione: {pz2_plate_count} tablic z ramkami znaków "
+                        f"(minimum: {min_plates}), "
                         f"ramek znaków: {char_boxes}. Przejdź w Z3 z PZ2 do PZ3, aby jawnie rozliczyć kontrakt PZ2."
                     )
                     pz2_tone = "info"
@@ -8534,7 +9274,7 @@ def _render_step1_route_actions(self, frame):
                         _contract_badge(pz2_tone),
                         "Krok 1 / PZ2",
                         "Ramki znaków na tablicach",
-                        "Wymagane",
+                        pz2_balance,
                         pz2_tone,
                         pz2_state,
                     ),
@@ -8542,7 +9282,7 @@ def _render_step1_route_actions(self, frame):
                         _contract_badge(pz3_tone),
                         "Krok 2 / PZ3",
                         "Źródłowy dataset znaków",
-                        "Wymagane",
+                        pz3_balance,
                         pz3_tone,
                         pz3_state,
                     ),
@@ -8550,7 +9290,7 @@ def _render_step1_route_actions(self, frame):
 
                 dialog = tk.Toplevel(self.frame)
                 try:
-                    self.app.style_dialog_window(dialog, title=f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}", geometry="880x430", parent=self.frame)
+                    self.app.style_dialog_window(dialog, title=f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}", geometry="980x460", parent=self.frame)
                 except Exception:
                     dialog.title(f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}")
                 build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -8594,10 +9334,10 @@ def _render_step1_route_actions(self, frame):
 
                 table = tk.Frame(body, bg=body_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
                 table.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
-                for col, weight in enumerate((0, 0, 2, 0, 4)):
+                for col, weight in enumerate((0, 0, 2, 3, 4)):
                     table.grid_columnconfigure(col, weight=weight)
                 header_bg = blend_hex_colors(field_bg, accent, 0.10)
-                for col, header in enumerate(("Stan", "Krok", "Produkt", "Wymóg", "Aktualny stan")):
+                for col, header in enumerate(("Stan", "Krok", "Produkt", "Bilans iteracji", "Aktualny stan")):
                     tk.Label(
                         table,
                         text=repair(header),
@@ -8615,25 +9355,34 @@ def _render_step1_route_actions(self, frame):
                     "info": accent,
                     "muted": muted,
                 }
-                for row_idx, (status_badge, step_label, product, requirement, tone, state_text) in enumerate(rows, start=1):
+                for row_idx, (status_badge, step_label, product, balance_text, tone, state_text) in enumerate(rows, start=1):
                     row_bg = blend_hex_colors(field_bg, card_bg, 0.22) if row_idx % 2 else field_bg
                     state_color = tone_colors.get(tone, muted)
-                    fulfillment = status_badge
-                    if fulfillment == "Spełnione":
-                        fulfillment_color = success
-                    elif fulfillment == "Do zatwierdzenia":
-                        fulfillment_color = accent
-                    else:
-                        fulfillment_color = warning
                     for col, text, color, wrap in (
                         (0, status_badge, state_color, 62),
                         (1, step_label, accent, 90),
                         (2, product, fg, 180),
-                        (3, requirement, state_color, 85),
+                        (3, balance_text, state_color, 230),
                         (4, state_text, state_color, 360),
                     ):
                         cell = tk.Frame(table, bg=row_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
                         cell.grid(row=row_idx, column=col, sticky="nsew")
+                        if col == 3:
+                            balance_colors = (muted, accent, success)
+                            for line_idx, line in enumerate(str(text or "").splitlines()):
+                                tk.Label(
+                                    cell,
+                                    text=repair(line),
+                                    fg=balance_colors[min(line_idx, len(balance_colors) - 1)],
+                                    bg=row_bg,
+                                    anchor="w",
+                                    justify=tk.LEFT,
+                                    font=("Segoe UI", 9, "bold"),
+                                    padx=8,
+                                    pady=(5 if line_idx == 0 else 2),
+                                    wraplength=wrap,
+                                ).pack(fill=tk.X)
+                            continue
                         tk.Label(
                             cell,
                             text=repair(text),
@@ -14255,13 +15004,25 @@ def _render_step1_route_actions(self, frame):
                 }
             )
             try:
-                pz2_done = bool(CAMPAIGN.is_step3_stage2_done())
+                pz2_done = False
             except Exception:
                 pz2_done = False
             try:
                 contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
                 pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
-                pz2_done = bool(pz2_done or pz2_contract.get("fulfilled"))
+                pz2_iteration = 0
+                for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                    try:
+                        pz2_iteration = int(pz2_contract.get(field, 0) or 0)
+                    except Exception:
+                        pz2_iteration = 0
+                    if pz2_iteration > 0:
+                        break
+                pz2_done = bool(
+                    pz2_contract.get("fulfilled")
+                    and pz2_iteration > 0
+                    and pz2_iteration == int(current_iteration or 0)
+                )
             except Exception:
                 pass
             pz2_label = (
@@ -14650,6 +15411,7 @@ def _render_step1_route_actions(self, frame):
             pass
         graph_zoom_preview_state["after_id"] = None
         graph_zoom_preview_state["factor"] = 1.0
+        graph_zoom_text_preview_cache.clear()
         previous_frame_tag = "graph_redraw_previous_frame"
         try:
             if canvas.find_all():
@@ -14703,12 +15465,16 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 layout_offset_x = 0.0
         else:
-            right_panel_visual_bias = min(64.0, max(36.0, float(width) * 0.045))
+            right_panel_visual_bias = min(94.0, max(58.0, float(width) * 0.055))
             layout_offset_x = ((float(width) - layout_width) / 2.0) - right_panel_visual_bias
             try:
                 graph_view["layout_offset_x"] = float(layout_offset_x)
             except Exception:
                 pass
+        try:
+            layout_offset_y = float(graph_view.get("layout_offset_y", 0.0) or 0.0)
+        except Exception:
+            layout_offset_y = 0.0
         stages = tuple(CAMPAIGN_GRAPH_STAGE_ORDER)
         margin_x = 96
         usable_w = max(layout_width - (2 * margin_x), 360)
@@ -14718,13 +15484,13 @@ def _render_step1_route_actions(self, frame):
         step_gap = usable_w / max(column_count - 1, 1)
         # Center the whole transition map vertically, not just the stage row.
         # The map extends above nodes for T01 and below nodes for shortcuts/final gate.
-        node_y = max(224, min(342, int(height * 0.48)))
-        node_w = 124
-        node_h = 62
+        node_y = 284
+        node_w = 144
+        node_h = 84
         base_stage_pos = {
             stage_key: (
                 layout_offset_x + margin_x + stage_columns.get(stage_key, idx) * step_gap,
-                node_y + stage_y_offsets.get(stage_key, 0),
+                node_y + layout_offset_y + stage_y_offsets.get(stage_key, 0),
             )
             for idx, stage_key in enumerate(stages)
         }
@@ -14740,15 +15506,67 @@ def _render_step1_route_actions(self, frame):
             y = base_y + float(offset_y or 0.0)
             stage_pos[stage_key] = (x, y)
         zoom_for_fonts = _graph_zoom()
+        graph_zoom_scale = max(0.001, float(zoom_for_fonts or 1.0))
+        graph_base_font_scale = 1.22
+        graph_card_text = "#101316"
+        graph_card_muted = "#3f4951"
+        graph_card_disabled = "#6a747c"
+        graph_node_surface = "#cce7f5"
+        graph_gate_surface = "#f5d7a8"
+        graph_node_outline = "#2f7ea4"
+        graph_gate_outline = "#b46a12"
+        graph_shadow = blend_hex_colors(card_bg, "#000000", 0.12)
+        graph_card_success = "#126f3f"
+        graph_card_warning = "#8a5200"
+        graph_card_error = "#9f241d"
+        graph_card_accent = "#075f8f"
+        graph_card_active = "#5b21b6"
+
+        def _graph_card_contrast_color(color: str) -> str:
+            token = str(color or "").strip().lower()
+            palette_map = {
+                str(success).strip().lower(): graph_card_success,
+                str(warning).strip().lower(): graph_card_warning,
+                str(error).strip().lower(): graph_card_error,
+                str(accent).strip().lower(): graph_card_accent,
+                str(active_edge_color).strip().lower(): graph_card_active,
+                str(muted).strip().lower(): graph_card_muted,
+                str(muted_dim).strip().lower(): graph_card_disabled,
+            }
+            return palette_map.get(token, color)
 
         def _graph_font(size: int, weight: str | None = None):
-            scaled_size = max(5, int(round(float(size) * zoom_for_fonts)))
+            scaled_size = max(5, int(round(float(size) * zoom_for_fonts * graph_base_font_scale)))
+            if weight:
+                return ("Segoe UI", scaled_size, weight)
+            return ("Segoe UI", scaled_size)
+
+        def _graph_layout_font(size: int, weight: str | None = None):
+            scaled_size = max(5, int(round(float(size) * graph_base_font_scale)))
+            if weight:
+                return ("Segoe UI", scaled_size, weight)
+            return ("Segoe UI", scaled_size)
+
+        def _graph_overlay_font(size: int, weight: str | None = None):
+            scaled_size = max(5, int(round(float(size) * graph_base_font_scale)))
             if weight:
                 return ("Segoe UI", scaled_size, weight)
             return ("Segoe UI", scaled_size)
 
         def _gate_font(size: int, local_scale: float = 1.0, weight: str | None = None):
-            scaled_size = max(5, int(round(float(size) * zoom_for_fonts * max(1.0, float(local_scale)))))
+            scaled_size = max(
+                5,
+                int(round(float(size) * zoom_for_fonts * graph_base_font_scale * max(1.0, float(local_scale)))),
+            )
+            if weight:
+                return ("Segoe UI", scaled_size, weight)
+            return ("Segoe UI", scaled_size)
+
+        def _gate_layout_font(size: int, local_scale: float = 1.0, weight: str | None = None):
+            scaled_size = max(
+                5,
+                int(round(float(size) * graph_base_font_scale * max(1.0, float(local_scale)))),
+            )
             if weight:
                 return ("Segoe UI", scaled_size, weight)
             return ("Segoe UI", scaled_size)
@@ -14768,18 +15586,33 @@ def _render_step1_route_actions(self, frame):
             )
 
         def _draw_pending_corner_handles(width_value: float, height_value: float) -> None:
-            handle_w = 14.0
-            handle_h = 14.0
-            pad = 5.0
-            dot_r = 1.0
+            def _gate_overlay_scale(tags: tuple[str, ...]) -> float:
+                edge_key = ""
+                for tag in tags:
+                    raw = str(tag or "")
+                    if raw.startswith("gate-drag:"):
+                        edge_key = raw.split(":", 1)[1]
+                        break
+                    if raw.startswith("gate:") and raw.endswith(":zoom"):
+                        parts = raw.split(":")
+                        if len(parts) >= 3:
+                            edge_key = parts[1]
+                            break
+                return max(0.25, _graph_zoom() * _gate_local_zoom(edge_key))
+
             for _x0, top_y, x1, _bottom_y, color, base_fill, tags in pending_corner_handles:
+                overlay_scale = _gate_overlay_scale(tags)
+                handle_w = 14.0 * overlay_scale
+                handle_h = 14.0 * overlay_scale
+                dot_r = max(0.75, 1.0 * overlay_scale)
                 sx1 = _screen_x(x1, width_value)
                 sy0 = _screen_y(top_y, height_value)
-                hx = sx1 + 3.0
-                hy = sy0 + 2.0
-                fill = blend_hex_colors(base_fill, color, 0.10)
-                outline = blend_hex_colors(color, card_bg, 0.24)
-                dot_fill = blend_hex_colors(color, "#ffffff", 0.10)
+                hx = sx1 + 3.0 * overlay_scale
+                hy = sy0 + 2.0 * overlay_scale
+                grip_color = _graph_card_contrast_color(color)
+                fill = blend_hex_colors(base_fill, grip_color, 0.16)
+                outline = blend_hex_colors(grip_color, "#111820", 0.10)
+                dot_fill = "#172027"
                 canvas.create_rectangle(
                     hx,
                     hy,
@@ -14787,15 +15620,15 @@ def _render_step1_route_actions(self, frame):
                     hy + handle_h,
                     fill=fill,
                     outline=outline,
-                    width=1,
+                    width=max(1, int(round(overlay_scale))),
                     tags=tags,
                 )
                 center_x = round(hx + handle_w / 2.0)
                 center_y = round(hy + handle_h / 2.0)
                 for row_idx in range(3):
                     for col_idx in (-1, 1):
-                        cx = center_x + (col_idx * 2)
-                        cy = center_y + ((row_idx - 1) * 4)
+                        cx = center_x + (col_idx * 2.0 * overlay_scale)
+                        cy = center_y + ((row_idx - 1) * 4.0 * overlay_scale)
                         canvas.create_oval(
                             cx - dot_r,
                             cy - dot_r,
@@ -14808,13 +15641,14 @@ def _render_step1_route_actions(self, frame):
                         )
 
         def _draw_pending_gate_zoom_badges(width_value: float, height_value: float) -> None:
-            badge_size = 14.0
-            for x1, top_y, _edge_key, color, base_fill, tags in pending_gate_zoom_badges:
-                zx = _screen_x(x1, width_value) + 3.0
-                zy = _screen_y(top_y, height_value) + 19.0
-                fill = blend_hex_colors(base_fill, color, 0.08)
-                outline = blend_hex_colors(color, card_bg, 0.26)
-                icon_color = blend_hex_colors(color, "#ffffff", 0.08)
+            for x1, top_y, edge_key, color, base_fill, tags in pending_gate_zoom_badges:
+                overlay_scale = max(0.25, _graph_zoom() * _gate_local_zoom(str(edge_key or "")))
+                badge_size = 14.0 * overlay_scale
+                zx = _screen_x(x1, width_value) + 3.0 * overlay_scale
+                zy = _screen_y(top_y, height_value) + 19.0 * overlay_scale
+                icon_color = _graph_card_contrast_color(color)
+                fill = blend_hex_colors(base_fill, icon_color, 0.12)
+                outline = blend_hex_colors(icon_color, "#111820", 0.12)
                 canvas.create_rectangle(
                     zx,
                     zy,
@@ -14822,28 +15656,28 @@ def _render_step1_route_actions(self, frame):
                     zy + badge_size,
                     fill=fill,
                     outline=outline,
-                    width=1,
+                    width=max(1, int(round(overlay_scale))),
                     tags=tags,
                 )
-                lens_x = zx + 5.7
-                lens_y = zy + 5.7
-                lens_r = 3.1
+                lens_x = zx + 5.7 * overlay_scale
+                lens_y = zy + 5.7 * overlay_scale
+                lens_r = 3.1 * overlay_scale
                 canvas.create_oval(
                     lens_x - lens_r,
                     lens_y - lens_r,
                     lens_x + lens_r,
                     lens_y + lens_r,
                     outline=icon_color,
-                    width=1,
+                    width=max(1, int(round(overlay_scale))),
                     tags=tags,
                 )
                 canvas.create_line(
-                    lens_x + 2.5,
-                    lens_y + 2.5,
-                    zx + 11.2,
-                    zy + 11.2,
+                    lens_x + 2.5 * overlay_scale,
+                    lens_y + 2.5 * overlay_scale,
+                    zx + 11.2 * overlay_scale,
+                    zy + 11.2 * overlay_scale,
                     fill=icon_color,
-                    width=1,
+                    width=max(1, int(round(overlay_scale))),
                     tags=tags,
                 )
 
@@ -14906,7 +15740,7 @@ def _render_step1_route_actions(self, frame):
             available_bottom = max(available_top + 1.0, float(height_value) - bottom_pad)
             available_h = max(1.0, available_bottom - available_top)
             if graph_h <= available_h:
-                target_center = (available_top + available_bottom) / 2.0
+                target_center = ((available_top + available_bottom) / 2.0) - 24.0
                 dy = target_center - ((top + bottom) / 2.0)
                 dy = max(available_top - top, min(available_bottom - bottom, dy))
             else:
@@ -14917,6 +15751,19 @@ def _render_step1_route_actions(self, frame):
                 canvas.move("all", 0.0, dy)
             except Exception:
                 return
+            try:
+                graph_view["layout_offset_y"] = float(graph_view.get("layout_offset_y", 0.0) or 0.0) + float(dy)
+                for cached in auto_gate_positions.values():
+                    if not isinstance(cached, dict):
+                        continue
+                    for key in ("y", "cy"):
+                        try:
+                            if key in cached:
+                                cached[key] = float(cached.get(key, 0.0) or 0.0) + dy
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
             def _shift_numeric_y(store: dict, keys: tuple[str, ...]) -> None:
                 for key in keys:
@@ -14955,21 +15802,44 @@ def _render_step1_route_actions(self, frame):
                 return
             x, y = stage_pos[stage_key]
             normalized_stage_key = str(stage_key).strip().upper()
-            node_w_current = 168 if normalized_stage_key in {"E4T", "E4Z"} else node_w
-            node_h_current = 76 if normalized_stage_key == "E4Z" else node_h
+            node_w_current = 192 if normalized_stage_key in {"E4T", "E4Z"} else node_w
+            node_h_current = 96 if normalized_stage_key == "E4Z" else node_h
             default_x, default_y = base_stage_pos[stage_key]
             stage_num = _stage_num(stage_key)
             stage_in_path = _stage_in_selected_path(stage_key)
             active = bool(stage_in_path and current_step == stage_num)
             reached = _stage_reached_in_current_iteration(stage_key)
+            node_title_font = _graph_font(13, "bold")
+            node_subtitle_font = _graph_font(9)
+            node_effect_font = _graph_font(8, "bold" if reached else None)
+            node_title_layout_font = _graph_layout_font(13, "bold")
+            node_subtitle_layout_font = _graph_layout_font(9)
+            node_effect_layout_font = _graph_layout_font(8, "bold" if reached else None)
+
+            def _font_linespace_layout_safe(font_spec, fallback: float) -> float:
+                try:
+                    return float(tkfont.Font(root=canvas, font=font_spec).metrics("linespace"))
+                except Exception:
+                    return float(fallback)
+
+            def _measure_node_text_px(text: object, font_spec) -> float:
+                lines = str(text or "").splitlines() or [""]
+                try:
+                    font_obj = tkfont.Font(root=canvas, font=font_spec)
+                    return float(max((font_obj.measure(str(line).strip()) for line in lines), default=0.0))
+                except Exception:
+                    return float(max((len(str(line).strip()) * 7.0 for line in lines), default=0.0))
+
             done = bool(
                 reached
                 and not active
                 and (current_step > stage_num or _stage_status_value(stage_key) == "approved")
             )
-            node_color = warning if active else (success if done else muted_dim)
-            fill = blend_hex_colors(card_bg, node_color, 0.14 if active or done else 0.05)
+            node_color = _graph_card_contrast_color(warning if active else (success if done else muted_dim))
+            fill = blend_hex_colors(graph_node_surface, node_color, 0.10 if active or done else 0.02)
+            outline = blend_hex_colors(graph_node_outline, node_color, 0.32 if active else 0.08)
             group_tag = f"node-group:{stage_key}"
+            title_tag = f"node-title:{stage_key}"
             drag_tag = f"node-drag:{stage_key}"
             history_tag = f"node-history:{stage_key}"
             history_tags = (group_tag, history_tag, "node_history", "node_button") if reached else (group_tag,)
@@ -14979,6 +15849,25 @@ def _render_step1_route_actions(self, frame):
                 effect_text = "Pominięty w tej ścieżce"
             else:
                 effect_text = "Jeszcze przed Tobą"
+            title_text = str(node.short_title or "").strip()
+            subtitle_text = str(node.title.replace(f"{node.short_title}. ", "") or "").strip()
+            effect_text = str(effect_text or "").strip()
+            title_world_w = _measure_node_text_px(title_text, node_title_layout_font)
+            subtitle_world_w = _measure_node_text_px(subtitle_text, node_subtitle_layout_font)
+            effect_world_w = _measure_node_text_px(effect_text, node_effect_layout_font)
+            min_node_w = 192 if normalized_stage_key in {"E4T", "E4Z"} else node_w
+            node_w_current = max(
+                float(min_node_w),
+                title_world_w + 34.0,
+                subtitle_world_w + 26.0,
+                effect_world_w + 38.0,
+            )
+            effect_badge_h = max(25.0, _font_linespace_layout_safe(node_effect_layout_font, 14.0) + 10.0)
+            min_node_h = 96 if normalized_stage_key == "E4Z" else node_h
+            node_h_current = max(
+                float(min_node_h),
+                (58.0 if normalized_stage_key == "E4Z" else 50.0) + effect_badge_h + 18.0,
+            )
             node_geometry[stage_key] = {
                 "default_x": float(default_x),
                 "default_y": float(default_y),
@@ -14992,14 +15881,32 @@ def _render_step1_route_actions(self, frame):
                 "node_h": float(node_h_current),
             }
             canvas.create_rectangle(
+                x - node_w_current / 2 + 3,
+                y - node_h_current / 2 + 3,
+                x + node_w_current / 2 + 3,
+                y + node_h_current / 2 + 3,
+                fill=graph_shadow,
+                outline="",
+                tags=(group_tag,),
+            )
+            canvas.create_rectangle(
                 x - node_w_current / 2,
                 y - node_h_current / 2,
                 x + node_w_current / 2,
                 y + node_h_current / 2,
                 fill=fill,
-                outline=blend_hex_colors(node_color, card_bg, 0.22),
+                outline=outline,
                 width=2 if active else 1,
                 tags=(group_tag,),
+            )
+            canvas.create_rectangle(
+                x - node_w_current / 2 + 8,
+                y - node_h_current / 2 + 7,
+                x + node_w_current / 2 - 8,
+                y - node_h_current / 2 + min(56, node_h_current - 34),
+                fill=fill,
+                outline="",
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
             _draw_corner_drag_handle(
                 x - node_w_current / 2,
@@ -15011,33 +15918,33 @@ def _render_step1_route_actions(self, frame):
                 tags=(group_tag, drag_tag, "node_drag", "node_handle"),
             )
             if normalized_stage_key == "E4Z":
-                title_y = y - 24
-                subtitle_y = y - 4
-                effect_y0 = y + 16
+                title_y = y - 34
+                subtitle_y = y - 11
                 subtitle_width = max(1, int((node_w_current - 10) * zoom_for_fonts))
             else:
-                title_y = y - 15
-                subtitle_y = y + 2
-                effect_y0 = y + 14
+                title_y = y - 27
+                subtitle_y = y - 6
                 subtitle_width = max(1, int((node_w_current - 12) * zoom_for_fonts))
+            effect_y1 = y + node_h_current / 2 - 7
+            effect_y0 = effect_y1 - effect_badge_h
+            effect_text_width = max(1, int((node_w_current - 26) * zoom_for_fonts))
             canvas.create_text(
                 x,
                 title_y,
-                text=node.short_title,
-                fill=fg,
-                font=_graph_font(12, "bold"),
-                tags=(group_tag,),
+                text=title_text,
+                fill=graph_card_text,
+                font=node_title_font,
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
             canvas.create_text(
                 x,
                 subtitle_y,
-                text=node.title.replace(f"{node.short_title}. ", ""),
-                fill=muted,
-                font=_graph_font(8),
+                text=subtitle_text,
+                fill=graph_card_muted,
+                font=node_subtitle_font,
                 width=subtitle_width,
-                tags=(group_tag,),
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
-            effect_y1 = y + node_h_current / 2 - 6
             canvas.create_rectangle(
                 x - node_w_current / 2 + 8,
                 effect_y0,
@@ -15052,9 +15959,9 @@ def _render_step1_route_actions(self, frame):
                 x,
                 (effect_y0 + effect_y1) / 2,
                 text=effect_text,
-                fill=fg if reached and (active or done) else muted,
-                font=_graph_font(6),
-                width=max(1, int((node_w_current - 26) * zoom_for_fonts)),
+                fill=graph_card_text if reached and (active or done) else graph_card_muted,
+                font=node_effect_font,
+                width=effect_text_width,
                 tags=history_tags,
             )
 
@@ -16910,29 +17817,36 @@ def _render_step1_route_actions(self, frame):
         def _button(x0, y0, label, tag, enabled):
             color = accent if enabled else muted_dim
             fill = blend_hex_colors(card_bg, color, 0.10 if enabled else 0.03)
+            button_font = _graph_font(8, "bold")
+            try:
+                button_text_w = tkfont.Font(root=canvas, font=button_font).measure(str(label or ""))
+            except Exception:
+                button_text_w = len(str(label or "")) * 7
+            button_w = max(40, int(round(button_text_w / graph_zoom_scale + 14)))
+            button_h = 23
             canvas.create_rectangle(
                 x0,
                 y0,
-                x0 + 34,
-                y0 + 17,
+                x0 + button_w,
+                y0 + button_h,
                 fill=fill,
                 outline=blend_hex_colors(color, card_bg, 0.22),
                 width=1,
                 tags=(tag, "gate_button"),
             )
             canvas.create_text(
-                x0 + 17,
-                y0 + 8,
+                x0 + button_w / 2,
+                y0 + button_h / 2,
                 text=label,
                 fill=color,
-                font=_graph_font(6),
+                font=button_font,
                 tags=(tag, "gate_button"),
             )
 
         def _draw_graph_legend() -> None:
             fixed_tag = "graph_overlay_fixed"
             legend_y = height - 10
-            legend_font = ("Segoe UI", 8)
+            legend_font = _graph_overlay_font(8)
             line_color = blend_hex_colors(muted_dim, card_bg, 0.08)
             canvas.create_line(6, legend_y, 44, legend_y, fill=line_color, width=2, tags=("graph_legend", fixed_tag))
             canvas.create_text(
@@ -16961,8 +17875,10 @@ def _render_step1_route_actions(self, frame):
             status_color = success if selected_path else warning
             x0 = 8
             y0 = 6
-            x1 = 118 if selected_path else 126
-            y1 = 26
+            label_font = _graph_overlay_font(8, "bold")
+            label_width = tkfont.Font(font=label_font).measure(label)
+            x1 = x0 + max(112, int(round(label_width + 18)))
+            y1 = 28
             canvas.create_rectangle(
                 x0,
                 y0,
@@ -16979,17 +17895,25 @@ def _render_step1_route_actions(self, frame):
                 text=label,
                 fill=status_color,
                 anchor="w",
-                font=("Segoe UI", 8, "bold"),
+                font=label_font,
                 tags=("graph_status_overlay", fixed_tag),
             )
 
         def _draw_graph_choice_guide_overlay() -> None:
             fixed_tag = "graph_overlay_fixed"
             tag = "graph_choice_guide"
-            x0 = 136 if selected_path else 144
+            status_w = 118 if selected_path else 126
+            try:
+                status_w = int(canvas.bbox("graph_status_overlay")[2]) + 8
+            except Exception:
+                pass
+            x0 = max(136 if selected_path else 144, status_w)
             y0 = 6
-            x1 = x0 + 122
-            y1 = 26
+            label = "? poradnik wyboru"
+            label_font = _graph_overlay_font(8, "bold")
+            label_width = tkfont.Font(font=label_font).measure(label)
+            x1 = x0 + max(122, int(round(label_width + 18)))
+            y1 = 28
             canvas.create_rectangle(
                 x0,
                 y0,
@@ -17003,20 +17927,28 @@ def _render_step1_route_actions(self, frame):
             canvas.create_text(
                 x0 + 9,
                 (y0 + y1) / 2,
-                text="? poradnik wyboru",
+                text=label,
                 fill=blend_hex_colors(accent, "#ffffff", 0.10),
                 anchor="w",
-                font=("Segoe UI", 8, "bold"),
+                font=label_font,
                 tags=(tag, "gate_button", fixed_tag),
             )
 
         def _draw_graph_project_trace_overlay() -> None:
             fixed_tag = "graph_overlay_fixed"
             tag = "graph_project_trace"
-            x0 = 266 if selected_path else 274
+            choice_w = 258 if selected_path else 266
+            try:
+                choice_w = int(canvas.bbox("graph_choice_guide")[2]) + 8
+            except Exception:
+                pass
+            x0 = max(266 if selected_path else 274, choice_w)
             y0 = 6
-            x1 = x0 + 116
-            y1 = 26
+            label = "↳ ślad projektu"
+            label_font = _graph_overlay_font(8, "bold")
+            label_width = tkfont.Font(font=label_font).measure(label)
+            x1 = x0 + max(116, int(round(label_width + 18)))
+            y1 = 28
             color = success if selected_path else accent
             canvas.create_rectangle(
                 x0,
@@ -17031,10 +17963,10 @@ def _render_step1_route_actions(self, frame):
             canvas.create_text(
                 x0 + 9,
                 (y0 + y1) / 2,
-                text="↳ ślad projektu",
+                text=label,
                 fill=blend_hex_colors(color, "#ffffff", 0.10),
                 anchor="w",
-                font=("Segoe UI", 8, "bold"),
+                font=label_font,
                 tags=(tag, "gate_button", fixed_tag),
             )
 
@@ -17054,10 +17986,16 @@ def _render_step1_route_actions(self, frame):
             reset_symbol = "\u21ba"
             reset_label = f"{reset_symbol} {int(round(zoom * 100))}%" if view_changed else "1:1"
             font_size = 8
-            button_h = 22
-            button_w = max(32, int(round(20 + len(reset_label) * 6.4)))
-            trace_x0 = 266 if selected_path else 274
-            x0 = trace_x0 + 116 + 8
+            label_font = _graph_overlay_font(font_size, "bold" if view_changed else "normal")
+            label_metrics = tkfont.Font(font=label_font)
+            button_h = max(24, int(round(label_metrics.metrics("linespace") + 8)))
+            button_w = max(34, int(round(label_metrics.measure(reset_label) + 20)))
+            trace_right = (266 if selected_path else 274) + 116
+            try:
+                trace_right = int(canvas.bbox("graph_project_trace")[2])
+            except Exception:
+                pass
+            x0 = trace_right + 8
             y0 = 6
             x1 = x0 + button_w
             y1 = y0 + button_h
@@ -17081,9 +18019,135 @@ def _render_step1_route_actions(self, frame):
                 text=reset_label,
                 fill=icon_color,
                 anchor="center",
-                font=("Segoe UI", font_size, "bold" if view_changed else "normal"),
+                font=label_font,
                 tags=(tag, "gate_button", fixed_tag),
             )
+
+        def _draw_graph_toolbar_overlay() -> None:
+            fixed_tag = "graph_overlay_fixed"
+            toolbar_tag = "graph_toolbar_overlay"
+            zoom = _graph_zoom()
+            pan_x, pan_y = _graph_pan()
+            has_moved_items = bool(gate_offsets or node_offsets)
+            has_local_zoom = any(_gate_local_zoom(str(key)) > 1.01 for key in gate_zoom_scales.keys())
+            view_changed = bool(
+                abs(zoom - 1.0) > 0.01
+                or abs(pan_x) > 0.5
+                or abs(pan_y) > 0.5
+                or has_moved_items
+                or has_local_zoom
+            )
+            status_label = "ścieżka wybrana" if selected_path else "wybierz ścieżkę"
+            reset_label = f"\u21ba {int(round(zoom * 100))}%" if view_changed else "1:1"
+            items = (
+                {
+                    "label": status_label,
+                    "tag": "graph_status_overlay",
+                    "color": success if selected_path else warning,
+                    "clickable": False,
+                    "bold": True,
+                    "min_w": 112,
+                },
+                {
+                    "label": "? poradnik wyboru",
+                    "tag": "graph_choice_guide",
+                    "color": accent,
+                    "clickable": True,
+                    "bold": True,
+                    "min_w": 122,
+                },
+                {
+                    "label": "\u2190 ślad projektu",
+                    "tag": "graph_project_trace",
+                    "color": success if selected_path else accent,
+                    "clickable": True,
+                    "bold": True,
+                    "min_w": 116,
+                },
+                {
+                    "label": reset_label,
+                    "tag": "graph_layout_reset",
+                    "color": accent if view_changed else muted,
+                    "clickable": True,
+                    "bold": bool(view_changed),
+                    "min_w": 42,
+                },
+            )
+            button_specs: list[dict[str, object]] = []
+            max_h = 0
+            total_w = 0
+            gap = 5
+            pad_x = 7
+            pad_y = 5
+            for item in items:
+                label = str(item.get("label") or "")
+                font_spec = _graph_overlay_font(8, "bold" if item.get("bold") else None)
+                try:
+                    metrics = tkfont.Font(font=font_spec)
+                    text_w = int(metrics.measure(label))
+                    text_h = int(metrics.metrics("linespace"))
+                except Exception:
+                    text_w = len(label) * 7
+                    text_h = 14
+                button_w = max(int(item.get("min_w") or 40), int(round(text_w + 18)))
+                button_h = max(24, int(round(text_h + 8)))
+                button_specs.append(
+                    {
+                        **item,
+                        "font": font_spec,
+                        "w": button_w,
+                        "h": button_h,
+                    }
+                )
+                total_w += button_w
+                max_h = max(max_h, button_h)
+            total_w += gap * max(0, len(button_specs) - 1)
+            x0 = 8
+            y0 = 6
+            x1 = x0 + total_w + 2 * pad_x
+            y1 = y0 + max_h + 2 * pad_y
+            canvas.create_rectangle(
+                x0,
+                y0,
+                x1,
+                y1,
+                fill=blend_hex_colors(card_bg, muted_dim, 0.045),
+                outline=blend_hex_colors(muted_dim, card_bg, 0.18),
+                width=1,
+                tags=(toolbar_tag, fixed_tag),
+            )
+            cursor_x = x0 + pad_x
+            button_y = y0 + pad_y
+            for spec in button_specs:
+                tag = str(spec.get("tag") or "")
+                label = str(spec.get("label") or "")
+                color = str(spec.get("color") or muted)
+                clickable = bool(spec.get("clickable"))
+                button_w = int(spec.get("w") or 40)
+                button_h = int(spec.get("h") or max_h)
+                button_tags = (tag, "gate_button", toolbar_tag, fixed_tag) if clickable else (tag, toolbar_tag, fixed_tag)
+                fill = blend_hex_colors(card_bg, color, 0.09 if clickable else 0.055)
+                outline = blend_hex_colors(color, card_bg, 0.24 if clickable else 0.16)
+                canvas.create_rectangle(
+                    cursor_x,
+                    button_y,
+                    cursor_x + button_w,
+                    button_y + button_h,
+                    fill=fill,
+                    outline=outline,
+                    width=1,
+                    tags=button_tags,
+                )
+                canvas.create_text(
+                    cursor_x + button_w / 2,
+                    button_y + button_h / 2,
+                    text=label,
+                    fill=blend_hex_colors(color, "#ffffff", 0.10) if clickable else color,
+                    anchor="center",
+                    font=spec.get("font"),
+                    tags=button_tags,
+                )
+                cursor_x += button_w + gap
 
         def _find_clear_gate_position(
             edge_key: str,
@@ -17302,6 +18366,57 @@ def _render_step1_route_actions(self, frame):
                 return fallback_x, fallback_y
             return best[0], best[1]
 
+        def _stable_gate_position(
+            edge_key: str,
+            base_x: float,
+            base_y: float,
+            gate_w: float,
+            gate_h: float,
+            x_min: float,
+            x_max: float,
+            y_min: float,
+            y_max: float,
+            fingerprint: tuple[object, ...],
+        ) -> tuple[float, float]:
+            if edge_key in gate_offsets:
+                return _find_clear_gate_position(edge_key, base_x, base_y, gate_w, gate_h, x_min, x_max, y_min, y_max)
+
+            def _clamp_cached_position(candidate_x: float, candidate_y: float) -> tuple[float, float]:
+                visible_min_x = 8.0
+                visible_min_y = 34.0
+                visible_max_x = max(visible_min_x, float(width) - float(gate_w) - 8.0)
+                visible_max_y = max(visible_min_y, float(height) - float(gate_h) - 30.0)
+                return (
+                    max(visible_min_x, min(visible_max_x, float(candidate_x))),
+                    max(visible_min_y, min(visible_max_y, float(candidate_y))),
+                )
+
+            cached = auto_gate_positions.get(edge_key)
+            if isinstance(cached, dict) and tuple(cached.get("fingerprint") or ()) == tuple(fingerprint):
+                try:
+                    center_x_cached = float(cached.get("cx", 0.0) or 0.0)
+                    center_y_cached = float(cached.get("cy", 0.0) or 0.0)
+                    if center_x_cached or center_y_cached:
+                        return _clamp_cached_position(
+                            center_x_cached - float(gate_w) / 2.0,
+                            center_y_cached - float(gate_h) / 2.0,
+                        )
+                    x_cached = cached.get("x")
+                    y_cached = cached.get("y")
+                    if x_cached is not None and y_cached is not None:
+                        return _clamp_cached_position(float(x_cached), float(y_cached))
+                except Exception:
+                    pass
+            x, y = _find_clear_gate_position(edge_key, base_x, base_y, gate_w, gate_h, x_min, x_max, y_min, y_max)
+            auto_gate_positions[edge_key] = {
+                "fingerprint": tuple(fingerprint),
+                "x": float(x),
+                "y": float(y),
+                "cx": float(x) + float(gate_w) / 2.0,
+                "cy": float(y) + float(gate_h) / 2.0,
+            }
+            return x, y
+
         def _refresh_graph_routes_world_after_gates() -> None:
             for edge in CAMPAIGN_TRANSITION_GRAPH.edges:
                 if not _t07_edge_visible(getattr(edge, "key", "")):
@@ -17388,18 +18503,25 @@ def _render_step1_route_actions(self, frame):
             mini_text = f"{gate_id} {mini_label}".strip().upper()
             # Miniaturki są tylko znacznikami orientacyjnymi, więc ich geometria
             # ma wynikać z krótkiej etykiety zamiast udawać pełną bramkę.
-            compact_limit = 22
-            mini_len = len(mini_text)
-            if mini_len <= compact_limit:
-                mini_w = max(94, min(176, 30 + mini_len * 5.0))
-                mini_h = 32
-            elif mini_len <= 48:
-                mini_w = max(132, min(214, 40 + mini_len * 3.8))
-                mini_h = 42
-            else:
-                mini_w = max(156, min(232, 64 + min(mini_len, 64) * 2.6))
-                mini_h = 54
-            mini_text_width = max(64, (mini_w - 28) * zoom_for_fonts)
+            mini_font = _graph_font(8, "bold")
+            mini_layout_font = _graph_layout_font(8, "bold")
+            try:
+                mini_font_obj = tkfont.Font(root=canvas, font=mini_layout_font)
+                mini_text_px = max(
+                    (mini_font_obj.measure(part.strip()) for part in str(mini_text or "").splitlines()),
+                    default=0,
+                )
+            except Exception:
+                mini_text_px = max((len(part.strip()) * 5.0 for part in str(mini_text or "").splitlines()), default=0)
+            mini_w = max(96, min(260, int(round(mini_text_px + 24))))
+            mini_avg_char_px = max(4.0, mini_text_px / max(1, len(mini_text or "")))
+            mini_chars_per_line = max(10, int((mini_w - 18) / mini_avg_char_px))
+            mini_lines = 0
+            for part in str(mini_text or "").splitlines() or [""]:
+                line_len = len(part.strip())
+                mini_lines += max(1, int((line_len + mini_chars_per_line - 1) / mini_chars_per_line))
+            mini_h = max(38, min(92, 18 + mini_lines * 15))
+            mini_text_width = max(64, (mini_w - 20) * graph_zoom_scale)
             post_clear_x_shift = 0.0
             forced_y_after_clear: float | None = None
             if edge.kind == "shortcut":
@@ -17444,17 +18566,30 @@ def _render_step1_route_actions(self, frame):
             y_max = free_drag_extent
             x = default_x + float(offset_x or 0.0)
             y = default_y + float(offset_y or 0.0)
-            x, y = _find_clear_gate_position(edge.key, x, y, mini_w, mini_h, x_min, x_max, y_min, y_max)
+            if post_clear_x_shift:
+                default_x += float(post_clear_x_shift)
+                x += float(post_clear_x_shift)
+                post_clear_x_shift = 0.0
+            layout_fingerprint = (
+                "placeholder",
+                str(edge.key),
+                str(getattr(edge, "kind", "") or ""),
+                str(mini_text or ""),
+                bool(completed),
+            )
+            x, y = _stable_gate_position(edge.key, x, y, mini_w, mini_h, x_min, x_max, y_min, y_max, layout_fingerprint)
             if post_clear_x_shift:
                 default_x += float(post_clear_x_shift)
                 x += float(post_clear_x_shift)
             if forced_y_after_clear is not None:
                 default_y = float(forced_y_after_clear)
                 y = default_y + float(offset_y or 0.0)
-            fill = blend_hex_colors(card_bg, color, 0.028)
-            outline = blend_hex_colors(color, card_bg, 0.18)
+            card_color = _graph_card_contrast_color(color)
+            fill = blend_hex_colors(graph_gate_surface, card_color, 0.025)
+            outline = blend_hex_colors(graph_gate_outline, card_color, 0.18)
             connector_color = blend_hex_colors(muted_dim, card_bg, 0.14)
             group_tag = f"gate-group:{edge.key}"
+            title_tag = f"gate-title:{edge.key}"
             drag_tag = f"gate-drag:{edge.key}"
             connector_tag = f"gate-connector:{edge.key}"
             gate_geometry[edge.key] = {
@@ -17496,6 +18631,15 @@ def _render_step1_route_actions(self, frame):
             )
             gate_connector_items[str(edge.key)] = int(connector_id)
             canvas.create_rectangle(
+                x + 2,
+                y + 2,
+                x + mini_w + 2,
+                y + mini_h + 2,
+                fill=graph_shadow,
+                outline="",
+                tags=(group_tag,),
+            )
+            canvas.create_rectangle(
                 x,
                 y,
                 x + mini_w,
@@ -17503,27 +18647,27 @@ def _render_step1_route_actions(self, frame):
                 fill=fill,
                 outline=outline,
                 width=1,
-                tags=(group_tag,),
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
             _draw_corner_drag_handle(
                 x,
                 y,
                 x + mini_w,
                 y + mini_h,
-                color=color,
+                color=card_color,
                 base_fill=fill,
                 tags=(group_tag, drag_tag, "gate_drag", "gate_handle"),
             )
             canvas.create_text(
                 x + 8,
-                y + (mini_h / 2 if mini_h <= 34 else 8),
+                y + (mini_h / 2 if mini_h <= 38 else 9),
                 text=mini_text,
-                fill=muted,
-                anchor="w" if mini_h <= 34 else "nw",
-                font=_graph_font(6),
+                fill=graph_card_muted,
+                anchor="w" if mini_h <= 38 else "nw",
+                font=mini_font,
                 width=mini_text_width,
                 justify=tk.LEFT,
-                tags=(group_tag,),
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
 
         def _draw_gate(edge) -> None:
@@ -17549,19 +18693,112 @@ def _render_step1_route_actions(self, frame):
             long_gate_title = len(gate_title_text) > 34
             completed = bool(_edge_completed(edge))
             local_zoom = _gate_local_zoom(edge.key)
-            gate_w = (206 if long_gate_title else 162) * local_zoom
-            title_h = (52 if long_gate_title else 38) * local_zoom
-            row_h = 15 * local_zoom
             resource_status_value = _edge_resource_badge_status(edge)
-            resource_row_h = row_h
-            if (
-                resource_status_value
-                and str(resource_status_value).strip().upper() not in {"OK", "WYBIERZ"}
-            ):
-                resource_row_h = 25 * local_zoom
-            approve_row_h = 33 * local_zoom
-            gate_h = title_h + row_h * 2 + resource_row_h + approve_row_h
-            title_text_width = max(54, (gate_w - 30 * local_zoom) * zoom_for_fonts)
+            work_status_value = _edge_pending_resource_review_label(edge) if _edge_fields_enabled(edge) else ""
+            approve_display_label = _edge_approve_label(edge) if _edge_approve_enabled(edge) else "ZATWIERDŹ"
+            rows = (
+                ("BRAMKA", status_text, None, False),
+                ("ZASOBY", resource_status_value, f"gate:{edge.key}:resources", _edge_resources_enabled(edge)),
+                ("PRACA", work_status_value, f"gate:{edge.key}:actions", _edge_actions_enabled(edge)),
+                ("ZATWIERDŹ", "", f"gate:{edge.key}:approve", _edge_approve_enabled(edge)),
+            )
+
+            title_font = _gate_font(9, local_zoom, "bold")
+            row_label_font = _gate_font(8, local_zoom)
+            row_value_font = _gate_font(8, local_zoom, "bold")
+            detail_label_font = _gate_font(8, local_zoom, "bold")
+            title_layout_font = _gate_layout_font(9, local_zoom, "bold")
+            row_label_layout_font = _gate_layout_font(8, local_zoom)
+            row_value_layout_font = _gate_layout_font(8, local_zoom, "bold")
+            detail_label_layout_font = _gate_layout_font(8, local_zoom, "bold")
+
+            def _measure_text_width(text: object, font_spec) -> float:
+                parts = str(text or "").splitlines() or [""]
+                try:
+                    font_obj = tkfont.Font(root=canvas, font=font_spec)
+                    return float(max((font_obj.measure(part.strip()) for part in parts), default=0))
+                except Exception:
+                    scale = max(1.0, float(local_zoom or 1.0))
+                    return float(max((len(part.strip()) * 5.2 * scale for part in parts), default=0))
+
+            def _measure_text_world_width(text: object, font_spec) -> float:
+                return _measure_text_width(text, font_spec)
+
+            def _font_linespace_world(font_spec, fallback: float) -> float:
+                try:
+                    return float(tkfont.Font(root=canvas, font=font_spec).metrics("linespace"))
+                except Exception:
+                    return float(fallback)
+
+            def _inline_row_width(label: str, value: object, *, approve: bool = False) -> float:
+                clean_value = str(value or "").strip()
+                if approve:
+                    return _measure_text_world_width(approve_display_label, detail_label_layout_font) + 24 * local_zoom
+                if clean_value and clean_value.upper() not in {"OK", "WYBIERZ"}:
+                    return max(
+                        _measure_text_world_width(label, detail_label_layout_font),
+                        _measure_text_world_width(clean_value, row_value_layout_font),
+                    ) + 24 * local_zoom
+                if clean_value:
+                    return (
+                        _measure_text_world_width(label, row_label_layout_font)
+                        + _measure_text_world_width(clean_value.upper(), row_value_layout_font)
+                        + 38 * local_zoom
+                    )
+                return _measure_text_world_width(label, row_label_layout_font) + 24 * local_zoom
+
+            content_widths = [
+                _measure_text_world_width(gate_title_text, title_layout_font) + 26 * local_zoom,
+                _inline_row_width("BRAMKA", status_text),
+                _inline_row_width("ZASOBY", resource_status_value),
+                _inline_row_width("PRACA", work_status_value),
+                _inline_row_width("ZATWIERDŹ", "", approve=True),
+            ]
+            min_gate_w = 104 * local_zoom
+            max_gate_w = max(min_gate_w, min(width * 0.26, 330 * local_zoom))
+            gate_w = max(min_gate_w, min(max_gate_w, max(content_widths or [min_gate_w])))
+            title_line_h = _font_linespace_world(title_layout_font, 11 * local_zoom)
+            row_line_h = _font_linespace_world(row_label_layout_font, 10 * local_zoom)
+            detail_line_h = _font_linespace_world(row_value_layout_font, 9 * local_zoom)
+            row_h = max(20 * local_zoom, row_line_h + 7 * local_zoom)
+            title_text_width = max(54, (gate_w - 30 * local_zoom) * graph_zoom_scale)
+            row_text_width = max(1, (gate_w - 24 * local_zoom) * graph_zoom_scale)
+
+            def _wrapped_line_count(text: object, *, chars_per_line: int) -> int:
+                clean_lines = str(text or "").splitlines() or [""]
+                total = 0
+                for clean_line in clean_lines:
+                    length = len(clean_line.strip())
+                    total += max(1, int((length + max(1, chars_per_line) - 1) / max(1, chars_per_line)))
+                return max(1, total)
+
+            try:
+                avg_char_width = max(4.4, tkfont.Font(root=canvas, font=row_value_layout_font).measure("MMMMMMMMMM") / 10)
+            except Exception:
+                avg_char_width = 5.6 * max(1.0, float(local_zoom or 1.0))
+            row_text_width_world = max(1.0, gate_w - 24 * local_zoom)
+            inline_value_chars = max(17, int(max(1.0, row_text_width_world - 54 * local_zoom) / avg_char_width))
+            chars_per_line = max(12, int(max(1.0, row_text_width_world) / avg_char_width))
+            title_lines = _wrapped_line_count(gate_title_text, chars_per_line=chars_per_line)
+            title_h = max(28 * local_zoom, 7 * local_zoom + title_lines * title_line_h)
+
+            def _field_row_height(label: str, value: object, *, is_approve: bool = False) -> float:
+                if is_approve:
+                    approve_lines = _wrapped_line_count(approve_display_label, chars_per_line=chars_per_line)
+                    return max(28 * local_zoom, 7 * local_zoom + approve_lines * detail_line_h)
+                value_text = str(value or "").strip()
+                if value_text and value_text.upper() not in {"OK", "WYBIERZ"}:
+                    value_lines = _wrapped_line_count(value_text, chars_per_line=chars_per_line)
+                    return max(row_h, 7 * local_zoom + (1 + value_lines) * detail_line_h)
+                return row_h
+
+            row_heights = {
+                "BRAMKA": row_h,
+                "ZASOBY": _field_row_height("ZASOBY", resource_status_value),
+                "PRACA": _field_row_height("PRACA", work_status_value),
+                "ZATWIERDŹ": _field_row_height("ZATWIERDŹ", "", is_approve=True),
+            }
+            gate_h = title_h + sum(row_heights.get(str(label).strip().upper(), row_h) for label, _value, _tag, _enabled in rows)
             default_x_shift = 0
             post_clear_x_shift = 0.0
             forced_y_after_clear: float | None = None
@@ -17610,7 +18847,23 @@ def _render_step1_route_actions(self, frame):
             y_max = free_drag_extent
             x = default_x + float(offset_x or 0.0)
             y = default_y + float(offset_y or 0.0)
-            x, y = _find_clear_gate_position(edge.key, x, y, gate_w, gate_h, x_min, x_max, y_min, y_max)
+            if post_clear_x_shift:
+                default_x += float(post_clear_x_shift)
+                x += float(post_clear_x_shift)
+                post_clear_x_shift = 0.0
+            layout_fingerprint = (
+                "full",
+                str(edge.key),
+                str(gate_title_text or ""),
+                str(status_text or ""),
+                str(resource_status_value or ""),
+                str(work_status_value or ""),
+                str(approve_display_label or ""),
+                bool(_edge_resources_enabled(edge)),
+                bool(_edge_actions_enabled(edge)),
+                bool(_edge_approve_enabled(edge)),
+            )
+            x, y = _stable_gate_position(edge.key, x, y, gate_w, gate_h, x_min, x_max, y_min, y_max, layout_fingerprint)
             if post_clear_x_shift:
                 default_x += float(post_clear_x_shift)
                 x += float(post_clear_x_shift)
@@ -17619,13 +18872,19 @@ def _render_step1_route_actions(self, frame):
                 y = default_y + float(offset_y or 0.0)
 
             group_tag = f"gate-group:{edge.key}"
+            title_tag = f"gate-title:{edge.key}"
             drag_tag = f"gate-drag:{edge.key}"
             select_tag = f"gate:{edge.key}:select"
             selector_enabled = _edge_select_enabled(edge)
             highlighted_route = _edge_route_highlighted(edge)
             gate_color = active_edge_color if highlighted_route else (status_color if operable else muted_dim)
-            fill = blend_hex_colors(card_bg, gate_color, 0.07 if operable else 0.035)
-            outline = blend_hex_colors(gate_color, card_bg, 0.24 if highlighted_route else 0.34)
+            gate_card_color = _graph_card_contrast_color(gate_color)
+            fill = blend_hex_colors(graph_gate_surface, gate_card_color, 0.08 if operable else 0.025)
+            outline = (
+                blend_hex_colors(gate_card_color, graph_gate_outline, 0.26)
+                if highlighted_route
+                else blend_hex_colors(graph_gate_outline, gate_card_color, 0.14 if operable else 0.06)
+            )
             connector_color = gate_color if highlighted_route else blend_hex_colors(gate_color, card_bg, 0.24)
             connector_tag = f"gate-connector:{edge.key}"
             gate_geometry[edge.key] = {
@@ -17667,6 +18926,15 @@ def _render_step1_route_actions(self, frame):
             )
             gate_connector_items[str(edge.key)] = int(connector_id)
             canvas.create_rectangle(
+                x + 3,
+                y + 3,
+                x + gate_w + 3,
+                y + gate_h + 3,
+                fill=graph_shadow,
+                outline="",
+                tags=(group_tag,),
+            )
+            canvas.create_rectangle(
                 x,
                 y,
                 x + gate_w,
@@ -17677,7 +18945,7 @@ def _render_step1_route_actions(self, frame):
                 tags=(group_tag,),
             )
 
-            title_fill = blend_hex_colors(fill, gate_color, 0.24 if operable else 0.12)
+            title_fill = blend_hex_colors(fill, gate_card_color, 0.18 if operable else 0.10)
             canvas.create_rectangle(
                 x,
                 y,
@@ -17686,21 +18954,21 @@ def _render_step1_route_actions(self, frame):
                 fill=title_fill,
                 outline=outline,
                 width=1,
-                tags=(group_tag,),
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
             canvas.create_text(
                 x + 16 * local_zoom,
                 y + title_h / 2,
                 text=gate_title_text,
-                fill=fg if operable else muted,
+                fill=graph_card_text if operable else graph_card_disabled,
                 anchor="w",
-                font=_gate_font(8, local_zoom, "bold"),
+                font=title_font,
                 width=title_text_width,
                 justify=tk.LEFT,
-                tags=(group_tag,),
+                tags=(title_tag, "graph_title_raise", group_tag),
             )
             selector_tags = (group_tag, select_tag, "gate_button") if selector_enabled else (group_tag,)
-            electrode_color = blend_hex_colors(accent if selected else muted_dim, "#ffffff", 0.08 if selected else 0.0)
+            electrode_color = _graph_card_contrast_color(accent if selected else muted_dim)
             electrode_dim = blend_hex_colors(electrode_color, card_bg, 0.36 if selected else 0.62)
             selector_mid_y = y + title_h / 2
             selector_h = min(title_h - 2 * local_zoom, 24 * local_zoom)
@@ -17724,8 +18992,8 @@ def _render_step1_route_actions(self, frame):
                 selector_y0,
                 selector_x1,
                 selector_y1,
-                fill=blend_hex_colors(title_fill, accent if selected else muted_dim, 0.045 if selected else 0.018),
-                outline=blend_hex_colors(accent if selected else muted_dim, card_bg, 0.38 if selected else 0.55),
+                fill=blend_hex_colors(title_fill, electrode_color, 0.06 if selected else 0.025),
+                outline=blend_hex_colors(electrode_color, card_bg, 0.28 if selected else 0.42),
                 width=1,
                 tags=selector_tags,
             )
@@ -17734,7 +19002,7 @@ def _render_step1_route_actions(self, frame):
                 selector_mid_y,
                 x,
                 selector_mid_y,
-                fill=blend_hex_colors(accent if selected else muted_dim, card_bg, 0.22),
+                fill=blend_hex_colors(electrode_color, card_bg, 0.22),
                 width=1,
                 tags=(group_tag,),
             )
@@ -17798,29 +19066,22 @@ def _render_step1_route_actions(self, frame):
                     "local_zoom": float(local_zoom),
                 }
 
-            work_status_value = _edge_pending_resource_review_label(edge) if _edge_fields_enabled(edge) else ""
-            rows = (
-                ("BRAMKA", status_text, None, False),
-                ("ZASOBY", resource_status_value, f"gate:{edge.key}:resources", _edge_resources_enabled(edge)),
-                ("PRACA", work_status_value, f"gate:{edge.key}:actions", _edge_actions_enabled(edge)),
-                ("ZATWIERDŹ", "", f"gate:{edge.key}:approve", _edge_approve_enabled(edge)),
-            )
             row_y = y + title_h
             for idx, (label, value, tag, enabled) in enumerate(rows):
                 is_approve_row = bool(tag and str(tag).endswith(":approve"))
                 is_resource_row = str(label or "").strip().upper() == "ZASOBY"
-                current_row_h = approve_row_h if is_approve_row else (resource_row_h if is_resource_row else row_h)
+                current_row_h = row_heights.get(str(label or "").strip().upper(), row_h)
                 y0 = row_y
-                row_fill = blend_hex_colors(fill, gate_color, 0.05 if idx == 0 else 0.025)
+                row_fill = blend_hex_colors(fill, gate_card_color, 0.05 if idx == 0 else 0.025)
                 row_outline = outline
                 row_width = 1
                 if is_approve_row:
                     if tag and enabled:
-                        row_fill = blend_hex_colors(fill, success, 0.16)
-                        row_outline = blend_hex_colors(success, card_bg, 0.18)
+                        row_fill = blend_hex_colors(fill, graph_card_success, 0.16)
+                        row_outline = blend_hex_colors(graph_card_success, card_bg, 0.18)
                         row_width = 2
                     else:
-                        row_fill = blend_hex_colors(fill, muted_dim, 0.04)
+                        row_fill = blend_hex_colors(fill, graph_card_disabled, 0.04)
                 work_interrupted = bool(
                     _is_t07_graph_edge(edge.key)
                     and str(tag or "").endswith(":actions")
@@ -17901,32 +19162,35 @@ def _render_step1_route_actions(self, frame):
                     tags=rect_tags,
                 )
                 if approve_blink:
-                    row_color = success
+                    row_color = graph_card_success
                 elif work_interrupted or t06_work_interrupted or step4_work_interrupted:
-                    row_color = accent if tag and enabled else (muted if operable else muted_dim)
+                    row_color = graph_card_accent if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif step4_training_candidate_action:
-                    row_color = warning if tag and enabled else (muted if operable else muted_dim)
+                    row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif resource_review_action:
-                    row_color = warning if tag and enabled else (muted if operable else muted_dim)
+                    row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif is_approve_row and tag and enabled:
-                    row_color = success
+                    row_color = graph_card_success
                 elif tag and enabled:
-                    row_color = accent
+                    row_color = graph_card_accent
                 else:
-                    row_color = muted if operable else muted_dim
-                value_color = status_color
+                    row_color = graph_card_muted if operable else graph_card_disabled
+                row_text_color = graph_card_text if operable else graph_card_disabled
+                if tag and not enabled:
+                    row_text_color = graph_card_disabled
+                value_color = _graph_card_contrast_color(status_color)
                 if is_resource_row:
-                    value_color = success if str(value or "").strip().upper() == "OK" else warning
+                    value_color = graph_card_success if str(value or "").strip().upper() == "OK" else graph_card_warning
                 if work_interrupted or t06_work_interrupted or step4_work_interrupted:
-                    value_color = error
+                    value_color = graph_card_error
                 if step4_training_candidate_action:
-                    value_color = warning
+                    value_color = graph_card_warning
                 if resource_review_action:
-                    value_color = warning
+                    value_color = graph_card_warning
                 if str(value or "").strip().upper().startswith("PRZERWANE"):
-                    value_color = error
+                    value_color = graph_card_error
                 resource_detail_layout = bool(
-                    is_resource_row
+                    (is_resource_row or str(label or "").strip().upper() == "PRACA")
                     and value
                     and str(value).strip().upper() not in {"OK", "WYBIERZ"}
                     and current_row_h > row_h + 1
@@ -17941,27 +19205,27 @@ def _render_step1_route_actions(self, frame):
                     }
                 display_label = str(label or "")
                 if is_approve_row:
-                    display_label = _edge_approve_label(edge) or "ZATWIERDŹ"
+                    display_label = approve_display_label or "ZATWIERDŹ"
                 if resource_detail_layout:
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 8 * local_zoom,
+                        y0 + 4 * local_zoom,
                         text=display_label,
-                        fill=row_color,
-                        anchor="w",
-                        font=_gate_font(6, local_zoom, "bold"),
-                        width=max(1, gate_w - 24 * local_zoom),
+                        fill=row_text_color,
+                        anchor="nw",
+                        font=detail_label_font,
+                        width=row_text_width,
                         justify=tk.LEFT,
                         tags=text_tags,
                     )
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 19 * local_zoom,
+                        y0 + 4 * local_zoom + detail_line_h,
                         text=str(value).strip(),
                         fill=value_color,
-                        anchor="w",
-                        font=_gate_font(6, local_zoom, "bold"),
-                        width=max(1, gate_w - 24 * local_zoom),
+                        anchor="nw",
+                        font=row_value_font,
+                        width=row_text_width,
                         justify=tk.LEFT,
                         tags=text_tags,
                     )
@@ -17969,23 +19233,23 @@ def _render_step1_route_actions(self, frame):
                     approve_title, approve_detail = display_label.split("\n", 1)
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 9 * local_zoom,
+                        y0 + 5 * local_zoom,
                         text=approve_title.strip(),
-                        fill=row_color,
-                        anchor="w",
-                        font=_gate_font(6, local_zoom, "bold"),
-                        width=max(1, gate_w - 22 * local_zoom),
+                        fill=row_text_color,
+                        anchor="nw",
+                        font=detail_label_font,
+                        width=max(1, row_text_width),
                         justify=tk.LEFT,
                         tags=text_tags,
                     )
                     canvas.create_text(
                         x + 16 * local_zoom,
-                        y0 + 24.5 * local_zoom,
+                        y0 + 5 * local_zoom + detail_line_h,
                         text=approve_detail.strip(),
-                        fill=blend_hex_colors(row_color, muted, 0.18),
-                        anchor="w",
-                        font=_gate_font(6, local_zoom, "bold"),
-                        width=max(1, gate_w - 22 * local_zoom),
+                        fill=graph_card_muted,
+                        anchor="nw",
+                        font=row_value_font,
+                        width=max(1, row_text_width),
                         justify=tk.LEFT,
                         tags=text_tags,
                     )
@@ -17994,32 +19258,46 @@ def _render_step1_route_actions(self, frame):
                         x + 16 * local_zoom,
                         y0 + current_row_h / 2,
                         text=display_label,
-                        fill=row_color,
+                        fill=row_text_color,
                         anchor="w",
-                        font=_gate_font(6 if is_approve_row else 7, local_zoom, "bold" if is_approve_row else "normal"),
-                        width=max(1, gate_w - 22 * local_zoom),
+                        font=detail_label_font if is_approve_row else row_label_font,
+                        width=max(1, row_text_width),
                         justify=tk.LEFT,
                         tags=text_tags,
                     )
                 if value and not resource_detail_layout:
                     if idx == 0:
                         status_value = str(value).strip().upper()
-                        pill_w = min(
-                            gate_w * 0.56,
-                            max(34 * local_zoom, (len(status_value) * 5.5 + 14) * local_zoom),
+                        status_pill_font = _gate_font(8, local_zoom, "bold")
+                        status_pill_layout_font = _gate_layout_font(8, local_zoom, "bold")
+                        status_label_w = _measure_text_world_width("BRAMKA", row_label_layout_font)
+                        status_text_w = _measure_text_world_width(status_value, status_pill_layout_font)
+                        max_pill_w = max(
+                            46 * local_zoom,
+                            gate_w - status_label_w - 38 * local_zoom,
                         )
-                        pill_h = max(9 * local_zoom, current_row_h - 5 * local_zoom)
-                        pill_x1 = x + gate_w - 5 * local_zoom
+                        pill_w = min(
+                            max_pill_w,
+                            max(46 * local_zoom, status_text_w + 18 * local_zoom),
+                        )
+                        pill_h = max(
+                            17 * local_zoom,
+                            _font_linespace_world(status_pill_layout_font, 12 * local_zoom) + 7 * local_zoom,
+                        )
+                        pill_x1 = x + gate_w - 7 * local_zoom
                         pill_x0 = pill_x1 - pill_w
                         pill_y0 = y0 + (current_row_h - pill_h) / 2
                         pill_y1 = pill_y0 + pill_h
+                        pill_fill = "#e8edf0"
+                        pill_outline = blend_hex_colors(value_color, "#d8dee3", 0.38)
+                        pill_text = "#101316"
                         canvas.create_rectangle(
                             pill_x0,
                             pill_y0,
                             pill_x1,
                             pill_y1,
-                            fill=blend_hex_colors(fill, value_color, 0.22),
-                            outline=blend_hex_colors(value_color, card_bg, 0.28),
+                            fill=pill_fill,
+                            outline=pill_outline,
                             width=1,
                             tags=row_tags,
                         )
@@ -18027,19 +19305,19 @@ def _render_step1_route_actions(self, frame):
                             (pill_x0 + pill_x1) / 2,
                             y0 + current_row_h / 2,
                             text=status_value,
-                            fill=value_color,
+                            fill=pill_text,
                             anchor="center",
-                            font=_gate_font(5, local_zoom, "bold"),
+                            font=status_pill_font,
                             tags=row_tags,
                         )
                     else:
                         canvas.create_text(
                             x + gate_w - 5 * local_zoom,
                             y0 + current_row_h / 2,
-                            text=shorten(str(value).upper(), width=max(17, int(17 * local_zoom)), placeholder="..."),
+                            text=shorten(str(value).upper(), width=inline_value_chars, placeholder="..."),
                             fill=value_color,
                             anchor="e",
-                            font=_gate_font(6, local_zoom, "bold"),
+                            font=row_value_font,
                             tags=row_tags,
                         )
                 row_y += current_row_h
@@ -18049,7 +19327,7 @@ def _render_step1_route_actions(self, frame):
                 y,
                 x + gate_w,
                 y + gate_h,
-                color=gate_color,
+                color=gate_card_color,
                 base_fill=fill,
                 tags=(group_tag, drag_tag, "gate_drag", "gate_handle"),
             )
@@ -18058,7 +19336,7 @@ def _render_step1_route_actions(self, frame):
                     x + gate_w,
                     y,
                     edge.key,
-                    gate_color,
+                    gate_card_color,
                     fill,
                     (group_tag, f"gate:{edge.key}:zoom", "gate_button", "gate_zoom"),
                 )
@@ -18620,10 +19898,7 @@ def _render_step1_route_actions(self, frame):
                 canvas.tag_raise(f"gate-group:{dragging_gate_key}")
         except Exception:
             pass
-        _draw_graph_status_overlay()
-        _draw_graph_choice_guide_overlay()
-        _draw_graph_project_trace_overlay()
-        _draw_graph_reset_overlay()
+        _draw_graph_toolbar_overlay()
         _draw_graph_legend()
         _sync_gate_approve_blink()
         _sync_gate_selector_arc_animation()
@@ -18638,10 +19913,7 @@ def _render_step1_route_actions(self, frame):
     def _redraw_graph_fixed_overlay() -> None:
         try:
             canvas.delete("graph_overlay_fixed")
-            _draw_graph_status_overlay()
-            _draw_graph_choice_guide_overlay()
-            _draw_graph_project_trace_overlay()
-            _draw_graph_reset_overlay()
+            _draw_graph_toolbar_overlay()
             _draw_graph_legend()
             _raise_graph_interactive_layers()
         except tk.TclError:
@@ -18666,6 +19938,24 @@ def _render_step1_route_actions(self, frame):
         if not _edge_gate_active(edge):
             return
         if field_key == "select":
+            if t02_review_committed_current_iteration and edge_key == "e1_to_e2":
+                try:
+                    self.app.update_status(
+                        "T02 ma juz zapisany wklad w puli projektu. T01 bedzie dostepna dopiero w kolejnej iteracji.",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+                return
+            if t01_entry_committed_current_iteration and edge_key == "e1_to_e3":
+                try:
+                    self.app.update_status(
+                        "T01 ma juz zatwierdzony wybor w tej iteracji. T02 bedzie dostepna dopiero w kolejnej iteracji.",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+                return
             if _edge_selected(edge) and _can_clear_step1_gate_selection(edge):
                 _clear_step1_gate_selection(update_status=True)
                 _request_graph_redraw(delay_ms=1, restart=True)
@@ -18937,8 +20227,6 @@ def _render_step1_route_actions(self, frame):
 
             def _raise_active_drag_bundle() -> None:
                 """Keep the currently edited circuit visually above the static graph."""
-                active_stage_key = str(node_drag_state.get("stage_key") or "")
-                active_gate_key = str(gate_drag_state.get("edge_key") or "")
                 try:
                     canvas.tag_lower("edge_line")
                 except Exception:
@@ -18990,11 +20278,8 @@ def _render_step1_route_actions(self, frame):
                 except Exception:
                     pass
                 try:
-                    if active_gate_key:
-                        canvas.tag_raise(f"gate-connector:{active_gate_key}")
-                        canvas.tag_raise(f"gate-group:{active_gate_key}")
-                    if active_stage_key:
-                        canvas.tag_raise(f"node-group:{active_stage_key}")
+                    _raise_drag_target_layers()
+                    _raise_graph_overlay_layers()
                 except Exception:
                     pass
 
@@ -19183,6 +20468,8 @@ def _render_step1_route_actions(self, frame):
                     "anchor_world_y": anchor_world_y,
                 }
             )
+            graph_focus_state["kind"] = "gate"
+            graph_focus_state["key"] = str(edge_key)
             graph_pan_state["active"] = False
             try:
                 after_id = graph_pan_state.get("after_id")
@@ -19193,7 +20480,7 @@ def _render_step1_route_actions(self, frame):
                 graph_pan_state["after_id"] = None
             canvas.config(cursor="fleur")
             try:
-                canvas.tag_raise(f"gate-group:{edge_key}")
+                _raise_drag_target_layers()
             except Exception:
                 pass
             try:
@@ -19352,8 +20639,8 @@ def _render_step1_route_actions(self, frame):
             )
             _set_gate_connector_coords(edge_key, connector_coords)
             try:
-                canvas.tag_raise(f"gate_selector_arc_anim:{edge_key}")
-                canvas.tag_raise(f"gate-group:{edge_key}")
+                _raise_drag_target_layers()
+                _raise_graph_overlay_layers()
             except Exception:
                 pass
         except Exception:
@@ -19376,7 +20663,7 @@ def _render_step1_route_actions(self, frame):
             return None
         try:
             _redraw_graph_fixed_overlay()
-            canvas.tag_raise(f"gate-group:{edge_key}")
+            _raise_graph_interactive_layers()
         except Exception:
             pass
         return "break"
@@ -19386,6 +20673,9 @@ def _render_step1_route_actions(self, frame):
             current_items = canvas.find_withtag("current")
             if current_items:
                 current_tags = canvas.gettags(current_items[0])
+                if any(str(tag) == "graph_title_raise" or str(tag).startswith("node-title:") for tag in current_tags):
+                    node_drag_state["stage_key"] = ""
+                    return _raise_graph_title_target("node", stage_key, event)
                 if any(str(tag) == "node_history" or str(tag).startswith("node-history:") for tag in current_tags):
                     node_drag_state["stage_key"] = ""
                     return None
@@ -19404,6 +20694,8 @@ def _render_step1_route_actions(self, frame):
                     "orig_y": float(offset_y or 0.0),
                 }
             )
+            graph_focus_state["kind"] = "node"
+            graph_focus_state["key"] = str(stage_key)
             graph_pan_state["active"] = False
             try:
                 pending_after_id = graph_redraw_state.get("after_id")
@@ -19414,7 +20706,7 @@ def _render_step1_route_actions(self, frame):
                 graph_redraw_state["after_id"] = None
             canvas.config(cursor="fleur")
             try:
-                canvas.tag_raise(f"node-group:{stage_key}")
+                _raise_drag_target_layers()
             except Exception:
                 pass
         except Exception:
@@ -19442,7 +20734,7 @@ def _render_step1_route_actions(self, frame):
                 return "break"
             canvas.move(f"node-group:{stage_key}", move_x, move_y)
             try:
-                canvas.tag_raise(f"node-group:{stage_key}")
+                _raise_drag_target_layers()
             except Exception:
                 pass
             geom["x"] = float(new_x)
@@ -19450,7 +20742,8 @@ def _render_step1_route_actions(self, frame):
             node_offsets[stage_key] = (new_x - geom["default_x"], new_y - geom["default_y"])
             _refresh_connected_graph_links_for_stage(stage_key)
             try:
-                canvas.tag_raise(f"node-group:{stage_key}")
+                _raise_drag_target_layers()
+                _raise_graph_overlay_layers()
             except Exception:
                 pass
         except Exception:
@@ -19477,15 +20770,18 @@ def _render_step1_route_actions(self, frame):
         try:
             _refresh_connected_graph_links_for_stage(stage_key)
             _redraw_graph_fixed_overlay()
-            canvas.tag_raise(f"node-group:{stage_key}")
+            _raise_graph_interactive_layers()
         except Exception:
             pass
 
     def _reset_graph_layout(_event=None) -> str:
         try:
             gate_offsets.clear()
+            auto_gate_positions.clear()
             node_offsets.clear()
             gate_zoom_scales.clear()
+            graph_focus_state["kind"] = ""
+            graph_focus_state["key"] = ""
             try:
                 after_id = gate_zoom_anim_state.get("after_id")
                 if after_id:
@@ -19498,6 +20794,7 @@ def _render_step1_route_actions(self, frame):
             graph_view["pan_y"] = 0.0
             graph_view.pop("layout_width", None)
             graph_view.pop("layout_offset_x", None)
+            graph_view.pop("layout_offset_y", None)
             _draw()
             _bind_gate_tags()
             try:
@@ -19554,6 +20851,24 @@ def _render_step1_route_actions(self, frame):
                 pass
         return "break"
 
+    def _raise_graph_title_target(kind: str, key: str, _event=None) -> str:
+        normalized_kind = str(kind or "").strip().lower()
+        normalized_key = str(key or "").strip()
+        if not normalized_kind or not normalized_key:
+            return "break"
+        graph_focus_state["kind"] = normalized_kind
+        graph_focus_state["key"] = normalized_key
+        try:
+            _clear_gate_selector_tooltip()
+            _clear_gate_field_hover()
+        except Exception:
+            pass
+        try:
+            _raise_graph_interactive_layers()
+        except Exception:
+            pass
+        return "break"
+
     def _bind_gate_tags() -> None:
         try:
             if not canvas.winfo_exists():
@@ -19571,12 +20886,28 @@ def _render_step1_route_actions(self, frame):
             canvas.tag_bind("graph_project_trace", "<Button-1>", _open_project_trace_history)
             for stage_key in CAMPAIGN_GRAPH_STAGE_ORDER:
                 group_tag = f"node-group:{stage_key}"
+                title_tag = f"node-title:{stage_key}"
                 history_tag = f"node-history:{stage_key}"
+                canvas.tag_bind(
+                    title_tag,
+                    "<ButtonPress-1>",
+                    lambda event, key=stage_key: _raise_graph_title_target("node", key, event),
+                )
+                canvas.tag_bind(title_tag, "<Enter>", lambda _event: canvas.config(cursor="hand2"))
+                canvas.tag_bind(title_tag, "<Leave>", lambda _event: canvas.config(cursor=""))
                 canvas.tag_bind(history_tag, "<Button-1>", lambda _event, key=stage_key: _open_stage_history(key))
                 canvas.tag_bind(group_tag, "<ButtonPress-1>", lambda event, key=stage_key: _start_node_drag(key, event))
                 canvas.tag_bind(group_tag, "<B1-Motion>", _move_node_drag)
                 canvas.tag_bind(group_tag, "<ButtonRelease-1>", _end_node_drag)
             for edge in CAMPAIGN_TRANSITION_GRAPH.edges:
+                title_tag = f"gate-title:{edge.key}"
+                canvas.tag_bind(
+                    title_tag,
+                    "<ButtonPress-1>",
+                    lambda event, key=edge.key: _raise_graph_title_target("gate", key, event),
+                )
+                canvas.tag_bind(title_tag, "<Enter>", lambda _event: canvas.config(cursor="hand2"))
+                canvas.tag_bind(title_tag, "<Leave>", lambda _event: canvas.config(cursor=""))
                 for field_key in ("select", "resources", "actions", "approve", "zoom"):
                     tag = f"gate:{edge.key}:{field_key}"
                     canvas.tag_bind(tag, "<Button-1>", lambda _event, t=tag: _handle_gate_click(t))
@@ -19740,30 +21071,52 @@ def _render_step1_route_actions(self, frame):
                     parts = list(canvas.tk.splitlist(font_spec))
                     if len(parts) < 2:
                         continue
-                    size_index = -1
-                    size = 0
-                    for index, token in enumerate(parts):
-                        try:
-                            size = int(float(str(token)))
-                            size_index = index
-                            break
-                        except Exception:
+                    cached = graph_zoom_text_preview_cache.get(int(item_id))
+                    if not isinstance(cached, dict):
+                        size_index = -1
+                        size = 0
+                        for index, token in enumerate(parts):
+                            try:
+                                size = int(float(str(token)))
+                                size_index = index
+                                break
+                            except Exception:
+                                continue
+                        if size_index <= 0:
                             continue
-                    if size_index <= 0:
-                        continue
-                    family = " ".join(str(part) for part in parts[:size_index]).strip() or "Segoe UI"
-                    sign = -1 if size < 0 else 1
-                    next_size = max(5, min(52, int(round(abs(size) * abs(factor)))))
-                    attrs = tuple(str(part) for part in parts[size_index + 1 :] if str(part).strip())
-                    canvas.itemconfigure(item_id, font=(family, sign * next_size, *attrs))
-                    width_value = str(canvas.itemcget(item_id, "width") or "").strip()
-                    if width_value:
+                        family = " ".join(str(part) for part in parts[:size_index]).strip() or "Segoe UI"
+                        width_value = str(canvas.itemcget(item_id, "width") or "").strip()
                         try:
-                            width_float = float(width_value)
+                            base_width = float(width_value)
                         except Exception:
-                            width_float = 0.0
-                        if width_float > 0:
-                            canvas.itemconfigure(item_id, width=max(1.0, width_float * factor))
+                            base_width = 0.0
+                        cached = {
+                            "family": family,
+                            "sign": -1 if size < 0 else 1,
+                            "base_size": max(1.0, float(abs(size))),
+                            "current_size": max(1.0, float(abs(size))),
+                            "attrs": tuple(str(part) for part in parts[size_index + 1 :] if str(part).strip()),
+                            "base_width": max(0.0, base_width),
+                            "current_width": max(0.0, base_width),
+                        }
+                        graph_zoom_text_preview_cache[int(item_id)] = cached
+                    current_size = max(1.0, float(cached.get("current_size", cached.get("base_size", 1.0)) or 1.0))
+                    current_size *= abs(factor)
+                    cached["current_size"] = current_size
+                    next_size = max(5, min(52, int(round(current_size))))
+                    sign = int(cached.get("sign", 1) or 1)
+                    attrs = tuple(cached.get("attrs") or ())
+                    canvas.itemconfigure(
+                        item_id,
+                        font=(str(cached.get("family") or "Segoe UI"), sign * next_size, *attrs),
+                    )
+                    width_value = str(canvas.itemcget(item_id, "width") or "").strip()
+                    if width_value or float(cached.get("current_width", 0.0) or 0.0) > 0:
+                        current_width = float(cached.get("current_width", cached.get("base_width", 0.0)) or 0.0)
+                        current_width *= abs(factor)
+                        cached["current_width"] = current_width
+                        if current_width > 0:
+                            canvas.itemconfigure(item_id, width=max(1.0, current_width))
                 except tk.TclError:
                     continue
                 except Exception:
@@ -19826,7 +21179,9 @@ def _render_step1_route_actions(self, frame):
             if delta == 0:
                 return "break"
             old_zoom = _graph_zoom()
-            step = 1.07 if delta > 0 else 1 / 1.07
+            wheel_units = max(-4.0, min(4.0, float(delta) / 120.0))
+            step_base = 1.035
+            step = step_base ** wheel_units
             new_zoom = max(0.65, min(2.4, old_zoom * step))
             factor = new_zoom / old_zoom
             if abs(factor - 1.0) < 0.001:
@@ -19836,13 +21191,21 @@ def _render_step1_route_actions(self, frame):
             center_x = width / 2
             center_y = height / 2
             pan_x, pan_y = _graph_pan()
-            event_x = float(getattr(event, "x", center_x) or center_x)
-            event_y = float(getattr(event, "y", center_y) or center_y)
+            event_x = center_x
+            event_y = center_y
             graph_view["zoom"] = new_zoom
             graph_view["pan_x"] = factor * pan_x + (1 - factor) * (event_x - center_x)
             graph_view["pan_y"] = factor * pan_y + (1 - factor) * (event_y - center_y)
-            _queue_graph_zoom_preview(event_x, event_y, factor)
-            _request_graph_redraw(delay_ms=graph_zoom_redraw_delay_ms, restart=True)
+            try:
+                pending_zoom_after = graph_zoom_preview_state.get("after_id")
+                if pending_zoom_after:
+                    canvas.after_cancel(pending_zoom_after)
+            except Exception:
+                pass
+            graph_zoom_preview_state["after_id"] = None
+            graph_zoom_preview_state["factor"] = 1.0
+            graph_zoom_text_preview_cache.clear()
+            _request_graph_redraw(delay_ms=1, restart=True)
         except Exception:
             pass
         return "break"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict
 
 from .campaign_iteration_paths import (
@@ -16,6 +17,168 @@ from .campaign_iteration_paths import (
     iteration_path_target,
     normalize_iteration_path,
 )
+
+_E1_RESOURCE_CONTRACT_BASELINE_KEYS = (
+    "master_pool_dir",
+    "master_pool_selected_iteration",
+    "project_start_mode",
+    "project_start_scope_plate_run",
+    "project_start_scope_plate_model",
+    "project_start_scope_char_model",
+    "project_start_plate_source_run",
+    "project_start_plate_source_xml",
+    "project_start_plate_source_input",
+    "project_start_plate_source_mode",
+    "project_start_plate_source_iteration",
+    "step1_source_manual_clear_iteration",
+    "step1_restored_image_source_dir",
+)
+
+
+def _e1_resource_contract_snapshot(project_data: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+    for key in _E1_RESOURCE_CONTRACT_BASELINE_KEYS:
+        value = project_data.get(key, "")
+        if key in {"master_pool_selected_iteration", "project_start_plate_source_iteration", "step1_source_manual_clear_iteration"}:
+            try:
+                value = int(value or 0)
+            except Exception:
+                value = 0
+        else:
+            value = str(value or "").strip()
+        snapshot[key] = value
+    return snapshot
+
+
+def _invalidate_e1_resource_contract_caches(self) -> None:
+    for cache_name in (
+        "_latest_ingest_plan_summary_cache",
+        "_latest_ingest_plan_summary_runtime_cache",
+        "_iteration_image_count_cache",
+        "_iteration_image_source_dir_cache",
+    ):
+        try:
+            cache = getattr(self, cache_name, None)
+            if cache is not None:
+                cache.clear()
+        except Exception:
+            pass
+    try:
+        invalidator = getattr(self, "invalidate_step3_char_source_state_cache", None)
+        if callable(invalidator):
+            invalidator()
+    except Exception:
+        pass
+
+
+def _safe_positive_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return int(default or 0)
+    if isinstance(value, str) and not value.strip():
+        return int(default or 0)
+    try:
+        return max(0, int(value or 0))
+    except Exception:
+        return int(default or 0)
+
+
+def _safe_path_token(value: Any) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    try:
+        return str(Path(raw_value).expanduser().resolve()).strip().lower()
+    except Exception:
+        return raw_value.lower()
+
+
+def _same_artifact_path(left: Any, right: Any) -> bool:
+    left_token = _safe_path_token(left)
+    right_token = _safe_path_token(right)
+    if not left_token or not right_token:
+        return False
+    if left_token == right_token:
+        return True
+    try:
+        return Path(left_token).name.lower() == Path(right_token).name.lower()
+    except Exception:
+        return False
+
+
+def _entry_matches_iteration(entry: Dict[str, Any], iteration: int) -> bool:
+    for key in ("approved_iteration", "first_approved_iteration", "iteration"):
+        try:
+            if int(entry.get(key, 0) or 0) == int(iteration or 0):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _entry_plate_count(entry: Dict[str, Any]) -> int:
+    for key in ("plate_count", "valid_plate_count", "plates_count"):
+        count = _safe_positive_int(entry.get(key), -1)
+        if count >= 0:
+            return count
+    plates = entry.get("plates")
+    if isinstance(plates, list):
+        return len(plates)
+    return 0
+
+
+def _infer_t02_at_review_commit_from_approved_set(
+    self,
+    project_name: str,
+    project_data: Dict[str, Any],
+    current_iteration: int,
+) -> Dict[str, Any]:
+    source_run = str(project_data.get("project_start_plate_source_run", "") or "").strip()
+    source_xml = str(project_data.get("project_start_plate_source_xml", "") or "").strip()
+    if not source_run and not source_xml:
+        return {"committed": False}
+
+    try:
+        entries = list(self.list_plate_approved_entries(project_name) or [])
+    except Exception:
+        entries = []
+    if not entries:
+        return {"committed": False}
+
+    matched_entries: list[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not _entry_matches_iteration(entry, current_iteration):
+            continue
+        entry_run = str(entry.get("approved_from_run", "") or "").strip()
+        entry_xml = str(entry.get("approved_from_xml", "") or "").strip()
+        if (
+            (source_run and _same_artifact_path(entry_run, source_run))
+            or (source_xml and _same_artifact_path(entry_xml, source_xml))
+        ):
+            matched_entries.append(entry)
+
+    if not matched_entries:
+        return {"committed": False}
+
+    approved_images = len(matched_entries)
+    approved_plates = sum(_entry_plate_count(entry) for entry in matched_entries)
+    approved_plates = int(approved_plates or approved_images)
+    committed_at = ""
+    for entry in matched_entries:
+        committed_at = str(entry.get("approved_at", "") or entry.get("first_approved_at", "") or "").strip()
+        if committed_at:
+            break
+    return {
+        "committed": True,
+        "inferred": True,
+        "iteration": int(current_iteration or 0),
+        "current_iteration": int(current_iteration or 0),
+        "committed_at": committed_at,
+        "run_dir": source_run,
+        "approved_images": int(approved_images or 0),
+        "approved_plates": int(approved_plates or 0),
+    }
 
 
 def _get_active_data(self) -> Dict[str, Any]:
@@ -120,6 +283,10 @@ def set_project_start_asset_scope(self, row_key: str, scope: str | None, project
     if not state_key:
         return False
 
+    try:
+        self.ensure_e1_resource_contract_baseline(project_name=project_name)
+    except Exception:
+        pass
     normalized = self._normalize_project_start_asset_scope(scope)
     if str(self.state["projects"][project_name].get(state_key, "") or "").strip().lower() == normalized:
         return True
@@ -164,6 +331,10 @@ def set_project_start_plate_source(
     except Exception:
         current_iteration = 1
 
+    try:
+        self.ensure_e1_resource_contract_baseline(project_name=project_name)
+    except Exception:
+        pass
     project_data["project_start_plate_source_run"] = source_run
     project_data["project_start_plate_source_xml"] = source_xml
     project_data["project_start_plate_source_input"] = source_input
@@ -256,6 +427,34 @@ def set_iteration_path(self, path: str | None):
         return
     normalized_path = normalize_iteration_path(path)
     project_data = self.state["projects"][act]
+    try:
+        t01_state = dict(self.get_t01_entry_commit_state(act) or {})
+        t01_committed = bool(t01_state.get("committed"))
+    except Exception:
+        t01_state = {}
+        t01_committed = False
+    if t01_committed:
+        locked_path = normalize_iteration_path(t01_state.get("path") or project_data.get("iteration_path", ""))
+        if locked_path not in {"plate_training", "char_from_images"}:
+            current_target = self._normalize_iteration_target(project_data.get("iteration_target", ""))
+            locked_path = "plate_training" if current_target == "plate" else "char_from_images"
+        if normalized_path != locked_path:
+            project_data["iteration_path"] = locked_path
+            target = iteration_path_target(locked_path)
+            if target:
+                project_data["iteration_target"] = target
+            self.save_state()
+            return
+    if normalized_path != "char_from_ready_plates":
+        try:
+            t02_committed = bool(self.get_t02_at_review_commit_state(act).get("committed"))
+        except Exception:
+            t02_committed = False
+        if t02_committed:
+            project_data["iteration_path"] = "char_from_ready_plates"
+            project_data["iteration_target"] = "char"
+            self.save_state()
+            return
     project_data["iteration_path"] = normalized_path
     target = iteration_path_target(normalized_path)
     if target:
@@ -304,6 +503,115 @@ def get_graph_selected_edge_key(self) -> str:
 
 def clear_graph_selected_edge_key(self):
     self.set_graph_selected_edge_key("")
+
+
+def ensure_e1_resource_contract_baseline(
+    self,
+    *,
+    force: bool = False,
+    project_name: str = None,
+) -> bool:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return False
+
+    project_data = self.state["projects"][project_name]
+    try:
+        current_iteration = int(project_data.get("current_iteration", 1) or 1)
+    except Exception:
+        current_iteration = 1
+    try:
+        baseline_iteration = int(project_data.get("e1_resource_contract_baseline_iteration", 0) or 0)
+    except Exception:
+        baseline_iteration = 0
+    baseline = project_data.get("e1_resource_contract_baseline")
+    if (
+        force
+        or baseline_iteration != current_iteration
+        or not isinstance(baseline, dict)
+        or not baseline
+    ):
+        project_data["e1_resource_contract_baseline_iteration"] = int(current_iteration)
+        project_data["e1_resource_contract_baseline"] = _e1_resource_contract_snapshot(project_data)
+        project_data["e1_resource_contract_last_rollback_at"] = ""
+        project_data["e1_resource_contract_last_rollback_from_path"] = ""
+        project_data["e1_resource_contract_last_rollback_to_path"] = ""
+        self.save_state()
+        return True
+    return True
+
+
+def get_e1_resource_contract_state(self, project_name: str = None) -> Dict[str, Any]:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return {
+            "baseline_ready": False,
+            "has_draft": False,
+            "changed_keys": [],
+            "current_iteration": 0,
+            "baseline_iteration": 0,
+        }
+
+    project_data = self.state["projects"].get(project_name, {})
+    try:
+        current_iteration = int(project_data.get("current_iteration", 1) or 1)
+    except Exception:
+        current_iteration = 1
+    try:
+        baseline_iteration = int(project_data.get("e1_resource_contract_baseline_iteration", 0) or 0)
+    except Exception:
+        baseline_iteration = 0
+    baseline = project_data.get("e1_resource_contract_baseline")
+    baseline_ready = bool(isinstance(baseline, dict) and baseline and baseline_iteration == current_iteration)
+    current = _e1_resource_contract_snapshot(project_data)
+    changed_keys: list[str] = []
+    if baseline_ready:
+        for key in _E1_RESOURCE_CONTRACT_BASELINE_KEYS:
+            if current.get(key, "") != baseline.get(key, ""):
+                changed_keys.append(key)
+    return {
+        "baseline_ready": baseline_ready,
+        "has_draft": bool(changed_keys),
+        "changed_keys": changed_keys,
+        "current_iteration": int(current_iteration or 0),
+        "baseline_iteration": int(baseline_iteration or 0),
+        "current": current,
+        "baseline": dict(baseline or {}) if isinstance(baseline, dict) else {},
+    }
+
+
+def has_e1_resource_contract_draft_current_iteration(self, project_name: str = None) -> bool:
+    return bool(self.get_e1_resource_contract_state(project_name).get("has_draft"))
+
+
+def restore_e1_resource_contract_baseline(
+    self,
+    *,
+    from_path: str = "",
+    to_path: str = "",
+    project_name: str = None,
+) -> bool:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return False
+
+    state = self.get_e1_resource_contract_state(project_name)
+    if not bool(state.get("baseline_ready")):
+        return False
+
+    project_data = self.state["projects"][project_name]
+    baseline = dict(state.get("baseline") or {})
+    for key in _E1_RESOURCE_CONTRACT_BASELINE_KEYS:
+        if key in baseline:
+            project_data[key] = baseline.get(key)
+        else:
+            project_data[key] = 0 if key.endswith("_iteration") else ""
+    project_data["e1_resource_contract_last_rollback_at"] = datetime.now().isoformat(timespec="seconds")
+    project_data["e1_resource_contract_last_rollback_from_path"] = normalize_iteration_path(from_path)
+    project_data["e1_resource_contract_last_rollback_to_path"] = normalize_iteration_path(to_path)
+    self.save_state()
+    _invalidate_e1_resource_contract_caches(self)
+    return True
 
 
 def mark_t02_at_review_committed(
@@ -361,8 +669,28 @@ def get_t02_at_review_commit_state(self, project_name: str = None) -> Dict[str, 
         approved_plates = max(0, int(project_data.get("t02_at_review_committed_plates", 0) or 0))
     except Exception:
         approved_plates = 0
+    inferred_state: Dict[str, Any] = {}
+    if not committed:
+        inferred_state = _infer_t02_at_review_commit_from_approved_set(
+            self,
+            project_name,
+            project_data,
+            current_iteration,
+        )
+        if bool(inferred_state.get("committed")):
+            try:
+                project_data["t02_at_review_committed_iteration"] = int(current_iteration)
+                project_data["t02_at_review_committed_at"] = str(inferred_state.get("committed_at", "") or "").strip()
+                project_data["t02_at_review_committed_run"] = str(inferred_state.get("run_dir", "") or "").strip()
+                project_data["t02_at_review_committed_images"] = _safe_positive_int(inferred_state.get("approved_images"))
+                project_data["t02_at_review_committed_plates"] = _safe_positive_int(inferred_state.get("approved_plates"))
+                self.save_state()
+            except Exception:
+                pass
+            return inferred_state
     return {
         "committed": committed,
+        "inferred": False,
         "iteration": int(committed_iteration or 0),
         "current_iteration": int(current_iteration or 0),
         "committed_at": str(project_data.get("t02_at_review_committed_at", "") or "").strip(),
@@ -374,6 +702,44 @@ def get_t02_at_review_commit_state(self, project_name: str = None) -> Dict[str, 
 
 def is_t02_at_review_committed_current_iteration(self, project_name: str = None) -> bool:
     return bool(self.get_t02_at_review_commit_state(project_name).get("committed"))
+
+
+def get_t01_entry_commit_state(self, project_name: str = None) -> Dict[str, Any]:
+    project_name = self._resolve_project_name(project_name)
+    if not project_name:
+        return {"committed": False}
+
+    project_data = self.state["projects"].get(project_name, {})
+    current_path = normalize_iteration_path(project_data.get("iteration_path", ""))
+    if current_path not in {"plate_training", "char_from_images"}:
+        return {"committed": False}
+
+    try:
+        current_iteration = int(project_data.get("current_iteration", 1) or 1)
+    except Exception:
+        current_iteration = 1
+    try:
+        current_step = int(project_data.get("current_step", 1) or 1)
+    except Exception:
+        current_step = 1
+    step1_status = str(project_data.get("step1_status", "pending") or "pending").strip().lower()
+    committed = bool(step1_status == "approved" or current_step > 1)
+    reason = ""
+    if committed:
+        reason = "step1_approved" if step1_status == "approved" else "current_step"
+    return {
+        "committed": committed,
+        "path": current_path,
+        "target": iteration_path_target(current_path),
+        "iteration": int(current_iteration or 0),
+        "current_step": int(current_step or 0),
+        "step1_status": step1_status,
+        "reason": reason,
+    }
+
+
+def is_t01_entry_committed_current_iteration(self, project_name: str = None) -> bool:
+    return bool(self.get_t01_entry_commit_state(project_name).get("committed"))
 
 
 def get_last_iteration_target(self) -> str:
@@ -739,7 +1105,7 @@ def set_step3_extract_state(
     self.save_state()
 
 
-_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'get_explicit_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'mark_t02_at_review_committed', 'get_t02_at_review_commit_state', 'is_t02_at_review_committed_current_iteration', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step4_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'get_step3_detection_yolo_model', 'set_step3_detection_yolo_model', 'set_step3_extract_state')
+_INSTANCE_METHODS = ('_get_active_data', 'get_safe_project_folder_name', 'get_project_created_at', 'get_current_iteration_num', 'get_current_step', 'set_current_step', 'approve_step1', 'reset_step1', 'get_step1_status', 'set_project_start_mode', 'get_project_start_mode', 'set_project_start_asset_scope', 'get_project_start_asset_scope', 'set_project_start_plate_source', 'clear_project_start_plate_source', 'get_project_start_plate_source', 'set_iteration_target', 'get_iteration_target', 'clear_iteration_target', 'set_iteration_path', 'get_iteration_path', 'get_explicit_iteration_path', 'clear_iteration_path', 'set_graph_selected_edge_key', 'get_graph_selected_edge_key', 'clear_graph_selected_edge_key', 'ensure_e1_resource_contract_baseline', 'get_e1_resource_contract_state', 'has_e1_resource_contract_draft_current_iteration', 'restore_e1_resource_contract_baseline', 'mark_t02_at_review_committed', 'get_t02_at_review_commit_state', 'is_t02_at_review_committed_current_iteration', 'get_t01_entry_commit_state', 'is_t01_entry_committed_current_iteration', 'get_last_iteration_target', 'get_project_status', 'is_project_completed', 'is_project_paused', 'get_project_paused_at', 'get_project_completed_at', 'pause_project', 'complete_project', 'reopen_project', 'set_step2_generated', 'approve_step2', 'reset_step2', 'get_step2_status', 'get_step2_staging_run', 'set_step3_needs_rework', 'set_step3_ready', 'approve_step3', 'set_step3_pending', 'reset_step3', 'get_step3_status', 'get_step4_status', 'get_step3_substep', 'set_step3_substep', 'is_step3_stage1_done', 'set_step3_stage1_done', 'is_step3_stage2_done', 'set_step3_stage2_done', 'reset_step3_progress', 'get_step3_extract_state', 'get_step3_preview_dir', 'set_step3_preview_dir', 'get_step3_detection_yolo_model', 'set_step3_detection_yolo_model', 'set_step3_extract_state')
 
 
 _STATIC_METHODS = ('_normalize_project_start_mode', '_normalize_project_start_asset_scope', '_project_start_asset_scope_state_key', '_normalize_iteration_target', '_normalize_iteration_path')
