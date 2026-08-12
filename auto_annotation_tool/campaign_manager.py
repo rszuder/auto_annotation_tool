@@ -898,6 +898,11 @@ class CampaignManager:
         project_data["project_start_plate_source_input"] = ""
         project_data["project_start_plate_source_mode"] = ""
         project_data["project_start_plate_source_iteration"] = 0
+        project_data["e1_resource_contract_baseline_iteration"] = 0
+        project_data["e1_resource_contract_baseline"] = {}
+        project_data["e1_resource_contract_last_rollback_at"] = ""
+        project_data["e1_resource_contract_last_rollback_from_path"] = ""
+        project_data["e1_resource_contract_last_rollback_to_path"] = ""
         project_data["t02_at_review_committed_iteration"] = 0
         project_data["t02_at_review_committed_at"] = ""
         project_data["t02_at_review_committed_run"] = ""
@@ -943,6 +948,10 @@ class CampaignManager:
         project_data["project_status"] = "active"
         project_data["project_paused_at"] = ""
         project_data["project_completed_at"] = ""
+        try:
+            self.ensure_e1_resource_contract_baseline(force=True, project_name=act)
+        except Exception:
+            pass
         self.save_state()
         try:
             self.clear_project_iteration_ui_snapshots(act)
@@ -2551,6 +2560,10 @@ class CampaignManager:
         if not resolved_target:
             return False
         project_data = self.state["projects"][project_name]
+        try:
+            self.ensure_e1_resource_contract_baseline(project_name=project_name)
+        except Exception:
+            pass
         project_data["master_pool_dir"] = str(resolved_target)
         try:
             project_data["master_pool_selected_iteration"] = int(project_data.get("current_iteration", 1) or 1)
@@ -2582,6 +2595,10 @@ class CampaignManager:
         if not project_name:
             return False
         project_data = self.state["projects"][project_name]
+        try:
+            self.ensure_e1_resource_contract_baseline(project_name=project_name)
+        except Exception:
+            pass
         project_data["master_pool_dir"] = ""
         project_data["master_pool_selected_iteration"] = 0
         project_data["step1_restored_image_source_dir"] = ""
