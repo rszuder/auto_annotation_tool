@@ -1466,6 +1466,48 @@ def update_gold_export_split_labels(host) -> None:
                 pass
 
 
+def update_gold_export_total_row(host, row_info: dict | None, *, plate_count: int, char_count: int) -> None:
+    if not isinstance(row_info, dict):
+        return
+
+    palette = getattr(host.app, "palette", {})
+    panel_bg = palette.get("panel", "#252526")
+    success = palette.get("success", "#2ecc71")
+    warning = palette.get("warning", "#f4c27a")
+    fg = palette.get("fg", "#f3f3f3")
+    muted = palette.get("muted", "#a0a0a0")
+    has_data = int(plate_count or 0) > 0 or int(char_count or 0) > 0
+
+    label_widget = row_info.get("label")
+    plate_widget = row_info.get("plate_label")
+    char_widget = row_info.get("char_label")
+    badge_widget = row_info.get("badge")
+
+    try:
+        if label_widget is not None:
+            label_widget.configure(text=str(row_info.get("base_label", "Suma wybranych") or "Suma wybranych"))
+    except Exception:
+        pass
+    for widget, value in ((plate_widget, int(plate_count or 0)), (char_widget, int(char_count or 0))):
+        if widget is None:
+            continue
+        try:
+            widget.configure(text=str(value))
+        except Exception:
+            pass
+    if badge_widget is not None:
+        try:
+            badge_widget.configure(text=("W EKSPORCIE" if has_data else "PUSTE"))
+        except Exception:
+            pass
+
+    row_info["fg"] = fg if has_data else muted
+    row_info["badge_bg"] = blend_hex_colors(success if has_data else warning, panel_bg, 0.74)
+    row_info["badge_fg"] = success if has_data else warning
+    row_info["border_color"] = blend_hex_colors(success if has_data else warning, panel_bg, 0.45)
+    host._refresh_selection_row(row_info)
+
+
 def refresh_gold_export_filter_labels(host) -> None:
     contextual = host._build_campaign_aware_gold_export_counts(
         selected_sources=host._get_selected_gold_export_source_buckets(),
@@ -1526,6 +1568,14 @@ def refresh_gold_export_filter_labels(host) -> None:
         row_info["badge_bg"] = badge_bg
         row_info["badge_fg"] = badge_fg
         host._refresh_selection_row(row_info)
+
+    selected_strategy_keys = host._get_selected_gold_export_strategy_buckets()
+    update_gold_export_total_row(
+        host,
+        getattr(host, "gold_export_filter_total_row", None),
+        plate_count=sum(int(strategy_counts.get(key, 0) or 0) for key in selected_strategy_keys),
+        char_count=sum(int(strategy_char_counts.get(key, 0) or 0) for key in selected_strategy_keys),
+    )
 
 
 def refresh_gold_export_source_labels(host) -> None:
@@ -1597,6 +1647,14 @@ def refresh_gold_export_source_labels(host) -> None:
         row_info["badge_bg"] = badge_bg
         row_info["badge_fg"] = badge_fg
         host._refresh_selection_row(row_info)
+
+    selected_source_keys = host._get_selected_gold_export_source_buckets()
+    update_gold_export_total_row(
+        host,
+        getattr(host, "gold_export_source_total_row", None),
+        plate_count=sum(int(source_counts.get(key, 0) or 0) for key in selected_source_keys),
+        char_count=sum(int(source_char_counts.get(key, 0) or 0) for key in selected_source_keys),
+    )
 
     cvat_label = getattr(host, "gold_cvat_source_status_lbl", None)
     if cvat_label is not None:

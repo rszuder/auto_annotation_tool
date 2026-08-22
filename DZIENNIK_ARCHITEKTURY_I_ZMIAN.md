@@ -1812,3 +1812,556 @@ Decyzja:
 - nie wdrazac tego teraz;
 - zapisac jako kierunek docelowy;
 - najpierw doprowadzic obecny system do stabilnosci, a dopiero potem ocenic, czy Z2 powinno dostac pierwszy `LayerController`.
+
+## Eksport modeli do klienta mobilnego ALPR - 2026-08-19
+
+Dodano i udokumentowano osobny tor eksportu wytrenowanych modeli do pakietu mobilnego `.alprmodel`.
+
+Cel:
+
+- przygotowac wytrenowane modele `MZ` i `MT` do uzycia w demonstracyjnym kliencie Android;
+- nie wymagac od klienta mobilnego importu surowego `best.pt`;
+- przekazac telefonowi kompletny kontrakt inferencji: model, manifest, warianty wykonawcze, progi dekodera, klasy, ksztalty tensorow i sumy kontrolne.
+
+Ustalenia architektoniczne:
+
+- klient mobilny ALPR istnieje jako osobny projekt Android i importuje pakiety `.alprmodel`;
+- `.alprmodel` jest pakietem ZIP z `manifest.json` i katalogiem `variants/`;
+- zaznaczenie kilku formatow w prawym panelu eksportu nie oznacza kilku roznych modeli logicznych;
+- kilka zaznaczonych formatow oznacza kilka wariantow wykonawczych tego samego checkpointu `best.pt` w jednym pakiecie;
+- przyklad: `LiteRT/TFLite FP32 + ONNX FP32` tworzy jeden pakiet z wariantem `variants/tflite/model.tflite` i `variants/onnx/model.onnx`;
+- telefon moze potem wybrac najlepszy wariant dla urzadzenia, np. LiteRT/GPU jako wariant glowny, ONNX jako fallback albo wariant kontrolny;
+- wariant `LiteRT/TFLite INT8` wymaga kalibracji przez reprezentatywny `data.yaml`;
+- kalibracja INT8 nie jest treningiem, tylko pomiarem zakresow liczbowych aktywacji na przykladowych obrazach przed kwantyzacja;
+- `NCNN` pozostaje wariantem opcjonalnym/eksperymentalnym i nie powinien byc jedynym formatem pakietu.
+
+Rekomendacja praktyczna:
+
+- minimum wdrozeniowe: `LiteRT/TFLite FP32 + ONNX FP32`;
+- wariant badawczy: dodac `LiteRT/TFLite INT8` z dobra kalibracja i porownac jakosc/szybkosc z FP32;
+- przyszly wariant eksperymentalny: rozwazyc `W8A16` dla LiteRT, jezeli klient Android i eksporter beda mialy potwierdzone wsparcie.
+
+Rozszerzenie 2026-08-19:
+
+- eksporter rozroznia teraz pojedynczy pakiet `alpr.model.v1` i kompletny pakiet `alpr.package.v1`;
+- kompletny pakiet nie jest nowym formatem modelu, tylko kontenerem badawczo-wdrozeniowym dla pary `MT+MZ`;
+- wewnatrz kompletnego pakietu znajduja sie dwa zwykle `.alprmodel`, kazdy ze swoim manifestem, wariantami runtime, progami i sumami kontrolnymi;
+- manifest pakietu glownego opisuje pipeline: detekcja tablic, rektyfikacja, detekcja znakow i skladanie sekwencji;
+- po stronie Androida zmniejsza to ryzyko pomylenia modelu tablic z modelem znakow i daje jednoznaczny import kompletnego systemu ALPR.
+
+Zrodla prawdy w repozytorium:
+
+- `alpr_python_exporter_handoff.md` - kontrakt Python -> Android;
+- `docs/eksport_mobilny_kwantyzacja.md` - opis formatow, kwantyzacji, kalibracji i parametrow inferencji do pracy inzynierskiej;
+- `docs/specyfikacja_agenta_aplikacji_mobilnej_alpr.md` - instrukcja dla agenta Android oraz uporzadkowana dokumentacja eksportu i testow mobilnych;
+- `auto_annotation_tool/gui/z4_model_export.py` - modal eksportu mobilnego;
+- `auto_annotation_tool/exporters/mobile_model_exporter.py` - budowa pakietu `.alprmodel`;
+- `requirements-mobile-export.txt` - zaleznosci eksportu mobilnego.
+
+### Stabilizacja zaleznosci i preflightu eksportu - 2026-08-19
+
+Problem:
+
+- podczas eksportu LiteRT/TFLite w logu pojawialo sie ostrzezenie `Invalid export format='litert', updating to format='tflite'`;
+- Ultralytics probowal samodzielnie uruchamiac `AutoUpdate` brakujacych zaleznosci, np. `tf_keras`, `onnx_graphsurgeon`, `onnx2tf`, `onnxruntime-gpu`;
+- eksport TFLite potrafil zakonczyc konwersje poprawnie, ale pakiet nadal upadal na inspekcji wariantu, bo `from tensorflow.lite import Interpreter` nie jest poprawnym importem w lokalnym TensorFlow `2.19`;
+- stary przycisk instalacji mogl instalowac zbyt szeroki zestaw pakietow, niezaleznie od tego, jaki format eksportu wybral uzytkownik;
+- blad eksportu mogl zostac przykryty wtornym bledem callbacku, jezeli zmienna `exc` byla odczytywana dopiero po wyjsciu z bloku `except`.
+
+Decyzja:
+
+- nazwa `LiteRT/TFLite` zostaje w UI jako nazwa wdrozeniowa zrozumiala dla Androida;
+- do API Ultralytics przekazujemy jednak `format="tflite"`, bo to jest realna nazwa formatu eksportu obslugiwana przez lokalna wersje biblioteki;
+- przed eksportem wykonujemy jawny preflight zaleznosci dla wybranych formatow, zamiast pozwalac Ultralytics na niekontrolowany `AutoUpdate`;
+- podczas samego eksportu ustawiany jest kontrolowany kontekst `ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS=1`, zeby Ultralytics nie instalowal bibliotek w tle;
+- preflight rozroznia zaleznosci bazowe, ONNX, LiteRT/TFLite i NCNN;
+- preflight LiteRT/TFLite sprawdza nie tylko obecność TensorFlow, ale też dostępność interpretera TFLite potrzebnego do odczytu rzeczywistych tensorow eksportowanego pliku;
+- inspekcja TFLite uzywa `tf.lite.Interpreter`, z fallbackiem do `tensorflow.lite.python.interpreter` oraz `tflite_runtime.interpreter`;
+- instalator w modalu instaluje tylko brakujace zaleznosci aktualnego wyboru, a nie pelny `requirements-mobile-export.txt`;
+- callbacki workerow eksportu przechowuja tekst bledu w osobnej zmiennej, zeby modal mogl pokazac prawdziwa przyczyne awarii.
+
+Uzasadnienie:
+
+- eksport mobilny jest czescia eksperymentu i musi byc powtarzalny;
+- automatyczne, ukryte instalowanie pakietow przez biblioteke narzedziowa zmienia srodowisko badawcze poza kontrola aplikacji;
+- jawny preflight daje uzytkownikowi liste brakow, kontekst, postep instalacji i mozliwosc ponownego sprawdzenia srodowiska;
+- rozdzielenie zaleznosci wedlug formatu ogranicza ryzyko, ze wybor opcjonalnego runtime, np. `NCNN`, uszkodzi dzialajacy eksport `TFLite` albo `ONNX`;
+- w pracy inzynierskiej mozna dzieki temu opisac eksporter jako deterministyczny etap przygotowania artefaktu, a nie jako czarna skrzynke, ktora w trakcie badania samoczynnie modyfikuje srodowisko.
+
+Uzasadnienie importow zaleznosci:
+
+- `ultralytics` jest potrzebne do wczytania checkpointu `best.pt`, inspekcji modelu i wywolania eksportu;
+- `torch` jest potrzebny, bo checkpoint YOLO jest artefaktem PyTorch i bez poprawnego runtime nie da sie go wiarygodnie odczytac;
+- `torchvision` jest sprawdzany razem z `torch`, poniewaz niespojnosc tych bibliotek potrafi ujawnic sie dopiero przy imporcie Ultralytics albo operacjach detekcyjnych;
+- `onnx`, `onnxruntime` i `onnxslim` sa wymagane przy wariancie ONNX oraz przy inspekcji tensorow i uproszczeniu grafu;
+- `tensorflow`, `tf_keras`, `onnx2tf`, `onnx_graphsurgeon`, `sng4onnx`, `ai-edge-litert`, `onnxslim`, `onnxruntime` i `protobuf` stanowia lancuch konwersji oraz walidacji wariantu LiteRT/TFLite;
+- `tf.lite.Interpreter` albo `tflite_runtime.interpreter` jest potrzebny po eksporcie do odczytania realnego wejscia i wyjscia modelu `.tflite`;
+- `jsonschema` waliduje manifest pakietu `.alprmodel`, zeby Android nie dostal niepelnego albo niespojnego kontraktu;
+- `ncnn` i `pnnx` sa wymagane tylko dla opcjonalnego wariantu NCNN;
+- `pytest` pozostaje zaleznoscia testowa dla walidacji eksportera, a nie wymogiem runtime aplikacji Android.
+
+Stan po zmianie:
+
+- lokalny preflight pokazuje komplet zaleznosci dla `LiteRT/TFLite` i `ONNX`;
+- lokalny test interpretera TFLite zwraca `OK`, wiec wariant `.tflite` moze byc po eksporcie sprawdzony przed zbudowaniem manifestu;
+- jedyne wykryte braki dotycza opcjonalnego wariantu `NCNN`: `ncnn` i `pnnx`;
+- runtime `ultralytics/torch/torchvision` importuje sie poprawnie;
+- sprawdzono `py_compile` oraz `git diff --check` dla zmienionych plikow eksportu.
+
+## Siatka eksperymentow ALPR i pakietow mobilnych - 2026-08-19
+
+Po przegladzie plikow TeX pracy dyplomowej doprecyzowano metodyke badan dla wyboru finalnego pakietu ALPR.
+
+Najwazniejsze ustalenia:
+
+- finalnym kandydatem do aplikacji Android nie jest pojedynczy model, tylko pakiet `MT+MZ` z manifestem i wariantami runtime;
+- ranking pojedynczych modeli zostaje potrzebny, ale sluzy diagnostyce `MT` i `MZ`, a nie samodzielnemu wyborowi kompletnego systemu mobilnego;
+- uczciwe porownanie wymaga wspolnego toru testowego, osobnego od treningu i osobnego od koncowego testu raportowanego w pracy;
+- metryki desktopowe i mobilne musza byc laczone: `mAP`, `precision`, `recall`, `F1`, `CER`, dokladnosc calej tablicy, p50/p90/p95, RAM, rozmiar pakietu i stabilnosc runtime;
+- aplikacja desktopowa jest laboratorium: tworzy datasety, trenuje, porownuje, eksportuje `.alprmodel` i scala raporty;
+- aplikacja mobilna jest stanowiskiem pomiarowym: importuje pakiet, waliduje manifest, mierzy inferencje, runtime i wynik end-to-end na urzadzeniu.
+
+Nowy dokument:
+
+- `docs/siatka_eksperymentow_mobilnych_alpr.md` - metodyka porownywania modeli, pakietow `MT+MZ`, wariantow runtime, wykresow i odpowiedzialnosci ALPR/Android.
+- `docs/podbudowa_literaturowa_metodyki_testow_alpr.md` - literaturowa podbudowa wiarygodnosci testow: podzial danych, metryki detekcji, ALPR end-to-end, testy mobilne, kwantyzacja i powtarzalnosc.
+
+Pierwszy fundament kodowy:
+
+- dodano `auto_annotation_tool/ranking/mobile_package_experiments.py`;
+- dodano katalog roboczy `Workspace/7_rankings/mobile_packages`;
+- modul opisuje kandydata `MT+MZ`, warianty runtime, raport z Androida, import raportu JSON i punktacje `quality/latency/memory/reliability`;
+- obecny eksporter pojedynczego `.alprmodel` nie zostal zmieniony, zeby nie rozbic dzialajacego kontraktu modelu.
+
+## Stabilizacja dragu okna eksportu mobilnego - 2026-08-19
+
+Problem:
+
+- modal eksportu mobilnego dalo sie przesuwac natywnym paskiem Windows, ale okno poruszalo sie z duzym opoznieniem;
+- ruch wygladal jak "suniecie po sladzie kursora", czyli okno doganialo mysz dopiero po czasie;
+- przy probach obejscia problemu pojawial sie efekt ghosta, znikanie/minimalizacja modala albo aktywowanie okien lezacych pod aplikacja, np. VS Code;
+- problem byl szczegolnie widoczny w duzym, bogatym modalowym UI z tabela kandydatow, tabelami wymagan, parametrow, wykresami i dynamicznym zawijaniem tekstu.
+
+Pierwsze hipotezy:
+
+- natywny pasek Windows sam w sobie mogl byc zrodlem laga;
+- Tkinter mogl zbyt czesto odswiezac tabele i wrapy przy kazdym zdarzeniu `<Configure>`;
+- problem mogl wynikac z liczby widgetow w modalu;
+- preflight eksportu albo rysowanie wykresow mogly blokowac petle zdarzen;
+- opakowanie okna we wlasny pasek moglo ominac problem natywnego dragu.
+
+Proby rozwiazania:
+
+- dodano wlasny mechanizm przesuwania okna oraz imitacje paska natywnego;
+- sprawdzono wariant bez natywnego paska;
+- dodano opoznienia i debouncing dla odswiezania tabel, wykresow, scrollregionow i wrapow;
+- ograniczono przebudowe tabel po wyborze kandydata;
+- zmniejszono koszt ustawiania wierszy przez fingerprint danych i pomijanie przebudowy, jezeli wiersze sie nie zmienily;
+- przeniesiono ciezsze odswiezanie wymagan/preflight do opoznionych kolejek;
+- dodano pomiary wydajnosci zamiast dalszego zgadywania.
+
+Co testowalismy:
+
+- zwykle przesuwanie natywnym paskiem Windows;
+- przesuwanie przez wlasny pasek/uchwyt;
+- przesuwanie po wyborze kandydata i po odswiezeniu wymagan;
+- zachowanie modala po minimalizacji, maksymalizacji, restore i zamknieciu;
+- liczbe zdarzen podczas ruchu okna;
+- przerwy w petli zdarzen Tkintera;
+- koszt przebudowy tabel i odswiezania wrapow;
+- zachowanie przy wielu zdarzeniach `<Configure>` pochodzacych od dzieci modala.
+
+Dodane logowanie diagnostyczne:
+
+- `AAT_MOBILE_EXPORT_PERF=1` wlacza pomiary modala eksportu mobilnego;
+- `[MOBILE EXPORT PERF]` zbiera m.in. `table_set_rows`, `requirements_refresh`, `chart_redraw`, `label_wrap_apply`, `window_configure`, `native_move_stream`, `event_loop_gap`;
+- `[MOBILE EXPORT STALL]` pokazuje dluzsze zastoje petli zdarzen razem ze stackiem watku glownego;
+- `widget_tree` pozwala sprawdzic przyblizona liczbe widgetow w modalu.
+
+Wyniki pomiarow:
+
+- pierwotnie `table_set_rows` potrafilo kosztowac ok. 200-330 ms przy przebudowie kilkudziesieciu komorek;
+- po optymalizacji ta sama operacja spadla do kilku-kilkunastu milisekund, a przy braku zmian danych byla pomijana;
+- `requirements_refresh` spadl z ok. 80-110 ms do kilku milisekund;
+- `native_move_stream` potwierdzil, ze podczas normalnego dragu generowana jest duza liczba zmian pozycji okna;
+- `event_loop_gap` pokazal, ze odczuwalny lag nie zawsze pochodzil z jednego ciezkiego miejsca, lecz z kumulacji wielu malych odswiezen;
+- stack z `[MOBILE EXPORT STALL]` przy zamykaniu pokazywal tez osobny koszt `gc.collect()` i `torch.cuda.synchronize()`, ale to byl problem zamykania aplikacji, nie zasadnicza przyczyna laga dragu.
+
+Co finalnie bylo zle:
+
+- bledne bylo zalozenie, ze winny jest sam natywny pasek Windows;
+- glownym problemem byla nasza reakcja na zdarzenia okna: przesuniecie okna bylo traktowane podobnie jak zmiana rozmiaru;
+- kazdy ruch modala mogl uruchamiac kolejki odswiezania wrapow, tabel, scrollregionow, wykresow albo preflightu;
+- zdarzenia `<Configure>` z dzieci modala dodatkowo powodowaly szum i potegowaly liczbe niepotrzebnych reakcji;
+- imitacja paska natywnego rozwiazywala tylko objaw, ale tworzyla gorszy UX: brak standardowych przyciskow okna, ghost/przesuwanie bez naturalnego zachowania i ryzyko aktywowania okien pod aplikacja.
+
+Rozwiazanie docelowe:
+
+- zostawic natywny pasek Windows;
+- rozdzielic `position_changed` od `size_changed`;
+- przy samym przesuwaniu okna nie przeliczac wrapow, scrollregionow, tabel, wykresow ani preflightu;
+- ignorowac `<Configure>` dzieci modala tam, gdzie interesuje nas tylko rozmiar glownego kontenera;
+- stosowac fingerprint danych w tabelach, aby nie przebudowywac identycznej zawartosci;
+- kolejkowac redraw tylko wtedy, gdy realnie zmienila sie szerokosc/wysokosc kontenera;
+- podczas ruchu okna wydluzac albo odkladac odswiezanie elementow niekrytycznych;
+- traktowac Win32 move guard jako opcje diagnostyczna wlaczana flaga `AAT_MOBILE_EXPORT_WIN32_MOVE_GUARD=1`;
+- domyslnie nie przechwytywac natywnego dragu okna, zeby nie ryzykowac ghosta, minimalizacji albo plynacego okna.
+- domyslnie wlaczyc lekkie sledzenie ruchu okna, ktore nie przechwytuje natywnego paska, lecz pozwala odkladac redraw tabel, wykresow, wrapow i preflightu do momentu zakonczenia przesuwania.
+
+Efekt i dalsze zalecenie:
+
+- natywny pasek Windows zostaje kierunkiem docelowym, ale mechanizm nie moze ukrywac laga przez ghost albo wlasny pasek;
+- stabilizacja dragu musi byc dalej pilnowana przy zmianach w tabelach i panelach konfiguracji, ale nie wymaga juz obchodzenia natywnego paska okna;
+- wnioskiem dla pozostalych ciezkich modali jest zasada: nie wolno laczyc kazdego `<Configure>` z pelnym rerenderem UI;
+- przy kolejnych modalach trzeba od poczatku mierzyc: koszt tabel, liczbe widgetow, przerwy petli zdarzen, liczbe zdarzen configure i osobno ruch okna oraz resize.
+
+Domkniecie regresu 2026-08-21:
+
+- po kolejnych zmianach eksportera zanikl splash budowania modala, bo zamiast lekkiego loadera pojawialo sie ukrywane/ujawniane okno glowne;
+- radosny fakt diagnostyczny: lag dragu zostal namierzony i po poprawce okno eksportu mobilnego znowu przesuwa sie plynnie z natywnym paskiem Windows;
+- przyczyna regresu nie lezala w samym wygladzie modala ani w liczbie widgetow, tylko w rozszczelnionym wykrywaniu stanu przesuwania okna;
+- funkcje rysujace i odkladajace redraw byly juz przygotowane pod warunek `_mobile_export_window_is_moving()`, ale ten warunek zaczynal dzialac za pozno albo nie wlaczal sie domyslnie przy natywnym dragu;
+- w efekcie Tk nadal wykonywal niepotrzebne aktualizacje tabel, wykresow, wrapow, scrollregionow i preflightu w czasie, gdy Windows przesuwal okno;
+- przywrocono model docelowy: natywny pasek Windows, osobny splash przed skanowaniem kandydatow i domyslnie wlaczone lekkie sledzenie ruchu bez przechwytywania dragu;
+- dodano lekki hook Win32 na `WM_ENTERSIZEMOVE` i `WM_EXITSIZEMOVE`, ktory tylko ustawia `native_move_state` i natychmiast informuje UI, ze okno jest przesuwane;
+- hook nie zamraza dzieci okna, nie manipuluje `WM_SETREDRAW` i nie tworzy efektu ghosta;
+- agresywny `AAT_MOBILE_EXPORT_WIN32_MOVE_GUARD` oraz eksperyment z alfa/DWM pozostaja opcjami diagnostycznymi, a nie domyslna sciezka pracy;
+- dodatkowo zabezpieczono funkcje rysujace i callback preflightu, aby nie przebudowywaly tabel, wykresow, statusu ani podsumowan w trakcie dragu.
+
+Wniosek po naprawie:
+
+- jezeli lag okna eksportu wroci, najpierw sprawdzic `AAT_MOBILE_EXPORT_TRACK_WINDOW_MOVE`, `native_move_state` i hook Win32, a dopiero potem ruszac layout;
+- w ciezkich oknach Tk/Ttk kluczowy jest nie tylko koszt pojedynczego widgetu, ale rytm zdarzen: redraw musi wiedziec, kiedy uzytkownik przesuwa okno, a kiedy faktycznie zmienia jego rozmiar.
+
+## Plan rozwoju po wersji obronnej - 2026-08-19
+
+Ten rozdzial zbiera tematy, ktore sa wazne dla dalszego rozwoju programu, ale nie powinny destabilizowac wersji przygotowywanej do pracy inzynierskiej. Wersja obronna ma dowiezc stabilny rdzen: kampanie, iteracje, kontrolowana prace na anotacjach, trening, ranking, eksport mobilny i dokumentacje metodyki. Rzeczy ponizej traktujemy jako kierunki rozwoju, a nie warunki konieczne do domkniecia pracy.
+
+### 1. Warstwowy model UI dla ciezkich widokow
+
+Cel:
+
+- ograniczyc lagi i przebudowy widokow w `Z2`, `Z3/PZ2`, fullscreenie i duzych modalach;
+- zastapic lokalne wyjatki jednym modelem warstw: obraz, anotacje, HUD, panele, modal, interakcje;
+- sprawic, aby fullscreen byl ukryciem/pokazaniem warstw, a nie przebudowa ukladu.
+
+Uzasadnienie:
+
+- obecne problemy wydajnosciowe najczesciej wynikaja z pelnych rerenderow po drobnych akcjach;
+- osobny `LayerController` pozwolilby pilnowac kolejnosci rysowania, aktywnego elementu, hit-testow, dragu i skrotow klawiaturowych;
+- podobny wzorzec moze potem posluzyc grafowi kampanii, canvasom anotacji i overlayom AS.
+
+### 2. Manager artefaktow projektu
+
+Cel:
+
+- dac uzytkownikowi jedno miejsce do przegladania i usuwania artefaktow: runow, datasetow, augmentacji, eksportow i raportow;
+- pokazywac rozmiar na dysku, powiazania z iteracja, bramka, modelem i statusem zatwierdzenia;
+- bezpiecznie usuwac tylko artefakty nieuzywane przez aktywny kontrakt projektu.
+
+Uzasadnienie:
+
+- projekt produkuje wiele plikow pomocniczych i wynikowych;
+- bez managera trudno ocenic, co nadal jest potrzebne, a co tylko zajmuje miejsce;
+- usuwanie musi znac zaleznosci, zeby nie zniszczyc powtarzalnosci eksperymentow.
+
+### 3. Pelny import/eksport AZ miedzy instancjami
+
+Cel:
+
+- umozliwic przenoszenie anotacji znakow `AZ` pomiedzy instalacjami programu;
+- eksportowac `AZ` razem z kontekstem `AT`, aby geometria cropow tablic byla weryfikowalna;
+- nie dopuszczac ryzykownego importu samych znakow bez mozliwosci sprawdzenia zgodnosci z tablicami.
+
+Uzasadnienie:
+
+- same znaki bez skorelowanych ramek tablic moga pasowac pozornie, ale geometrycznie dotyczyc innego cropa;
+- import zewnetrzny ma sens tylko wtedy, gdy system potrafi jasno pokazac, co pasuje, co wymaga kontroli, a co nalezy odrzucic;
+- bezpieczna wersja powinna importowac material do kontroli, a nie od razu jako gotowy zasob projektu.
+
+### 4. Mocniejszy model kontraktow T01/T02 i rollback decyzji iteracji
+
+Cel:
+
+- formalnie opisac moment, w ktorym wybor `T01` albo `T02` staje sie nieodwracalny w danej iteracji;
+- zapewnic przewidywalny rollback, jesli uzytkownik porzuca jedna bramke przed zatwierdzonym przyrostem;
+- konsekwentnie pokazywac, czy zasob pochodzi z biezacej iteracji, czy z poprzednich.
+
+Uzasadnienie:
+
+- `T01` i `T02` sa alternatywami startowymi, ale obie dotykaja zasobow tablic;
+- po zatwierdzeniu przyrostu jedna sciezka powinna blokowac druga w tej samej iteracji;
+- uzytkownik musi widziec, czy bramka jest gotowa dzieki obecnej pracy, czy dzieki dziedziczeniu z poprzednich iteracji.
+
+### 5. Testy regresji przeplywow kampanii i trybu swobodnego
+
+Cel:
+
+- dodac zestaw scenariuszy kontrolnych dla przeplywow `T01/T02/T05/T06`, `Z2`, `Z3/PZ2`, `Z3/PZ3`, `Z4/PZ1`, `Z4/PZ2`;
+- automatycznie sprawdzac, czy tryb kampanii nie przecieka do trybu swobodnego i odwrotnie;
+- kontrolowac statusy bramek, zasobow, pracy przerwanej, zatwierdzen i powrotow do grafu.
+
+Uzasadnienie:
+
+- najgrozniejsze regresje pojawialy sie nie w pojedynczych funkcjach, tylko na styku stanow;
+- potrzebujemy testow scenariuszowych, ktore symuluja realne decyzje uzytkownika;
+- to naturalny krok, jesli aplikacja ma byc rozwijana po obronie jako stabilne narzedzie.
+
+### 6. Rozbudowana metodyka porownywania pakietow mobilnych
+
+Cel:
+
+- porownywac nie tylko pojedyncze modele `MT` i `MZ`, ale kompletne pakiety `MT+MZ`;
+- laczyc wyniki desktopowe z raportami z aplikacji Android;
+- generowac wykresy i raporty gotowe do wykorzystania w pracy i dalszych eksperymentach.
+
+Uzasadnienie:
+
+- model znakow sam nie daje kompletnego ALPR na telefonie;
+- finalnym kandydatem wdrozeniowym jest caly pipeline: detekcja tablic, rektyfikacja, detekcja/rozpoznanie znakow, dekoder i runtime mobilny;
+- ranking pakietow musi uwzgledniac jakosc, opoznienie, pamiec, rozmiar i stabilnosc dzialania na urzadzeniu.
+
+### 7. Zaawansowana augmentacja fizyczna jako osobny modul badawczy
+
+Cel:
+
+- odseparowac eksperymentalne efekty fizyczne od stabilnego toru generowania datasetu;
+- rozwazyc osobny renderer GPU/shader dla zjawisk takich jak mokry film, krople, odblaski, cienie wypuklych znakow i oswietlenie reflektorami;
+- zachowac powtarzalnosc przez presety, ziarno losowosci i raport parametrow.
+
+Uzasadnienie:
+
+- prosta augmentacja 2D jest wystarczajaca do wersji obronnej, jezeli jest stabilna i powtarzalna;
+- realistyczna optyka kropel, filmu wodnego i odbic wymaga modelu blizszego shaderom niz zwyklemu rysowaniu na bitmapie;
+- to ciekawy kierunek badawczy, ale zbyt ryzykowny, zeby byl warunkiem stabilizacji glownego workflow.
+
+### 8. Globalny standard modalow, splashy i feedbacku dlugich operacji
+
+Cel:
+
+- ujednolicic wyglad i zachowanie wszystkich splashy, modalow i paskow postepu;
+- rozdzielic realny postep od komunikatu "czekam na dluga operacje";
+- zapewnic, ze okno nie pokazuje bialych, niedoladowanych lub postrzepionych stanow posrednich.
+
+Uzasadnienie:
+
+- uzytkownik musi wiedziec, czy program pracuje, czeka, laduje dane czy zakonczyl zadanie;
+- pasek 100% nie moze wisiec, jesli UI nadal sie buduje;
+- standard modalowy zmniejszy ryzyko kolejnych regresji UX.
+
+### 9. Profilowanie i budzet wydajnosciowy dla akcji interaktywnych
+
+Cel:
+
+- zdefiniowac maksymalne czasy reakcji dla akcji takich jak select boxa, drag narożnika, `q/e`, zatwierdzenie `[OK]`, sortowanie listy, otwarcie modala;
+- logowac nie tylko duze operacje, ale tez odczuwalna zwloke miedzy intencja uzytkownika a widoczna reakcja UI;
+- stosowac pomiary przed kazda wieksza optymalizacja.
+
+Uzasadnienie:
+
+- wielokrotnie okazalo sie, ze zgadywanie przyczyny laga prowadzi do regresji;
+- pomiary typu `event_loop_gap`, koszt tabel, liczba widgetow i koszt synchronizacji pomagaja szybko wskazac prawdziwe zrodlo problemu;
+- taki budzet wydajnosciowy jest tez dobrym materialem do opisu inzynierskiego dojrzalosci projektu.
+
+### 10. Dokumentacja uzytkowa i onboarding
+
+Cel:
+
+- rozbudowac `Z5`, AS i dokumenty `docs/` tak, aby nowy uzytkownik rozumial podstawowe pojecia bez znajomosci historii projektu;
+- opisac kontrakty `O/AT/AZ`, role `MT/MZ`, bramki `T01-T06`, iteracje, statusy i eksport mobilny;
+- unikac opisow historycznych typu "kiedys bylo inaczej"; dokumentacja ma opisywac aktualny model pracy.
+
+Uzasadnienie:
+
+- aplikacja ma duzo pojec i bez jasnej dokumentacji moze sprawiac wrazenie bardziej skomplikowanej niz jest;
+- AS powinien tlumaczyc aktualny ekran, a nie tylko wyswietlac ogolne definicje;
+- dobra dokumentacja obniza koszt dalszej stabilizacji i pomaga w obronie pracy.
+
+### 11. Stabilizacja dekodera wyjścia YOLO pose w eksporcie mobilnym
+
+Problem:
+
+- eksport `LiteRT/TFLite` modelu tablic `MT` zakonczyl sie sukcesem, ale walidator pakietu odrzucil realny ksztalt wyjscia `[1, 300, 14]`;
+- przyczyna bylo stare zalozenie, ze kazdy keypoint modelu `pose` ma trzy skladowe `(x, y, confidence)`;
+- wytrenowany model zwracal cztery narozniki jako `kpt_shape=[4,2]`, czyli same wspolrzedne `(x, y)`.
+
+Zmiana:
+
+- inspektor wariantow ONNX/TFLite czyta i przenosi `keypoint_dimensions` do manifestu;
+- walidator rozpoznaje oba poprawne warianty `pose`: `keypoint_dimensions=2` oraz `keypoint_dimensions=3`;
+- dla modelu z jedna klasa i czterema naroznikami ksztalt `[1, 300, 14]` jest traktowany jako poprawny uklad `anchors_first` z `objectness`.
+
+Uzasadnienie:
+
+- manifest ma opisywac rzeczywisty model po eksporcie, a nie domyslna interpretacje eksportera;
+- Android musi czytac `output.keypoint_dimensions`, zeby poprawnie zdekodowac `MT`;
+- ta poprawka domyka zgodnosc kontraktu Python -> Android bez zmiany samych wag modelu.
+
+### 12. Obsługa wyjścia end-to-end YOLO26 w eksporcie mobilnym
+
+Problem:
+
+- eksport `LiteRT/TFLite` modelu znakow `MZ` zakonczyl konwersje powodzeniem, ale walidator odrzucil ksztalt `[1, 300, 6]`;
+- model mial `36` klas, wiec stary walidator oczekiwal `40` albo `41` kanalow surowego YOLO;
+- realny checkpoint `YOLO26` jest modelem end-to-end i zwraca gotowe detekcje w ukladzie `x1, y1, x2, y2, score, class_index`.
+
+Zmiana:
+
+- manifest rozroznia `output_format=raw_yolo` oraz `output_format=end2end_detections`;
+- dla wariantu end-to-end zapisywane sa `decoder=ultralytics_detect_end2end_v1` albo `ultralytics_pose_end2end_v1`, `box_format=xyxy` i `nms_required=false`;
+- inspektor TFLite dopuszcza ksztalt `[1, max_det, 6]` dla modeli `detect` oraz `[1, max_det, 6 + keypoint_dimensions * keypoint_count]` dla modeli `pose`.
+
+Uzasadnienie:
+
+- liczba klas nadal pozostaje w manifeście i etykietach, ale wyjscie end-to-end niesie tylko indeks wybranej klasy, a nie pelny wektor score klas;
+- Android musi dekodowac taki wariant jako gotowa liste detekcji i nie wykonywac drugiego NMS;
+- to pozwala eksportowac modele `YOLO26` bez sztucznego cofania ich do klasycznego ukladu raw.
+
+### 13. Modernizacja kompletnej paczki mobilnej `MP+MT+MZ`
+
+Problem:
+
+- pierwotnie zakladalismy, ze model pojazdow `MP` moze byc dociagniety albo przygotowany po stronie klienta mobilnego;
+- testy praktyczne pokazaly, ze pobieranie surowego YOLO i konwersja na telefonie sa zbyt ciezkie dla urzadzenia mobilnego;
+- desktopowy eksporter wybieral dotad realnie tylko `MT` i `MZ`, mimo ze kontrakt Androida przewiduje tez pelna kaskade `MP+MT+MZ`.
+
+Decyzja:
+
+- aplikacja macierzysta ALPR ma przygotowywac gotowy model `MP` tak samo jak `MT` i `MZ`;
+- kompletna paczka mobilna moze miec wariant `MT+MZ` albo `MP+MT+MZ`;
+- Android importuje gotowe `.alprmodel`, wybiera wariant runtime i uruchamia inferencje, ale nie konwertuje surowego checkpointu YOLO na urzadzeniu.
+
+Zmiana:
+
+- `MobileAlprPackageRequest` i `MobileAlprPackageExporter` obsluguja opcjonalne `vehicle_request` / `vehicle_package`;
+- manifest `alpr.package.v1` zapisuje `models.vehicle` i etap `vehicle_detection`, jezeli w paczce jest `MP`;
+- centrum eksportu mobilnego pozwala zaznaczyc po jednym kandydacie `MP`, `MT`, `MZ` i pilnuje zgodnych zestawow: pojedynczy model, `MT+MZ` albo `MP+MT+MZ`;
+- kandydaci `MP` sa wyszukiwani takze w katalogu bazowych modeli detect `Workspace/6_models/base/detect`, dzieki czemu standardowy model COCO moze zostac wyeksportowany na desktopie i dolaczony do paczki bez konwersji po stronie Androida;
+- dokumenty handoff i metodyka badan zostaly doprecyzowane tak, aby odpowiedzialnosc za ciezka konwersje byla po stronie aplikacji desktopowej.
+
+Uzasadnienie:
+
+- taki podzial zmniejsza ryzyko awarii na telefonie i poprawia powtarzalnosc eksperymentu;
+- kazdy model w paczce zachowuje wlasne `imgsz`, formaty, progi, kalibracje i metadane;
+- finalny ranking mobilny moze porownywac duet `MT+MZ` z pelna kaskada `MP+MT+MZ`, zamiast mieszac odpowiedzialnosc aplikacji desktopowej i Androida.
+
+### 14. Filtr klas pojazdow w eksporcie `MP`
+
+Problem:
+
+- standardowy detektor YOLO/COCO zwraca wiele klas, nie tylko pojazdy;
+- samo `role=vehicle` nie wystarcza klientowi mobilnemu do rozstrzygniecia, ktore klasy maja wejsc do dalszej kaskady ALPR;
+- bez jawnego filtra Android moglby uruchamiac detekcje tablic na obiektach niebedacych pojazdami albo inaczej interpretowac model niestandardowy.
+
+Zmiana:
+
+- modal wykonawczy eksportu pokazuje dla `MP` osobne pole klas pojazdow przepuszczanych do kaskady;
+- request eksportu zapisuje blok `vehicle_detection` z `include_labels`, `include_class_indices`, fallbackiem COCO `[2,3,5,7]` i informacja, ze nastepnym etapem jest `plate_detection`;
+- eksporter po odczytaniu faktycznych `labels` modelu przelicza indeksy klas wzgledem realnego manifestu modelu;
+- manifest paczki `MP+MT+MZ` przenosi ten filtr takze do etapu `vehicle_detection`.
+
+Uzasadnienie:
+
+- `MP` jest etapem ROI, a nie wynikiem koncowym ALPR;
+- filtr klas musi byc czescia kontraktu, bo Python i Android powinny identycznie rozumiec, ktore detekcje pojazdow uruchamiaja `MT`;
+- przy modelach COCO dziala bezpieczny fallback indeksow, a przy modelach niestandardowych wazniejsze sa etykiety zapisane w `labels`.
+
+### 15. Katalogowy import modelu `MP` YOLO detect w centrum eksportu
+
+Problem:
+
+- eksport pelnej paczki mobilnej moze wymagac modelu pojazdow `MP`, ktory nie powstal w biezacym projekcie;
+- model z katalogu Ultralytics nie powinien byc mieszany z historia treningow, bo nie jest runem, nie ma datasetu projektu i nie ma lokalnych metryk treningowych;
+- Android nie powinien pobierac ani konwertowac surowego checkpointu `.pt`, bo odpowiedzialnosc za ciezka konwersje lezy po stronie aplikacji desktopowej.
+
+Zmiana:
+
+- centrum eksportu mobilnego ma importer `+ model pojazdow`;
+- importer pokazuje liste modeli Ultralytics `detect`, najpierw szuka pliku w katalogach programu, a dopiero gdy go nie znajdzie, pobiera checkpoint do `Workspace/6_models/base/detect/ultralytics` i zapisuje metadane sidecar;
+- po walidacji technicznej model pojawia sie na liscie kandydatow jako `MP`;
+- importowany model jest automatycznie zaznaczany do eksportu jako kandydat `MP`, ale ustawienia formatu, `imgsz`, progow, kwantyzacji i klas pojazdow pozostaja w oknie wykonawczym eksportu.
+
+Uzasadnienie:
+
+- zachowujemy jeden kontrakt eksportu `.alprmodel`: klient mobilny zawsze dostaje gotowy pakiet, a nie surowy model;
+- zewnetrzny model ma jawne pochodzenie i nie udaje wyniku treningu projektu;
+- walidacja roli zmniejsza ryzyko przypadkowego dolaczenia modelu `pose` jako `MP`;
+- import Ultralytics w tym miejscu nie dotyczy `MT`, bo model tablic jest elementem toru projektu albo oddzielnego mechanizmu treningu/rankingu.
+
+### 16. Kalibracja INT8 dla modelu pojazdow `MP`
+
+Problem:
+
+- `MP` moze byc gotowym modelem Ultralytics/COCO, a nie modelem trenowanym w naszym projekcie;
+- taki model nie ma projektowego runu treningowego ani naturalnie powiazanego `data.yaml`;
+- jednoczesnie statyczny `LiteRT/TFLite INT8` wymaga danych reprezentatywnych do kalibracji zakresow aktywacji;
+- UI nie powinien sugerowac, ze dla `MP` konieczny jest "dataset treningowy modelu", bo to myli kalibracje z treningiem.
+
+Ustalenie:
+
+- `MP FP32` pozostaje najbezpieczniejszym wariantem domyslnym;
+- `MP INT8 static` dopuszczamy tylko z jawna kalibracja, ale nie wymagamy, aby byl to dataset treningowy modelu;
+- dla `MP` kalibracja powinna opierac sie na reprezentatywnych obrazach wejsciowych z naszego zastosowania, czyli na realnych kadrach/zbiorze `O`, na ktorych telefon bedzie uruchamial detekcje pojazdow;
+- eksporter powinien proponowac wygenerowany kalibracyjny `data.yaml` dla `MP` z obrazow projektu albo katalogu wskazanego przez uzytkownika;
+- fallback typu `coco8.yaml` traktujemy jako techniczny fallback biblioteki, nie jako pelnowartosciowy wariant badawczy do pracy inzynierskiej;
+- dynamiczne `LiteRT w8a32` jest interesujacym kierunkiem, bo dokumentacja opisuje je jako dynamic INT8 bez danych kalibracyjnych, ale w naszej lokalnej wersji `ultralytics 8.4.19` eksporter nadal pracuje glownie na starszym `int8=True`, wiec wymaga to osobnego testu przed wlaczeniem do UI.
+
+Uzasadnienie:
+
+- kalibracja INT8 nie jest treningiem; sluzy do oszacowania zakresow aktywacji zmiennych tensorow podczas konwersji;
+- dla modelu pojazdow reprezentatywnosc danych oznacza podobienstwo do klatek/ROI, ktore zobaczy telefon, a nie koniecznie zgodnosc z oryginalnym datasetem COCO;
+- brak jawnej kalibracji moze dac technicznie dzialajacy plik, ale wynik badawczy bylby slaby metodologicznie, bo nie wiemy, czy spadek jakosci wynika z modelu, runtime, kwantyzacji czy zlej kalibracji;
+- w paczce `MP+MT+MZ` kazdy model ma wlasna kalibracje, bo `MP` widzi pelna klatke/ROI pojazdu, `MT` widzi tablice/ROI, a `MZ` widzi wyprostowany crop tablicy.
+
+Stan lokalnej biblioteki:
+
+- sprawdzono `ultralytics 8.4.19`;
+- lokalny kod Ultralytics przy `int8=True` i braku `data` ustawia domyslny dataset z `TASK2DATA`;
+- dla zadania `detect` fallbackiem jest `coco8.yaml`;
+- sam fallback jest wygodny technicznie, ale nie powinien byc naszym zalecanym trybem eksperymentalnym dla `MP` w ALPR.
+
+Zrodla:
+
+- Ultralytics, `Model Export with Ultralytics YOLO`: https://docs.ultralytics.com/modes/export;
+- Ultralytics, `Export YOLO Models to LiteRT`: https://docs.ultralytics.com/integrations/litert;
+- TensorFlow, `Post-training quantization`: https://www.tensorflow.org/model_optimization/guide/quantization/post_training;
+- lokalna paczka `ultralytics 8.4.19`, pliki `ultralytics/engine/exporter.py` i `ultralytics/cfg/default.yaml`.
+
+### 17. Swiadomy wybor formatow eksportu mobilnego
+
+Problem:
+
+- checkboxy formatow eksportu (`LiteRT/TFLite`, `ONNX`, `NCNN`, `INT8`) byly technicznie poprawne, ale zbyt malo mowily uzytkownikowi, po co wybiera dany wariant;
+- eksport kilku formatow w jednej paczce moze byc bardzo sensowny badawczo, ale w finalnym wdrozeniu nie powinien byc przypadkowym mnozeniem plikow;
+- uzytkownik musi rozumiec roznice miedzy formatem finalnym, fallbackiem, wariantem kontrolnym i eksperymentem wydajnosciowym.
+
+Decyzja:
+
+- kilka formatow w jednym `.alprmodel` traktujemy jako warianty wykonawcze tego samego checkpointu, a nie jako rozne modele logiczne;
+- `LiteRT/TFLite FP32` jest domyslnym wariantem stabilnym dla Androida;
+- `LiteRT/TFLite INT8` jest wariantem lekkim/wydajnosciowym, ale wymaga reprezentatywnej kalibracji i porownania z FP32;
+- `ONNX FP32` jest wariantem kontrolnym/fallbackiem, szczegolnie przydatnym do diagnostyki i porownan runtime;
+- `NCNN FP32` pozostaje wariantem eksperymentalnym, sensownym dopiero wtedy, gdy klient Android ma pelna obsluge runtime NCNN.
+
+Zmiana:
+
+- modal wykonawczy eksportu dostal krotki przewodnik przy wyborze formatow;
+- kazdy format ma opisany cel: `Android stabilny`, `Android lekki`, `Kontrola`, `Eksperyment`;
+- domyslnie zaznaczony jest tylko stabilny `LiteRT/TFLite FP32`; `ONNX`, `INT8` i `NCNN` uzytkownik wlacza swiadomie;
+- dokument handoff doprecyzowuje, ze Android powinien wybierac runtime jawnie i raportowac, ktory wariant zostal uzyty;
+- dokumentacja kwantyzacji/eksportu dostala rozszerzony opis konsekwencji wyboru kilku formatow.
+
+Uzasadnienie:
+
+- zgodnie z dokumentacja Ultralytics format eksportu jest zalezy od docelowego runtime i sprzetu, a nie jest cecha samego treningu;
+- LiteRT/TFLite jest naturalnym kierunkiem dla Androida i inferencji on-device;
+- ONNX Runtime Mobile moze byc dobra sciezka kontrolna, ale wymaga osobnego runtime w aplikacji;
+- NCNN jest runtime mobilnym/embedded, lecz wymaga dedykowanej integracji po stronie klienta;
+- powtarzalny eksperyment wymaga, aby roznice miedzy wariantami wynikaly z formatu/runtime/kwantyzacji, a nie z roznych checkpointow.
+
+Zrodla:
+
+- Ultralytics, `Model Export with Ultralytics YOLO`: https://docs.ultralytics.com/modes/export;
+- Google AI Edge, `LiteRT for Android`: https://developers.google.cn/edge/litert/android;
+- ONNX Runtime, `Deploy on mobile`: https://onnxruntime.ai/docs/tutorials/mobile/;
+- Tencent NCNN: https://github.com/Tencent/ncnn.

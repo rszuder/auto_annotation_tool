@@ -72,6 +72,26 @@ def build_lazy_subtab_placeholder(host: "CharacterAnnotationTab", parent, messag
     ).pack(padx=24, pady=18)
 
 
+def is_step3_campaign_runtime(host: "CharacterAnnotationTab") -> bool:
+    try:
+        return bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    except Exception:
+        return False
+
+
+def get_step3_pz2_intro_text(host: "CharacterAnnotationTab") -> str:
+    if is_step3_campaign_runtime(host):
+        return (
+            "T05 składa się z dwóch kroków. Tutaj, w PZ2, przygotowujesz anotacje znaków na tablicach: "
+            "poprawiasz ramki, wpisujesz znaki i doprowadzasz tablice do statusu perfect. "
+            "Gdy zbiór PZ2 jest sensowny, użyj przycisku „Krok 2: dataset PZ3”, aby przejść do PZ3 i utworzyć źródłowy dataset znaków."
+        )
+    return (
+        "PZ2 przygotowuje anotacje znaków na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
+        "i doprowadzasz tablice do statusu perfect. Gdy zbiór PZ2 jest sensowny, przejdź do PZ3 i utwórz źródłowy dataset znaków."
+    )
+
+
 def ensure_step3_subtab_built(host: "CharacterAnnotationTab", tab_widget) -> bool:
     if tab_widget is getattr(host, "tab_detect", None):
         return host._ensure_detect_tab_built()
@@ -457,10 +477,7 @@ def _get_pz3_existing_dataset_status_from_summary(host: "CharacterAnnotationTab"
 def build_step3_pz3_dataset_mode_view_model(
     host: "CharacterAnnotationTab",
 ) -> Step3Pz3DatasetModeViewModel:
-    try:
-        in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
-    except Exception:
-        in_campaign = False
+    in_campaign = is_step3_campaign_runtime(host)
 
     mode = "perfect"
 
@@ -636,7 +653,7 @@ def build_step3_extract_workflow_view_model(
     except Exception:
         has_preview = bool(str(host.preview_dir_var.get() or "").strip())
     has_run = bool(str(host.annotation_run_dir_var.get() or "").strip())
-    linear_mode = bool(getattr(host, "_step3_linear_mode", False))
+    linear_mode = is_step3_campaign_runtime(host)
     candidate = host._get_preferred_z2_source_candidate()
     step3_status = ""
     if linear_mode:
@@ -1595,7 +1612,7 @@ def refresh_pz3_cards_ui(host: "CharacterAnnotationTab"):
 
 
 def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
-    in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    in_campaign = is_step3_campaign_runtime(host)
 
     host._set_grid_visibility(getattr(host, "preview_source_lf", None), (not in_campaign))
     host._set_grid_visibility(getattr(host, "preview_counts_frame", None), True)
@@ -1629,6 +1646,18 @@ def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
             host._set_inline_status_label_state(
                 note,
                 text=note_text,
+                tone="muted",
+                emphasis=False,
+            )
+    except Exception:
+        pass
+
+    try:
+        intro = getattr(host, "preview_list_intro_lbl", None)
+        if intro is not None:
+            host._set_inline_status_label_state(
+                intro,
+                text=get_step3_pz2_intro_text(host),
                 tone="muted",
                 emphasis=False,
             )

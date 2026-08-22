@@ -67,6 +67,7 @@ from .z3_campaign_flow import (
     go_to_substep_2_campaign,
     go_to_substep_3_campaign,
     has_any_step3_export_outputs,
+    _mark_t06_pz2_contract,
     mark_step3_work_interrupted_on_app_close,
     open_campaign_step3_entry,
     persist_step3_progress,
@@ -74,6 +75,7 @@ from .z3_campaign_flow import (
     resolve_step3_campaign_action_command,
     restore_campaign_step3_mode,
     return_step3_result_to_wizard,
+    return_to_wizard_from_step3_pz2,
     return_to_wizard_for_step3_rework,
     set_step3_finish_hint,
     unlock_dataset_subtab,
@@ -82,6 +84,7 @@ from .z3_campaign_flow import (
 from .z3_free_mode_flow import (
     back_to_substep_1_free_mode,
     back_to_substep_2_free_mode,
+    ensure_step3_free_mode_context,
     go_to_substep_2_free_mode,
     go_to_substep_3_free_mode,
     reset_extract_source_inputs,
@@ -1970,11 +1973,19 @@ class CharacterAnnotationTab:
         except Exception:
             return False
 
-    def _sync_step3_access_from_preview_state(self, metadata_map=None):
+    def _sync_step3_access_from_preview_state(
+        self,
+        metadata_map=None,
+        *,
+        mark_current_work: bool = False,
+        mark_reason: str = "pz2_manual_ready",
+    ):
         stage1_ready = False
         stage2_ready = False
+        requires_current_pz2 = False
+        in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
         hold_pz2_after_reextract = bool(
-            getattr(self, "_campaign_step3_hold_pz2_after_reextract", False)
+            in_campaign and getattr(self, "_campaign_step3_hold_pz2_after_reextract", False)
         )
 
         try:
@@ -1988,11 +1999,31 @@ class CharacterAnnotationTab:
             stage2_ready = self._preview_dir_has_completed_detection_output()
         if hold_pz2_after_reextract:
             stage2_ready = False
-        elif self._step3_linear_mode:
+        elif in_campaign:
             try:
                 stage2_ready = stage2_ready or bool(self._campaign_step3_pz2_base_ready())
             except Exception:
                 pass
+            try:
+                requires_current_pz2 = bool(self._campaign_step3_requires_current_pz2_for_pz3())
+            except Exception:
+                requires_current_pz2 = False
+            if requires_current_pz2:
+                try:
+                    current_pz2_ready = bool(self._campaign_step3_pz2_current_contract_ready())
+                except Exception:
+                    current_pz2_ready = False
+                if bool(mark_current_work) and stage2_ready and not current_pz2_ready:
+                    try:
+                        _mark_t06_pz2_contract(
+                            self,
+                            reason=str(mark_reason or "pz2_manual_ready"),
+                            force=True,
+                        )
+                        current_pz2_ready = bool(self._campaign_step3_pz2_current_contract_ready())
+                    except Exception:
+                        current_pz2_ready = False
+                stage2_ready = bool(stage2_ready and current_pz2_ready)
 
         if stage1_ready:
             try:
@@ -2000,7 +2031,7 @@ class CharacterAnnotationTab:
                 self._set_subtab_state(self.tab_detect, "normal")
             except Exception:
                 pass
-            if self._step3_linear_mode:
+            if in_campaign:
                 try:
                     CAMPAIGN.set_step3_stage1_done(True)
                 except Exception:
@@ -2012,7 +2043,7 @@ class CharacterAnnotationTab:
                 self._set_subtab_state(self.tab_dataset, "normal")
             except Exception:
                 pass
-            if self._step3_linear_mode:
+            if in_campaign:
                 try:
                     CAMPAIGN.set_step3_stage2_done(True)
                 except Exception:
@@ -2023,11 +2054,21 @@ class CharacterAnnotationTab:
                 self._set_subtab_state(self.tab_dataset, "disabled")
             except Exception:
                 pass
-            if self._step3_linear_mode:
+            if in_campaign:
                 try:
                     CAMPAIGN.set_step3_stage2_done(False)
                 except Exception:
                     pass
+        elif in_campaign and requires_current_pz2:
+            try:
+                self._set_button_state("btn_to_dataset", False)
+                self._set_subtab_state(self.tab_dataset, "disabled")
+            except Exception:
+                pass
+            try:
+                CAMPAIGN.set_step3_stage2_done(False)
+            except Exception:
+                pass
 
         try:
             self._sync_step3_nav_buttons()
@@ -3429,6 +3470,9 @@ class CharacterAnnotationTab:
     # --- STEP3 NOTEBOOK PERSIST ---
     _on_main_nb_tab_changed = z3_navigation_runtime._on_main_nb_tab_changed
     _campaign_step3_pz2_base_ready = z3_navigation_runtime.campaign_step3_pz2_base_ready
+    _campaign_step3_pz2_current_contract_ready = z3_navigation_runtime.campaign_step3_pz2_current_contract_ready
+    _campaign_step3_requires_current_pz2_for_pz3 = z3_navigation_runtime.campaign_step3_requires_current_pz2_for_pz3
+    _can_open_step3_dataset_from_current_context = z3_navigation_runtime.campaign_step3_can_open_pz3_from_current_context
     get_free_mode_assistant_context = get_step3_free_mode_assistant_context
     _refresh_campaign_step3_navigation_visibility = refresh_campaign_step3_navigation_visibility
     _sync_step3_nav_buttons = sync_step3_nav_buttons
@@ -3436,24 +3480,27 @@ class CharacterAnnotationTab:
     open_campaign_step3_entry = open_campaign_step3_entry
     _auto_progress_campaign_step3_entry = auto_progress_campaign_step3_entry
     reset_subtab_flow = reset_step3_subtab_flow
+    ensure_free_mode_context_ready = ensure_step3_free_mode_context
     unlock_detection_subtab = unlock_detection_subtab
     unlock_dataset_subtab = unlock_dataset_subtab
 
     def go_to_substep_2(self, *, force: bool = False):
-        if self._step3_linear_mode:
+        if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
             go_to_substep_2_campaign(self, force=force)
             return
+        if self._step3_linear_mode:
+            self.ensure_free_mode_context_ready()
 
         go_to_substep_2_free_mode(self)
 
     def go_to_substep_3(self):
-        if self._step3_linear_mode:
+        if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
             go_to_substep_3_campaign(self)
             return
-
-        if not self._step3_linear_mode:
-            go_to_substep_3_free_mode(self)
-            return
+        if self._step3_linear_mode:
+            self.ensure_free_mode_context_ready()
+        go_to_substep_3_free_mode(self)
+        return
 
     def back_to_substep_1(self):
         """
@@ -3462,8 +3509,7 @@ class CharacterAnnotationTab:
         if getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name():
             return
         if self._step3_linear_mode:
-            back_to_substep_1_campaign(self)
-            return
+            self.ensure_free_mode_context_ready()
 
         back_to_substep_1_free_mode(self)
 
@@ -3473,13 +3519,16 @@ class CharacterAnnotationTab:
         Powrót z PZ3 do PZ2 zostawia użytkownika w tym samym etapie E3,
         ale otwiera z powrotem aktywny zestaw wykrywania znaków.
         """
-        if self._step3_linear_mode:
+        if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
             back_to_substep_2_campaign(self)
             return
+        if self._step3_linear_mode:
+            self.ensure_free_mode_context_ready()
 
         back_to_substep_2_free_mode(self)
 
     _persist_step3_progress = persist_step3_progress
+    _return_to_wizard_from_step3_pz2 = return_to_wizard_from_step3_pz2
     restore_campaign_step3_mode = restore_campaign_step3_mode
     can_restore_step3_substep = z3_navigation_runtime.can_restore_step3_substep
 

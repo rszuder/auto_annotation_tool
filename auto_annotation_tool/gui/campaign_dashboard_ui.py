@@ -1310,8 +1310,9 @@ def _render_step1_route_actions(self, frame):
     warning = palette.get("warning", "#f39c12")
     error = palette.get("error", "#c0392b")
     accent = palette.get("accent", "#4fc1ff")
-    edge_route_color = palette.get("campaign_edge", "#0F9F9A")
-    active_edge_color = palette.get("campaign_active_edge", "#8B5CF6")
+    graph_canvas_bg = palette.get("campaign_graph_bg", blend_hex_colors(card_bg, "#0f172a", 0.06))
+    edge_route_color = palette.get("campaign_edge", "#386d83")
+    active_edge_color = palette.get("campaign_active_edge", "#6652c7")
     border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
     field_bg = palette.get("field", "#1a1a1a")
 
@@ -1672,7 +1673,7 @@ def _render_step1_route_actions(self, frame):
     canvas = tk.Canvas(
         frame,
         height=700,
-        bg=card_bg,
+        bg=graph_canvas_bg,
         bd=0,
         highlightthickness=0,
         highlightbackground=border,
@@ -3055,6 +3056,21 @@ def _render_step1_route_actions(self, frame):
             session = {}
         dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
         pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+        t06_backfill_reasons = {
+            "approve_step3_backfill",
+            "graph_backfill_from_pz3_summary",
+            "summary_backfill",
+            "summary_backfill_after_pz3_session",
+            "replace_approve_backfill_with_pz3_export",
+        }
+
+        def _is_t06_backfill_reason(reason_value: object) -> bool:
+            normalized = str(reason_value or "").strip().lower()
+            return bool(
+                normalized in t06_backfill_reasons
+                or normalized.startswith("graph_backfill")
+                or normalized.startswith("summary_backfill")
+            )
 
         def _summary_int(summary: dict, *keys: str) -> int:
             for key in keys:
@@ -3163,7 +3179,16 @@ def _render_step1_route_actions(self, frame):
                 contract = dict((entry.get("t06_contracts") or {}).get("pz3_char_dataset") or {})
                 if not _contract_path_matches(contract, dataset_path, summary_path):
                     continue
-                found = _summary_iteration(contract)
+                if _is_t06_backfill_reason(contract.get("reason")):
+                    found = (
+                        _positive_int(contract.get("source_iteration"))
+                        or _positive_int(contract.get("created_iteration"))
+                        or _positive_int(contract.get("produced_iteration"))
+                    )
+                    if found <= 0:
+                        continue
+                else:
+                    found = _summary_iteration(contract)
                 if found <= 0:
                     found = _positive_int(contract.get("iteration"))
                 if found <= 0:
@@ -3232,6 +3257,19 @@ def _render_step1_route_actions(self, frame):
                 return {}
             now = datetime.now().isoformat(timespec="seconds")
             source_iteration = _infer_pz3_source_iteration({}, dataset_path, summary)
+            try:
+                current_iter_for_session = int(CAMPAIGN.get_current_iteration_num() or current_iteration or 1)
+            except Exception:
+                current_iter_for_session = 1
+            resolving_interrupted_session = (
+                str(reason or "").strip().lower() == "graph_resolve_interrupted_pz3_export"
+            )
+            if (
+                resolving_interrupted_session
+                and source_iteration > 0
+                and source_iteration != current_iter_for_session
+            ):
+                return {}
             contract = {
                 "fulfilled": True,
                 "product": "char_yolo_dataset",
@@ -3254,7 +3292,8 @@ def _render_step1_route_actions(self, frame):
                 CAMPAIGN.upsert_iteration_state(updates={"t06_contracts": {"pz3_char_dataset": contract}})
                 pz3_contract = dict(contract)
                 dataset_raw = str(dataset_path)
-                _close_t06_z3_session_from_graph(str(reason or "pz3_dataset_ready"))
+                if source_iteration > 0 and source_iteration == current_iter_for_session:
+                    _close_t06_z3_session_from_graph(str(reason or "pz3_dataset_ready"))
                 return dict(contract)
             except Exception as exc:
                 logger.debug(f"Nie udało się odbudować kontraktu T06/PZ3 z aktywnego podsumowania: {exc}")
@@ -3405,13 +3444,17 @@ def _render_step1_route_actions(self, frame):
                 dataset_hint=dataset_raw,
             )
             return invalid
-        _close_t06_z3_session_from_graph("pz3_dataset_ready")
         try:
             current_iter_for_origin = int(CAMPAIGN.get_current_iteration_num() or current_iteration or 1)
         except Exception:
             current_iter_for_origin = 1
-        pz3_iteration = _infer_pz3_source_iteration(pz3_contract, dataset_path) or _contract_iteration(pz3_contract)
+        inferred_pz3_iteration = _infer_pz3_source_iteration(pz3_contract, dataset_path)
+        if inferred_pz3_iteration <= 0 and not _is_t06_backfill_reason(pz3_reason):
+            inferred_pz3_iteration = _contract_iteration(pz3_contract)
+        pz3_iteration = inferred_pz3_iteration
         pz2_iteration = _contract_iteration(pz2_contract) or pz3_iteration
+        if int(pz3_iteration or 0) == int(current_iter_for_origin or 0):
+            _close_t06_z3_session_from_graph("pz3_dataset_ready")
         return {
             "ok": True,
             "reason": "source_dataset_ready_for_split",
@@ -4002,11 +4045,28 @@ def _render_step1_route_actions(self, frame):
                 )
             except Exception:
                 exported_gate_iteration = 0
+            try:
+                current_iter_for_session = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+            except Exception:
+                current_iter_for_session = 1
+            pz3_export_ready_current = bool(
+                pz3_export_ready
+                and exported_gate_iteration > 0
+                and exported_gate_iteration == current_iter_for_session
+            )
             session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
             session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
             session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
+            controlled_pz2_return = bool(
+                session_gate_id in CHAR_WORK_GATE_SESSION_IDS
+                and session_work_area == "z3"
+                and session_targets_pz2
+                and session_state in {"paused", "ready_for_pz3", "waiting_for_pz3"}
+                and str(session.get("reason") or "").strip().lower()
+                in {"return_to_graph_pz2_ready", "return_to_graph_pz2_pending"}
+            )
             if (
-                pz3_export_ready
+                pz3_export_ready_current
                 and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                 and session_work_area == "z3"
                 and session_targets_pz3
@@ -4028,7 +4088,7 @@ def _render_step1_route_actions(self, frame):
                     logger.debug(f"Nie udało się zapisać domknięcia sesji T06/Z3 w grafie: {exc}")
                 session_active = False
                 session_state = "completed"
-            if pz3_export_ready:
+            if pz3_export_ready_current:
                 if (
                     session_active
                     and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
@@ -4068,11 +4128,9 @@ def _render_step1_route_actions(self, frame):
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             )
             missing_z3_export_interrupted = bool(
-                not pz3_export_ready
-                and (
-                    pz2_contract_ready
-                    or z3_session_touched
-                )
+                not pz3_export_ready_current
+                and not controlled_pz2_return
+                and z3_session_touched
             )
         except Exception:
             missing_z3_export_interrupted = False
@@ -5181,6 +5239,97 @@ def _render_step1_route_actions(self, frame):
             return ""
         return ""
 
+    def _edge_current_iteration_work_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key != "e3_to_e4":
+            return ""
+        try:
+            if _t06_interrupted_work_state():
+                return ""
+        except Exception:
+            pass
+        try:
+            if not _edge_ready(edge):
+                return ""
+        except Exception:
+            return ""
+        try:
+            current_iter = max(1, int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1))
+        except Exception:
+            current_iter = 1
+        if current_iter <= 1:
+            return ""
+
+        backfill_reasons = {
+            "approve_step3_backfill",
+            "graph_backfill_from_pz3_summary",
+            "summary_backfill",
+            "summary_backfill_after_pz3_session",
+            "replace_approve_backfill_with_pz3_export",
+        }
+
+        def _is_backfill_reason(payload: dict) -> bool:
+            reason = str((payload or {}).get("reason") or "").strip().lower()
+            return bool(
+                reason in backfill_reasons
+                or reason.startswith("graph_backfill")
+                or reason.startswith("summary_backfill")
+            )
+
+        def _payload_iteration(payload: dict) -> int:
+            if not isinstance(payload, dict):
+                return 0
+            for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                try:
+                    iteration_num = int(payload.get(field, 0) or 0)
+                except Exception:
+                    iteration_num = 0
+                if iteration_num > 0:
+                    return iteration_num
+            return 0
+
+        def _is_current_user_work(payload: dict) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            if not bool(payload.get("fulfilled")):
+                return False
+            if _is_backfill_reason(payload):
+                return False
+            return bool(_payload_iteration(payload) == current_iter)
+
+        try:
+            contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+        except Exception:
+            contracts = {}
+        pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+        pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
+        current_products = []
+        if _is_current_user_work(pz2_contract):
+            current_products.append("PZ2")
+        if _is_current_user_work(pz3_contract):
+            current_products.append("PZ3")
+        try:
+            gate = dict(_t06_exported_char_dataset_state() or {})
+        except Exception:
+            gate = {}
+        if not _is_backfill_reason(pz3_contract):
+            for field, label in (("pz2_iteration", "PZ2"), ("pz3_iteration", "PZ3"), ("source_iteration", "PZ3")):
+                try:
+                    gate_iteration = int(gate.get(field, 0) or 0)
+                except Exception:
+                    gate_iteration = 0
+                if gate_iteration == current_iter and label not in current_products:
+                    current_products.append(label)
+        if current_products:
+            return ""
+        return f"BEZ PRZYROSTU IT{current_iter}"
+
+    def _edge_work_compact_status(edge) -> str:
+        review_label = _edge_pending_resource_review_label(edge)
+        if review_label:
+            return review_label
+        return _edge_current_iteration_work_status(edge)
+
     def _edge_status(edge) -> tuple[str, str]:
         if not _edge_gate_active(edge):
             return "", muted_dim
@@ -5296,8 +5445,6 @@ def _render_step1_route_actions(self, frame):
                     return f"OK: AZ z IT{source_iteration} ({suffix})"
                 return "OK: AZ gotowy"
         if _is_t07_graph_edge(getattr(edge, "key", "")):
-            if _current_step4_work_interruption_state():
-                return "PRZERWANE"
             if _current_t07_training_candidate_state():
                 return "WYBIERZ WYNIK"
             pending_t07 = _get_t07_pending_repair_approved_state()
@@ -7543,13 +7690,21 @@ def _render_step1_route_actions(self, frame):
             pass
 
     def _open_t06_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
+        modal_width = 760
+        modal_height = 520
+        modal_content_wrap = modal_width - 104
         dialog = tk.Toplevel(self.frame)
         try:
-            self.app.style_dialog_window(dialog, title=f"Praca {CHAR_WORK_GATE_DISPLAY_ID}", geometry="660x500", parent=self.frame)
+            self.app.style_dialog_window(
+                dialog,
+                title=f"Praca {CHAR_WORK_GATE_DISPLAY_ID}",
+                geometry=f"{modal_width}x{modal_height}",
+                parent=self.frame,
+            )
         except Exception:
             dialog.title(f"Praca {CHAR_WORK_GATE_DISPLAY_ID}")
         try:
-            dialog.minsize(640, 460)
+            dialog.minsize(720, 500)
         except Exception:
             pass
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -7675,21 +7830,26 @@ def _render_step1_route_actions(self, frame):
             iteration_num = _t06_contract_iteration(payload)
             return bool(iteration_num > 0 and iteration_num == _t06_current_iteration_number())
 
+        def _t06_contract_is_backfill(payload: dict) -> bool:
+            reason = str((payload or {}).get("reason") or "").strip().lower()
+            return bool(
+                reason in {
+                    "approve_step3_backfill",
+                    "graph_backfill_from_pz3_summary",
+                    "summary_backfill",
+                    "summary_backfill_after_pz3_session",
+                    "replace_approve_backfill_with_pz3_export",
+                }
+                or reason.startswith("graph_backfill")
+                or reason.startswith("summary_backfill")
+            )
+
         def _t06_contract_is_current_user_work(payload: dict) -> bool:
             """Backfills restore readiness, but they are not CTA work done now."""
 
             if not _t06_contract_is_current_iteration(payload):
                 return False
-            reason = str((payload or {}).get("reason") or "").strip().lower()
-            if reason in {
-                "approve_step3_backfill",
-                "graph_backfill_from_pz3_summary",
-                "summary_backfill",
-                "summary_backfill_after_pz3_session",
-                "replace_approve_backfill_with_pz3_export",
-            }:
-                return False
-            if reason.startswith("graph_backfill") or reason.startswith("summary_backfill"):
+            if _t06_contract_is_backfill(payload):
                 return False
             if str((payload or {}).get("product") or "").strip().lower() == "char_yolo_dataset":
                 origin_iteration = _t06_contract_artifact_origin_iteration(payload)
@@ -7776,6 +7936,8 @@ def _render_step1_route_actions(self, frame):
                 gate_iteration = int(gate.get("source_iteration") or gate.get("pz3_iteration") or gate.get("iteration") or 0)
             except Exception:
                 gate_iteration = 0
+            if _t06_contract_is_backfill(pz3_contract):
+                return False
             return bool(gate.get("ok") and ready_dataset and gate_iteration == _t06_current_iteration_number())
 
         def _t06_origin_label(iteration_num: int) -> str:
@@ -8142,7 +8304,7 @@ def _render_step1_route_actions(self, frame):
             font=("Segoe UI", 9, "bold" if pending_work else "normal"),
             justify=tk.LEFT,
             anchor="w",
-            wraplength=560,
+            wraplength=modal_content_wrap,
             padx=10 if pending_work else 0,
             pady=5 if pending_work else 0,
         ).pack(fill=tk.X, padx=16, pady=(0, 10))
@@ -8154,6 +8316,8 @@ def _render_step1_route_actions(self, frame):
             bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
             font=("Segoe UI", 9, "bold"),
             anchor="w",
+            justify=tk.LEFT,
+            wraplength=modal_content_wrap,
             padx=10,
             pady=5,
         ).pack(fill=tk.X, padx=16, pady=(0, 10))
@@ -8371,6 +8535,38 @@ def _render_step1_route_actions(self, frame):
                 "tone": muted,
                 "fill": 0.045,
             }
+
+        def _t06_action_completion_badge(
+            *,
+            disabled_reason: str,
+            is_resume: bool,
+            is_z3_action: bool,
+            is_char_pz2: bool,
+        ) -> dict:
+            current_iter = _t06_current_iteration_number()
+
+            def _badge(text: str, tone_value: str, *, fill: float = 0.14) -> dict:
+                return {
+                    "text": campaign_ui_helpers._repair_polish_text(text),
+                    "tone": tone_value,
+                    "fill": fill,
+                }
+
+            if disabled_reason:
+                return _badge(f"NIEDOSTĘPNE IT{current_iter}", muted, fill=0.07)
+            if pending_z3_work and _t06_pending_z3_targets_pz2() and is_char_pz2:
+                return _badge(f"PRZERWANE IT{current_iter}", error, fill=0.18)
+            if pending_z3_work and _t06_pending_z3_targets_pz3() and is_z3_action:
+                return _badge(f"PRZERWANE IT{current_iter}", error, fill=0.18)
+            if pending_ok_work and is_resume:
+                return _badge(f"DO ROZLICZENIA IT{current_iter}", warning, fill=0.16)
+            if pending_ok_work and (is_char_pz2 or is_z3_action):
+                return _badge(f"CZEKA [OK] IT{current_iter}", warning, fill=0.14)
+            if is_char_pz2 and _t06_pz2_contract_ready_current():
+                return _badge(f"WYKONANE IT{current_iter}", success, fill=0.18)
+            if is_z3_action and _t06_pz3_contract_ready_current():
+                return _badge(f"WYKONANE IT{current_iter}", success, fill=0.18)
+            return _badge(f"DO WYKONANIA IT{current_iter}", muted, fill=0.08)
 
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 12))
@@ -8682,15 +8878,6 @@ def _render_step1_route_actions(self, frame):
             row.columnconfigure(0, weight=1)
             row.columnconfigure(1, weight=0, minsize=suggestion_frame_width)
             row.columnconfigure(2, weight=0)
-            tk.Label(
-                row,
-                text=f"{index}. {normalized_label}",
-                fg=fg if is_enabled else muted,
-                bg=row_bg,
-                font=("Segoe UI", 10, "bold"),
-                anchor="w",
-            ).grid(row=0, column=0, sticky="w", padx=(12, 8), pady=7)
-
             status = _t06_action_status(
                 normalized_label,
                 disabled_reason=disabled_reason,
@@ -8699,6 +8886,41 @@ def _render_step1_route_actions(self, frame):
                 is_char_pz2=is_char_pz2,
                 is_recommended=is_recommended,
             )
+            completion_badge = _t06_action_completion_badge(
+                disabled_reason=disabled_reason,
+                is_resume=is_resume,
+                is_z3_action=is_z3_action,
+                is_char_pz2=is_char_pz2,
+            )
+            title_cell = tk.Frame(row, bg=row_bg)
+            title_cell.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=7)
+            title_cell.columnconfigure(0, weight=1)
+            tk.Label(
+                title_cell,
+                text=f"{index}. {normalized_label}",
+                fg=fg if is_enabled else muted,
+                bg=row_bg,
+                font=("Segoe UI", 10, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=300,
+            ).grid(row=0, column=0, sticky="ew")
+            badge_tone = str(completion_badge.get("tone") or muted)
+            badge_bg = blend_hex_colors(row_bg, badge_tone, float(completion_badge.get("fill", 0.10) or 0.10))
+            badge_border = blend_hex_colors(badge_tone, row_bg, 0.30)
+            tk.Label(
+                title_cell,
+                text=str(completion_badge.get("text") or ""),
+                fg=badge_tone if is_enabled else muted,
+                bg=badge_bg,
+                font=("Segoe UI Semibold", 7),
+                anchor="center",
+                padx=7,
+                pady=2,
+                highlightthickness=1,
+                highlightbackground=badge_border,
+                highlightcolor=badge_border,
+            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
             status_tone = str(status.get("tone") or muted)
             status_bg = blend_hex_colors(row_bg, status_tone, float(status.get("fill", 0.08) or 0.08))
             status_border = blend_hex_colors(status_tone, row_bg, 0.34)
@@ -9162,9 +9384,9 @@ def _render_step1_route_actions(self, frame):
                         previous_plates, current_plates, all_plates = _balance_counts(total_plates, origin_iteration)
                         previous_units, current_units, all_units = _balance_counts(total_units, origin_iteration)
                     return (
-                        f"Z poprzednich iteracji: {previous_plates} tablic / {previous_units} {unit_label}\n"
-                        f"Przyrost aktualnej iteracji (IT{current_iter_num}): {current_plates} tablic / {current_units} {unit_label}\n"
-                        f"Łącznie: {all_plates} tablic / {all_units} {unit_label}"
+                        f"Aktualna iteracja (IT{current_iter_num}): {current_plates} tablic / {current_units} {unit_label}\n"
+                        f"Dziedziczone z poprzednich iteracji: {previous_plates} tablic / {previous_units} {unit_label}\n"
+                        f"Łącznie dostępne: {all_plates} tablic / {all_units} {unit_label}"
                     )
 
                 pz2_total_plates = max(
@@ -9290,7 +9512,7 @@ def _render_step1_route_actions(self, frame):
 
                 dialog = tk.Toplevel(self.frame)
                 try:
-                    self.app.style_dialog_window(dialog, title=f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}", geometry="980x460", parent=self.frame)
+                    self.app.style_dialog_window(dialog, title=f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}", geometry="1080x500", parent=self.frame)
                 except Exception:
                     dialog.title(f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}")
                 build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -9329,15 +9551,15 @@ def _render_step1_route_actions(self, frame):
                     bg=body_bg,
                     justify=tk.LEFT,
                     anchor="w",
-                    wraplength=760,
+                    wraplength=900,
                 ).pack(fill=tk.X, padx=16, pady=(0, 10))
 
                 table = tk.Frame(body, bg=body_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
                 table.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
-                for col, weight in enumerate((0, 0, 2, 3, 4)):
+                for col, weight in enumerate((0, 0, 2, 4, 4)):
                     table.grid_columnconfigure(col, weight=weight)
                 header_bg = blend_hex_colors(field_bg, accent, 0.10)
-                for col, header in enumerate(("Stan", "Krok", "Produkt", "Bilans iteracji", "Aktualny stan")):
+                for col, header in enumerate(("Stan", "Krok", "Produkt", "Przyrost / dziedziczone", "Aktualny stan")):
                     tk.Label(
                         table,
                         text=repair(header),
@@ -9362,24 +9584,39 @@ def _render_step1_route_actions(self, frame):
                         (0, status_badge, state_color, 62),
                         (1, step_label, accent, 90),
                         (2, product, fg, 180),
-                        (3, balance_text, state_color, 230),
-                        (4, state_text, state_color, 360),
+                        (3, balance_text, state_color, 300),
+                        (4, state_text, state_color, 390),
                     ):
                         cell = tk.Frame(table, bg=row_bg, bd=0, highlightthickness=1, highlightbackground=border, highlightcolor=border)
                         cell.grid(row=row_idx, column=col, sticky="nsew")
                         if col == 3:
-                            balance_colors = (muted, accent, success)
+                            balance_colors = (success, muted, accent)
+                            balance_fills = (
+                                blend_hex_colors(row_bg, success, 0.14),
+                                blend_hex_colors(row_bg, muted, 0.065),
+                                blend_hex_colors(row_bg, accent, 0.11),
+                            )
                             for line_idx, line in enumerate(str(text or "").splitlines()):
-                                tk.Label(
+                                segment_color = balance_colors[min(line_idx, len(balance_colors) - 1)]
+                                segment_bg = balance_fills[min(line_idx, len(balance_fills) - 1)]
+                                segment = tk.Frame(
                                     cell,
+                                    bg=segment_bg,
+                                    highlightthickness=1 if line_idx == 0 else 0,
+                                    highlightbackground=blend_hex_colors(segment_color, row_bg, 0.36),
+                                    highlightcolor=blend_hex_colors(segment_color, row_bg, 0.36),
+                                )
+                                segment.pack(fill=tk.X, padx=6, pady=(6 if line_idx == 0 else 3, 2))
+                                tk.Label(
+                                    segment,
                                     text=repair(line),
-                                    fg=balance_colors[min(line_idx, len(balance_colors) - 1)],
-                                    bg=row_bg,
+                                    fg=segment_color,
+                                    bg=segment_bg,
                                     anchor="w",
                                     justify=tk.LEFT,
-                                    font=("Segoe UI", 9, "bold"),
+                                    font=("Segoe UI", 9 if line_idx == 0 else 8, "bold" if line_idx in (0, 2) else "normal"),
                                     padx=8,
-                                    pady=(5 if line_idx == 0 else 2),
+                                    pady=4,
                                     wraplength=wrap,
                                 ).pack(fill=tk.X)
                             continue
@@ -15018,8 +15255,21 @@ def _render_step1_route_actions(self, frame):
                         pz2_iteration = 0
                     if pz2_iteration > 0:
                         break
+                pz2_reason = str(pz2_contract.get("reason") or "").strip().lower()
+                pz2_backfill = bool(
+                    pz2_reason in {
+                        "approve_step3_backfill",
+                        "graph_backfill_from_pz3_summary",
+                        "summary_backfill",
+                        "summary_backfill_after_pz3_session",
+                        "replace_approve_backfill_with_pz3_export",
+                    }
+                    or pz2_reason.startswith("graph_backfill")
+                    or pz2_reason.startswith("summary_backfill")
+                )
                 pz2_done = bool(
                     pz2_contract.get("fulfilled")
+                    and not pz2_backfill
                     and pz2_iteration > 0
                     and pz2_iteration == int(current_iteration or 0)
                 )
@@ -15508,19 +15758,19 @@ def _render_step1_route_actions(self, frame):
         zoom_for_fonts = _graph_zoom()
         graph_zoom_scale = max(0.001, float(zoom_for_fonts or 1.0))
         graph_base_font_scale = 1.22
-        graph_card_text = "#101316"
-        graph_card_muted = "#3f4951"
-        graph_card_disabled = "#6a747c"
-        graph_node_surface = "#cce7f5"
-        graph_gate_surface = "#f5d7a8"
-        graph_node_outline = "#2f7ea4"
-        graph_gate_outline = "#b46a12"
-        graph_shadow = blend_hex_colors(card_bg, "#000000", 0.12)
-        graph_card_success = "#126f3f"
-        graph_card_warning = "#8a5200"
-        graph_card_error = "#9f241d"
-        graph_card_accent = "#075f8f"
-        graph_card_active = "#5b21b6"
+        graph_card_text = palette.get("campaign_card_text", "#161b22")
+        graph_card_muted = palette.get("campaign_card_muted", "#4a5660")
+        graph_card_disabled = palette.get("campaign_card_disabled", "#87919a")
+        graph_node_surface = palette.get("campaign_node_surface", "#e4ebef")
+        graph_gate_surface = palette.get("campaign_gate_surface", "#eee2d0")
+        graph_node_outline = palette.get("campaign_node_outline", "#6f8793")
+        graph_gate_outline = palette.get("campaign_gate_outline", "#987646")
+        graph_shadow = blend_hex_colors(graph_canvas_bg, "#000000", 0.18)
+        graph_card_success = palette.get("campaign_card_success", "#1f7a4d")
+        graph_card_warning = palette.get("campaign_card_warning", "#956318")
+        graph_card_error = palette.get("campaign_card_error", "#a13a32")
+        graph_card_accent = palette.get("campaign_card_accent", "#245f82")
+        graph_card_active = palette.get("campaign_card_active", "#5f50c8")
 
         def _graph_card_contrast_color(color: str) -> str:
             token = str(color or "").strip().lower()
@@ -18694,7 +18944,7 @@ def _render_step1_route_actions(self, frame):
             completed = bool(_edge_completed(edge))
             local_zoom = _gate_local_zoom(edge.key)
             resource_status_value = _edge_resource_badge_status(edge)
-            work_status_value = _edge_pending_resource_review_label(edge) if _edge_fields_enabled(edge) else ""
+            work_status_value = _edge_work_compact_status(edge) if _edge_fields_enabled(edge) else ""
             approve_display_label = _edge_approve_label(edge) if _edge_approve_enabled(edge) else "ZATWIERDŹ"
             rows = (
                 ("BRAMKA", status_text, None, False),

@@ -61,7 +61,79 @@ def set_pz3_selected_path(host: "CharacterAnnotationTab", path_key: str) -> str:
     return str(getattr(host, "_pz3_selected_path", "") or "").strip().lower()
 
 
+def clear_step3_free_mode_campaign_markers(host: "CharacterAnnotationTab") -> None:
+    """Usuń wyłącznie lokalne markery wejścia z grafu; nie czyści danych użytkownika."""
+    for attr_name, value in (
+        ("_campaign_graph_entry_context", {}),
+        ("_campaign_force_pz2_entry", False),
+        ("_campaign_force_pz3_entry", False),
+        ("_campaign_force_detect_entry", False),
+        ("_campaign_pz2_sync_loading", False),
+        ("_campaign_step3_entry_splash_pinned", False),
+        ("_campaign_detect_splash_force_root_surface", False),
+        ("_campaign_step3_hold_pz2_after_reextract", False),
+        ("_campaign_step3_reextract_seed_metadata", {}),
+    ):
+        try:
+            setattr(host, attr_name, value.copy() if isinstance(value, dict) else value)
+        except Exception:
+            pass
+
+
+def ensure_step3_free_mode_context(host: "CharacterAnnotationTab") -> None:
+    clear_step3_free_mode_campaign_markers(host)
+    host._step3_linear_mode = False
+    try:
+        host._hide_campaign_detect_splash()
+    except Exception:
+        pass
+    for tab_widget in (
+        getattr(host, "tab_extract", None),
+        getattr(host, "tab_detect", None),
+        getattr(host, "tab_dataset", None),
+    ):
+        if tab_widget is None:
+            continue
+        try:
+            host._set_subtab_state(tab_widget, "normal")
+        except Exception:
+            pass
+    for button_name in (
+        "btn_to_detect",
+        "btn_to_dataset",
+        "btn_run_detection",
+        "btn_rank_presets",
+        "btn_ocr_lab",
+    ):
+        try:
+            host._set_button_state(button_name, True)
+        except Exception:
+            pass
+    for frame_name in (
+        "btn_to_detect_frame",
+        "btn_to_dataset_frame",
+        "btn_run_detection_frame",
+    ):
+        try:
+            host._set_button_emphasis(frame_name, False)
+        except Exception:
+            pass
+    try:
+        host._refresh_step3_mode_specific_ui()
+    except Exception:
+        pass
+    try:
+        host._refresh_campaign_step3_navigation_visibility()
+    except Exception:
+        pass
+    try:
+        host._sync_step3_nav_buttons()
+    except Exception:
+        pass
+
+
 def reset_step3_subtab_flow(host: "CharacterAnnotationTab") -> None:
+    clear_step3_free_mode_campaign_markers(host)
     host._step3_linear_mode = False
     try:
         host._hide_campaign_detect_splash()

@@ -41,6 +41,136 @@ def _dataset_summary_id(path_like, *, target_hint: str, counts: dict | None = No
             return raw
 
 
+def _safe_step4_int(value, default: int = 0) -> int:
+    try:
+        number = int(value or default or 0)
+    except Exception:
+        number = int(default or 0)
+    return number
+
+
+def _current_step4_iteration() -> int:
+    try:
+        return int(CAMPAIGN.get_current_iteration_num() or 1)
+    except Exception:
+        return 1
+
+
+def _step4_record_declared_iteration(record: dict | None) -> int:
+    data = dict(record or {})
+    for field in ("dataset_iteration", "created_iteration", "iteration"):
+        value = _safe_step4_int(data.get(field))
+        if value > 0:
+            return value
+    return 0
+
+
+def _step4_dataset_record_counts(record: dict | None) -> dict:
+    data = dict(record or {})
+    train = max(0, _safe_step4_int(data.get("train_images")))
+    val = max(0, _safe_step4_int(data.get("val_images")))
+    test = max(0, _safe_step4_int(data.get("test_images")))
+    total = max(0, _safe_step4_int(data.get("total_images")))
+    if total <= 0:
+        total = train + val + test
+    return {"train": train, "val": val, "test": test, "total": total}
+
+
+def _current_iteration_step4_dataset_record(target: str | None) -> dict:
+    normalized_target = str(target or "").strip().lower()
+    if normalized_target not in {"char", "plate"}:
+        normalized_target = "char"
+    iteration_num = _current_step4_iteration()
+
+    record = {}
+    try:
+        iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=iteration_num) or {})
+        record = dict(iteration_state.get("step4_dataset") or {})
+    except Exception:
+        record = {}
+    if not record:
+        try:
+            bundle = dict(CAMPAIGN.get_iteration_artifact_bundle(iteration_num=iteration_num) or {})
+            bundle_record = dict(bundle.get("step4_dataset") or {})
+            if _step4_record_declared_iteration(bundle_record) == iteration_num:
+                record = bundle_record
+        except Exception:
+            record = {}
+    if not record:
+        return {}
+
+    record.setdefault("iteration", iteration_num)
+    record_target = str(record.get("target") or "").strip().lower()
+    if record_target and record_target != normalized_target:
+        return {}
+    counts = _step4_dataset_record_counts(record)
+    if int(counts.get("total", 0) or 0) <= 0:
+        return {}
+    return dict(record)
+
+
+def _resolve_step4_dataset_record_root(record: dict | None) -> Path | None:
+    data = dict(record or {})
+    candidates: list[Path] = []
+    dataset_path = str(data.get("dataset_path") or "").strip()
+    yaml_path = str(data.get("yaml_path") or "").strip()
+    if dataset_path:
+        try:
+            candidate = Path(dataset_path)
+            candidates.append(candidate.parent if candidate.is_file() and candidate.name.lower() == "data.yaml" else candidate)
+        except Exception:
+            pass
+    if yaml_path:
+        try:
+            candidates.append(Path(yaml_path).parent)
+        except Exception:
+            pass
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except Exception:
+            continue
+    return candidates[0] if candidates else None
+
+
+def _current_iteration_pz3_source_contract() -> dict:
+    iteration_num = _current_step4_iteration()
+    try:
+        iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=iteration_num) or {})
+    except Exception:
+        iteration_state = {}
+    contracts = iteration_state.get("t06_contracts")
+    contracts = dict(contracts) if isinstance(contracts, dict) else {}
+    contract = contracts.get("pz3_char_dataset")
+    contract = dict(contract) if isinstance(contract, dict) else {}
+    if not bool(contract.get("fulfilled")):
+        return {}
+    product = str(contract.get("product") or "").strip().lower()
+    if product and product != "char_yolo_dataset":
+        return {}
+    source_iteration = (
+        _safe_step4_int(contract.get("source_iteration"))
+        or _safe_step4_int(contract.get("created_iteration"))
+        or _safe_step4_int(contract.get("iteration"))
+    )
+    if source_iteration > 0 and source_iteration != iteration_num:
+        return {}
+    dataset_path = str(contract.get("dataset_path") or contract.get("gold_dataset_path") or "").strip()
+    if not dataset_path:
+        return {}
+    try:
+        root = Path(dataset_path)
+        if root.is_file() and root.name.lower() == "data.yaml":
+            root = root.parent
+        if not root.exists() or not root.is_dir():
+            return {}
+    except Exception:
+        return {}
+    contract["dataset_path"] = str(root)
+    return contract
+
+
 def _apply_campaign_project_base_model_selection(host: "TrainingTab", target: str | None) -> bool:
     normalized_target = str(target or "").strip().lower()
     if normalized_target not in {"plate", "char"}:
@@ -534,27 +664,38 @@ def open_campaign_step4_entry(
     _perf_mark("context_reuse" if context_matches else "context_restore")
 
     datasets_dir = Path(datasets_dir)
-    source_candidates = []
-    try:
-        for path in host._find_dataset_source_candidates(datasets_dir):
-            inferred = host._infer_dataset_target(str(path))
-            if target == "char":
-                if inferred != "char":
-                    continue
-            elif inferred not in {"plate", None}:
-                continue
-            source_candidates.append(path)
-    except Exception:
-        source_candidates = []
-    _perf_mark("source_scan")
-
-    latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
-
     readiness = host.get_campaign_step4_readiness(iteration_target=target)
     _perf_mark("readiness")
     readiness_reason = str(readiness.get("reason") or "").strip().lower()
     ready_dataset_text = str(readiness.get("ready_dataset") or "").strip()
     source_dataset_text = str(readiness.get("source_dataset") or "").strip()
+    latest_source = None
+    if target == "char" and source_dataset_text:
+        try:
+            source_dataset_path = Path(source_dataset_text)
+            if source_dataset_path.exists() and source_dataset_path.is_dir():
+                latest_source = source_dataset_path
+        except Exception:
+            latest_source = None
+
+    if latest_source is None:
+        source_candidates = []
+        try:
+            for path in host._find_dataset_source_candidates(datasets_dir):
+                inferred = host._infer_dataset_target(str(path))
+                if target == "char":
+                    if inferred != "char":
+                        continue
+                elif inferred not in {"plate", None}:
+                    continue
+                source_candidates.append(path)
+        except Exception:
+            source_candidates = []
+        latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime) if source_candidates else None
+        _perf_mark("source_scan")
+    else:
+        _perf_mark("source_fast")
+
     if target == "char" and readiness_reason == "source_dataset_ready_for_split":
         preferred_subtab = "dataset"
         if source_dataset_text:
@@ -741,10 +882,33 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
     latest_xml_images = ""
     current_iter_images = ""
 
+    if remembered_target == "char":
+        fast_dataset_record = _current_iteration_step4_dataset_record("char")
+        fast_dataset_root = _resolve_step4_dataset_record_root(fast_dataset_record)
+        fast_counts = _step4_dataset_record_counts(fast_dataset_record)
+        if (
+            fast_dataset_root is not None
+            and int(fast_counts.get("train", 0) or 0) > 0
+            and int(fast_counts.get("val", 0) or 0) > 0
+        ):
+            ready_dataset = fast_dataset_root
+            ready_target = "char"
+        else:
+            pz3_source = _current_iteration_pz3_source_contract()
+            pz3_source_path = str(pz3_source.get("dataset_path") or "").strip()
+            if pz3_source_path:
+                try:
+                    pz3_root = Path(pz3_source_path)
+                    if pz3_root.exists() and pz3_root.is_dir():
+                        latest_source = pz3_root
+                except Exception:
+                    latest_source = None
+
     if datasets_dir is not None and datasets_dir.exists():
-        source_candidates = host._find_dataset_source_candidates(datasets_dir)
-        if source_candidates:
-            latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
+        if latest_source is None:
+            source_candidates = host._find_dataset_source_candidates(datasets_dir)
+            if source_candidates:
+                latest_source = max(source_candidates, key=lambda p: p.stat().st_mtime)
 
         if remembered_target == "plate":
             plate_dataset_info = host._resolve_campaign_plate_ready_dataset(datasets_dir)
@@ -752,7 +916,7 @@ def restore_step4_campaign_project_state(host: "TrainingTab"):
                 ready_dataset = plate_dataset_info.get("path")
                 if ready_dataset is not None:
                     ready_target = "plate"
-        else:
+        elif ready_dataset is None:
             ready_candidates = host._find_ready_dataset_candidates(datasets_dir)
 
             preferred = [rec for rec in ready_candidates if rec[1] == remembered_target]

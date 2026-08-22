@@ -1750,6 +1750,13 @@ def _show_history_context_menu(self, event=None):
         pass
     try:
         menu.entryconfigure(
+            "Eksportuj pakiet mobilny (.alprmodel)",
+            state=(tk.NORMAL if exportable else tk.DISABLED),
+        )
+    except Exception:
+        pass
+    try:
+        menu.entryconfigure(
             f"Podepnij jako wynik bramki {_step4_finish_gate_display_id()}",
             state=(tk.NORMAL if promotable else tk.DISABLED),
         )

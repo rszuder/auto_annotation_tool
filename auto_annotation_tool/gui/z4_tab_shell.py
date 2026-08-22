@@ -40,6 +40,7 @@ from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, Dataset
 from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
+from .free_mode_assistant import get_mobile_export_assistant_context
 from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
@@ -203,11 +204,14 @@ def get_free_mode_assistant_context(self) -> dict:
                 "PZ1 zamienia źródło danych w gotowy wariant treningowy YOLO: układa train / val / test "
                 "i zapisuje data.yaml. Ten wariant wybierzesz później w PZ2."
             ),
+            "current": (
+                "PZ1 tworzy wariant datasetu. Jeśli źródło dotyczy znaków, pochodzi z Z3/PZ3; jeśli dotyczy tablic, pochodzi z zatwierdzonych anotacji tablic."
+            ),
             "workflow": (
                 "Wybierz typ datasetu: tablice albo znaki.",
                 "Dla tablic wskaż gotowy dataset albo parę: XML anotacji + zgodny katalog zdjęć.",
                 "Po wskazaniu XML system spróbuje znaleźć pasujący katalog zdjęć i poprosi o potwierdzenie.",
-                "Dla znaków użyj datasetu źródłowego wyeksportowanego wcześniej w Z3/PZ3.",
+                "Dla znaków użyj datasetu źródłowego wyeksportowanego w Z3/PZ3.",
                 "Opcjonalnie ustaw syntetyczne zwiększanie tylko części train.",
                 "Kliknij „Utwórz split treningowy”; po sukcesie możesz pozostać w PZ1 albo przejść do PZ2.",
             ),
@@ -223,28 +227,54 @@ def get_free_mode_assistant_context(self) -> dict:
                 "XML i katalog zdjęć muszą opisywać te same pliki. Augmentacja nie zmienia val/test, "
                 "tylko powiększa train."
             ),
+            "references": ("docs/mapa_funkcji_i_kodu.md", "docs/siatka_eksperymentow_mobilnych_alpr.md"),
         }
     if selected_tab == str(getattr(self, "tab_train", "")):
+        mobile_export = get_mobile_export_assistant_context()
         return {
             "location": "[Z4] Trening i analiza / [PZ2] Trening i wyniki",
-            "goal": "PZ2 korzysta z wariantu splitu przygotowanego w PZ1, wybiera model startowy treningu i uruchamia nowy run.",
+            "goal": (
+                "PZ2 korzysta z wariantu splitu przygotowanego w PZ1, wybiera model startowy treningu, "
+                "uruchamia run i pozwala zbudować pakiet mobilny z gotowego checkpointu."
+            ),
+            "current": (
+                "Model startowy rozpoczyna trening. Wynik bramki to model jawnie wskazany po treningu, rankingu albo analizie historii runów."
+            ),
             "workflow": (
                 "Wybierz wariant splitu z listy.",
                 "Wybierz model startowy zgodny z typem datasetu.",
                 "Ustaw parametry startowe: epoki, batch, rozdzielczość, learning rate i urządzenie.",
                 "Uruchom trening i obserwuj postęp oraz terminal procesu.",
                 "Po treningu sprawdź historię runów, wykonaj walidację lub porównaj wyniki w rankingu.",
+                "Eksport mobilny uruchamiaj z gotowego best.pt: pojedynczy model jest do diagnostyki, komplet MT+MZ do testu całego ALPR.",
+                "W prawym panelu eksportu formaty oznaczają warianty tego samego checkpointu, a data.yaml jest potrzebny tylko do kalibracji INT8.",
             ),
             "glossary": (
                 "epoka = pełne przejście po danych",
                 "val = walidacja jakości",
                 "ranking = porównanie modeli",
+                "pakiet mobilny = plik .alprmodel z manifestem i wariantami wykonawczymi",
+                "pakiet MT+MZ = komplet modelu tablic i modelu znaków do testu end-to-end",
+                "data.yaml = opis datasetu YOLO; w INT8 jest reprezentatywną próbką do kalibracji",
+                "kalibracja = pomiar zakresów aktywacji, a nie trening",
+                "LiteRT/TFLite = główny format Androida",
+                "ONNX = wariant kontrolny/fallback",
+                "INT8 = mniejszy wariant kwantyzowany, który trzeba porównać z FP32",
             ),
-            "caution": "Jeśli trening ma używać innego splitu, wróć do PZ1 i wybierz albo utwórz inny wariant.",
+            "caution": (
+                "Jeśli trening ma używać innego splitu, wróć do PZ1. "
+                + str(mobile_export.get("caution", "") or "")
+            ),
+            "references": (
+                "docs/eksport_mobilny_kwantyzacja.md",
+                "docs/siatka_eksperymentow_mobilnych_alpr.md",
+                "docs/podbudowa_literaturowa_metodyki_testow_alpr.md",
+            ),
         }
     return {
         "location": "[Z4] Trening i analiza",
         "goal": "Z4 prowadzi prostym przepływem: PZ1 przygotowuje wariant splitu, PZ2 trenuje model na wybranym wariancie.",
+        "current": "Ranking i eksport korzystają z gotowych checkpointów oraz metadanych runów.",
         "workflow": (
             "PZ1 buduje wariant treningowy zgodny z typem datasetu.",
             "PZ2 używa wybranego wariantu do treningu, walidacji i porównania modeli.",
@@ -252,4 +282,5 @@ def get_free_mode_assistant_context(self) -> dict:
         ),
         "glossary": ("PZ1 = wariant treningowy", "PZ2 = trening i wyniki", "ranking = porównanie modeli"),
         "caution": "PZ2 trenuje na splicie wybranym z listy. Nowe splity przygotowuje PZ1.",
+        "references": ("docs/mapa_funkcji_i_kodu.md",),
     }

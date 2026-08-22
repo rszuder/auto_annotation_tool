@@ -70,8 +70,10 @@ def _step_goto_training_dataset(self):
                     "i przygotowuję panel datasetu."
                 ),
                 tone="info",
-                progress=18.0,
+                progress=None,
             )
+            self.frame.update_idletasks()
+            self.frame.update()
         except Exception:
             pass
         try:
@@ -123,6 +125,7 @@ def _step_goto_training_dataset(self):
             tone="success",
             progress=86.0,
         )
+        self.frame.update_idletasks()
     except Exception:
         pass
     self.app.open_controlled_tab("training")

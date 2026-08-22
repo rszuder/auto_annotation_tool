@@ -388,6 +388,7 @@ Odpowiedzialne pliki:
 
 - `auto_annotation_tool/ranking/model_ranking.py` - ranking modeli.
 - `auto_annotation_tool/ranking/annotation_comparator.py` - porównywanie anotacji.
+- `auto_annotation_tool/ranking/mobile_package_experiments.py` - kontrakt eksperymentów pakietów `MT+MZ` / `MP+MT+MZ`, raportów Android i punktacji mobilnej.
 - `auto_annotation_tool/gui/tab_ranking.py` - starsza/oddzielna karta rankingu.
 - `auto_annotation_tool/gui/z4_analysis_ranking.py` - analiza runów i raporty rankingowe w Z4.
 - `auto_annotation_tool/gui/z4_validation_panel.py` - modal walidacji modeli.
@@ -395,7 +396,7 @@ Odpowiedzialne pliki:
 
 ### 14. Import i eksport formatów
 
-Program pracuje głównie z CVAT XML i YOLO.
+Program pracuje głównie z CVAT XML i YOLO. Dodatkowo ma osobny tor eksportu modeli do klienta mobilnego ALPR jako pakiet `.alprmodel`.
 
 Odpowiedzialne pliki:
 
@@ -405,8 +406,17 @@ Odpowiedzialne pliki:
 - `auto_annotation_tool/cvat_tools/cvat_character_exporter.py` - eksport znaków do CVAT.
 - `auto_annotation_tool/exporters/cvat_exporter.py` - eksport CVAT XML.
 - `auto_annotation_tool/exporters/yolo_exporter.py` - eksport YOLO Pose.
+- `auto_annotation_tool/exporters/mobile_model_exporter.py` - budowa pojedynczego `.alprmodel` (`alpr.model.v1`) oraz kompletnego pakietu `MT+MZ` lub `MP+MT+MZ` (`alpr.package.v1`).
 - `auto_annotation_tool/exporters/report_generator.py` - raporty.
 - `auto_annotation_tool/validators.py` - walidacja modeli i metadanych YOLO.
+- `auto_annotation_tool/gui/z4_model_export.py` - modal eksportu modeli, wybór kandydatów i formatów mobilnych.
+- `alpr_python_exporter_handoff.md` - kontrakt eksportera Python z klientem Android.
+- `docs/eksport_mobilny_kwantyzacja.md` - opis formatów, kwantyzacji, kalibracji i parametrów inferencji dla pracy inżynierskiej.
+- `docs/siatka_eksperymentow_mobilnych_alpr.md` - metodyka porównywania modeli, pakietów `MT+MZ` / `MP+MT+MZ`, wariantów runtime i wyników mobilnych.
+- `docs/podbudowa_literaturowa_metodyki_testow_alpr.md` - uzasadnienie literaturowe: podzial danych, metryki detekcji, ocena end-to-end, testy mobilne i kwantyzacja.
+- `docs/specyfikacja_agenta_aplikacji_mobilnej_alpr.md` - specyfikacja dla agenta Android: import `.alprmodel`, walidacja, inferencja mobilna i metodyka badań.
+
+Uwaga: zaznaczenie kilku formatów w modalu eksportu mobilnego oznacza kilka wariantów tego samego checkpointu `best.pt` w jednym pakiecie `.alprmodel`, a nie kilka oddzielnych modeli logicznych.
 
 ### 15. Identyfikatory prezentacyjne
 
@@ -561,4 +571,3 @@ rg -n "class CharacterAnnotationTab|PZ2|PZ3" auto_annotation_tool/gui/tab_charac
 rg -n "class TrainingTab|PZ1|PZ2|training" auto_annotation_tool/gui/tab_training.py auto_annotation_tool/gui/z4_*.py
 rg -n "class AugmentationProfile|class Step4AugmentationModal" auto_annotation_tool/training/dataset_augmentation.py auto_annotation_tool/gui/z4_augmentation_modal.py
 ```
-
