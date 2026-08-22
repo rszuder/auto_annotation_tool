@@ -11,6 +11,122 @@ from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG
 from ..config import logger
 
+_T05_PZ2_BACKFILL_REASONS = {
+    "approve_step3_backfill",
+    "graph_backfill_from_pz3_summary",
+    "summary_backfill",
+    "summary_backfill_after_pz3_session",
+    "replace_approve_backfill_with_pz3_export",
+    "pz2_current_work_ready",
+}
+
+
+def _truthy_marker(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "tak", "yes", "on"}
+    return bool(value)
+
+
+def _campaign_context(host) -> dict:
+    try:
+        return dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        return {}
+
+
+def _campaign_session() -> dict:
+    try:
+        return dict((CAMPAIGN.get_iteration_state() or {}).get("t06_work_session") or {})
+    except Exception:
+        return {}
+
+
+def _is_t05_z3_session(session: dict | None) -> bool:
+    data = dict(session or {})
+    gate = str(data.get("working_gate_id") or data.get("gate_id") or "").strip().upper()
+    area = str(data.get("work_area") or "").strip().lower()
+    return bool(gate in {"T05", "T06"} and area in {"", "z3"})
+
+
+def _contract_iteration(contract: dict | None) -> int:
+    data = dict(contract or {})
+    for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+        try:
+            value = int(data.get(field, 0) or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _contract_is_backfill(contract: dict | None) -> bool:
+    reason = str((contract or {}).get("reason") or "").strip().lower()
+    return bool(
+        reason in _T05_PZ2_BACKFILL_REASONS
+        or reason.startswith("graph_backfill")
+        or reason.startswith("summary_backfill")
+    )
+
+
+def campaign_step3_pz2_current_contract_ready(host) -> bool:
+    try:
+        if not bool(getattr(host, "_step3_linear_mode", False)) or not CAMPAIGN.get_active_project_name():
+            return False
+        current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+        contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+        contract = dict(contracts.get("pz2_char_boxes") or {})
+    except Exception:
+        return False
+    if not bool(contract.get("fulfilled")) or _contract_is_backfill(contract):
+        return False
+    contract_iteration = _contract_iteration(contract)
+    return bool(current_iteration > 0 and contract_iteration == current_iteration)
+
+
+def campaign_step3_requires_current_pz2_for_pz3(host) -> bool:
+    try:
+        if not bool(getattr(host, "_step3_linear_mode", False)) or not CAMPAIGN.get_active_project_name():
+            return False
+    except Exception:
+        return False
+
+    ctx = _campaign_context(host)
+    target_hint = str(
+        ctx.get("target_substep")
+        or ctx.get("graph_target_substep")
+        or ctx.get("preferred_substep")
+        or ""
+    ).strip().lower()
+    if (
+        _truthy_marker(ctx.get("force_pz3"))
+        or bool(getattr(host, "_campaign_force_pz3_entry", False))
+        or target_hint in {"3", "dataset", "pz3", "z3_pz3"}
+    ):
+        return False
+    if (
+        _truthy_marker(ctx.get("force_pz2"))
+        or bool(getattr(host, "_campaign_force_pz2_entry", False))
+        or bool(getattr(host, "_campaign_force_detect_entry", False))
+        or target_hint in {"2", "detect", "pz2", "z3_pz2"}
+    ):
+        return True
+
+    session = _campaign_session()
+    if not _is_t05_z3_session(session):
+        return False
+    state = str(session.get("state") or "").strip().lower()
+    if state in {"resolved", "closed", "complete", "completed"}:
+        return False
+    substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+    return substep in {"2", "detect", "pz2", "z3_pz2"}
+
+
+def campaign_step3_can_open_pz3_from_current_context(host) -> bool:
+    if not campaign_step3_requires_current_pz2_for_pz3(host):
+        return True
+    return campaign_step3_pz2_current_contract_ready(host)
+
 
 def _refresh_preview_source_panel(self):
     status_lbl = getattr(self, "preview_source_status_lbl", None)
@@ -87,6 +203,28 @@ def _on_main_nb_tab_changed(self, event=None):
     except Exception:
         selected_tab = ""
 
+    if selected_tab == str(getattr(self, "tab_dataset", "")):
+        try:
+            can_open_dataset = bool(self._can_open_step3_dataset_from_current_context())
+        except Exception:
+            can_open_dataset = True
+        if not can_open_dataset:
+            try:
+                self._set_subtab_state(self.tab_detect, "normal")
+                self._set_subtab_state(self.tab_dataset, "disabled")
+                self.main_nb.select(str(self.tab_detect))
+            except Exception:
+                pass
+            try:
+                self.app.update_status(
+                    "PZ3 jest dostępne dopiero po domknięciu PZ2 w bieżącej iteracji. "
+                    "Najpierw przygotuj anotacje znaków w PZ2.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+
     if selected_tab == str(getattr(self, "tab_detect", "")):
         if not self._ensure_detect_tab_built():
             return
@@ -112,10 +250,7 @@ def _on_main_nb_tab_changed(self, event=None):
         except Exception:
             pass
 
-    if not getattr(self, "_step3_linear_mode", False):
-        return
-
-    if not CAMPAIGN.get_active_project_name():
+    if not (getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name()):
         return
 
     self._persist_step3_progress()
@@ -129,7 +264,7 @@ def campaign_step3_pz2_base_ready(self) -> bool:
     do kroku eksportu.
     """
     try:
-        if not bool(getattr(self, "_step3_linear_mode", False)):
+        if not bool(getattr(self, "_step3_linear_mode", False)) or not CAMPAIGN.get_active_project_name():
             return False
         if bool(getattr(self, "_campaign_step3_hold_pz2_after_reextract", False)):
             return False
@@ -239,6 +374,11 @@ def can_restore_step3_substep(self, substep: int) -> bool:
     # substep 3 dodatkowo wymaga, żeby etap 2 był realnie zakończony
     if substep >= 3:
         try:
+            if not bool(campaign_step3_can_open_pz3_from_current_context(self)):
+                return False
+        except Exception:
+            pass
+        try:
             if bool(getattr(self, "_campaign_step3_hold_pz2_after_reextract", False)):
                 return False
         except Exception:
@@ -251,7 +391,7 @@ def can_restore_step3_substep(self, substep: int) -> bool:
         if campaign_step3_pz2_base_ready(self):
             return True
         try:
-            if bool(getattr(self, "_step3_linear_mode", False)) and bool(
+            if bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name()) and bool(
                 self._get_campaign_step3_annotation_readiness().get("ok")
             ):
                 return True

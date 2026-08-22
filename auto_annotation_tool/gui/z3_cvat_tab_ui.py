@@ -1247,12 +1247,32 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
         headers=("Wybór", "Źródło", "Tablice", "Znaki", "Status"),
     )
 
-    def _add_gold_table_row(table, row_index: int, *, bucket_key: str, label_text: str, selected_getter, toggle_command=None, locked: bool = False):
+    def _add_gold_table_row(
+        table,
+        row_index: int,
+        *,
+        bucket_key: str,
+        label_text: str,
+        selected_getter,
+        toggle_command=None,
+        locked: bool = False,
+        summary: bool = False,
+    ):
         palette = getattr(self.app, "palette", {})
         panel_bg = palette.get("panel", "#252526")
         panel_alt = palette.get("panel_alt", panel_bg)
         row_bg = blend_hex_colors(panel_alt, panel_bg, 0.22)
         row_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+        if summary:
+            row_bg = blend_hex_colors(palette.get("accent", "#4f8de3"), panel_bg, 0.88)
+            row_border = blend_hex_colors(palette.get("accent", "#4f8de3"), row_border, 0.42)
+        row_cursor = "arrow" if locked or summary else "hand2"
+        summary_font = None
+        if summary:
+            try:
+                summary_font = self._get_preview_legend_font(9, "bold")
+            except Exception:
+                summary_font = None
         row = tk.Frame(
             table,
             bg=row_bg,
@@ -1260,7 +1280,7 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             highlightthickness=1,
             highlightbackground=row_border,
             highlightcolor=row_border,
-            cursor=("arrow" if locked else "hand2"),
+            cursor=row_cursor,
         )
         row.grid(row=row_index, column=0, sticky="ew", pady=(0, 1))
         _configure_gold_table_columns(row)
@@ -1271,7 +1291,7 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             height=16,
             bd=0,
             highlightthickness=0,
-            cursor=("arrow" if locked else "hand2"),
+            cursor=row_cursor,
         )
         indicator.grid(row=0, column=0, sticky="", padx=6, pady=6)
 
@@ -1283,23 +1303,24 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             bg=row_bg,
             bd=0,
             highlightthickness=0,
-            cursor=("arrow" if locked else "hand2"),
+            cursor=row_cursor,
             padx=4,
             pady=6,
+            font=summary_font,
         )
         label.grid(row=0, column=1, sticky="ew")
 
-        plate_lbl = tk.Label(row, text="0", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=6, pady=6)
+        plate_lbl = tk.Label(row, text="0", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=6, pady=6, font=summary_font)
         plate_lbl.grid(row=0, column=2, sticky="ew")
 
-        char_lbl = tk.Label(row, text="0", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=6, pady=6)
+        char_lbl = tk.Label(row, text="0", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=6, pady=6, font=summary_font)
         char_lbl.grid(row=0, column=3, sticky="ew")
 
-        badge = tk.Label(row, text="", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=8, pady=3)
+        badge = tk.Label(row, text="", anchor="center", bg=row_bg, bd=0, highlightthickness=0, padx=8, pady=3, font=summary_font)
         badge.grid(row=0, column=4, sticky="ew", padx=(4, 8), pady=5)
 
         row_info = {
-            "kind": "check",
+            "kind": "summary" if summary else "check",
             "frame": row,
             "indicator": indicator,
             "label": label,
@@ -1315,9 +1336,10 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             "base_bg": row_bg,
             "hover_bg": blend_hex_colors(palette.get("accent", "#4f8de3"), panel_bg, 0.88),
             "border_color": row_border,
+            "summary": bool(summary),
         }
 
-        if callable(toggle_command) and not locked:
+        if callable(toggle_command) and not locked and not summary:
             for widget in (row, indicator, label, plate_lbl, char_lbl, badge):
                 widget.bind("<Button-1>", toggle_command)
                 widget.bind("<Enter>", lambda _event, info=row_info: self._set_selection_row_hover(info, True))
@@ -1348,6 +1370,16 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             )
         )
 
+    self.gold_export_filter_total_row = _add_gold_table_row(
+        gold_strategy_table,
+        len(self.gold_export_filter_rows) + 1,
+        bucket_key="__strategy_total__",
+        label_text="Suma wybranych",
+        selected_getter=lambda: True,
+        locked=True,
+        summary=True,
+    )
+
     self.gold_export_source_rows = []
     for row_idx, (bucket_key, filter_label, filter_var) in enumerate((
         ("auto_preview", GOLD_SOURCE_LABELS["auto_preview"], self.gold_include_source_auto_var),
@@ -1377,6 +1409,16 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
             selected_getter=lambda: True,
             locked=True,
         )
+    )
+
+    self.gold_export_source_total_row = _add_gold_table_row(
+        gold_source_table,
+        len(self.gold_export_source_rows) + 1,
+        bucket_key="__source_total__",
+        label_text="Suma wybranych",
+        selected_getter=lambda: True,
+        locked=True,
+        summary=True,
     )
 
     self._apply_gold_export_filter_check_style()

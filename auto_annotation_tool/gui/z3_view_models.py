@@ -47,6 +47,7 @@ class Step3CampaignNavigationViewModel:
     in_campaign: bool = False
     splash_visible: bool = False
     show_detect_back_to_extract: bool = True
+    show_detect_return_to_graph: bool = False
     show_detect_to_dataset: bool = True
     show_dataset_back_to_detect: bool = True
 

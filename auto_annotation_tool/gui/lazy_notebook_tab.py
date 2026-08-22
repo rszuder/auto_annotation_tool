@@ -440,6 +440,49 @@ class _LazyNotebookTab:
                 return result
             return result
 
+        try:
+            current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
+            iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=current_iteration) or {})
+            contracts = iteration_state.get("t06_contracts")
+            contracts = dict(contracts) if isinstance(contracts, dict) else {}
+            pz3_contract = contracts.get("pz3_char_dataset")
+            pz3_contract = dict(pz3_contract) if isinstance(pz3_contract, dict) else {}
+            source_iteration = (
+                int(pz3_contract.get("source_iteration", 0) or 0)
+                or int(pz3_contract.get("created_iteration", 0) or 0)
+                or int(pz3_contract.get("iteration", 0) or 0)
+            )
+            source_path = str(pz3_contract.get("dataset_path") or pz3_contract.get("gold_dataset_path") or "").strip()
+            if (
+                bool(pz3_contract.get("fulfilled"))
+                and source_path
+                and (source_iteration <= 0 or source_iteration == current_iteration)
+            ):
+                root = Path(source_path)
+                if root.is_file() and root.name.lower() == "data.yaml":
+                    root = root.parent
+                if root.exists() and root.is_dir():
+                    pairs = (
+                        int(pz3_contract.get("source_image_label_pairs", 0) or 0)
+                        or int(pz3_contract.get("exportable_plate_count", 0) or 0)
+                        or int(pz3_contract.get("perfect_count", 0) or 0)
+                    )
+                    result.update(
+                        ok=True,
+                        reason="source_dataset_ready_for_split",
+                        ready_dataset="",
+                        dataset_hint=str(root),
+                        source_dataset=str(root),
+                        source_yaml=str(root / "data.yaml"),
+                        source_image_label_pairs=int(pairs or 0),
+                        validation_message=(
+                            "Źródłowy dataset znaków jest gotowy. W Z4/PZ1 utwórz wariant train/val/test."
+                        ),
+                    )
+                    return result
+        except Exception:
+            pass
+
         ready = self._lazy_find_ready_dataset(datasets_dir, "char")
         if ready.get("path"):
             counts = dict(ready.get("counts") or {})

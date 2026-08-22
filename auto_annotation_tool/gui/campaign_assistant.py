@@ -39,27 +39,27 @@ def _build_campaign_graph_assistant_context(self, status: WizardStageStatus | No
     step3_caution = ""
     if step_num == 3:
         step3_workflow = (
-            "Dla T06 praca ma dwa kroki: PZ2 buduje bazę znaków na wyodrębnionych tablicach, a PZ3 eksportuje źródłowy dataset znaków.",
-            "Próg w PZ2 mówi tylko, czy baza znaków jest sensowna. Bramkę T06 domyka dopiero artefakt AZ utworzony w PZ3.",
+            "Dla T05 praca ma dwa kroki: PZ2 buduje bazę znaków na wyodrębnionych tablicach, a PZ3 eksportuje źródłowy dataset znaków.",
+            "Próg w PZ2 mówi tylko, czy baza znaków jest sensowna. Bramkę T05 domyka dopiero artefakt AZ utworzony w PZ3.",
         )
         step3_glossary = (
             "baza PZ2 = tablice perfect i ramki znaków przygotowane do eksportu",
             "AZ = źródłowy dataset znaków utworzony w PZ3",
         )
-        step3_caution = "W E3 nie traktuj progu PZ2 jako pełnego otwarcia T06: to tylko pierwszy składnik pracy."
+        step3_caution = "W E3 nie traktuj progu PZ2 jako pełnego otwarcia T05: to tylko pierwszy składnik pracy."
 
     return _repair_assistant_context({
         "location": f"[Z1] Mapa przej\u015b\u0107 kampanii / E{step_num}",
         "goal": (
-            "Z1 dzia\u0142a teraz jak mapa przej\u015b\u0107 kampanii. W\u0119z\u0142y E1, E2, E3, E4T i E4Z s\u0105 etapami, "
+            "Z1 działa jak mapa przejść kampanii. Węzły E1, E2, E3, E4T i E4Z są etapami, "
             "a bramki przy kraw\u0119dziach opisuj\u0105 konkretne przej\u015bcia mi\u0119dzy etapami."
         ),
         "workflow": (
             "Najpierw wybierz jedn\u0105 bramk\u0119 elektrod\u0105 przy jej etykiecie. Dopiero wybrana bramka jest aktywn\u0105 \u015bcie\u017ck\u0105 pracy.",
             "Pole Zasoby otwiera wymagane wej\u015bcia dla tej jednej \u015bcie\u017cki: obrazy, modele albo anotacje.",
-            "Pole Akcje prowadzi do w\u0142a\u015bciwej karty roboczej, np. Z2, Z3 albo Z4. Po wyj\u015bciu wracasz do mapy przej\u015b\u0107.",
+            "Pole Praca prowadzi do właściwej karty roboczej, np. Z2, Z3 albo Z4. Po wyjściu wracasz do mapy przejść.",
             "Pole Zatwierd\u017a zamyka przej\u015bcie dopiero wtedy, gdy bramka jest otwarta i warunki s\u0105 spe\u0142nione.",
-            "Je\u015bli wahasz si\u0119 mi\u0119dzy T01 i T03, u\u017cyj przycisku Poradnik wyboru na grafie.",
+            "Jeśli wybierasz ścieżkę startową iteracji, porównuj T01 i T02 jako alternatywy.",
             *step3_workflow,
         ),
         "current": (
@@ -71,12 +71,19 @@ def _build_campaign_graph_assistant_context(self, status: WizardStageStatus | No
             "w\u0119ze\u0142 = etap projektu, np. E1, E2, E3, E4T albo E4Z",
             "E4T = trening modelu tablic; E4Z = trening modelu znaków",
             "kraw\u0119d\u017a = mo\u017cliwe przej\u015bcie mi\u0119dzy etapami",
-            "bramka = ma\u0142y panel na kraw\u0119dzi z polami Bramka, Zasoby, Akcje i Zatwierd\u017a",
+            "bramka = mały panel na krawędzi z polami Bramka, Zasoby, Praca i Zatwierdź",
             "elektroda = prze\u0142\u0105cznik wyboru bramki; bez niej pola bramki pozostaj\u0105 pasywne",
             "zasoby = dane wymagane przez wybran\u0105 \u015bcie\u017ck\u0119, np. katalog zdj\u0119\u0107, model albo anotacje",
-            "akcje = operacje otwieraj\u0105ce w\u0142a\u015bciwe zak\u0142adki robocze",
+            "akcje = operacje dostępne w polu Praca",
             "zatwierd\u017a = formalne zamkni\u0119cie przej\u015bcia i przesuni\u0119cie kampanii dalej",
-            "T01 = wsp\u00f3lna bramka przygotowania anotacji tablic na obrazach; w jej pracy wybierasz, czy AT zasil\u0105 model tablic, czy tor znak\u00f3w",
+            "T01 = E1 -> E2, praca od obrazów i anotacji tablic",
+            "T02 = E1 -> E3, skrót do pracy nad znakami na dostępnych tablicach",
+            "T03 = E2 -> E3, przekazanie zatwierdzonych tablic do znaków",
+            "T04 = E2 -> E4T, dataset i trening modelu tablic",
+            "T05 = E3 -> E4Z, dataset i trening modelu znaków",
+            "T06 = E4T/E4Z -> E1, domknięcie iteracji",
+            "kontrakt zasobu = odpowiedź, czy zasób jest spełniony, do kontroli albo brakujący",
+            "przyrost iteracji = zatwierdzony materiał wytworzony w bieżącym cyklu",
             *step3_glossary,
         ),
         "caution": (
@@ -84,6 +91,7 @@ def _build_campaign_graph_assistant_context(self, status: WizardStageStatus | No
             "Nie mieszaj zasob\u00f3w mi\u0119dzy r\u00f3wnoleg\u0142ymi \u015bcie\u017ckami."
             + (f" {step3_caution}" if step3_caution else "")
         ),
+        "references": ("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
     })
 
 
@@ -93,17 +101,20 @@ def get_free_mode_assistant_context(self) -> dict:
         return _repair_assistant_context({
             "location": "[Z1] Projekty i mapa przej\u015b\u0107",
             "goal": "Wybierz istniej\u0105cy projekt albo utw\u00f3rz nowy. Po otwarciu projektu zobaczysz graf przej\u015b\u0107 E1, E2, E3 oraz E4T/E4Z.",
+            "current": "Projekt kampanii przechowuje iteracje, wybrane ścieżki, zasoby, wyniki bramek i ślad pracy.",
             "workflow": (
                 "Otw\u00f3rz projekt z listy albo rozpocznij nowy projekt.",
-                "Po otwarciu projektu AS b\u0119dzie opisywa\u0142 aktywn\u0105 bramk\u0119, wymagane zasoby i dalsze akcje.",
+                "Po otwarciu projektu AS opisuje aktywną bramkę, wymagane zasoby, przyrost iteracji i dalszą pracę.",
             ),
             "glossary": (
                 "Z1 = panel projektu i mapa przej\u015b\u0107 kampanii",
                 "kampania = projekt prowadzony etapami",
                 "graf = widok przej\u015b\u0107 mi\u0119dzy etapami E1, E2, E3, E4T i E4Z",
-                "bramka = panel przy kraw\u0119dzi grafu, kt\u00f3ry zbiera zasoby, akcje i zatwierdzenie",
+                "bramka = panel przy krawędzi grafu, który zbiera zasoby, pracę i zatwierdzenie",
+                "ślad projektu = zapis kolejnych decyzji i wyników iteracji",
             ),
             "caution": "AS jest pasywn\u0105 podpowiedzi\u0105. Nie wykonuje akcji i nie zmienia stanu projektu.",
+            "references": ("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
         })
 
     status = self._get_wizard_assistant_stage_status()

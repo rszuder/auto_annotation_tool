@@ -243,6 +243,11 @@ def draw_selection_indicator(host, canvas, kind: str, selected: bool, background
             canvas.create_oval(5, 5, 11, 11, outline=background, width=1, fill=background)
         return
 
+    if kind == "summary":
+        canvas.create_line(3, 5, 13, 5, fill=success, width=2, capstyle=tk.ROUND)
+        canvas.create_line(3, 11, 13, 11, fill=success, width=2, capstyle=tk.ROUND)
+        return
+
     canvas.create_rectangle(2, 2, 14, 14, outline=(success if selected else outline), width=2, fill=background)
     if selected:
         canvas.create_line(

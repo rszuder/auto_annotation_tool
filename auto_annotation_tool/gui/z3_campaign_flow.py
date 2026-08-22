@@ -79,7 +79,15 @@ def _mark_t06_z3_work_session(
         current_substep = int(substep if substep is not None else CAMPAIGN.get_step3_substep() or 1)
     except Exception:
         current_substep = 1
-    active = normalized_state not in {"resolved", "closed", "complete", "completed", "paused"}
+    active = normalized_state not in {
+        "resolved",
+        "closed",
+        "complete",
+        "completed",
+        "paused",
+        "ready_for_pz3",
+        "waiting_for_pz3",
+    }
     session.update(
         {
             "active": bool(active),
@@ -595,6 +603,90 @@ def return_to_wizard_for_step3_rework(host: "CharacterAnnotationTab") -> None:
         logger.debug(f"Nie udało się wrócić do grafu dla kroku 3: {e}")
 
 
+def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
+    try:
+        host._hide_campaign_detect_splash()
+    except Exception:
+        pass
+    try:
+        host._cancel_preview_char_label_interaction()
+    except Exception:
+        pass
+    try:
+        flush = getattr(host, "_flush_scheduled_preview_metadata_save", None)
+        if callable(flush):
+            flush()
+    except Exception as exc:
+        logger.debug(f"Nie udało się zapisać odłożonych zmian PZ2 przed powrotem do grafu: {exc}")
+    try:
+        host._sync_step3_access_from_preview_state(
+            getattr(host, "preview_metadata", None),
+            mark_current_work=True,
+            mark_reason="return_to_graph_pz2_ready",
+        )
+    except TypeError:
+        try:
+            host._sync_step3_access_from_preview_state(getattr(host, "preview_metadata", None))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        pz2_ready = bool(host._campaign_step3_pz2_current_contract_ready())
+    except Exception:
+        pz2_ready = False
+
+    try:
+        CAMPAIGN.set_current_step(3)
+        if pz2_ready:
+            CAMPAIGN.set_step3_stage2_done(True)
+        else:
+            CAMPAIGN.set_step3_stage2_done(False)
+        CAMPAIGN.set_step3_pending()
+    except Exception as exc:
+        logger.debug(f"Nie udało się ustawić stanu T05/PZ2 przy powrocie do grafu: {exc}")
+
+    try:
+        _mark_t06_z3_work_session(
+            host,
+            state="ready_for_pz3" if pz2_ready else "paused",
+            substep=2,
+            reason="return_to_graph_pz2_ready" if pz2_ready else "return_to_graph_pz2_pending",
+            force=True,
+        )
+    except Exception:
+        pass
+
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+        if campaign_tab:
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=3)
+            except Exception:
+                pass
+            campaign_tab._rebuild_roadmap_ui()
+            campaign_tab._refresh_dashboard()
+    except Exception as exc:
+        logger.debug(f"Nie udało się odświeżyć grafu po powrocie z PZ2: {exc}")
+
+    try:
+        host.app.open_controlled_tab("campaign")
+        host.app.update_campaign_tab_access()
+        if pz2_ready:
+            host.app.update_status(
+                f"Wracasz do grafu. PZ2 jest domknięte w tej iteracji; kolejny krok wybierzesz w pracy bramki {CHAR_WORK_GATE_DISPLAY_ID}.",
+                "success",
+            )
+        else:
+            host.app.update_status(
+                f"Wracasz do grafu. Praca w PZ2 bramki {CHAR_WORK_GATE_DISPLAY_ID} pozostaje w toku.",
+                "info",
+            )
+    except Exception as exc:
+        logger.debug(f"Nie udało się wrócić do grafu z PZ2: {exc}")
+
+
 def return_step3_result_to_wizard(host: "CharacterAnnotationTab", summary: dict) -> None:
     """
     Single return contract for campaign E3.
@@ -985,6 +1077,11 @@ def open_campaign_step3_entry(
                 "graph_transition_source",
                 "graph_transition_target",
                 "graph_path_key",
+                "target_substep",
+                "graph_target_substep",
+                "preferred_substep",
+                "force_pz2",
+                "force_pz3",
             )
             if str(source_context.get(key) or "").strip()
         }
@@ -1062,6 +1159,8 @@ def open_campaign_step3_entry(
             pass
     try:
         host._campaign_force_detect_entry = bool(force_detect_entry)
+        host._campaign_force_pz2_entry = bool(force_detect_entry)
+        host._campaign_force_pz3_entry = bool(force_dataset_entry)
     except Exception:
         pass
     _mark_t06_z3_work_session(
@@ -1989,13 +2088,29 @@ def unlock_detection_subtab(host: "CharacterAnnotationTab"):
 
 def unlock_dataset_subtab(host: "CharacterAnnotationTab"):
     _set_campaign_step3_hold_pz2_after_reextract(host, False)
+    if getattr(host, "_step3_linear_mode", False):
+        try:
+            _mark_t06_pz2_contract(host, reason="pz2_detection_ready", force=True)
+        except Exception:
+            pass
+        try:
+            dataset_enabled = bool(host._can_open_step3_dataset_from_current_context())
+        except Exception:
+            dataset_enabled = False
+        host._set_button_state("btn_to_dataset", dataset_enabled)
+        host._set_subtab_state(host.tab_dataset, "normal" if dataset_enabled else "disabled")
+        host._set_button_emphasis("btn_run_detection_frame", False)
+        host._set_button_emphasis("btn_to_dataset_frame", dataset_enabled)
+        if dataset_enabled:
+            CAMPAIGN.set_step3_stage2_done(True)
+        else:
+            CAMPAIGN.set_step3_stage2_done(False)
+        host._persist_step3_progress()
+        return
+
     host._set_button_state("btn_to_dataset", True)
     host._set_button_emphasis("btn_run_detection_frame", False)
     host._set_button_emphasis("btn_to_dataset_frame", True)
-
-    if getattr(host, "_step3_linear_mode", False):
-        CAMPAIGN.set_step3_stage2_done(True)
-        host._persist_step3_progress()
 
 
 def _ensure_campaign_pz2_preview_loaded(
@@ -2114,6 +2229,7 @@ def _ensure_campaign_pz2_preview_loaded(
             if (
                 not _campaign_step3_hold_pz2_after_reextract(host)
                 and host._preview_dir_has_completed_detection_output()
+                and host._can_open_step3_dataset_from_current_context()
             ):
                 CAMPAIGN.set_step3_stage2_done(True)
                 host._set_subtab_state(host.tab_dataset, "normal")
@@ -2290,6 +2406,20 @@ def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
         pass
     try:
         host._cancel_preview_char_label_interaction()
+    except Exception:
+        pass
+    try:
+        if not bool(host._can_open_step3_dataset_from_current_context()):
+            host._set_button_state("btn_to_dataset", False)
+            host._set_subtab_state(host.tab_dataset, "disabled")
+            try:
+                host.app.update_status(
+                    "PZ3 jest dostępne dopiero po domknięciu PZ2 w bieżącej iteracji.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
     except Exception:
         pass
     btn = getattr(host, "btn_to_dataset", None)
@@ -2486,6 +2616,11 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
                 stage2_done = bool(host._get_campaign_step3_annotation_readiness().get("ok"))
     except Exception:
         pass
+    try:
+        if not bool(host._can_open_step3_dataset_from_current_context()):
+            stage2_done = False
+    except Exception:
+        pass
 
     try:
         if stage1_done:
@@ -2565,6 +2700,7 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
                     or bool(host._campaign_step3_pz2_base_ready())
                     or bool(host._get_campaign_step3_annotation_readiness().get("ok"))
                 )
+                and host._can_open_step3_dataset_from_current_context()
             ):
                 stage2_done = True
                 CAMPAIGN.set_step3_stage2_done(True)
@@ -2651,6 +2787,7 @@ def build_step3_campaign_navigation_view_model(
         in_campaign=in_campaign,
         splash_visible=splash_visible,
         show_detect_back_to_extract=not in_campaign,
+        show_detect_return_to_graph=in_campaign and (not splash_visible),
         show_detect_to_dataset=(not in_campaign) or (not splash_visible),
         show_dataset_back_to_detect=True,
     )
@@ -2713,8 +2850,217 @@ def build_step3_finish_action_view_model(
     )
 
 
-def _describe_step3_export_summary_for_status(summary: dict | None) -> tuple[str, str]:
+def _safe_positive_int(value, default: int = 0) -> int:
+    try:
+        number = int(value or default or 0)
+    except Exception:
+        number = int(default or 0)
+    return number if number > 0 else 0
+
+
+def _safe_iteration_from_payload(payload: dict | None) -> int:
+    data = dict(payload or {})
+    for key in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+        iteration = _safe_positive_int(data.get(key))
+        if iteration > 0:
+            return iteration
+    return 0
+
+
+def _safe_path_token(path_like) -> str:
+    value = str(path_like or "").strip()
+    if not value:
+        return ""
+    try:
+        return str(Path(value).resolve()).lower()
+    except Exception:
+        return value.replace("\\", "/").lower()
+
+
+def _dataset_counts_text_from_context(context: dict | None) -> str:
+    data = dict(context or {})
+    details = []
+    plates = _safe_positive_int(data.get("plates"))
+    chars = _safe_positive_int(data.get("chars"))
+    if plates > 0:
+        details.append(f"{plates} tablic")
+    if chars > 0:
+        details.append(f"{chars} znaków")
+    return f" ({', '.join(details)})" if details else ""
+
+
+def _is_step3_pz3_session_interrupted(session: dict | None) -> bool:
+    data = dict(session or {})
+    if str(data.get("work_area") or "").strip().lower() not in {"z3", "pz3", "char"}:
+        return False
+    substep = str(data.get("substep") or data.get("stage") or "").strip().lower()
+    if substep not in {"", "3", "pz3", "dataset", "z3_pz3"}:
+        return False
+    state = str(data.get("state") or "").strip().lower()
+    if state in {"completed", "closed", "resolved", "finished"}:
+        return False
+    return bool(data.get("active")) or state in {"active", "started", "dirty", "interrupted", "paused"}
+
+
+def _build_step3_pz3_dataset_iteration_context(host: "CharacterAnnotationTab", summary: dict | None) -> dict:
     data = dict(summary or {})
+    try:
+        current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+    except Exception:
+        current_iteration = 1
+
+    try:
+        iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
+    except Exception:
+        iteration_state = {}
+
+    contracts = iteration_state.get("t06_contracts")
+    contracts = dict(contracts) if isinstance(contracts, dict) else {}
+    current_contract = contracts.get("pz3_char_dataset")
+    current_contract = dict(current_contract) if isinstance(current_contract, dict) else {}
+
+    dataset_path = str(
+        data.get("gold_dataset_path")
+        or data.get("dataset_path")
+        or current_contract.get("dataset_path")
+        or current_contract.get("gold_dataset_path")
+        or ""
+    ).strip()
+    dataset_name = Path(dataset_path).name if dataset_path else ""
+    summary_path = str(
+        data.get("_summary_path")
+        or data.get("summary_path")
+        or current_contract.get("summary_path")
+        or ""
+    ).strip()
+
+    dataset_exists = False
+    if dataset_path:
+        try:
+            dataset_exists = Path(dataset_path).exists()
+        except Exception:
+            dataset_exists = False
+
+    created_from_summary = (
+        bool(data.get("gold_dataset_created"))
+        and bool(data.get("gold_dataset_valid", True))
+        and bool(dataset_path)
+        and bool(dataset_exists)
+    )
+    created_from_contract = (
+        bool(current_contract.get("fulfilled"))
+        and bool(current_contract.get("gold_dataset_valid", True))
+        and bool(dataset_path)
+        and bool(dataset_exists)
+    )
+    has_dataset = bool(created_from_summary or created_from_contract)
+
+    origin_iteration = _safe_iteration_from_payload(data)
+    dataset_token = _safe_path_token(dataset_path)
+    summary_token = _safe_path_token(summary_path)
+    contract_dataset_token = _safe_path_token(
+        current_contract.get("dataset_path") or current_contract.get("gold_dataset_path")
+    )
+    contract_summary_token = _safe_path_token(current_contract.get("summary_path"))
+    contract_matches = bool(
+        current_contract
+        and (
+            (dataset_token and dataset_token == contract_dataset_token)
+            or (summary_token and summary_token == contract_summary_token)
+        )
+    )
+    if contract_matches:
+        origin_iteration = _safe_iteration_from_payload(current_contract) or origin_iteration
+
+    if has_dataset and origin_iteration <= 0:
+        try:
+            project_name = CAMPAIGN.get_active_project_name()
+            registry = dict(CAMPAIGN.load_artifact_registry(project_name) or {})
+            registry_states = registry.get("iteration_state")
+            registry_states = dict(registry_states) if isinstance(registry_states, dict) else {}
+        except Exception:
+            registry_states = {}
+        for raw_iteration, raw_state in registry_states.items():
+            state = dict(raw_state) if isinstance(raw_state, dict) else {}
+            registry_contracts = state.get("t06_contracts")
+            registry_contracts = dict(registry_contracts) if isinstance(registry_contracts, dict) else {}
+            candidate = registry_contracts.get("pz3_char_dataset")
+            candidate = dict(candidate) if isinstance(candidate, dict) else {}
+            if not candidate:
+                continue
+            candidate_dataset_token = _safe_path_token(
+                candidate.get("dataset_path") or candidate.get("gold_dataset_path")
+            )
+            candidate_summary_token = _safe_path_token(candidate.get("summary_path"))
+            if not (
+                (dataset_token and dataset_token == candidate_dataset_token)
+                or (summary_token and summary_token == candidate_summary_token)
+            ):
+                continue
+            origin_iteration = _safe_iteration_from_payload(candidate) or _safe_positive_int(raw_iteration)
+            if origin_iteration > 0:
+                break
+
+    if has_dataset and origin_iteration <= 0:
+        origin_iteration = current_iteration
+
+    plates = (
+        _safe_positive_int(data.get("exportable_plate_count"))
+        or _safe_positive_int(current_contract.get("exportable_plate_count"))
+        or _safe_positive_int(data.get("perfect_count"))
+        or _safe_positive_int(current_contract.get("perfect_count"))
+    )
+    chars = _safe_positive_int(data.get("exportable_char_count")) or _safe_positive_int(
+        current_contract.get("exportable_char_count")
+    )
+
+    session = iteration_state.get("t06_work_session")
+    session = dict(session) if isinstance(session, dict) else {}
+    interrupted_pz3 = _is_step3_pz3_session_interrupted(session)
+
+    return {
+        "current_iteration": current_iteration,
+        "origin_iteration": origin_iteration,
+        "is_current_iteration": bool(has_dataset and origin_iteration == current_iteration),
+        "has_dataset": has_dataset,
+        "dataset_path": dataset_path,
+        "dataset_name": dataset_name,
+        "summary_path": summary_path,
+        "plates": plates,
+        "chars": chars,
+        "interrupted_pz3": interrupted_pz3,
+    }
+
+
+def _describe_step3_export_summary_for_status(
+    summary: dict | None,
+    *,
+    dataset_context: dict | None = None,
+) -> tuple[str, str]:
+    data = dict(summary or {})
+    context = dict(dataset_context or {})
+    if bool(context.get("has_dataset")):
+        dataset_name = str(context.get("dataset_name") or "").strip() or "dataset znaków"
+        details_text = _dataset_counts_text_from_context(context)
+        current_iteration = _safe_positive_int(context.get("current_iteration"), 1)
+        origin_iteration = _safe_positive_int(context.get("origin_iteration"), current_iteration)
+        if bool(context.get("is_current_iteration")):
+            if bool(context.get("interrupted_pz3")):
+                return (
+                    f"Dataset znaków gotowy w bieżącej IT{current_iteration}: {dataset_name}{details_text}. "
+                    "Ostatnia sesja PZ3 jest jednak przerwana.",
+                    "warning",
+                )
+            return (
+                f"Dataset znaków gotowy w bieżącej iteracji IT{current_iteration}: {dataset_name}{details_text}.",
+                "success",
+            )
+        return (
+            f"Dataset znaków dostępny z IT{origin_iteration}: {dataset_name}{details_text}. "
+            f"W bieżącej IT{current_iteration} nie ma jeszcze nowego eksportu PZ3.",
+            "warning",
+        )
+
     dataset_path = str(data.get("gold_dataset_path") or "").strip()
     dataset_name = Path(dataset_path).name if dataset_path else ""
     dataset_exists = False
@@ -2772,9 +3118,33 @@ def _describe_step3_dataset_for_status(
     summary: dict | None,
     *,
     readiness: dict | None,
+    dataset_context: dict | None = None,
 ) -> tuple[str, str]:
     data = dict(summary or {})
     readiness_data = dict(readiness or {})
+    context = dict(dataset_context or {})
+    if bool(context.get("has_dataset")):
+        dataset_name = str(context.get("dataset_name") or "").strip() or "dataset znaków"
+        suffix = _dataset_counts_text_from_context(context)
+        current_iteration = _safe_positive_int(context.get("current_iteration"), 1)
+        origin_iteration = _safe_positive_int(context.get("origin_iteration"), current_iteration)
+        if bool(context.get("is_current_iteration")):
+            if bool(context.get("interrupted_pz3")):
+                return (
+                    f"Dataset: {dataset_name}{suffix}. Źródło: eksport PZ3 z bieżącej IT{current_iteration}; "
+                    "ostatnia sesja PZ3 jest przerwana.",
+                    "warning",
+                )
+            return (
+                f"Dataset: {dataset_name}{suffix}. Źródło: eksport PZ3 z bieżącej IT{current_iteration}.",
+                "success",
+            )
+        return (
+            f"Dataset: {dataset_name}{suffix}. Źródło: eksport PZ3 z IT{origin_iteration}; "
+            f"w IT{current_iteration} nie wyeksportowano jeszcze nowego datasetu.",
+            "warning",
+        )
+
     dataset_path = str(data.get("gold_dataset_path") or "").strip()
     dataset_name = Path(dataset_path).name if dataset_path else ""
     dataset_exists = False
@@ -2805,9 +3175,35 @@ def _describe_step3_export_for_status(
     summary: dict | None,
     *,
     readiness: dict | None,
+    dataset_context: dict | None = None,
 ) -> tuple[str, str]:
     data = dict(summary or {})
     readiness_data = dict(readiness or {})
+    context = dict(dataset_context or {})
+    if bool(context.get("has_dataset")):
+        current_iteration = _safe_positive_int(context.get("current_iteration"), 1)
+        origin_iteration = _safe_positive_int(context.get("origin_iteration"), current_iteration)
+        if bool(context.get("is_current_iteration")):
+            if bool(context.get("interrupted_pz3")):
+                return (
+                    f"Eksport PZ3: dataset AZ z bieżącej IT{current_iteration} istnieje, "
+                    "ale ostatnia sesja PZ3 została przerwana.",
+                    "warning",
+                )
+            return (
+                f"Eksport PZ3: wykonany w bieżącej IT{current_iteration}; dataset AZ może domknąć {CHAR_WORK_GATE_DISPLAY_ID}.",
+                "success",
+            )
+        prefix = f"Eksport PZ3 w IT{current_iteration}: "
+        if bool(context.get("interrupted_pz3")):
+            prefix += "praca przerwana, brak nowego eksportu. "
+        else:
+            prefix += "brak nowego eksportu. "
+        return (
+            f"{prefix}Ostatni dostępny dataset pochodzi z IT{origin_iteration}.",
+            "warning",
+        )
+
     dataset_path = str(data.get("gold_dataset_path") or "").strip()
     dataset_exists = False
     if dataset_path:
@@ -2829,7 +3225,32 @@ def _describe_step3_readiness_flow_for_status(
     *,
     readiness: dict | None,
     export_summary_tone: str,
+    dataset_context: dict | None = None,
 ) -> tuple[str, str]:
+    context = dict(dataset_context or {})
+    if bool(context.get("has_dataset")):
+        current_iteration = _safe_positive_int(context.get("current_iteration"), 1)
+        origin_iteration = _safe_positive_int(context.get("origin_iteration"), current_iteration)
+        if bool(context.get("is_current_iteration")):
+            if bool(context.get("interrupted_pz3")):
+                return (
+                    f"Dataset AZ z bieżącej IT{current_iteration} istnieje, ale ostatnia praca PZ3 jest przerwana.",
+                    "warning",
+                )
+            return (
+                f"Bramka {CHAR_WORK_GATE_DISPLAY_ID} gotowa do zatwierdzenia dzięki eksportowi AZ z bieżącej IT{current_iteration}.",
+                "success",
+            )
+        if bool(context.get("interrupted_pz3")):
+            return (
+                f"Praca PZ3 w IT{current_iteration} jest przerwana. Ostatni eksport AZ pochodzi z IT{origin_iteration}.",
+                "warning",
+            )
+        return (
+            f"W IT{current_iteration} nie ma nowego eksportu AZ. Dostępny dataset pochodzi z IT{origin_iteration}.",
+            "warning",
+        )
+
     if str(export_summary_tone or "").strip().lower() == "success":
         return (
             f"Bramka {CHAR_WORK_GATE_DISPLAY_ID} gotowa do zatwierdzenia.",
@@ -2885,17 +3306,30 @@ def build_step3_pz3_status_panel_view_model(
         export_summary = dict(host._read_step3_export_summary() or {})
     except Exception:
         export_summary = {}
-    summary_export_text, summary_export_tone = _describe_step3_export_summary_for_status(export_summary)
+    dataset_context = _build_step3_pz3_dataset_iteration_context(host, export_summary)
+    summary_export_text, summary_export_tone = _describe_step3_export_summary_for_status(
+        export_summary,
+        dataset_context=dataset_context,
+    )
     try:
         readiness = dict(host._get_campaign_step3_training_readiness() or {})
     except Exception:
         readiness = {}
     run_text, run_tone = _describe_step3_run_for_status(export_summary, host)
-    dataset_text, dataset_tone = _describe_step3_dataset_for_status(export_summary, readiness=readiness)
-    chain_export_text, chain_export_tone = _describe_step3_export_for_status(export_summary, readiness=readiness)
+    dataset_text, dataset_tone = _describe_step3_dataset_for_status(
+        export_summary,
+        readiness=readiness,
+        dataset_context=dataset_context,
+    )
+    chain_export_text, chain_export_tone = _describe_step3_export_for_status(
+        export_summary,
+        readiness=readiness,
+        dataset_context=dataset_context,
+    )
     readiness_text, readiness_tone = _describe_step3_readiness_flow_for_status(
         readiness=readiness,
         export_summary_tone=summary_export_tone,
+        dataset_context=dataset_context,
     )
     export_text, export_tone = host._get_inline_status_widget_snapshot(
         getattr(host, "export_console", None),
@@ -2967,6 +3401,17 @@ def refresh_campaign_step3_navigation_visibility(host: "CharacterAnnotationTab")
         except Exception:
             pass
 
+    return_to_graph_frame = getattr(host, "btn_return_to_graph_pz2_frame", None)
+    if return_to_graph_frame is not None:
+        try:
+            if not bool(view_model.show_detect_return_to_graph):
+                if str(return_to_graph_frame.winfo_manager()):
+                    return_to_graph_frame.grid_remove()
+            elif not str(return_to_graph_frame.winfo_manager()):
+                return_to_graph_frame.grid(row=0, column=0, sticky="sw")
+        except Exception:
+            pass
+
     to_dataset_frame = getattr(host, "btn_to_dataset_frame", None)
     if to_dataset_frame is not None:
         try:
@@ -3013,6 +3458,12 @@ def clear_step3_campaign_context(host, nav_button_width: int = 18):
 
     try:
         self._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+    try:
+        self._campaign_force_pz2_entry = False
+        self._campaign_force_pz3_entry = False
+        self._campaign_force_detect_entry = False
     except Exception:
         pass
 

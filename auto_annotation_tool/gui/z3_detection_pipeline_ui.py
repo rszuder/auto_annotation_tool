@@ -5,12 +5,20 @@ from pathlib import Path
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING
 
+from ..campaign_manager import CAMPAIGN
 from .z3_detection_controls_ui import normalize_detection_method_key
 from .z3_model_metadata_dialog import show_yolo_model_metadata_dialog
 from .web_slim_scrollbar import blend_hex_colors
 
 if TYPE_CHECKING:
     from .tab_character_annotation import CharacterAnnotationTab
+
+
+def _is_step3_campaign_runtime(host: "CharacterAnnotationTab") -> bool:
+    try:
+        return bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    except Exception:
+        return False
 
 
 def get_detection_pipeline_blocks(host, method_key: str | None, method_labels: dict, key_by_label: dict) -> list[str]:
@@ -1171,7 +1179,7 @@ def refresh_detection_pipeline_model_row(host, compiled: dict | None = None) -> 
     if not requires_yolo:
         return
 
-    project_mode = bool(getattr(host, "_step3_linear_mode", False))
+    project_mode = _is_step3_campaign_runtime(host)
     model_path = str(host._get_effective_yolo_model_path() or "").strip()
     yolo_ready = bool(model_path and Path(model_path).exists())
 

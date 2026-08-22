@@ -21,7 +21,11 @@ from .tab_character_annotation import CharacterAnnotationTab
 from .tab_training import TrainingTab
 from .tab_campaign import CampaignTab
 from .help_manager import HELP
-from .free_mode_assistant import FreeModeAssistantContext, FreeModeAssistantOverlay
+from .free_mode_assistant import (
+    FreeModeAssistantContext,
+    FreeModeAssistantOverlay,
+    get_mobile_export_assistant_context,
+)
 from .lazy_notebook_tab import _LazyNotebookTab
 from .app_delegates import bind_app_delegates
 from .app_theme_runtime import bind_app_theme_runtime
@@ -34,6 +38,171 @@ except ImportError:
 
 
 APP_AUTHOR = "R. Szuderski"
+
+
+class _MobileExportMenuHost:
+    """Lightweight adapter for opening mobile export without building the Z4 UI."""
+
+    def __init__(self, app):
+        self.app = app
+        self.frame = app.root
+        self.history = None
+        self._mobile_export_center_dialog = None
+
+    @staticmethod
+    def _safe_model_export_slug(value: str, fallback: str = "model") -> str:
+        import re
+
+        text = str(value or "").strip() or fallback
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._-")
+        return (slug or fallback)[:48]
+
+    @staticmethod
+    def _format_training_target_label(target: str) -> str:
+        normalized = CONFIG.normalize_task_target(target)
+        labels = {
+            "plate": "tablice (YOLO Pose)",
+            "char": "znaki tablic (YOLO Detect)",
+            "vehicle": "pojazdy (YOLO Detect)",
+        }
+        return labels.get(normalized, "znaki tablic (YOLO Detect)")
+
+    @staticmethod
+    def _json_safe_training_value(value):
+        from pathlib import Path
+
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(k): _MobileExportMenuHost._json_safe_training_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_MobileExportMenuHost._json_safe_training_value(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @staticmethod
+    def _training_metric_float(value) -> float | None:
+        if value in (None, "", "-"):
+            return None
+        try:
+            numeric = float(str(value).strip().replace(",", "."))
+        except Exception:
+            return None
+        return numeric if numeric == numeric else None
+
+    @classmethod
+    def _training_metric_value(cls, mapping: dict | None, keys: tuple[str, ...]) -> float | None:
+        if not isinstance(mapping, dict):
+            return None
+        for key in keys:
+            if key in mapping:
+                value = cls._training_metric_float(mapping.get(key))
+                if value is not None:
+                    return value
+        lowered = {str(k or "").strip().lower(): v for k, v in mapping.items()}
+        for key in keys:
+            value = cls._training_metric_float(lowered.get(str(key or "").strip().lower()))
+            if value is not None:
+                return value
+        return None
+
+    def _append_train_log(self, message: str) -> None:
+        logger.info(str(message or ""))
+
+    def _infer_dataset_target(self, dataset_path) -> str:
+        from pathlib import Path
+
+        text = str(dataset_path or "").strip().lower().replace("\\", "/")
+        if not text:
+            return ""
+        try:
+            path = Path(dataset_path)
+            if path.is_file() and path.name.lower() == "data.yaml":
+                text = f"{text} {path.parent.name.lower()}"
+        except Exception:
+            pass
+        if any(token in text for token in ("plate", "plates", "tablic", "pose", "mt-")):
+            return "plate"
+        if any(token in text for token in ("char", "chars", "znak", "mz-")):
+            return "char"
+        if any(token in text for token in ("vehicle", "vehicles", "pojazd", "mp-")):
+            return "vehicle"
+        return ""
+
+    def _find_best_weights_for_run(self, run_id: str):
+        from pathlib import Path
+        from ..campaign_manager import CAMPAIGN
+
+        safe_run_id = str(run_id or "").strip()
+        if not safe_run_id:
+            return None
+        roots = []
+        try:
+            project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+            project_root = CAMPAIGN.get_active_project_root_dir() if project_name else None
+            if project_root:
+                roots.append(Path(project_root) / "5_training_runs")
+        except Exception:
+            pass
+        for target in ("plate", "char", "vehicle"):
+            try:
+                roots.append(Path(CONFIG.get_training_runs_dir(target)))
+            except Exception:
+                pass
+        seen = set()
+        for root in roots:
+            try:
+                root = Path(root)
+                key = str(root.resolve()).lower()
+            except Exception:
+                key = str(root).lower()
+            if key in seen or not root.exists():
+                continue
+            seen.add(key)
+            try:
+                candidates = list(root.rglob("best.pt"))
+            except Exception:
+                candidates = []
+            matching = []
+            for candidate in candidates:
+                text = str(candidate).lower()
+                if safe_run_id.lower() in text:
+                    matching.append(candidate)
+            if matching:
+                matching.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+                return matching[0]
+        return None
+
+    def _infer_history_run_target(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._infer_history_run_target(self, *args, **kwargs)
+
+    def _resolve_history_run_best_weights(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._resolve_history_run_best_weights(self, *args, **kwargs)
+
+    def _build_history_run_metric_summary(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._build_history_run_metric_summary(self, *args, **kwargs)
+
+    def _build_mobile_model_export_path(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._build_mobile_model_export_path(self, *args, **kwargs)
+
+    def _build_mobile_alpr_package_export_path(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._build_mobile_alpr_package_export_path(self, *args, **kwargs)
+
+    def _build_mobile_export_metadata(self, *args, **kwargs):
+        from . import z4_model_export
+
+        return z4_model_export._build_mobile_export_metadata(self, *args, **kwargs)
 
 
 class AutoAnnotationApp:
@@ -84,6 +253,10 @@ class AutoAnnotationApp:
         self._free_mode_assistant_refresh_after_id = None
         self._free_mode_assistant_toggle_btn = None
         self._free_mode_assistant_enabled = False
+        self._free_mode_assistant_overlay_owner = None
+        self._free_mode_assistant_context_override_key = ""
+        self._free_mode_assistant_context_override = None
+        self._free_mode_assistant_context_override_owner = None
         self._simple_tooltip_window = None
         self._simple_tooltip_after_id = None
         self._simple_tooltip_target = None
@@ -280,7 +453,11 @@ class AutoAnnotationApp:
         # główna blokada działa przez disabled tabs
         self.notebook.bind("<ButtonPress-1>", self._on_main_notebook_button_press, add="+")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_main_notebook_tab_changed)
-        self._free_mode_assistant_overlay = FreeModeAssistantOverlay(root)
+        self._free_mode_assistant_overlay = FreeModeAssistantOverlay(
+            root,
+            on_close=self._close_free_mode_assistant_overlay,
+        )
+        self._free_mode_assistant_overlay_owner = root
         self.root.bind("<Configure>", lambda _event: self._schedule_free_mode_assistant_placement(), add="+")
 
         # początkowa synchronizacja stanów zakładek
@@ -1098,6 +1275,18 @@ class AutoAnnotationApp:
         )
 
         make_menu_button(
+            "Eksport",
+            lambda: [
+                {
+                    "kind": "command",
+                    "label": "Pakiet mobilny ALPR (.alprmodel)",
+                    "command": self._open_mobile_model_export_center_from_menu,
+                },
+            ],
+            min_width=300
+        )
+
+        make_menu_button(
             "Styl",
             lambda: [
                 {
@@ -1132,6 +1321,215 @@ class AutoAnnotationApp:
             pady=3
         )
         self.menu_theme_badge.pack(side=tk.RIGHT)
+
+    def _paint_mobile_export_menu_loader(self, loader: tk.Toplevel, progress_canvas: tk.Canvas, progress: float) -> None:
+        try:
+            palette = getattr(self, "palette", {})
+            bg = palette.get("panel", "#252526")
+            fg = palette.get("fg", "#f3f3f3")
+            accent = palette.get("accent", "#4f8de3")
+            success = palette.get("success", "#2ecc71")
+            border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+            width = max(320, int(progress_canvas.winfo_width() or 420))
+            height = max(12, int(progress_canvas.winfo_height() or 14))
+            value = max(0.0, min(100.0, float(progress or 0.0)))
+            fill_width = int(width * value / 100.0)
+            progress_canvas.delete("all")
+            progress_canvas.create_rectangle(
+                0,
+                0,
+                width,
+                height,
+                fill=blend_hex_colors(bg, fg, 0.08),
+                outline=blend_hex_colors(border, bg, 0.25),
+                width=1,
+            )
+            if fill_width > 1:
+                progress_canvas.create_rectangle(
+                    1,
+                    1,
+                    max(1, fill_width - 1),
+                    max(1, height - 1),
+                    fill=blend_hex_colors(accent, success, 0.35),
+                    outline="",
+                )
+            loader.update()
+        except Exception:
+            pass
+
+    def _show_mobile_export_menu_loader(self, message: str = "Przygotowuję eksport mobilny...", progress: float = 8.0) -> None:
+        try:
+            existing = getattr(self, "_mobile_export_menu_loader", None)
+            if existing is not None and existing.winfo_exists():
+                status_var = getattr(self, "_mobile_export_menu_loader_status_var", None)
+                progress_canvas = getattr(self, "_mobile_export_menu_loader_progress_canvas", None)
+                if status_var is not None:
+                    status_var.set(message)
+                if progress_canvas is not None:
+                    self._paint_mobile_export_menu_loader(existing, progress_canvas, progress)
+                return
+        except Exception:
+            pass
+        try:
+            palette = getattr(self, "palette", {})
+            bg = palette.get("panel", "#252526")
+            fg = palette.get("fg", "#f3f3f3")
+            muted = palette.get("muted", "#c7c7c7")
+            accent = palette.get("accent", "#4f8de3")
+            card_bg = blend_hex_colors(bg, accent, 0.045)
+            border = blend_hex_colors(accent, bg, 0.38)
+            loader = tk.Toplevel(self.root)
+            loader.withdraw()
+            loader.overrideredirect(True)
+            try:
+                loader.attributes("-topmost", True)
+            except Exception:
+                pass
+            loader.configure(bg=bg)
+            card = tk.Frame(
+                loader,
+                bg=card_bg,
+                padx=18,
+                pady=15,
+                highlightthickness=1,
+                highlightbackground=border,
+            )
+            card.pack(fill=tk.BOTH, expand=True)
+            tk.Label(
+                card,
+                text="Ładowanie eksportu mobilnego",
+                bg=card_bg,
+                fg=fg,
+                font=("Segoe UI", 11, "bold"),
+                anchor=tk.W,
+            ).pack(fill=tk.X, pady=(0, 8))
+            progress_canvas = tk.Canvas(card, width=420, height=14, bg=card_bg, highlightthickness=0, bd=0)
+            progress_canvas.pack(fill=tk.X)
+            status_var = tk.StringVar(value=message)
+            tk.Label(
+                card,
+                textvariable=status_var,
+                bg=card_bg,
+                fg=muted,
+                font=("Segoe UI", 9),
+                anchor=tk.W,
+            ).pack(fill=tk.X, pady=(8, 0))
+            loader.update_idletasks()
+            width = max(420, int(card.winfo_reqwidth() or 460))
+            height = max(116, int(card.winfo_reqheight() or 128))
+            try:
+                root_x = int(self.root.winfo_rootx())
+                root_y = int(self.root.winfo_rooty())
+                root_w = int(self.root.winfo_width())
+                root_h = int(self.root.winfo_height())
+                x = root_x + int((root_w - width) / 2)
+                y = root_y + int((root_h - height) / 2)
+            except Exception:
+                screen_w = int(loader.winfo_screenwidth() or 1360)
+                screen_h = int(loader.winfo_screenheight() or 840)
+                x = int((screen_w - width) / 2)
+                y = int((screen_h - height) / 2)
+            loader.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+            self._mobile_export_menu_loader = loader
+            self._mobile_export_menu_loader_status_var = status_var
+            self._mobile_export_menu_loader_progress_canvas = progress_canvas
+            loader.deiconify()
+            loader.lift()
+            self._paint_mobile_export_menu_loader(loader, progress_canvas, progress)
+        except Exception:
+            self._mobile_export_menu_loader = None
+
+    def _close_mobile_export_menu_loader(self) -> None:
+        loader = getattr(self, "_mobile_export_menu_loader", None)
+        self._mobile_export_menu_loader = None
+        self._mobile_export_menu_loader_status_var = None
+        self._mobile_export_menu_loader_progress_canvas = None
+        try:
+            if loader is not None and loader.winfo_exists():
+                loader.destroy()
+        except Exception:
+            pass
+
+    def _open_mobile_model_export_center_from_menu_legacy_training_loader(self):
+        self._show_mobile_export_menu_loader("Ładuję moduł treningu przed eksportem mobilnym...", 12.0)
+        try:
+            training_tab = self._ensure_tab_loaded("training", select=False)
+        except Exception as e:
+            self._close_mobile_export_menu_loader()
+            logger.error(f"Nie udało się przygotować eksportu mobilnego: {e}")
+            return self.themed_info(
+                "Eksport mobilny",
+                f"Nie udało się przygotować modułu eksportu mobilnego:\n{e}",
+                parent=self.root,
+                tone="error",
+            )
+
+        if isinstance(training_tab, _LazyNotebookTab):
+            attempts = int(getattr(self, "_mobile_export_menu_load_attempts", 0) or 0) + 1
+            self._mobile_export_menu_load_attempts = attempts
+            if attempts > 20:
+                self._mobile_export_menu_load_attempts = 0
+                self._close_mobile_export_menu_loader()
+                return self.themed_info(
+                    "Eksport mobilny",
+                    "Nie udało się załadować modułu treningu. Otwórz kartę Z4 ręcznie i spróbuj ponownie.",
+                    parent=self.root,
+                    tone="warning",
+                )
+            try:
+                self._show_mobile_export_menu_loader(
+                    f"Ładuję moduł treningu przed eksportem mobilnym... próba {attempts}/20",
+                    min(72.0, 12.0 + attempts * 3.0),
+                )
+            except Exception:
+                pass
+            try:
+                self.root.after(250, self._open_mobile_model_export_center_from_menu)
+            except Exception:
+                pass
+            return None
+
+        self._mobile_export_menu_load_attempts = 0
+        opener = getattr(training_tab, "_open_mobile_model_export_center", None)
+        if not callable(opener):
+            self._close_mobile_export_menu_loader()
+            return self.themed_info(
+                "Eksport mobilny",
+                "Moduł treningu nie udostępnia jeszcze centrum eksportu mobilnego.",
+                parent=self.root,
+                tone="warning",
+            )
+        self._show_mobile_export_menu_loader("Uruchamiam centrum eksportu mobilnego...", 86.0)
+        self._close_mobile_export_menu_loader()
+        return opener()
+
+    def _get_mobile_export_menu_host(self):
+        host = getattr(self, "_mobile_export_menu_host", None)
+        if host is None or getattr(host, "app", None) is not self:
+            host = _MobileExportMenuHost(self)
+            self._mobile_export_menu_host = host
+        return host
+
+    def _open_mobile_model_export_center_from_menu(self):
+        self._show_mobile_export_menu_loader("Ładuję moduł eksportu mobilnego...", 12.0)
+        try:
+            host = self._get_mobile_export_menu_host()
+            self._show_mobile_export_menu_loader("Przygotowuję lekkie centrum eksportu...", 34.0)
+            from . import z4_model_export
+        except Exception as e:
+            self._close_mobile_export_menu_loader()
+            logger.error(f"Nie udało się przygotować eksportu mobilnego: {e}")
+            return self.themed_info(
+                "Eksport mobilny",
+                f"Nie udało się przygotować modułu eksportu mobilnego:\n{e}",
+                parent=self.root,
+                tone="error",
+            )
+
+        self._mobile_export_menu_load_attempts = 0
+        self._show_mobile_export_menu_loader("Uruchamiam centrum eksportu mobilnego...", 86.0)
+        self._close_mobile_export_menu_loader()
+        return z4_model_export._open_mobile_model_export_center(host)
 
     def _get_menu_badge_text(self) -> str:
         try:
@@ -1607,15 +2005,22 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
-    def _is_free_mode_assistant_available(self) -> bool:
+    def _is_free_mode_assistant_available(self, context: FreeModeAssistantContext | None = None) -> bool:
         try:
+            if context is not None:
+                return not context.is_empty()
             if not self._is_free_mode_assistant_context():
                 return False
             return not self._get_free_mode_assistant_context().is_empty()
         except Exception:
             return False
 
-    def _sync_free_mode_assistant_toggle_state(self):
+    def _sync_free_mode_assistant_toggle_state(
+        self,
+        context: FreeModeAssistantContext | None = None,
+        *,
+        available: bool | None = None,
+    ):
         btn = getattr(self, "_free_mode_assistant_toggle_btn", None)
         if btn is None:
             return
@@ -1626,7 +2031,8 @@ class AutoAnnotationApp:
         success = palette.get("success", palette.get("accent", "#4ec9b0"))
         guide = palette.get("guide", palette.get("warning", "#f0b44c"))
         muted = palette.get("muted_dim", palette.get("muted", "#9a9a9a"))
-        available = self._is_free_mode_assistant_available()
+        if available is None:
+            available = self._is_free_mode_assistant_available(context)
         active = bool(getattr(self, "_free_mode_assistant_enabled", False)) and available
         bg = blend_hex_colors(success, base_bg, 0.20) if active else base_bg
         fg = guide if available else muted
@@ -1647,8 +2053,21 @@ class AutoAnnotationApp:
         except Exception:
             pass
 
+    def _close_free_mode_assistant_overlay(self):
+        self._free_mode_assistant_enabled = False
+        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.hide()
+            except Exception:
+                pass
+        try:
+            self._sync_free_mode_assistant_toggle_state()
+        except Exception:
+            pass
+
     def toggle_free_mode_assistant(self):
-        if not self._is_free_mode_assistant_available():
+        if not self._is_free_mode_assistant_context():
             self._free_mode_assistant_enabled = False
             overlay = getattr(self, "_free_mode_assistant_overlay", None)
             if overlay is not None:
@@ -1656,11 +2075,23 @@ class AutoAnnotationApp:
                     overlay.hide()
                 except Exception:
                     pass
-            self._sync_free_mode_assistant_toggle_state()
+            self._sync_free_mode_assistant_toggle_state(FreeModeAssistantContext())
+            return
+
+        context = self._get_free_mode_assistant_context()
+        if context.is_empty():
+            self._free_mode_assistant_enabled = False
+            overlay = getattr(self, "_free_mode_assistant_overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.hide()
+                except Exception:
+                    pass
+            self._sync_free_mode_assistant_toggle_state(context)
             return
 
         self._free_mode_assistant_enabled = not bool(getattr(self, "_free_mode_assistant_enabled", False))
-        self._refresh_free_mode_assistant()
+        self._refresh_free_mode_assistant(context=context)
 
     # Delegates from app_global_terminal are bound after class creation.
 
@@ -1789,6 +2220,95 @@ class AutoAnnotationApp:
         self.campaign_mode_active = bool(active)
         self.update_campaign_tab_access()
 
+    def set_free_mode_assistant_context_override(self, key: str, context, owner: tk.Misc | None = None) -> None:
+        self._free_mode_assistant_context_override_key = str(key or "").strip()
+        self._free_mode_assistant_context_override = FreeModeAssistantContext.from_value(context)
+        self._free_mode_assistant_context_override_owner = self._normalize_free_mode_assistant_owner(owner)
+        self.notify_free_mode_assistant_context_changed()
+
+    def clear_free_mode_assistant_context_override(self, key: str | None = None) -> None:
+        current_key = str(getattr(self, "_free_mode_assistant_context_override_key", "") or "")
+        if key is not None and str(key or "").strip() != current_key:
+            return
+        self._free_mode_assistant_context_override_key = ""
+        self._free_mode_assistant_context_override = None
+        self._free_mode_assistant_context_override_owner = None
+        self.notify_free_mode_assistant_context_changed()
+
+    def _normalize_free_mode_assistant_owner(self, owner: tk.Misc | None = None) -> tk.Misc | None:
+        if owner is None:
+            return None
+        try:
+            top = owner.winfo_toplevel()
+        except Exception:
+            top = owner
+        try:
+            if top is None or not bool(top.winfo_exists()):
+                return None
+        except Exception:
+            return None
+        return top
+
+    def _get_free_mode_assistant_owner(self) -> tk.Misc:
+        try:
+            override = FreeModeAssistantContext.from_value(
+                getattr(self, "_free_mode_assistant_context_override", None)
+            )
+            owner = self._normalize_free_mode_assistant_owner(
+                getattr(self, "_free_mode_assistant_context_override_owner", None)
+            )
+            if not override.is_empty() and owner is not None:
+                return owner
+        except Exception:
+            pass
+        return self.root
+
+    def _ensure_free_mode_assistant_overlay(self, owner: tk.Misc | None = None) -> FreeModeAssistantOverlay | None:
+        owner = self._normalize_free_mode_assistant_owner(owner) or self.root
+        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        current_owner = getattr(self, "_free_mode_assistant_overlay_owner", None)
+        if overlay is not None and current_owner is owner:
+            return overlay
+
+        if overlay is not None:
+            try:
+                overlay.hide()
+            except Exception:
+                pass
+
+        try:
+            overlay = FreeModeAssistantOverlay(
+                owner,
+                on_close=self._close_free_mode_assistant_overlay,
+            )
+            self._free_mode_assistant_overlay = overlay
+            self._free_mode_assistant_overlay_owner = owner
+            try:
+                owner.bind("<Configure>", lambda _event: self._schedule_free_mode_assistant_placement(), add="+")
+            except Exception:
+                pass
+            return overlay
+        except Exception:
+            return None
+
+    def _restore_free_mode_assistant_owner(self, owner: tk.Misc | None = None) -> None:
+        owner = self._normalize_free_mode_assistant_owner(owner)
+        if owner is None or owner is self.root:
+            return
+        try:
+            if str(owner.state() or "") == "iconic":
+                owner.deiconify()
+        except Exception:
+            pass
+        try:
+            owner.lift()
+        except Exception:
+            pass
+        try:
+            owner.focus_force()
+        except Exception:
+            pass
+
     def _get_selected_tab_key(self):
         try:
             selected_widget = str(self.notebook.select())
@@ -1811,107 +2331,186 @@ class AutoAnnotationApp:
         return None
 
     def _is_free_mode_assistant_context(self) -> bool:
+        try:
+            override = FreeModeAssistantContext.from_value(
+                getattr(self, "_free_mode_assistant_context_override", None)
+            )
+            if not override.is_empty():
+                return True
+        except Exception:
+            pass
         tab_key = self._get_selected_tab_key()
         return bool(tab_key)
 
     def _get_default_free_mode_assistant_context(self, tab_key: str | None) -> FreeModeAssistantContext:
         if tab_key == "campaign":
             return FreeModeAssistantContext(
-                location="[Z1] Wizard",
-                goal="Ta zakładka pokazuje kampanię jako serię etapów: od zasobów wejściowych, przez anotacje, do datasetu i treningu.",
+                location="[Z1] Kampania i graf przejść",
+                goal=(
+                    "Z1 prowadzi projekt przez graf bramek T01-T06. Tutaj wybierasz aktywną ścieżkę, "
+                    "sprawdzasz zasoby, uruchamiasz pracę bramki i formalnie domykasz przejścia."
+                ),
+                current=(
+                    "Źródłem prawdy dla gotowości bramki jest kontrakt zasobów i zatwierdzony przyrost pracy, "
+                    "nie sam kolor pola w UI."
+                ),
                 workflow=(
-                    "Sprawdź, który etap ma status aktywny, gotowy albo wymaga uwagi.",
-                    "Używaj badge'a „Zatwierdź etap”, gdy etap jest gotowy do formalnego zamknięcia.",
-                    "Otwieraj Z2, Z3 albo Z4 z kart etapów, żeby wykonać właściwą pracę.",
-                    "Po domknięciu E4T albo E4Z rozpocznij kolejną iterację albo wróć do analizy wyników.",
+                    "Wybierz jedną bramkę elektrodą, jeśli etap ma kilka możliwych przejść.",
+                    "W Zasobach sprawdź kontrakt: wymagane, opcjonalne, do kontroli, spełnione albo brakujące.",
+                    "W Pracy wybierz akcję prowadzącą do właściwej karty roboczej: Z2, Z3/PZ2, Z3/PZ3 albo Z4.",
+                    "Po powrocie do grafu zatwierdź bramkę tylko wtedy, gdy rozumiesz, co zostanie dodane do projektu.",
+                    "T06 domyka tor treningowy albo świadome pominięcie treningu i przenosi projekt do kolejnej iteracji.",
                 ),
                 glossary=(
-                    "Z1 = wizard kampanii",
-                    "kampania = projekt prowadzony etapami",
-                    "iteracja = jeden cykl pracy projektu",
-                    "badge = mały przycisk statusowy przy etapie",
+                    "Z1 = graf kampanii",
+                    "T01-T06 = bramki przejść między etapami",
+                    "kontrakt zasobu = wymaganie bramki policzone na danych projektu",
+                    "przyrost iteracji = materiał zatwierdzony w bieżącym cyklu",
+                    "zasób dziedziczony = materiał z poprzednich iteracji",
                 ),
-                caution="Z1 pilnuje kolejności etapów. Jeśli coś jest zablokowane, zwykle brakuje zatwierdzenia wcześniejszego etapu albo gotowego artefaktu.",
+                caution="T01 i T02 są alternatywami startowymi iteracji. Po zatwierdzonym przyroście jednej ścieżki druga nie powinna przejmować tego samego cyklu pracy.",
+                references=("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
             )
         if tab_key == "help":
             return FreeModeAssistantContext(
                 location="[Z5] Instrukcja i architektura",
-                goal="Ta zakładka jest miejscem dokumentacji: pomaga zrozumieć przepływ programu, pojęcia, dziennik zmian i aktualną architekturę.",
+                goal="Ta zakładka jest miejscem dokumentacji: wyjaśnia przepływ programu, pojęcia, architekturę, eksport i metodykę badań.",
+                current="Z5 opisuje obowiązujący model pracy aplikacji i odsyła do dokumentów źródłowych w katalogu docs.",
                 workflow=(
                     "Użyj Z5, gdy chcesz sprawdzić znaczenie zakładek, etapów albo pojęć używanych w aplikacji.",
-                    "Czytaj opisy architektury przed większymi zmianami workflow.",
-                    "Wracaj do Z1-Z4 z kontekstem, który lepiej wyjaśnia, po co dany krok istnieje.",
+                    "W części Kampania sprawdzisz sens bramek T01-T06 i kontraktów O/AT/AZ.",
+                    "W części Dane i kod znajdziesz mapę najważniejszych modułów.",
+                    "W części Eksport i badania znajdziesz zasady pakietu .alprmodel, kalibracji i eksperymentów.",
                 ),
                 glossary=(
                     "Z5 = instrukcja i architektura",
                     "architektura = opis odpowiedzialności modułów i przepływów",
                     "workflow = kolejność pracy użytkownika",
-                    "dziennik = zapis decyzji i zmian w projekcie",
+                    "docs = katalog dokumentacji projektu",
                 ),
                 caution="Z5 nie wykonuje pracy na danych. To mapa i dokumentacja, a właściwe operacje robisz w Z1-Z4.",
+                references=(
+                    "docs/mapa_funkcji_i_kodu.md",
+                    "docs/eksport_mobilny_kwantyzacja.md",
+                    "docs/siatka_eksperymentow_mobilnych_alpr.md",
+                ),
             )
         if tab_key == "annotation":
             return FreeModeAssistantContext(
-                location="[Z2] Anotacja tablic",
-                goal="Ta zakładka prowadzi pracę nad tablicami: wybierasz tor, przygotowujesz obrazy i tworzysz albo poprawiasz anotacje.",
+                location="[Z2] Kontrola i anotacje tablic",
+                goal=(
+                    "Z2 pracuje na obrazach i ramkach tablic. Może tworzyć anotacje ręcznie, wspierać się modelem "
+                    "albo kontrolować importowane AT przed dodaniem ich do puli projektu."
+                ),
+                current=(
+                    "Materiał staje się zasobem projektu dopiero po kontroli i statusie [OK]. Import AT jest wejściem do kontroli, "
+                    "nie gotowym wynikiem."
+                ),
                 workflow=(
-                    "Wybierz tor pracy i źródło obrazów.",
-                    "Utwórz XML ręcznie albo uruchom autoanotację po wyborze modelu.",
-                    "Popraw poligony tablic i zatwierdź poprawne obrazy.",
-                    "Wyeksportuj anotacje lub dataset i zdecyduj, czy przechodzisz do Z4.",
+                    "Wybierz albo potwierdź zbiór obrazów O.",
+                    "Utwórz anotacje tablic ręcznie, uruchom autoanotację MT albo skontroluj importowane AT.",
+                    "Popraw ramki/poligony tablic i oznacz poprawne pozycje statusem [OK].",
+                    "Zapisz wynik kontroli i wróć do bramki kampanii albo wyeksportuj dataset tablic w trybie swobodnym.",
                 ),
                 glossary=(
-                    "run = katalog pracy z artefaktami",
-                    "XML = plik współrzędnych ramek",
-                    "autoanotacja = YOLO tworzy wstępne boxy",
+                    "O = zbiór obrazów wejściowych",
+                    "AT = anotacje tablic zgodne z O",
+                    "do kontroli = materiał wymagający sprawdzenia w Z2",
+                    "status [OK] = obraz/tablica zaakceptowana do dalszych etapów",
+                    "MT = model tablic używany do autoanotacji",
                 ),
-                caution="Model PT jest wymagany tylko dla autoanotacji; ręczny tor pracuje na obrazach i XML.",
+                caution="Nie zatwierdzaj obrazów bez poprawnych ramek tablic. Tylko [OK] zasila pulę projektową i liczy się jako przyrost iteracji.",
+                references=("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
             )
         if tab_key == "characters":
             return FreeModeAssistantContext(
-                location="[Z3] Autoanotacja znaków tablic",
-                goal="Ta zakładka prowadzi pracę nad znakami: od cropów tablic, przez OCR i boxy znaków, do źródłowego datasetu znaków.",
+                location="[Z3] Znaki na wyodrębnionych tablicach",
+                goal=(
+                    "Z3 prowadzi pracę nad znakami: od cropów tablic, przez pipeline YB/YS/OCR i korekty manualne, "
+                    "do źródłowego datasetu znaków eksportowanego w PZ3."
+                ),
+                current=(
+                    "PZ2 przygotowuje i kontroluje znaki. PZ3 tworzy artefakt datasetu. Dopiero eksport PZ3 jest zasobem "
+                    "do treningu modelu MZ."
+                ),
                 workflow=(
-                    "PZ1 tworzy cropy tablic ze źródła Z2.",
-                    "PZ2 analizuje znaki przez OCR lub YOLO i pozwala poprawiać boxy.",
+                    "PZ1 wyodrębnia tablice z zatwierdzonego źródła.",
+                    "PZ2 wykrywa i koryguje znaki blokami YB, YS i OCR.",
+                    "Ręczne ramki i ręcznie wpisane znaki mają pierwszeństwo przed wynikiem automatu.",
+                    "Status perfect oznacza zgodność odczytu, ramek i układu tablicy z regułami projektu.",
                     "PZ3 zbiera perfecty, obsługuje opcjonalny CVAT i eksportuje źródłowy dataset znaków.",
                 ),
                 glossary=(
-                    "preview run = roboczy zestaw cropów tablic",
-                    "perfect = tablica gotowa do datasetu",
-                    "gold pack = wybrane poprawne przykłady",
+                    "YB = detekcja ramek znaków",
+                    "YS = rozpoznanie klas znaków na istniejących ramkach",
+                    "OCR = odczyt tekstu całej tablicy",
+                    "MB/MS = ręczna ramka lub ręcznie wpisany znak",
+                    "AZ = anotacje znaków do datasetu MZ",
                 ),
-                caution="CVAT w PZ3 dotyczy cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach.",
+                caution="Detekcja ma pomagać, ale nie powinna nadpisywać manuali. Przy zdjęciu z kilkoma rejestracjami odczyt może pasować do jednego z kandydatów zapisanych w nazwie pliku.",
+                references=("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
             )
         if tab_key == "training":
+            mobile_export = get_mobile_export_assistant_context()
             return FreeModeAssistantContext(
                 location="[Z4] Trening i analiza",
-                goal="Ta zakładka służy do przygotowania wariantu datasetu, wyboru splitu i uruchomienia treningu modelu.",
+                goal=(
+                    "Z4 przygotowuje warianty datasetów, uruchamia trening, porównuje modele, wybiera wynik bramki "
+                    "i buduje pakiet mobilny .alprmodel."
+                ),
+                current=(
+                    "Model startowy treningu i wynik bramki to dwa różne wybory. Model startowy rozpoczyna run, "
+                    "a wynik bramki wskazuje zatwierdzony model projektu."
+                ),
                 workflow=(
-                    "W PZ1 wybierz tor i utwórz wariant datasetu.",
-                    "W PZ2 wybierz wariant, model startowy treningu i parametry.",
-                    "Po treningu sprawdź historię, walidację i ranking wyników.",
+                    "W PZ1 wybierz źródło i utwórz wariant treningowy datasetu.",
+                    "W PZ2 wybierz wariant, model startowy, parametry i uruchom trening.",
+                    "Po treningu sprawdź historię, ranking i porównania na wspólnym torze testowym.",
+                    "Jako wynik bramki wskaż model świadomie: z historii, rankingu albo sekcji wyboru wyniku.",
+                    "Do Androida eksportuj pojedynczy model do diagnostyki albo pakiet MT+MZ do testu end-to-end.",
                 ),
                 glossary=(
                     "wariant = konkretna wersja datasetu",
                     "split = train / val / test",
-                    "data.yaml = wejście YOLO Detect/Pose",
+                    "model startowy = checkpoint użyty na wejściu treningu",
+                    "wynik bramki = model zatwierdzony jako rezultat pracy",
+                    "data.yaml = opis datasetu YOLO; przy INT8 służy do kalibracji",
+                    "pakiet mobilny = plik .alprmodel z manifestem i wariantami wykonawczymi",
+                    "kalibracja = pomiar zakresów aktywacji na reprezentatywnych obrazach",
+                    "INT8 = wariant kwantyzowany wymagający kalibracji",
                 ),
-                caution="Źródła datasetu tworzysz wcześniej; w Z4/PZ2 wybierasz wariant, a nie podmieniasz ręcznie bazę danych.",
+                caution=mobile_export.get("caution", "") or "Źródła datasetu przygotowuje PZ1; PZ2 trenuje na wybranym wariancie.",
+                references=(
+                    "docs/eksport_mobilny_kwantyzacja.md",
+                    "docs/siatka_eksperymentow_mobilnych_alpr.md",
+                    "docs/podbudowa_literaturowa_metodyki_testow_alpr.md",
+                ),
             )
         return FreeModeAssistantContext(
-            location="Tryb swobodny",
-            goal="Jesteś poza wizardem kampanii i możesz przechodzić między zakładkami Z2, Z3 oraz Z4 według potrzeb.",
+            location="Kontekst roboczy aplikacji",
+            goal="AS opisuje bieżący ekran, kolejny sensowny krok, pojęcia i ryzyka wynikające z przepływu danych.",
+            current="W kampanii obowiązują bramki T01-T06 i kontrakty zasobów. W trybie swobodnym użytkownik sam pilnuje spójności artefaktów.",
             workflow=(
-                "Z2 przygotowuje tablice i eksport anotacji lub datasetu.",
-                "Z3 przygotowuje znaki i źródłowy dataset znaków.",
-                "Z4 tworzy warianty datasetu i uruchamia trening modeli.",
+                "Z2 przygotowuje i kontroluje tablice.",
+                "Z3 przygotowuje znaki oraz źródłowy dataset znaków.",
+                "Z4 tworzy warianty datasetu, trenuje, rankinguje i eksportuje modele.",
+                "Z5 dokumentuje przepływy, architekturę i metodykę badań.",
             ),
-            glossary=("Z2 = tablice", "Z3 = znaki", "Z4 = dataset i trening"),
-            caution="Jeśli wrócisz do kampanii, obowiązuje już prowadzenie etapowe wizarda.",
+            glossary=("Z2 = tablice", "Z3 = znaki", "Z4 = dataset, trening i eksport", "Z5 = instrukcja"),
+            caution="Przy pracy poza kampanią nie mieszaj artefaktów z różnych źródeł bez świadomej kontroli zgodności.",
+            references=("docs/mapa_funkcji_i_kodu.md",),
         )
 
     def _get_free_mode_assistant_context(self) -> FreeModeAssistantContext:
+        try:
+            override = FreeModeAssistantContext.from_value(
+                getattr(self, "_free_mode_assistant_context_override", None)
+            )
+            if not override.is_empty():
+                return override
+        except Exception:
+            pass
+
         tab_key = self._get_selected_tab_key()
         if tab_key is None:
             return FreeModeAssistantContext()
@@ -1937,38 +2536,61 @@ class AutoAnnotationApp:
 
     def _place_free_mode_assistant(self):
         self._free_mode_assistant_place_after_id = None
-        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        if not bool(getattr(self, "_free_mode_assistant_enabled", False)):
+            return
+        owner = self._get_free_mode_assistant_owner()
+        overlay = self._ensure_free_mode_assistant_overlay(owner)
         if overlay is None:
             return
         try:
+            moving_callback = getattr(owner, "_aat_window_is_moving_callback", None)
+            if callable(moving_callback) and bool(moving_callback()):
+                self._free_mode_assistant_place_after_id = self.root.after(240, self._place_free_mode_assistant)
+                return
+        except Exception:
+            pass
+        is_root_owner = owner is self.root
+        try:
             overlay.place(
-                notebook=getattr(self, "notebook", None),
-                info_panel=getattr(self, "info_panel_frame", None),
+                notebook=getattr(self, "notebook", None) if is_root_owner else None,
+                info_panel=getattr(self, "info_panel_frame", None) if is_root_owner else None,
             )
+            self._restore_free_mode_assistant_owner(owner)
         except Exception:
             pass
 
-    def _refresh_free_mode_assistant(self):
+    def _refresh_free_mode_assistant(self, context: FreeModeAssistantContext | None = None):
         overlay = getattr(self, "_free_mode_assistant_overlay", None)
+
+        context_possible = self._is_free_mode_assistant_context()
+        if not context_possible:
+            self._sync_free_mode_assistant_toggle_state(FreeModeAssistantContext(), available=False)
+            if overlay is not None:
+                overlay.hide()
+            return
+
+        if not bool(getattr(self, "_free_mode_assistant_enabled", False)):
+            self._sync_free_mode_assistant_toggle_state(available=True)
+            if overlay is not None:
+                overlay.hide()
+            return
+
+        if context is None:
+            context = self._get_free_mode_assistant_context()
+        self._sync_free_mode_assistant_toggle_state(context)
+        if context.is_empty():
+            if overlay is not None:
+                overlay.hide()
+            return
+
+        owner = self._get_free_mode_assistant_owner()
+        overlay = self._ensure_free_mode_assistant_overlay(owner)
         if overlay is None:
             return
 
-        self._sync_free_mode_assistant_toggle_state()
-        if not self._is_free_mode_assistant_context():
-            overlay.hide()
-            return
-
-        context = self._get_free_mode_assistant_context()
-        if context.is_empty():
-            overlay.hide()
-            return
-
         overlay.update_context(context, palette=getattr(self, "palette", {}))
-        if not bool(getattr(self, "_free_mode_assistant_enabled", False)):
-            overlay.hide()
-            return
-
         overlay.show()
+        self._restore_free_mode_assistant_owner(owner)
         self._schedule_free_mode_assistant_placement()
 
     def notify_free_mode_assistant_context_changed(self):
@@ -2309,6 +2931,22 @@ class AutoAnnotationApp:
                         )
             except Exception:
                 pass
+        elif selected_key == "characters":
+            try:
+                from ..campaign_manager import CAMPAIGN
+
+                active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+            except Exception:
+                active_project = ""
+            if not active_project:
+                try:
+                    character_tab = getattr(self, "tabs", {}).get("characters")
+                    if character_tab is not None and not isinstance(character_tab, _LazyNotebookTab):
+                        ensure_free_mode = getattr(character_tab, "ensure_free_mode_context_ready", None)
+                        if callable(ensure_free_mode):
+                            self.root.after_idle(ensure_free_mode)
+                except Exception:
+                    pass
         elif selected_key == "training":
             try:
                 training_tab = getattr(self, "tabs", {}).get("training")

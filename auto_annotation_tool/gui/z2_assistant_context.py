@@ -193,6 +193,7 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Wróciłeś do Z2, żeby poprawić albo powiększyć zbiór tablic przed dalszą pracą kampanii. "
                 "Najważniejsze jest przygotowanie poprawnych ramek tablic i nadanie zdjęciom statusu [OK]."
             ),
+            "current": "Z2 działa jako kontrola jakości tablic. Tylko pozycje [OK] zasilają pulę projektową i przyrost bieżącej iteracji.",
             "workflow": (
                 "Jeśli masz dobry model tablic, uruchom autoanotację i potraktuj jej wynik jako punkt startowy.",
                 "Jeśli dokładność jest ważniejsza niż czas, popraw ramki ręcznie na canvasie.",
@@ -202,7 +203,7 @@ def get_free_mode_assistant_context(self) -> dict:
             ),
             "glossary": (
                 "Z2 = zakładka pracy nad tablicami",
-                "tryb naprawczy = powrót do wcześniejszego kroku, żeby uzupełnić dane",
+                "tryb naprawczy = powrót do karty roboczej, żeby uzupełnić dane",
                 "ramka = obrys tablicy na zdjęciu",
                 "status [OK] = zdjęcie/anotacja zatwierdzone do dalszych etapów",
                 "autoanotacja = model PT tworzy wstępne ramki",
@@ -214,6 +215,7 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Nie zatwierdzaj zdjęć bez poprawnych ramek tablic. "
                 "Tylko pozycje z [OK] zasilą wspólną pulę projektu."
             ),
+            "references": ("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
         }
 
     try:
@@ -231,8 +233,9 @@ def get_free_mode_assistant_context(self) -> dict:
             "goal": (
                 "Sprawdzasz wynik autoanotacji tablic i decydujesz, co dalej zrobić z bieżącym runem Z2."
             ),
+            "current": "Autoanotacja jest propozycją. Materiał projektowy powstaje dopiero po ręcznej kontroli i statusie [OK].",
             "workflow": (
-                "Po prawej możesz ręcznie poprawić polygony tablic i zatwierdzić poprawne pozycje statusem [OK].",
+                "Po prawej możesz ręcznie poprawić poligony tablic i zatwierdzić poprawne pozycje statusem [OK].",
                 "Po samej autoanotacji akcje „Wyodrębnij tablice” i eksport datasetu YOLO Pose pozostają zablokowane, jeśli nie ma pozycji [OK].",
                 "Eksport samych anotacji XML jest wyjątkiem: wystarczy, że run ma zapisaną co najmniej jedną tablicę.",
                 "„Ponowna autoanotacja” wraca do startu procesu, żeby uruchomić kolejny przebieg, także innym modelem.",
@@ -252,6 +255,7 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Wyodrębnianie tablic do Z3 i eksport datasetu YOLO Pose to ścieżki treningowe wymagające [OK]. "
                 "Eksport anotacji XML służy przeniesieniu zapisanej pracy i nie wymaga statusu [OK]."
             ),
+            "references": ("docs/mapa_funkcji_i_kodu.md",),
         }
 
     if free_mode_context and free_mode_route == "manual" and free_mode_screen == "manual_review":
@@ -261,8 +265,9 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Sprawdzasz ręczny run anotacji tablic i wybierasz, czy ma zasilić pracę nad znakami, "
                 "czy dataset tablic do treningu YOLO Pose."
             ),
+            "current": "Ręcznie zapisany XML jest artefaktem roboczym. Do dalszych etapów treningowych trafiają pozycje zatwierdzone jako [OK].",
             "workflow": (
-                "Po prawej możesz dalej poprawiać polygony tablic i zatwierdzać poprawne pozycje statusem [OK].",
+                "Po prawej możesz dalej poprawiać poligony tablic i zatwierdzać poprawne pozycje statusem [OK].",
                 "Po samym utworzeniu XML wyodrębnianie tablic i dataset YOLO Pose pozostają zablokowane do czasu nadania statusu [OK].",
                 "Eksport samych anotacji XML jest wyjątkiem: wystarczy co najmniej jedna zapisana ramka/poligon tablicy.",
                 "„Wyodrębnij tablice” prowadzi do Z3/PZ1 i przygotowuje tablice do anotacji znaków.",
@@ -281,11 +286,13 @@ def get_free_mode_assistant_context(self) -> dict:
                 "Wyodrębnianie tablic do Z3 i eksport datasetu YOLO Pose wymagają [OK]. "
                 "Eksport anotacji XML służy przeniesieniu zapisanej pracy i nie wymaga statusu [OK]."
             ),
+            "references": ("docs/mapa_funkcji_i_kodu.md",),
         }
 
     return {
         "location": "[Z2] Anotacja tablic",
-        "goal": "Ta zakładka służy do przygotowania anotacji tablic: możesz utworzyć ręczny XML, uruchomić autoanotację albo poprawić istniejący run.",
+        "goal": "Ta zakładka służy do przygotowania i kontroli anotacji tablic: możesz utworzyć ręczny XML, uruchomić autoanotację albo poprawić istniejący run.",
+        "current": "W kampanii Z2 jest czarną skrzynką kontroli: wejściem jest O/AT albo detekcja, wyjściem są tylko zatwierdzone pozycje [OK].",
         "workflow": (
             "Wybierz tor pracy: autoanotacja, anotacja ręczna albo powrót do istniejącego runu.",
             "Wskaż katalog zdjęć i przejdź dalej dopiero wtedy, gdy chcesz załadować pełny obszar roboczy Z2.",
@@ -297,6 +304,10 @@ def get_free_mode_assistant_context(self) -> dict:
             "run = katalog pracy Z2",
             "XML = anotacje tablic",
             "autoanotacja = model PT tworzy wstępne ramki",
+            "O = zbiór obrazów",
+            "AT = anotacje tablic",
+            "status [OK] = pozycja zatwierdzona do dalszego użycia",
         ),
         "caution": "W autoanotacji najpierw wybierasz katalog obrazów, a model i progi ustawiasz dopiero w modalu startu.",
+        "references": ("docs/mapa_funkcji_i_kodu.md",),
     }

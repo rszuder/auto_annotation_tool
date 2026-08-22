@@ -3310,11 +3310,26 @@ class TrainingTab:
     def _build_free_mode_model_export_path(self, *args, **kwargs):
         return z4_model_export._build_free_mode_model_export_path(self, *args, **kwargs)
 
+    def _build_mobile_model_export_path(self, *args, **kwargs):
+        return z4_model_export._build_mobile_model_export_path(self, *args, **kwargs)
+
+    def _build_mobile_alpr_package_export_path(self, *args, **kwargs):
+        return z4_model_export._build_mobile_alpr_package_export_path(self, *args, **kwargs)
+
+    def _build_mobile_export_metadata(self, *args, **kwargs):
+        return z4_model_export._build_mobile_export_metadata(self, *args, **kwargs)
+
     def _build_exported_model_metadata(self, *args, **kwargs):
         return z4_model_export._build_exported_model_metadata(self, *args, **kwargs)
 
     def _export_selected_run_model_to_free_mode(self, *args, **kwargs):
         return z4_model_export._export_selected_run_model_to_free_mode(self, *args, **kwargs)
+
+    def _export_selected_run_model_to_mobile_package(self, *args, **kwargs):
+        return z4_model_export._export_selected_run_model_to_mobile_package(self, *args, **kwargs)
+
+    def _open_mobile_model_export_center(self, *args, **kwargs):
+        return z4_model_export._open_mobile_model_export_center(self, *args, **kwargs)
 
 
     def _poll_training_completion(self):

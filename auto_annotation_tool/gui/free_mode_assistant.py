@@ -4,11 +4,33 @@ from dataclasses import dataclass
 import re
 import tkinter as tk
 
-from .web_slim_scrollbar import blend_hex_colors
+from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 
 FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
-    "akcje": "pole bramki grafu kampanii; otwiera operacje prowadz\u0105ce do kart roboczych, np. Z2, Z3 albo Z4.",
+    "AS": "globalny asystent kontekstu; wyjaśnia bieżącą kartę, najbliższy krok, pojęcia i ryzyka bez wykonywania akcji.",
+    "AT": "anotacje tablic powiązane ze zbiorem obrazów; po imporcie wymagają kontroli w Z2 przed zasileniem puli projektu.",
+    "AZ": "anotacje znaków na wyodrębnionych tablicach; są źródłem datasetu znaków i treningu modelu MZ.",
+    "YB": "blok pipeline znaków odpowiedzialny za wykrywanie ramek znaków na tablicy.",
+    "YS": "blok pipeline znaków pracujący na istniejących ramkach i przypisujący klasy znaków.",
+    "MB": "manual box, czyli ręcznie ustawiona ramka znaku mająca pierwszeństwo przed automatem.",
+    "MS": "manual sign, czyli ręcznie wpisany znak mający pierwszeństwo przed automatycznym odczytem.",
+    "bieżąca iteracja": "cykl pracy projektu, w którym użytkownik podejmuje decyzje i wytwarza przyrost danych albo modelu.",
+    "do kontroli": "stan zasobu zgodnego technicznie, ale wymagającego ręcznego sprawdzenia przed użyciem jako materiał projektowy.",
+    "komplet O-AT": "para zbioru obrazów i pasujących anotacji tablic; tylko zgodny komplet może prowadzić do kontroli i dalszej pracy.",
+    "kontrakt zasobu": "jednoznaczna ocena zasobu: wymagany, opcjonalny, spełniony, do kontroli albo niespełniony w danym kontekście.",
+    "model projektowy": "model wskazany jako wynik bramki lub domyślny model projektu dla kolejnych iteracji.",
+    "model startowy": "checkpoint wybrany jako punkt startu treningu; nie jest tym samym co wynik bramki.",
+    "przyrost iteracji": "materiał dodany i zatwierdzony w bieżącej iteracji, odróżniany od zasobów dziedziczonych.",
+    "wynik bramki": "artefakt jawnie wybrany jako rezultat przejścia, np. model po treningu albo zatwierdzony dataset.",
+    "zasób dziedziczony": "zasób pochodzący z poprzednich iteracji projektu; może spełniać kontrakt, ale nie jest przyrostem bieżącej iteracji.",
+    "T01": "bramka E1 -> E2; prowadzi do pracy od obrazów i anotacji tablic.",
+    "T02": "bramka E1 -> E3; skrót do pracy nad znakami na podstawie dostępnych tablic.",
+    "T03": "bramka E2 -> E3; przekazuje zatwierdzone tablice do pracy nad znakami.",
+    "T04": "bramka E2 -> E4T; prowadzi do datasetu i treningu modelu tablic.",
+    "T05": "bramka E3 -> E4Z; prowadzi do przygotowania datasetu znaków i modelu znaków.",
+    "T06": "bramka E4T/E4Z -> E1; domyka iterację po treningu albo świadomym pominięciu treningu.",
+    "akcje": "operacje dostępne w polu Praca bramki; prowadzą do kart roboczych, np. Z2, Z3 albo Z4.",
     "bramka": "interaktywny panel przy kraw\u0119dzi grafu kampanii; pokazuje status przej\u015bcia, zasoby, akcje i zatwierdzenie.",
     "elektroda": "prze\u0142\u0105cznik wyboru bramki na grafie; po jej w\u0142\u0105czeniu dana \u015bcie\u017cka staje si\u0119 aktywna.",
     "graf": "mapa przej\u015b\u0107 kampanii pokazuj\u0105ca etapy jako w\u0119z\u0142y oraz decyzje jako kraw\u0119dzie z bramkami.",
@@ -25,7 +47,7 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
     "confidence": "próg pewności detekcji; niższy próg daje więcej propozycji, wyższy odrzuca słabsze trafienia.",
     "crop": "wycięty fragment obrazu, np. sama tablica wycięta z pełnego zdjęcia pojazdu.",
     "CVAT": "zewnętrzne narzędzie do ręcznego poprawiania anotacji obrazów.",
-    "data.yaml": "plik konfiguracyjny YOLO wskazujący klasy oraz foldery train, val i test.",
+    "data.yaml": "plik opisu datasetu YOLO: wskazuje klasy oraz ścieżki train, val i test. Przy eksporcie INT8 służy jako reprezentatywne źródło obrazów do kalibracji, a nie jako nowy trening.",
     "dataset": "uporządkowany zestaw danych treningowych: obrazy oraz odpowiadające im etykiety/anotacje.",
     "epoka": "jedno pełne przejście treningu po danych treningowych.",
     "eksport": "zapisanie gotowych danych do formatu używanego dalej, np. XML, YOLO albo zestawu CVAT.",
@@ -33,22 +55,37 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
     "gold pack": "wybrany, zaufany zestaw przykładów, z którego buduje się lepszy dataset znaków.",
     "GPU": "karta graficzna używana do szybszej inferencji lub treningu modeli.",
     "inferencja": "uruchomienie gotowego modelu na danych, aby uzyskać predykcje, np. boxy albo odczyt znaków.",
+    "INT8": "wariant kwantyzowany do 8-bitowych liczb całkowitych; może być mniejszy i szybszy na telefonie, ale wymaga kalibracji i kontroli jakości względem FP32.",
+    "IoU": "próg nakładania ramek używany m.in. w NMS; wpływa na to, czy nakładające się detekcje zostaną połączone, odrzucone albo zostawione.",
     "iteracja": "jeden pełny cykl pracy projektu: przygotowanie danych, anotacja, ewentualnie znaki, dataset i trening.",
+    "kalibracja": "pomiarowy etap konwersji INT8: konwerter przepuszcza reprezentatywne obrazy przez model i dobiera zakresy liczbowe aktywacji.",
     "kampania": "projekt prowadzony etapami przez wizard, z pamięcią iteracji, modeli i zatwierdzonych artefaktów.",
     "katalog": "folder na dysku zawierający dane danego kroku, np. obrazy, run albo gotowy dataset.",
     "korekta": "ręczne sprawdzenie i poprawienie anotacji po automatycznym albo wcześniejszym etapie pracy.",
     "klasa": "nazwa typu obiektu, którego uczy się model, np. konkretnego znaku albo tablicy.",
     "modal": "okno dialogowe wymagające decyzji użytkownika przed kontynuacją danego działania.",
     "model": "plik wag lub konfiguracja sieci neuronowej używana do detekcji, OCR albo treningu.",
+    "manifest": "plik metadanych pakietu .alprmodel; opisuje rolę modelu, warianty wykonawcze, progi, etykiety, wejścia/wyjścia i sumy kontrolne.",
+    "MT": "model tablic; wykrywa tablice na pełnym obrazie albo w scenie wejściowej.",
+    "MZ": "model znaków; pracuje na wyciętej tablicy i wykrywa znaki potrzebne do odczytu numeru.",
     "obraz": "pojedynczy plik graficzny używany jako wejście do anotacji, datasetu albo treningu.",
+    "NCNN": "opcjonalny mobilny format wykonawczy z plikami .param i .bin; traktujemy go jako wariant eksperymentalny, dopóki klient mobilny nie ma pełnej ścieżki NCNN.",
+    "NMS": "post-processing usuwający nadmiarowe, nakładające się detekcje; korzysta m.in. z progu IoU.",
     "OCR": "rozpoznawanie znaków z obrazu, np. odczyt liter i cyfr z wyciętej tablicy.",
+    "ONNX": "format kontrolny i diagnostyczny modelu; pomaga porównywać wynik eksportu z checkpointem, ale na Androidzie zwykle jest fallbackiem, nie główną ścieżką.",
     "overlay": "nakładka na obszar roboczy pokazująca stan procesu, postęp albo krótkie sterowanie bez przechodzenia do innej karty.",
+    "pakiet mobilny": "plik .alprmodel, czyli ZIP z manifestem, wariantami wykonawczymi modelu i metadanymi potrzebnymi aplikacji Android.",
+    "pakiet MT+MZ": "kompletny pakiet ALPR zawierający model tablic MT, model znaków MZ i opis pipeline; to właściwy kandydat do testu end-to-end na telefonie.",
     "perfect": "status oznaczający, że przykład jest sprawdzony i nadaje się do datasetu.",
     "poligon": "wielopunktowy obrys obiektu; dokładniejszy niż zwykły prostokątny box.",
     "preview run": "roboczy zestaw podglądowy, zwykle używany do sprawdzenia cropów przed dalszym etapem.",
     "PT": "plik wag modelu PyTorch/YOLO, zwykle z rozszerzeniem .pt.",
+    "LiteRT/TFLite": "główny format wykonawczy dla Androida; FP32 jest bezpiecznym wariantem referencyjnym, a INT8 wymaga kalibracji.",
+    "FP32": "wariant zmiennoprzecinkowy 32-bitowy; zwykle najbardziej zgodny z checkpointem i najlepszy jako punkt odniesienia jakości.",
+    "kwantyzacja": "zmiana precyzji liczbowej modelu, np. z FP32 na INT8, aby zmniejszyć rozmiar i koszt inferencji.",
     "ranking": "porównanie wyników modeli lub treningów, pomagające wybrać najlepszy wariant.",
     "review pack": "zestaw przykładów przygotowany do ręcznego sprawdzenia, często poza aplikacją.",
+    "runtime": "silnik uruchamiający model na urządzeniu, np. LiteRT/TFLite, ONNX Runtime albo NCNN.",
     "run": "katalog konkretnego przebiegu pracy, zawierający pliki i artefakty danego kroku.",
     "split": "podział datasetu na części: train do uczenia, val do kontroli jakości i test do końcowej oceny.",
     "tablica": "tablica rejestracyjna widoczna na zdjęciu lub wycięta jako crop do dalszej pracy.",
@@ -59,6 +96,7 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
     "val": "część walidacyjna datasetu, używana do sprawdzania jakości podczas treningu.",
     "walidacja": "sprawdzenie jakości modelu na danych, których nie używa bezpośrednio do uczenia.",
     "wariant": "konkretna wersja datasetu lub konfiguracji, którą można porównać z innymi.",
+    "wariant wykonawczy": "konkretny plik modelu w pakiecie, np. TFLite FP32, TFLite INT8 albo ONNX FP32, zbudowany z tego samego checkpointu.",
     "VRAM": "pamięć karty graficznej; jej brak zwykle wymaga mniejszego batcha albo niższej rozdzielczości.",
     "wizard": "prowadzenie projektowe w Z1, które pilnuje kolejności etapów kampanii.",
     "znak": "pojedynczy znak z tablicy, np. litera albo cyfra rozpoznawana w Z3.",
@@ -80,8 +118,57 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
 }
 
 FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
+    "as": "AS",
+    "asystent": "AS",
+    "globalny as": "AS",
+    "adnotacje tablic": "AT",
+    "anotacje tablic": "AT",
+    "at": "AT",
+    "adnotacje znaków": "AZ",
+    "anotacje znaków": "AZ",
+    "az": "AZ",
+    "yb": "YB",
+    "ys": "YS",
+    "manual box": "MB",
+    "manual sign": "MS",
+    "mb": "MB",
+    "ms": "MS",
+    "bramka t01": "T01",
+    "bramka t02": "T02",
+    "bramka t03": "T03",
+    "bramka t04": "T04",
+    "bramka t05": "T05",
+    "bramka t06": "T06",
+    "t01": "T01",
+    "t02": "T02",
+    "t03": "T03",
+    "t04": "T04",
+    "t05": "T05",
+    "t06": "T06",
+    "kontrakt": "kontrakt zasobu",
+    "kontrakty": "kontrakt zasobu",
+    "kontrakty zasobów": "kontrakt zasobu",
+    "komplet o at": "komplet O-AT",
+    "komplet o-at": "komplet O-AT",
+    "o-at": "komplet O-AT",
+    "do sprawdzenia": "do kontroli",
+    "kontrola": "do kontroli",
+    "przyrost": "przyrost iteracji",
+    "przyrost bieżącej iteracji": "przyrost iteracji",
+    "dziedziczone": "zasób dziedziczony",
+    "zasoby dziedziczone": "zasób dziedziczony",
+    "wynik": "wynik bramki",
+    "wynik bramki": "wynik bramki",
+    "model bazowy": "model startowy",
+    "model do treningu": "model startowy",
+    "model wynikowy": "wynik bramki",
+    "model podpięty": "model projektowy",
+    "model przypięty": "model projektowy",
     "akcja": "akcje",
     "akcji": "akcje",
+    "praca": "akcje",
+    "pole praca": "akcje",
+    "praca bramki": "akcje",
     "bramki": "bramka",
     "bramek": "bramka",
     "elektrody": "elektroda",
@@ -130,9 +217,34 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
     "model PT": "model",
     "modele": "model",
     "modeli": "model",
+    "model tablic": "MT",
+    "model tablicy": "MT",
+    "model znaków": "MZ",
+    "model znakow": "MZ",
+    "mt": "MT",
+    "mz": "MZ",
     "poligony": "poligon",
     "progi": "confidence",
     "próg": "confidence",
+    "alprmodel": "pakiet mobilny",
+    ".alprmodel": "pakiet mobilny",
+    "fp32": "FP32",
+    "int8": "INT8",
+    "iou": "IoU",
+    "kalibracji": "kalibracja",
+    "kwantyzacji": "kwantyzacja",
+    "litert": "LiteRT/TFLite",
+    "lite rt": "LiteRT/TFLite",
+    "tflite": "LiteRT/TFLite",
+    "manifestu": "manifest",
+    "ncnn": "NCNN",
+    "nms": "NMS",
+    "onnx": "ONNX",
+    "pakiet": "pakiet mobilny",
+    "pakietu": "pakiet mobilny",
+    "pakiet mobilny alpr": "pakiet mobilny",
+    "pakiet mt mz": "pakiet MT+MZ",
+    "pakiet mt+mz": "pakiet MT+MZ",
     "ramka": "box",
     "ramki": "box",
     "ramek": "box",
@@ -164,6 +276,53 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
     "źródłowy": "źródło",
     "źródłowych": "źródło",
 }
+
+
+def get_mobile_export_assistant_context() -> dict:
+    return {
+        "location": "[Eksport] Pakiet mobilny ALPR (.alprmodel)",
+        "goal": (
+            "Ten ekran nie trenuje modelu. Bierze gotowy checkpoint best.pt i buduje pakiet, "
+            "który aplikacja Android może bezpiecznie zaimportować, zwalidować i uruchomić."
+        ),
+        "current": (
+            "Pojedynczy model MT albo MZ służy diagnostyce. Do pełnej demonstracji ALPR potrzebny jest pakiet "
+            "MT+MZ z manifestem, wariantami runtime i progami inferencji."
+        ),
+        "workflow": (
+            "Najpierw wybierz kandydata: pojedynczy model MT/MZ do diagnostyki albo komplet MT+MZ do testu całego ALPR.",
+            "Formaty w prawym panelu to warianty wykonawcze tego samego checkpointu, np. LiteRT/TFLite FP32, LiteRT/TFLite INT8, ONNX FP32 albo NCNN.",
+            "data.yaml wskazujesz tylko wtedy, gdy eksportujesz INT8. To nie są importowane obrazy i nie jest trening, tylko próbka do kalibracji zakresów liczbowych.",
+            "Modal eksportu podpowiada zgodne pliki data.yaml: najpierw dataset przypisany do modelu, potem zgodne datasety projektu i katalogi globalne danego toru.",
+            "Dla MP wybieraj YAML pojazdów, dla MT YAML tablic/pose, a dla MZ YAML znaków. Nie mieszaj torów, bo kalibracja INT8 może wtedy pogorszyć inferencję mimo poprawnego pliku wyjściowego.",
+            "imgsz, conf i IoU trafiają do manifestu jako domyślne parametry inferencji/post-processingu na telefonie; nie zmieniają wytrenowanego checkpointu.",
+            "Pakiet .alprmodel zawiera manifest, warianty modelu, etykiety, progi, metadane, wersję kontraktu i sumy SHA-256.",
+        ),
+        "glossary": (
+            "pakiet mobilny = plik .alprmodel, czyli ZIP z manifestem i wariantami modelu",
+            "pakiet MT+MZ = kompletny zestaw do testu end-to-end: model tablic + model znaków",
+            "data.yaml = opis datasetu YOLO używany przy INT8 jako źródło kalibracji",
+            "zgodny data.yaml = YAML z tego samego toru co model: MP->pojazdy, MT->tablice/pose, MZ->znaki",
+            "kalibracja = pomiar zakresów aktywacji na reprezentatywnych obrazach",
+            "kwantyzacja = zmiana precyzji liczbowej modelu, np. FP32 -> INT8",
+            "LiteRT/TFLite = główny format wykonawczy dla Androida",
+            "ONNX = wariant kontrolny/fallback i narzędzie diagnostyczne",
+            "NCNN = eksperymentalny wariant runtime mobilnego",
+            "manifest = kontrakt dla aplikacji mobilnej: co jest w pakiecie i jak to uruchomić",
+            "wariant wykonawczy = jeden format modelu zbudowany z tego samego best.pt",
+        ),
+        "caution": (
+            "Nie wybieraj przypadkowego data.yaml do INT8. Zła kalibracja może dać szybki, mały model, "
+            "który gorzej rozpoznaje tablice lub znaki. Jeśli nie masz reprezentatywnego YAML-a dla danego toru, "
+            "bezpieczniejszy do testu porównawczego jest FP32. Jeden MZ nie wykona pełnego ALPR; do demonstracji end-to-end "
+            "potrzebny jest komplet MT+MZ."
+        ),
+        "references": (
+            "docs/eksport_mobilny_kwantyzacja.md",
+            "docs/siatka_eksperymentow_mobilnych_alpr.md",
+            "docs/specyfikacja_agenta_aplikacji_mobilnej_alpr.md",
+        ),
+    }
 
 
 def _normalize_glossary_key(value: str) -> str:
@@ -198,6 +357,7 @@ def get_step3_free_mode_assistant_context(host) -> dict:
         return {
             "location": "[Z3] Autoanotacja znaków tablic / [PZ1] Wyodrębnianie zaanotowanych tablic",
             "goal": "Ta podzakładka bierze źródło z Z2, czyli XML i zgodny katalog obrazów, a następnie wyodrębnia tablice do dalszej pracy nad znakami.",
+            "current": "Źródło Z2 musi być zgodnym kompletem obrazy + anotacje tablic. Wyodrębnione tablice stają się wejściem PZ2.",
             "workflow": (
                 "Wskaż albo potwierdź źródło Z2: annotations.xml oraz zgodny folder obrazów.",
                 "Jeśli program znajdzie pasujący folder obrazów, świadomie potwierdź podpięcie w modalu.",
@@ -210,6 +370,7 @@ def get_step3_free_mode_assistant_context(host) -> dict:
                 "źródło Z2 = XML + zgodne obrazy",
             ),
             "caution": "XML i katalog obrazów muszą pochodzić z tego samego zestawu; inaczej cropy będą niespójne.",
+            "references": ("docs/mapa_funkcji_i_kodu.md",),
         }
     if selected_tab == str(getattr(host, "tab_detect", "")):
         return {
@@ -218,6 +379,9 @@ def get_step3_free_mode_assistant_context(host) -> dict:
                 "PZ2 jest pierwszym krokiem pracy T05: tutaj przygotowujesz anotacje znaków na wyodrębnionych tablicach. "
                 "Poprawiasz ramki, wpisujesz znaki i doprowadzasz tablice do statusu perfect. "
                 "Sam zbiór przygotowany w PZ2 nie otwiera jeszcze T05; po zbudowaniu sensownego materiału trzeba przejść do PZ3 i wyeksportować źródłowy dataset znaków."
+            ),
+            "current": (
+                "Pipeline PZ2 składa się z bloków YB, YS i OCR. Manualne ramki oraz ręcznie wpisane znaki mają pierwszeństwo przed wynikiem automatu."
             ),
             "workflow": (
                 "W PZ2 popraw ramki znaków i doprowadź możliwie dużo tablic do statusu perfect.",
@@ -233,14 +397,18 @@ def get_step3_free_mode_assistant_context(host) -> dict:
                 "2R = tablica dwurzędowa",
                 "2R? = program podejrzewa układ dwurzędowy, ale nie ma pewności",
                 "2R* / 1R* = układ ręcznie wymuszony przez użytkownika",
-                "1.2 przy boxie = rząd 1, znak 2 w kolejności czytania",
+                "YB = blok wykrywania ramek znaków",
+                "YS = blok rozpoznawania znaków w istniejących ramkach",
+                "MB/MS = ręczna ramka lub ręcznie wpisany znak",
             ),
-            "caution": "Nie myl poziomu jakości w PZ2 z otwarciem T06. PZ2 przygotowuje materiał, PZ3 tworzy artefakt datasetu.",
+            "caution": "Nie myl poziomu jakości w PZ2 z otwarciem T05. PZ2 przygotowuje materiał, PZ3 tworzy artefakt datasetu.",
+            "references": ("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
         }
     if selected_tab == str(getattr(host, "tab_dataset", "")):
         return {
             "location": "[Z3] Autoanotacja znaków tablic / [PZ3] Integracje i dataset (YOLO)",
             "goal": "Ta podzakładka domyka pracę nad znakami: zbiera sprawdzone tablice perfect, opcjonalne poprawki CVAT i eksportuje źródłowy dataset znaków do dalszej pracy w Z4.",
+            "current": "Eksport PZ3 tworzy artefakt AZ. Ten artefakt jest później wybierany w Z4/PZ1 jako źródło wariantu treningowego MZ.",
             "workflow": (
                 "Sprawdź, że pracujesz na perfectach z aktywnego runu PZ2.",
                 "Jeśli poprawki zewnętrzne nie są potrzebne, wybierz strategie i źródła gold packa.",
@@ -254,10 +422,12 @@ def get_step3_free_mode_assistant_context(host) -> dict:
                 "Poprawki CVAT = ręczne korekty boxów znaków wracające z CVAT do PZ3 i włączane do datasetu",
             ),
             "caution": "CVAT w PZ3 używa cropów tablic i boxów znaków, nie boxów tablic na pełnych zdjęciach.",
+            "references": ("docs/mapa_funkcji_i_kodu.md", "DZIENNIK_ARCHITEKTURY_I_ZMIAN.md"),
         }
     return {
         "location": "[Z3] Autoanotacja znaków tablic",
         "goal": "Ta zakładka prowadzi od tablic przygotowanych w Z2 do cropów, korekty znaków i źródłowego datasetu znaków.",
+        "current": "PZ2 przygotowuje i kontroluje znaki. PZ3 tworzy dataset znaków używany w Z4.",
         "workflow": (
             "PZ1 wyodrębnia tablice z obrazów i XML z Z2.",
             "PZ2 rozpoznaje i poprawia znaki na cropach tablic.",
@@ -270,6 +440,7 @@ def get_step3_free_mode_assistant_context(host) -> dict:
             "PZ3 = integracje i dataset YOLO",
         ),
         "caution": "Wariant treningowy i split końcowo przygotujesz w Z4.",
+        "references": ("docs/mapa_funkcji_i_kodu.md",),
     }
 
 
@@ -277,9 +448,11 @@ def get_step3_free_mode_assistant_context(host) -> dict:
 class FreeModeAssistantContext:
     location: str = ""
     goal: str = ""
+    current: str = ""
     workflow: tuple[str, ...] = ()
     glossary: tuple[str, ...] = ()
     caution: str = ""
+    references: tuple[str, ...] = ()
 
     @classmethod
     def from_value(cls, value) -> "FreeModeAssistantContext":
@@ -292,17 +465,34 @@ class FreeModeAssistantContext:
             workflow = value.get("workflow", value.get("steps", ()))
             if isinstance(workflow, str):
                 workflow = (workflow,)
+            references = value.get("references", value.get("docs", ()))
+            if isinstance(references, str):
+                references = (references,)
             return cls(
                 location=str(value.get("location", "") or ""),
                 goal=str(value.get("goal", "") or ""),
+                current=str(value.get("current", value.get("state", "")) or ""),
                 workflow=tuple(str(item or "") for item in workflow if str(item or "").strip()),
                 glossary=tuple(str(item or "") for item in glossary if str(item or "").strip()),
                 caution=str(value.get("caution", "") or ""),
+                references=tuple(
+                    str(item or "")
+                    for item in references or ()
+                    if str(item or "").strip()
+                ),
             )
         return cls()
 
     def is_empty(self) -> bool:
-        return not any((self.location, self.goal, self.workflow, self.glossary, self.caution))
+        return not any((
+            self.location,
+            self.goal,
+            self.current,
+            self.workflow,
+            self.glossary,
+            self.caution,
+            self.references,
+        ))
 
     def render_body(self) -> str:
         return "\n".join(self.render_body_lines())
@@ -313,16 +503,30 @@ class FreeModeAssistantContext:
             lines.append(f"Jesteś tutaj: {self.location}")
         if self.goal:
             lines.append(f"Co robisz: {self.goal}")
+        if self.current:
+            lines.append(f"Stan/kontekst: {self.current}")
         if self.workflow:
             lines.append("Kolejność pracy:")
             for index, item in enumerate(self.workflow, start=1):
                 lines.append(f"{index}. {item}")
         if self.caution:
             lines.append(f"Uważaj: {self.caution}")
+        if self.references:
+            lines.append("Dokumenty:")
+            for item in self.references:
+                lines.append(f"- {item}")
         return tuple(lines)
 
     def render_glossary_lines(self) -> tuple[str, ...]:
-        text_parts = [self.location, self.goal, self.caution, *self.workflow, *self.glossary]
+        text_parts = [
+            self.location,
+            self.goal,
+            self.current,
+            self.caution,
+            *self.workflow,
+            *self.glossary,
+            *self.references,
+        ]
         searchable_text = " ".join(str(part or "") for part in text_parts)
         explicit_defs: dict[str, str] = {}
         ordered_keys: list[str] = []
@@ -365,8 +569,9 @@ class FreeModeAssistantContext:
 class FreeModeAssistantOverlay:
     """Mały, pasywny HUD kontekstu dla trybu swobodnego."""
 
-    def __init__(self, root: tk.Misc):
+    def __init__(self, root: tk.Misc, on_close=None):
         self.root = root
+        self._on_close = on_close
         self._visible = False
         self._context = FreeModeAssistantContext()
         self._palette = {}
@@ -375,6 +580,14 @@ class FreeModeAssistantOverlay:
         self._last_notebook: tk.Misc | None = None
         self._last_info_panel: tk.Misc | None = None
         self._glossary_expanded = False
+        self._body_text = ""
+        self._glossary_lines: tuple[str, ...] = ()
+        self._glossary_text = ""
+        self._last_width = 390
+        self._last_height = 180
+        self._estimated_content_height = 130
+        self._content_window_id = None
+        self._scrollregion_after_id = None
 
         self.frame = tk.Frame(
             root,
@@ -383,9 +596,17 @@ class FreeModeAssistantOverlay:
             padx=12,
             pady=10,
         )
-        self.title_lbl = tk.Label(
+        self.header_frame = tk.Frame(
             self.frame,
-            text="Asystent kontekstu  |  GRAB",
+            bd=0,
+            highlightthickness=0,
+            cursor="fleur",
+        )
+        self.header_frame.pack(fill=tk.X)
+
+        self.title_lbl = tk.Label(
+            self.header_frame,
+            text="Asystent kontekstu",
             anchor="w",
             justify=tk.LEFT,
             bd=0,
@@ -393,22 +614,68 @@ class FreeModeAssistantOverlay:
             font=("Segoe UI", 9, "bold"),
             cursor="fleur",
         )
-        self.title_lbl.pack(fill=tk.X)
+        self.title_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.body_lbl = tk.Message(
-            self.frame,
+        self.drag_hint_lbl = tk.Label(
+            self.header_frame,
+            text="GRAB",
+            anchor="center",
+            bd=0,
+            highlightthickness=0,
+            font=("Segoe UI", 8, "bold"),
+            cursor="fleur",
+            padx=8,
+        )
+        self.drag_hint_lbl.pack(side=tk.LEFT, padx=(8, 4))
+
+        self.close_btn = tk.Button(
+            self.header_frame,
+            text="X",
+            command=self._request_close,
+            width=2,
+            bd=0,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            cursor="hand2",
+            padx=4,
+            pady=0,
+            font=("Segoe UI", 8, "bold"),
+        )
+        self.close_btn.pack(side=tk.RIGHT)
+
+        self.body_shell = tk.Frame(self.frame, bd=0, highlightthickness=0)
+        self.body_shell.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        self.body_canvas = tk.Canvas(self.body_shell, bd=0, highlightthickness=0, takefocus=0)
+        self.body_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.body_scrollbar = WebSlimScrollbar(
+            self.body_shell,
+            orient=tk.VERTICAL,
+            command=self.body_canvas.yview,
+            auto_hide=True,
+            thickness=8,
+        )
+        self.body_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        self.body_canvas.configure(yscrollcommand=self.body_scrollbar.set)
+
+        self.content_frame = tk.Frame(self.body_canvas, bd=0, highlightthickness=0)
+        self._content_window_id = self.body_canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
+
+        self.body_lbl = tk.Label(
+            self.content_frame,
             text="",
             anchor="w",
             justify=tk.LEFT,
             bd=0,
             highlightthickness=0,
             font=("Segoe UI", 9),
-            width=330,
+            wraplength=330,
         )
         self.body_lbl.pack(fill=tk.X, pady=(6, 0))
 
         self.glossary_toggle_btn = tk.Button(
-            self.frame,
+            self.content_frame,
             text="Słownik pojęć (0) pokaż",
             command=self._toggle_glossary,
             anchor="w",
@@ -423,26 +690,54 @@ class FreeModeAssistantOverlay:
         )
         self.glossary_toggle_btn.pack(fill=tk.X, pady=(8, 0))
 
-        self.glossary_lbl = tk.Message(
-            self.frame,
+        self.glossary_lbl = tk.Label(
+            self.content_frame,
             text="",
             anchor="w",
             justify=tk.LEFT,
             bd=0,
             highlightthickness=0,
             font=("Segoe UI", 8),
-            width=330,
+            wraplength=330,
         )
         self.glossary_lbl.pack(fill=tk.X, pady=(4, 0))
         self.glossary_lbl.pack_forget()
 
-        for widget in (self.frame, self.title_lbl):
+        self.content_frame.bind("<Configure>", self._queue_scrollregion_refresh, add="+")
+        self.body_canvas.bind("<Configure>", self._on_body_canvas_configure, add="+")
+        for widget in (
+            self.body_shell,
+            self.body_canvas,
+            self.content_frame,
+            self.body_lbl,
+            self.glossary_toggle_btn,
+            self.glossary_lbl,
+            self.body_scrollbar,
+        ):
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                try:
+                    widget.bind(sequence, self._on_mousewheel, add="+")
+                except Exception:
+                    pass
+
+        for widget in (self.frame, self.header_frame, self.title_lbl, self.drag_hint_lbl):
             try:
                 widget.bind("<ButtonPress-1>", self._begin_drag, add="+")
                 widget.bind("<B1-Motion>", self._drag, add="+")
                 widget.bind("<ButtonRelease-1>", self._end_drag, add="+")
             except Exception:
                 pass
+
+    def _request_close(self) -> str:
+        callback = getattr(self, "_on_close", None)
+        if callable(callback):
+            try:
+                callback()
+                return "break"
+            except Exception:
+                pass
+        self.hide()
+        return "break"
 
     def refresh_theme(self, palette: dict | None = None) -> None:
         self._palette = dict(palette or self._palette or {})
@@ -458,7 +753,20 @@ class FreeModeAssistantOverlay:
         title_fg = palette.get("success", palette.get("accent", "#4ec9b0"))
         body_fg = palette.get("muted", palette.get("fg", "#f3f3f3"))
 
-        for widget in (self.frame, self.title_lbl, self.body_lbl, self.glossary_toggle_btn, self.glossary_lbl):
+        themed_widgets = (
+            self.frame,
+            self.header_frame,
+            self.title_lbl,
+            self.drag_hint_lbl,
+            self.close_btn,
+            self.body_shell,
+            self.body_canvas,
+            self.content_frame,
+            self.body_lbl,
+            self.glossary_toggle_btn,
+            self.glossary_lbl,
+        )
+        for widget in themed_widgets:
             try:
                 widget.configure(bg=bg)
             except Exception:
@@ -466,6 +774,13 @@ class FreeModeAssistantOverlay:
         try:
             self.frame.configure(highlightbackground=border, highlightcolor=border)
             self.title_lbl.configure(fg=title_fg)
+            self.drag_hint_lbl.configure(fg=palette.get("muted", palette.get("fg", "#f3f3f3")))
+            close_fg = palette.get("danger", palette.get("error", "#ff6b6b"))
+            self.close_btn.configure(
+                fg=close_fg,
+                activeforeground=close_fg,
+                activebackground=blend_hex_colors(close_fg, bg, 0.18),
+            )
             self.body_lbl.configure(fg=body_fg)
             self.glossary_toggle_btn.configure(
                 fg=title_fg,
@@ -473,21 +788,40 @@ class FreeModeAssistantOverlay:
                 activebackground=bg,
             )
             self.glossary_lbl.configure(fg=body_fg)
+            self.body_scrollbar.configure_style(
+                track_color=bg,
+                thumb_color=blend_hex_colors(title_fg, bg, 0.40),
+                thumb_hover_color=title_fg,
+            )
         except Exception:
             pass
 
     def update_context(self, context, *, palette: dict | None = None) -> None:
-        self._context = FreeModeAssistantContext.from_value(context)
+        next_context = FreeModeAssistantContext.from_value(context)
+        context_changed = next_context != self._context
+        self._context = next_context
         if palette is not None:
             self.refresh_theme(palette)
+        if context_changed:
+            self._body_text = self._context.render_body()
+            self._glossary_lines = self._context.render_glossary_lines()
+            self._glossary_text = "\n".join(self._glossary_lines)
+            self._estimated_content_height = self._estimate_content_height()
+            try:
+                self.body_canvas.yview_moveto(0.0)
+            except Exception:
+                pass
         try:
-            self.body_lbl.configure(text=self._context.render_body())
+            if str(self.body_lbl.cget("text") or "") != self._body_text:
+                self.body_lbl.configure(text=self._body_text)
         except Exception:
             pass
         self._refresh_glossary_display()
+        self._queue_scrollregion_refresh()
 
     def _toggle_glossary(self) -> None:
         self._glossary_expanded = not bool(self._glossary_expanded)
+        self._estimated_content_height = self._estimate_content_height()
         self._refresh_glossary_display()
         self.place(
             notebook=self._last_notebook,
@@ -495,7 +829,7 @@ class FreeModeAssistantOverlay:
         )
 
     def _refresh_glossary_display(self) -> None:
-        lines = self._context.render_glossary_lines()
+        lines = self._glossary_lines
         count = len(lines)
         if count <= 0:
             try:
@@ -510,7 +844,8 @@ class FreeModeAssistantOverlay:
                 self.glossary_toggle_btn.pack(fill=tk.X, pady=(8, 0))
             action = "ukryj" if self._glossary_expanded else "pokaż"
             self.glossary_toggle_btn.configure(text=f"Słownik pojęć ({count}) {action}")
-            self.glossary_lbl.configure(text="\n".join(lines))
+            if self._glossary_expanded and str(self.glossary_lbl.cget("text") or "") != self._glossary_text:
+                self.glossary_lbl.configure(text=self._glossary_text)
             if self._glossary_expanded:
                 if not str(self.glossary_lbl.winfo_manager()):
                     self.glossary_lbl.pack(fill=tk.X, pady=(4, 0))
@@ -518,6 +853,59 @@ class FreeModeAssistantOverlay:
                 self.glossary_lbl.pack_forget()
         except Exception:
             pass
+        self._queue_scrollregion_refresh()
+
+    def _estimate_content_height(self) -> int:
+        body_lines = max(1, len(str(getattr(self, "_body_text", "") or "").splitlines()))
+        glossary_lines = len(getattr(self, "_glossary_lines", ()) or ()) if self._glossary_expanded else 0
+        return max(112, (body_lines * 18) + (glossary_lines * 17) + 42)
+
+    def _on_body_canvas_configure(self, event=None) -> None:
+        try:
+            width = max(220, int(getattr(event, "width", self.body_canvas.winfo_width()) or 0))
+            if self._content_window_id is not None:
+                self.body_canvas.itemconfigure(self._content_window_id, width=width)
+            wrap = max(220, width - 4)
+            if int(float(self.body_lbl.cget("wraplength") or 0)) != wrap:
+                self.body_lbl.configure(wraplength=wrap)
+            if int(float(self.glossary_lbl.cget("wraplength") or 0)) != wrap:
+                self.glossary_lbl.configure(wraplength=wrap)
+        except Exception:
+            pass
+        self._queue_scrollregion_refresh()
+
+    def _queue_scrollregion_refresh(self, _event=None) -> None:
+        if getattr(self, "_scrollregion_after_id", None):
+            return
+        try:
+            self._scrollregion_after_id = self.root.after_idle(self._refresh_scrollregion)
+        except Exception:
+            self._scrollregion_after_id = None
+
+    def _refresh_scrollregion(self) -> None:
+        self._scrollregion_after_id = None
+        try:
+            self.body_canvas.configure(scrollregion=self.body_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_mousewheel(self, event) -> str:
+        try:
+            if getattr(event, "num", None) == 4:
+                units = -3
+            elif getattr(event, "num", None) == 5:
+                units = 3
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                units = -int(delta / 120) if delta else 0
+                if units == 0 and delta:
+                    units = -1 if delta > 0 else 1
+                units *= 3
+            if units:
+                self.body_canvas.yview_scroll(units, "units")
+        except Exception:
+            pass
+        return "break"
 
     def show(self) -> None:
         self._visible = True
@@ -550,11 +938,18 @@ class FreeModeAssistantOverlay:
             start_x, start_y, frame_x, frame_y = self._drag_anchor
             next_x = frame_x + int(event.x_root) - start_x
             next_y = frame_y + int(event.y_root) - start_y
-            self._manual_position = (next_x, next_y)
-            self.place(
-                notebook=self._last_notebook,
+            width = max(280, int(getattr(self, "_last_width", 390) or 390))
+            height = max(120, int(getattr(self, "_last_height", 180) or 180))
+            next_x, next_y = self._clamp_position(
+                next_x,
+                next_y,
+                width=width,
+                height=height,
                 info_panel=self._last_info_panel,
             )
+            self._manual_position = (next_x, next_y)
+            self.frame.place(x=next_x, y=next_y, width=width, height=height)
+            self.frame.lift()
         except Exception:
             pass
         return "break"
@@ -611,28 +1006,49 @@ class FreeModeAssistantOverlay:
             self._last_info_panel = info_panel
 
         try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
-
-        try:
             root_w = max(640, int(self.root.winfo_width() or 0))
         except Exception:
             root_w = 1024
+        try:
+            root_h = max(420, int(self.root.winfo_height() or 0))
+        except Exception:
+            root_h = 768
+        info_height = 0
+        if info_panel is not None:
+            try:
+                info_height = max(0, int(info_panel.winfo_height() or 0))
+            except Exception:
+                info_height = 0
 
         width = min(390, max(320, int(root_w * 0.30)))
         wrap = max(260, width - 26)
         try:
-            self.body_lbl.configure(width=wrap)
-            self.glossary_lbl.configure(width=wrap)
+            self.body_lbl.configure(wraplength=wrap)
+            self.glossary_lbl.configure(wraplength=wrap)
+            if self._content_window_id is not None:
+                self.body_canvas.itemconfigure(self._content_window_id, width=max(220, width - 44))
         except Exception:
             pass
 
+        title_h = 26
+        content_req = 130
         try:
-            self.frame.update_idletasks()
-            height = int(self.frame.winfo_reqheight())
+            title_h = max(
+                22,
+                int(self.header_frame.winfo_reqheight() or 0),
+                int(self.title_lbl.winfo_reqheight() or title_h),
+            )
+            content_req = max(
+                96,
+                int(self.content_frame.winfo_reqheight() or content_req),
+                int(getattr(self, "_estimated_content_height", content_req) or content_req),
+            )
         except Exception:
-            height = 150
+            pass
+        max_height = max(180, root_h - info_height - 88)
+        height = min(max_height, max(154, title_h + content_req + 34))
+        self._last_width = width
+        self._last_height = height
 
         if self._manual_position is not None:
             x, y = self._manual_position
@@ -650,7 +1066,8 @@ class FreeModeAssistantOverlay:
             self._manual_position = (x, y)
 
         try:
-            self.frame.place(x=x, y=y, width=width)
+            self.frame.place(x=x, y=y, width=width, height=height)
             self.frame.lift()
+            self._queue_scrollregion_refresh()
         except Exception:
             pass

@@ -228,11 +228,13 @@ class Config:
     DIR_6_MODELS_TRAINED_PLATES: Path = DIR_6_MODELS_TRAINED / "plates"
     DIR_6_MODELS_TRAINED_CHARS: Path = DIR_6_MODELS_TRAINED / "chars"
     DIR_6_MODELS_TRAINED_VEHICLES: Path = DIR_6_MODELS_TRAINED / "vehicles"
+    DIR_6_MODELS_MOBILE_PACKAGES: Path = DIR_6_MODELS / "mobile_packages"
     
     DIR_7_RANKINGS: Path    = WORKSPACE_DIR / "7_rankings"
     DIR_7_RANKINGS_PLATES: Path = DIR_7_RANKINGS / "plates"
     DIR_7_RANKINGS_CHARS: Path = DIR_7_RANKINGS / "chars"
     DIR_7_RANKINGS_VEHICLES: Path = DIR_7_RANKINGS / "vehicles"
+    DIR_7_RANKINGS_MOBILE_PACKAGES: Path = DIR_7_RANKINGS / "mobile_packages"
 
     DIR_8_PRESETS: Path = WORKSPACE_DIR / "8_presets"
     DIR_8_PRESETS_OCR: Path = DIR_8_PRESETS / "ocr"
@@ -364,6 +366,10 @@ class Config:
         if normalized == "vehicle":
             return self.DIR_6_MODELS_TRAINED_VEHICLES
         return self.DIR_6_MODELS_TRAINED_CHARS
+
+    def get_mobile_model_packages_dir(self, target: str | None = None) -> Path:
+        normalized = self.normalize_task_target(target)
+        return self.DIR_6_MODELS_MOBILE_PACKAGES / normalized
 
     def get_base_models_dir(self, target: str | None = None) -> Path:
         normalized = self.normalize_task_target(target)
@@ -521,7 +527,9 @@ class Config:
             self.DIR_4_DATASETS_CHAR_CLASSIFICATION,
             self.DIR_5_RUNS, 
             self.DIR_6_MODELS, 
+            self.DIR_6_MODELS_MOBILE_PACKAGES,
             self.DIR_7_RANKINGS, 
+            self.DIR_7_RANKINGS_MOBILE_PACKAGES,
             self.DIR_8_PRESETS,
             self.DIR_8_PRESETS_OCR,
             self.DIR_8_PRESETS_DETECTION_PIPELINE,

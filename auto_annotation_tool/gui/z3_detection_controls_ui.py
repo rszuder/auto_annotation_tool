@@ -8,12 +8,20 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
+from ..campaign_manager import CAMPAIGN
 from .web_slim_scrollbar import blend_hex_colors
 
 HYBRID_RESCUE_AUTO_LIMIT = 999
 DETECTION_SETTING_FLOAT_MIN = 0.00001
 DETECTION_SETTING_FLOAT_MAX = 1.0
 DETECTION_SETTING_FLOAT_DIGITS = 5
+
+
+def is_step3_campaign_runtime(host) -> bool:
+    try:
+        return bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    except Exception:
+        return False
 
 
 def normalize_detection_float(
@@ -81,14 +89,6 @@ def ensure_detection_status_visible(host) -> None:
     _restore_grid_if_hidden(
         getattr(host, "preview_layout_summary_lbl", None),
         {"row": 3, "column": 0, "sticky": "ew", "pady": (6, 0)},
-    )
-    _restore_grid_if_hidden(
-        getattr(host, "preview_repair_progress_title_lbl", None),
-        {"row": 4, "column": 0, "sticky": "ew", "pady": (6, 0)},
-    )
-    _restore_grid_if_hidden(
-        getattr(host, "preview_repair_progress", None),
-        {"row": 5, "column": 0, "sticky": "ew", "pady": (4, 0)},
     )
 
 
@@ -830,12 +830,13 @@ def refresh_detect_mode_cards(host, card_meta: dict):
     selected_bg = blend_hex_colors(panel_alt, hover_bg, 0.42)
     yolo_model_path = str(self._get_effective_yolo_model_path() or "").strip()
     yolo_ready = bool(yolo_model_path and Path(yolo_model_path).exists())
+    in_campaign = is_step3_campaign_runtime(self)
 
     for mode_key, widgets in cards.items():
         meta = card_meta.get(mode_key, {})
         is_selected = mode_key == current_method
         requires_yolo = mode_key in ("YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL")
-        is_enabled = not (requires_yolo and getattr(self, "_step3_linear_mode", False) and not yolo_ready)
+        is_enabled = not (requires_yolo and in_campaign and not yolo_ready)
         is_hovered = hover_key == mode_key
         card_bg = selected_bg if is_selected else (hover_bg if is_hovered else panel_alt)
         border_color = border
@@ -855,7 +856,7 @@ def refresh_detect_mode_cards(host, card_meta: dict):
                     description = "Preset w budowniczym: OCR pilnuje tekstu, a YOLO dopasowuje pozycje."
                 else:
                     description = "Preset w budowniczym: YOLO wyznacza boxy, a OCR czyta pojedyncze cropy."
-            elif getattr(self, "_step3_linear_mode", False):
+            elif in_campaign:
                 description = "Tryb odblokuje się po przypięciu modelu YOLO znaków do projektu."
             else:
                 description = "Preset dostępny w budowniczym pipeline po wskazaniu modelu YOLO znaków (.pt)."

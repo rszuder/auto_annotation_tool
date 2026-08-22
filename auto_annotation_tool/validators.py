@@ -41,6 +41,8 @@ def _empty_model_info() -> Dict:
         "source_model_name": "",
         "source_architecture_label": "",
         "ultralytics_version": "",
+        "parameter_count": 0,
+        "parameters_millions": 0.0,
     }
 
 
@@ -571,6 +573,20 @@ def validate_model_file(
             else:
                 info["classes"] = list(model.names)
             info["num_classes"] = len(info["classes"])
+
+        try:
+            model_obj = getattr(model, "model", None)
+            for source in (model_obj, model):
+                parameters = getattr(source, "parameters", None)
+                if not callable(parameters):
+                    continue
+                parameter_count = int(sum(int(param.numel()) for param in parameters()))
+                if parameter_count > 0:
+                    info["parameter_count"] = parameter_count
+                    info["parameters_millions"] = round(parameter_count / 1_000_000.0, 3)
+                    break
+        except Exception:
+            pass
 
         ok, message = True, f"Model {info['type'].upper()} OK"
         if write_sidecar:

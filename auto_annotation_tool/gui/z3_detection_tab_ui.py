@@ -1191,9 +1191,8 @@ def build_detection_tab(
     self.preview_list_intro_lbl = tk.Label(
         list_lf,
         text=(
-            "T05 składa się z dwóch kroków. Tutaj, w PZ2, przygotowujesz anotacje znaków na tablicach: "
-            "poprawiasz ramki, wpisujesz znaki i doprowadzasz tablice do statusu perfect. "
-            "Gdy zbiór PZ2 jest sensowny, użyj przycisku „Krok 2: dataset PZ3”, aby przejść do PZ3 i utworzyć źródłowy dataset znaków."
+            "PZ2 przygotowuje anotacje znaków na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
+            "i doprowadzasz tablice do statusu perfect. Gdy zbiór PZ2 jest sensowny, przejdź do PZ3 i utwórz źródłowy dataset znaków."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -2643,6 +2642,9 @@ def build_detection_tab(
         emphasis=False
     )
     try:
+        if bool(getattr(self, "_campaign_pz2_sync_loading", False)):
+            self.preview_repair_progress_title_lbl.grid_remove()
+            self.preview_repair_progress.grid_remove()
         self.preview_repair_progress_status_lbl.grid_remove()
         self.preview_fusion_info_lbl.grid_remove()
         self.preview_box_mode_info_lbl.grid_remove()
@@ -2756,6 +2758,18 @@ def build_detection_tab(
     )
     self.btn_back_to_extract.grid(row=0, column=0, sticky="sw")
     self.btn_back_to_extract.configure(text="Wstecz do PZ1", padding=(6, 0), width=NAV_BUTTON_WIDTH)
+
+    self.btn_return_to_graph_pz2_frame = tk.Frame(self.detect_nav_row, bd=0, highlightthickness=0)
+    self.btn_return_to_graph_pz2_frame.grid(row=0, column=0, sticky="sw")
+    self.btn_return_to_graph_pz2 = ttk.Button(
+        self.btn_return_to_graph_pz2_frame,
+        text="Zapisz PZ2 i wróć do grafu",
+        command=self._return_to_wizard_from_step3_pz2,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_return_to_graph_pz2.pack(anchor=tk.SW)
+    self.btn_return_to_graph_pz2.configure(padding=(8, 0), width=28)
+    self.btn_return_to_graph_pz2_frame.grid_remove()
 
     self.btn_run_detection_frame = tk.Frame(self.detect_actions_row, bd=0, highlightthickness=0)
     self.btn_run_detection_frame.grid(row=0, column=0, sticky="w")

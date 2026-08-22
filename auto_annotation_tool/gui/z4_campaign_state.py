@@ -50,6 +50,10 @@ from .z4_campaign_flow import (
     build_step4_training_inputs_view_model,
     clear_campaign_context,
     complete_campaign_project,
+    _current_iteration_pz3_source_contract,
+    _current_iteration_step4_dataset_record,
+    _resolve_step4_dataset_record_root,
+    _step4_dataset_record_counts,
     finish_campaign_step4,
     get_campaign_training_target,
     open_campaign_step4_entry as _flow_open_campaign_step4_entry,
@@ -551,6 +555,43 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
         return result
 
     if target == "char":
+        fast_dataset_record = _current_iteration_step4_dataset_record("char")
+        fast_dataset_root = _resolve_step4_dataset_record_root(fast_dataset_record)
+        fast_counts = _step4_dataset_record_counts(fast_dataset_record)
+        if (
+            fast_dataset_root is not None
+            and int(fast_counts.get("train", 0) or 0) > 0
+            and int(fast_counts.get("val", 0) or 0) > 0
+        ):
+            try:
+                yaml_path = fast_dataset_root / "data.yaml"
+                yaml_ok = yaml_path.exists()
+            except Exception:
+                yaml_ok = False
+            if yaml_ok:
+                result["ready_dataset"] = str(fast_dataset_root)
+                result["dataset_hint"] = str(fast_dataset_root)
+                result["train_images"] = int(fast_counts.get("train", 0) or 0)
+                result["val_images"] = int(fast_counts.get("val", 0) or 0)
+                result["test_images"] = int(fast_counts.get("test", 0) or 0)
+                result["validation_message"] = "Wariant treningowy odtworzony z kontraktu Z4/PZ1 bieżącej iteracji."
+                source_dataset = str(fast_dataset_record.get("source_dataset", "") or "").strip()
+                source_yaml = str(fast_dataset_record.get("source_yaml", "") or "").strip()
+                if source_dataset or source_yaml:
+                    try:
+                        source_root = Path(source_yaml or source_dataset)
+                        if source_root.is_file() and source_root.name.lower() == "data.yaml":
+                            source_yaml = str(source_root)
+                            source_root = source_root.parent
+                        elif source_root:
+                            source_yaml = source_yaml or str(source_root / "data.yaml")
+                        source_dataset = str(source_root.resolve()) if source_root.exists() else str(source_root)
+                    except Exception:
+                        pass
+                    result["source_dataset"] = source_dataset
+                    result["source_yaml"] = source_yaml
+                return result
+
         current_step4_record: dict = {}
 
         def _current_iteration_step4_dataset_path() -> Path | None:
@@ -676,6 +717,32 @@ def get_campaign_step4_readiness(self, *, iteration_target: str | None = None) -
                 }
             else:
                 return result
+
+        pz3_source = _current_iteration_pz3_source_contract()
+        pz3_source_path = str(pz3_source.get("dataset_path") or "").strip()
+        if pz3_source_path:
+            source_pairs = (
+                int(pz3_source.get("source_image_label_pairs", 0) or 0)
+                or int(pz3_source.get("exportable_plate_count", 0) or 0)
+                or int(pz3_source.get("perfect_count", 0) or 0)
+            )
+            result.update(
+                ok=True,
+                reason="source_dataset_ready_for_split",
+                ready_dataset="",
+                dataset_hint=pz3_source_path,
+                source_dataset=pz3_source_path,
+                source_yaml=str(Path(pz3_source_path) / "data.yaml"),
+                train_images=0,
+                val_images=0,
+                test_images=0,
+                source_image_label_pairs=int(source_pairs or 0),
+                validation_message=(
+                    "Źródłowy dataset YOLO Detect znaków jest wskazany przez PZ3 bieżącej iteracji. "
+                    "W Z4/PZ1 utwórz wariant treningowy train/val/test."
+                ),
+            )
+            return result
 
         latest_source = None
         latest_source_info = {}

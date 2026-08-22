@@ -299,6 +299,8 @@ def _persist_preview_metadata(
     success_message: str | None = None,
     refresh_list: bool = True,
     sync_access: bool = True,
+    mark_current_work: bool = False,
+    mark_reason: str = "pz2_manual_ready",
 ):
     perf_start = time.perf_counter()
     write_ms = refresh_ms = sync_ms = info_ms = 0.0
@@ -321,7 +323,11 @@ def _persist_preview_metadata(
         refresh_ms = (time.perf_counter() - phase_start) * 1000.0
     if bool(sync_access):
         phase_start = time.perf_counter()
-        self._sync_step3_access_from_preview_state(self.preview_metadata)
+        self._sync_step3_access_from_preview_state(
+            self.preview_metadata,
+            mark_current_work=bool(mark_current_work),
+            mark_reason=str(mark_reason or "pz2_manual_ready"),
+        )
         sync_ms = (time.perf_counter() - phase_start) * 1000.0
     if success_message:
         phase_start = time.perf_counter()
