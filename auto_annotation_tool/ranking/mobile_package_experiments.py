@@ -12,6 +12,9 @@ experiment.
 from __future__ import annotations
 
 import datetime as _dt
+import csv
+import hashlib
+import io
 import json
 import re
 import zipfile
@@ -25,6 +28,13 @@ from ..config import CONFIG, logger
 MOBILE_PACKAGE_EXPERIMENT_SCHEMA = "alpr.mobile_package_experiment.v1"
 MOBILE_BENCHMARK_REPORT_SCHEMA = "alpr.mobile_benchmark_report.v1"
 MOBILE_ALPR_PACKAGE_SCHEMA = "alpr.package.v1"
+MOBILE_RESEARCH_BUNDLE_SCHEMA = "alpr.mobile_research_bundle.v1"
+MOBILE_THESIS_BUNDLE_SCHEMA = "alpr.mobile_thesis_bundle.v1"
+
+MOBILE_REPORT_MAX_TEXT_BYTES = 32 * 1024 * 1024
+MOBILE_REPORT_MAX_TOTAL_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MOBILE_REPORT_MAX_ENTRIES = 50000
+MOBILE_REPORT_TRACE_PREVIEW_ROWS = 5000
 
 DEFAULT_SCORE_WEIGHTS = {
     "quality": 0.50,
@@ -140,6 +150,452 @@ def read_alpr_package_manifest(package_path: Path) -> dict[str, Any]:
     if not models.get("plate") or not models.get("character"):
         raise ValueError(f"Complete ALPR package has no required MT+MZ models: {package_path}")
     return manifest
+
+
+@dataclass(frozen=True)
+class ReportBundleEntry:
+    """One safe, indexed entry inside a mobile report archive."""
+
+    name: str
+    file_size: int = 0
+    compress_size: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReportBundleValidation:
+    """Validation result shown before report metrics."""
+
+    ok: bool
+    errors: tuple[str, ...] = field(default_factory=tuple)
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+    checked_hashes: int = 0
+    skipped_hashes: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MobileReportBundle:
+    """A safely parsed report bundle exported by the Android ALPR client."""
+
+    path: str
+    bundle_kind: str
+    bundle_schema: str
+    report: "MobileBenchmarkReport"
+    manifest: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    report_payload: dict[str, Any] = field(default_factory=dict)
+    trace_columns: tuple[str, ...] = field(default_factory=tuple)
+    trace_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    trace_total: int = 0
+    sample_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    sample_total: int = 0
+    crop_count: int = 0
+    annotation_count: int = 0
+    log_preview: str = ""
+    entries: tuple[ReportBundleEntry, ...] = field(default_factory=tuple)
+    validation: ReportBundleValidation = field(
+        default_factory=lambda: ReportBundleValidation(ok=True)
+    )
+    imported_at: str = field(default_factory=_utc_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "bundle_kind": self.bundle_kind,
+            "bundle_schema": self.bundle_schema,
+            "report": self.report.to_dict(),
+            "manifest": dict(self.manifest or {}),
+            "metadata": dict(self.metadata or {}),
+            "trace_columns": list(self.trace_columns),
+            "trace_rows": [dict(row) for row in self.trace_rows],
+            "trace_total": self.trace_total,
+            "sample_rows": [dict(row) for row in self.sample_rows],
+            "sample_total": self.sample_total,
+            "crop_count": self.crop_count,
+            "annotation_count": self.annotation_count,
+            "log_preview": self.log_preview,
+            "entries": [entry.to_dict() for entry in self.entries],
+            "validation": self.validation.to_dict(),
+            "imported_at": self.imported_at,
+        }
+
+
+def _archive_name_safe(raw_name: str) -> tuple[bool, str]:
+    normalized = str(raw_name or "").replace("\\", "/").strip()
+    if not normalized:
+        return False, normalized
+    if normalized.startswith("/") or normalized.startswith("//"):
+        return False, normalized
+    if re.match(r"^[A-Za-z]:", normalized):
+        return False, normalized
+    parts = [part for part in normalized.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return False, normalized
+    return True, "/".join(parts)
+
+
+def _compact_json_text(value: Any, *, limit: int = 900) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[: max(0, limit - 1)].rstrip() + "…"
+    return text
+
+
+def _report_payload_from_thesis_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(metadata or {})
+    payload.setdefault("schema", MOBILE_BENCHMARK_REPORT_SCHEMA)
+    payload.setdefault(
+        "report_id",
+        payload.get("report_id")
+        or payload.get("bundle_id")
+        or payload.get("session_id")
+        or payload.get("package_id")
+        or "thesis-report",
+    )
+    payload.setdefault("package_id", payload.get("package_id") or payload.get("model_package_id") or "thesis-package")
+    payload.setdefault("variant_id", payload.get("variant_id") or payload.get("runtime") or "thesis")
+    if "quality" not in payload and isinstance(payload.get("metrics"), dict):
+        payload["quality"] = dict(payload.get("metrics") or {})
+    payload.setdefault("raw_metadata_schema", metadata.get("schema", ""))
+    return payload
+
+
+class ReportBundleReader:
+    """Open Android report bundles without unsafe extraction or full-image loading."""
+
+    def __init__(
+        self,
+        *,
+        max_text_bytes: int = MOBILE_REPORT_MAX_TEXT_BYTES,
+        max_total_uncompressed_bytes: int = MOBILE_REPORT_MAX_TOTAL_UNCOMPRESSED_BYTES,
+        max_entries: int = MOBILE_REPORT_MAX_ENTRIES,
+        max_trace_rows: int = MOBILE_REPORT_TRACE_PREVIEW_ROWS,
+    ):
+        self.max_text_bytes = int(max_text_bytes)
+        self.max_total_uncompressed_bytes = int(max_total_uncompressed_bytes)
+        self.max_entries = int(max_entries)
+        self.max_trace_rows = int(max_trace_rows)
+
+    def read(self, path: Path) -> MobileReportBundle:
+        safe_path = Path(path)
+        if not safe_path.exists() or not safe_path.is_file():
+            raise FileNotFoundError(f"Nie znaleziono raportu mobilnego: {safe_path}")
+        if zipfile.is_zipfile(safe_path):
+            return self._read_zip_bundle(safe_path)
+        return self._read_json_report(safe_path)
+
+    def _read_json_report(self, path: Path) -> MobileReportBundle:
+        size = path.stat().st_size
+        if size > self.max_text_bytes:
+            raise ValueError(f"Plik raportu JSON jest za duży do bezpiecznego podglądu: {size} B")
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(payload, list):
+            if not payload:
+                raise ValueError("Plik JSON nie zawiera raportów.")
+            payload = payload[0]
+        if isinstance(payload, dict) and isinstance(payload.get("reports"), list):
+            reports = list(payload.get("reports") or [])
+            if not reports:
+                raise ValueError("Plik JSON nie zawiera raportów.")
+            payload = dict(reports[0] or {})
+        if not isinstance(payload, dict):
+            raise ValueError("Raport JSON musi być obiektem albo listą obiektów.")
+        report = MobileBenchmarkReport.from_dict(payload)
+        traces, columns, trace_total = self._trace_rows_from_json(payload.get("traces"))
+        validation = ReportBundleValidation(
+            ok=str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA) == MOBILE_BENCHMARK_REPORT_SCHEMA,
+            warnings=()
+            if str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA) == MOBILE_BENCHMARK_REPORT_SCHEMA
+            else (f"Nieoczekiwany schemat raportu: {payload.get('schema')}",),
+        )
+        return MobileReportBundle(
+            path=str(path),
+            bundle_kind="json",
+            bundle_schema=str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA),
+            report=report,
+            report_payload=payload,
+            trace_columns=tuple(columns),
+            trace_rows=tuple(traces),
+            trace_total=trace_total,
+            validation=validation,
+        )
+
+    def _read_zip_bundle(self, path: Path) -> MobileReportBundle:
+        errors: list[str] = []
+        warnings: list[str] = []
+        checked_hashes = 0
+        skipped_hashes = 0
+        with zipfile.ZipFile(path, "r") as archive:
+            infos = archive.infolist()
+            if len(infos) > self.max_entries:
+                errors.append(f"Archiwum ma zbyt dużo wpisów: {len(infos)}.")
+            normalized_names: dict[str, zipfile.ZipInfo] = {}
+            entries: list[ReportBundleEntry] = []
+            total_uncompressed = 0
+            for info in infos:
+                ok, normalized = _archive_name_safe(info.filename)
+                if not ok:
+                    errors.append(f"Niebezpieczna ścieżka w archiwum: {info.filename}")
+                    continue
+                if normalized in normalized_names:
+                    errors.append(f"Zduplikowany wpis w archiwum: {normalized}")
+                    continue
+                normalized_names[normalized] = info
+                total_uncompressed += int(info.file_size or 0)
+                entries.append(
+                    ReportBundleEntry(
+                        name=normalized,
+                        file_size=int(info.file_size or 0),
+                        compress_size=int(info.compress_size or 0),
+                    )
+                )
+            if total_uncompressed > self.max_total_uncompressed_bytes:
+                errors.append(
+                    "Archiwum deklaruje zbyt duży rozmiar po rozpakowaniu: "
+                    f"{total_uncompressed / (1024 * 1024):.1f} MB."
+                )
+
+            def read_text(name: str, *, optional: bool = False, limit: int | None = None) -> str:
+                info = normalized_names.get(name)
+                if info is None:
+                    if not optional:
+                        errors.append(f"Brakuje wpisu {name}.")
+                    return ""
+                max_bytes = int(limit or self.max_text_bytes)
+                if int(info.file_size or 0) > max_bytes:
+                    warnings.append(f"Pominięto zbyt duży wpis tekstowy {name}.")
+                    return ""
+                with archive.open(info, "r") as handle:
+                    return handle.read(max_bytes + 1).decode("utf-8-sig", errors="replace")
+
+            def read_json(name: str, *, optional: bool = False) -> dict[str, Any]:
+                text = read_text(name, optional=optional)
+                if not text:
+                    return {}
+                try:
+                    value = json.loads(text)
+                    if isinstance(value, dict):
+                        return value
+                    warnings.append(f"Wpis {name} nie jest obiektem JSON.")
+                except Exception as exc:
+                    errors.append(f"Nie udało się odczytać JSON {name}: {exc}")
+                return {}
+
+            manifest = read_json("manifest.json", optional=True)
+            bundle_schema = str(manifest.get("schema") or "")
+            metadata = read_json("metadata.json", optional=True)
+            report_payload = read_json("report.json", optional=True)
+            if not report_payload and metadata:
+                report_payload = _report_payload_from_thesis_metadata(metadata)
+
+            if not report_payload:
+                errors.append("Archiwum nie zawiera czytelnego report.json ani metadata.json.")
+
+            report_schema = str(report_payload.get("schema") or "")
+            if report_payload and report_schema != MOBILE_BENCHMARK_REPORT_SCHEMA:
+                warnings.append(f"Nieoczekiwany schemat report.json: {report_schema or 'brak'}.")
+
+            if manifest:
+                hash_errors, hash_warnings, checked_hashes, skipped_hashes = self._verify_manifest_hashes(
+                    archive,
+                    normalized_names,
+                    manifest,
+                )
+                errors.extend(hash_errors)
+                warnings.extend(hash_warnings)
+            elif report_payload:
+                warnings.append("Brak manifest.json, więc sprawdzono tylko strukturę raportu.")
+
+            traces, trace_columns, trace_total = self._read_csv_from_zip(
+                archive,
+                normalized_names,
+                "traces.csv" if "traces.csv" in normalized_names else "tables/trace_data.csv",
+                optional=True,
+            )
+            if not traces and report_payload:
+                traces, trace_columns, trace_total = self._trace_rows_from_json(report_payload.get("traces"))
+
+            sample_rows, _sample_columns, sample_total = self._read_csv_from_zip(
+                archive,
+                normalized_names,
+                "samples/index.csv",
+                optional=True,
+                max_rows=1000,
+            )
+            crop_count = sum(
+                1
+                for name in normalized_names
+                if name.startswith("samples/crops/") and name.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+            )
+            annotation_count = self._count_text_lines(
+                archive,
+                normalized_names.get("samples/annotations.jsonl"),
+            )
+            log_preview = read_text("application.log", optional=True, limit=512 * 1024)
+
+            if not bundle_schema:
+                if path.name.lower().endswith(".alprsession"):
+                    bundle_schema = MOBILE_RESEARCH_BUNDLE_SCHEMA
+                elif "tables/trace_data.csv" in normalized_names:
+                    bundle_schema = MOBILE_THESIS_BUNDLE_SCHEMA
+                else:
+                    bundle_schema = MOBILE_BENCHMARK_REPORT_SCHEMA
+
+            if bundle_schema == MOBILE_RESEARCH_BUNDLE_SCHEMA:
+                bundle_kind = "alprsession"
+            elif bundle_schema == MOBILE_THESIS_BUNDLE_SCHEMA:
+                bundle_kind = "thesis"
+            else:
+                bundle_kind = "legacy_zip"
+
+            report = MobileBenchmarkReport.from_dict(report_payload or {})
+            validation = ReportBundleValidation(
+                ok=not errors,
+                errors=tuple(errors),
+                warnings=tuple(warnings),
+                checked_hashes=checked_hashes,
+                skipped_hashes=skipped_hashes,
+            )
+            return MobileReportBundle(
+                path=str(path),
+                bundle_kind=bundle_kind,
+                bundle_schema=bundle_schema,
+                report=report,
+                manifest=manifest,
+                metadata=metadata,
+                report_payload=report_payload,
+                trace_columns=tuple(trace_columns),
+                trace_rows=tuple(traces),
+                trace_total=trace_total,
+                sample_rows=tuple(sample_rows),
+                sample_total=sample_total,
+                crop_count=crop_count,
+                annotation_count=annotation_count,
+                log_preview=log_preview,
+                entries=tuple(entries),
+                validation=validation,
+            )
+
+    def _verify_manifest_hashes(
+        self,
+        archive: zipfile.ZipFile,
+        normalized_names: dict[str, zipfile.ZipInfo],
+        manifest: dict[str, Any],
+    ) -> tuple[list[str], list[str], int, int]:
+        errors: list[str] = []
+        warnings: list[str] = []
+        checked = 0
+        skipped = 0
+        raw_hashes = manifest.get("entry_sha256") or manifest.get("sha256") or {}
+        if not isinstance(raw_hashes, dict):
+            warnings.append("Manifest nie zawiera słownika entry_sha256.")
+            return errors, warnings, checked, skipped
+        for raw_name, expected in raw_hashes.items():
+            ok, normalized = _archive_name_safe(str(raw_name or ""))
+            if not ok or normalized == "manifest.json":
+                continue
+            info = normalized_names.get(normalized)
+            if info is None:
+                errors.append(f"Manifest wymienia brakujący wpis: {normalized}")
+                continue
+            expected_hash = str(expected or "").strip().lower()
+            if not expected_hash:
+                skipped += 1
+                continue
+            digest = hashlib.sha256()
+            try:
+                with archive.open(info, "r") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                checked += 1
+                actual = digest.hexdigest().lower()
+                if actual != expected_hash:
+                    errors.append(f"SHA-256 nie zgadza się dla {normalized}.")
+            except Exception as exc:
+                errors.append(f"Nie udało się policzyć SHA-256 dla {normalized}: {exc}")
+        return errors, warnings, checked, skipped
+
+    def _read_csv_from_zip(
+        self,
+        archive: zipfile.ZipFile,
+        normalized_names: dict[str, zipfile.ZipInfo],
+        name: str,
+        *,
+        optional: bool = False,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], int]:
+        info = normalized_names.get(name)
+        if info is None:
+            if not optional:
+                raise FileNotFoundError(name)
+            return [], [], 0
+        rows: list[dict[str, str]] = []
+        columns: list[str] = []
+        total = 0
+        limit = self.max_trace_rows if max_rows is None else int(max_rows)
+        with archive.open(info, "r") as binary:
+            wrapper = io.TextIOWrapper(binary, encoding="utf-8-sig", errors="replace", newline="")
+            reader = csv.DictReader(wrapper)
+            columns = [str(item or "") for item in (reader.fieldnames or [])]
+            for row in reader:
+                total += 1
+                if len(rows) < limit:
+                    rows.append({str(key or ""): str(value or "") for key, value in dict(row or {}).items()})
+        return rows, columns, total
+
+    def _count_text_lines(self, archive: zipfile.ZipFile, info: zipfile.ZipInfo | None) -> int:
+        if info is None:
+            return 0
+        total = 0
+        with archive.open(info, "r") as handle:
+            for _line in handle:
+                total += 1
+        return total
+
+    def _trace_rows_from_json(self, traces_value: Any) -> tuple[list[dict[str, str]], list[str], int]:
+        if not isinstance(traces_value, list):
+            return [], [], 0
+        rows: list[dict[str, str]] = []
+        columns: list[str] = []
+        seen: set[str] = set()
+        for item in traces_value:
+            if not isinstance(item, dict):
+                continue
+            row: dict[str, str] = {}
+            for key in ("frame_id", "timestamp_ms", "status", "text"):
+                row[key] = str(item.get(key, ""))
+            for nested_name, suffix in (("stage_ms", "_ms"), ("confidence", ""), ("counters", ""), ("memory", "")):
+                nested = item.get(nested_name)
+                if not isinstance(nested, dict):
+                    continue
+                for key, value in nested.items():
+                    column = str(key)
+                    if suffix and not column.endswith(suffix):
+                        column = f"{column}{suffix}"
+                    row[column] = str(value)
+            for key in row:
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
+            if len(rows) < self.max_trace_rows:
+                rows.append(row)
+        return rows, columns, len([item for item in traces_value if isinstance(item, dict)])
+
+
+def read_mobile_report_bundle(path: Path, *, max_trace_rows: int = MOBILE_REPORT_TRACE_PREVIEW_ROWS) -> MobileReportBundle:
+    """Read an Android report bundle according to the mobile-report handoff."""
+    return ReportBundleReader(max_trace_rows=max_trace_rows).read(path)
 
 
 @dataclass(frozen=True)
@@ -397,14 +853,16 @@ class MobileBenchmarkReport:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def identity(self) -> tuple[str, str, str, str, str]:
+    def identity(self) -> tuple[str, str, str, str, str, str, str]:
         device_name = str(self.device.get("name") or self.device.get("device_name") or "").strip()
         return (
+            self.report_id,
             self.package_id,
             self.variant_id,
             device_name,
             str(self.runtime or ""),
             str(self.delegate or ""),
+            str(self.measured_at or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -554,6 +1012,7 @@ def score_mobile_report(
         _nested_value(
             quality_data,
             "plate_exact_match",
+            "exact_match_rate",
             "plate_accuracy",
             "success_rate",
             "accuracy_plate",
@@ -706,6 +1165,13 @@ class MobilePackageExperimentStore:
         return report
 
     def import_mobile_report_file(self, report_path: Path, *, save: bool = True) -> list[MobileBenchmarkReport]:
+        if zipfile.is_zipfile(Path(report_path)):
+            bundle = read_mobile_report_bundle(Path(report_path))
+            imported = [self.add_report(bundle.report, save=False)]
+            if save:
+                self.save()
+            return imported
+
         data = json.loads(Path(report_path).read_text(encoding="utf-8-sig"))
         if isinstance(data, dict) and isinstance(data.get("reports"), list):
             raw_reports = list(data.get("reports") or [])

@@ -1275,12 +1275,17 @@ class AutoAnnotationApp:
         )
 
         make_menu_button(
-            "Eksport",
+            "Integracje",
             lambda: [
                 {
                     "kind": "command",
-                    "label": "Pakiet mobilny ALPR (.alprmodel)",
+                    "label": "Eksport mobilny",
                     "command": self._open_mobile_model_export_center_from_menu,
+                },
+                {
+                    "kind": "command",
+                    "label": "Import raportów",
+                    "command": self._open_mobile_report_browser_from_menu,
                 },
             ],
             min_width=300
@@ -1530,6 +1535,21 @@ class AutoAnnotationApp:
         self._show_mobile_export_menu_loader("Uruchamiam centrum eksportu mobilnego...", 86.0)
         self._close_mobile_export_menu_loader()
         return z4_model_export._open_mobile_model_export_center(host)
+
+    def _open_mobile_report_browser_from_menu(self):
+        try:
+            host = self._get_mobile_export_menu_host()
+            from . import z4_mobile_report_browser
+        except Exception as e:
+            logger.error(f"Nie udało się przygotować importu raportów mobilnych: {e}")
+            return self.themed_info(
+                "Import raportów",
+                f"Nie udało się przygotować przeglądarki raportów:\n{e}",
+                parent=self.root,
+                tone="error",
+            )
+
+        return z4_mobile_report_browser.open_mobile_report_browser(host, parent=self.root)
 
     def _get_menu_badge_text(self) -> str:
         try:

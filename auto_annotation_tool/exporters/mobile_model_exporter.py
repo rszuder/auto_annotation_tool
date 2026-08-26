@@ -37,6 +37,8 @@ MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ALPR_PACKAGE_ENTRIES = 640
 MAX_ALPR_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 SAFE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+CALIBRATION_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+ONNX_INT8_CALIBRATION_MAX_IMAGES = 300
 
 MOBILE_EXPORT_CORE_REQUIREMENTS: tuple[tuple[str, str], ...] = (
     ("ultralytics", "ultralytics"),
@@ -47,6 +49,10 @@ MOBILE_EXPORT_ONNX_REQUIREMENTS: tuple[tuple[str, str], ...] = (
     ("onnx", "onnx>=1.12.0,<2.0.0"),
     ("onnxruntime", "onnxruntime"),
     ("onnxslim", "onnxslim>=0.1.71"),
+)
+MOBILE_EXPORT_ONNX_INT8_REQUIREMENTS: tuple[tuple[str, str], ...] = (
+    ("PIL", "Pillow"),
+    ("yaml", "PyYAML"),
 )
 MOBILE_EXPORT_TFLITE_REQUIREMENTS: tuple[tuple[str, str], ...] = (
     ("tensorflow", "tensorflow>=2.0.0,<=2.19.0"),
@@ -78,6 +84,7 @@ class MobileExportRequest:
     formats: tuple[MobileFormat, ...]
     image_size: int | tuple[int, int]
     quantizations: tuple[str, ...] = ("fp32",)
+    format_quantizations: dict[str, tuple[str, ...]] = field(default_factory=dict)
     calibration_data: Path | None = None
     confidence_threshold: float = 0.25
     iou_threshold: float = 0.45
@@ -169,7 +176,12 @@ def mobile_export_requirement_status(spec: str, import_name: str = "") -> tuple[
     return True, f"{dist_name}=={version}"
 
 
-def mobile_export_required_specs(formats: tuple[str, ...] | list[str] | set[str]) -> list[dict[str, str]]:
+def mobile_export_required_specs(
+    formats: tuple[str, ...] | list[str] | set[str],
+    *,
+    quantizations: tuple[str, ...] | list[str] | set[str] | None = None,
+    format_quantizations: dict[str, tuple[str, ...] | list[str] | set[str]] | None = None,
+) -> list[dict[str, str]]:
     selected = set(str(item or "").strip().lower() for item in (formats or ()))
     rows: dict[str, dict[str, str]] = {}
 
@@ -183,6 +195,20 @@ def mobile_export_required_specs(formats: tuple[str, ...] | list[str] | set[str]
     add("YOLO", MOBILE_EXPORT_CORE_REQUIREMENTS)
     if "onnx" in selected:
         add("ONNX", MOBILE_EXPORT_ONNX_REQUIREMENTS)
+        raw_map = format_quantizations if isinstance(format_quantizations, dict) else {}
+        onnx_precisions = set(
+            str(item or "").strip().lower()
+            for item in (raw_map.get("onnx") or raw_map.get("ONNX") or ())
+            if str(item or "").strip()
+        )
+        if not onnx_precisions and quantizations is not None:
+            onnx_precisions = {
+                str(item or "").strip().lower()
+                for item in (quantizations or ())
+                if str(item or "").strip()
+            }
+        if "int8" in onnx_precisions:
+            add("ONNX INT8", MOBILE_EXPORT_ONNX_INT8_REQUIREMENTS)
     if "litert" in selected:
         add("LiteRT/TFLite", MOBILE_EXPORT_TFLITE_REQUIREMENTS)
     if "ncnn" in selected:
@@ -255,6 +281,25 @@ def check_mobile_tflite_inspection_runtime() -> str | None:
         _tflite_interpreter_class()
     except Exception as exc:
         return str(exc)
+    return None
+
+
+def check_mobile_onnx_int8_runtime() -> str | None:
+    missing = []
+    required = (
+        ("onnx", "onnx"),
+        ("onnxruntime.quantization", "onnxruntime.quantization"),
+        ("numpy", "numpy"),
+        ("PIL", "Pillow/PIL"),
+        ("yaml", "PyYAML"),
+    )
+    for module_name, label in required:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            missing.append(f"{label}: {exc}")
+    if missing:
+        return "Brak runtime kwantyzacji ONNX INT8: " + "; ".join(missing)
     return None
 
 
@@ -345,20 +390,72 @@ def _runtime_toolchain_payload() -> dict[str, Any]:
     }
 
 
-def _export_request_payload(request: MobileExportRequest) -> dict[str, Any]:
-    formats = list(dict.fromkeys(str(item or "").strip().lower() for item in (request.formats or ()) if str(item or "").strip()))
-    quantizations = list(
-        dict.fromkeys(str(item or "").strip().lower() for item in (request.quantizations or ()) if str(item or "").strip())
+def _normalized_export_formats(formats: tuple[Any, ...] | list[Any] | set[Any] | None) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(item or "").strip().lower() for item in (formats or ()) if str(item or "").strip()))
+
+
+def _normalized_export_quantizations(
+    quantizations: tuple[Any, ...] | list[Any] | set[Any] | None,
+    *,
+    default: tuple[str, ...] = ("fp32",),
+) -> tuple[str, ...]:
+    normalized = tuple(
+        dict.fromkeys(str(item or "").strip().lower() for item in (quantizations or ()) if str(item or "").strip())
     )
+    return normalized or default
+
+
+def _request_format_quantization_map(request: MobileExportRequest) -> dict[str, tuple[str, ...]]:
+    formats = _normalized_export_formats(request.formats)
+    global_quantizations = _normalized_export_quantizations(request.quantizations)
+    raw_map = request.format_quantizations if isinstance(getattr(request, "format_quantizations", None), dict) else {}
+    supported: dict[str, tuple[str, ...]] = {
+        "litert": ("fp32", "int8"),
+        "onnx": ("fp32", "int8"),
+        "ncnn": ("fp32",),
+    }
+    result: dict[str, tuple[str, ...]] = {}
+    for fmt in formats:
+        aliases = [fmt]
+        if fmt == "litert":
+            aliases.append("tflite")
+        raw_values = None
+        for alias in aliases:
+            if alias in raw_map:
+                raw_values = raw_map.get(alias)
+                break
+        requested = _normalized_export_quantizations(raw_values, default=global_quantizations) if raw_values is not None else global_quantizations
+        allowed = supported.get(fmt, ("fp32",))
+        precisions = tuple(item for item in requested if item in allowed)
+        result[fmt] = precisions or ("fp32",)
+    return result
+
+
+def _request_int8_calibration_targets(request: MobileExportRequest) -> list[str]:
+    labels = {"litert": "litert:int8", "onnx": "onnx:int8"}
+    targets: list[str] = []
+    for fmt, precisions in _request_format_quantization_map(request).items():
+        if "int8" in precisions and fmt in labels:
+            targets.append(labels[fmt])
+    return targets
+
+
+def _export_request_payload(request: MobileExportRequest) -> dict[str, Any]:
+    formats = list(_normalized_export_formats(request.formats))
+    quantizations = list(
+        _normalized_export_quantizations(request.quantizations, default=())
+    )
+    format_quantizations = _request_format_quantization_map(request)
     calibration_payload = _path_reproducibility_payload(request.calibration_data)
     return {
         "formats": formats,
         "quantizations": quantizations,
+        "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
         "image_size": _json_safe_value(request.image_size),
         "confidence_threshold": float(request.confidence_threshold),
         "iou_threshold": float(request.iou_threshold),
         "calibration_data": calibration_payload,
-        "calibration_required_for": ["litert:int8"] if "int8" in quantizations else [],
+        "calibration_required_for": _request_int8_calibration_targets(request),
     }
 
 
@@ -673,6 +770,136 @@ def _ultralytics_imgsz(value: int | tuple[int, int]) -> int | tuple[int, int]:
     return (height, width)
 
 
+def _resolve_calibration_yaml_root(data_yaml: Path, payload: dict[str, Any]) -> Path:
+    raw_root = payload.get("path") if isinstance(payload, dict) else None
+    if raw_root:
+        root = Path(str(raw_root))
+        if not root.is_absolute():
+            root = data_yaml.parent / root
+        return root.resolve()
+    return data_yaml.parent.resolve()
+
+
+def _as_path_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item or "").strip()]
+    return [str(value)] if str(value or "").strip() else []
+
+
+def _resolve_calibration_sources(data_yaml: Path) -> list[Path]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise MobileExportError(f"Brak PyYAML do odczytu data.yaml kalibracji ONNX INT8: {exc}") from exc
+
+    try:
+        payload = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise MobileExportError(f"Nie można odczytać data.yaml kalibracji ONNX INT8: {data_yaml} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise MobileExportError(f"Nieprawidłowy data.yaml kalibracji ONNX INT8: {data_yaml}")
+
+    root = _resolve_calibration_yaml_root(data_yaml, payload)
+    result: list[Path] = []
+    for split in ("val", "train", "test"):
+        for item in _as_path_list(payload.get(split)):
+            path = Path(item)
+            if not path.is_absolute():
+                path = root / path
+            result.append(path.resolve())
+    return result or [data_yaml.parent.resolve()]
+
+
+def _collect_calibration_images(data_yaml: Path, *, limit: int = ONNX_INT8_CALIBRATION_MAX_IMAGES) -> list[Path]:
+    images: list[Path] = []
+    seen: set[str] = set()
+    for source in _resolve_calibration_sources(data_yaml):
+        candidates: list[Path] = []
+        if source.is_file():
+            if source.suffix.lower() in CALIBRATION_IMAGE_SUFFIXES:
+                candidates = [source]
+            else:
+                try:
+                    candidates = [
+                        Path(line.strip())
+                        for line in source.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        if line.strip() and not line.strip().startswith("#")
+                    ]
+                except Exception:
+                    candidates = []
+        elif source.is_dir():
+            candidates = [path for path in source.rglob("*") if path.suffix.lower() in CALIBRATION_IMAGE_SUFFIXES]
+        for candidate in candidates:
+            path = candidate if candidate.is_absolute() else (source.parent / candidate)
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            key = str(resolved).lower()
+            if key in seen or not resolved.exists() or not resolved.is_file():
+                continue
+            seen.add(key)
+            images.append(resolved)
+            if len(images) >= limit:
+                return images
+    return images
+
+
+def _onnx_input_name_and_size(onnx_path: Path, fallback_size: int | tuple[int, int]) -> tuple[str, tuple[int, int]]:
+    try:
+        import onnx  # type: ignore
+    except Exception as exc:
+        raise MobileExportError(f"Brak pakietu onnx do przygotowania kwantyzacji ONNX INT8: {exc}") from exc
+    model = onnx.load(str(onnx_path))
+    if not model.graph.input:
+        raise MobileExportError("Model ONNX nie ma wejścia do kalibracji INT8.")
+    input_value = model.graph.input[0]
+    shape = [_shape_dim_value(dim) for dim in input_value.type.tensor_type.shape.dim]
+    fallback_width, fallback_height = _normalize_image_size(fallback_size)
+    width, height = fallback_width, fallback_height
+    if len(shape) >= 4:
+        try:
+            if isinstance(shape[2], int) and int(shape[2]) > 0:
+                height = int(shape[2])
+            if isinstance(shape[3], int) and int(shape[3]) > 0:
+                width = int(shape[3])
+        except Exception:
+            pass
+    return str(input_value.name or "images"), (width, height)
+
+
+class _OnnxImageCalibrationReader:
+    def __init__(self, *, input_name: str, image_paths: list[Path], image_size: tuple[int, int]):
+        self.input_name = input_name
+        self.image_paths = list(image_paths)
+        self.image_size = image_size
+        self.index = 0
+
+    def get_next(self):
+        if self.index >= len(self.image_paths):
+            return None
+        path = self.image_paths[self.index]
+        self.index += 1
+        try:
+            import numpy as np  # type: ignore
+            from PIL import Image  # type: ignore
+        except Exception as exc:
+            raise MobileExportError(f"Brak bibliotek obrazu do kalibracji ONNX INT8: {exc}") from exc
+        width, height = self.image_size
+        try:
+            image = Image.open(path).convert("RGB").resize((width, height))
+        except Exception as exc:
+            raise MobileExportError(f"Nie można odczytać obrazu kalibracyjnego ONNX INT8: {path} ({exc})") from exc
+        array = np.asarray(image, dtype=np.float32) / 255.0
+        array = np.transpose(array, (2, 0, 1))[None, ...]
+        return {self.input_name: array}
+
+    def rewind(self) -> None:
+        self.index = 0
+
+
 def _dtype_name_from_onnx(elem_type: int) -> str:
     try:
         import onnx  # type: ignore
@@ -906,17 +1133,38 @@ class MobileModelExporter:
         except Exception as exc:
             problems.append(str(exc))
 
-        formats = tuple(dict.fromkeys(str(item).strip().lower() for item in (request.formats or ())))
+        formats = _normalized_export_formats(request.formats)
         if not formats:
             problems.append("Wybierz co najmniej jeden format: LiteRT/TFLite, ONNX albo NCNN.")
         for item in formats:
             if item not in {"litert", "onnx", "ncnn"}:
                 problems.append(f"Nieobsługiwany format eksportu: {item}")
 
-        quantizations = tuple(dict.fromkeys(str(item).strip().lower() for item in (request.quantizations or ("fp32",))))
+        quantizations = _normalized_export_quantizations(request.quantizations)
         for precision in quantizations:
             if precision not in {"fp32", "int8"}:
                 problems.append(f"Nieobsługiwana precyzja: {precision}")
+
+        raw_format_quantizations = request.format_quantizations if isinstance(request.format_quantizations, dict) else {}
+        supported_by_format = {
+            "litert": {"fp32", "int8"},
+            "onnx": {"fp32", "int8"},
+            "ncnn": {"fp32"},
+        }
+        for raw_format, raw_precisions in raw_format_quantizations.items():
+            fmt = str(raw_format or "").strip().lower()
+            if fmt == "tflite":
+                fmt = "litert"
+            if fmt not in supported_by_format:
+                problems.append(f"Nieobsługiwany format eksportu w mapie precyzji: {raw_format}")
+                continue
+            requested_precisions = _normalized_export_quantizations(raw_precisions, default=())
+            for precision in requested_precisions:
+                if precision not in supported_by_format[fmt]:
+                    if fmt == "ncnn" and precision == "int8":
+                        problems.append("NCNN nie obsługuje eksportu INT8 w ścieżce Ultralytics; użyj NCNN FP32 albo ONNX/LiteRT INT8.")
+                    else:
+                        problems.append(f"Format {fmt.upper()} nie obsługuje precyzji {precision.upper()}.")
 
         try:
             _normalize_image_size(request.image_size)
@@ -941,8 +1189,15 @@ class MobileModelExporter:
             if tflite_problem:
                 problems.append(tflite_problem)
 
-        if "litert" in formats and "int8" in quantizations and request.calibration_data is None:
-            problems.append("LiteRT INT8 wymaga datasetu kalibracyjnego data.yaml.")
+        calibration_targets = _request_int8_calibration_targets(request)
+        if "onnx:int8" in calibration_targets:
+            onnx_int8_problem = check_mobile_onnx_int8_runtime()
+            if onnx_int8_problem:
+                problems.append(onnx_int8_problem)
+        if calibration_targets and request.calibration_data is None:
+            target_labels = {"litert:int8": "LiteRT/TFLite INT8", "onnx:int8": "ONNX INT8"}
+            labels = ", ".join(target_labels.get(target, target) for target in calibration_targets)
+            problems.append(f"{labels} wymaga datasetu kalibracyjnego data.yaml.")
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -1003,7 +1258,17 @@ class MobileModelExporter:
             variant_specs = self._requested_variant_specs(request)
             total_specs = max(1, len(variant_specs))
             for index, (runtime, precision) in enumerate(variant_specs, start=1):
-                notify(8.0 + (index - 1) * (62.0 / total_specs), f"Eksportuję wariant {runtime.upper()} {precision.upper()}.")
+                slot_start = 8.0 + (index - 1) * (62.0 / total_specs)
+                slot_span = 62.0 / total_specs
+                notify(slot_start, f"Eksportuję wariant {runtime.upper()} {precision.upper()}.")
+
+                def variant_progress(fraction: float, message: str, *, start=slot_start, span=slot_span) -> None:
+                    try:
+                        value = max(0.0, min(1.0, float(fraction)))
+                    except Exception:
+                        value = 0.0
+                    notify(start + (value * span), message)
+
                 variant = self._export_variant(
                     model,
                     runtime=runtime,
@@ -1015,6 +1280,7 @@ class MobileModelExporter:
                     keypoint_count=keypoint_count,
                     keypoint_dimensions=keypoint_dimensions,
                     end2end_output=end2end_output,
+                    progress=variant_progress,
                 )
                 variants.append(variant)
 
@@ -1284,17 +1550,19 @@ class MobileModelExporter:
         return False
 
     def _requested_variant_specs(self, request: MobileExportRequest) -> list[tuple[str, str]]:
-        formats = tuple(dict.fromkeys(str(item).strip().lower() for item in (request.formats or ())))
-        quantizations = tuple(dict.fromkeys(str(item).strip().lower() for item in (request.quantizations or ("fp32",))))
+        format_quantizations = _request_format_quantization_map(request)
         specs: list[tuple[str, str]] = []
-        if "litert" in formats:
-            if "fp32" in quantizations:
+        if "litert" in format_quantizations:
+            if "fp32" in format_quantizations["litert"]:
                 specs.append(("tflite", "fp32"))
-            if "int8" in quantizations:
+            if "int8" in format_quantizations["litert"]:
                 specs.append(("tflite", "int8"))
-        if "onnx" in formats:
-            specs.append(("onnx", "fp32"))
-        if "ncnn" in formats:
+        if "onnx" in format_quantizations:
+            if "fp32" in format_quantizations["onnx"]:
+                specs.append(("onnx", "fp32"))
+            if "int8" in format_quantizations["onnx"]:
+                specs.append(("onnx", "int8"))
+        if "ncnn" in format_quantizations:
             specs.append(("ncnn", "fp32"))
         return specs
 
@@ -1311,14 +1579,35 @@ class MobileModelExporter:
         keypoint_count: int,
         keypoint_dimensions: int = 0,
         end2end_output: bool = False,
+        progress: Callable[[float, str], None] | None = None,
     ) -> ExportedVariant:
+        def notify(value: float, message: str) -> None:
+            if progress is not None:
+                try:
+                    progress(value, message)
+                except Exception:
+                    pass
+
+        notify(0.08, f"Buduję plik {runtime.upper()} {precision.upper()}.")
         export_result = self._run_ultralytics_export(model, runtime=runtime, precision=precision, request=request)
+        if runtime == "onnx" and precision == "int8":
+            notify(0.42, "ONNX FP32 gotowy. Przygotowuję kalibrację INT8.")
+            fp32_files = self._locate_export_outputs(export_result, runtime="onnx", precision="fp32")
+            source_onnx = fp32_files[0]
+            export_result = self._quantize_onnx_int8(
+                source_onnx,
+                request,
+                output_path=source_onnx.with_name(f"{source_onnx.stem}_int8{source_onnx.suffix}"),
+                progress=lambda value, message: notify(0.42 + (max(0.0, min(1.0, float(value))) * 0.38), message),
+            )
+        notify(0.82, "Kopiuję pliki wariantu do paczki.")
         exported_files = self._locate_export_outputs(export_result, runtime=runtime, precision=precision)
 
         variant_dir_name = {
             ("tflite", "fp32"): "tflite",
             ("tflite", "int8"): "tflite_int8",
             ("onnx", "fp32"): "onnx",
+            ("onnx", "int8"): "onnx_int8",
             ("ncnn", "fp32"): "ncnn",
         }.get((runtime, precision), f"{runtime}_{precision}")
         variant_dir = package_root / "variants" / variant_dir_name
@@ -1376,7 +1665,9 @@ class MobileModelExporter:
             output_spec=default_output,
         )
         if runtime in {"onnx", "tflite"}:
+            notify(0.94, "Sprawdzam wejście i wyjście wyeksportowanego modelu.")
             variant = self.inspect_variant(variant)
+        notify(1.0, f"Wariant {runtime.upper()} {precision.upper()} gotowy.")
         return variant
 
     def _run_ultralytics_export(self, model, *, runtime: str, precision: str, request: MobileExportRequest):
@@ -1389,7 +1680,9 @@ class MobileModelExporter:
         }
         with _controlled_ultralytics_export_runtime():
             if runtime == "onnx":
-                return model.export(format="onnx", dynamic=False, simplify=True, **common)
+                args = dict(common)
+                args.update({"dynamic": False, "simplify": True})
+                return model.export(format="onnx", **args)
             if runtime == "ncnn":
                 return model.export(format="ncnn", **common)
             if runtime == "tflite":
@@ -1405,6 +1698,80 @@ class MobileModelExporter:
                         return model.export(format="tflite", quantize=8, **args)
                 return model.export(format="tflite", **args)
         raise MobileExportError(f"Nieobsługiwany runtime eksportu: {runtime}")
+
+    def _quantize_onnx_int8(
+        self,
+        onnx_path: Path,
+        request: MobileExportRequest,
+        *,
+        output_path: Path,
+        progress: Callable[[float, str], None] | None = None,
+    ) -> Path:
+        def notify(value: float, message: str) -> None:
+            if progress is not None:
+                try:
+                    progress(value, message)
+                except Exception:
+                    pass
+
+        if request.calibration_data is None:
+            raise MobileExportError("Eksport ONNX INT8 wymaga datasetu kalibracyjnego data.yaml.")
+        data_yaml = Path(request.calibration_data).resolve()
+        if not data_yaml.exists() or not data_yaml.is_file():
+            raise MobileExportError(f"Dataset kalibracyjny ONNX INT8 nie istnieje: {data_yaml}")
+
+        notify(0.05, "Czytam data.yaml i wybieram obrazy kalibracyjne ONNX INT8.")
+        images = _collect_calibration_images(data_yaml)
+        if not images:
+            raise MobileExportError(f"Dataset kalibracyjny ONNX INT8 nie zawiera obrazów: {data_yaml}")
+        notify(0.18, f"Kalibracja ONNX INT8 użyje {len(images)} obrazów.")
+
+        try:
+            import onnx  # type: ignore
+            from onnxruntime.quantization import QuantFormat, QuantType, quantize_static  # type: ignore
+        except Exception as exc:
+            raise MobileExportError(f"Brak bibliotek do kwantyzacji ONNX INT8: {exc}") from exc
+
+        input_name, image_size = _onnx_input_name_and_size(onnx_path, request.image_size)
+        reader = _OnnxImageCalibrationReader(input_name=input_name, image_paths=images, image_size=image_size)
+        notify(0.28, f"Przygotowałem wejście kalibracji: {input_name}, rozmiar {image_size[0]}x{image_size[1]}.")
+
+        excluded_nodes: list[str] = []
+        try:
+            graph = onnx.load(str(onnx_path)).graph
+            excluded_nodes = [
+                str(node.name)
+                for node in graph.node
+                if str(getattr(node, "name", "") or "").strip() and node.op_type not in {"Conv", "Gemm", "MatMul"}
+            ]
+            del graph
+        except Exception:
+            excluded_nodes = []
+        if excluded_nodes:
+            notify(0.38, f"Kwantyzuję warstwy wagowe, pomijam {len(excluded_nodes)} węzłów głowicy i pomocniczych.")
+        else:
+            notify(0.38, "Kwantyzuję ONNX INT8 przez ONNX Runtime.")
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            notify(0.48, "Trwa statyczna kwantyzacja ONNX INT8. To może chwilę potrwać.")
+            quantize_static(
+                str(onnx_path),
+                str(output_path),
+                reader,
+                quant_format=QuantFormat.QDQ,
+                activation_type=QuantType.QInt8,
+                weight_type=QuantType.QInt8,
+                per_channel=False,
+                nodes_to_exclude=excluded_nodes or None,
+            )
+            notify(0.92, "Kwantyzacja ONNX INT8 zakończona, sprawdzam plik wynikowy.")
+        except Exception as exc:
+            raise MobileExportError(f"Nie udało się wykonać kwantyzacji ONNX INT8: {exc}") from exc
+
+        if not output_path.exists() or not output_path.is_file():
+            raise MobileExportError("Kwantyzacja ONNX INT8 nie utworzyła pliku wynikowego.")
+        return output_path
 
     def _locate_export_outputs(self, export_result, *, runtime: str, precision: str) -> tuple[Path, ...]:
         candidates: list[Path] = []
@@ -1446,6 +1813,12 @@ class MobileModelExporter:
 
         if runtime == "onnx":
             files = [item for item in files if item.suffix.lower() == ".onnx"]
+            if precision == "int8":
+                filtered = [item for item in files if any(token in item.name.lower() for token in ("int8", "integer", "quant"))]
+                files = filtered or files
+            elif precision == "fp32":
+                filtered = [item for item in files if not any(token in item.name.lower() for token in ("int8", "integer", "quant"))]
+                files = filtered or files
             if not files:
                 raise MobileExportError("Eksport ONNX nie zwrócił pliku .onnx.")
             return (sorted(files, key=lambda item: len(str(item)))[0],)
