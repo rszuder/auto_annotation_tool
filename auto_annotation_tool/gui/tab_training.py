@@ -107,6 +107,7 @@ from . import z4_dataset_validation
 from . import z4_layout_runtime
 from . import z4_device_runtime
 from . import z4_model_export
+from . import z4_character_balance
 from . import z4_training_progress
 from . import z4_ui_runtime
 from . import z4_theme_runtime
@@ -854,6 +855,8 @@ class TrainingTab:
         return z4_dataset_sources._resolve_selected_training_base_model_profile(self, *args, **kwargs)
     def _get_training_dataset_profile(self, *args, **kwargs):
         return z4_dataset_sources._get_training_dataset_profile(self, *args, **kwargs)
+    def _open_character_class_distribution_dialog(self, *args, **kwargs):
+        return z4_character_balance.open_character_class_distribution_dialog(self, *args, **kwargs)
     def _get_campaign_plate_builder_source(self, *args, **kwargs):
         return z4_dataset_sources._get_campaign_plate_builder_source(self, *args, **kwargs)
     def _load_step4_training_ui_state(self, *args, **kwargs):

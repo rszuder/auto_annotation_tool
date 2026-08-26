@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""UI for MZ character class balance diagnostics."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+from ..config import CONFIG, logger
+from ..training import (
+    CharacterClassDistribution,
+    analyze_character_class_distribution,
+    save_character_class_distribution_csv,
+    save_character_class_distribution_json,
+)
+from .dataset_display import build_dataset_display_ref
+
+
+_STATUS_LABELS = {
+    "OK": "OK",
+    "LOW": "Mało próbek",
+    "LOW_DIVERSITY": "Mała różnorodność",
+    "LOW+LOW_DIVERSITY": "Mało i wąsko",
+    "CRITICAL": "Brak klasy",
+}
+
+_STATUS_COLORS = {
+    "OK": "#2faa66",
+    "LOW": "#d89a20",
+    "LOW_DIVERSITY": "#c9a521",
+    "LOW+LOW_DIVERSITY": "#e0792f",
+    "CRITICAL": "#d94b4b",
+}
+
+
+def open_character_class_distribution_dialog(host) -> None:
+    target = "char"
+    try:
+        target = CONFIG.normalize_task_target(host._get_selected_training_target())
+    except Exception:
+        target = "char"
+    if target != "char":
+        parent = getattr(host, "frame", None) or getattr(getattr(host, "app", None), "root", None)
+        messagebox.showinfo(
+            "Analiza rozkładu klas",
+            "Ta analiza dotyczy modelu znaków MZ. Przełącz Z4 na tor znaków i wybierz wariant datasetu.",
+            parent=parent,
+        )
+        return
+
+    resolver = getattr(host, "_resolve_training_dataset_yaml_path", None)
+    yaml_path = resolver() if callable(resolver) else None
+    if yaml_path is None:
+        parent = getattr(host, "frame", None) or getattr(getattr(host, "app", None), "root", None)
+        messagebox.showwarning(
+            "Brak wariantu datasetu",
+            "Najpierw wybierz aktywny wariant datasetu znaków w Z4/PZ2.",
+            parent=parent,
+        )
+        return
+
+    try:
+        yaml_path = Path(yaml_path)
+        dataset_root = yaml_path.parent if yaml_path.is_file() else yaml_path
+    except Exception:
+        messagebox.showerror(
+            "Błąd datasetu",
+            "Nie udało się odczytać ścieżki aktywnego wariantu datasetu.",
+            parent=getattr(host, "frame", None),
+        )
+        return
+
+    _CharacterClassDistributionDialog(host, dataset_root, yaml_path).show()
+
+
+class _CharacterClassDistributionDialog:
+    def __init__(self, host, dataset_root: Path, yaml_path: Path | None):
+        self.host = host
+        self.dataset_root = Path(dataset_root)
+        self.yaml_path = Path(yaml_path) if yaml_path is not None else None
+        self.app = getattr(host, "app", None)
+        self.palette = getattr(self.app, "palette", {}) if self.app is not None else {}
+        self.window: tk.Toplevel | None = None
+        self.progress: ttk.Progressbar | None = None
+        self.status_var = tk.StringVar(value="Przygotowuję analizę rozkładu klas...")
+        self.dataset_var = tk.StringVar(value=self._dataset_label())
+        self.result: CharacterClassDistribution | None = None
+        self.summary_value_labels: dict[str, tk.Label] = {}
+        self.table: ttk.Treeview | None = None
+        self.chart: tk.Canvas | None = None
+        self.export_csv_btn: ttk.Button | None = None
+        self.export_json_btn: ttk.Button | None = None
+
+    def show(self) -> None:
+        parent = getattr(self.host, "frame", None)
+        root = getattr(self.app, "root", None) or (parent.winfo_toplevel() if parent is not None else None)
+        self.window = tk.Toplevel(root or parent)
+        self.window.title("Analiza rozkładu klas MZ")
+        self.window.minsize(980, 620)
+        self.window.geometry("1160x740")
+        try:
+            self.window.transient(root)
+        except Exception:
+            pass
+
+        self._build()
+        self._center()
+        self._start_analysis()
+
+    def _build(self) -> None:
+        assert self.window is not None
+        bg = self.palette.get("bg", "#1e1f22")
+        fg = self.palette.get("fg", "#f3f3f3")
+        muted = self.palette.get("muted", "#b7bcc6")
+        panel = self.palette.get("panel", "#25262b")
+        panel_alt = self.palette.get("panel_alt", "#2c2d33")
+
+        self.window.configure(bg=bg)
+        self.window.grid_rowconfigure(0, weight=1)
+        self.window.grid_columnconfigure(0, weight=1)
+
+        root = tk.Frame(self.window, bg=bg, padx=14, pady=12)
+        root.grid(row=0, column=0, sticky="nsew")
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(3, weight=1)
+
+        title = tk.Label(
+            root,
+            text="Analiza rozkładu klas znaków MZ",
+            bg=bg,
+            fg=fg,
+            font=("Segoe UI Semibold", 15),
+            anchor=tk.W,
+        )
+        title.grid(row=0, column=0, sticky="ew")
+
+        intro = tk.Label(
+            root,
+            text=(
+                "Liczymy realne wystąpienia klas 0-9 i A-Z oraz liczbę unikalnych tablic, "
+                "żeby augmentacja nie udawała większej różnorodności danych."
+            ),
+            bg=bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=980,
+        )
+        intro.grid(row=1, column=0, sticky="ew", pady=(3, 10))
+
+        meta = tk.Frame(root, bg=panel_alt, highlightthickness=1, highlightbackground=self._border())
+        meta.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        meta.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            meta,
+            text="Dataset",
+            bg=panel_alt,
+            fg=muted,
+            font=("Segoe UI Semibold", 9),
+            padx=8,
+            pady=6,
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            meta,
+            textvariable=self.dataset_var,
+            bg=panel_alt,
+            fg=fg,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+            padx=8,
+            pady=6,
+        ).grid(row=0, column=1, sticky="ew")
+
+        content = tk.Frame(root, bg=bg)
+        content.grid(row=3, column=0, sticky="nsew")
+        content.grid_columnconfigure(0, weight=0, minsize=290)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_rowconfigure(0, weight=0)
+        content.grid_rowconfigure(1, weight=1)
+
+        summary = tk.LabelFrame(
+            content,
+            text=" Podsumowanie ",
+            bg=panel,
+            fg=fg,
+            padx=8,
+            pady=8,
+            font=("Segoe UI Semibold", 9),
+            highlightthickness=1,
+            highlightbackground=self._border(),
+        )
+        summary.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 10))
+        summary.grid_columnconfigure(1, weight=1)
+        self._build_summary_rows(summary)
+
+        chart_shell = tk.LabelFrame(
+            content,
+            text=" Wykres train ",
+            bg=panel,
+            fg=fg,
+            padx=8,
+            pady=8,
+            font=("Segoe UI Semibold", 9),
+            highlightthickness=1,
+            highlightbackground=self._border(),
+        )
+        chart_shell.grid(row=0, column=1, sticky="nsew", pady=(0, 10))
+        chart_shell.grid_columnconfigure(0, weight=1)
+        self.chart = tk.Canvas(
+            chart_shell,
+            height=210,
+            bg=panel,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.chart.grid(row=0, column=0, sticky="nsew")
+        self.chart.bind("<Configure>", lambda _event: self._draw_chart())
+
+        table_shell = tk.LabelFrame(
+            content,
+            text=" Klasy znaków ",
+            bg=panel,
+            fg=fg,
+            padx=8,
+            pady=8,
+            font=("Segoe UI Semibold", 9),
+            highlightthickness=1,
+            highlightbackground=self._border(),
+        )
+        table_shell.grid(row=1, column=1, sticky="nsew")
+        table_shell.grid_rowconfigure(0, weight=1)
+        table_shell.grid_columnconfigure(0, weight=1)
+        self._build_table(table_shell)
+
+        footer = tk.Frame(root, bg=bg)
+        footer.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        ttk.Label(footer, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        self.progress = ttk.Progressbar(footer, mode="indeterminate", length=180)
+        self.progress.grid(row=0, column=1, sticky="e", padx=(8, 8))
+        self.export_csv_btn = ttk.Button(
+            footer,
+            text="Zapisz CSV",
+            command=self._export_csv,
+            state=tk.DISABLED,
+        )
+        self.export_csv_btn.grid(row=0, column=2, sticky="e", padx=(0, 6))
+        self.export_json_btn = ttk.Button(
+            footer,
+            text="Zapisz JSON",
+            command=self._export_json,
+            state=tk.DISABLED,
+        )
+        self.export_json_btn.grid(row=0, column=3, sticky="e", padx=(0, 6))
+        ttk.Button(footer, text="Zamknij", command=self.window.destroy).grid(row=0, column=4, sticky="e")
+
+    def _build_summary_rows(self, parent: tk.Widget) -> None:
+        labels = [
+            ("layout", "Układ danych"),
+            ("diagnostic_split", "Kryterium"),
+            ("total_labels", "Etykiety"),
+            ("range", "Min / mediana / max"),
+            ("ratio", "Stosunek max/min"),
+            ("zero", "Braki krytyczne"),
+            ("low", "Mało próbek"),
+            ("diversity", "Mała różnorodność"),
+            ("files", "Pliki / błędy"),
+        ]
+        for row_index, (key, label) in enumerate(labels):
+            tk.Label(
+                parent,
+                text=label,
+                bg=self.palette.get("panel", "#25262b"),
+                fg=self.palette.get("muted", "#b7bcc6"),
+                font=("Segoe UI Semibold", 8),
+                anchor=tk.W,
+                padx=4,
+                pady=5,
+            ).grid(row=row_index, column=0, sticky="nw")
+            value_lbl = tk.Label(
+                parent,
+                text="-",
+                bg=self.palette.get("panel", "#25262b"),
+                fg=self.palette.get("fg", "#f3f3f3"),
+                font=("Segoe UI", 8),
+                anchor=tk.W,
+                justify=tk.LEFT,
+                wraplength=165,
+                padx=4,
+                pady=5,
+            )
+            value_lbl.grid(row=row_index, column=1, sticky="ew")
+            self.summary_value_labels[key] = value_lbl
+
+    def _build_table(self, parent: tk.Widget) -> None:
+        columns = ("symbol", "train", "unique_train", "val", "test", "total", "share", "status")
+        self.table = ttk.Treeview(parent, columns=columns, show="headings", height=16)
+        headings = {
+            "symbol": "Znak",
+            "train": "Train",
+            "unique_train": "Unikalne tablice train",
+            "val": "Val",
+            "test": "Test",
+            "total": "Razem",
+            "share": "Udział train",
+            "status": "Status",
+        }
+        widths = {
+            "symbol": 54,
+            "train": 76,
+            "unique_train": 150,
+            "val": 70,
+            "test": 70,
+            "total": 78,
+            "share": 92,
+            "status": 145,
+        }
+        for column in columns:
+            self.table.heading(column, text=headings[column])
+            self.table.column(column, width=widths[column], minwidth=42, stretch=column in {"unique_train", "status"})
+        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.table.yview)
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        for status, color in _STATUS_COLORS.items():
+            tag = _status_tag(status)
+            try:
+                self.table.tag_configure(tag, foreground=color)
+            except Exception:
+                pass
+
+    def _start_analysis(self) -> None:
+        if self.progress is not None:
+            self.progress.start(12)
+
+        def worker() -> None:
+            try:
+                result = analyze_character_class_distribution(self.dataset_root)
+            except Exception as exc:
+                logger.exception("Nie udało się przeanalizować rozkładu klas MZ")
+                self._after(lambda: self._show_error(str(exc)))
+                return
+            self._after(lambda: self._apply_result(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_result(self, result: CharacterClassDistribution) -> None:
+        self.result = result
+        if self.progress is not None:
+            self.progress.stop()
+            self.progress.grid_remove()
+        if self.export_csv_btn is not None:
+            self.export_csv_btn.configure(state=tk.NORMAL)
+        if self.export_json_btn is not None:
+            self.export_json_btn.configure(state=tk.NORMAL)
+        self.status_var.set("Analiza gotowa. Eksport CSV/JSON używa tych samych policzonych danych.")
+        self._fill_summary(result)
+        self._fill_table(result)
+        self._draw_chart()
+
+    def _show_error(self, error_text: str) -> None:
+        if self.progress is not None:
+            self.progress.stop()
+            self.progress.grid_remove()
+        self.status_var.set("Nie udało się wykonać analizy.")
+        if self.window is not None and self.window.winfo_exists():
+            messagebox.showerror("Błąd analizy rozkładu klas", error_text, parent=self.window)
+
+    def _fill_summary(self, result: CharacterClassDistribution) -> None:
+        summary = dict(result.summary or {})
+        range_text = (
+            f"{int(summary.get('minimum_class_count', 0) or 0)} / "
+            f"{_format_float(summary.get('median_class_count'))} / "
+            f"{int(summary.get('maximum_class_count', 0) or 0)}"
+        )
+        ratio_value = summary.get("max_min_ratio")
+        ratio_text = "nieokreślony przy brakach" if ratio_value is None else _format_float(ratio_value)
+        file_errors = int(summary.get("invalid_label_lines", 0) or 0) + int(summary.get("invalid_class_ids", 0) or 0)
+        values = {
+            "layout": _layout_label(result.layout),
+            "diagnostic_split": "train" if result.diagnostic_split == "train" else "razem",
+            "total_labels": str(int(summary.get("total_labels", 0) or 0)),
+            "range": range_text,
+            "ratio": ratio_text,
+            "zero": _symbols(summary.get("zero_classes")),
+            "low": _symbols(summary.get("low_count_classes")),
+            "diversity": _symbols(summary.get("low_diversity_classes")),
+            "files": f"{int(summary.get('files_read', 0) or 0)} plików, błędy: {file_errors}",
+        }
+        for key, value in values.items():
+            label = self.summary_value_labels.get(key)
+            if label is None:
+                continue
+            color = self.palette.get("fg", "#f3f3f3")
+            if key == "zero" and value != "brak":
+                color = _STATUS_COLORS["CRITICAL"]
+            elif key in {"low", "diversity"} and value != "brak":
+                color = _STATUS_COLORS["LOW"]
+            try:
+                label.configure(text=value, fg=color)
+            except Exception:
+                label.configure(text=value)
+
+    def _fill_table(self, result: CharacterClassDistribution) -> None:
+        if self.table is None:
+            return
+        self.table.delete(*self.table.get_children())
+        for row in result.classes:
+            self.table.insert(
+                "",
+                tk.END,
+                values=(
+                    row.symbol,
+                    row.train_count,
+                    row.unique_train_plate_count,
+                    row.val_count,
+                    row.test_count,
+                    row.total_count,
+                    _format_percent(row.train_share),
+                    _STATUS_LABELS.get(row.status, row.status),
+                ),
+                tags=(_status_tag(row.status),),
+            )
+
+    def _draw_chart(self) -> None:
+        if self.chart is None:
+            return
+        self.chart.delete("all")
+        width = max(320, int(self.chart.winfo_width() or 760))
+        height = max(160, int(self.chart.winfo_height() or 210))
+        panel = self.palette.get("panel", "#25262b")
+        fg = self.palette.get("fg", "#f3f3f3")
+        muted = self.palette.get("muted", "#b7bcc6")
+        grid = self._border()
+        self.chart.configure(bg=panel)
+
+        if self.result is None:
+            self.chart.create_text(width / 2, height / 2, text="Liczenie klas...", fill=muted, font=("Segoe UI", 10))
+            return
+
+        result = self.result
+        use_train = result.diagnostic_split == "train"
+        values = [row.train_count if use_train else row.total_count for row in result.classes]
+        max_value = max(values) if values else 0
+        left = 42
+        right = 14
+        top = 30
+        bottom = 34
+        plot_w = max(1, width - left - right)
+        plot_h = max(1, height - top - bottom)
+        base_y = top + plot_h
+        self.chart.create_line(left, top, left, base_y, fill=grid)
+        self.chart.create_line(left, base_y, width - right, base_y, fill=grid)
+        title = "Liczba etykiet w train" if use_train else "Liczba etykiet razem"
+        self.chart.create_text(left, 10, anchor=tk.W, text=title, fill=fg, font=("Segoe UI Semibold", 9))
+        self.chart.create_text(width - right, 10, anchor=tk.E, text=f"max: {max_value}", fill=muted, font=("Segoe UI", 8))
+
+        if max_value <= 0:
+            self.chart.create_text(width / 2, height / 2, text="Brak etykiet do pokazania.", fill=muted, font=("Segoe UI", 10))
+            return
+
+        slot = plot_w / max(1, len(values))
+        bar_w = max(4, slot * 0.64)
+        for index, row in enumerate(result.classes):
+            value = values[index]
+            bar_h = (float(value) / float(max_value)) * plot_h if max_value else 0
+            x_mid = left + slot * index + slot / 2
+            x0 = x_mid - bar_w / 2
+            x1 = x_mid + bar_w / 2
+            y0 = base_y - bar_h
+            color = _STATUS_COLORS.get(row.status, _STATUS_COLORS["OK"])
+            self.chart.create_rectangle(x0, y0, x1, base_y, fill=color, outline="")
+            self.chart.create_text(x_mid, base_y + 12, text=row.symbol, fill=muted, font=("Segoe UI", 7))
+        self.chart.create_text(8, top, anchor=tk.W, text=str(max_value), fill=muted, font=("Segoe UI", 7))
+        self.chart.create_text(8, base_y, anchor=tk.W, text="0", fill=muted, font=("Segoe UI", 7))
+
+    def _export_csv(self) -> None:
+        if self.result is None or self.window is None:
+            return
+        selected = filedialog.asksaveasfilename(
+            parent=self.window,
+            title="Zapisz analizę rozkładu klas jako CSV",
+            initialdir=str(self.dataset_root),
+            initialfile="mz_class_distribution.csv",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("Wszystkie pliki", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            output = save_character_class_distribution_csv(self.result, selected)
+        except Exception as exc:
+            messagebox.showerror("Błąd zapisu CSV", str(exc), parent=self.window)
+            return
+        self.status_var.set(f"Zapisano CSV: {output}")
+
+    def _export_json(self) -> None:
+        if self.result is None or self.window is None:
+            return
+        selected = filedialog.asksaveasfilename(
+            parent=self.window,
+            title="Zapisz analizę rozkładu klas jako JSON",
+            initialdir=str(self.dataset_root),
+            initialfile="mz_class_distribution.json",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("Wszystkie pliki", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            output = save_character_class_distribution_json(self.result, selected)
+        except Exception as exc:
+            messagebox.showerror("Błąd zapisu JSON", str(exc), parent=self.window)
+            return
+        self.status_var.set(f"Zapisano JSON: {output}")
+
+    def _dataset_label(self) -> str:
+        try:
+            counts = self.host._get_dataset_split_image_counts(self.dataset_root)
+        except Exception:
+            counts = {}
+        try:
+            ref = build_dataset_display_ref(self.dataset_root, target_hint="char", counts=counts)
+            return ref.detail_label
+        except Exception:
+            return str(self.dataset_root)
+
+    def _center(self) -> None:
+        if self.window is None:
+            return
+        center = getattr(self.app, "_center_dialog_window", None)
+        if callable(center):
+            try:
+                center(self.window, parent=getattr(self.app, "root", None), width=1160, height=740)
+                return
+            except Exception:
+                pass
+        try:
+            self.window.update_idletasks()
+            width = int(self.window.winfo_width() or 1160)
+            height = int(self.window.winfo_height() or 740)
+            screen_w = int(self.window.winfo_screenwidth())
+            screen_h = int(self.window.winfo_screenheight())
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 2)
+            self.window.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+
+    def _border(self) -> str:
+        return self.palette.get("panel_border", self.palette.get("border", "#3b3d46"))
+
+    def _after(self, callback) -> None:
+        window = self.window
+        if window is None:
+            return
+        try:
+            if window.winfo_exists():
+                window.after(0, callback)
+        except Exception:
+            pass
+
+
+def _status_tag(status: str) -> str:
+    return "class_balance_" + str(status or "OK").lower().replace("+", "_").replace("-", "_")
+
+
+def _format_percent(value: float) -> str:
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "0.00%"
+
+
+def _format_float(value) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return "-"
+    if abs(numeric - round(numeric)) < 0.0001:
+        return str(int(round(numeric)))
+    return f"{numeric:.2f}"
+
+
+def _symbols(values) -> str:
+    if not values:
+        return "brak"
+    try:
+        items = [str(item) for item in values if str(item)]
+    except Exception:
+        items = []
+    return ", ".join(items) if items else "brak"
+
+
+def _layout_label(layout: str) -> str:
+    if layout == "split":
+        return "train / val / test"
+    if layout == "flat":
+        return "niesplitowany: liczymy razem"
+    return "brak etykiet"
