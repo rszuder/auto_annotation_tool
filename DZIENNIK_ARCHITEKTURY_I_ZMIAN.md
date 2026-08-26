@@ -2410,3 +2410,29 @@ Uzasadnienie:
 - wejscie z globalnego paska jest celowe: raport z telefonu nie jest operacja treningowa ani robocza dla pojedynczej bramki, tylko integracja miedzy aplikacja desktopowa i klientem mobilnym.
 - preview ma charakter diagnostyczny, a nie obliczeniowy: pelne liczniki artefaktow pozostaja w indeksie eksperymentu, co pozwala pozniej budowac wykresy i guard porownywalnosci bez ponownego importu paczki.
 - guard porownywalnosci nie blokuje uzytkownika, ale sygnalizuje, kiedy wynik moze byc niemiarodajny, bo zmienila sie zmienna uboczna, np. telefon, delegate, rozdzielczosc albo build aplikacji.
+
+### 19. Diagnostyka balansu znakow MZ
+
+Problem:
+
+- modele znakow MZ moga osiagac pozornie dobre metryki mimo slabego pokrycia wybranych znakow;
+- sama liczba etykiet nie wystarcza, bo wiele probek moze pochodzic z jednej tablicy albo z augmentowanych kopii tego samego zrodla;
+- przed zamrozeniem datasetu do eksperymentu potrzebna jest szybka, powtarzalna kontrola rozkladu klas 0-9 i A-Z.
+
+Decyzja:
+
+- dodano niezalezny od UI analizator `analyze_character_class_distribution(dataset_root)`;
+- alfabet MZ jest staly i jawny: `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ`;
+- analiza liczy `train`, `val`, `test` i `razem`, a dodatkowo dla kazdej klasy liczy liczbe unikalnych tablic/zrodel;
+- manifest augmentacji jest brany pod uwage, zeby kopie wygenerowane w train nie zawyzaly roznorodnosci zrodel;
+- layouty datasetu sa rozpoznawane ostroznie: `images/train + labels/train`, `train/images + train/labels` oraz plaski `labels/` jako material niesplitowany;
+- status klasy jest diagnostyczny, nie naprawczy: `CRITICAL` dla braku klasy, `LOW` dla malej liczby probek i `LOW_DIVERSITY` dla malej liczby unikalnych zrodel;
+- w Z4/PZ2 dodano przycisk `Analizuj rozklad klas`, ktory otwiera lekki modal z podsumowaniem, tabela i wykresem slupkowym;
+- eksport CSV/JSON zapisuje juz policzony wynik, bez ponownego przeliczania datasetu.
+
+Uzasadnienie:
+
+- naturalny rozklad znakow tablic nie musi byc idealnie rowny, dlatego analiza wskazuje ryzyka, ale nie wymusza sztucznego rownania do maksimum;
+- walidacja i test nie powinny byc sztucznie balansowane, bo maja reprezentowac rzeczywisty rozklad danych;
+- licznik unikalnych tablic jest kluczowy badawczo, bo odroznia realna roznorodnosc od powielania tej samej probki;
+- CSV ulatwia dalsza analize w arkuszu, a JSON jest powtarzalnym artefaktem do raportu i dokumentacji eksperymentu.

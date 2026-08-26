@@ -504,6 +504,14 @@ def _build_train_tab(self):
     self.train_dataset_quality_title_lbl.pack(anchor=tk.W, fill=tk.X)
     self._train_dataset_quality_row_widgets = []
 
+    self.btn_character_class_distribution = ttk.Button(
+        self.train_dataset_section_frame,
+        text="Analizuj rozkład klas",
+        command=self._open_character_class_distribution_dialog,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_character_class_distribution.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+
     self.train_scope_hint_lbl = ttk.Label(
         settings_col,
         text="",
@@ -1868,6 +1876,7 @@ def _build_train_tab(self):
     HELP.bind_help(self.train_dataset_section_frame, "tr_train_ds")
     HELP.bind_help(self.dataset_variant_row, "tr_dataset_variant")
     HELP.bind_help(self.dataset_variant_combo, "tr_dataset_variant")
+    HELP.bind_help(self.btn_character_class_distribution, "tr_train_ds")
     HELP.bind_help(self.train_dataset_hint_lbl, "tr_train_ds")
     HELP.bind_help(self.base_combo, "tr_train_base")
     HELP.bind_help(self.base_custom_btn, "tr_train_custom")

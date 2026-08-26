@@ -39,6 +39,15 @@ from .dataset_augmentation import (
     preview_augmentation_image,
     update_yolo_dataset_class_names,
 )
+from .character_class_distribution import (
+    CHARACTER_BALANCE_ALPHABET,
+    CHARACTER_CLASS_DISTRIBUTION_SCHEMA,
+    CharacterClassDistribution,
+    CharacterClassDistributionRow,
+    analyze_character_class_distribution,
+    save_character_class_distribution_csv,
+    save_character_class_distribution_json,
+)
 from .trainer import YOLOPoseTrainer
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .resource_monitor import TrainingResourceMonitor, format_resource_sample_line
@@ -77,6 +86,13 @@ __all__ = [
     'ensure_yolo_dataset_yaml_points_to_root',
     'preview_augmentation_image',
     'update_yolo_dataset_class_names',
+    'CHARACTER_BALANCE_ALPHABET',
+    'CHARACTER_CLASS_DISTRIBUTION_SCHEMA',
+    'CharacterClassDistribution',
+    'CharacterClassDistributionRow',
+    'analyze_character_class_distribution',
+    'save_character_class_distribution_csv',
+    'save_character_class_distribution_json',
     'YOLOPoseTrainer',
     'TrainingHistory',
     'TrainingRun',
