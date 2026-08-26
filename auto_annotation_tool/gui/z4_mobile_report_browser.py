@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import statistics
 import threading
 from pathlib import Path
@@ -18,7 +19,7 @@ from ..ranking import (
     MobileBenchmarkReport,
     MobilePackageExperimentStore,
     MobileReportBundle,
-    read_mobile_report_bundle,
+    read_mobile_report_bundles,
     score_mobile_report,
 )
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
@@ -527,6 +528,18 @@ class MobileReportBrowser:
         self.summary_table.shell.grid(row=0, column=0, sticky="nsew")
         self.notebook.add(summary, text="Podsumowanie")
 
+        comparison = tab_frame()
+        self.comparison_table = _TreeTable(
+            comparison,
+            ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
+            ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
+            (170, 220, 160, 120, 330),
+            palette={**self.palette, "panel": self.panel},
+            height=17,
+        )
+        self.comparison_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.notebook.add(comparison, text="Porównywalność")
+
         config = tab_frame()
         self.config_table = _TreeTable(
             config,
@@ -555,6 +568,18 @@ class MobileReportBrowser:
         )
         self.latency_table.shell.grid(row=1, column=0, sticky="nsew")
         self.notebook.add(latency, text="Opóźnienia")
+
+        artifacts = tab_frame()
+        self.artifacts_table = _TreeTable(
+            artifacts,
+            ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
+            ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
+            (170, 90, 90, 110, 430),
+            palette={**self.palette, "panel": self.panel},
+            height=17,
+        )
+        self.artifacts_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.notebook.add(artifacts, text="Artefakty")
 
         quality = tab_frame()
         self.quality_table = _TreeTable(
@@ -734,13 +759,13 @@ class MobileReportBrowser:
         report_paths = [Path(value) for value in path_values if str(value or "").strip()]
         if not report_paths:
             return
-        total = len(report_paths)
-        if total == 1:
+        total_files = len(report_paths)
+        if total_files == 1:
             self._set_status(f"Czytam raport: {report_paths[0].name}...", "info")
             self._set_loading(True)
         else:
-            self._set_status(f"Czytam raporty: 0/{total}.", "info")
-            self._set_loading(True, determinate=True, maximum=total, value=0)
+            self._set_status(f"Czytam pliki raportów: 0/{total_files}.", "info")
+            self._set_loading(True, determinate=True, maximum=total_files, value=0)
 
         def worker() -> None:
             bundles: list[tuple[Path, MobileReportBundle]] = []
@@ -751,20 +776,21 @@ class MobileReportBrowser:
                         self.window.after(
                             0,
                             lambda i=index, p=report_path: (
-                                self._set_status(f"Czytam raport {i}/{total}: {p.name}...", "info"),
-                                self._set_loading_progress(i - 1, maximum=total) if total > 1 else None,
+                                self._set_status(f"Czytam plik {i}/{total_files}: {p.name}...", "info"),
+                                self._set_loading_progress(i - 1, maximum=total_files) if total_files > 1 else None,
                             ),
                         )
                     except Exception:
                         pass
                     try:
-                        bundles.append((report_path, read_mobile_report_bundle(report_path)))
+                        for bundle in read_mobile_report_bundles(report_path):
+                            bundles.append((report_path, bundle))
                     except Exception as exc:
                         failures.append((report_path, str(exc)))
                         logger.exception(f"Nie udało się odczytać raportu mobilnego: {report_path}")
                     try:
-                        if total > 1:
-                            self.window.after(0, lambda i=index: self._set_loading_progress(i, maximum=total))
+                        if total_files > 1:
+                            self.window.after(0, lambda i=index: self._set_loading_progress(i, maximum=total_files))
                     except Exception:
                         pass
 
@@ -807,16 +833,16 @@ class MobileReportBrowser:
                     failed_count = len(failures)
                     invalid_count = len(invalid)
                     if saved and not failed_count and not invalid_count:
-                        if total == 1 and bundles:
+                        if total_files == 1 and saved == 1 and bundles:
                             report = bundles[0][1].report
                             self._set_status(f"Raport zaimportowany: {report.package_id} / {report.variant_id}.", "success")
                         else:
-                            self._set_status(f"Zaimportowano {saved}/{total} raportów.", "success")
+                            self._set_status(f"Zaimportowano {saved} raportów z {total_files} plików.", "success")
                         return
 
                     if saved:
                         self._set_status(
-                            f"Zaimportowano {saved}/{total}. Do kontroli: {invalid_count}, błędy odczytu: {failed_count}.",
+                            f"Zaimportowano {saved} raportów. Do kontroli: {invalid_count}, błędy odczytu: {failed_count}.",
                             "warning",
                         )
                         return
@@ -856,8 +882,10 @@ class MobileReportBrowser:
         for var in self.card_vars.values():
             var.set("-")
         self.summary_table.set_rows([("Brak raportów", "Importuj raport z Androida", "Obsługiwane są .alprsession, ZIP benchmarku i JSON.")])
+        self.comparison_table.set_rows([])
         self.config_table.set_rows([])
         self.latency_table.set_rows([])
+        self.artifacts_table.set_rows([])
         self.quality_table.set_rows([])
         self.diagnostics_table.set_rows([])
         self.crops_table.set_rows([])
@@ -872,8 +900,10 @@ class MobileReportBrowser:
         self.current_bundle = bundle
         self._update_cards(report, bundle)
         self._populate_summary(report, bundle)
+        self._populate_comparison_guard(report, bundle)
         self._populate_config(report)
         self._populate_latency(report, bundle)
+        self._populate_artifacts(report, bundle)
         self._populate_quality(report)
         self._populate_diagnostics(report, bundle)
         self._populate_crops(report, bundle)
@@ -890,7 +920,8 @@ class MobileReportBrowser:
             if bundle.validation.warnings and bundle.validation.ok:
                 integrity += f" | ostrz. {len(bundle.validation.warnings)}"
         else:
-            integrity = "Zapisany JSON"
+            source_hash = str(getattr(report, "source_archive_sha256", "") or "").strip()
+            integrity = f"Zapisany | SHA {source_hash[:8]}" if source_hash else "Zapisany JSON"
             tone = self.accent
         trace_total = bundle.trace_total if bundle else _safe_int(_nested_value(report.raw, "summary.processed_frames"), 0)
         if not trace_total:
@@ -922,6 +953,11 @@ class MobileReportBrowser:
         rows: list[tuple[Any, ...]] = [
             ("Typ paczki", bundle.bundle_kind if bundle else "zapisany raport", bundle.bundle_schema if bundle else ""),
             ("Report ID", report.report_id, "Identyfikator pomiaru z Androida."),
+            (
+                "Hash źródła",
+                str(bundle.source_archive_sha256 if bundle else getattr(report, "source_archive_sha256", "") or "")[:16] or "-",
+                "Deduplikacja identycznego archiwum/pliku i ślad odtwarzalności.",
+            ),
             ("Pakiet", report.package_id, "Model/pakiet badany w telefonie."),
             ("Wariant", report.variant_id, "Runtime, precyzja lub wariant wykonawczy."),
             ("Pomiar", _format_datetime(report.measured_at), "Data i czas zapisane przez klienta mobilnego."),
@@ -937,11 +973,186 @@ class MobileReportBrowser:
                 "Obrazy nie są ładowane automatycznie do pamięci.",
             ),
         ]
+        index = dict((bundle.experiment_session if bundle else getattr(report, "experiment_index", {})) or {})
+        if index:
+            rows.extend(
+                [
+                    ("Seria", str(index.get("series_id") or "-"), "Identyfikator kampanii porównawczej."),
+                    ("Scenariusz", str(index.get("scenario_id") or "-"), "Materiał albo warunki sceny eksperymentalnej."),
+                    ("Zmienna/wariant", str(index.get("experiment_variant") or "-"), "Badany wariant w ramach serii."),
+                    ("Replika", str(index.get("replicate_index") or "-"), "Numer powtórzenia tego samego wariantu."),
+                ]
+            )
         self.summary_table.set_rows(validation_rows + rows)
+
+    def _report_experiment_index(
+        self,
+        report: MobileBenchmarkReport,
+        bundle: MobileReportBundle | None = None,
+    ) -> dict[str, Any]:
+        if bundle and isinstance(bundle.experiment_session, dict):
+            return dict(bundle.experiment_session or {})
+        raw = dict(report.raw or {})
+        return dict(getattr(report, "experiment_index", {}) or raw.get("desktop_experiment_index") or {})
+
+    def _guard_profile_hash(self, value: Any) -> str:
+        if value in (None, "", {}, []):
+            return "-"
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            text = str(value)
+        digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+        return f"profil {digest}"
+
+    def _guard_resolution_value(self, report: MobileBenchmarkReport, index: dict[str, Any]) -> str:
+        resolution = index.get("resolution") if isinstance(index.get("resolution"), dict) else {}
+        raw = dict(report.raw or {})
+        width = _nested_value(resolution, "width_px", "width") or _nested_value(raw, "capture.width_px", "capture.width", "camera.width_px", "input.width_px")
+        height = _nested_value(resolution, "height_px", "height") or _nested_value(raw, "capture.height_px", "capture.height", "camera.height_px", "input.height_px")
+        fps = _nested_value(resolution, "fps") or _nested_value(raw, "capture.fps", "camera.fps", "input.fps")
+        if width and height and fps:
+            return f"{width}x{height} @ {fps} fps"
+        if width and height:
+            return f"{width}x{height}"
+        return "-"
+
+    def _guard_artifact_count(self, index: dict[str, Any], key: str) -> int:
+        counts = index.get("artifact_counts") if isinstance(index.get("artifact_counts"), dict) else {}
+        if key == "traces":
+            return _safe_int(index.get("trace_total_source") or counts.get("traces"))
+        return _safe_int(counts.get(key))
+
+    def _populate_comparison_guard(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
+        selected_index = self._report_experiment_index(report, bundle)
+        series_id = str(selected_index.get("series_id") or "").strip()
+        scenario_id = str(selected_index.get("scenario_id") or "").strip()
+
+        def matches_group(candidate: MobileBenchmarkReport) -> bool:
+            index = self._report_experiment_index(candidate)
+            candidate_series = str(index.get("series_id") or "").strip()
+            candidate_scenario = str(index.get("scenario_id") or "").strip()
+            if series_id and scenario_id:
+                return candidate_series == series_id and candidate_scenario == scenario_id
+            if series_id:
+                return candidate_series == series_id
+            return False
+
+        cohort = [candidate for candidate in self.store.reports if matches_group(candidate)]
+        if not any(candidate.identity == report.identity for candidate in cohort):
+            cohort.append(report)
+
+        rows: list[tuple[Any, ...]] = []
+        if not series_id:
+            rows.append(
+                (
+                    "Indeks eksperymentu",
+                    "-",
+                    "-",
+                    "Brak serii",
+                    "Raport da się obejrzeć, ale bez series_id nie powinien automatycznie trafiać do porównań badawczych.",
+                    {"tag": "warning"},
+                )
+            )
+        else:
+            scope = f"{series_id} / {scenario_id or 'brak scenariusza'}"
+            rows.append(
+                (
+                    "Zakres porównania",
+                    scope,
+                    f"{len(cohort)} raportów",
+                    "Gotowe" if scenario_id else "Niepełne",
+                    "Porównujemy tylko raporty z tej samej serii i tego samego scenariusza.",
+                    {"tag": "success" if scenario_id else "warning"},
+                )
+            )
+
+        def index_for(candidate: MobileBenchmarkReport) -> dict[str, Any]:
+            return self._report_experiment_index(candidate)
+
+        field_defs = (
+            (
+                "Urządzenie",
+                lambda candidate, index: _device_label(candidate),
+                "Ten sam telefon ogranicza ryzyko, że porównujemy sprzęt zamiast modeli.",
+                True,
+            ),
+            (
+                "Runtime",
+                lambda candidate, index: str(candidate.runtime or "-"),
+                "Runtime powinien być stały, jeśli badamy wpływ modelu albo pakietu.",
+                True,
+            ),
+            (
+                "Delegate",
+                lambda candidate, index: str(candidate.delegate or "-"),
+                "CPU/GPU/NNAPI wpływa na opóźnienia i zużycie energii.",
+                True,
+            ),
+            (
+                "Rozdzielczość wejścia",
+                lambda candidate, index: self._guard_resolution_value(candidate, index),
+                "Zmiana rozdzielczości zmienia koszt inferencji i jakość detekcji.",
+                True,
+            ),
+            (
+                "Build aplikacji",
+                lambda candidate, index: str(index.get("app_git_sha") or index.get("app_version") or "-"),
+                "Inny build klienta może oznaczać inną logikę pipeline'u.",
+                True,
+            ),
+            (
+                "Profil rozpoznawania",
+                lambda candidate, index: self._guard_profile_hash(index.get("recognition_profile") or _nested_value(candidate.raw, "recognition_profile", "profile")),
+                "Profil progu, autozoomu i postprocessingu powinien być świadomą zmienną albo stałą.",
+                True,
+            ),
+            (
+                "Trace klatek",
+                lambda candidate, index: str(self._guard_artifact_count(index, "traces") or "-"),
+                "Pełny ślad klatek jest podstawą wykresów opóźnień i stabilności.",
+                False,
+            ),
+            (
+                "Próbki/GT",
+                lambda candidate, index: str(self._guard_artifact_count(index, "samples") or _nested_value(candidate.quality, "ground_truth_samples") or "-"),
+                "Bez próbek z GT nie wolno mylić confidence z accuracy.",
+                False,
+            ),
+        )
+
+        for label, getter, description, require_same in field_defs:
+            selected_value = str(getter(report, selected_index) or "-")
+            values = [str(getter(candidate, index_for(candidate)) or "-") for candidate in cohort]
+            non_empty_values = [value for value in values if value and value != "-"]
+            distinct = sorted(set(non_empty_values))
+            if selected_value in ("", "-"):
+                status = "Brak danych"
+                tag = "warning"
+                series_value = "-"
+            elif require_same and len(distinct) > 1:
+                status = "Różne"
+                tag = "error"
+                series_value = f"{len(distinct)} wartości"
+            elif require_same:
+                status = "Spójne"
+                tag = "success"
+                series_value = selected_value
+            else:
+                status = "Jest" if selected_value not in ("", "-") else "Brak"
+                tag = "success" if selected_value not in ("", "-") else "warning"
+                series_value = f"{len(non_empty_values)}/{len(cohort)} raportów"
+            rows.append((label, selected_value, series_value, status, description, {"tag": tag}))
+
+        self.comparison_table.set_rows(rows)
 
     def _populate_config(self, report: MobileBenchmarkReport) -> None:
         raw = dict(report.raw or {})
         rows: list[tuple[str, str, str]] = []
+        index = dict(getattr(report, "experiment_index", {}) or raw.get("desktop_experiment_index") or {})
+        if index:
+            for field, field_value, extra in _flatten_rows(index, prefix="Indeks eksperymentu", limit=28):
+                rows.append((field, field_value, extra))
         sections = (
             ("capture", "Akwizycja obrazu"),
             ("recognition_profile", "Profil rozpoznawania"),
@@ -1016,6 +1227,87 @@ class MobileReportBrowser:
                 )
         self.latency_table.set_rows(rows or [("Brak danych", "-", "-", "-", "-", "-", "-", "-", "-", "-")])
         self._draw_latency_chart()
+
+    def _populate_artifacts(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
+        index = dict((bundle.experiment_session if bundle else getattr(report, "experiment_index", {})) or {})
+        counts = dict(index.get("artifact_counts") or {})
+        flags = dict(index.get("artifact_flags") or {})
+
+        def count_value(name: str, fallback: int = 0) -> int:
+            return _safe_int(counts.get(name), fallback)
+
+        if bundle:
+            values = {
+                "traces": (bundle.trace_total, len(bundle.trace_rows)),
+                "thermal": (bundle.thermal_total, len(bundle.thermal_rows)),
+                "frame_flow": (bundle.frame_flow_total, len(bundle.frame_flow_rows)),
+                "events": (bundle.event_total, len(bundle.event_rows)),
+                "samples": (bundle.sample_total, len(bundle.sample_rows)),
+                "crops": (bundle.crop_count, bundle.crop_count),
+                "annotations": (bundle.annotation_count, bundle.annotation_count),
+                "log": (1 if bundle.log_preview else 0, 1 if bundle.log_preview else 0),
+            }
+        else:
+            values = {
+                "traces": (count_value("traces"), -1),
+                "thermal": (count_value("thermal"), -1),
+                "frame_flow": (count_value("frame_flow"), -1),
+                "events": (count_value("events"), -1),
+                "samples": (count_value("samples"), -1),
+                "crops": (count_value("crops"), count_value("crops")),
+                "annotations": (count_value("annotations"), count_value("annotations")),
+                "log": (1 if flags.get("has_log") else 0, 1 if flags.get("has_log") else 0),
+            }
+
+        descriptions = {
+            "traces": "Czasy i statusy przetwarzania klatek; preview nie może ograniczać przyszłych obliczeń serii.",
+            "thermal": "Szereg termiczny telefonu, potrzebny do wykresów throttlingu i stabilności pomiaru.",
+            "frame_flow": "Przepływ klatek: otrzymane, przetworzone i świadomie pominięte klatki.",
+            "events": "Zdarzenia wysokiego poziomu: consensus, autozoom, lock, zmiany tracków.",
+            "samples": "Indeks próbek/cropów używany do jakości, GT i analizy błędów.",
+            "crops": "Liczba obrazów cropów w archiwum; same obrazy nie są ładowane automatycznie.",
+            "annotations": "Adnotacje próbek, zwykle JSONL, używane do odtworzenia jakości.",
+            "log": "Log aplikacji mobilnej jako pomoc diagnostyczna.",
+        }
+        labels = {
+            "traces": "Trace klatek",
+            "thermal": "Termika",
+            "frame_flow": "Przepływ klatek",
+            "events": "Eventy",
+            "samples": "Próbki",
+            "crops": "Cropy",
+            "annotations": "Adnotacje próbek",
+            "log": "Log aplikacji",
+        }
+        rows: list[tuple[Any, ...]] = []
+        for key in ("traces", "thermal", "frame_flow", "events", "samples", "crops", "annotations", "log"):
+            source_total, preview_total = values.get(key, (0, 0))
+            source_total = _safe_int(source_total)
+            preview_total = _safe_int(preview_total)
+            if source_total:
+                if key in {"crops", "annotations", "log"}:
+                    preview_text = "-"
+                    status = "Jest"
+                elif preview_total < 0:
+                    preview_text = "zapisany"
+                    status = "Jest"
+                else:
+                    preview_text = str(preview_total)
+                    status = "Preview ucięty" if preview_total and source_total > preview_total else "Jest"
+            else:
+                preview_text = "-"
+                status = "Brak"
+            rows.append(
+                (
+                    labels[key],
+                    str(source_total or "-"),
+                    preview_text,
+                    status,
+                    descriptions[key],
+                    {"tag": "success" if source_total else "muted"},
+                )
+            )
+        self.artifacts_table.set_rows(rows)
 
     def _populate_quality(self, report: MobileBenchmarkReport) -> None:
         quality = dict(report.quality or {})

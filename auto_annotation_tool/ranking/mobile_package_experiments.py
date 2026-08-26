@@ -18,7 +18,7 @@ import io
 import json
 import re
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +119,20 @@ def _nested_value(data: dict[str, Any], *paths: str) -> Any:
     return None
 
 
+def _optional_dict(value: Any) -> dict[str, Any]:
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _role_marker(role: str) -> str:
     raw = str(role or "").strip().lower()
     if raw in {"plate", "plates", "pose", "tablica", "tablice", "mt"}:
@@ -186,12 +200,23 @@ class MobileReportBundle:
     bundle_kind: str
     bundle_schema: str
     report: "MobileBenchmarkReport"
+    source_archive_sha256: str = ""
+    experiment_session: dict[str, Any] = field(default_factory=dict)
     manifest: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     report_payload: dict[str, Any] = field(default_factory=dict)
     trace_columns: tuple[str, ...] = field(default_factory=tuple)
     trace_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
     trace_total: int = 0
+    thermal_columns: tuple[str, ...] = field(default_factory=tuple)
+    thermal_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    thermal_total: int = 0
+    frame_flow_columns: tuple[str, ...] = field(default_factory=tuple)
+    frame_flow_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    frame_flow_total: int = 0
+    event_columns: tuple[str, ...] = field(default_factory=tuple)
+    event_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    event_total: int = 0
     sample_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
     sample_total: int = 0
     crop_count: int = 0
@@ -206,14 +231,25 @@ class MobileReportBundle:
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
+            "source_archive_sha256": self.source_archive_sha256,
             "bundle_kind": self.bundle_kind,
             "bundle_schema": self.bundle_schema,
             "report": self.report.to_dict(),
+            "experiment_session": dict(self.experiment_session or {}),
             "manifest": dict(self.manifest or {}),
             "metadata": dict(self.metadata or {}),
             "trace_columns": list(self.trace_columns),
             "trace_rows": [dict(row) for row in self.trace_rows],
             "trace_total": self.trace_total,
+            "thermal_columns": list(self.thermal_columns),
+            "thermal_rows": [dict(row) for row in self.thermal_rows],
+            "thermal_total": self.thermal_total,
+            "frame_flow_columns": list(self.frame_flow_columns),
+            "frame_flow_rows": [dict(row) for row in self.frame_flow_rows],
+            "frame_flow_total": self.frame_flow_total,
+            "event_columns": list(self.event_columns),
+            "event_rows": [dict(row) for row in self.event_rows],
+            "event_total": self.event_total,
             "sample_rows": [dict(row) for row in self.sample_rows],
             "sample_total": self.sample_total,
             "crop_count": self.crop_count,
@@ -293,15 +329,48 @@ class ReportBundleReader:
             return self._read_zip_bundle(safe_path)
         return self._read_json_report(safe_path)
 
+    def read_many(self, path: Path) -> tuple[MobileReportBundle, ...]:
+        safe_path = Path(path)
+        if not safe_path.exists() or not safe_path.is_file():
+            raise FileNotFoundError(f"Nie znaleziono raportu mobilnego: {safe_path}")
+        if zipfile.is_zipfile(safe_path):
+            return (self._read_zip_bundle(safe_path),)
+        return self._read_json_bundles(safe_path)
+
     def _read_json_report(self, path: Path) -> MobileReportBundle:
+        bundles = self._read_json_bundles(path)
+        if not bundles:
+            raise ValueError("Plik JSON nie zawiera raportów.")
+        return bundles[0]
+
+    def _read_json_bundles(self, path: Path) -> tuple[MobileReportBundle, ...]:
         size = path.stat().st_size
         if size > self.max_text_bytes:
             raise ValueError(f"Plik raportu JSON jest za duży do bezpiecznego podglądu: {size} B")
+        source_hash = _file_sha256(path)
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        payloads = self._json_report_payloads(payload)
+        return tuple(self._json_payload_to_bundle(path, item, source_hash) for item in payloads)
+
+    def _json_report_payloads(self, payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):
             if not payload:
                 raise ValueError("Plik JSON nie zawiera raportów.")
-            payload = payload[0]
+            reports = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("reports"), list):
+            reports = list(payload.get("reports") or [])
+            if not reports:
+                raise ValueError("Plik JSON nie zawiera raportów.")
+        elif isinstance(payload, dict):
+            reports = [payload]
+        else:
+            raise ValueError("Raport JSON musi być obiektem albo listą obiektów.")
+        result = [dict(item or {}) for item in reports if isinstance(item, dict)]
+        if not result:
+            raise ValueError("Plik JSON nie zawiera poprawnych obiektów raportów.")
+        return result
+
+    def _json_payload_to_bundle(self, path: Path, payload: dict[str, Any], source_hash: str) -> MobileReportBundle:
         if isinstance(payload, dict) and isinstance(payload.get("reports"), list):
             reports = list(payload.get("reports") or [])
             if not reports:
@@ -311,21 +380,81 @@ class ReportBundleReader:
             raise ValueError("Raport JSON musi być obiektem albo listą obiektów.")
         report = MobileBenchmarkReport.from_dict(payload)
         traces, columns, trace_total = self._trace_rows_from_json(payload.get("traces"))
+        thermal_rows, thermal_columns, thermal_total = self._rows_from_json_records(
+            payload.get("thermal") or payload.get("thermal_samples") or payload.get("thermal_trace")
+        )
+        frame_flow_rows, frame_flow_columns, frame_flow_total = self._rows_from_json_records(
+            payload.get("frame_flow") or payload.get("frame_flow_buckets") or payload.get("flow")
+        )
+        event_rows, event_columns, event_total = self._rows_from_json_records(
+            payload.get("events") or payload.get("event_stream")
+        )
+        sample_rows, _sample_columns, sample_total = self._rows_from_json_records(
+            payload.get("samples") or _nested_value(payload, "crop_session.records"),
+            max_rows=1000,
+        )
+        crop_count = _safe_int(_nested_value(payload, "crop_session.collected_count", "samples.crop_count"))
+        annotation_count = _safe_int(_nested_value(payload, "crop_session.annotation_count", "samples.annotation_count"))
+        bundle_schema = str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA)
         validation = ReportBundleValidation(
-            ok=str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA) == MOBILE_BENCHMARK_REPORT_SCHEMA,
+            ok=bundle_schema == MOBILE_BENCHMARK_REPORT_SCHEMA,
             warnings=()
-            if str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA) == MOBILE_BENCHMARK_REPORT_SCHEMA
+            if bundle_schema == MOBILE_BENCHMARK_REPORT_SCHEMA
             else (f"Nieoczekiwany schemat raportu: {payload.get('schema')}",),
+        )
+        artifact_flags = {
+            "has_traces": bool(trace_total),
+            "has_thermal": bool(thermal_total),
+            "has_frame_flow": bool(frame_flow_total),
+            "has_events": bool(event_total),
+            "has_samples": bool(sample_total or payload.get("samples") or payload.get("crop_session")),
+            "has_log": bool(payload.get("application_log") or payload.get("log")),
+        }
+        artifact_counts = {
+            "traces": trace_total,
+            "thermal": thermal_total,
+            "frame_flow": frame_flow_total,
+            "events": event_total,
+            "samples": sample_total,
+            "crops": crop_count,
+            "annotations": annotation_count,
+        }
+        report, experiment_session = _attach_report_ingest_metadata(
+            report,
+            path=path,
+            source_archive_sha256=source_hash,
+            bundle_kind="json",
+            bundle_schema=bundle_schema,
+            trace_total=trace_total,
+            trace_rows_preview=len(traces),
+            validation=validation,
+            artifact_flags=artifact_flags,
+            artifact_counts=artifact_counts,
         )
         return MobileReportBundle(
             path=str(path),
+            source_archive_sha256=source_hash,
             bundle_kind="json",
-            bundle_schema=str(payload.get("schema") or MOBILE_BENCHMARK_REPORT_SCHEMA),
+            bundle_schema=bundle_schema,
             report=report,
+            experiment_session=experiment_session,
             report_payload=payload,
             trace_columns=tuple(columns),
             trace_rows=tuple(traces),
             trace_total=trace_total,
+            thermal_columns=tuple(thermal_columns),
+            thermal_rows=tuple(thermal_rows),
+            thermal_total=thermal_total,
+            frame_flow_columns=tuple(frame_flow_columns),
+            frame_flow_rows=tuple(frame_flow_rows),
+            frame_flow_total=frame_flow_total,
+            event_columns=tuple(event_columns),
+            event_rows=tuple(event_rows),
+            event_total=event_total,
+            sample_rows=tuple(sample_rows),
+            sample_total=sample_total,
+            crop_count=crop_count,
+            annotation_count=annotation_count,
             validation=validation,
         )
 
@@ -334,6 +463,7 @@ class ReportBundleReader:
         warnings: list[str] = []
         checked_hashes = 0
         skipped_hashes = 0
+        source_hash = _file_sha256(path)
         with zipfile.ZipFile(path, "r") as archive:
             infos = archive.infolist()
             if len(infos) > self.max_entries:
@@ -424,6 +554,46 @@ class ReportBundleReader:
             if not traces and report_payload:
                 traces, trace_columns, trace_total = self._trace_rows_from_json(report_payload.get("traces"))
 
+            thermal_rows, thermal_columns, thermal_total, _thermal_source = self._read_first_csv_from_zip(
+                archive,
+                normalized_names,
+                ("thermal.csv", "tables/thermal.csv", "tables/thermal_data.csv"),
+                max_rows=self.max_trace_rows,
+            )
+            if not thermal_rows and report_payload:
+                thermal_rows, thermal_columns, thermal_total = self._rows_from_json_records(
+                    report_payload.get("thermal") or report_payload.get("thermal_samples") or report_payload.get("thermal_trace")
+                )
+
+            frame_flow_rows, frame_flow_columns, frame_flow_total, _frame_flow_source = self._read_first_csv_from_zip(
+                archive,
+                normalized_names,
+                ("frame_flow.csv", "tables/frame_flow.csv", "tables/frame_flow_data.csv"),
+                max_rows=self.max_trace_rows,
+            )
+            if not frame_flow_rows and report_payload:
+                frame_flow_rows, frame_flow_columns, frame_flow_total = self._rows_from_json_records(
+                    report_payload.get("frame_flow") or report_payload.get("frame_flow_buckets") or report_payload.get("flow")
+                )
+
+            event_rows, event_columns, event_total, _event_source = self._read_first_csv_from_zip(
+                archive,
+                normalized_names,
+                ("events.csv", "tables/events.csv", "tables/event_data.csv"),
+                max_rows=self.max_trace_rows,
+            )
+            if not event_rows:
+                event_rows, event_columns, event_total, _event_source = self._read_first_jsonl_from_zip(
+                    archive,
+                    normalized_names,
+                    ("events.jsonl", "tables/events.jsonl", "event_stream.jsonl"),
+                    max_rows=self.max_trace_rows,
+                )
+            if not event_rows and report_payload:
+                event_rows, event_columns, event_total = self._rows_from_json_records(
+                    report_payload.get("events") or report_payload.get("event_stream")
+                )
+
             sample_rows, _sample_columns, sample_total = self._read_csv_from_zip(
                 archive,
                 normalized_names,
@@ -457,7 +627,6 @@ class ReportBundleReader:
             else:
                 bundle_kind = "legacy_zip"
 
-            report = MobileBenchmarkReport.from_dict(report_payload or {})
             validation = ReportBundleValidation(
                 ok=not errors,
                 errors=tuple(errors),
@@ -465,17 +634,58 @@ class ReportBundleReader:
                 checked_hashes=checked_hashes,
                 skipped_hashes=skipped_hashes,
             )
+            artifact_flags = {
+                "has_traces": bool(trace_total),
+                "has_thermal": bool(thermal_total),
+                "has_frame_flow": bool(frame_flow_total),
+                "has_events": bool(event_total),
+                "has_samples": bool(sample_total or crop_count or annotation_count),
+                "has_log": bool(log_preview),
+            }
+            artifact_counts = {
+                "traces": trace_total,
+                "thermal": thermal_total,
+                "frame_flow": frame_flow_total,
+                "events": event_total,
+                "samples": sample_total,
+                "crops": crop_count,
+                "annotations": annotation_count,
+            }
+            report = MobileBenchmarkReport.from_dict(report_payload or {})
+            report, experiment_session = _attach_report_ingest_metadata(
+                report,
+                path=path,
+                source_archive_sha256=source_hash,
+                bundle_kind=bundle_kind,
+                bundle_schema=bundle_schema,
+                trace_total=trace_total,
+                trace_rows_preview=len(traces),
+                validation=validation,
+                artifact_flags=artifact_flags,
+                artifact_counts=artifact_counts,
+            )
             return MobileReportBundle(
                 path=str(path),
+                source_archive_sha256=source_hash,
                 bundle_kind=bundle_kind,
                 bundle_schema=bundle_schema,
                 report=report,
+                experiment_session=experiment_session,
                 manifest=manifest,
                 metadata=metadata,
                 report_payload=report_payload,
                 trace_columns=tuple(trace_columns),
                 trace_rows=tuple(traces),
                 trace_total=trace_total,
+                thermal_columns=tuple(thermal_columns),
+                thermal_rows=tuple(thermal_rows),
+                thermal_total=thermal_total,
+                frame_flow_columns=tuple(frame_flow_columns),
+                frame_flow_rows=tuple(frame_flow_rows),
+                frame_flow_total=frame_flow_total,
+                event_columns=tuple(event_columns),
+                event_rows=tuple(event_rows),
+                event_total=event_total,
                 sample_rows=tuple(sample_rows),
                 sample_total=sample_total,
                 crop_count=crop_count,
@@ -554,6 +764,85 @@ class ReportBundleReader:
                     rows.append({str(key or ""): str(value or "") for key, value in dict(row or {}).items()})
         return rows, columns, total
 
+    def _read_first_csv_from_zip(
+        self,
+        archive: zipfile.ZipFile,
+        normalized_names: dict[str, zipfile.ZipInfo],
+        names: tuple[str, ...],
+        *,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], int, str]:
+        for name in names:
+            if name not in normalized_names:
+                continue
+            rows, columns, total = self._read_csv_from_zip(
+                archive,
+                normalized_names,
+                name,
+                optional=True,
+                max_rows=max_rows,
+            )
+            return rows, columns, total, name
+        return [], [], 0, ""
+
+    def _read_jsonl_from_zip(
+        self,
+        archive: zipfile.ZipFile,
+        normalized_names: dict[str, zipfile.ZipInfo],
+        name: str,
+        *,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], int]:
+        info = normalized_names.get(name)
+        if info is None:
+            return [], [], 0
+        rows: list[dict[str, str]] = []
+        columns: list[str] = []
+        seen: set[str] = set()
+        total = 0
+        limit = self.max_trace_rows if max_rows is None else int(max_rows)
+        with archive.open(info, "r") as binary:
+            wrapper = io.TextIOWrapper(binary, encoding="utf-8-sig", errors="replace", newline="")
+            for line in wrapper:
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                total += 1
+                try:
+                    item = json.loads(text)
+                except Exception:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                row = self._json_record_to_row(item)
+                for key in row:
+                    if key not in seen:
+                        seen.add(key)
+                        columns.append(key)
+                if len(rows) < limit:
+                    rows.append(row)
+        return rows, columns, total
+
+    def _read_first_jsonl_from_zip(
+        self,
+        archive: zipfile.ZipFile,
+        normalized_names: dict[str, zipfile.ZipInfo],
+        names: tuple[str, ...],
+        *,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], int, str]:
+        for name in names:
+            if name not in normalized_names:
+                continue
+            rows, columns, total = self._read_jsonl_from_zip(
+                archive,
+                normalized_names,
+                name,
+                max_rows=max_rows,
+            )
+            return rows, columns, total, name
+        return [], [], 0, ""
+
     def _count_text_lines(self, archive: zipfile.ZipFile, info: zipfile.ZipInfo | None) -> int:
         if info is None:
             return 0
@@ -563,7 +852,57 @@ class ReportBundleReader:
                 total += 1
         return total
 
+    def _json_record_to_row(self, item: dict[str, Any]) -> dict[str, str]:
+        row: dict[str, str] = {}
+        for key, value in dict(item or {}).items():
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    row[f"{key}.{child_key}"] = _compact_json_text(child_value, limit=180)
+            elif isinstance(value, list):
+                row[str(key)] = _compact_json_text(value, limit=220)
+            else:
+                row[str(key)] = "" if value is None else str(value)
+        return row
+
+    def _rows_from_json_records(
+        self,
+        records_value: Any,
+        *,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, str]], list[str], int]:
+        if isinstance(records_value, dict):
+            for key in ("records", "rows", "samples", "events", "traces", "data"):
+                nested = records_value.get(key)
+                if isinstance(nested, list):
+                    records_value = nested
+                    break
+        if not isinstance(records_value, list):
+            return [], [], 0
+        rows: list[dict[str, str]] = []
+        columns: list[str] = []
+        seen: set[str] = set()
+        limit = self.max_trace_rows if max_rows is None else int(max_rows)
+        total = 0
+        for item in records_value:
+            if not isinstance(item, dict):
+                continue
+            total += 1
+            row = self._json_record_to_row(item)
+            for key in row:
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
+            if len(rows) < limit:
+                rows.append(row)
+        return rows, columns, total
+
     def _trace_rows_from_json(self, traces_value: Any) -> tuple[list[dict[str, str]], list[str], int]:
+        if isinstance(traces_value, dict):
+            for key in ("records", "rows", "traces", "data"):
+                nested = traces_value.get(key)
+                if isinstance(nested, list):
+                    traces_value = nested
+                    break
         if not isinstance(traces_value, list):
             return [], [], 0
         rows: list[dict[str, str]] = []
@@ -596,6 +935,15 @@ class ReportBundleReader:
 def read_mobile_report_bundle(path: Path, *, max_trace_rows: int = MOBILE_REPORT_TRACE_PREVIEW_ROWS) -> MobileReportBundle:
     """Read an Android report bundle according to the mobile-report handoff."""
     return ReportBundleReader(max_trace_rows=max_trace_rows).read(path)
+
+
+def read_mobile_report_bundles(
+    path: Path,
+    *,
+    max_trace_rows: int = MOBILE_REPORT_TRACE_PREVIEW_ROWS,
+) -> tuple[MobileReportBundle, ...]:
+    """Read one or many Android report bundles from a single selected file."""
+    return ReportBundleReader(max_trace_rows=max_trace_rows).read_many(path)
 
 
 @dataclass(frozen=True)
@@ -843,6 +1191,9 @@ class MobileBenchmarkReport:
     package_id: str
     variant_id: str
     measured_at: str = field(default_factory=_utc_now_iso)
+    source_archive_sha256: str = ""
+    source_path: str = ""
+    experiment_index: dict[str, Any] = field(default_factory=dict)
     device: dict[str, Any] = field(default_factory=dict)
     runtime: str = ""
     delegate: str = ""
@@ -853,9 +1204,13 @@ class MobileBenchmarkReport:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def identity(self) -> tuple[str, str, str, str, str, str, str]:
+    def identity(self) -> tuple[str, ...]:
+        source_hash = str(self.source_archive_sha256 or "").strip().lower()
+        if source_hash:
+            return ("source_sha256", source_hash, self.report_id, str(self.measured_at or ""))
         device_name = str(self.device.get("name") or self.device.get("device_name") or "").strip()
         return (
+            "report",
             self.report_id,
             self.package_id,
             self.variant_id,
@@ -872,6 +1227,9 @@ class MobileBenchmarkReport:
             "package_id": self.package_id,
             "variant_id": self.variant_id,
             "measured_at": self.measured_at,
+            "source_archive_sha256": self.source_archive_sha256,
+            "source_path": self.source_path,
+            "experiment_index": dict(self.experiment_index or {}),
             "device": dict(self.device or {}),
             "runtime": self.runtime,
             "delegate": self.delegate,
@@ -885,6 +1243,8 @@ class MobileBenchmarkReport:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MobileBenchmarkReport":
         payload = dict(data or {})
+        stored_raw = payload.get("raw")
+        raw_payload = dict(stored_raw) if isinstance(stored_raw, dict) else payload
         device = dict(payload.get("device") or {})
         if not device:
             device = {
@@ -912,6 +1272,18 @@ class MobileBenchmarkReport:
             package_id=package_id,
             variant_id=variant_id,
             measured_at=str(payload.get("measured_at") or _utc_now_iso()),
+            source_archive_sha256=str(
+                payload.get("source_archive_sha256")
+                or _nested_value(raw_payload, "desktop_ingest.source_archive_sha256")
+                or ""
+            ),
+            source_path=str(payload.get("source_path") or _nested_value(raw_payload, "desktop_ingest.source_path") or ""),
+            experiment_index=dict(
+                payload.get("experiment_index")
+                or payload.get("desktop_experiment_index")
+                or _nested_value(raw_payload, "desktop_experiment_index")
+                or {}
+            ),
             device=device,
             runtime=str(payload.get("runtime") or ""),
             delegate=str(payload.get("delegate") or ""),
@@ -919,8 +1291,218 @@ class MobileBenchmarkReport:
             memory=memory,
             quality=quality,
             errors=errors,
-            raw=payload,
+            raw=raw_payload,
         )
+
+
+@dataclass(frozen=True)
+class ExperimentSessionRecord:
+    """Normalized session-level index used by desktop-side experiment analysis."""
+
+    report_id: str
+    experiment_session_id: str = ""
+    series_id: str = ""
+    scenario_id: str = ""
+    experiment_variant: str = ""
+    replicate_index: int = 0
+    package_id: str = ""
+    variant_id: str = ""
+    measured_at: str = ""
+    source_archive_sha256: str = ""
+    source_path: str = ""
+    bundle_kind: str = ""
+    bundle_schema: str = ""
+    app_git_sha: str = ""
+    app_version: str = ""
+    build_type: str = ""
+    device: dict[str, Any] = field(default_factory=dict)
+    runtime: str = ""
+    delegate: str = ""
+    model_fingerprints: dict[str, Any] = field(default_factory=dict)
+    resolution: dict[str, Any] = field(default_factory=dict)
+    recognition_profile: dict[str, Any] = field(default_factory=dict)
+    autozoom_config: dict[str, Any] = field(default_factory=dict)
+    trace_total_source: int = 0
+    trace_rows_preview: int = 0
+    trace_preview_truncated: bool = False
+    artifact_flags: dict[str, bool] = field(default_factory=dict)
+    artifact_counts: dict[str, int] = field(default_factory=dict)
+    validation_ok: bool = True
+    validation_errors: tuple[str, ...] = field(default_factory=tuple)
+    validation_warnings: tuple[str, ...] = field(default_factory=tuple)
+    raw_extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_report(
+        cls,
+        report: MobileBenchmarkReport,
+        *,
+        source_archive_sha256: str = "",
+        source_path: str = "",
+        bundle_kind: str = "",
+        bundle_schema: str = "",
+        trace_total_source: int = 0,
+        trace_rows_preview: int = 0,
+        validation: ReportBundleValidation | None = None,
+        artifact_flags: dict[str, bool] | None = None,
+        artifact_counts: dict[str, int] | None = None,
+    ) -> "ExperimentSessionRecord":
+        raw = dict(report.raw or {})
+        experiment = _optional_dict(raw.get("experiment"))
+        app_build = _optional_dict(raw.get("app_build") or raw.get("build") or raw.get("application"))
+        capture = _optional_dict(raw.get("capture") or raw.get("camera") or raw.get("input"))
+        recognition_profile = _optional_dict(raw.get("recognition_profile") or raw.get("profile"))
+        autozoom_config = _optional_dict(
+            raw.get("autozoom")
+            or raw.get("autozoom_config")
+            or recognition_profile.get("autozoom")
+            or recognition_profile.get("autozoom_config")
+        )
+        resolution: dict[str, Any] = {}
+        for key, paths in {
+            "width_px": ("capture.width_px", "capture.width", "camera.width_px", "input.width_px", "resolution.width_px"),
+            "height_px": ("capture.height_px", "capture.height", "camera.height_px", "input.height_px", "resolution.height_px"),
+            "fps": ("capture.fps", "camera.fps", "input.fps"),
+        }.items():
+            value = _nested_value(raw, *paths)
+            if value not in (None, ""):
+                resolution[key] = value
+
+        model_fingerprints: dict[str, Any] = {}
+        for path in (
+            "model_fingerprints",
+            "models",
+            "execution.models",
+            "execution.model_fingerprints",
+            "runtime_composition.models",
+        ):
+            value = _nested_value(raw, path)
+            if isinstance(value, dict):
+                model_fingerprints.update(value)
+
+        validation_ok = True if validation is None else bool(validation.ok)
+        validation_errors = tuple() if validation is None else tuple(validation.errors)
+        validation_warnings = tuple() if validation is None else tuple(validation.warnings)
+        preview_count = max(0, int(trace_rows_preview or 0))
+        trace_total = max(0, int(trace_total_source or 0))
+        return cls(
+            report_id=report.report_id,
+            experiment_session_id=str(
+                _nested_value(
+                    raw,
+                    "experiment.session.id",
+                    "experiment.session_id",
+                    "experiment_session_id",
+                    "session_id",
+                )
+                or experiment.get("session_id")
+                or experiment.get("id")
+                or report.report_id
+            ),
+            series_id=str(_nested_value(raw, "experiment.series_id", "series_id") or experiment.get("series_id") or ""),
+            scenario_id=str(_nested_value(raw, "experiment.scenario_id", "scenario_id") or experiment.get("scenario_id") or ""),
+            experiment_variant=str(
+                _nested_value(raw, "experiment.variant", "experiment.variant_id", "variant")
+                or experiment.get("variant")
+                or report.variant_id
+            ),
+            replicate_index=_safe_int(
+                _nested_value(raw, "experiment.replicate_index", "replicate_index")
+                or experiment.get("replicate_index")
+            ),
+            package_id=report.package_id,
+            variant_id=report.variant_id,
+            measured_at=report.measured_at,
+            source_archive_sha256=source_archive_sha256,
+            source_path=source_path,
+            bundle_kind=bundle_kind,
+            bundle_schema=bundle_schema,
+            app_git_sha=str(
+                _nested_value(raw, "app_build.git_commit", "app_build.git_sha", "build.git_commit", "app_git_sha")
+                or app_build.get("git_commit")
+                or app_build.get("git_sha")
+                or ""
+            ),
+            app_version=str(
+                _nested_value(raw, "app_build.version", "app_version", "application.version")
+                or app_build.get("version")
+                or ""
+            ),
+            build_type=str(
+                _nested_value(raw, "app_build.build_type", "build.type", "build_type")
+                or app_build.get("build_type")
+                or app_build.get("type")
+                or ""
+            ),
+            device=dict(report.device or {}),
+            runtime=str(report.runtime or _nested_value(raw, "runtime", "execution.runtime") or ""),
+            delegate=str(report.delegate or _nested_value(raw, "delegate", "execution.delegate") or ""),
+            model_fingerprints=model_fingerprints,
+            resolution=resolution or capture,
+            recognition_profile=recognition_profile,
+            autozoom_config=autozoom_config,
+            trace_total_source=trace_total,
+            trace_rows_preview=preview_count,
+            trace_preview_truncated=bool(trace_total > preview_count > 0),
+            artifact_flags={str(k): bool(v) for k, v in dict(artifact_flags or {}).items()},
+            artifact_counts={str(k): int(v or 0) for k, v in dict(artifact_counts or {}).items()},
+            validation_ok=validation_ok,
+            validation_errors=validation_errors,
+            validation_warnings=validation_warnings,
+            raw_extra={
+                "schema": raw.get("schema", ""),
+                "quality_available": bool(_nested_value(raw, "quality.available")),
+                "measured_runs": _nested_value(raw, "measured_runs", "runs", "samples"),
+            },
+        )
+
+
+def _attach_report_ingest_metadata(
+    report: MobileBenchmarkReport,
+    *,
+    path: Path,
+    source_archive_sha256: str,
+    bundle_kind: str,
+    bundle_schema: str,
+    trace_total: int,
+    trace_rows_preview: int,
+    validation: ReportBundleValidation,
+    artifact_flags: dict[str, bool] | None = None,
+    artifact_counts: dict[str, int] | None = None,
+) -> tuple[MobileBenchmarkReport, dict[str, Any]]:
+    session = ExperimentSessionRecord.from_report(
+        report,
+        source_archive_sha256=source_archive_sha256,
+        source_path=str(path),
+        bundle_kind=bundle_kind,
+        bundle_schema=bundle_schema,
+        trace_total_source=trace_total,
+        trace_rows_preview=trace_rows_preview,
+        validation=validation,
+        artifact_flags=artifact_flags or {},
+        artifact_counts=artifact_counts or {},
+    )
+    ingest = {
+        "source_path": str(path),
+        "source_archive_sha256": source_archive_sha256,
+        "bundle_kind": bundle_kind,
+        "bundle_schema": bundle_schema,
+        "imported_at": _utc_now_iso(),
+    }
+    raw = dict(report.raw or {})
+    raw["desktop_ingest"] = ingest
+    raw["desktop_experiment_index"] = session.to_dict()
+    updated = replace(
+        report,
+        source_archive_sha256=source_archive_sha256,
+        source_path=str(path),
+        experiment_index=session.to_dict(),
+        raw=raw,
+    )
+    return updated, session.to_dict()
 
 
 @dataclass(frozen=True)
@@ -1165,22 +1747,12 @@ class MobilePackageExperimentStore:
         return report
 
     def import_mobile_report_file(self, report_path: Path, *, save: bool = True) -> list[MobileBenchmarkReport]:
-        if zipfile.is_zipfile(Path(report_path)):
-            bundle = read_mobile_report_bundle(Path(report_path))
-            imported = [self.add_report(bundle.report, save=False)]
-            if save:
-                self.save()
-            return imported
-
-        data = json.loads(Path(report_path).read_text(encoding="utf-8-sig"))
-        if isinstance(data, dict) and isinstance(data.get("reports"), list):
-            raw_reports = list(data.get("reports") or [])
-        elif isinstance(data, list):
-            raw_reports = data
-        else:
-            raw_reports = [data]
-
-        imported = [self.add_report(MobileBenchmarkReport.from_dict(item), save=False) for item in raw_reports]
+        safe_path = Path(report_path)
+        imported = [
+            self.add_report(bundle.report, save=False)
+            for bundle in read_mobile_report_bundles(safe_path)
+            if bundle.validation.ok
+        ]
         if save:
             self.save()
         return imported
