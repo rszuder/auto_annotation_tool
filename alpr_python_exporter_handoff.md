@@ -143,7 +143,7 @@ porównywania kandydackich pakietów w pracy inżynierskiej.
 | LiteRT `.tflite` FP32 | tak | CPU/GPU | tak |
 | LiteRT `.tflite` INT8/UINT8 | tak | CPU/GPU, zależnie od delegata | tak |
 | ONNX `.onnx` FP32 | tak | CPU | tak |
-| ONNX INT8 | technicznie może być spakowany | nie | nie |
+| ONNX `.onnx` INT8 | tak | CPU/ONNX Runtime, po walidacji operatorów | tak, jako wariant badawczy |
 | NCNN `.param` + `.bin` | tak | jeszcze nie | nie |
 | PyTorch `.pt` | nie | nie | nie |
 
@@ -196,6 +196,7 @@ Znaczenie formatow dla klienta mobilnego:
 | `LiteRT/TFLite FP32` | wariant stabilny i domyslny na Androida | preferowany punkt startowy, jesli runtime LiteRT jest dostepny |
 | `LiteRT/TFLite INT8` | wariant lekki/wydajnosciowy | uzywac dopiero po walidacji jakosci wzgledem FP32 i po sprawdzeniu kalibracji |
 | `ONNX FP32` | wariant kontrolny/fallback | uruchamiac, gdy potrzebna jest diagnostyka albo gdy TFLite nie dziala na urzadzeniu |
+| `ONNX INT8` | wariant kwantyzowany do badan runtime ONNX | uruchamiac jako oddzielny wariant porownawczy; wymaga raportowania jakosci i czasu inferencji wzgledem `ONNX FP32` |
 | `NCNN FP32` | wariant eksperymentalny | importowac tylko jako opcje, dopoki aplikacja nie ma pelnego runtime NCNN |
 
 Android powinien zapisac w raporcie, ktory wariant faktycznie uruchomil dla
@@ -206,10 +207,23 @@ numeryczne w zaleznosci od runtime.
 Rekomendowany model wyboru:
 
 1. Dla demonstracji: preferowac `LiteRT/TFLite FP32`.
-2. Dla badan: eksportowac rownolegle `LiteRT/TFLite FP32`, `ONNX FP32` i
-   opcjonalnie `LiteRT/TFLite INT8`.
+2. Dla badan: eksportowac rownolegle `LiteRT/TFLite FP32`, `ONNX FP32`,
+   opcjonalnie `LiteRT/TFLite INT8` oraz `ONNX INT8`.
 3. Dla finalnego domyslnego runtime: wybrac wariant na podstawie raportu
    mobilnego, a nie na podstawie samego rozmiaru pliku.
+
+Manifest eksportu moze zawierac pole `format_quantizations`, ktore rozdziela
+precyzje per format, np. `litert: [fp32, int8]`, `onnx: [fp32, int8]`,
+`ncnn: [fp32]`. Android powinien czytac konkretne warianty z listy `variants`
+w manifeście modelu potomnego i nie zakladac, ze globalne `quantizations`
+dotyczy kazdego formatu jednakowo.
+
+Wariant `ONNX INT8` moze powstawac jako postprocess po eksporcie `ONNX FP32`.
+Powod jest praktyczny: nowsza dokumentacja Ultralytics opisuje `quantize=8`
+dla ONNX, ale lokalna wersja biblioteki moze tego argumentu jeszcze nie
+obslugiwac. Po stronie Androida nie ma to zmieniac kontraktu importu: klient
+ma traktowac `variants/runtime=onnx, precision=int8` jako oddzielny plik ONNX
+z wlasnym opisem wejscia/wyjscia i wlasnym SHA-256.
 
 ## 4. Biblioteki Python
 
@@ -866,6 +880,7 @@ Modal:
 - ONNX FP32 — opcjonalny wariant kontrolny/fallback;
 - NCNN — opcjonalne;
 - `imgsz` z runu;
+- ONNX INT8 - opcjonalny wariant kwantyzowany do badan runtime ONNX;
 - confidence i IoU;
 - ścieżka `.alprmodel`.
 
@@ -888,6 +903,7 @@ Eksport uruchomić w workerze, nie blokować Tkintera. Anulowanie nie może pozo
 - LiteRT FP32 i ONNX FP32 z tego samego checkpointu.
 - LiteRT INT8 tylko z kalibracją.
 - Manifest przechodzi `alpr-model-v1.schema.json`.
+- LiteRT INT8 i ONNX INT8 wymagaja data.yaml kalibracji.
 - Manifest kompletu przechodzi `alpr-package-v1.schema.json`.
 - SHA-256 zgadza się po ponownym otwarciu ZIP.
 - Eksport MT+MZ tworzy pipeline dokładnie 4-etapowy.

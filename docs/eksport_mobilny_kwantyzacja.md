@@ -282,3 +282,23 @@ Kluczowa literatura naukowa użyta do uzasadnienia decyzji:
 - Janapa Reddi, V. et al. (2022). `MLPerf Mobile Inference Benchmark: An Industry-Standard Open-Source Machine Learning Benchmark for On-Device AI`. Proceedings of Machine Learning and Systems, 4, 352-369.
 - Lin, T.-Y. et al. (2014). `Microsoft COCO: Common Objects in Context`. ECCV 2014. DOI: 10.1007/978-3-319-10602-1_48.
 - Sokolova, M., Lapalme, G. (2009). `A systematic analysis of performance measures for classification tasks`. Information Processing and Management, 45(4), 427-437. DOI: 10.1016/j.ipm.2009.03.002.
+
+## Doprecyzowanie ONNX INT8
+
+Aktualny exporter desktopowy dopuszcza kwantyzacje `INT8` dla `LiteRT/TFLite`
+oraz `ONNX`. Wariant `ONNX INT8` jest potrzebny badawczo, bo pozwala porownac
+ten sam checkpoint w runtime ONNX w wersji `FP32` i `INT8`.
+
+W nowszej dokumentacji Ultralytics `ONNX` obsluguje `quantize=8`, ale lokalne
+srodowisko moze miec starsza implementacje eksportera, ktora odrzuca argument
+`quantize`. Z tego powodu desktopowy exporter powinien byc odporny na wersje
+biblioteki: buduje `ONNX FP32`, a nastepnie tworzy `ONNX INT8` przez statyczna
+kwantyzacje ONNX Runtime z obrazami kalibracyjnymi z `data.yaml`.
+
+Kwantyzacja ONNX INT8 powinna omijac elementy glowicy dekodujacej YOLO i
+kwantyzowac przede wszystkim operacje z wagami (`Conv`, `Gemm`, `MatMul`).
+Zmniejsza to ryzyko utraty informacji o prawdopodobienstwach klas i
+wspolrzednych ramek.
+
+`NCNN` pozostaje wariantem `FP32`, poniewaz oficjalna tabela eksportu
+Ultralytics nie deklaruje wsparcia `INT8` dla NCNN w tej sciezce eksportu.

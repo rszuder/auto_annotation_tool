@@ -2341,13 +2341,20 @@ Decyzja:
 - `LiteRT/TFLite FP32` jest domyslnym wariantem stabilnym dla Androida;
 - `LiteRT/TFLite INT8` jest wariantem lekkim/wydajnosciowym, ale wymaga reprezentatywnej kalibracji i porownania z FP32;
 - `ONNX FP32` jest wariantem kontrolnym/fallbackiem, szczegolnie przydatnym do diagnostyki i porownan runtime;
+- `ONNX INT8` wlaczamy jako wariant badawczy, bo dokumentacja Ultralytics wspiera statyczna kwantyzacje ONNX przez ONNX Runtime i dane kalibracyjne;
 - `NCNN FP32` pozostaje wariantem eksperymentalnym, sensownym dopiero wtedy, gdy klient Android ma pelna obsluge runtime NCNN.
+- `NCNN INT8` nie jest wlaczany, poniewaz oficjalna tabela Ultralytics oznacza INT8 dla NCNN jako niewspierane w sciezce eksportu.
 
 Zmiana:
 
 - modal wykonawczy eksportu dostal krotki przewodnik przy wyborze formatow;
+- modal wykonawczy eksportu ma jeden glowny CTA: najpierw sprawdza gotowosc, po powodzeniu zmienia sie w `Eksportuj pakiet mobilny`, a przy brakach bibliotek prowadzi do uzupelnienia zaleznosci;
+- domyslna nazwa pliku eksportu jest czytelna i nietechniczna: `ALPR_data-godzina_typy-modeli_razem-rozmiar.alprmodel`, bez runow, metryk i dlugich identyfikatorow;
 - kazdy format ma opisany cel: `Android stabilny`, `Android lekki`, `Kontrola`, `Eksperyment`;
 - domyslnie zaznaczony jest tylko stabilny `LiteRT/TFLite FP32`; `ONNX`, `INT8` i `NCNN` uzytkownik wlacza swiadomie;
+- exporter zapisuje teraz `format_quantizations`, czyli precyzje per format, np. `litert: [fp32, int8]`, `onnx: [fp32, int8]`, `ncnn: [fp32]`;
+- `ONNX INT8` jest budowany kompatybilnie wstecz: najpierw eksport `ONNX FP32`, potem statyczna kwantyzacja ONNX Runtime na wskazanym `data.yaml`;
+- kwantyzacja ONNX INT8 omija wezly inne niz `Conv`, `Gemm` i `MatMul`, zeby nie psuc glowicy dekodujacej YOLO;
 - dokument handoff doprecyzowuje, ze Android powinien wybierac runtime jawnie i raportowac, ktory wariant zostal uzyty;
 - dokumentacja kwantyzacji/eksportu dostala rozszerzony opis konsekwencji wyboru kilku formatow.
 
@@ -2356,12 +2363,42 @@ Uzasadnienie:
 - zgodnie z dokumentacja Ultralytics format eksportu jest zalezy od docelowego runtime i sprzetu, a nie jest cecha samego treningu;
 - LiteRT/TFLite jest naturalnym kierunkiem dla Androida i inferencji on-device;
 - ONNX Runtime Mobile moze byc dobra sciezka kontrolna, ale wymaga osobnego runtime w aplikacji;
+- lokalna wersja Ultralytics moze nie przyjmowac argumentu `quantize` dla ONNX, dlatego bezpieczniej utrzymac wlasny krok post-processingu ONNX Runtime;
 - NCNN jest runtime mobilnym/embedded, lecz wymaga dedykowanej integracji po stronie klienta;
 - powtarzalny eksperyment wymaga, aby roznice miedzy wariantami wynikaly z formatu/runtime/kwantyzacji, a nie z roznych checkpointow.
 
 Zrodla:
 
 - Ultralytics, `Model Export with Ultralytics YOLO`: https://docs.ultralytics.com/modes/export;
+- Ultralytics, `utils.export.onnx.onnx_int8_quantize`: https://docs.ultralytics.com/reference/utils/export/onnx;
 - Google AI Edge, `LiteRT for Android`: https://developers.google.cn/edge/litert/android;
 - ONNX Runtime, `Deploy on mobile`: https://onnxruntime.ai/docs/tutorials/mobile/;
 - Tencent NCNN: https://github.com/Tencent/ncnn.
+
+### 18. Importer i przegladarka raportow z klienta Android
+
+Problem:
+
+- aplikacja mobilna potrafi eksportowac raporty eksperymentow, ale aplikacja desktopowa nie miala wygodnego miejsca do ich importu, walidacji i analizy;
+- reczne rozpakowywanie `.alprsession` albo ZIP-ow grozi mieszaniem poziomow danych: `report.json` jest zrodlem metryk zbiorczych, a `traces.csv` opisuje przebieg klatkowy;
+- wyniki badawcze musza byc czytelne, powtarzalne i widoczne w aplikacji macierzystej, bez uruchamiania modeli dolaczonych do raportu.
+
+Decyzja:
+
+- dodano bezpieczny czytnik `ReportBundleReader`, ktory traktuje `.alprsession`, klasyczny ZIP benchmarku i paczke thesis jako archiwum ZIP;
+- czytnik odrzuca niebezpieczne sciezki, duplikaty wpisow i zbyt duze archiwa, a manifest `entry_sha256` weryfikuje strumieniowo bez rozpakowywania paczki do projektu;
+- importer czyta `report.json`, `traces.csv`, `application.log`, `samples/index.csv` i `samples/annotations.jsonl`, ale nie laduje automatycznie modeli ani wszystkich obrazow;
+- istniejacy `MobilePackageExperimentStore` zostal rozszerzony o import paczek ZIP, dzieki czemu raporty z telefonu trafiaja do tego samego magazynu co raporty JSON;
+- scoring raportow uwzglednia teraz androidowy klucz `quality.exact_match_rate`;
+- centrum eksportu mobilnego dostalo wejscie `Raporty z telefonu`, uruchamiajace przegladarke z podsumowaniem, konfiguracja, opoznieniami, jakoscia, diagnostyka, cropami i surowymi danymi.
+- glowny pasek okna dostal grupe `Integracje`, w ktorej `Eksport mobilny` i `Import raportow` sa rownorzednymi wejsciami do wymiany danych z klientem Android.
+- importer raportow pozwala zaznaczyc wiele plikow naraz i przetwarza je sekwencyjnie, zapisujac poprawne raporty nawet wtedy, gdy pojedynczy plik wymaga kontroli albo konczy sie bledem odczytu.
+- tozsamosc raportu uwzglednia teraz `report_id` i date pomiaru, zeby kilka prob tego samego pakietu, wariantu i telefonu nie bylo nadpisywanych jako jeden wynik.
+
+Uzasadnienie:
+
+- walidacja integralnosci musi poprzedzac interpretacje metryk, bo inaczej wynik moze wygladac wiarygodnie mimo uszkodzonej paczki;
+- `report.json` i `traces.csv` nie moga byc sumowane, poniewaz opisuja inne poziomy obserwacji;
+- brak ground truth jest prezentowany oddzielnie od jakosci rownej zero, bo confidence i sam uzysk odczytow nie sa miara accuracy;
+- przegladarka jest izolowana od grafu, treningu i kart roboczych, zeby import raportow nie zwiekszal ryzyka regresu w podstawowym flow ALPR.
+- wejscie z globalnego paska jest celowe: raport z telefonu nie jest operacja treningowa ani robocza dla pojedynczej bramki, tylko integracja miedzy aplikacja desktopowa i klientem mobilnym.

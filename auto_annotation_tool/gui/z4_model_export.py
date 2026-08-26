@@ -67,6 +67,7 @@ from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
+from .z4_mobile_report_browser import open_mobile_report_browser
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -565,6 +566,58 @@ def _mobile_export_file_size_mb(path_like) -> float | None:
         return round(Path(path_like).stat().st_size / (1024 * 1024), 2)
     except Exception:
         return None
+
+def _mobile_export_filename_timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M")
+
+def _mobile_export_marker_from_target(target: str) -> str:
+    normalized = CONFIG.normalize_task_target(target)
+    if normalized == "vehicle":
+        return "MP"
+    if normalized == "plate":
+        return "MT"
+    return "MZ"
+
+def _mobile_export_size_filename_part(size_mb: float | None) -> str:
+    if size_mb is None:
+        return "razem-nieznanyMB"
+    try:
+        value = max(0.0, float(size_mb))
+    except Exception:
+        return "razem-nieznanyMB"
+    return f"razem-{value:.1f}MB".replace(".", "p")
+
+def _mobile_export_readable_package_filename(markers: list[str] | tuple[str, ...], total_size_mb: float | None) -> str:
+    clean_markers: list[str] = []
+    for marker in markers:
+        text = re.sub(r"[^A-Za-z0-9]+", "", str(marker or "").strip().upper())
+        if text and text not in clean_markers:
+            clean_markers.append(text)
+    marker_part = "-".join(clean_markers) if clean_markers else "MODEL"
+    size_part = _mobile_export_size_filename_part(total_size_mb)
+    return f"ALPR_{_mobile_export_filename_timestamp()}_{marker_part}_{size_part}.alprmodel"
+
+def _mobile_export_candidate_size_mb(candidate: dict | None) -> float | None:
+    if not isinstance(candidate, dict):
+        return None
+    value = candidate.get("file_size_mb")
+    if value is not None:
+        try:
+            return float(value)
+        except Exception:
+            pass
+    return _mobile_export_file_size_mb(candidate.get("best_weights"))
+
+def _mobile_export_candidates_total_size_mb(candidates: list[dict] | tuple[dict, ...]) -> float | None:
+    total = 0.0
+    count = 0
+    for candidate in candidates or ():
+        size_mb = _mobile_export_candidate_size_mb(candidate)
+        if size_mb is None:
+            continue
+        total += float(size_mb)
+        count += 1
+    return round(total, 1) if count else None
 
 def _mobile_export_task_label(target: str, info: dict | None = None, task_hint: str = "") -> str:
     raw_task = str(task_hint or "").strip().lower()
@@ -1313,23 +1366,13 @@ def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, 
     }
 
 def _build_mobile_model_export_path(self, run, target: str, source_path: Path) -> Path:
-    role = _mobile_role_from_training_target(target)
+    marker = _mobile_export_marker_from_target(target)
     target_dir = Path(CONFIG.get_mobile_model_packages_dir(target))
     target_dir.mkdir(parents=True, exist_ok=True)
-    source_name = Path(source_path).stem if source_path else ""
-    run_name = self._safe_model_export_slug(getattr(run, "name", "") or getattr(run, "id", "") or source_name, fallback=role)
-    run_id = self._safe_model_export_slug(getattr(run, "id", "") or source_name, fallback=datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-    metric_summary = self._build_history_run_metric_summary(run)
-    metric_value = metric_summary.get("best_map50_95") or metric_summary.get("best_map50")
-    if metric_value is None:
-        metric_value = _mobile_export_metric_from_filename(source_path)
-    metric_tag = ""
-    if metric_value is not None:
-        try:
-            metric_tag = f"_map{int(round(max(0.0, min(1.0, float(metric_value))) * 100)):03d}"
-        except Exception:
-            metric_tag = ""
-    return target_dir / f"{role}_{run_name}_{run_id}{metric_tag}.alprmodel"
+    return target_dir / _mobile_export_readable_package_filename(
+        [marker],
+        _mobile_export_file_size_mb(source_path),
+    )
 
 def _build_mobile_alpr_package_export_path(
     self,
@@ -1340,15 +1383,17 @@ def _build_mobile_alpr_package_export_path(
 ) -> Path:
     target_dir = Path(getattr(CONFIG, "DIR_6_MODELS_MOBILE_PACKAGES", CONFIG.DIR_6_MODELS / "mobile_packages")) / "alpr"
     target_dir.mkdir(parents=True, exist_ok=True)
-    vehicle_id = ""
+    selected_candidates = []
+    markers = []
     if vehicle_candidate:
-        vehicle_id = self._safe_model_export_slug(str(vehicle_candidate.get("model_label") or "MP"), fallback="MP")
-    plate_id = self._safe_model_export_slug(str(plate_candidate.get("model_label") or "MT"), fallback="MT")
-    char_id = self._safe_model_export_slug(str(char_candidate.get("model_label") or "MZ"), fallback="MZ")
-    stamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
-    if vehicle_id:
-        return target_dir / f"ALPR_{vehicle_id}_{plate_id}_{char_id}_{stamp}.alprmodel"
-    return target_dir / f"ALPR_{plate_id}_{char_id}_{stamp}.alprmodel"
+        selected_candidates.append(vehicle_candidate)
+        markers.append("MP")
+    selected_candidates.extend([plate_candidate, char_candidate])
+    markers.extend(["MT", "MZ"])
+    return target_dir / _mobile_export_readable_package_filename(
+        markers,
+        _mobile_export_candidates_total_size_mb(selected_candidates),
+    )
 
 def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) -> dict:
     metric_summary = self._build_history_run_metric_summary(run)
@@ -3420,6 +3465,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
     litert_var = tk.BooleanVar(value=True)
     onnx_var = tk.BooleanVar(value=False)
     int8_var = tk.BooleanVar(value=False)
+    onnx_int8_var = tk.BooleanVar(value=False)
     ncnn_var = tk.BooleanVar(value=False)
     imgsz_var = tk.IntVar(value=img_size)
     conf_var = tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE)
@@ -3464,6 +3510,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         ("LiteRT/TFLite FP32", litert_var),
         ("ONNX FP32", onnx_var),
         ("LiteRT/TFLite INT8", int8_var),
+        ("ONNX INT8", onnx_int8_var),
         ("NCNN", ncnn_var),
     )):
         cb = ttk.Checkbutton(formats_frame, text=text, variable=var)
@@ -3570,15 +3617,38 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         formats = []
         if litert_var.get() or int8_var.get():
             formats.append("litert")
-        if onnx_var.get():
+        if onnx_var.get() or onnx_int8_var.get():
             formats.append("onnx")
         if ncnn_var.get():
             formats.append("ncnn")
+        format_quantizations = {}
+        if "litert" in formats:
+            litert_quantizations = []
+            if litert_var.get():
+                litert_quantizations.append("fp32")
+            if int8_var.get():
+                litert_quantizations.append("int8")
+            format_quantizations["litert"] = tuple(dict.fromkeys(litert_quantizations or ["fp32"]))
+        if "onnx" in formats:
+            onnx_quantizations = []
+            if onnx_var.get():
+                onnx_quantizations.append("fp32")
+            if onnx_int8_var.get():
+                onnx_quantizations.append("int8")
+            format_quantizations["onnx"] = tuple(dict.fromkeys(onnx_quantizations or ["fp32"]))
+        if "ncnn" in formats:
+            format_quantizations["ncnn"] = ("fp32",)
         quantizations = []
         if litert_var.get():
             quantizations.append("fp32")
         if int8_var.get():
             quantizations.append("int8")
+        if onnx_var.get():
+            quantizations.append("fp32")
+        if onnx_int8_var.get():
+            quantizations.append("int8")
+        if ncnn_var.get():
+            quantizations.append("fp32")
         destination = Path(str(destination_var.get() or default_destination).strip())
         if destination.suffix.lower() != ".alprmodel":
             destination = destination.with_suffix(".alprmodel")
@@ -3619,6 +3689,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
                 "schema": "alpr.export.settings_snapshot.v1",
                 "formats": list(formats),
                 "quantizations": list(dict.fromkeys(quantizations)),
+                "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
                 "image_size": int(imgsz_var.get() or img_size),
                 "confidence_threshold": max(0.0, min(1.0, float(conf_var.get() or CONFIG.DEFAULT_CONFIDENCE))),
                 "iou_threshold": max(0.0, min(1.0, float(iou_var.get() or CONFIG.DEFAULT_IOU))),
@@ -3633,6 +3704,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             formats=tuple(formats),
             image_size=int(imgsz_var.get() or img_size),
             quantizations=tuple(dict.fromkeys(quantizations)),
+            format_quantizations=format_quantizations,
             calibration_data=calibration,
             confidence_threshold=max(0.0, min(1.0, float(conf_var.get() or CONFIG.DEFAULT_CONFIDENCE))),
             iou_threshold=max(0.0, min(1.0, float(iou_var.get() or CONFIG.DEFAULT_IOU))),
@@ -3665,6 +3737,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         except Exception as exc:
             problems = [str(exc)]
         if problems:
+            preflight_ready_state["ready"] = False
             text = (
                 "Eksport nie może jeszcze ruszyć.\n"
                 + "\n".join(f"- {item}" for item in problems)
@@ -3673,12 +3746,15 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             set_status(text, "warning")
             if show_dialog:
                 messagebox.showwarning("Sprawdzenie gotowości eksportu", text, parent=dialog)
-                return False
+            sync_primary_button()
+            return False
+        preflight_ready_state["ready"] = True
         set_status("Eksport gotowy. Można zbudować pakiet mobilny.", "success")
+        sync_primary_button()
         return True
 
     def ask_destination() -> Path | None:
-        current = Path(str(destination_var.get() or default_destination).strip())
+        current = self._build_mobile_model_export_path(run, target, best_weights)
         initial_dir = current.parent
         if str(initial_dir) == ".":
             initial_dir = Path.cwd()
@@ -3698,14 +3774,38 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         return path
 
     worker_state = {"running": False}
+    preflight_ready_state = {"ready": False}
+    primary_button = None
+
+    def sync_primary_button() -> None:
+        button = primary_button
+        if button is None:
+            return
+        try:
+            if worker_state.get("running"):
+                button.configure(text="Eksport trwa...", state=tk.DISABLED)
+            elif preflight_ready_state.get("ready"):
+                button.configure(text="Eksportuj .alprmodel", state=tk.NORMAL)
+            else:
+                button.configure(text="Sprawdź gotowość eksportu", state=tk.NORMAL)
+        except Exception:
+            pass
+
+    def mark_preflight_dirty(*_args) -> None:
+        if worker_state.get("running"):
+            return
+        preflight_ready_state["ready"] = False
+        set_status("Ustawienia zmienione. Najpierw sprawdź gotowość eksportu.", "info")
+        sync_primary_button()
 
     def set_running(running: bool) -> None:
         worker_state["running"] = running
-        for widget in (export_button, preflight_button, close_button):
+        for widget in (primary_button, close_button):
             try:
                 widget.configure(state=(tk.DISABLED if running else tk.NORMAL))
             except Exception:
                 pass
+        sync_primary_button()
 
     def export_package() -> None:
         if worker_state.get("running"):
@@ -3787,14 +3887,35 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
 
         threading.Thread(target=worker, name="mobile-model-export", daemon=True).start()
 
-    preflight_button = ttk.Button(actions, text="Sprawdź gotowość", command=lambda: run_preflight(show_dialog=True))
-    preflight_button.grid(row=0, column=1, sticky="e", padx=(0, 8), ipadx=8, ipady=4)
-    export_button = ttk.Button(actions, text="Eksportuj .alprmodel", command=export_package)
-    export_button.grid(row=0, column=2, sticky="e", padx=(0, 8), ipadx=10, ipady=4)
-    close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
-    close_button.grid(row=0, column=3, sticky="e", ipadx=8, ipady=4)
+    def run_primary_action() -> None:
+        if worker_state.get("running"):
+            return
+        if preflight_ready_state.get("ready"):
+            export_package()
+            return
+        run_preflight(show_dialog=True)
 
-    run_preflight(show_dialog=False)
+    primary_button = ttk.Button(actions, text="Sprawdź gotowość eksportu", command=run_primary_action)
+    primary_button.grid(row=0, column=1, sticky="e", padx=(0, 8), ipadx=10, ipady=4)
+    close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
+    close_button.grid(row=0, column=2, sticky="e", ipadx=8, ipady=4)
+
+    for export_option_var in (
+        litert_var,
+        onnx_var,
+        int8_var,
+        onnx_int8_var,
+        ncnn_var,
+        imgsz_var,
+        conf_var,
+        iou_var,
+        calibration_var,
+    ):
+        try:
+            export_option_var.trace_add("write", mark_preflight_dirty)
+        except Exception:
+            pass
+    sync_primary_button()
     try:
         dialog.wait_window()
     except Exception:
@@ -6666,6 +6787,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     litert_var = tk.BooleanVar(value=True)
     onnx_var = tk.BooleanVar(value=False)
     int8_var = tk.BooleanVar(value=False)
+    onnx_int8_var = tk.BooleanVar(value=False)
     ncnn_var = tk.BooleanVar(value=False)
     imgsz_var = tk.IntVar(value=CONFIG.DEFAULT_IMG_SIZE)
     conf_var = tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE)
@@ -6860,6 +6982,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ("LiteRT/TFLite", "FP32, bez kwantyzacji", litert_var),
             ("LiteRT/TFLite", "INT8, kwantyzacja po kalibracji", int8_var),
             ("ONNX", "FP32", onnx_var),
+            ("ONNX", "INT8, kwantyzacja po kalibracji", onnx_int8_var),
             ("NCNN", "FP32", ncnn_var),
         )
     ):
@@ -8120,7 +8243,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
         if request is None:
             return []
         try:
-            specs = mobile_export_required_specs(tuple(request.formats or ()))
+            specs = mobile_export_required_specs(
+                tuple(request.formats or ()),
+                quantizations=tuple(getattr(request, "quantizations", ()) or ()),
+                format_quantizations=getattr(request, "format_quantizations", {}) or {},
+            )
         except Exception:
             specs = []
         rows: list[dict] = []
@@ -8513,16 +8640,26 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return "-"
         formats = set(str(item or "").strip().lower() for item in (request.formats or ()))
         quantizations = set(str(item or "").strip().lower() for item in (request.quantizations or ()))
+        format_quantizations = getattr(request, "format_quantizations", {}) if request is not None else {}
+        if not isinstance(format_quantizations, dict) or not format_quantizations:
+            format_quantizations = {item: tuple(quantizations or {"fp32"}) for item in formats}
         items: list[str] = []
         if "litert" in formats:
+            litert_quantizations = set(str(item or "").strip().lower() for item in (format_quantizations.get("litert") or ()))
             precision = []
-            if "fp32" in quantizations:
+            if "fp32" in litert_quantizations:
                 precision.append("FP32")
-            if "int8" in quantizations:
+            if "int8" in litert_quantizations:
                 precision.append("INT8")
             items.append("LiteRT/TFLite " + ("/".join(precision) if precision else "FP32"))
         if "onnx" in formats:
-            items.append("ONNX FP32")
+            onnx_quantizations = set(str(item or "").strip().lower() for item in (format_quantizations.get("onnx") or ()))
+            precision = []
+            if "fp32" in onnx_quantizations:
+                precision.append("FP32")
+            if "int8" in onnx_quantizations:
+                precision.append("INT8")
+            items.append("ONNX " + ("/".join(precision) if precision else "FP32"))
         if "ncnn" in formats:
             items.append("NCNN FP32")
         return ", ".join(items) if items else "Nie wybrano formatu eksportu"
@@ -8776,11 +8913,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
             preflight=int(bool(preflight_after)),
         )
 
-    def _selected_export_formats_and_quantizations(option_vars: dict | None = None) -> tuple[list[str], list[str]]:
+    def _selected_export_format_quantizations(option_vars: dict | None = None) -> dict[str, tuple[str, ...]]:
         source = option_vars if isinstance(option_vars, dict) else {}
         litert_source = source.get("litert") or litert_var
         onnx_source = source.get("onnx") or onnx_var
         int8_source = source.get("int8") or int8_var
+        onnx_int8_source = source.get("onnx_int8") or onnx_int8_var
         ncnn_source = source.get("ncnn") or ncnn_var
 
         def _bool_value(variable) -> bool:
@@ -8789,18 +8927,31 @@ def _open_mobile_model_export_center(self, initial_run=None):
             except Exception:
                 return bool(variable)
 
-        formats: list[str] = []
-        quantizations: list[str] = []
+        result: dict[str, tuple[str, ...]] = {}
         if _bool_value(litert_source) or _bool_value(int8_source):
-            formats.append("litert")
-        if _bool_value(onnx_source):
-            formats.append("onnx")
+            values = []
+            if _bool_value(litert_source):
+                values.append("fp32")
+            if _bool_value(int8_source):
+                values.append("int8")
+            result["litert"] = tuple(dict.fromkeys(values or ["fp32"]))
+        if _bool_value(onnx_source) or _bool_value(onnx_int8_source):
+            values = []
+            if _bool_value(onnx_source):
+                values.append("fp32")
+            if _bool_value(onnx_int8_source):
+                values.append("int8")
+            result["onnx"] = tuple(dict.fromkeys(values or ["fp32"]))
         if _bool_value(ncnn_source):
-            formats.append("ncnn")
-        if _bool_value(litert_source):
-            quantizations.append("fp32")
-        if _bool_value(int8_source):
-            quantizations.append("int8")
+            result["ncnn"] = ("fp32",)
+        return result
+
+    def _selected_export_formats_and_quantizations(option_vars: dict | None = None) -> tuple[list[str], list[str]]:
+        format_quantizations = _selected_export_format_quantizations(option_vars)
+        formats = list(format_quantizations.keys())
+        quantizations: list[str] = []
+        for values in format_quantizations.values():
+            quantizations.extend(values)
         return formats, quantizations
 
     def _build_mobile_export_request_for_candidate(
@@ -8819,6 +8970,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         img_size = int(candidate.get("img_size") or getattr(run, "img_size", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE)
         options = option_vars if isinstance(option_vars, dict) else {}
         formats, quantizations = _selected_export_formats_and_quantizations(options)
+        format_quantizations = _selected_export_format_quantizations(options)
 
         def _option_value(name: str, fallback):
             variable = options.get(name)
@@ -8879,6 +9031,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     "schema": "alpr.export.settings_snapshot.v1",
                     "formats": list(formats),
                     "quantizations": list(dict.fromkeys(quantizations)),
+                    "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
                     "image_size": int(_option_value("imgsz", imgsz_var.get()) or img_size),
                     "confidence_threshold": max(
                         0.0,
@@ -8900,6 +9053,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             formats=tuple(formats),
             image_size=int(_option_value("imgsz", imgsz_var.get()) or img_size),
             quantizations=tuple(dict.fromkeys(quantizations)),
+            format_quantizations=format_quantizations,
             calibration_data=calibration,
             confidence_threshold=max(0.0, min(1.0, float(_option_value("conf", conf_var.get()) or CONFIG.DEFAULT_CONFIDENCE))),
             iou_threshold=max(0.0, min(1.0, float(_option_value("iou", iou_var.get()) or CONFIG.DEFAULT_IOU))),
@@ -9803,6 +9957,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 "litert": tk.BooleanVar(value=True),
                 "int8": tk.BooleanVar(value=False),
                 "onnx": tk.BooleanVar(value=False),
+                "onnx_int8": tk.BooleanVar(value=False),
                 "ncnn": tk.BooleanVar(value=False),
                 "imgsz": tk.IntVar(value=img_size),
                 "conf": tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE),
@@ -9816,7 +9971,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             }
 
         def _mark_executor_dirty(*_args) -> None:
-            exec_preflight_state["ready"] = False
+            exec_preflight_state.update({"ready": False, "problems": [], "installable": False})
             exec_status_var.set("Ustawienia zmienione. Sprawdzenie gotowości zostanie wykonane ponownie przy eksporcie.")
             _sync_executor_buttons()
 
@@ -9969,6 +10124,16 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 formats,
                 row=2,
                 column=1,
+                title="ONNX INT8",
+                body="Kwantyzowany ONNX do badan porownawczych. Wymaga data.yaml kalibracji.",
+                color=warning,
+                bg_color=formats["bg"],
+                variable=state["onnx_int8"],
+            )
+            _create_format_hint_card(
+                formats,
+                row=3,
+                column=0,
                 title="Eksperyment",
                 body="NCNN FP32. Tylko gdy klient Android ma obsługę runtime NCNN.",
                 color=muted,
@@ -9977,7 +10142,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             )
 
             params = tk.Frame(panel, bg=panel_bg)
-            params.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+            params.grid(row=4, column=0, sticky="ew", pady=(0, 8))
             for grid_col in range(6):
                 params.grid_columnconfigure(grid_col, weight=1 if grid_col in {1, 3, 5} else 0)
             tk.Label(params, text="imgsz", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5))
@@ -9987,7 +10152,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             tk.Label(params, text="IoU", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=4, sticky="w", padx=(0, 5))
             ttk.Spinbox(params, from_=0.00001, to=1.0, increment=0.01, textvariable=state["iou"], width=7, format="%.5f").grid(row=0, column=5, sticky="w")
 
-            next_row = 4
+            next_row = 5
             if marker == "MP":
                 vehicle_box = tk.Frame(
                     panel,
@@ -10119,7 +10284,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             def _sync_int8_calibration_hint(*_args, current_state=state) -> None:
                 try:
-                    if bool(current_state["int8"].get()) and not str(current_state["calibration"].get() or "").strip():
+                    if (
+                        (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get()))
+                        and not str(current_state["calibration"].get() or "").strip()
+                    ):
                         suggestions = list(current_state.get("calibration_suggestions") or [])
                         if suggestions:
                             current_state["calibration_choice"].set(str(suggestions[0].get("label") or ""))
@@ -10129,10 +10297,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             try:
                 state["int8"].trace_add("write", _sync_int8_calibration_hint)
+                state["onnx_int8"].trace_add("write", _sync_int8_calibration_hint)
             except Exception:
                 pass
 
-            for key in ("litert", "int8", "onnx", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes"):
+            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes"):
                 try:
                     state[key].trace_add("write", _mark_executor_dirty)
                 except Exception:
@@ -10293,10 +10462,27 @@ def _open_mobile_model_export_center(self, initial_run=None):
             running = bool(worker_state.get("running"))
             install_running = bool(exec_install_control.get("running"))
             installable = bool(exec_preflight_state.get("installable"))
+            ready = bool(exec_preflight_state.get("ready")) and not bool(exec_preflight_state.get("problems"))
+            if running:
+                primary_text = "Eksport trwa..."
+                primary_state = tk.DISABLED
+            elif install_running:
+                primary_text = "Instaluję zależności..."
+                primary_state = tk.DISABLED
+            elif ready:
+                primary_text = "Eksportuj pakiet mobilny"
+                primary_state = tk.NORMAL
+            elif installable:
+                primary_text = "Uzupełnij zależności"
+                primary_state = tk.NORMAL
+            elif exec_preflight_state.get("problems"):
+                primary_text = "Sprawdź ponownie"
+                primary_state = tk.NORMAL
+            else:
+                primary_text = "Sprawdź gotowość eksportu"
+                primary_state = tk.NORMAL
             for key, state_value in (
-                ("preflight", tk.DISABLED if running else tk.NORMAL),
-                ("install", tk.NORMAL if installable and not running else tk.DISABLED),
-                ("export", tk.DISABLED if running else tk.NORMAL),
+                ("primary", primary_state),
                 ("pause", tk.NORMAL if install_running else tk.DISABLED),
                 ("close", tk.DISABLED if running else tk.NORMAL),
             ):
@@ -10307,6 +10493,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     button.configure(state=state_value)
                 except Exception:
                     pass
+            try:
+                primary_button = exec_buttons.get("primary")
+                if primary_button is not None:
+                    primary_button.configure(text=primary_text)
+            except Exception:
+                pass
             try:
                 pause_button = exec_buttons.get("pause")
                 if pause_button is not None:
@@ -10335,6 +10527,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         def _state_export_manifest_snapshot(state: dict) -> dict:
             candidate = state.get("candidate") if isinstance(state.get("candidate"), dict) else {}
             formats, quantizations = _selected_export_formats_and_quantizations(state)
+            format_quantizations = _selected_export_format_quantizations(state)
 
             def _state_value(key: str, fallback=""):
                 value = state.get(key)
@@ -10350,6 +10543,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     "candidate": _mobile_export_candidate_manifest_snapshot(candidate),
                     "formats": list(formats),
                     "quantizations": list(dict.fromkeys(quantizations)),
+                    "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
                     "image_size": int(_state_value("imgsz", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE),
                     "confidence_threshold": max(0.0, min(1.0, float(_state_value("conf", CONFIG.DEFAULT_CONFIDENCE) or CONFIG.DEFAULT_CONFIDENCE))),
                     "iou_threshold": max(0.0, min(1.0, float(_state_value("iou", CONFIG.DEFAULT_IOU) or CONFIG.DEFAULT_IOU))),
@@ -10454,6 +10648,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
         def _executor_formats_description(state: dict) -> str:
             formats, quantizations = _selected_export_formats_and_quantizations(state)
+            format_quantizations = _selected_export_format_quantizations(state)
             request = MobileExportRequest(
                 checkpoint=Path(state["candidate"].get("best_weights")),
                 destination=Path("preview.alprmodel"),
@@ -10461,6 +10656,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 formats=tuple(formats),
                 image_size=int(state["imgsz"].get() or CONFIG.DEFAULT_IMG_SIZE),
                 quantizations=tuple(quantizations),
+                format_quantizations=format_quantizations,
             )
             return _formats_description(request)
 
@@ -10473,6 +10669,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 "onnx": "Budowa i inspekcja wariantu ONNX oraz ścieżki TFLite.",
                 "onnxruntime": "Walidacja ONNX po eksporcie; używamy wariantu CPU.",
                 "onnxslim": "Uproszczenie grafu ONNX.",
+                "PIL": "Odczyt obrazów kalibracyjnych dla wariantu ONNX INT8.",
+                "yaml": "Odczyt data.yaml używanego do kalibracji ONNX INT8.",
                 "tensorflow": "Konwersja do wariantu TFLite/LiteRT.",
                 "tf_keras": "Warstwa Keras wymagana przez konwerter TFLite.",
                 "sng4onnx": "Narzędzie pomocnicze konwersji ONNX do TensorFlow.",
@@ -10484,7 +10682,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 "pnnx": "Konwerter wymagany przez eksport NCNN.",
             }
             result: list[dict] = []
-            for row in mobile_export_required_specs(tuple(formats)):
+            for row in mobile_export_required_specs(
+                tuple(formats),
+                quantizations=tuple(quantizations),
+                format_quantizations=_selected_export_format_quantizations(state),
+            ):
                 module = str(row.get("module") or "").strip()
                 result.append(
                     {
@@ -10951,16 +11153,23 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             threading.Thread(target=worker, name="mobile-selected-export", daemon=True).start()
 
-        exec_buttons["preflight"] = ttk.Button(actions_exec, text="Sprawdź gotowość", command=lambda: run_executor_preflight(show_dialog=True))
-        exec_buttons["preflight"].grid(row=0, column=1, sticky="e", padx=(0, 7), ipadx=8, ipady=3)
-        exec_buttons["install"] = ttk.Button(actions_exec, text="Uzupełnij zależności", command=install_executor_dependencies, state=tk.DISABLED)
-        exec_buttons["install"].grid(row=0, column=2, sticky="e", padx=(0, 7), ipadx=8, ipady=3)
+        def run_executor_primary_action() -> None:
+            if worker_state.get("running") or exec_install_control.get("running"):
+                return
+            if bool(exec_preflight_state.get("ready")) and not bool(exec_preflight_state.get("problems")):
+                export_executor_package()
+                return
+            if bool(exec_preflight_state.get("installable")) and bool(exec_preflight_state.get("problems")):
+                install_executor_dependencies()
+                return
+            run_executor_preflight(show_dialog=True)
+
+        exec_buttons["primary"] = ttk.Button(actions_exec, text="Sprawdź gotowość eksportu", command=run_executor_primary_action)
+        exec_buttons["primary"].grid(row=0, column=1, sticky="e", padx=(0, 7), ipadx=12, ipady=3)
         exec_buttons["pause"] = ttk.Button(actions_exec, text="Pauza", command=toggle_executor_pause, state=tk.DISABLED)
-        exec_buttons["pause"].grid(row=0, column=3, sticky="e", padx=(0, 7), ipadx=8, ipady=3)
-        exec_buttons["export"] = ttk.Button(actions_exec, text="Eksportuj pakiet", command=export_executor_package)
-        exec_buttons["export"].grid(row=0, column=4, sticky="e", padx=(0, 7), ipadx=10, ipady=3)
+        exec_buttons["pause"].grid(row=0, column=2, sticky="e", padx=(0, 7), ipadx=8, ipady=3)
         exec_buttons["close"] = ttk.Button(actions_exec, text="Zamknij", command=executor_modal.destroy)
-        exec_buttons["close"].grid(row=0, column=5, sticky="e", ipadx=8, ipady=3)
+        exec_buttons["close"].grid(row=0, column=3, sticky="e", ipadx=8, ipady=3)
 
         _set_executor_rows(
             [
@@ -11515,6 +11724,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
         command=open_selected_mobile_export_executor,
         state=tk.DISABLED,
     )
+    ttk.Button(
+        actions,
+        text="Raporty z telefonu",
+        command=lambda: open_mobile_report_browser(self, parent=dialog),
+    ).grid(row=0, column=0, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
     export_button.grid(row=0, column=1, sticky="e", padx=(0, 7), ipadx=10, ipady=2)
     close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
     close_button.grid(row=0, column=2, sticky="e", ipadx=7, ipady=2)
