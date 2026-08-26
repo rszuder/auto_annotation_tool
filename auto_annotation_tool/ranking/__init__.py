@@ -13,6 +13,7 @@ from .model_ranking import (
 )
 from .mobile_package_experiments import (
     DatasetRef,
+    ExperimentSessionRecord,
     ExperimentModelRef,
     MobileBenchmarkReport,
     MobilePackageCandidate,
@@ -27,6 +28,7 @@ from .mobile_package_experiments import (
     build_package_id,
     default_runtime_variants,
     read_mobile_report_bundle,
+    read_mobile_report_bundles,
     read_alpr_package_manifest,
     read_alprmodel_manifest,
     score_mobile_report,
@@ -38,6 +40,7 @@ __all__ = [
     'ModelRanking',
     'ModelRankingEntry',
     'DatasetRef',
+    'ExperimentSessionRecord',
     'ExperimentModelRef',
     'MobileBenchmarkReport',
     'MobilePackageCandidate',
@@ -56,5 +59,6 @@ __all__ = [
     'read_alpr_package_manifest',
     'read_alprmodel_manifest',
     'read_mobile_report_bundle',
+    'read_mobile_report_bundles',
     'score_mobile_report',
 ]

@@ -2394,6 +2394,12 @@ Decyzja:
 - glowny pasek okna dostal grupe `Integracje`, w ktorej `Eksport mobilny` i `Import raportow` sa rownorzednymi wejsciami do wymiany danych z klientem Android.
 - importer raportow pozwala zaznaczyc wiele plikow naraz i przetwarza je sekwencyjnie, zapisujac poprawne raporty nawet wtedy, gdy pojedynczy plik wymaga kontroli albo konczy sie bledem odczytu.
 - tozsamosc raportu uwzglednia teraz `report_id` i date pomiaru, zeby kilka prob tego samego pakietu, wariantu i telefonu nie bylo nadpisywanych jako jeden wynik.
+- raport zachowuje `source_archive_sha256`, a deduplikacja opiera sie na hashu zrodla oraz identyfikatorze konkretnego przebiegu, dzieki czemu identyczny plik nie dubluje wynikow, ale kilka powtorzen eksperymentu pozostaje widoczne.
+- dodano neutralny `ExperimentSessionRecord`: parser wydobywa serie, scenariusz, wariant, replike, build aplikacji, urzadzenie, runtime, modele, rozdzielczosc, profil rozpoznawania i flagi kompletnosci artefaktow bez odwolywania sie do Tkintera.
+- widok raportu pokazuje hash zrodla oraz podstawowy indeks eksperymentu, co przygotowuje grunt pod guard porownywalnosci i pozniejsze widoki serii eksperymentalnych.
+- czytnik raportow rozpoznaje dodatkowe artefakty badawcze: `thermal.csv`, `frame_flow.csv`, `events.csv/jsonl` oraz `samples/index.csv`; w store zapisywane sa liczniki zrodla, a w UI pokazywany jest tylko lekki preview, zeby nie mylic podgladu z pelna analiza.
+- dodano `read_mobile_report_bundles`, czyli import wielu raportow z jednego pliku JSON/listy `reports`; dzieki temu plik zbiorczy z telefonu nie jest przycinany do pierwszego raportu i moze reprezentowac cala serie albo kilka powtorzen.
+- przegladarka raportow dostala zakladke `Porownywalnosc`, ktora sprawdza wybrany raport wzgledem innych raportow tej samej serii i scenariusza: urzadzenie, runtime, delegate, rozdzielczosc, build aplikacji, profil rozpoznawania oraz obecnosc trace/GT.
 
 Uzasadnienie:
 
@@ -2402,3 +2408,5 @@ Uzasadnienie:
 - brak ground truth jest prezentowany oddzielnie od jakosci rownej zero, bo confidence i sam uzysk odczytow nie sa miara accuracy;
 - przegladarka jest izolowana od grafu, treningu i kart roboczych, zeby import raportow nie zwiekszal ryzyka regresu w podstawowym flow ALPR.
 - wejscie z globalnego paska jest celowe: raport z telefonu nie jest operacja treningowa ani robocza dla pojedynczej bramki, tylko integracja miedzy aplikacja desktopowa i klientem mobilnym.
+- preview ma charakter diagnostyczny, a nie obliczeniowy: pelne liczniki artefaktow pozostaja w indeksie eksperymentu, co pozwala pozniej budowac wykresy i guard porownywalnosci bez ponownego importu paczki.
+- guard porownywalnosci nie blokuje uzytkownika, ale sygnalizuje, kiedy wynik moze byc niemiarodajny, bo zmienila sie zmienna uboczna, np. telefon, delegate, rozdzielczosc albo build aplikacji.
