@@ -18,10 +18,11 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from ..config import CONFIG, CV2_AVAILABLE, YAML_AVAILABLE, cv2, logger, np, yaml
 from ..utils import safe_load_yaml
@@ -4096,6 +4097,250 @@ def _discover_train_items(dataset_dir: Path) -> list[tuple[Path, Path]]:
         if label_path.exists() and label_path.read_text(encoding="utf-8", errors="ignore").strip():
             items.append((image_path, label_path))
     return items
+
+
+_BALANCE_EXPLICIT_AUG_SUFFIX_RE = re.compile(
+    r"(?i)(?:__aug[_-]?\d+|[_-]aug(?:mented)?[_-]?\d*)$"
+)
+
+
+def _load_augmentation_source_map(dataset_dir: Path) -> dict[str, str]:
+    manifest_path = Path(dataset_dir) / "augmentation_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    generated_files = payload.get("generated_files")
+    if not isinstance(generated_files, list):
+        return {}
+    mapping: dict[str, str] = {}
+    for item in generated_files:
+        if not isinstance(item, dict):
+            continue
+        source_key = str(item.get("source_key") or "").strip()
+        source = item.get("source_label") or item.get("source_image")
+        generated = item.get("label") or item.get("image")
+        if not generated:
+            continue
+        generated_stem = Path(str(generated)).stem
+        source_stem = source_key or Path(str(source or "")).stem
+        if generated_stem and source_stem:
+            mapping[generated_stem] = source_stem
+    return mapping
+
+
+def _normalize_balance_source_key(stem: str, source_map: dict[str, str] | None = None) -> str:
+    source_map = source_map or {}
+    current = str(stem or "").strip()
+    seen: set[str] = set()
+    while current in source_map and current not in seen:
+        seen.add(current)
+        current = str(source_map.get(current) or current).strip()
+    while True:
+        stripped = _BALANCE_EXPLICIT_AUG_SUFFIX_RE.sub("", current)
+        if stripped == current:
+            break
+        current = stripped
+    return current or str(stem or "")
+
+
+def _is_original_balance_source_label(label_path: Path, source_key: str, source_map: dict[str, str]) -> bool:
+    stem = Path(label_path).stem
+    if stem in source_map:
+        return False
+    return stem == str(source_key or stem)
+
+
+def _balance_candidate_attr(candidate: Any, key: str, default: Any = None) -> Any:
+    if isinstance(candidate, Mapping):
+        return candidate.get(key, default)
+    return getattr(candidate, key, default)
+
+
+def _iter_balance_plan_candidates(balance_plan: Any) -> list[Any]:
+    if not balance_plan:
+        return []
+    if isinstance(balance_plan, Mapping):
+        candidates = balance_plan.get("candidates") or []
+    else:
+        candidates = getattr(balance_plan, "candidates", []) or []
+    return list(candidates) if isinstance(candidates, (list, tuple)) else []
+
+
+def _balance_plan_attr(balance_plan: Any, key: str, default: Any = None) -> Any:
+    if isinstance(balance_plan, Mapping):
+        return balance_plan.get(key, default)
+    return getattr(balance_plan, key, default)
+
+
+def _path_rel_key(path: Path, root: Path) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(Path(root).resolve())).replace("\\", "/").lower()
+    except Exception:
+        try:
+            return str(Path(path).relative_to(root)).replace("\\", "/").lower()
+        except Exception:
+            return str(path).replace("\\", "/").lower()
+
+
+def _path_rel_key_if_under(path: Path, root: Path) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(Path(root).resolve())).replace("\\", "/").lower()
+    except Exception:
+        return ""
+
+
+def _candidate_label_rel_key(candidate: Any, dataset_dir: Path, base_dataset: Path | None) -> str:
+    raw_label = str(_balance_candidate_attr(candidate, "label_path", "") or "").strip()
+    if not raw_label:
+        return ""
+    label_path = Path(raw_label)
+    if label_path.is_absolute():
+        if base_dataset is not None:
+            key = _path_rel_key_if_under(label_path, base_dataset)
+            if key:
+                return key
+        key = _path_rel_key_if_under(label_path, dataset_dir)
+        return key or str(label_path).replace("\\", "/").lower()
+    return str(label_path).replace("\\", "/").lower()
+
+
+def _build_balance_augmented_source_state(
+    dataset_dir: Path,
+    items: list[tuple[Path, Path]],
+    *,
+    balance_plan: Any = None,
+    max_augmented_variants_per_source: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int | None], dict[str, int], dict[str, Any]]:
+    source_map = _load_augmentation_source_map(dataset_dir)
+    raw_candidates = _iter_balance_plan_candidates(balance_plan)
+    plan_enabled = bool(raw_candidates)
+    base_dataset_text = str(_balance_plan_attr(balance_plan, "base_dataset", "") or "").strip()
+    base_dataset = Path(base_dataset_text) if base_dataset_text else None
+    plan_max = _balance_plan_attr(balance_plan, "max_augmented_variants_per_source", None)
+    try:
+        default_limit = int(max_augmented_variants_per_source if max_augmented_variants_per_source is not None else plan_max)
+    except Exception:
+        default_limit = 0 if plan_enabled else -1
+    if not plan_enabled and max_augmented_variants_per_source is None:
+        default_limit = -1
+
+    plan_by_label: dict[str, dict[str, Any]] = {}
+    allowed_sources: set[str] = set()
+    source_limits: dict[str, int | None] = {}
+    source_priorities: dict[str, float] = {}
+    for candidate in raw_candidates:
+        source_key = str(_balance_candidate_attr(candidate, "source_key", "") or "").strip()
+        if not source_key:
+            label_stem = Path(str(_balance_candidate_attr(candidate, "label_path", "") or "")).stem
+            source_key = _normalize_balance_source_key(label_stem, source_map)
+        if not source_key:
+            continue
+        allowed_sources.add(source_key)
+        try:
+            priority = float(_balance_candidate_attr(candidate, "priority", 1.0) or 1.0)
+        except Exception:
+            priority = 1.0
+        try:
+            limit = int(_balance_candidate_attr(candidate, "max_augmented_variants", default_limit) or default_limit)
+        except Exception:
+            limit = default_limit
+        source_limits[source_key] = None if limit < 0 else max(0, limit)
+        source_priorities[source_key] = max(float(source_priorities.get(source_key, 0.0)), float(priority))
+        label_key = _candidate_label_rel_key(candidate, dataset_dir, base_dataset)
+        if label_key:
+            plan_by_label[label_key] = {
+                "source_key": source_key,
+                "priority": max(0.0, float(priority)),
+                "limit": source_limits[source_key],
+            }
+
+    records: list[dict[str, Any]] = []
+    initial_generated_by_source: dict[str, int] = {}
+    for image_path, label_path in items:
+        label_key = _path_rel_key(label_path, dataset_dir)
+        plan_meta = plan_by_label.get(label_key)
+        source_key = str((plan_meta or {}).get("source_key") or "").strip()
+        if not source_key:
+            source_key = _normalize_balance_source_key(label_path.stem, source_map)
+        source_key = source_key or label_path.stem
+        is_original = _is_original_balance_source_label(label_path, source_key, source_map)
+        if not is_original:
+            initial_generated_by_source[source_key] = int(initial_generated_by_source.get(source_key, 0) or 0) + 1
+        priority = float((plan_meta or {}).get("priority") or source_priorities.get(source_key, 1.0) or 1.0)
+        limit = (plan_meta or {}).get("limit", source_limits.get(source_key))
+        if source_key not in source_limits:
+            source_limits[source_key] = None if default_limit < 0 else max(0, default_limit)
+        records.append(
+            {
+                "image_path": image_path,
+                "label_path": label_path,
+                "label_key": label_key,
+                "source_key": source_key,
+                "priority": max(0.0, float(priority)),
+                "limit": limit if limit is not None else source_limits.get(source_key),
+                "is_original": bool(is_original),
+            }
+        )
+
+    if plan_enabled:
+        exact_records = [record for record in records if str(record.get("label_key") or "") in plan_by_label]
+        if exact_records:
+            records = exact_records
+        else:
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for record in records:
+                source_key = str(record.get("source_key") or "")
+                if source_key in allowed_sources:
+                    grouped.setdefault(source_key, []).append(record)
+            selected: list[dict[str, Any]] = []
+            for group in grouped.values():
+                group.sort(key=lambda item: (0 if item.get("is_original") else 1, str(item.get("label_key") or "")))
+                selected.append(group[0])
+            records = selected
+
+    stats = {
+        "balance_plan_enabled": bool(plan_enabled),
+        "balance_plan_candidates": len(raw_candidates),
+        "balance_pool": len(records),
+        "max_augmented_variants_per_source": None if default_limit < 0 else max(0, default_limit),
+        "initial_generated_by_source": dict(sorted(initial_generated_by_source.items())),
+    }
+    return records, source_limits, initial_generated_by_source, stats
+
+
+def _select_balance_record(
+    rng: random.Random,
+    pool: list[dict[str, Any]],
+    *,
+    generated_by_source: dict[str, int],
+    initial_generated_by_source: dict[str, int],
+    source_limits: dict[str, int | None],
+) -> dict[str, Any] | None:
+    eligible: list[dict[str, Any]] = []
+    weights: list[float] = []
+    for record in pool:
+        source_key = str(record.get("source_key") or "")
+        limit = source_limits.get(source_key, record.get("limit"))
+        total_generated = int(initial_generated_by_source.get(source_key, 0) or 0) + int(generated_by_source.get(source_key, 0) or 0)
+        if limit is not None and total_generated >= int(limit):
+            continue
+        eligible.append(record)
+        weights.append(max(0.0001, float(record.get("priority") or 1.0)))
+    if not eligible:
+        return None
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return rng.choice(eligible)
+    marker = rng.random() * total_weight
+    upto = 0.0
+    for record, weight in zip(eligible, weights):
+        upto += weight
+        if marker <= upto:
+            return record
+    return eligible[-1]
 
 
 def _parse_yolo_label(label_path: Path, *, kpt_count: int, kpt_dim: int) -> list[YoloObject]:
@@ -8816,6 +9061,8 @@ def augment_yolo_dataset_train_split(
     dataset_dir: Path,
     profile: AugmentationProfile,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    balance_plan: Any = None,
+    max_augmented_variants_per_source: int | None = None,
 ) -> tuple[bool, str, dict]:
     """Create additional augmented samples in images/train and labels/train."""
     dataset_dir = Path(dataset_dir)
@@ -8830,6 +9077,9 @@ def augment_yolo_dataset_train_split(
         "train_after": 0,
         "sample_pool": 0,
         "profile_jitter": profile_jitter_label,
+        "balance_plan_enabled": False,
+        "max_augmented_variants_per_source": None,
+        "generated_by_source": {},
     }
 
     if not profile.enabled or profile.extra_count <= 0:
@@ -8850,7 +9100,13 @@ def augment_yolo_dataset_train_split(
         return False, "Brak obrazów z etykietami w train, nie ma czego augmentować.", stats
 
     rng = random.Random(profile.seed)
-    pool = list(items)
+    pool, source_limits, initial_generated_by_source, balance_stats = _build_balance_augmented_source_state(
+        dataset_dir,
+        items,
+        balance_plan=balance_plan,
+        max_augmented_variants_per_source=max_augmented_variants_per_source,
+    )
+    stats.update(balance_stats)
     rng.shuffle(pool)
     pool = pool[: min(len(pool), profile.sample_size)]
     stats["sample_pool"] = len(pool)
@@ -8864,6 +9120,7 @@ def augment_yolo_dataset_train_split(
 
     label_dir = dataset_dir / "labels" / "train"
     generated_files: list[dict] = []
+    generated_by_source: dict[str, int] = {}
     reserved_stems = _collect_reserved_dataset_stems(dataset_dir)
 
     max_attempts = max(profile.extra_count * 10, profile.extra_count + len(pool) * 2)
@@ -8873,7 +9130,18 @@ def augment_yolo_dataset_train_split(
         if callable(progress_callback):
             progress_callback(stats["generated"], profile.extra_count, "augmentacja")
 
-        image_path, label_path = rng.choice(pool)
+        selected_record = _select_balance_record(
+            rng,
+            pool,
+            generated_by_source=generated_by_source,
+            initial_generated_by_source=initial_generated_by_source,
+            source_limits=source_limits,
+        )
+        if selected_record is None:
+            break
+        image_path = Path(selected_record["image_path"])
+        label_path = Path(selected_record["label_path"])
+        source_key = str(selected_record.get("source_key") or label_path.stem)
         sample_seed = int(rng.randint(1, 2_147_483_647))
         sample_profile = _jitter_augmentation_profile(profile, random.Random(sample_seed))
         image = cv2.imread(str(image_path))
@@ -8952,18 +9220,25 @@ def augment_yolo_dataset_train_split(
         out_lbl.write_text("\n".join(label_lines) + "\n", encoding="utf-8")
 
         stats["generated"] += 1
+        generated_by_source[source_key] = int(generated_by_source.get(source_key, 0) or 0) + 1
         generated_files.append(
             {
                 "image": str(out_img.relative_to(dataset_dir)),
                 "label": str(out_lbl.relative_to(dataset_dir)),
                 "source_image": str(image_path.relative_to(dataset_dir)),
                 "source_label": str(label_path.relative_to(dataset_dir)),
+                "source_key": source_key,
                 "augmentation_seed": sample_seed,
                 "randomness_mode": randomness_mode,
             }
         )
 
     stats["train_after"] = stats["train_before"] + stats["generated"]
+    stats["generated_by_source"] = dict(sorted(generated_by_source.items()))
+    stats["total_generated_variants_by_source"] = {
+        key: int(initial_generated_by_source.get(key, 0) or 0) + int(generated_by_source.get(key, 0) or 0)
+        for key in sorted(set(initial_generated_by_source) | set(generated_by_source))
+    }
     profile_payload = _build_augmentation_profile_payload(dataset_dir, profile, stats, generated_files)
     _write_manifest(dataset_dir, profile_payload)
     _write_augmentation_profile_files(dataset_dir, profile_payload)

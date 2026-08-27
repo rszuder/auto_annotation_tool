@@ -14,6 +14,9 @@ from ..training import (
     CharacterClassMapValidationError,
     CharacterClassDistribution,
     analyze_character_class_distribution,
+    find_character_real_source_candidates,
+    plan_character_train_augmentation,
+    save_character_distribution_artifacts,
     save_character_class_distribution_csv,
     save_character_class_distribution_json,
 )
@@ -93,6 +96,8 @@ class _CharacterClassDistributionDialog:
         self.summary_value_labels: dict[str, tk.Label] = {}
         self.table: ttk.Treeview | None = None
         self.chart: tk.Canvas | None = None
+        self.save_before_btn: ttk.Button | None = None
+        self.plan_btn: ttk.Button | None = None
         self.export_csv_btn: ttk.Button | None = None
         self.export_json_btn: ttk.Button | None = None
 
@@ -274,21 +279,35 @@ class _CharacterClassDistributionDialog:
         ttk.Label(footer, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
         self.progress = ttk.Progressbar(footer, mode="indeterminate", length=180)
         self.progress.grid(row=0, column=1, sticky="e", padx=(8, 8))
+        self.save_before_btn = ttk.Button(
+            footer,
+            text="Zapisz before",
+            command=self._save_before_artifacts,
+            state=tk.DISABLED,
+        )
+        self.save_before_btn.grid(row=0, column=2, sticky="e", padx=(0, 6))
+        self.plan_btn = ttk.Button(
+            footer,
+            text="Przygotuj plan uzupełnienia",
+            command=self._show_balance_plan,
+            state=tk.DISABLED,
+        )
+        self.plan_btn.grid(row=0, column=3, sticky="e", padx=(0, 6))
         self.export_csv_btn = ttk.Button(
             footer,
             text="Zapisz CSV",
             command=self._export_csv,
             state=tk.DISABLED,
         )
-        self.export_csv_btn.grid(row=0, column=2, sticky="e", padx=(0, 6))
+        self.export_csv_btn.grid(row=0, column=4, sticky="e", padx=(0, 6))
         self.export_json_btn = ttk.Button(
             footer,
             text="Zapisz JSON",
             command=self._export_json,
             state=tk.DISABLED,
         )
-        self.export_json_btn.grid(row=0, column=3, sticky="e", padx=(0, 6))
-        ttk.Button(footer, text="Zamknij", command=self.window.destroy).grid(row=0, column=4, sticky="e")
+        self.export_json_btn.grid(row=0, column=5, sticky="e", padx=(0, 6))
+        ttk.Button(footer, text="Zamknij", command=self.window.destroy).grid(row=0, column=6, sticky="e")
 
     def _build_summary_rows(self, parent: tk.Widget) -> None:
         labels = [
@@ -417,6 +436,10 @@ class _CharacterClassDistributionDialog:
 
     def _restart_analysis(self) -> None:
         self.result = None
+        if self.save_before_btn is not None:
+            self.save_before_btn.configure(state=tk.DISABLED)
+        if self.plan_btn is not None:
+            self.plan_btn.configure(state=tk.DISABLED)
         if self.export_csv_btn is not None:
             self.export_csv_btn.configure(state=tk.DISABLED)
         if self.export_json_btn is not None:
@@ -444,6 +467,10 @@ class _CharacterClassDistributionDialog:
         if self.progress is not None:
             self.progress.stop()
             self.progress.grid_remove()
+        if self.save_before_btn is not None:
+            self.save_before_btn.configure(state=tk.NORMAL)
+        if self.plan_btn is not None:
+            self.plan_btn.configure(state=tk.NORMAL)
         if self.export_csv_btn is not None:
             self.export_csv_btn.configure(state=tk.NORMAL)
         if self.export_json_btn is not None:
@@ -588,6 +615,186 @@ class _CharacterClassDistributionDialog:
             self.chart.create_text(x_mid, base_y + 12, text=row.symbol, fill=muted, font=("Segoe UI", 7))
         self.chart.create_text(8, top, anchor=tk.W, text=str(max_value), fill=muted, font=("Segoe UI", 7))
         self.chart.create_text(8, base_y, anchor=tk.W, text="0", fill=muted, font=("Segoe UI", 7))
+
+    def _save_before_artifacts(self) -> None:
+        if self.result is None or self.window is None:
+            return
+        try:
+            refs = save_character_distribution_artifacts(
+                self.result,
+                self.dataset_root / "analysis",
+                prefix="character_class_distribution_before",
+            )
+        except Exception as exc:
+            messagebox.showerror("Błąd zapisu before", str(exc), parent=self.window)
+            return
+        json_ref = refs.get("json", {})
+        self.status_var.set(f"Zapisano before: {json_ref.get('path', '')}")
+
+    def _show_balance_plan(self) -> None:
+        if self.window is None:
+            return
+        target_ratio = self._target_ratio()
+        self.status_var.set("Przygotowuję plan uzupełnienia MZ...")
+        if self.plan_btn is not None:
+            self.plan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                plan = plan_character_train_augmentation(
+                    self.dataset_root,
+                    target_ratio=target_ratio,
+                    max_augmented_variants_per_source=3,
+                )
+                try:
+                    real_sources = find_character_real_source_candidates(
+                        self.dataset_root,
+                        (self.dataset_root.parent,),
+                        target_ratio=target_ratio,
+                        candidate_limit_per_symbol=50,
+                    )
+                except Exception as exc:
+                    logger.debug(f"Nie udało się wyszukać dodatkowych realnych źródeł MZ: {exc}")
+                    real_sources = {}
+            except Exception as exc:
+                self._after(lambda: self._show_plan_error(str(exc)))
+                return
+            self._after(lambda: self._open_plan_dialog(plan, real_sources))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_plan_error(self, error_text: str) -> None:
+        if self.plan_btn is not None:
+            self.plan_btn.configure(state=tk.NORMAL if self.result is not None else tk.DISABLED)
+        self.status_var.set("Nie udało się przygotować planu.")
+        if self.window is not None and self.window.winfo_exists():
+            messagebox.showerror("Błąd planu uzupełnienia", error_text, parent=self.window)
+
+    def _open_plan_dialog(self, plan, real_sources: dict[str, dict]) -> None:
+        if self.plan_btn is not None:
+            self.plan_btn.configure(state=tk.NORMAL if self.result is not None else tk.DISABLED)
+        if self.window is None or not self.window.winfo_exists():
+            return
+        self.status_var.set("Plan uzupełnienia gotowy do podglądu.")
+        bg = self.palette.get("bg", "#1e1f22")
+        fg = self.palette.get("fg", "#f3f3f3")
+        muted = self.palette.get("muted", "#b7bcc6")
+        panel = self.palette.get("panel", "#25262b")
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Plan uzupełnienia klas MZ")
+        dialog.minsize(820, 520)
+        dialog.geometry("940x600")
+        dialog.configure(bg=bg)
+        try:
+            dialog.transient(self.window)
+        except Exception:
+            pass
+        root = tk.Frame(dialog, bg=bg, padx=14, pady=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(2, weight=1)
+        tk.Label(
+            root,
+            text="Plan uzupełnienia train dla modelu znaków MZ",
+            bg=bg,
+            fg=fg,
+            font=("Segoe UI Semibold", 13),
+            anchor=tk.W,
+        ).grid(row=0, column=0, sticky="ew")
+        total_deficit = sum(int(value or 0) for value in dict(plan.deficit_by_symbol or {}).values())
+        real_total = sum(int(row.get("available_unused_real_sources", 0) or 0) for row in real_sources.values())
+        max_variants = int(getattr(plan, "max_augmented_variants_per_source", 0) or 0)
+        max_new = len(getattr(plan, "candidates", []) or []) * max_variants
+        summary = (
+            f"Cel: {int(getattr(plan, 'target_count', 0) or 0)} na klasę  |  "
+            f"Deficyt łącznie: {total_deficit}  |  "
+            f"Źródła-kandydaci: {len(getattr(plan, 'candidates', []) or [])}  |  "
+            f"Maks. wariantów/źródło: {max_variants}  |  "
+            f"Maks. nowych próbek: {max_new}  |  "
+            f"Dodatkowe realne źródła: {real_total}"
+        )
+        tk.Label(
+            root,
+            text=summary,
+            bg=bg,
+            fg=muted,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=880,
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 10))
+        table = ttk.Treeview(
+            root,
+            columns=("source", "symbols", "priority", "max_variants"),
+            show="headings",
+            height=16,
+        )
+        headings = {
+            "source": "Źródło",
+            "symbols": "Znaki deficytowe",
+            "priority": "Priorytet",
+            "max_variants": "Maks. wariantów",
+        }
+        widths = {"source": 320, "symbols": 260, "priority": 90, "max_variants": 120}
+        for column in headings:
+            table.heading(column, text=headings[column])
+            table.column(column, width=widths[column], minwidth=70, stretch=column in {"source", "symbols"})
+        yscroll = ttk.Scrollbar(root, orient=tk.VERTICAL, command=table.yview)
+        table.configure(yscrollcommand=yscroll.set)
+        table.grid(row=2, column=0, sticky="nsew")
+        yscroll.grid(row=2, column=1, sticky="ns")
+        deficit_symbols = set(dict(plan.deficit_by_symbol or {}).keys())
+        for candidate in getattr(plan, "candidates", []) or []:
+            symbols = [symbol for symbol in getattr(candidate, "symbols", []) if symbol in deficit_symbols]
+            table.insert(
+                "",
+                tk.END,
+                values=(
+                    Path(str(getattr(candidate, "label_path", "") or getattr(candidate, "source_key", ""))).name,
+                    ", ".join(symbols) if symbols else "-",
+                    _format_float(getattr(candidate, "priority", 0.0)),
+                    int(getattr(candidate, "max_augmented_variants", 0) or 0),
+                ),
+            )
+        footer = tk.Frame(root, bg=bg)
+        footer.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            footer,
+            text="Dodatkowe realne źródła mają pierwszeństwo przed augmentacją; wykonanie tworzy nowy wariant datasetu.",
+            bg=bg,
+            fg=muted,
+            font=("Segoe UI", 8),
+            anchor=tk.W,
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            footer,
+            text="Użyj planu przy najbliższej augmentacji",
+            command=lambda: self._accept_balance_plan(dialog, plan, real_sources),
+        ).grid(row=0, column=1, sticky="e", padx=(8, 6))
+        ttk.Button(footer, text="Zamknij", command=dialog.destroy).grid(row=0, column=2, sticky="e")
+        try:
+            self.window.update_idletasks()
+            dialog.update_idletasks()
+            width = int(dialog.winfo_width() or 940)
+            height = int(dialog.winfo_height() or 600)
+            x = int(self.window.winfo_rootx()) + max(20, (int(self.window.winfo_width()) - width) // 2)
+            y = int(self.window.winfo_rooty()) + max(20, (int(self.window.winfo_height()) - height) // 2)
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+
+    def _accept_balance_plan(self, dialog: tk.Toplevel, plan, real_sources: dict[str, dict]) -> None:
+        try:
+            setattr(self.host, "_pending_character_balance_plan", plan)
+            setattr(self.host, "_pending_character_balance_real_sources", dict(real_sources or {}))
+        except Exception:
+            pass
+        self.status_var.set("Plan MZ zatwierdzony do najbliższej augmentacji train.")
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
 
     def _export_csv(self) -> None:
         if self.result is None or self.window is None:

@@ -2513,3 +2513,48 @@ Testy:
 - dodano syntetyczny raport `.alprsession` z 12000 rekordami w kazdym strumieniu;
 - test potwierdza, ze preview pozostaje ograniczone, ale iteratory pelne zwracaja wszystkie rekordy;
 - dodano test JSON zawierajacego wiele raportow w polu `reports`.
+
+### 22. Domkniecie kontraktu MZ i guarda porownywalnosci przed freeze
+
+Problem:
+
+- targeted balancing MZ musi uzupelniac braki klas bez sztucznego zawyzania roznorodnosci przez kopie tego samego zrodla;
+- limit `max_augmented_variants_per_source` musi byc egzekwowany przez wykonanie augmentacji, a nie tylko zapisany w planie;
+- wariant treningowy MZ musi miec odtwarzalny slad `before/after` oraz dowod, ze `val/test` nie zostaly ruszone;
+- porownania raportow Android musza jawnie kontrolowac wersje Androida i fingerprinty modeli MP/MT/MZ.
+
+Decyzja:
+
+- planner `plan_character_train_augmentation(...)` grupuje kandydatow po realnym `source_key` i zwraca maksymalnie jeden reprezentant zrodla;
+- jezeli istnieje oryginalny plik zrodla, jest wybierany przed kopia augmentowana;
+- jezeli pozostaly tylko kopie augmentowane, planner wybiera deterministycznego reprezentanta i zapisuje ostrzezenie w planie;
+- executor `augment_yolo_dataset_train_split(...)` przyjmuje opcjonalny plan balansu i pilnuje realnego limitu wariantow na jedno zrodlo;
+- przed augmentacja MZ zapisywany jest stan `before`, po augmentacji stan `after`, a manifest wariantu przechowuje sciezki i SHA-256 artefaktow;
+- fingerprint `val/test` jest liczony przed i po operacji, a zmiana tych splitow oznacza blad kontraktu freeze;
+- dodano lekkie wyszukiwanie dodatkowych realnych zrodel po istniejacych polach metadanych, m.in. `source_expected_text`, `expected_text`, `plate_text`, `ground_truth` i `source_expected_texts`;
+- plan zatwierdzony w oknie analizy MZ jest przekazywany do najblizszej augmentacji znakow tylko wtedy, gdy dotyczy dokladnie tego samego datasetu;
+- manifest wariantu zapisuje, czy uzyto zatwierdzonego planu oraz podsumowanie wyszukiwania dodatkowych realnych zrodel;
+- guard przegladarki raportow mobilnych pokazuje osobno `Android version`, `MP fingerprint`, `MT fingerprint` i `MZ fingerprint`.
+
+Uzasadnienie:
+
+- jedna realna tablica nie moze udawac wielu niezaleznych zrodel tylko dlatego, ze ma kilka kopii augmentowanych;
+- realne dodatkowe zrodla maja pierwszenstwo przed augmentacja, bo wnosza wieksza wartosc badawcza niz kolejne przeksztalcenie tej samej probki;
+- `val/test` musza pozostac stabilna miara generalizacji, dlatego workflow MZ jest ograniczony do `train`;
+- SHA artefaktow `before/after` i fingerprint datasetu pozwalaja powtorzyc eksperyment oraz zweryfikowac, do jakiego materialu odnosil sie wynik;
+- wersja Androida i fingerprinty modeli sa czescia konfiguracji eksperymentu, wiec rozne wartosci musza byc widoczne przed interpretacja metryk.
+
+Testy:
+
+- dodano test deduplikacji kandydatow `plate_001`, `plate_001_aug1`, `plate_001_aug2`;
+- dodano test ostrzezenia, gdy planner ma tylko kopie augmentowane danego zrodla;
+- dodano test stanu wykonawcy potwierdzajacy respektowanie limitu wariantow na zrodlo;
+- dodano test fingerprintu `val/test` i wykrywania zmiany splitu;
+- dodano test manifestu MZ z `before.path`, `before.sha256`, `after.path`, `after.sha256`, `target_count`, `selection_policy`, `max_augmented_variants_per_source` i `val_test_unchanged`;
+- dodano test wyszukiwania niewykorzystanych realnych zrodel dla deficytowego znaku;
+- dodano test guarda raportow mobilnych dla roznych wersji Androida oraz roznych fingerprintow MZ;
+- dodano test zachowania replik eksperymentu przy deduplikacji identycznego raportu.
+
+Ograniczenie swiadome przed freeze:
+
+- wyszukiwanie dodatkowych realnych zrodel jest raportowane i zapisywane w sladzie, ale zrodla te nie sa dolaczane automatycznie do train; ich wlaczenie wymaga jawnego wyboru uzytkownika, zeby nie zmieniac materialu badawczego bez kontroli.

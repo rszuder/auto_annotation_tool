@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
@@ -8,10 +9,15 @@ from auto_annotation_tool.training.character_class_distribution import (
     CharacterClassMapValidationError,
     analyze_character_class_distribution,
     build_character_training_variant_manifest,
+    build_character_dataset_file_fingerprint,
+    compare_character_val_test_unchanged,
+    find_character_real_source_candidates,
     plan_character_train_augmentation,
+    save_character_distribution_artifacts,
     save_character_class_distribution_csv,
     save_character_class_distribution_json,
 )
+from auto_annotation_tool.training.dataset_augmentation import _build_balance_augmented_source_state
 
 
 def _names_list_yaml() -> str:
@@ -216,24 +222,164 @@ class CharacterClassDistributionTests(unittest.TestCase):
             (root / "labels" / "train" / "plate.txt").write_text("0 0 0 0 0\n", encoding="utf-8")
             before = analyze_character_class_distribution(root)
             plan = plan_character_train_augmentation(root, max_augmented_variants_per_source=4)
+            refs = save_character_distribution_artifacts(before, root / "analysis", prefix="character_class_distribution_before")
+            after_path = root / "analysis" / "character_class_distribution_after.json"
+            after_path.write_text('{"after": true}', encoding="utf-8")
+            base_fingerprint = build_character_dataset_file_fingerprint(root)
+            val_test_guard = compare_character_val_test_unchanged(
+                build_character_dataset_file_fingerprint(root, splits=("val", "test")),
+                build_character_dataset_file_fingerprint(root, splits=("val", "test")),
+            )
 
             manifest = build_character_training_variant_manifest(
                 base_dataset=root,
-                before_distribution=before,
-                after_distribution=root / "after.json",
+                before_distribution=refs["json"]["path"],
+                after_distribution=after_path,
                 plan=plan,
-                sources={"real": 7, "augmented_real": 3},
+                sources={"real": 7, "added_real": 2, "augmented_real": 3},
+                base_dataset_sha_or_fingerprint=base_fingerprint,
+                val_test_unchanged=val_test_guard,
             )
 
             self.assertEqual(manifest["schema"], CHARACTER_TRAINING_VARIANT_SCHEMA)
             self.assertEqual(manifest["alphabet"], CHARACTER_BALANCE_ALPHABET)
             self.assertEqual(manifest["selection_policy"], "deficit_weighted")
             self.assertEqual(manifest["sources"]["real"], 7)
+            self.assertEqual(manifest["sources"]["added_real"], 2)
             self.assertEqual(manifest["sources"]["augmented_real"], 3)
             self.assertEqual(manifest["sources"]["synthetic"], 0)
+            self.assertEqual(manifest["max_augmented_variants_per_source"], 4)
             self.assertEqual(manifest["augmentation"]["max_variants_per_source"], 4)
-            self.assertEqual(manifest["before_distribution"], str(root))
-            self.assertTrue(manifest["after_distribution"].endswith("after.json"))
+            self.assertTrue(manifest["before_distribution"]["path"].endswith("character_class_distribution_before.json"))
+            self.assertRegex(manifest["before_distribution"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(manifest["after_distribution"]["path"].endswith("character_class_distribution_after.json"))
+            self.assertRegex(manifest["after_distribution"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(manifest["val_test_unchanged"])
+            self.assertRegex(manifest["base_dataset_sha_or_fingerprint"]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_plan_deduplicates_augmented_source_key_and_prefers_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            (root / "labels" / "train" / "heavy.txt").write_text("0 0 0 0 0\n" * 8, encoding="utf-8")
+            for stem in ("plate_001", "plate_001_aug1", "plate_001_aug2"):
+                (root / "labels" / "train" / f"{stem}.txt").write_text("16 0 0 0 0\n", encoding="utf-8")
+                (root / "images" / "train" / f"{stem}.jpg").write_bytes(b"fake")
+            (root / "augmentation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "generated_files": [
+                            {"label": "labels/train/plate_001_aug1.txt", "source_label": "labels/train/plate_001.txt"},
+                            {"label": "labels/train/plate_001_aug2.txt", "source_label": "labels/train/plate_001.txt"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = plan_character_train_augmentation(root, target_ratio=1.0)
+            source_candidates = [candidate for candidate in plan.candidates if candidate.source_key == "plate_001"]
+
+            self.assertEqual(len(source_candidates), 1)
+            self.assertTrue(source_candidates[0].label_path.endswith("plate_001.txt"))
+
+    def test_plan_warns_when_only_augmented_representatives_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            (root / "labels" / "train" / "heavy.txt").write_text("0 0 0 0 0\n" * 8, encoding="utf-8")
+            (root / "labels" / "train" / "plate_001_aug1.txt").write_text("16 0 0 0 0\n", encoding="utf-8")
+            (root / "labels" / "train" / "plate_001_aug2.txt").write_text("16 0 0 0 0\n", encoding="utf-8")
+
+            plan = plan_character_train_augmentation(root, target_ratio=1.0)
+
+            self.assertEqual(sum(1 for candidate in plan.candidates if candidate.source_key == "plate_001"), 1)
+            self.assertTrue(any("tylko kopie augmentowane" in warning for warning in plan.warnings))
+
+    def test_executor_balance_state_respects_max_variants_per_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            for stem in ("plate_001", "plate_001__aug_0001", "plate_001__aug_0002"):
+                label = root / "labels" / "train" / f"{stem}.txt"
+                image = root / "images" / "train" / f"{stem}.jpg"
+                label.write_text("16 0 0 0 0\n", encoding="utf-8")
+                image.write_bytes(b"fake")
+            (root / "augmentation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "generated_files": [
+                            {"label": "labels/train/plate_001__aug_0001.txt", "source_label": "labels/train/plate_001.txt"},
+                            {"label": "labels/train/plate_001__aug_0002.txt", "source_label": "labels/train/plate_001.txt"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = {
+                "base_dataset": str(root),
+                "max_augmented_variants_per_source": 3,
+                "candidates": [
+                    {
+                        "source_key": "plate_001",
+                        "label_path": str(root / "labels" / "train" / "plate_001.txt"),
+                        "priority": 10,
+                        "max_augmented_variants": 3,
+                    }
+                ],
+            }
+
+            records, limits, initial, stats = _build_balance_augmented_source_state(root, [
+                (root / "images" / "train" / "plate_001.jpg", root / "labels" / "train" / "plate_001.txt"),
+                (root / "images" / "train" / "plate_001__aug_0001.jpg", root / "labels" / "train" / "plate_001__aug_0001.txt"),
+                (root / "images" / "train" / "plate_001__aug_0002.jpg", root / "labels" / "train" / "plate_001__aug_0002.txt"),
+            ], balance_plan=plan)
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(limits["plate_001"], 3)
+            self.assertEqual(initial["plate_001"], 2)
+            self.assertEqual(stats["max_augmented_variants_per_source"], 3)
+
+    def test_val_test_fingerprint_detects_untouched_and_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "val").mkdir(parents=True)
+            (root / "images" / "val").mkdir(parents=True)
+            (root / "labels" / "test").mkdir(parents=True)
+            (root / "images" / "test").mkdir(parents=True)
+            (root / "labels" / "val" / "a.txt").write_text("0 0 0 0 0\n", encoding="utf-8")
+            (root / "images" / "val" / "a.jpg").write_bytes(b"a")
+
+            before = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            after = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            self.assertTrue(compare_character_val_test_unchanged(before, after)["unchanged"])
+
+            (root / "labels" / "test" / "b.txt").write_text("1 0 0 0 0\n", encoding="utf-8")
+            changed = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            self.assertFalse(compare_character_val_test_unchanged(before, changed)["unchanged"])
+
+    def test_real_source_search_counts_unused_sources_for_deficit_symbol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            pool = Path(tmp) / "pool"
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            (root / "labels" / "train" / "many.txt").write_text("0 0 0 0 0\n" * 8, encoding="utf-8")
+            (root / "labels" / "train" / "used_q.txt").write_text("26 0 0 0 0\n26 0 0 0 0\n", encoding="utf-8")
+            pool.mkdir()
+            records = [{"source_key": "used_q", "source_expected_text": "Q0"}]
+            records.extend({"source_key": f"unused_q_{index}", "source_expected_text": f"AQ{index}"} for index in range(5))
+            (pool / "metadata.json").write_text(json.dumps({"plates": records}), encoding="utf-8")
+
+            result = find_character_real_source_candidates(root, (pool,), target_ratio=1.0)
+
+            self.assertEqual(result["Q"]["current_unique_train"], 1)
+            self.assertEqual(result["Q"]["available_unused_real_sources"], 5)
 
     def test_swapped_class_names_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
