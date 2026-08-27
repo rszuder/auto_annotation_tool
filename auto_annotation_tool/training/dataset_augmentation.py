@@ -4169,6 +4169,14 @@ def _iter_balance_plan_candidates(balance_plan: Any) -> list[Any]:
     return list(candidates) if isinstance(candidates, (list, tuple)) else []
 
 
+def _has_balance_plan(balance_plan: Any) -> bool:
+    if balance_plan is None:
+        return False
+    if isinstance(balance_plan, Mapping):
+        return bool(balance_plan)
+    return bool(getattr(balance_plan, "schema", None) or hasattr(balance_plan, "candidates"))
+
+
 def _balance_plan_attr(balance_plan: Any, key: str, default: Any = None) -> Any:
     if isinstance(balance_plan, Mapping):
         return balance_plan.get(key, default)
@@ -4216,7 +4224,7 @@ def _build_balance_augmented_source_state(
 ) -> tuple[list[dict[str, Any]], dict[str, int | None], dict[str, int], dict[str, Any]]:
     source_map = _load_augmentation_source_map(dataset_dir)
     raw_candidates = _iter_balance_plan_candidates(balance_plan)
-    plan_enabled = bool(raw_candidates)
+    plan_enabled = _has_balance_plan(balance_plan)
     base_dataset_text = str(_balance_plan_attr(balance_plan, "base_dataset", "") or "").strip()
     base_dataset = Path(base_dataset_text) if base_dataset_text else None
     plan_max = _balance_plan_attr(balance_plan, "max_augmented_variants_per_source", None)
@@ -4309,6 +4317,29 @@ def _build_balance_augmented_source_state(
         "initial_generated_by_source": dict(sorted(initial_generated_by_source.items())),
     }
     return records, source_limits, initial_generated_by_source, stats
+
+
+def _select_augmentation_sample_pool(
+    rng: random.Random,
+    pool: list[dict[str, Any]],
+    sample_size: int,
+    *,
+    balance_plan_enabled: bool = False,
+) -> list[dict[str, Any]]:
+    limit = min(len(pool), max(0, int(sample_size or 0)))
+    if limit <= 0:
+        return []
+    if balance_plan_enabled:
+        return sorted(
+            pool,
+            key=lambda record: (
+                -float(record.get("priority") or 0.0),
+                str(record.get("source_key") or ""),
+                str(record.get("label_key") or ""),
+            ),
+        )[:limit]
+    rng.shuffle(pool)
+    return pool[:limit]
 
 
 def _select_balance_record(
@@ -9107,8 +9138,12 @@ def augment_yolo_dataset_train_split(
         max_augmented_variants_per_source=max_augmented_variants_per_source,
     )
     stats.update(balance_stats)
-    rng.shuffle(pool)
-    pool = pool[: min(len(pool), profile.sample_size)]
+    pool = _select_augmentation_sample_pool(
+        rng,
+        pool,
+        profile.sample_size,
+        balance_plan_enabled=bool(stats.get("balance_plan_enabled")),
+    )
     stats["sample_pool"] = len(pool)
     if not pool:
         return False, "Losowa próbka train jest pusta.", stats

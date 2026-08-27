@@ -64,6 +64,30 @@ def _nested_value(data: dict[str, Any] | None, *paths: str) -> Any:
     return None
 
 
+_MODEL_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "mp": ("mp", "MP", "vehicle", "vehicles", "Vehicle", "VEHICLE"),
+    "mt": ("mt", "MT", "plate", "plates", "Plate", "PLATE"),
+    "mz": ("mz", "MZ", "character", "characters", "char", "chars", "Character", "CHARACTER"),
+}
+
+
+def _merge_model_fingerprint_aliases(target: dict[str, Any], value: Any) -> None:
+    if not isinstance(value, dict):
+        return
+    for nested_key in ("model_fingerprints", "models"):
+        nested = value.get(nested_key)
+        if isinstance(nested, dict):
+            _merge_model_fingerprint_aliases(target, nested)
+    for canonical, aliases in _MODEL_ROLE_ALIASES.items():
+        for alias in aliases:
+            if alias not in value:
+                continue
+            role_value = value.get(alias)
+            if role_value not in (None, "", {}, []) and canonical not in target:
+                target[canonical] = role_value
+                break
+
+
 def _format_datetime(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1027,6 +1051,22 @@ class MobileReportBrowser:
             or "-"
         )
 
+    def _guard_app_git_sha_value(self, report: MobileBenchmarkReport, index: dict[str, Any]) -> str:
+        raw = dict(getattr(report, "raw", {}) or {})
+        return str(
+            index.get("app_git_sha")
+            or _nested_value(raw, "app_build.git_commit", "app_build.git_sha", "build.git_commit", "app_git_sha")
+            or "-"
+        )
+
+    def _guard_app_version_value(self, report: MobileBenchmarkReport, index: dict[str, Any]) -> str:
+        raw = dict(getattr(report, "raw", {}) or {})
+        return str(
+            index.get("app_version")
+            or _nested_value(raw, "app_build.version", "app_version", "application.version")
+            or "-"
+        )
+
     def _guard_model_fingerprint_value(self, report: MobileBenchmarkReport, index: dict[str, Any], role: str) -> str:
         role_key = str(role or "").strip().lower()
         raw = dict(getattr(report, "raw", {}) or {})
@@ -1034,18 +1074,16 @@ class MobileReportBrowser:
         for candidate in (
             index.get("model_fingerprints") if isinstance(index.get("model_fingerprints"), dict) else {},
             _nested_value(raw, "model_fingerprints"),
+            _nested_value(raw, "execution"),
             _nested_value(raw, "execution.model_fingerprints"),
             _nested_value(raw, "execution.models"),
+            _nested_value(raw, "runtime_composition"),
             _nested_value(raw, "runtime_composition.models"),
             _nested_value(raw, "models"),
         ):
             if isinstance(candidate, dict):
-                fingerprints.update(candidate)
-        value = None
-        for key in (role_key, role_key.upper(), role_key.capitalize()):
-            if key in fingerprints:
-                value = fingerprints.get(key)
-                break
+                _merge_model_fingerprint_aliases(fingerprints, candidate)
+        value = fingerprints.get(role_key)
         if value in (None, "", {}, []):
             return "-"
         if isinstance(value, dict):
@@ -1152,8 +1190,14 @@ class MobileReportBrowser:
             ),
             (
                 "Build aplikacji",
-                lambda candidate, index: str(index.get("app_git_sha") or index.get("app_version") or "-"),
-                "Inny build klienta może oznaczać inną logikę pipeline'u.",
+                lambda candidate, index: self._guard_app_git_sha_value(candidate, index),
+                "Commit/build klienta musi być jawny; brak app_git_sha traktujemy jako brak danych, nie jako wersję aplikacji.",
+                True,
+            ),
+            (
+                "Wersja aplikacji",
+                lambda candidate, index: self._guard_app_version_value(candidate, index),
+                "Wersja wydania jest pomocnicza i nie zastępuje identyfikatora buildu.",
                 True,
             ),
             (
