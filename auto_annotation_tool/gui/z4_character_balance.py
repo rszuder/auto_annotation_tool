@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..config import CONFIG, logger
 from ..training import (
+    CharacterClassMapValidationError,
     CharacterClassDistribution,
     analyze_character_class_distribution,
     save_character_class_distribution_csv,
@@ -87,6 +88,7 @@ class _CharacterClassDistributionDialog:
         self.progress: ttk.Progressbar | None = None
         self.status_var = tk.StringVar(value="Przygotowuję analizę rozkładu klas...")
         self.dataset_var = tk.StringVar(value=self._dataset_label())
+        self.target_ratio_var = tk.StringVar(value="0.50")
         self.result: CharacterClassDistribution | None = None
         self.summary_value_labels: dict[str, tk.Label] = {}
         self.table: ttk.Treeview | None = None
@@ -174,6 +176,36 @@ class _CharacterClassDistributionDialog:
             padx=8,
             pady=6,
         ).grid(row=0, column=1, sticky="ew")
+        tk.Label(
+            meta,
+            text="Cel uzupełniania",
+            bg=panel_alt,
+            fg=muted,
+            font=("Segoe UI Semibold", 9),
+            padx=8,
+            pady=6,
+        ).grid(row=1, column=0, sticky="w")
+        target_shell = tk.Frame(meta, bg=panel_alt)
+        target_shell.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(0, 6))
+        tk.Entry(
+            target_shell,
+            textvariable=self.target_ratio_var,
+            width=8,
+            justify=tk.CENTER,
+            bg=self.palette.get("entry_bg", "#1d1f24"),
+            fg=fg,
+            insertbackground=fg,
+            relief=tk.FLAT,
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            target_shell,
+            text="× mediany niezerowych klas",
+            bg=panel_alt,
+            fg=muted,
+            font=("Segoe UI", 8),
+            padx=8,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Button(target_shell, text="Przelicz", command=self._restart_analysis).grid(row=0, column=2, sticky="w")
 
         content = tk.Frame(root, bg=bg)
         content.grid(row=3, column=0, sticky="nsew")
@@ -261,9 +293,11 @@ class _CharacterClassDistributionDialog:
     def _build_summary_rows(self, parent: tk.Widget) -> None:
         labels = [
             ("layout", "Układ danych"),
+            ("class_map", "Mapa klas"),
             ("diagnostic_split", "Kryterium"),
             ("total_labels", "Etykiety"),
             ("range", "Min / mediana / max"),
+            ("target", "Cel / deficyt"),
             ("ratio", "Stosunek max/min"),
             ("zero", "Braki krytyczne"),
             ("low", "Mało próbek"),
@@ -297,12 +331,29 @@ class _CharacterClassDistributionDialog:
             self.summary_value_labels[key] = value_lbl
 
     def _build_table(self, parent: tk.Widget) -> None:
-        columns = ("symbol", "train", "unique_train", "val", "test", "total", "share", "status")
+        columns = (
+            "symbol",
+            "train",
+            "unique_train",
+            "count_status",
+            "diversity_status",
+            "target",
+            "deficit",
+            "val",
+            "test",
+            "total",
+            "share",
+            "status",
+        )
         self.table = ttk.Treeview(parent, columns=columns, show="headings", height=16)
         headings = {
             "symbol": "Znak",
             "train": "Train",
             "unique_train": "Unikalne tablice train",
+            "count_status": "Liczebność",
+            "diversity_status": "Różnorodność",
+            "target": "Cel",
+            "deficit": "Deficyt",
             "val": "Val",
             "test": "Test",
             "total": "Razem",
@@ -313,6 +364,10 @@ class _CharacterClassDistributionDialog:
             "symbol": 54,
             "train": 76,
             "unique_train": 150,
+            "count_status": 110,
+            "diversity_status": 125,
+            "target": 70,
+            "deficit": 76,
             "val": 70,
             "test": 70,
             "total": 78,
@@ -334,12 +389,24 @@ class _CharacterClassDistributionDialog:
                 pass
 
     def _start_analysis(self) -> None:
+        target_ratio = self._target_ratio()
         if self.progress is not None:
+            try:
+                self.progress.grid()
+            except Exception:
+                pass
             self.progress.start(12)
 
         def worker() -> None:
             try:
-                result = analyze_character_class_distribution(self.dataset_root)
+                result = analyze_character_class_distribution(
+                    self.dataset_root,
+                    target_ratio=target_ratio,
+                )
+            except CharacterClassMapValidationError as exc:
+                logger.warning("Analiza MZ zatrzymana przez niezgodną mapę klas: %s", exc)
+                self._after(lambda: self._show_error(str(exc)))
+                return
             except Exception as exc:
                 logger.exception("Nie udało się przeanalizować rozkładu klas MZ")
                 self._after(lambda: self._show_error(str(exc)))
@@ -347,6 +414,30 @@ class _CharacterClassDistributionDialog:
             self._after(lambda: self._apply_result(result))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _restart_analysis(self) -> None:
+        self.result = None
+        if self.export_csv_btn is not None:
+            self.export_csv_btn.configure(state=tk.DISABLED)
+        if self.export_json_btn is not None:
+            self.export_json_btn.configure(state=tk.DISABLED)
+        if self.table is not None:
+            self.table.delete(*self.table.get_children())
+        self.status_var.set("Przeliczam analizę rozkładu klas...")
+        self._draw_chart()
+        self._start_analysis()
+
+    def _target_ratio(self) -> float:
+        raw = str(self.target_ratio_var.get() or "0.50").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except Exception:
+            value = 0.50
+        if value > 1.0:
+            value /= 100.0
+        value = max(0.0, min(2.0, value))
+        self.target_ratio_var.set(f"{value:.2f}")
+        return value
 
     def _apply_result(self, result: CharacterClassDistribution) -> None:
         self.result = result
@@ -380,11 +471,23 @@ class _CharacterClassDistributionDialog:
         ratio_value = summary.get("max_min_ratio")
         ratio_text = "nieokreślony przy brakach" if ratio_value is None else _format_float(ratio_value)
         file_errors = int(summary.get("invalid_label_lines", 0) or 0) + int(summary.get("invalid_class_ids", 0) or 0)
+        target_count = int(summary.get("target_class_count", 0) or 0)
+        total_deficit = int(summary.get("total_deficit_count", 0) or 0)
+        class_map = dict(summary.get("class_map") or {})
+        class_map_status = str(class_map.get("status") or "-")
+        if class_map_status == "OK":
+            class_map_text = "Zgodna z MZ"
+        elif class_map_status == "WARNING":
+            class_map_text = "Ostrzeżenie: brak data.yaml"
+        else:
+            class_map_text = class_map.get("message") or "Nie sprawdzono"
         values = {
             "layout": _layout_label(result.layout),
+            "class_map": class_map_text,
             "diagnostic_split": "train" if result.diagnostic_split == "train" else "razem",
             "total_labels": str(int(summary.get("total_labels", 0) or 0)),
             "range": range_text,
+            "target": f"{target_count} na klasę, brakuje {total_deficit}",
             "ratio": ratio_text,
             "zero": _symbols(summary.get("zero_classes")),
             "low": _symbols(summary.get("low_count_classes")),
@@ -398,6 +501,10 @@ class _CharacterClassDistributionDialog:
             color = self.palette.get("fg", "#f3f3f3")
             if key == "zero" and value != "brak":
                 color = _STATUS_COLORS["CRITICAL"]
+            elif key == "target" and total_deficit > 0:
+                color = _STATUS_COLORS["LOW"]
+            elif key == "class_map" and str(class_map_status) == "WARNING":
+                color = _STATUS_COLORS["LOW"]
             elif key in {"low", "diversity"} and value != "brak":
                 color = _STATUS_COLORS["LOW"]
             try:
@@ -417,6 +524,10 @@ class _CharacterClassDistributionDialog:
                     row.symbol,
                     row.train_count,
                     row.unique_train_plate_count,
+                    _STATUS_LABELS.get(row.count_status, row.count_status),
+                    _STATUS_LABELS.get(row.diversity_status, row.diversity_status),
+                    row.target_count,
+                    row.deficit_count,
                     row.val_count,
                     row.test_count,
                     row.total_count,

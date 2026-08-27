@@ -946,6 +946,238 @@ def read_mobile_report_bundles(
     return ReportBundleReader(max_trace_rows=max_trace_rows).read_many(path)
 
 
+def iter_full_trace_rows(bundle_or_path) -> Any:
+    """Stream all trace rows from a report source, not only the UI preview."""
+    yield from _iter_full_report_rows(bundle_or_path, "trace")
+
+
+def iter_full_thermal_rows(bundle_or_path) -> Any:
+    """Stream all thermal rows from a report source, not only the UI preview."""
+    yield from _iter_full_report_rows(bundle_or_path, "thermal")
+
+
+def iter_full_frame_flow_rows(bundle_or_path) -> Any:
+    """Stream all frame-flow rows from a report source, not only the UI preview."""
+    yield from _iter_full_report_rows(bundle_or_path, "frame_flow")
+
+
+def iter_full_event_rows(bundle_or_path) -> Any:
+    """Stream all event rows from a report source, not only the UI preview."""
+    yield from _iter_full_report_rows(bundle_or_path, "events")
+
+
+def iter_full_sample_rows(bundle_or_path) -> Any:
+    """Stream all sample-index rows from a report source, not only the UI preview."""
+    yield from _iter_full_report_rows(bundle_or_path, "samples")
+
+
+_FULL_ROW_SOURCES = {
+    "trace": {
+        "csv": ("traces.csv", "tables/trace_data.csv"),
+        "json": ("traces",),
+    },
+    "thermal": {
+        "csv": ("thermal.csv", "tables/thermal.csv", "tables/thermal_data.csv"),
+        "json": ("thermal", "thermal_samples", "thermal_trace"),
+    },
+    "frame_flow": {
+        "csv": ("frame_flow.csv", "tables/frame_flow.csv", "tables/frame_flow_data.csv"),
+        "json": ("frame_flow", "frame_flow_buckets", "flow"),
+    },
+    "events": {
+        "csv": ("events.csv", "tables/events.csv", "tables/event_data.csv"),
+        "jsonl": ("events.jsonl", "tables/events.jsonl", "event_stream.jsonl"),
+        "json": ("events", "event_stream"),
+    },
+    "samples": {
+        "csv": ("samples/index.csv",),
+        "json": ("samples", "crop_session.records"),
+    },
+}
+
+
+def _iter_full_report_rows(bundle_or_path, kind: str) -> Any:
+    source_path = _full_report_source_path(bundle_or_path)
+    if source_path is not None and source_path.exists() and zipfile.is_zipfile(source_path):
+        yielded = False
+        for row in _iter_full_zip_rows(source_path, kind):
+            yielded = True
+            yield row
+        if yielded:
+            return
+
+    payload = _full_report_payload(bundle_or_path)
+    if payload is not None:
+        yield from _iter_full_json_rows(payload, kind)
+        return
+
+    if source_path is not None and source_path.exists() and source_path.is_file():
+        for payload_item in _read_full_json_payloads(source_path):
+            yield from _iter_full_json_rows(payload_item, kind)
+
+
+def _full_report_source_path(bundle_or_path) -> Path | None:
+    if isinstance(bundle_or_path, (str, Path)):
+        return Path(bundle_or_path)
+    raw_path = getattr(bundle_or_path, "path", "")
+    if raw_path:
+        try:
+            return Path(raw_path)
+        except Exception:
+            return None
+    raw_report_path = getattr(bundle_or_path, "source_path", "")
+    if raw_report_path:
+        try:
+            return Path(raw_report_path)
+        except Exception:
+            return None
+    return None
+
+
+def _full_report_payload(bundle_or_path) -> dict[str, Any] | None:
+    payload = getattr(bundle_or_path, "report_payload", None)
+    if isinstance(payload, dict):
+        return payload
+    raw = getattr(bundle_or_path, "raw", None)
+    if isinstance(raw, dict):
+        return raw
+    report = getattr(bundle_or_path, "report", None)
+    raw = getattr(report, "raw", None)
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _read_full_json_payloads(path: Path) -> list[dict[str, Any]]:
+    if path.stat().st_size > MOBILE_REPORT_MAX_TEXT_BYTES:
+        raise ValueError(f"Plik raportu JSON jest za duży do bezpiecznego odczytu: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if isinstance(payload, list):
+        return [dict(item or {}) for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict) and isinstance(payload.get("reports"), list):
+        return [dict(item or {}) for item in payload.get("reports", []) if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return [payload]
+    return []
+
+
+def _iter_full_zip_rows(path: Path, kind: str) -> Any:
+    spec = _FULL_ROW_SOURCES.get(kind, {})
+    with zipfile.ZipFile(path, "r") as archive:
+        normalized_names = _normalized_zip_entries_for_full_read(archive)
+        for name in tuple(spec.get("csv", ())):
+            if name in normalized_names:
+                yield from _iter_csv_zip_entry(archive, normalized_names[name])
+                return
+        for name in tuple(spec.get("jsonl", ())):
+            if name in normalized_names:
+                yield from _iter_jsonl_zip_entry(archive, normalized_names[name])
+                return
+        payload = _read_report_payload_from_zip_for_full_read(archive, normalized_names)
+        if payload:
+            yield from _iter_full_json_rows(payload, kind)
+
+
+def _normalized_zip_entries_for_full_read(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
+    infos = archive.infolist()
+    if len(infos) > MOBILE_REPORT_MAX_ENTRIES:
+        raise ValueError(f"Archiwum raportu ma zbyt dużo wpisów: {len(infos)}.")
+    total_uncompressed = sum(int(info.file_size or 0) for info in infos)
+    if total_uncompressed > MOBILE_REPORT_MAX_TOTAL_UNCOMPRESSED_BYTES:
+        raise ValueError(f"Archiwum raportu jest zbyt duże: {total_uncompressed} B.")
+    normalized_names: dict[str, zipfile.ZipInfo] = {}
+    for info in infos:
+        ok, normalized = _archive_name_safe(info.filename)
+        if not ok:
+            raise ValueError(f"Niebezpieczna ścieżka w archiwum: {info.filename}")
+        if normalized in normalized_names:
+            raise ValueError(f"Zduplikowany wpis w archiwum: {normalized}")
+        normalized_names[normalized] = info
+    return normalized_names
+
+
+def _iter_csv_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> Any:
+    with archive.open(info, "r") as binary:
+        wrapper = io.TextIOWrapper(binary, encoding="utf-8-sig", errors="replace", newline="")
+        reader = csv.DictReader(wrapper)
+        for row in reader:
+            yield {str(key or ""): str(value or "") for key, value in dict(row or {}).items()}
+
+
+def _iter_jsonl_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> Any:
+    parser = ReportBundleReader(max_trace_rows=0)
+    with archive.open(info, "r") as binary:
+        wrapper = io.TextIOWrapper(binary, encoding="utf-8-sig", errors="replace", newline="")
+        for line in wrapper:
+            text = str(line or "").strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except Exception:
+                continue
+            if isinstance(item, dict):
+                yield parser._json_record_to_row(item)
+
+
+def _read_report_payload_from_zip_for_full_read(
+    archive: zipfile.ZipFile,
+    normalized_names: dict[str, zipfile.ZipInfo],
+) -> dict[str, Any]:
+    for name in ("report.json", "metadata.json"):
+        info = normalized_names.get(name)
+        if info is None:
+            continue
+        if int(info.file_size or 0) > MOBILE_REPORT_MAX_TEXT_BYTES:
+            continue
+        try:
+            with archive.open(info, "r") as handle:
+                payload = json.loads(handle.read().decode("utf-8-sig", errors="replace"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            if name == "metadata.json" and str(payload.get("schema") or "") != MOBILE_BENCHMARK_REPORT_SCHEMA:
+                return _report_payload_from_thesis_metadata(payload)
+            return payload
+    return {}
+
+
+def _iter_full_json_rows(payload: dict[str, Any], kind: str) -> Any:
+    spec = _FULL_ROW_SOURCES.get(kind, {})
+    parser = ReportBundleReader(max_trace_rows=0)
+    value = None
+    for path in tuple(spec.get("json", ())):
+        value = _nested_value(payload, path)
+        if value not in (None, ""):
+            break
+    if isinstance(value, dict):
+        for key in ("records", "rows", "samples", "events", "traces", "data"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                value = nested
+                break
+    if not isinstance(value, list):
+        return
+    for item in value:
+        if isinstance(item, dict):
+            if kind == "trace":
+                row: dict[str, str] = {}
+                for key in ("frame_id", "timestamp_ms", "status", "text"):
+                    row[key] = str(item.get(key, ""))
+                for nested_name, suffix in (("stage_ms", "_ms"), ("confidence", ""), ("counters", ""), ("memory", "")):
+                    nested = item.get(nested_name)
+                    if not isinstance(nested, dict):
+                        continue
+                    for key, child_value in nested.items():
+                        column = str(key)
+                        if suffix and not column.endswith(suffix):
+                            column = f"{column}{suffix}"
+                        row[column] = str(child_value)
+                yield row
+            else:
+                yield parser._json_record_to_row(item)
+
+
 @dataclass(frozen=True)
 class ExperimentModelRef:
     """A stable model reference used by package-level experiments."""
