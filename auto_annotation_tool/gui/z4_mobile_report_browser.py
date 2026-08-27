@@ -1017,6 +1017,55 @@ class MobileReportBrowser:
             return f"{width}x{height}"
         return "-"
 
+    def _guard_android_version_value(self, report: MobileBenchmarkReport, index: dict[str, Any]) -> str:
+        device = dict(getattr(report, "device", {}) or {})
+        raw = dict(getattr(report, "raw", {}) or {})
+        return str(
+            device.get("android_version")
+            or _nested_value(index, "device.android_version", "android_version")
+            or _nested_value(raw, "device.android_version", "android_version", "system.android_version")
+            or "-"
+        )
+
+    def _guard_model_fingerprint_value(self, report: MobileBenchmarkReport, index: dict[str, Any], role: str) -> str:
+        role_key = str(role or "").strip().lower()
+        raw = dict(getattr(report, "raw", {}) or {})
+        fingerprints: dict[str, Any] = {}
+        for candidate in (
+            index.get("model_fingerprints") if isinstance(index.get("model_fingerprints"), dict) else {},
+            _nested_value(raw, "model_fingerprints"),
+            _nested_value(raw, "execution.model_fingerprints"),
+            _nested_value(raw, "execution.models"),
+            _nested_value(raw, "runtime_composition.models"),
+            _nested_value(raw, "models"),
+        ):
+            if isinstance(candidate, dict):
+                fingerprints.update(candidate)
+        value = None
+        for key in (role_key, role_key.upper(), role_key.capitalize()):
+            if key in fingerprints:
+                value = fingerprints.get(key)
+                break
+        if value in (None, "", {}, []):
+            return "-"
+        if isinstance(value, dict):
+            for key in (
+                "sha256",
+                "file_sha256",
+                "model_sha256",
+                "checkpoint_sha256",
+                "fingerprint",
+                "hash",
+                "id",
+                "model_id",
+            ):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    return text[:16] if len(text) > 20 else text
+            return self._guard_profile_hash(value).replace("profil ", "fp ")
+        text = str(value or "").strip()
+        return text[:16] if len(text) > 20 else (text or "-")
+
     def _guard_artifact_count(self, index: dict[str, Any], key: str) -> int:
         counts = index.get("artifact_counts") if isinstance(index.get("artifact_counts"), dict) else {}
         if key == "traces":
@@ -1078,6 +1127,12 @@ class MobileReportBrowser:
                 True,
             ),
             (
+                "Android version",
+                lambda candidate, index: self._guard_android_version_value(candidate, index),
+                "Wersja Androida jest częścią środowiska pomiarowego i musi być jawnie kontrolowana.",
+                True,
+            ),
+            (
                 "Runtime",
                 lambda candidate, index: str(candidate.runtime or "-"),
                 "Runtime powinien być stały, jeśli badamy wpływ modelu albo pakietu.",
@@ -1105,6 +1160,24 @@ class MobileReportBrowser:
                 "Profil rozpoznawania",
                 lambda candidate, index: self._guard_profile_hash(index.get("recognition_profile") or _nested_value(candidate.raw, "recognition_profile", "profile")),
                 "Profil progu, autozoomu i postprocessingu powinien być świadomą zmienną albo stałą.",
+                True,
+            ),
+            (
+                "MP fingerprint",
+                lambda candidate, index: self._guard_model_fingerprint_value(candidate, index, "mp"),
+                "Model pojazdów w pakiecie musi być ten sam, jeśli nie jest badaną zmienną.",
+                True,
+            ),
+            (
+                "MT fingerprint",
+                lambda candidate, index: self._guard_model_fingerprint_value(candidate, index, "mt"),
+                "Model tablic w pakiecie musi być ten sam, jeśli nie jest badaną zmienną.",
+                True,
+            ),
+            (
+                "MZ fingerprint",
+                lambda candidate, index: self._guard_model_fingerprint_value(candidate, index, "mz"),
+                "Model znaków w pakiecie musi być ten sam, jeśli nie jest badaną zmienną.",
                 True,
             ),
             (

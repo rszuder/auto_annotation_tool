@@ -49,12 +49,18 @@ from ..training import (
     TrainingHistory,
     TrainingStatus,
     YOLOPoseTrainer,
+    analyze_character_class_distribution,
     augment_yolo_dataset_train_split,
+    build_character_dataset_file_fingerprint,
+    build_character_training_variant_manifest,
+    compare_character_val_test_unchanged,
     describe_augmentation_randomness_mode,
     ensure_yolo_dataset_yaml_points_to_root,
     get_albumentations_status,
     install_albumentations,
     is_albumentations_available,
+    plan_character_train_augmentation,
+    save_character_distribution_artifacts,
     update_yolo_dataset_class_names,
 )
 from ..ranking import ModelRanking
@@ -2733,6 +2739,50 @@ def _write_step4_augmentation_scope_manifest(
         logger.debug(f"Nie udało się uzupełnić manifestu źródła datasetu augmentowanego: {exc}")
     return payload
 
+def _step4_balance_plan_matches_dataset(plan: object, source_dir: Path) -> bool:
+    base_dataset = str(getattr(plan, "base_dataset", "") or "").strip()
+    if not base_dataset:
+        return False
+    try:
+        return Path(base_dataset).resolve() == Path(source_dir).resolve()
+    except Exception:
+        return os.path.normcase(os.path.normpath(base_dataset)) == os.path.normcase(os.path.normpath(str(source_dir)))
+
+def _take_pending_character_balance_plan(self, source_dir: Path) -> tuple[object | None, dict, bool]:
+    plan = getattr(self, "_pending_character_balance_plan", None)
+    if plan is None or not _step4_balance_plan_matches_dataset(plan, source_dir):
+        return None, {}, False
+    real_sources = getattr(self, "_pending_character_balance_real_sources", {}) or {}
+    try:
+        real_sources = dict(real_sources)
+    except Exception:
+        real_sources = {}
+    return plan, real_sources, True
+
+def _clear_pending_character_balance_plan(self) -> None:
+    for attr_name in ("_pending_character_balance_plan", "_pending_character_balance_real_sources"):
+        try:
+            setattr(self, attr_name, None)
+        except Exception:
+            pass
+
+def _summarize_character_real_source_search(real_sources: dict) -> dict:
+    rows = dict(real_sources or {})
+    total_available = 0
+    by_symbol: dict[str, int] = {}
+    for symbol, row in rows.items():
+        if not isinstance(row, dict):
+            continue
+        count = int(row.get("available_unused_real_sources", 0) or 0)
+        by_symbol[str(symbol)] = count
+        total_available += count
+    return {
+        "symbols": len(by_symbol),
+        "available_unused_real_sources": total_available,
+        "by_symbol": by_symbol,
+        "policy": "reported_only_requires_user_selection",
+    }
+
 def _create_step4_augmented_dataset_variant(
     self,
     *,
@@ -2756,6 +2806,35 @@ def _create_step4_augmented_dataset_variant(
 
     augmented_dir = self._build_step4_augmented_dataset_dir(source_dir, profile, target=target)
     requested_extra = max(0, int(getattr(profile, "extra_count", 0) or 0))
+    normalized_target = CONFIG.normalize_task_target(target)
+    balance_plan = None
+    pending_real_sources: dict = {}
+    used_pending_balance_plan = False
+    before_distribution = None
+    base_dataset_fingerprint: dict = {}
+    val_test_before: dict = {}
+    if normalized_target == "char":
+        try:
+            balance_plan, pending_real_sources, used_pending_balance_plan = _take_pending_character_balance_plan(
+                self,
+                source_dir,
+            )
+            target_ratio = float(getattr(balance_plan, "target_ratio", 0.50) or 0.50) if balance_plan is not None else 0.50
+            before_distribution = analyze_character_class_distribution(source_dir, target_ratio=target_ratio)
+            if balance_plan is None:
+                balance_plan = plan_character_train_augmentation(source_dir, max_augmented_variants_per_source=3)
+            base_dataset_fingerprint = build_character_dataset_file_fingerprint(source_dir)
+            val_test_before = build_character_dataset_file_fingerprint(source_dir, splits=("val", "test"))
+        except Exception as exc:
+            logger.exception("Nie udało się przygotować planu balansu MZ")
+            return {
+                "ok": False,
+                "dataset_path": str(source_dir),
+                "message": f"Nie udało się przygotować planu balansu MZ: {exc}",
+                "counts": self._get_dataset_split_image_counts(source_dir),
+                "augmentation_stats": {},
+                "augmented": False,
+            }
     try:
         self._ui(
             lambda requested=requested_extra: self._set_training_widget_text(
@@ -2793,6 +2872,7 @@ def _create_step4_augmented_dataset_variant(
             profile=profile,
             progress_var_name=progress_var_name,
             status_attr_name=status_attr_name,
+            balance_plan=balance_plan,
         )
     except Exception as exc:
         logger.exception("Nie udało się zwiększyć syntetycznie datasetu")
@@ -2814,6 +2894,63 @@ def _create_step4_augmented_dataset_variant(
     generated = int(stats.get("generated", 0) or 0)
     base_total = int(base_counts.get("total", 0) or 0)
     augmented_total = int(augmented_counts.get("total", 0) or 0)
+    mz_variant_manifest: dict = {}
+    if normalized_target == "char" and before_distribution is not None:
+        try:
+            analysis_dir = augmented_dir / "analysis"
+            before_refs = save_character_distribution_artifacts(
+                before_distribution,
+                analysis_dir,
+                prefix="character_class_distribution_before",
+            )
+            after_distribution = analyze_character_class_distribution(
+                augmented_dir,
+                target_ratio=float(getattr(balance_plan, "target_ratio", 0.50) or 0.50),
+            )
+            after_refs = save_character_distribution_artifacts(
+                after_distribution,
+                analysis_dir,
+                prefix="character_class_distribution_after",
+            )
+            val_test_after = build_character_dataset_file_fingerprint(augmented_dir, splits=("val", "test"))
+            val_test_guard = compare_character_val_test_unchanged(val_test_before, val_test_after)
+            if used_pending_balance_plan and generated > 0:
+                _clear_pending_character_balance_plan(self)
+            mz_variant_manifest = build_character_training_variant_manifest(
+                base_dataset=source_dir,
+                before_distribution=before_refs.get("json", {}).get("path", ""),
+                after_distribution=after_refs.get("json", {}).get("path", ""),
+                plan=balance_plan,
+                sources={
+                    "real": int(base_counts.get("train", 0) or 0),
+                    "added_real": 0,
+                    "augmented_real": generated,
+                    "synthetic": 0,
+                    "augmented_synthetic": 0,
+                },
+                base_dataset_sha_or_fingerprint=base_dataset_fingerprint,
+                val_test_unchanged=val_test_guard,
+            )
+            if used_pending_balance_plan:
+                mz_variant_manifest["approved_balance_plan"] = True
+                mz_variant_manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
+            (augmented_dir / "mz_training_variant_manifest.json").write_text(
+                json.dumps(mz_variant_manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if not bool(val_test_guard.get("unchanged")):
+                postprocess["ok"] = False
+                postprocess["message"] = (
+                    str(postprocess.get("message") or "").strip()
+                    + "\nWalidacja freeze: split val/test zmienił się podczas augmentacji."
+                ).strip()
+        except Exception as exc:
+            logger.exception("Nie udało się zapisać manifestu wariantu MZ")
+            postprocess["ok"] = False
+            postprocess["message"] = (
+                str(postprocess.get("message") or "").strip()
+                + f"\nNie udało się zapisać manifestu wariantu MZ: {exc}"
+            ).strip()
     summary = (
         "Wariant utworzono: "
         f"oryginalne={base_total}, syntetyczne={generated}/{requested_extra}, razem={augmented_total}.\n"
@@ -2848,9 +2985,11 @@ def _create_step4_augmented_dataset_variant(
         "augmented_total": augmented_total,
         "status_message": status_message,
         "synthetic_scope": "training_dataset_only",
+        "used_pending_character_balance_plan": used_pending_balance_plan,
         "synthetic_images_project_base": False,
         "synthetic_images_next_iteration_base": False,
         "augmentation_scope": scope_meta,
+        "mz_training_variant_manifest": mz_variant_manifest,
     }
 
 def _apply_step4_dataset_postprocessing(
@@ -2861,6 +3000,7 @@ def _apply_step4_dataset_postprocessing(
     profile: AugmentationProfile,
     progress_var_name: str,
     status_attr_name: str,
+    balance_plan=None,
 ) -> dict:
     dataset_dir = Path(dataset_path)
     normalized_target = CONFIG.normalize_task_target(target)
@@ -2949,6 +3089,7 @@ def _apply_step4_dataset_postprocessing(
         dataset_dir,
         profile,
         progress_callback=progress,
+        balance_plan=balance_plan,
     )
     result["augmentation_stats"] = dict(aug_stats or {})
     if ok_aug:

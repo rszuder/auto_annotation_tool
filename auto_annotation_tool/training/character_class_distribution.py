@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import csv
 from datetime import datetime
+import hashlib
 import json
 from math import ceil
 from pathlib import Path
@@ -176,6 +177,40 @@ class CharacterBalancePlan:
             "deficit_by_symbol": dict(self.deficit_by_symbol),
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class CharacterRealSourceCandidate:
+    source_key: str
+    source_path: str
+    expected_text: str
+    metadata_field: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_key": self.source_key,
+            "source_path": self.source_path,
+            "expected_text": self.expected_text,
+            "metadata_field": self.metadata_field,
+        }
+
+
+@dataclass(frozen=True)
+class CharacterRealSourceSearchRow:
+    symbol: str
+    current_train_count: int = 0
+    current_unique_train: int = 0
+    available_unused_real_sources: int = 0
+    candidates: tuple[CharacterRealSourceCandidate, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "current_train_count": int(self.current_train_count),
+            "current_unique_train": int(self.current_unique_train),
+            "available_unused_real_sources": int(self.available_unused_real_sources),
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
 
 
@@ -439,7 +474,7 @@ def plan_character_train_augmentation(
     if layout != "split" or not split_dirs.get("train"):
         warnings.append("Brak jawnego splitu train; plan augmentacji train-only nie wybiera źródeł.")
 
-    candidates: list[CharacterBalanceAugmentationCandidate] = []
+    grouped_candidates: dict[str, list[CharacterBalanceAugmentationCandidate]] = {}
     source_map = _load_augmentation_source_map(root)
     for label_dir in split_dirs.get("train", []):
         for label_path in _iter_label_files(label_dir):
@@ -449,16 +484,37 @@ def plan_character_train_augmentation(
             if priority <= 0:
                 continue
             image_path = _resolve_image_for_label(root, label_path)
-            candidates.append(
-                CharacterBalanceAugmentationCandidate(
-                    source_key=source_key,
-                    label_path=str(label_path),
-                    image_path=str(image_path or ""),
-                    symbols=symbols,
-                    priority=round(priority, 4),
-                    max_augmented_variants=max_per_source,
-                )
+            candidate = CharacterBalanceAugmentationCandidate(
+                source_key=source_key,
+                label_path=str(label_path),
+                image_path=str(image_path or ""),
+                symbols=symbols,
+                priority=round(priority, 4),
+                max_augmented_variants=max_per_source,
             )
+            grouped_candidates.setdefault(source_key, []).append(candidate)
+
+    candidates: list[CharacterBalanceAugmentationCandidate] = []
+    for source_key, group in grouped_candidates.items():
+        group.sort(
+            key=lambda item: (
+                0 if _is_original_source_label(Path(item.label_path), item.source_key, source_map) else 1,
+                str(Path(item.label_path).name).lower(),
+            )
+        )
+        selected = group[0]
+        if len(group) > 1:
+            has_original = any(
+                _is_original_source_label(Path(item.label_path), item.source_key, source_map)
+                for item in group
+            )
+            if not has_original:
+                warnings.append(
+                    "Źródło "
+                    f"{source_key} ma tylko kopie augmentowane; wybrano deterministycznie "
+                    f"{Path(selected.label_path).name}."
+                )
+        candidates.append(selected)
 
     candidates.sort(key=lambda item: (-item.priority, item.source_key))
     return CharacterBalancePlan(
@@ -475,6 +531,147 @@ def plan_character_train_augmentation(
     )
 
 
+def find_character_real_source_candidates(
+    dataset_root: Path | str,
+    search_roots: list[Path | str] | tuple[Path | str, ...],
+    *,
+    target_ratio: float = 0.50,
+    candidate_limit_per_symbol: int = 200,
+) -> dict[str, dict[str, Any]]:
+    """Find unused real metadata sources that can reduce MZ class deficits.
+
+    The function scans existing JSON/YAML metadata fields only. It does not
+    create a new database and it does not mutate the dataset.
+    """
+
+    root, _yaml_path = _normalize_dataset_root(dataset_root)
+    distribution = analyze_character_class_distribution(root, target_ratio=target_ratio)
+    deficit_rows = {row.symbol: row for row in distribution.classes if int(row.deficit_count) > 0}
+    if not deficit_rows:
+        return {}
+
+    used_source_keys = _collect_train_source_keys(root)
+    result: dict[str, dict[str, Any]] = {
+        symbol: CharacterRealSourceSearchRow(
+            symbol=symbol,
+            current_train_count=int(row.train_count),
+            current_unique_train=int(row.unique_train_plate_count),
+        ).to_dict()
+        for symbol, row in deficit_rows.items()
+    }
+    by_symbol: dict[str, dict[str, CharacterRealSourceCandidate]] = {
+        symbol: {} for symbol in deficit_rows
+    }
+    limit = max(0, int(candidate_limit_per_symbol or 0))
+
+    for metadata_path in _iter_metadata_files(search_roots):
+        payload = _load_metadata_payload(metadata_path)
+        if not isinstance(payload, (dict, list)):
+            continue
+        for source_key, expected_text, field_name in _iter_metadata_expected_texts(payload, metadata_path):
+            if not source_key or source_key in used_source_keys:
+                continue
+            symbols = set(str(expected_text or ""))
+            if not symbols:
+                continue
+            for symbol in deficit_rows:
+                if symbol not in symbols:
+                    continue
+                bucket = by_symbol.setdefault(symbol, {})
+                if source_key in bucket:
+                    continue
+                if limit and len(bucket) >= limit:
+                    continue
+                bucket[source_key] = CharacterRealSourceCandidate(
+                    source_key=source_key,
+                    source_path=str(metadata_path),
+                    expected_text=expected_text,
+                    metadata_field=field_name,
+                )
+
+    for symbol, candidates_by_key in by_symbol.items():
+        row = dict(result.get(symbol) or {})
+        candidates = tuple(sorted(candidates_by_key.values(), key=lambda item: item.source_key))
+        row["available_unused_real_sources"] = len(candidates)
+        row["candidates"] = [candidate.to_dict() for candidate in candidates]
+        result[symbol] = row
+    return result
+
+
+def build_character_dataset_file_fingerprint(
+    dataset_root: Path | str,
+    *,
+    splits: tuple[str, ...] = CHARACTER_BALANCE_SPLITS,
+) -> dict[str, Any]:
+    """Create a lightweight dataset fingerprint from file names, sizes and mtimes."""
+
+    root, yaml_path = _normalize_dataset_root(dataset_root)
+    entries: list[dict[str, Any]] = []
+    if yaml_path is not None and yaml_path.exists():
+        entries.append(_fingerprint_entry(root, yaml_path, "config"))
+    for split_name in splits:
+        for folder_name in ("images", "labels"):
+            folder = root / folder_name / split_name
+            if not folder.exists() or not folder.is_dir():
+                continue
+            suffixes = {".txt"} if folder_name == "labels" else set(CHARACTER_BALANCE_IMAGE_EXTENSIONS)
+            try:
+                paths = sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
+            except Exception:
+                paths = []
+            for path in paths:
+                entries.append(_fingerprint_entry(root, path, split_name))
+    entries.sort(key=lambda item: str(item.get("relative_path", "")))
+    digest = hashlib.sha256(
+        json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "dataset_root": str(root),
+        "splits": list(splits),
+        "file_count": len(entries),
+        "sha256": digest,
+        "entries": entries,
+    }
+
+
+def compare_character_val_test_unchanged(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare two val/test fingerprints without reading image payloads."""
+
+    before_digest = str((before or {}).get("sha256") or "")
+    after_digest = str((after or {}).get("sha256") or "")
+    return {
+        "unchanged": bool(before_digest and before_digest == after_digest),
+        "before_sha256": before_digest,
+        "after_sha256": after_digest,
+        "before_file_count": int((before or {}).get("file_count", 0) or 0),
+        "after_file_count": int((after or {}).get("file_count", 0) or 0),
+    }
+
+
+def save_character_distribution_artifacts(
+    distribution: CharacterClassDistribution,
+    output_dir: Path | str,
+    *,
+    prefix: str,
+) -> dict[str, dict[str, str]]:
+    """Persist distribution as CSV/JSON and return path+SHA references."""
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", str(prefix or "").strip()).strip("._-")
+    if not safe_prefix:
+        safe_prefix = "character_class_distribution"
+    csv_path = save_character_class_distribution_csv(distribution, output / f"{safe_prefix}.csv")
+    json_path = save_character_class_distribution_json(distribution, output / f"{safe_prefix}.json")
+    return {
+        "csv": _file_artifact_ref(csv_path),
+        "json": _file_artifact_ref(json_path),
+    }
+
+
 def build_character_training_variant_manifest(
     *,
     base_dataset: Path | str,
@@ -482,12 +679,15 @@ def build_character_training_variant_manifest(
     after_distribution: CharacterClassDistribution | Path | str | None = None,
     plan: CharacterBalancePlan | None = None,
     sources: Mapping[str, int] | None = None,
+    base_dataset_sha_or_fingerprint: Mapping[str, Any] | str | None = None,
+    val_test_unchanged: bool | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the research manifest skeleton for an MZ training variant."""
 
     max_per_source = int(getattr(plan, "max_augmented_variants_per_source", 0) or 0)
     source_counts = {
         "real": 0,
+        "added_real": 0,
         "augmented_real": 0,
         "synthetic": 0,
         "augmented_synthetic": 0,
@@ -499,10 +699,20 @@ def build_character_training_variant_manifest(
         "schema": CHARACTER_TRAINING_VARIANT_SCHEMA,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "base_dataset": str(base_dataset),
+        "base_dataset_sha_or_fingerprint": (
+            _compact_fingerprint_ref(base_dataset_sha_or_fingerprint)
+            if isinstance(base_dataset_sha_or_fingerprint, Mapping)
+            else (
+                str(base_dataset_sha_or_fingerprint)
+                if base_dataset_sha_or_fingerprint
+                else build_character_dataset_file_fingerprint(base_dataset).get("sha256", "")
+            )
+        ),
         "alphabet": CHARACTER_BALANCE_ALPHABET,
         "target_count": int(getattr(plan, "target_count", 0) or 0),
         "target_ratio": float(getattr(plan, "target_ratio", 0.50) or 0.50),
         "selection_policy": str(getattr(plan, "selection_policy", "deficit_weighted") or "deficit_weighted"),
+        "max_augmented_variants_per_source": max_per_source,
         "sources": source_counts,
         "before_distribution": _distribution_ref(before_distribution),
         "after_distribution": _distribution_ref(after_distribution) if after_distribution is not None else "",
@@ -510,6 +720,12 @@ def build_character_training_variant_manifest(
             "max_variants_per_source": max_per_source,
         },
         "balance_plan": plan.to_dict() if plan is not None else {},
+        "val_test_unchanged": (
+            bool(val_test_unchanged.get("unchanged"))
+            if isinstance(val_test_unchanged, Mapping)
+            else (True if val_test_unchanged is None else bool(val_test_unchanged))
+        ),
+        "val_test_guard": dict(val_test_unchanged) if isinstance(val_test_unchanged, Mapping) else {},
     }
 
 
@@ -631,10 +847,201 @@ def _resolve_image_for_label(root: Path, label_path: Path) -> Path | None:
     return None
 
 
-def _distribution_ref(value: CharacterClassDistribution | Path | str) -> str:
+def _is_original_source_label(label_path: Path, source_key: str, source_map: dict[str, str]) -> bool:
+    stem = Path(label_path).stem
+    if stem in source_map:
+        return False
+    return stem == str(source_key or stem)
+
+
+def _collect_train_source_keys(root: Path) -> set[str]:
+    source_map = _load_augmentation_source_map(root)
+    split_dirs, _layout = _discover_label_dirs(root)
+    keys: set[str] = set()
+    for label_dir in split_dirs.get("train", []):
+        for label_path in _iter_label_files(label_dir):
+            source_key = _normalize_source_plate_key(label_path.stem, source_map)
+            if source_key:
+                keys.add(source_key)
+    return keys
+
+
+def _iter_metadata_files(search_roots: list[Path | str] | tuple[Path | str, ...]):
+    seen: set[str] = set()
+    for raw_root in search_roots or []:
+        root = Path(raw_root)
+        candidates: list[Path]
+        if root.is_file():
+            candidates = [root]
+        elif root.exists() and root.is_dir():
+            candidates = sorted(
+                path for path in root.rglob("*")
+                if path.is_file() and path.suffix.lower() in {".json", ".yaml", ".yml"}
+            )
+        else:
+            candidates = []
+        for path in candidates:
+            key = _path_key(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path
+
+
+def _load_metadata_payload(path: Path) -> Any:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        try:
+            return safe_load_yaml(Path(path))
+        except Exception:
+            return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig", errors="ignore"))
+    except Exception:
+        return {}
+
+
+_REAL_SOURCE_TEXT_FIELDS = {
+    "source_expected_text",
+    "expected_text",
+    "plate_text",
+    "ground_truth",
+    "ground_truth_text",
+    "source_expected_texts",
+    "expected_texts",
+    "ground_truth_texts",
+}
+_REAL_SOURCE_KEY_FIELDS = {
+    "source_key",
+    "source_id",
+    "plate_id",
+    "crop_id",
+    "image_id",
+    "source_image",
+    "image_path",
+    "path",
+    "filename",
+    "file_name",
+    "name",
+}
+
+
+def _iter_metadata_expected_texts(payload: Any, path: Path):
+    stack: list[tuple[Any, str]] = [(payload, "")]
+    while stack:
+        value, field_name = stack.pop()
+        if isinstance(value, dict):
+            texts: list[tuple[str, str]] = []
+            source_key = _metadata_source_key(value, path)
+            for key, raw_value in value.items():
+                key_text = str(key or "")
+                if key_text in _REAL_SOURCE_TEXT_FIELDS:
+                    texts.extend((token, key_text) for token in _expected_text_tokens(raw_value))
+                elif isinstance(raw_value, (dict, list, tuple)):
+                    stack.append((raw_value, key_text))
+            for text, text_field in texts:
+                if text:
+                    yield source_key, text, text_field
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in reversed(value):
+                stack.append((item, field_name))
+
+
+def _metadata_source_key(payload: Mapping[str, Any], path: Path) -> str:
+    for field_name in _REAL_SOURCE_KEY_FIELDS:
+        raw_value = payload.get(field_name)
+        if raw_value in (None, "", [], {}):
+            continue
+        if isinstance(raw_value, (list, tuple)):
+            raw_value = raw_value[0] if raw_value else ""
+        text = str(raw_value or "").strip()
+        if text:
+            return _normalize_source_plate_key(Path(text).stem, {})
+    return _normalize_source_plate_key(Path(path).stem, {})
+
+
+def _expected_text_tokens(value: Any) -> list[str]:
+    values: list[Any]
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = [value]
+    tokens: list[str] = []
+    for item in values:
+        text = str(item or "").strip().upper()
+        if not text:
+            continue
+        pieces = re.split(r"[_;,|/\\]+", text)
+        if len(pieces) <= 1:
+            pieces = [text]
+        for piece in pieces:
+            token = re.sub(r"[^0-9A-Z]+", "", piece.upper())
+            if token and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _file_artifact_ref(path: Path | str) -> dict[str, str]:
+    safe_path = Path(path)
+    ref = {"path": str(safe_path), "sha256": ""}
+    try:
+        if safe_path.exists() and safe_path.is_file():
+            ref["sha256"] = _file_sha256(safe_path)
+    except Exception:
+        ref["sha256"] = ""
+    return ref
+
+
+def _compact_fingerprint_ref(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "dataset_root": str(value.get("dataset_root") or ""),
+        "splits": list(value.get("splits") or []),
+        "file_count": int(value.get("file_count", 0) or 0),
+        "sha256": str(value.get("sha256") or ""),
+    }
+
+
+def _fingerprint_entry(root: Path, path: Path, split_name: str) -> dict[str, Any]:
+    try:
+        relative = str(Path(path).relative_to(root)).replace("\\", "/")
+    except Exception:
+        relative = str(path)
+    try:
+        stat = Path(path).stat()
+        size = int(stat.st_size or 0)
+        mtime_ns = int(stat.st_mtime_ns or 0)
+    except Exception:
+        size = 0
+        mtime_ns = 0
+    return {
+        "split": split_name,
+        "relative_path": relative,
+        "size": size,
+        "mtime_ns": mtime_ns,
+    }
+
+
+def _distribution_ref(value: CharacterClassDistribution | Path | str) -> dict[str, str]:
     if isinstance(value, CharacterClassDistribution):
-        return str(value.dataset_root or value.dataset_yaml or "")
-    return str(value or "")
+        payload = value.to_dict()
+        return {
+            "path": str(value.dataset_yaml or value.dataset_root or ""),
+            "sha256": _sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
+        }
+    return _file_artifact_ref(Path(str(value or "")))
 
 
 def _validate_character_class_map(yaml_path: Path | None, layout: str) -> CharacterClassMapValidation:
