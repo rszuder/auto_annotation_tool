@@ -2436,3 +2436,80 @@ Uzasadnienie:
 - walidacja i test nie powinny byc sztucznie balansowane, bo maja reprezentowac rzeczywisty rozklad danych;
 - licznik unikalnych tablic jest kluczowy badawczo, bo odroznia realna roznorodnosc od powielania tej samej probki;
 - CSV ulatwia dalsza analize w arkuszu, a JSON jest powtarzalnym artefaktem do raportu i dokumentacji eksperymentu.
+
+### 20. Walidacja mapy klas MZ i deficyt operacyjny przed freeze
+
+Problem:
+
+- analiza balansu MZ zaklada staly alfabet `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ`;
+- bez kontroli `data.yaml` dataset z inna kolejnoscia `names` moglby byc policzony po `class_id`, ale opisany blednymi symbolami;
+- sama informacja `LOW`/`CRITICAL` nie wystarcza do zaplanowania uzupelnienia materialu, bo potrzebujemy takze jawnego celu operacyjnego i deficytu.
+
+Decyzja:
+
+- przed analiza datasetu MZ walidujemy mape klas z `data.yaml`;
+- akceptowane sa dwa standardowe warianty `names`: lista oraz slownik indeksow;
+- splitowany dataset bez `data.yaml` jest traktowany jako blad, a plaski surowy katalog `labels/` dostaje ostrzezenie;
+- operacyjny target uzupelnienia nie rowna klas do maksimum, tylko domyslnie wynosi `0.50 * median_nonzero_class_count`;
+- target jest parametrem diagnostycznym, mozliwym do zmiany w UI, a nie automatyczna decyzja o modyfikacji datasetu.
+
+Zmiana:
+
+- dodano `CharacterClassMapValidation` i `CharacterClassMapValidationError`;
+- `analyze_character_class_distribution(...)` zapisuje w podsumowaniu blok `class_map`, `warnings`, `balance_target_ratio`, `target_class_count`, `deficit_classes` i `total_deficit_count`;
+- kazdy wiersz klasy ma oddzielnie `count_status`, `diversity_status`, `target_count` oraz `deficit_count`;
+- modal analizy MZ pokazuje mape klas, cel uzupelnienia i deficyt, a tabela rozdziela liczebnosc od roznorodnosci;
+- eksport CSV/JSON przenosi nowe pola, dzieki czemu artefakt badawczy niesie pelny kontekst interpretacji.
+- dodano nieinwazyjny plan targeted balancing: `plan_character_train_augmentation(...)` wybiera kandydatow tylko ze splitu `train` i sortuje ich po sumie deficytow znakow obecnych na tablicy;
+- plan zapisuje `max_augmented_variants_per_source`, zeby limit kopii jednego realnego zrodla byl jawna decyzja badawcza, a nie ukrytym stalym parametrem;
+- dodano `build_character_training_variant_manifest(...)`, czyli szkielet manifestu wariantu MZ z `base_dataset`, `before_distribution`, `after_distribution`, polityka wyboru i licznikami zrodel.
+
+Uzasadnienie:
+
+- niezgodna mapa klas jest bledem metodologicznym, a nie tylko ostrzezeniem kosmetycznym;
+- liczba probek i liczba unikalnych zrodel opisuja dwa rozne ryzyka: niedobor materialu oraz zbyt waska roznorodnosc;
+- deficyt liczony wzgledem polowy mediany jest ostroznym progiem roboczym, ktory pomaga planowac uzupelnienie bez sztucznego dopasowywania rozkladu do maksimum.
+- plan targeted balancing nie modyfikuje datasetu samodzielnie; sluzy jako warstwa decyzyjna przed istniejaca augmentacja train-only i zmniejsza ryzyko przypadkowego naruszenia `val/test`.
+
+Testy:
+
+- dodano testy dla poprawnego `data.yaml` jako listy i slownika;
+- dodano testy dla zamienionych klas, brakujacej klasy, dodatkowej klasy i braku `data.yaml`;
+- dodano test targetu i deficytu z domyslnym progiem oraz z progiem nadpisanym przez uzytkownika.
+- dodano test priorytetu tablicy z rzadkim znakiem, limitu augmentacji jednego zrodla i ignorowania `val/test` przez plan;
+- dodano test manifestu wariantu treningowego z referencja `before/after`.
+
+### 21. Pelne dane raportow mobilnych niezalezne od preview UI
+
+Problem:
+
+- przegladarka raportow mobilnych celowo ogranicza preview, np. do 5000 rekordow, zeby UI pozostalo responsywne;
+- ten limit nie moze ograniczac wlasciwej analizy badawczej, bo wtedy wykresy, agregaty i wnioski opieralyby sie tylko na poczatku przebiegu;
+- raport Androida moze zawierac osobne strumienie `traces`, `thermal`, `frame_flow`, `events` i `samples`, ktorych nie nalezy ladowac w calosci do pamieci tylko po to, by policzyc wynik.
+
+Decyzja:
+
+- rozdzielono zrodlo podgladu od zrodla analizy;
+- preview nadal moze byc male i lekkie;
+- analiza moze korzystac ze strumieniowych iteratorow pelnych danych;
+- archiwum ZIP nie jest rozpakowywane do katalogow roboczych, a sciezki wpisow sa walidowane tak samo jak przy imporcie raportu.
+
+Zmiana:
+
+- dodano publiczne iteratory backendowe: `iter_full_trace_rows`, `iter_full_thermal_rows`, `iter_full_frame_flow_rows`, `iter_full_event_rows` i `iter_full_sample_rows`;
+- iteratory obsluguja `.alprsession`/ZIP oraz JSON z jednym raportem albo lista `reports`;
+- dla ZIP czytane sa pelne wpisy `traces.csv`, `thermal.csv`, `frame_flow.csv`, `events.csv/jsonl` oraz `samples/index.csv`;
+- gdy osobny plik tabelaryczny nie istnieje, iterator potrafi skorzystac z danych osadzonych w `report.json`;
+- funkcje zostaly wyeksportowane z pakietu `auto_annotation_tool.ranking`.
+
+Uzasadnienie:
+
+- GUI i analiza badawcza maja rozne wymagania: GUI potrzebuje responsywnego podgladu, a metodyka wymaga pelnego materialu;
+- streaming ogranicza zuzycie RAM i unika kopiowania duzych raportow;
+- rozdzielenie preview/analysis zapobiega cichej utracie rekordow w pracy inzynierskiej.
+
+Testy:
+
+- dodano syntetyczny raport `.alprsession` z 12000 rekordami w kazdym strumieniu;
+- test potwierdza, ze preview pozostaje ograniczone, ale iteratory pelne zwracaja wszystkie rekordy;
+- dodano test JSON zawierajacego wiele raportow w polu `reports`.

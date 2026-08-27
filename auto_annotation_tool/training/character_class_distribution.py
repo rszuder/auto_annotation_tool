@@ -8,20 +8,56 @@ from dataclasses import dataclass, field
 import csv
 from datetime import datetime
 import json
+from math import ceil
 from pathlib import Path
 import re
 from statistics import median
-from typing import Any
+from typing import Any, Mapping
+
+from ..utils import safe_load_yaml
 
 
 CHARACTER_BALANCE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 CHARACTER_CLASS_DISTRIBUTION_SCHEMA = "alpr.character_class_distribution.v1"
+CHARACTER_BALANCE_PLAN_SCHEMA = "alpr.character_balance_plan.v1"
+CHARACTER_TRAINING_VARIANT_SCHEMA = "alpr.mz_training_variant.v1"
 CHARACTER_BALANCE_SPLITS = ("train", "val", "test")
+CHARACTER_BALANCE_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
-_ANALYSIS_CACHE: dict[tuple[str, str], "CharacterClassDistribution"] = {}
+_ANALYSIS_CACHE: dict[tuple[str, str, str], "CharacterClassDistribution"] = {}
 _EXPLICIT_AUG_SUFFIX_RE = re.compile(
     r"(?i)(?:__aug[_-]?\d+|[_-]aug(?:mented)?[_-]?\d*)$"
 )
+
+
+@dataclass(frozen=True)
+class CharacterClassMapValidation:
+    ok: bool
+    status: str
+    expected: tuple[str, ...]
+    detected: tuple[str, ...] = field(default_factory=tuple)
+    first_mismatch_index: int | None = None
+    message: str = ""
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": bool(self.ok),
+            "status": self.status,
+            "expected": list(self.expected),
+            "detected": list(self.detected),
+            "first_mismatch_index": self.first_mismatch_index,
+            "message": self.message,
+            "warnings": list(self.warnings),
+        }
+
+
+class CharacterClassMapValidationError(ValueError):
+    """Raised when data.yaml cannot be safely interpreted as the MZ alphabet."""
+
+    def __init__(self, validation: CharacterClassMapValidation):
+        self.validation = validation
+        super().__init__(validation.message or "Mapa klas datasetu nie jest zgodna ze standardem MZ.")
 
 
 @dataclass(frozen=True)
@@ -40,6 +76,8 @@ class CharacterClassDistributionRow:
     count_status: str = "OK"
     diversity_status: str = "OK"
     status: str = "OK"
+    target_count: int = 0
+    deficit_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +95,8 @@ class CharacterClassDistributionRow:
             "count_status": self.count_status,
             "diversity_status": self.diversity_status,
             "status": self.status,
+            "target_count": int(self.target_count),
+            "deficit_count": int(self.deficit_count),
         }
 
 
@@ -89,14 +129,70 @@ class CharacterClassDistribution:
         return [row.to_dict() for row in self.classes]
 
 
-def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterClassDistribution:
+@dataclass(frozen=True)
+class CharacterBalanceAugmentationCandidate:
+    source_key: str
+    label_path: str
+    image_path: str = ""
+    symbols: tuple[str, ...] = field(default_factory=tuple)
+    priority: float = 0.0
+    max_augmented_variants: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_key": self.source_key,
+            "label_path": self.label_path,
+            "image_path": self.image_path,
+            "symbols": list(self.symbols),
+            "priority": float(self.priority),
+            "max_augmented_variants": int(self.max_augmented_variants),
+        }
+
+
+@dataclass(frozen=True)
+class CharacterBalancePlan:
+    schema: str
+    created_at: str
+    base_dataset: str
+    alphabet: str
+    target_ratio: float
+    target_count: int
+    max_augmented_variants_per_source: int
+    selection_policy: str = "deficit_weighted"
+    deficit_by_symbol: dict[str, int] = field(default_factory=dict)
+    candidates: tuple[CharacterBalanceAugmentationCandidate, ...] = field(default_factory=tuple)
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "created_at": self.created_at,
+            "base_dataset": self.base_dataset,
+            "alphabet": self.alphabet,
+            "target_ratio": float(self.target_ratio),
+            "target_count": int(self.target_count),
+            "selection_policy": self.selection_policy,
+            "max_augmented_variants_per_source": int(self.max_augmented_variants_per_source),
+            "deficit_by_symbol": dict(self.deficit_by_symbol),
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "warnings": list(self.warnings),
+        }
+
+
+def analyze_character_class_distribution(
+    dataset_root: Path | str,
+    *,
+    target_ratio: float = 0.50,
+) -> CharacterClassDistribution:
     """Analyze YOLO label files for the fixed MZ alphabet."""
 
     root, yaml_path = _normalize_dataset_root(dataset_root)
+    target_ratio = _normalize_balance_target_ratio(target_ratio)
     root_key = _path_key(root)
     split_dirs, layout = _discover_label_dirs(root)
+    class_map_validation = _validate_character_class_map(yaml_path, layout)
     signature = _build_label_signature(split_dirs, yaml_path)
-    cache_key = (root_key, signature)
+    cache_key = (root_key, signature, f"target={target_ratio:.6f}")
     cached = _ANALYSIS_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -179,15 +275,26 @@ def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterC
     median_nonzero_unique = _median_nonzero(diagnostic_unique_counts)
     low_count_limit = 0.25 * median_nonzero_count if median_nonzero_count > 0 else 0.0
     low_diversity_limit = 0.25 * median_nonzero_unique if median_nonzero_unique > 0 else 0.0
+    target_count = (
+        int(ceil(float(target_ratio) * float(median_nonzero_count)))
+        if median_nonzero_count > 0 and target_ratio > 0
+        else 0
+    )
 
     rows: list[CharacterClassDistributionRow] = []
     zero_classes: list[str] = []
     low_count_classes: list[str] = []
     low_diversity_classes: list[str] = []
+    deficit_classes: list[str] = []
+    total_deficit_count = 0
 
     for class_id, symbol in enumerate(alphabet):
         diagnostic_count = int(diagnostic_counts[class_id])
         diagnostic_unique = int(diagnostic_unique_counts[class_id])
+        deficit_count = max(0, int(target_count) - diagnostic_count)
+        if deficit_count > 0:
+            deficit_classes.append(symbol)
+            total_deficit_count += deficit_count
         is_zero = diagnostic_count <= 0
         is_low_count = (
             not is_zero
@@ -242,6 +349,8 @@ def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterC
                 count_status=count_status,
                 diversity_status=diversity_status,
                 status=status,
+                target_count=target_count,
+                deficit_count=deficit_count,
             )
         )
 
@@ -258,6 +367,11 @@ def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterC
         "maximum_class_count": int(maximum_count),
         "median_class_count": float(median(diagnostic_counts)) if diagnostic_counts else 0.0,
         "median_nonzero_class_count": float(median_nonzero_count),
+        "balance_target_ratio": float(target_ratio),
+        "target_class_count": int(target_count),
+        "total_deficit_count": int(total_deficit_count),
+        "deficit_classes": deficit_classes,
+        "deficit_policy": "max(0, target_count - diagnostic_count)",
         "max_min_ratio": max_min_ratio,
         "zero_classes": zero_classes,
         "low_count_classes": low_count_classes,
@@ -271,6 +385,8 @@ def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterC
         "empty_label_files": int(empty_label_files),
         "invalid_label_lines": int(invalid_label_lines),
         "invalid_class_ids": int(invalid_class_ids),
+        "class_map": class_map_validation.to_dict(),
+        "warnings": list(class_map_validation.warnings),
         "label_files": {
             split: int(label_files_by_split.get(split, 0) or 0)
             for split in (*CHARACTER_BALANCE_SPLITS, "unsplit")
@@ -294,6 +410,109 @@ def analyze_character_class_distribution(dataset_root: Path | str) -> CharacterC
     return distribution
 
 
+def plan_character_train_augmentation(
+    dataset_root: Path | str,
+    *,
+    target_ratio: float = 0.50,
+    max_augmented_variants_per_source: int = 3,
+) -> CharacterBalancePlan:
+    """Build a train-only augmentation plan weighted by class deficits.
+
+    The function is deliberately non-destructive: it does not create images and
+    never touches val/test. It only exposes the source priority that the dataset
+    builder can use before creating a training variant.
+    """
+
+    root, _yaml_path = _normalize_dataset_root(dataset_root)
+    distribution = analyze_character_class_distribution(root, target_ratio=target_ratio)
+    target_ratio = float(distribution.summary.get("balance_target_ratio", target_ratio) or 0.50)
+    target_count = int(distribution.summary.get("target_class_count", 0) or 0)
+    max_per_source = max(0, int(max_augmented_variants_per_source or 0))
+    deficit_by_symbol = {
+        row.symbol: int(row.deficit_count)
+        for row in distribution.classes
+        if int(row.deficit_count) > 0
+    }
+
+    split_dirs, layout = _discover_label_dirs(root)
+    warnings: list[str] = []
+    if layout != "split" or not split_dirs.get("train"):
+        warnings.append("Brak jawnego splitu train; plan augmentacji train-only nie wybiera źródeł.")
+
+    candidates: list[CharacterBalanceAugmentationCandidate] = []
+    source_map = _load_augmentation_source_map(root)
+    for label_dir in split_dirs.get("train", []):
+        for label_path in _iter_label_files(label_dir):
+            source_key = _normalize_source_plate_key(label_path.stem, source_map)
+            symbols = _symbols_from_label_file(label_path)
+            priority = sum(float(deficit_by_symbol.get(symbol, 0)) for symbol in symbols)
+            if priority <= 0:
+                continue
+            image_path = _resolve_image_for_label(root, label_path)
+            candidates.append(
+                CharacterBalanceAugmentationCandidate(
+                    source_key=source_key,
+                    label_path=str(label_path),
+                    image_path=str(image_path or ""),
+                    symbols=symbols,
+                    priority=round(priority, 4),
+                    max_augmented_variants=max_per_source,
+                )
+            )
+
+    candidates.sort(key=lambda item: (-item.priority, item.source_key))
+    return CharacterBalancePlan(
+        schema=CHARACTER_BALANCE_PLAN_SCHEMA,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        base_dataset=str(root),
+        alphabet=CHARACTER_BALANCE_ALPHABET,
+        target_ratio=target_ratio,
+        target_count=target_count,
+        max_augmented_variants_per_source=max_per_source,
+        deficit_by_symbol=deficit_by_symbol,
+        candidates=tuple(candidates),
+        warnings=tuple(warnings),
+    )
+
+
+def build_character_training_variant_manifest(
+    *,
+    base_dataset: Path | str,
+    before_distribution: CharacterClassDistribution | Path | str,
+    after_distribution: CharacterClassDistribution | Path | str | None = None,
+    plan: CharacterBalancePlan | None = None,
+    sources: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Create the research manifest skeleton for an MZ training variant."""
+
+    max_per_source = int(getattr(plan, "max_augmented_variants_per_source", 0) or 0)
+    source_counts = {
+        "real": 0,
+        "augmented_real": 0,
+        "synthetic": 0,
+        "augmented_synthetic": 0,
+    }
+    if sources:
+        for key in source_counts:
+            source_counts[key] = max(0, int(sources.get(key, 0) or 0))
+    return {
+        "schema": CHARACTER_TRAINING_VARIANT_SCHEMA,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "base_dataset": str(base_dataset),
+        "alphabet": CHARACTER_BALANCE_ALPHABET,
+        "target_count": int(getattr(plan, "target_count", 0) or 0),
+        "target_ratio": float(getattr(plan, "target_ratio", 0.50) or 0.50),
+        "selection_policy": str(getattr(plan, "selection_policy", "deficit_weighted") or "deficit_weighted"),
+        "sources": source_counts,
+        "before_distribution": _distribution_ref(before_distribution),
+        "after_distribution": _distribution_ref(after_distribution) if after_distribution is not None else "",
+        "augmentation": {
+            "max_variants_per_source": max_per_source,
+        },
+        "balance_plan": plan.to_dict() if plan is not None else {},
+    }
+
+
 def save_character_class_distribution_csv(
     distribution: CharacterClassDistribution,
     output_path: Path | str,
@@ -315,6 +534,8 @@ def save_character_class_distribution_csv(
         "count_status",
         "diversity_status",
         "status",
+        "target_count",
+        "deficit_count",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -343,6 +564,213 @@ def _normalize_dataset_root(dataset_root: Path | str) -> tuple[Path, Path | None
         return root.parent, root
     yaml_path = root / "data.yaml"
     return root, yaml_path if yaml_path.exists() else None
+
+
+def _normalize_balance_target_ratio(value: Any) -> float:
+    try:
+        ratio = float(str(value).strip().replace(",", "."))
+    except Exception:
+        ratio = 0.50
+    if ratio > 1.0:
+        ratio /= 100.0
+    return max(0.0, min(2.0, ratio))
+
+
+def _iter_label_files(label_dir: Path) -> list[Path]:
+    try:
+        return sorted(
+            path for path in Path(label_dir).iterdir()
+            if path.is_file() and path.suffix.lower() == ".txt"
+        )
+    except Exception:
+        return []
+
+
+def _symbols_from_label_file(label_path: Path) -> tuple[str, ...]:
+    class_count = len(CHARACTER_BALANCE_ALPHABET)
+    class_ids: set[int] = set()
+    try:
+        lines = Path(label_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        lines = []
+    for line in lines:
+        class_id, status = _parse_label_class_id(line, class_count)
+        if status != "ok" or class_id is None:
+            continue
+        class_ids.add(int(class_id))
+    return tuple(CHARACTER_BALANCE_ALPHABET[index] for index in sorted(class_ids))
+
+
+def _resolve_image_for_label(root: Path, label_path: Path) -> Path | None:
+    label_path = Path(label_path)
+    root = Path(root)
+    relative: Path | None = None
+    try:
+        relative = label_path.relative_to(root)
+    except Exception:
+        relative = None
+
+    candidates: list[Path] = []
+    if relative is not None:
+        parts = list(relative.parts)
+        if len(parts) >= 3 and parts[0] == "labels":
+            candidates.append(root / "images" / parts[1] / label_path.name)
+        if len(parts) >= 3 and parts[1] == "labels":
+            candidates.append(root / parts[0] / "images" / label_path.name)
+    parent_parts = list(label_path.parent.parts)
+    if "labels" in parent_parts:
+        index = parent_parts.index("labels")
+        image_parent = Path(*parent_parts[:index], "images", *parent_parts[index + 1 :])
+        candidates.append(image_parent / label_path.name)
+
+    for candidate in candidates:
+        for suffix in CHARACTER_BALANCE_IMAGE_EXTENSIONS:
+            image_path = candidate.with_suffix(suffix)
+            if image_path.exists():
+                return image_path
+    return None
+
+
+def _distribution_ref(value: CharacterClassDistribution | Path | str) -> str:
+    if isinstance(value, CharacterClassDistribution):
+        return str(value.dataset_root or value.dataset_yaml or "")
+    return str(value or "")
+
+
+def _validate_character_class_map(yaml_path: Path | None, layout: str) -> CharacterClassMapValidation:
+    expected = tuple(CHARACTER_BALANCE_ALPHABET)
+    if yaml_path is None or not yaml_path.exists():
+        if layout == "flat":
+            return CharacterClassMapValidation(
+                ok=True,
+                status="WARNING",
+                expected=expected,
+                message="Brak mapy klas; interpretacja oparta na standardowym alfabecie MZ.",
+                warnings=("Brak mapy klas; interpretacja oparta na standardowym alfabecie MZ.",),
+            )
+        validation = CharacterClassMapValidation(
+            ok=False,
+            status="ERROR",
+            expected=expected,
+            message=(
+                "Brak data.yaml. Splitowany dataset MZ musi mieć jawną mapę klas, "
+                "żeby symbolika 0-9/A-Z była jednoznaczna."
+            ),
+        )
+        raise CharacterClassMapValidationError(validation)
+
+    payload = safe_load_yaml(yaml_path)
+    detected = _extract_yaml_class_names(payload)
+    if not detected:
+        detected = _extract_yaml_class_names_from_text(yaml_path)
+    first_mismatch = _first_class_map_mismatch(expected, detected)
+    if first_mismatch is None:
+        return CharacterClassMapValidation(
+            ok=True,
+            status="OK",
+            expected=expected,
+            detected=detected,
+            message="Mapa klas data.yaml jest zgodna ze standardem MZ.",
+        )
+
+    validation = CharacterClassMapValidation(
+        ok=False,
+        status="ERROR",
+        expected=expected,
+        detected=detected,
+        first_mismatch_index=first_mismatch,
+        message=_format_class_map_error(expected, detected, first_mismatch),
+    )
+    raise CharacterClassMapValidationError(validation)
+
+
+def _extract_yaml_class_names(payload: dict[str, Any]) -> tuple[str, ...]:
+    if not isinstance(payload, dict):
+        return tuple()
+    names = payload.get("names")
+    if isinstance(names, dict):
+        items: list[tuple[int, str]] = []
+        for raw_key, raw_value in names.items():
+            try:
+                key = int(str(raw_key).strip())
+            except Exception:
+                return tuple(str(value).strip() for value in names.values())
+            items.append((key, str(raw_value).strip()))
+        return tuple(value for _key, value in sorted(items, key=lambda item: item[0]))
+    if isinstance(names, (list, tuple)):
+        return tuple(str(value).strip() for value in names)
+    return tuple()
+
+
+def _extract_yaml_class_names_from_text(yaml_path: Path) -> tuple[str, ...]:
+    try:
+        lines = yaml_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return tuple()
+    names_started = False
+    list_values: list[str] = []
+    dict_values: dict[int, str] = {}
+    base_indent: int | None = None
+    for raw_line in lines:
+        line_without_comment = str(raw_line or "").split("#", 1)[0].rstrip()
+        stripped = line_without_comment.strip()
+        if not stripped:
+            continue
+        indent = len(line_without_comment) - len(line_without_comment.lstrip(" "))
+        if not names_started:
+            if re.match(r"^names\s*:\s*$", stripped):
+                names_started = True
+                base_indent = indent
+                continue
+            inline_match = re.match(r"^names\s*:\s*\[(.*)\]\s*$", stripped)
+            if inline_match:
+                return tuple(_clean_yaml_scalar(item) for item in inline_match.group(1).split(",") if item.strip())
+            continue
+        if base_indent is not None and indent <= base_indent:
+            break
+        if stripped.startswith("-"):
+            value = stripped[1:].strip()
+            list_values.append(_clean_yaml_scalar(value))
+            continue
+        mapping = re.match(r"^([0-9]+)\s*:\s*(.+?)\s*$", stripped)
+        if mapping:
+            dict_values[int(mapping.group(1))] = _clean_yaml_scalar(mapping.group(2))
+    if dict_values:
+        return tuple(value for _index, value in sorted(dict_values.items(), key=lambda item: item[0]))
+    return tuple(list_values)
+
+
+def _clean_yaml_scalar(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
+def _first_class_map_mismatch(expected: tuple[str, ...], detected: tuple[str, ...]) -> int | None:
+    limit = max(len(expected), len(detected))
+    for index in range(limit):
+        expected_value = expected[index] if index < len(expected) else None
+        detected_value = detected[index] if index < len(detected) else None
+        if expected_value != detected_value:
+            return index
+    return None
+
+
+def _format_class_map_error(
+    expected: tuple[str, ...],
+    detected: tuple[str, ...],
+    first_mismatch_index: int,
+) -> str:
+    expected_value = expected[first_mismatch_index] if first_mismatch_index < len(expected) else "<brak>"
+    detected_value = detected[first_mismatch_index] if first_mismatch_index < len(detected) else "<brak>"
+    return (
+        "Mapa klas datasetu nie jest zgodna ze standardem MZ.\n"
+        f"Pierwsza niezgodność: indeks {first_mismatch_index}, "
+        f"oczekiwano '{expected_value}', wykryto '{detected_value}'.\n"
+        f"Oczekiwana mapa: {''.join(expected)}\n"
+        f"Wykryta mapa: {' '.join(detected) if detected else '<brak names>'}"
+    )
 
 
 def _discover_label_dirs(root: Path) -> tuple[dict[str, list[Path]], str]:
