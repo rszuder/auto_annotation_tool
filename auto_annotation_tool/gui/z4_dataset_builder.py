@@ -2779,6 +2779,8 @@ def _summarize_character_real_source_search(real_sources: dict) -> dict:
     return {
         "symbols": len(by_symbol),
         "available_unused_real_sources": total_available,
+        "real_source_candidates_found": total_available,
+        "real_sources_added": 0,
         "by_symbol": by_symbol,
         "policy": "reported_only_requires_user_selection",
     }
@@ -2931,6 +2933,8 @@ def _create_step4_augmented_dataset_variant(
                 base_dataset_sha_or_fingerprint=base_dataset_fingerprint,
                 val_test_unchanged=val_test_guard,
             )
+            mz_variant_manifest["augmentation"]["seed"] = int(getattr(profile, "seed", 42) or 42)
+            mz_variant_manifest["augmentation"]["randomness_mode"] = str(getattr(profile, "randomness_mode", "") or "")
             if used_pending_balance_plan:
                 mz_variant_manifest["approved_balance_plan"] = True
                 mz_variant_manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)

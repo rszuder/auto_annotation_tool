@@ -761,7 +761,7 @@ class _CharacterClassDistributionDialog:
         footer.grid_columnconfigure(0, weight=1)
         tk.Label(
             footer,
-            text="Dodatkowe realne źródła mają pierwszeństwo przed augmentacją; wykonanie tworzy nowy wariant datasetu.",
+            text="Dodatkowe realne źródła są kandydatami do ręcznego uzupełnienia przed augmentacją; samo zatwierdzenie planu ich nie kopiuje.",
             bg=bg,
             fg=muted,
             font=("Segoe UI", 8),

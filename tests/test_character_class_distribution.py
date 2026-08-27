@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import os
+import random
 import tempfile
 import unittest
 
@@ -17,7 +19,10 @@ from auto_annotation_tool.training.character_class_distribution import (
     save_character_class_distribution_csv,
     save_character_class_distribution_json,
 )
-from auto_annotation_tool.training.dataset_augmentation import _build_balance_augmented_source_state
+from auto_annotation_tool.training.dataset_augmentation import (
+    _build_balance_augmented_source_state,
+    _select_augmentation_sample_pool,
+)
 
 
 def _names_list_yaml() -> str:
@@ -363,6 +368,94 @@ class CharacterClassDistributionTests(unittest.TestCase):
             changed = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
             self.assertFalse(compare_character_val_test_unchanged(before, changed)["unchanged"])
 
+    def test_val_test_fingerprint_excludes_data_yaml_but_full_dataset_includes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "val").mkdir(parents=True)
+            (root / "images" / "val").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            (root / "labels" / "val" / "a.txt").write_text("0 0 0 0 0\n", encoding="utf-8")
+            (root / "images" / "val" / "a.jpg").write_bytes(b"image")
+
+            val_before = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            full_before = build_character_dataset_file_fingerprint(root)
+            (root / "data.yaml").write_text("path: .\nnames:\n  0: changed\n", encoding="utf-8")
+            val_after = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            full_after = build_character_dataset_file_fingerprint(root)
+
+            self.assertFalse(val_before["includes_config"])
+            self.assertTrue(full_before["includes_config"])
+            self.assertTrue(compare_character_val_test_unchanged(val_before, val_after)["unchanged"])
+            self.assertNotEqual(full_before["sha256"], full_after["sha256"])
+
+    def test_val_test_fingerprint_supports_split_first_yolo_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "val" / "labels").mkdir(parents=True)
+            (root / "val" / "images").mkdir(parents=True)
+            (root / "val" / "labels" / "a.txt").write_text("0 0 0 0 0\n", encoding="utf-8")
+            (root / "val" / "images" / "a.jpg").write_bytes(b"image")
+
+            fingerprint = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+
+            self.assertEqual(fingerprint["mode"], "content_sha256")
+            self.assertEqual(fingerprint["file_count"], 2)
+            self.assertTrue(any(entry["relative_path"] == "val/labels/a.txt" for entry in fingerprint["entries"]))
+
+    def test_val_test_fingerprint_detects_same_size_same_mtime_content_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_dir = root / "labels" / "val"
+            label_dir.mkdir(parents=True)
+            label_path = label_dir / "a.txt"
+            label_path.write_text("0 0 0 0 0\n", encoding="utf-8")
+            stamp = 1_700_000_000_000_000_000
+            os.utime(label_path, ns=(stamp, stamp))
+
+            before = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+            label_path.write_text("1 0 0 0 0\n", encoding="utf-8")
+            os.utime(label_path, ns=(stamp, stamp))
+            after = build_character_dataset_file_fingerprint(root, splits=("val", "test"))
+
+            self.assertEqual(before["entries"][0]["size"], after["entries"][0]["size"])
+            self.assertNotEqual(before["sha256"], after["sha256"])
+
+    def test_executor_empty_balance_plan_does_not_fall_back_to_random_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = {
+                "base_dataset": str(root),
+                "max_augmented_variants_per_source": 3,
+                "candidates": [],
+            }
+
+            records, _limits, _initial, stats = _build_balance_augmented_source_state(
+                root,
+                [(root / "images" / "train" / "a.jpg", root / "labels" / "train" / "a.txt")],
+                balance_plan=plan,
+            )
+
+            self.assertEqual(records, [])
+            self.assertTrue(stats["balance_plan_enabled"])
+            self.assertEqual(stats["balance_plan_candidates"], 0)
+            self.assertEqual(stats["balance_pool"], 0)
+
+    def test_balance_sample_size_preserves_target_priorities(self):
+        pool = [
+            {"source_key": "low", "label_key": "labels/train/low.txt", "priority": 1},
+            {"source_key": "high", "label_key": "labels/train/high.txt", "priority": 100},
+            {"source_key": "mid", "label_key": "labels/train/mid.txt", "priority": 10},
+        ]
+
+        selected = _select_augmentation_sample_pool(
+            random.Random(42),
+            list(pool),
+            2,
+            balance_plan_enabled=True,
+        )
+
+        self.assertEqual([row["source_key"] for row in selected], ["high", "mid"])
+
     def test_real_source_search_counts_unused_sources_for_deficit_symbol(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "dataset"
@@ -380,6 +473,34 @@ class CharacterClassDistributionTests(unittest.TestCase):
 
             self.assertEqual(result["Q"]["current_unique_train"], 1)
             self.assertEqual(result["Q"]["available_unused_real_sources"], 5)
+
+    def test_real_source_search_includes_low_diversity_without_deficit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            pool = Path(tmp) / "pool"
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            for class_id in range(10):
+                for index in range(5):
+                    (root / "labels" / "train" / f"c{class_id}_{index}.txt").write_text(
+                        f"{class_id} 0 0 0 0\n",
+                        encoding="utf-8",
+                    )
+            (root / "labels" / "train" / "used_q.txt").write_text("26 0 0 0 0\n" * 6, encoding="utf-8")
+            pool.mkdir()
+            (pool / "metadata.json").write_text(
+                json.dumps({"plates": [{"source_key": "unused_q", "source_expected_text": "AQ1"}]}),
+                encoding="utf-8",
+            )
+
+            dist = analyze_character_class_distribution(root, target_ratio=0.5)
+            q_row = {row.symbol: row for row in dist.classes}["Q"]
+            result = find_character_real_source_candidates(root, (pool,), target_ratio=0.5)
+
+            self.assertEqual(q_row.deficit_count, 0)
+            self.assertEqual(q_row.diversity_status, "LOW_DIVERSITY")
+            self.assertIn("Q", result)
+            self.assertEqual(result["Q"]["available_unused_real_sources"], 1)
 
     def test_swapped_class_names_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

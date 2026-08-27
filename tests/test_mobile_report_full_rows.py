@@ -7,6 +7,7 @@ import zipfile
 
 from auto_annotation_tool.gui.z4_mobile_report_browser import MobileReportBrowser
 from auto_annotation_tool.ranking import (
+    ExperimentSessionRecord,
     iter_full_event_rows,
     iter_full_frame_flow_rows,
     iter_full_sample_rows,
@@ -180,6 +181,81 @@ class MobileReportFullRowsTests(unittest.TestCase):
         self.assertEqual(status_by_label["Android version"], "Różne")
         self.assertEqual(status_by_label["MT fingerprint"], "Spójne")
         self.assertEqual(status_by_label["MZ fingerprint"], "Różne")
+
+    def test_android_contract_roles_are_normalized_to_mp_mt_mz(self):
+        payload = _report_payload("android-contract")
+        payload["execution"] = {
+            "vehicle": {"sha256": "mp-sha-1234567890"},
+            "plate": {"sha256": "mt-sha-1234567890"},
+            "character": {"sha256": "mz-sha-1234567890"},
+        }
+        payload["runtime_composition"] = {
+            "models": {
+                "vehicle": {"sha256": "mp-sha-should-not-override"},
+                "plate": {"sha256": "mt-sha-should-not-override"},
+                "character": {"sha256": "mz-sha-should-not-override"},
+            }
+        }
+        report = MobileBenchmarkReport.from_dict(payload)
+        record = ExperimentSessionRecord.from_report(report)
+
+        self.assertEqual(record.model_fingerprints["mp"]["sha256"], "mp-sha-1234567890")
+        self.assertEqual(record.model_fingerprints["mt"]["sha256"], "mt-sha-1234567890")
+        self.assertEqual(record.model_fingerprints["mz"]["sha256"], "mz-sha-1234567890")
+
+        browser = object.__new__(MobileReportBrowser)
+        self.assertEqual(browser._guard_model_fingerprint_value(report, {}, "mp"), "mp-sha-1234567890")
+        self.assertEqual(browser._guard_model_fingerprint_value(report, {}, "mt"), "mt-sha-1234567890")
+        self.assertEqual(browser._guard_model_fingerprint_value(report, {}, "mz"), "mz-sha-1234567890")
+
+    def test_missing_experiment_ids_are_not_auto_generated_for_guard(self):
+        report = MobileBenchmarkReport.from_dict(_report_payload("no-index"))
+        record = ExperimentSessionRecord.from_report(report)
+
+        self.assertEqual(record.series_id, "")
+        self.assertEqual(record.scenario_id, "")
+        self.assertEqual(record.replicate_index, 0)
+
+        class FakeTable:
+            def __init__(self):
+                self.rows = []
+
+            def set_rows(self, rows):
+                self.rows = list(rows)
+
+        browser = object.__new__(MobileReportBrowser)
+        browser.store = SimpleNamespace(reports=[report])
+        browser.comparison_table = FakeTable()
+        browser._populate_comparison_guard(report, None)
+
+        self.assertEqual(browser.comparison_table.rows[0][0], "Indeks eksperymentu")
+        self.assertEqual(browser.comparison_table.rows[0][3], "Brak serii")
+
+    def test_app_git_sha_and_app_version_are_separate_guard_rows(self):
+        payload = _report_payload("app-build")
+        payload["app_version"] = "1.2.3"
+        payload["experiment_index"] = {
+            "series_id": "series-1",
+            "scenario_id": "scenario-1",
+        }
+        report = MobileBenchmarkReport.from_dict(payload)
+
+        class FakeTable:
+            def __init__(self):
+                self.rows = []
+
+            def set_rows(self, rows):
+                self.rows = list(rows)
+
+        browser = object.__new__(MobileReportBrowser)
+        browser.store = SimpleNamespace(reports=[report])
+        browser.comparison_table = FakeTable()
+        browser._populate_comparison_guard(report, None)
+        by_label = {row[0]: row for row in browser.comparison_table.rows}
+
+        self.assertEqual(by_label["Build aplikacji"][1], "-")
+        self.assertEqual(by_label["Build aplikacji"][3], "Brak danych")
+        self.assertEqual(by_label["Wersja aplikacji"][1], "1.2.3")
 
 
 if __name__ == "__main__":

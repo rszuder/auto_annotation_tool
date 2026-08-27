@@ -144,6 +144,41 @@ def _role_marker(role: str) -> str:
     return raw.upper()[:4] or "M?"
 
 
+_MODEL_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "mp": ("mp", "MP", "vehicle", "vehicles", "Vehicle", "VEHICLE"),
+    "mt": ("mt", "MT", "plate", "plates", "Plate", "PLATE"),
+    "mz": ("mz", "MZ", "character", "characters", "char", "chars", "Character", "CHARACTER"),
+}
+
+
+def _is_present_model_fingerprint(value: Any) -> bool:
+    return value not in (None, "", {}, [])
+
+
+def _merge_mobile_model_fingerprints(target: dict[str, Any], value: Any) -> None:
+    if not isinstance(value, dict):
+        return
+    for nested_key in ("model_fingerprints", "models"):
+        nested = value.get(nested_key)
+        if isinstance(nested, dict):
+            _merge_mobile_model_fingerprints(target, nested)
+    for canonical, aliases in _MODEL_ROLE_ALIASES.items():
+        for alias in aliases:
+            if alias not in value:
+                continue
+            role_value = value.get(alias)
+            if _is_present_model_fingerprint(role_value) and canonical not in target:
+                target[canonical] = role_value
+                break
+
+
+def _normalize_mobile_model_fingerprints(*values: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for value in values:
+        _merge_mobile_model_fingerprints(result, value)
+    return result
+
+
 def read_alprmodel_manifest(package_path: Path) -> dict[str, Any]:
     """Read the manifest from a single-model ``.alprmodel`` package."""
     safe_path = Path(package_path)
@@ -1603,17 +1638,15 @@ class ExperimentSessionRecord:
             if value not in (None, ""):
                 resolution[key] = value
 
-        model_fingerprints: dict[str, Any] = {}
-        for path in (
-            "model_fingerprints",
-            "models",
-            "execution.models",
-            "execution.model_fingerprints",
-            "runtime_composition.models",
-        ):
-            value = _nested_value(raw, path)
-            if isinstance(value, dict):
-                model_fingerprints.update(value)
+        model_fingerprints = _normalize_mobile_model_fingerprints(
+            _nested_value(raw, "model_fingerprints"),
+            _nested_value(raw, "models"),
+            _nested_value(raw, "execution"),
+            _nested_value(raw, "execution.models"),
+            _nested_value(raw, "execution.model_fingerprints"),
+            _nested_value(raw, "runtime_composition"),
+            _nested_value(raw, "runtime_composition.models"),
+        )
 
         validation_ok = True if validation is None else bool(validation.ok)
         validation_errors = tuple() if validation is None else tuple(validation.errors)

@@ -546,8 +546,17 @@ def find_character_real_source_candidates(
 
     root, _yaml_path = _normalize_dataset_root(dataset_root)
     distribution = analyze_character_class_distribution(root, target_ratio=target_ratio)
-    deficit_rows = {row.symbol: row for row in distribution.classes if int(row.deficit_count) > 0}
-    if not deficit_rows:
+    source_rows = {
+        row.symbol: row
+        for row in distribution.classes
+        if (
+            int(row.deficit_count) > 0
+            or str(row.count_status or "").upper() == "CRITICAL"
+            or str(row.diversity_status or "").upper() == "LOW_DIVERSITY"
+            or str(row.status or "").upper() in {"CRITICAL", "LOW_DIVERSITY", "LOW+LOW_DIVERSITY"}
+        )
+    }
+    if not source_rows:
         return {}
 
     used_source_keys = _collect_train_source_keys(root)
@@ -557,10 +566,10 @@ def find_character_real_source_candidates(
             current_train_count=int(row.train_count),
             current_unique_train=int(row.unique_train_plate_count),
         ).to_dict()
-        for symbol, row in deficit_rows.items()
+        for symbol, row in source_rows.items()
     }
     by_symbol: dict[str, dict[str, CharacterRealSourceCandidate]] = {
-        symbol: {} for symbol in deficit_rows
+        symbol: {} for symbol in source_rows
     }
     limit = max(0, int(candidate_limit_per_symbol or 0))
 
@@ -574,7 +583,7 @@ def find_character_real_source_candidates(
             symbols = set(str(expected_text or ""))
             if not symbols:
                 continue
-            for symbol in deficit_rows:
+            for symbol in source_rows:
                 if symbol not in symbols:
                     continue
                 bucket = by_symbol.setdefault(symbol, {})
@@ -602,32 +611,43 @@ def build_character_dataset_file_fingerprint(
     dataset_root: Path | str,
     *,
     splits: tuple[str, ...] = CHARACTER_BALANCE_SPLITS,
+    include_config: bool | None = None,
 ) -> dict[str, Any]:
-    """Create a lightweight dataset fingerprint from file names, sizes and mtimes."""
+    """Create a content fingerprint for YOLO dataset files.
+
+    The freeze guard for val/test deliberately excludes data.yaml, while the
+    whole-dataset fingerprint may include it as configuration metadata.
+    """
 
     root, yaml_path = _normalize_dataset_root(dataset_root)
+    requested_splits = tuple(str(split or "").strip() for split in (splits or CHARACTER_BALANCE_SPLITS) if str(split or "").strip())
+    if not requested_splits:
+        requested_splits = CHARACTER_BALANCE_SPLITS
+    if include_config is None:
+        include_config = tuple(requested_splits) == tuple(CHARACTER_BALANCE_SPLITS)
+
     entries: list[dict[str, Any]] = []
-    if yaml_path is not None and yaml_path.exists():
+    if include_config and yaml_path is not None and yaml_path.exists():
         entries.append(_fingerprint_entry(root, yaml_path, "config"))
-    for split_name in splits:
+    for split_name in requested_splits:
         for folder_name in ("images", "labels"):
-            folder = root / folder_name / split_name
-            if not folder.exists() or not folder.is_dir():
-                continue
             suffixes = {".txt"} if folder_name == "labels" else set(CHARACTER_BALANCE_IMAGE_EXTENSIONS)
-            try:
-                paths = sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
-            except Exception:
-                paths = []
-            for path in paths:
-                entries.append(_fingerprint_entry(root, path, split_name))
+            for folder in _dataset_split_file_dirs(root, split_name, folder_name):
+                try:
+                    paths = sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
+                except Exception:
+                    paths = []
+                for path in paths:
+                    entries.append(_fingerprint_entry(root, path, split_name))
     entries.sort(key=lambda item: str(item.get("relative_path", "")))
     digest = hashlib.sha256(
         json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return {
         "dataset_root": str(root),
-        "splits": list(splits),
+        "splits": list(requested_splits),
+        "mode": "content_sha256",
+        "includes_config": bool(include_config),
         "file_count": len(entries),
         "sha256": digest,
         "entries": entries,
@@ -638,7 +658,7 @@ def compare_character_val_test_unchanged(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Compare two val/test fingerprints without reading image payloads."""
+    """Compare two val/test content fingerprints."""
 
     before_digest = str((before or {}).get("sha256") or "")
     after_digest = str((after or {}).get("sha256") or "")
@@ -695,19 +715,18 @@ def build_character_training_variant_manifest(
     if sources:
         for key in source_counts:
             source_counts[key] = max(0, int(sources.get(key, 0) or 0))
+    if isinstance(base_dataset_sha_or_fingerprint, Mapping):
+        base_fingerprint_ref: dict[str, Any] | str = _compact_fingerprint_ref(base_dataset_sha_or_fingerprint)
+    elif base_dataset_sha_or_fingerprint:
+        base_fingerprint_ref = str(base_dataset_sha_or_fingerprint)
+    else:
+        base_fingerprint_ref = build_character_dataset_file_fingerprint(base_dataset).get("sha256", "")
     return {
         "schema": CHARACTER_TRAINING_VARIANT_SCHEMA,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "base_dataset": str(base_dataset),
-        "base_dataset_sha_or_fingerprint": (
-            _compact_fingerprint_ref(base_dataset_sha_or_fingerprint)
-            if isinstance(base_dataset_sha_or_fingerprint, Mapping)
-            else (
-                str(base_dataset_sha_or_fingerprint)
-                if base_dataset_sha_or_fingerprint
-                else build_character_dataset_file_fingerprint(base_dataset).get("sha256", "")
-            )
-        ),
+        "base_dataset_sha_or_fingerprint": base_fingerprint_ref,
+        "base_dataset_content_fingerprint": base_fingerprint_ref,
         "alphabet": CHARACTER_BALANCE_ALPHABET,
         "target_count": int(getattr(plan, "target_count", 0) or 0),
         "target_ratio": float(getattr(plan, "target_ratio", 0.50) or 0.50),
@@ -780,6 +799,29 @@ def _normalize_dataset_root(dataset_root: Path | str) -> tuple[Path, Path | None
         return root.parent, root
     yaml_path = root / "data.yaml"
     return root, yaml_path if yaml_path.exists() else None
+
+
+def _dataset_split_file_dirs(root: Path, split_name: str, folder_name: str) -> list[Path]:
+    """Return YOLO split directories for both supported layouts."""
+
+    candidates = (
+        Path(root) / folder_name / split_name,
+        Path(root) / split_name / folder_name,
+    )
+    result: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        try:
+            key = str(candidate.resolve()).lower()
+        except Exception:
+            key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
 
 
 def _normalize_balance_target_ratio(value: Any) -> float:
@@ -1009,6 +1051,8 @@ def _compact_fingerprint_ref(value: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "dataset_root": str(value.get("dataset_root") or ""),
         "splits": list(value.get("splits") or []),
+        "mode": str(value.get("mode") or "content_sha256"),
+        "includes_config": bool(value.get("includes_config", False)),
         "file_count": int(value.get("file_count", 0) or 0),
         "sha256": str(value.get("sha256") or ""),
     }
@@ -1020,17 +1064,18 @@ def _fingerprint_entry(root: Path, path: Path, split_name: str) -> dict[str, Any
     except Exception:
         relative = str(path)
     try:
-        stat = Path(path).stat()
-        size = int(stat.st_size or 0)
-        mtime_ns = int(stat.st_mtime_ns or 0)
+        size = int(Path(path).stat().st_size or 0)
     except Exception:
         size = 0
-        mtime_ns = 0
+    try:
+        content_sha256 = _file_sha256(Path(path))
+    except Exception:
+        content_sha256 = ""
     return {
         "split": split_name,
         "relative_path": relative,
         "size": size,
-        "mtime_ns": mtime_ns,
+        "sha256": content_sha256,
     }
 
 
