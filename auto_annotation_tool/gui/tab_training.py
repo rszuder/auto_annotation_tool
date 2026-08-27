@@ -2245,6 +2245,27 @@ class TrainingTab:
         except Exception:
             pass
 
+    def _refresh_character_class_distribution_button(self) -> None:
+        button = getattr(self, "btn_character_class_distribution", None)
+        if button is None:
+            return
+        try:
+            selected_target = CONFIG.normalize_task_target(self._get_selected_training_target())
+        except Exception:
+            selected_target = "char"
+        should_show = selected_target == "char"
+        is_visible = bool(getattr(self, "_character_class_distribution_button_visible", False))
+        if should_show == is_visible:
+            return
+        try:
+            if should_show:
+                button.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+            else:
+                button.pack_forget()
+            self._character_class_distribution_button_visible = should_show
+        except Exception:
+            pass
+
     def _apply_training_dataset_quality_theme(self, tone: str = "muted") -> None:
         palette = getattr(self.app, "palette", {})
         border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
@@ -2379,6 +2400,10 @@ class TrainingTab:
 
         try:
             self._refresh_training_dataset_quality_summary()
+        except Exception:
+            pass
+        try:
+            self._refresh_character_class_distribution_button()
         except Exception:
             pass
 
