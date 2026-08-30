@@ -366,9 +366,16 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
     augmentation_intro_label = ttk.Label(
         frame,
         text=(
-            "Opcjonalnie powiększ wyłącznie część train aktualnego wariantu datasetu. "
-            "Wygenerowane obrazy służą tylko treningowi tego wariantu: nie trafiają do puli obrazów "
-            "projektu i nie są bazą kolejnej iteracji. Val i test pozostają oryginalne."
+            (
+                "Najpierw sprawdź reprezentację znaków MZ. PZ1 wyliczy próg AUTO i planowaną liczbę "
+                "nowych obrazów train; val i test pozostają bez zmian."
+            )
+            if normalized_target == "char"
+            else (
+                "Opcjonalnie powiększ wyłącznie część train aktualnego wariantu datasetu. "
+                "Wygenerowane obrazy służą tylko treningowi tego wariantu: nie trafiają do puli obrazów "
+                "projektu i nie są bazą kolejnej iteracji. Val i test pozostają oryginalne."
+            )
         ),
         justify=tk.LEFT,
         wraplength=700,
@@ -408,14 +415,81 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
     plan_frame.columnconfigure(1, weight=0)
     plan_frame.columnconfigure(2, weight=0)
     plan_frame.columnconfigure(3, weight=1)
-    ttk.Checkbutton(
-        plan_frame,
-        text="W\u0142\u0105cz syntetyczne powi\u0119kszenie train",
-        variable=enabled_var,
-    ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4))
-    ttk.Label(plan_frame, text="Generuj dodatkowo").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-    ttk.Spinbox(plan_frame, from_=0, to=100000, textvariable=extra_var, width=9).grid(row=1, column=1, sticky=tk.W, pady=2)
-    ttk.Label(plan_frame, text="obraz\u00f3w train").grid(row=1, column=2, sticky=tk.W, padx=(8, 0), pady=2)
+    if normalized_target == "char":
+        table_colors = _get_step4_table_colors(self)
+        pending_plan = getattr(self, "_pending_character_balance_plan", None)
+        planned_images = max(0, int(getattr(pending_plan, "planned_images", 0) or 0)) if pending_plan is not None else 0
+        try:
+            enabled_var.set(planned_images > 0)
+            extra_var.set(planned_images)
+            sample_var.set(max(1, planned_images))
+        except Exception:
+            pass
+        mz_status_var = tk.StringVar(
+            value=(
+                (
+                    f"Próg AUTO: {int(getattr(pending_plan, 'target_count', 0) or 0)}. "
+                    f"Niedoreprezentowane: {', '.join(dict(getattr(pending_plan, 'deficit_by_symbol', {}) or {}).keys()) or 'brak'}. "
+                    f"Plan: +{planned_images} obrazów train."
+                )
+                if planned_images > 0
+                else (
+                    "Próg AUTO: do policzenia. Niedoreprezentowane klasy i liczba nowych obrazów "
+                    "pojawią się po analizie reprezentacji MZ."
+                )
+            )
+        )
+        setattr(self, "split_mz_representation_status_var", mz_status_var)
+
+        def _open_char_representation_plan():
+            try:
+                source_raw = str(getattr(self, "split_src_var", tk.StringVar()).get() or "").strip()
+            except Exception:
+                source_raw = ""
+            if not source_raw:
+                messagebox.showwarning(
+                    "Brak datasetu",
+                    "Najpierw wybierz dataset znaków, dla którego PZ1 ma policzyć reprezentację.",
+                    parent=getattr(self, "frame", None),
+                )
+                return
+            from . import z4_character_balance
+
+            z4_character_balance.open_character_class_distribution_dialog(
+                self,
+                dataset_root=Path(source_raw),
+                read_only=False,
+                context="pz1",
+            )
+
+        tk.Label(
+            plan_frame,
+            textvariable=mz_status_var,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=620,
+            padx=8,
+            pady=7,
+            bg=table_colors["row"],
+            fg=table_colors["fg"],
+            font=("Segoe UI", 9, "bold"),
+            highlightthickness=1,
+            highlightbackground=table_colors["border"],
+        ).grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 6))
+        ttk.Button(
+            plan_frame,
+            text="Analizuj / przelicz reprezentację MZ",
+            command=_open_char_representation_plan,
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=2)
+    else:
+        ttk.Checkbutton(
+            plan_frame,
+            text="W\u0142\u0105cz syntetyczne powi\u0119kszenie train",
+            variable=enabled_var,
+        ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4))
+        ttk.Label(plan_frame, text="Generuj dodatkowo").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        ttk.Spinbox(plan_frame, from_=0, to=100000, textvariable=extra_var, width=9).grid(row=1, column=1, sticky=tk.W, pady=2)
+        ttk.Label(plan_frame, text="obraz\u00f3w train").grid(row=1, column=2, sticky=tk.W, padx=(8, 0), pady=2)
     if normalized_target == "plate":
         ttk.Label(plan_frame, text="Klasa YOLO").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=(4, 0))
         ttk.Entry(plan_frame, textvariable=class_var, width=18).grid(row=2, column=1, sticky=tk.W, pady=(4, 0))
@@ -489,7 +563,7 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
     )
     configure_aug_button.grid(row=1, column=3, sticky=tk.W, padx=(12, 0), pady=2)
     configure_aug_button.configure(text="Edytuj efekty bazowe")
-    configure_aug_button.configure(state=(tk.NORMAL if bool(enabled_var.get()) and int(extra_var.get() or 0) > 0 else tk.DISABLED))
+    configure_aug_button.configure(state=(tk.NORMAL if normalized_target == "char" or (bool(enabled_var.get()) and int(extra_var.get() or 0) > 0) else tk.DISABLED))
     setattr(self, f"{prefix}_aug_configure_button", configure_aug_button)
     frame.columnconfigure(0, weight=1)
     try:

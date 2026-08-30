@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..config import CONFIG, logger
 from ..training import (
+    CHARACTER_REPRESENTATION_THRESHOLD_POLICY,
     CharacterClassMapValidationError,
     CharacterClassDistribution,
     analyze_character_class_distribution,
@@ -40,58 +41,96 @@ _STATUS_COLORS = {
 }
 
 
-def open_character_class_distribution_dialog(host) -> None:
-    target = "char"
-    try:
-        target = CONFIG.normalize_task_target(host._get_selected_training_target())
-    except Exception:
+def open_character_class_distribution_dialog(
+    host,
+    *,
+    dataset_root: Path | str | None = None,
+    yaml_path: Path | str | None = None,
+    read_only: bool | None = None,
+    context: str = "pz2",
+) -> None:
+    parent = getattr(host, "frame", None) or getattr(getattr(host, "app", None), "root", None)
+    if dataset_root is None:
         target = "char"
-    if target != "char":
-        parent = getattr(host, "frame", None) or getattr(getattr(host, "app", None), "root", None)
-        messagebox.showinfo(
-            "Analiza rozkładu klas",
-            "Ta analiza dotyczy modelu znaków MZ. Przełącz Z4 na tor znaków i wybierz wariant datasetu.",
-            parent=parent,
-        )
-        return
+        try:
+            target = CONFIG.normalize_task_target(host._get_selected_training_target())
+        except Exception:
+            target = "char"
+        if target != "char":
+            messagebox.showinfo(
+                "Analiza reprezentacji MZ",
+                "Ta analiza dotyczy modelu znaków MZ. Przełącz Z4 na tor znaków i wybierz wariant datasetu.",
+                parent=parent,
+            )
+            return
 
-    resolver = getattr(host, "_resolve_training_dataset_yaml_path", None)
-    yaml_path = resolver() if callable(resolver) else None
-    if yaml_path is None:
-        parent = getattr(host, "frame", None) or getattr(getattr(host, "app", None), "root", None)
-        messagebox.showwarning(
-            "Brak wariantu datasetu",
-            "Najpierw wybierz aktywny wariant datasetu znaków w Z4/PZ2.",
-            parent=parent,
-        )
-        return
+        resolver = getattr(host, "_resolve_training_dataset_yaml_path", None)
+        yaml_path = resolver() if callable(resolver) else None
+        if yaml_path is None:
+            messagebox.showwarning(
+                "Brak wariantu datasetu",
+                "Najpierw wybierz aktywny wariant datasetu znaków.",
+                parent=parent,
+            )
+            return
+        try:
+            yaml_path = Path(yaml_path)
+            dataset_root = yaml_path.parent if yaml_path.is_file() else yaml_path
+        except Exception:
+            messagebox.showerror(
+                "Błąd datasetu",
+                "Nie udało się odczytać ścieżki aktywnego wariantu datasetu.",
+                parent=parent,
+            )
+            return
+        if read_only is None:
+            read_only = True
+    else:
+        try:
+            dataset_root = Path(dataset_root)
+            yaml_path = Path(yaml_path) if yaml_path is not None else dataset_root / "data.yaml"
+        except Exception:
+            messagebox.showerror(
+                "Błąd datasetu",
+                "Nie udało się odczytać ścieżki wariantu datasetu.",
+                parent=parent,
+            )
+            return
+        if read_only is None:
+            read_only = False
 
-    try:
-        yaml_path = Path(yaml_path)
-        dataset_root = yaml_path.parent if yaml_path.is_file() else yaml_path
-    except Exception:
-        messagebox.showerror(
-            "Błąd datasetu",
-            "Nie udało się odczytać ścieżki aktywnego wariantu datasetu.",
-            parent=getattr(host, "frame", None),
-        )
-        return
-
-    _CharacterClassDistributionDialog(host, dataset_root, yaml_path).show()
+    _CharacterClassDistributionDialog(
+        host,
+        Path(dataset_root),
+        Path(yaml_path) if yaml_path is not None else None,
+        read_only=bool(read_only),
+        context=context,
+    ).show()
 
 
 class _CharacterClassDistributionDialog:
-    def __init__(self, host, dataset_root: Path, yaml_path: Path | None):
+    def __init__(
+        self,
+        host,
+        dataset_root: Path,
+        yaml_path: Path | None,
+        *,
+        read_only: bool = True,
+        context: str = "pz2",
+    ):
         self.host = host
         self.dataset_root = Path(dataset_root)
         self.yaml_path = Path(yaml_path) if yaml_path is not None else None
+        self.read_only = bool(read_only)
+        self.context = str(context or "pz2")
         self.app = getattr(host, "app", None)
         self.palette = getattr(self.app, "palette", {}) if self.app is not None else {}
         self.window: tk.Toplevel | None = None
         self.progress: ttk.Progressbar | None = None
-        self.status_var = tk.StringVar(value="Przygotowuję analizę rozkładu klas...")
+        self.status_var = tk.StringVar(value="Przygotowuję analizę reprezentacji znaków MZ...")
         self.dataset_var = tk.StringVar(value=self._dataset_label())
         self.target_ratio_var = tk.StringVar(value="0.50")
+        self.threshold_policy_var = tk.StringVar(value=f"AUTO ({CHARACTER_REPRESENTATION_THRESHOLD_POLICY})")
         self.result: CharacterClassDistribution | None = None
         self.summary_value_labels: dict[str, tk.Label] = {}
         self.table: ttk.Treeview | None = None
@@ -105,7 +144,8 @@ class _CharacterClassDistributionDialog:
         parent = getattr(self.host, "frame", None)
         root = getattr(self.app, "root", None) or (parent.winfo_toplevel() if parent is not None else None)
         self.window = tk.Toplevel(root or parent)
-        self.window.title("Analiza rozkładu klas MZ")
+        title_suffix = "raport" if self.read_only else "plan PZ1"
+        self.window.title(f"Analiza reprezentacji MZ - {title_suffix}")
         self.window.minsize(980, 620)
         self.window.geometry("1160x740")
         try:
@@ -136,7 +176,7 @@ class _CharacterClassDistributionDialog:
 
         title = tk.Label(
             root,
-            text="Analiza rozkładu klas znaków MZ",
+            text="Analiza reprezentacji znaków MZ",
             bg=bg,
             fg=fg,
             font=("Segoe UI Semibold", 15),
@@ -147,8 +187,8 @@ class _CharacterClassDistributionDialog:
         intro = tk.Label(
             root,
             text=(
-                "Liczymy realne wystąpienia klas 0-9 i A-Z oraz liczbę unikalnych tablic, "
-                "żeby augmentacja nie udawała większej różnorodności danych."
+                "Sprawdzamy, czy klasy 0-9 i A-Z mają wystarczającą reprezentację w train. "
+                "W PZ1 można z tego utworzyć plan AUTO, a w PZ2 ten widok jest tylko raportem."
             ),
             bg=bg,
             fg=muted,
@@ -183,7 +223,7 @@ class _CharacterClassDistributionDialog:
         ).grid(row=0, column=1, sticky="ew")
         tk.Label(
             meta,
-            text="Cel uzupełniania",
+            text="Próg reprezentacji",
             bg=panel_alt,
             fg=muted,
             font=("Segoe UI Semibold", 9),
@@ -192,19 +232,17 @@ class _CharacterClassDistributionDialog:
         ).grid(row=1, column=0, sticky="w")
         target_shell = tk.Frame(meta, bg=panel_alt)
         target_shell.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(0, 6))
-        tk.Entry(
+        tk.Label(
             target_shell,
-            textvariable=self.target_ratio_var,
-            width=8,
-            justify=tk.CENTER,
-            bg=self.palette.get("entry_bg", "#1d1f24"),
+            textvariable=self.threshold_policy_var,
+            bg=panel_alt,
             fg=fg,
-            insertbackground=fg,
-            relief=tk.FLAT,
+            font=("Segoe UI Semibold", 9),
+            padx=8,
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             target_shell,
-            text="× mediany niezerowych klas",
+            text="liczony automatycznie z bieżącego train",
             bg=panel_alt,
             fg=muted,
             font=("Segoe UI", 8),
@@ -288,11 +326,12 @@ class _CharacterClassDistributionDialog:
         self.save_before_btn.grid(row=0, column=2, sticky="e", padx=(0, 6))
         self.plan_btn = ttk.Button(
             footer,
-            text="Przygotuj plan uzupełnienia",
+            text="Przygotuj plan AUTO",
             command=self._show_balance_plan,
             state=tk.DISABLED,
         )
-        self.plan_btn.grid(row=0, column=3, sticky="e", padx=(0, 6))
+        if not self.read_only:
+            self.plan_btn.grid(row=0, column=3, sticky="e", padx=(0, 6))
         self.export_csv_btn = ttk.Button(
             footer,
             text="Zapisz CSV",
@@ -470,12 +509,15 @@ class _CharacterClassDistributionDialog:
         if self.save_before_btn is not None:
             self.save_before_btn.configure(state=tk.NORMAL)
         if self.plan_btn is not None:
-            self.plan_btn.configure(state=tk.NORMAL)
+            self.plan_btn.configure(state=(tk.DISABLED if self.read_only else tk.NORMAL))
         if self.export_csv_btn is not None:
             self.export_csv_btn.configure(state=tk.NORMAL)
         if self.export_json_btn is not None:
             self.export_json_btn.configure(state=tk.NORMAL)
-        self.status_var.set("Analiza gotowa. Eksport CSV/JSON używa tych samych policzonych danych.")
+        if self.read_only:
+            self.status_var.set("Raport gotowy. PZ2 nie zmienia planu augmentacji MZ.")
+        else:
+            self.status_var.set("Analiza gotowa. W PZ1 możesz przygotować plan AUTO dla train.")
         self._fill_summary(result)
         self._fill_table(result)
         self._draw_chart()
@@ -634,6 +676,9 @@ class _CharacterClassDistributionDialog:
     def _show_balance_plan(self) -> None:
         if self.window is None:
             return
+        if self.read_only:
+            self.status_var.set("PZ2 pokazuje tylko raport reprezentacji MZ. Plan tworzymy w PZ1.")
+            return
         target_ratio = self._target_ratio()
         self.status_var.set("Przygotowuję plan uzupełnienia MZ...")
         if self.plan_btn is not None:
@@ -644,7 +689,6 @@ class _CharacterClassDistributionDialog:
                 plan = plan_character_train_augmentation(
                     self.dataset_root,
                     target_ratio=target_ratio,
-                    max_augmented_variants_per_source=3,
                 )
                 try:
                     real_sources = find_character_real_source_candidates(
@@ -681,7 +725,7 @@ class _CharacterClassDistributionDialog:
         muted = self.palette.get("muted", "#b7bcc6")
         panel = self.palette.get("panel", "#25262b")
         dialog = tk.Toplevel(self.window)
-        dialog.title("Plan uzupełnienia klas MZ")
+        dialog.title("Plan AUTO reprezentacji MZ")
         dialog.minsize(820, 520)
         dialog.geometry("940x600")
         dialog.configure(bg=bg)
@@ -695,23 +739,22 @@ class _CharacterClassDistributionDialog:
         root.grid_rowconfigure(2, weight=1)
         tk.Label(
             root,
-            text="Plan uzupełnienia train dla modelu znaków MZ",
+            text="Plan AUTO dla reprezentacji znaków MZ",
             bg=bg,
             fg=fg,
             font=("Segoe UI Semibold", 13),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew")
         total_deficit = sum(int(value or 0) for value in dict(plan.deficit_by_symbol or {}).values())
+        deficient_symbols = list(dict(plan.deficit_by_symbol or {}).keys())
         real_total = sum(int(row.get("available_unused_real_sources", 0) or 0) for row in real_sources.values())
-        max_variants = int(getattr(plan, "max_augmented_variants_per_source", 0) or 0)
-        max_new = len(getattr(plan, "candidates", []) or []) * max_variants
+        planned_images = int(getattr(plan, "planned_images", 0) or 0)
         summary = (
-            f"Cel: {int(getattr(plan, 'target_count', 0) or 0)} na klasę  |  "
-            f"Deficyt łącznie: {total_deficit}  |  "
-            f"Źródła-kandydaci: {len(getattr(plan, 'candidates', []) or [])}  |  "
-            f"Maks. wariantów/źródło: {max_variants}  |  "
-            f"Maks. nowych próbek: {max_new}  |  "
-            f"Dodatkowe realne źródła: {real_total}"
+            f"Próg AUTO: {int(getattr(plan, 'target_count', 0) or 0)} na klasę  |  "
+            f"Niedoreprezentowane: {', '.join(deficient_symbols) if deficient_symbols else 'brak'}  |  "
+            f"Brakuje łącznie: {total_deficit}  |  "
+            f"Plan: +{planned_images} obrazów train  |  "
+            f"Dodatkowe realne źródła do rozważenia: {real_total}"
         )
         tk.Label(
             root,
@@ -725,35 +768,51 @@ class _CharacterClassDistributionDialog:
         ).grid(row=1, column=0, sticky="ew", pady=(4, 10))
         table = ttk.Treeview(
             root,
-            columns=("source", "symbols", "priority", "max_variants"),
+            columns=("symbol", "train", "target", "missing_before", "missing_after", "status"),
             show="headings",
             height=16,
         )
         headings = {
-            "source": "Źródło",
-            "symbols": "Znaki deficytowe",
-            "priority": "Priorytet",
-            "max_variants": "Maks. wariantów",
+            "symbol": "Znak",
+            "train": "Train",
+            "target": "Próg AUTO",
+            "missing_before": "Brakuje teraz",
+            "missing_after": "Po planie",
+            "status": "Prognoza",
         }
-        widths = {"source": 320, "symbols": 260, "priority": 90, "max_variants": 120}
+        widths = {
+            "symbol": 70,
+            "train": 90,
+            "target": 100,
+            "missing_before": 120,
+            "missing_after": 110,
+            "status": 210,
+        }
         for column in headings:
             table.heading(column, text=headings[column])
-            table.column(column, width=widths[column], minwidth=70, stretch=column in {"source", "symbols"})
+            table.column(column, width=widths[column], minwidth=60, stretch=column == "status")
         yscroll = ttk.Scrollbar(root, orient=tk.VERTICAL, command=table.yview)
         table.configure(yscrollcommand=yscroll.set)
         table.grid(row=2, column=0, sticky="nsew")
         yscroll.grid(row=2, column=1, sticky="ns")
-        deficit_symbols = set(dict(plan.deficit_by_symbol or {}).keys())
-        for candidate in getattr(plan, "candidates", []) or []:
-            symbols = [symbol for symbol in getattr(candidate, "symbols", []) if symbol in deficit_symbols]
+        result_rows = {str(row.symbol): row for row in (getattr(self.result, "classes", []) or [])}
+        predicted_after = dict(getattr(plan, "predicted_deficit_after", {}) or {})
+        target_count = int(getattr(plan, "target_count", 0) or 0)
+        for symbol in deficient_symbols:
+            row = result_rows.get(str(symbol))
+            before = int(dict(plan.deficit_by_symbol or {}).get(symbol, 0) or 0)
+            after = int(predicted_after.get(symbol, 0) or 0)
+            status = "OK po planie" if after <= 0 else f"Zostanie brak: {after}"
             table.insert(
                 "",
                 tk.END,
                 values=(
-                    Path(str(getattr(candidate, "label_path", "") or getattr(candidate, "source_key", ""))).name,
-                    ", ".join(symbols) if symbols else "-",
-                    _format_float(getattr(candidate, "priority", 0.0)),
-                    int(getattr(candidate, "max_augmented_variants", 0) or 0),
+                    symbol,
+                    int(getattr(row, "train_count", 0) or 0) if row is not None else "-",
+                    target_count,
+                    before,
+                    max(0, after),
+                    status,
                 ),
             )
         footer = tk.Frame(root, bg=bg)
@@ -761,7 +820,7 @@ class _CharacterClassDistributionDialog:
         footer.grid_columnconfigure(0, weight=1)
         tk.Label(
             footer,
-            text="Dodatkowe realne źródła są kandydatami do ręcznego uzupełnienia przed augmentacją; samo zatwierdzenie planu ich nie kopiuje.",
+            text="Plan dotyczy tylko syntetycznego powiększenia train. Val i test pozostają bez zmian.",
             bg=bg,
             fg=muted,
             font=("Segoe UI", 8),
@@ -769,7 +828,7 @@ class _CharacterClassDistributionDialog:
         ).grid(row=0, column=0, sticky="ew")
         ttk.Button(
             footer,
-            text="Użyj planu przy najbliższej augmentacji",
+            text="Użyj planu w PZ1",
             command=lambda: self._accept_balance_plan(dialog, plan, real_sources),
         ).grid(row=0, column=1, sticky="e", padx=(8, 6))
         ttk.Button(footer, text="Zamknij", command=dialog.destroy).grid(row=0, column=2, sticky="e")
@@ -785,12 +844,37 @@ class _CharacterClassDistributionDialog:
             pass
 
     def _accept_balance_plan(self, dialog: tk.Toplevel, plan, real_sources: dict[str, dict]) -> None:
+        if self.read_only:
+            self.status_var.set("PZ2 jest raportem: nie zapisuję planu augmentacji.")
+            return
+        planned_images = max(0, int(getattr(plan, "planned_images", 0) or 0))
         try:
             setattr(self.host, "_pending_character_balance_plan", plan)
             setattr(self.host, "_pending_character_balance_real_sources", dict(real_sources or {}))
+            enabled_var = getattr(self.host, "split_aug_enabled_var", None)
+            extra_var = getattr(self.host, "split_aug_extra_var", None)
+            sample_var = getattr(self.host, "split_aug_sample_var", None)
+            if enabled_var is not None:
+                enabled_var.set(planned_images > 0)
+            if extra_var is not None:
+                extra_var.set(planned_images)
+            if sample_var is not None:
+                sample_var.set(max(1, planned_images))
+            status_var = getattr(self.host, "split_mz_representation_status_var", None)
+            if status_var is not None:
+                target_count = int(getattr(plan, "target_count", 0) or 0)
+                deficits = dict(getattr(plan, "deficit_by_symbol", {}) or {})
+                status_var.set(
+                    f"Próg AUTO: {target_count}. "
+                    f"Niedoreprezentowane: {', '.join(deficits.keys()) if deficits else 'brak'}. "
+                    f"Plan: +{planned_images} obrazów train."
+                )
+            refresher = getattr(self.host, "_refresh_step4_augmentation_summary", None)
+            if callable(refresher):
+                refresher("char")
         except Exception:
             pass
-        self.status_var.set("Plan MZ zatwierdzony do najbliższej augmentacji train.")
+        self.status_var.set("Plan MZ zapisany dla PZ1.")
         try:
             dialog.destroy()
         except Exception:

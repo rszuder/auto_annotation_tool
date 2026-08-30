@@ -59,7 +59,6 @@ from ..training import (
     get_albumentations_status,
     install_albumentations,
     is_albumentations_available,
-    plan_character_train_augmentation,
     save_character_distribution_artifacts,
     update_yolo_dataset_class_names,
 )
@@ -2267,7 +2266,7 @@ def _refresh_step4_augmentation_summary(self, target: str | None = None):
                 except Exception:
                     extra_count = 0
                 configure_button.configure(
-                    state=(tk.NORMAL if checkbox_enabled and extra_count > 0 else tk.DISABLED)
+                    state=(tk.NORMAL if normalized == "char" or (checkbox_enabled and extra_count > 0) else tk.DISABLED)
                 )
             self._refresh_step4_creator_decision_summary()
         except Exception:
@@ -2748,9 +2747,58 @@ def _step4_balance_plan_matches_dataset(plan: object, source_dir: Path) -> bool:
     except Exception:
         return os.path.normcase(os.path.normpath(base_dataset)) == os.path.normcase(os.path.normpath(str(source_dir)))
 
+
+def _step4_plan_attr(plan: object, key: str, default=None):
+    if plan is None:
+        return default
+    if isinstance(plan, dict):
+        return plan.get(key, default)
+    return getattr(plan, key, default)
+
+
+def _step4_distribution_deficits(distribution) -> dict[str, int]:
+    rows = getattr(distribution, "classes", []) or []
+    deficits: dict[str, int] = {}
+    for row in rows:
+        symbol = str(getattr(row, "symbol", "") or "").strip()
+        if not symbol:
+            continue
+        count = max(0, int(getattr(row, "deficit_count", 0) or 0))
+        if count > 0:
+            deficits[symbol] = count
+    return deficits
+
+
+def _step4_distribution_diversity_warnings(distribution) -> list[str]:
+    rows = getattr(distribution, "classes", []) or []
+    warnings: list[str] = []
+    for row in rows:
+        symbol = str(getattr(row, "symbol", "") or "").strip()
+        if not symbol:
+            continue
+        if str(getattr(row, "diversity_status", "") or "").upper() == "LOW_DIVERSITY":
+            warnings.append(symbol)
+    return warnings
+
+
+def _step4_pending_plan_fingerprint_matches(plan: object, source_dir: Path) -> bool:
+    expected = str(_step4_plan_attr(plan, "base_dataset_fingerprint_sha256", "") or "").strip()
+    if not expected:
+        return True
+    try:
+        current = str(build_character_dataset_file_fingerprint(source_dir).get("sha256") or "").strip()
+    except Exception:
+        return False
+    return bool(current and current == expected)
+
+
 def _take_pending_character_balance_plan(self, source_dir: Path) -> tuple[object | None, dict, bool]:
     plan = getattr(self, "_pending_character_balance_plan", None)
-    if plan is None or not _step4_balance_plan_matches_dataset(plan, source_dir):
+    if (
+        plan is None
+        or not _step4_balance_plan_matches_dataset(plan, source_dir)
+        or not _step4_pending_plan_fingerprint_matches(plan, source_dir)
+    ):
         return None, {}, False
     real_sources = getattr(self, "_pending_character_balance_real_sources", {}) or {}
     try:
@@ -2821,10 +2869,13 @@ def _create_step4_augmented_dataset_variant(
                 self,
                 source_dir,
             )
-            target_ratio = float(getattr(balance_plan, "target_ratio", 0.50) or 0.50) if balance_plan is not None else 0.50
+            target_ratio = float(_step4_plan_attr(balance_plan, "target_ratio", 0.50) or 0.50) if balance_plan is not None else 0.50
             before_distribution = analyze_character_class_distribution(source_dir, target_ratio=target_ratio)
-            if balance_plan is None:
-                balance_plan = plan_character_train_augmentation(source_dir, max_augmented_variants_per_source=3)
+            if balance_plan is not None:
+                planned_extra = max(0, int(_step4_plan_attr(balance_plan, "planned_images", 0) or 0))
+                if planned_extra > 0 and requested_extra != planned_extra:
+                    profile = replace(profile, enabled=True, extra_count=planned_extra).normalized()
+                    requested_extra = planned_extra
             base_dataset_fingerprint = build_character_dataset_file_fingerprint(source_dir)
             val_test_before = build_character_dataset_file_fingerprint(source_dir, splits=("val", "test"))
         except Exception as exc:
@@ -2898,6 +2949,9 @@ def _create_step4_augmented_dataset_variant(
     augmented_total = int(augmented_counts.get("total", 0) or 0)
     generation_complete = bool(requested_extra <= 0 or generated >= requested_extra)
     mz_variant_manifest: dict = {}
+    mz_completion_status = ""
+    mz_remaining_deficits: dict[str, int] = {}
+    mz_diversity_warnings: list[str] = []
     if normalized_target == "char" and before_distribution is not None:
         try:
             analysis_dir = augmented_dir / "analysis"
@@ -2908,13 +2962,22 @@ def _create_step4_augmented_dataset_variant(
             )
             after_distribution = analyze_character_class_distribution(
                 augmented_dir,
-                target_ratio=float(getattr(balance_plan, "target_ratio", 0.50) or 0.50),
+                target_ratio=float(_step4_plan_attr(balance_plan, "target_ratio", 0.50) or 0.50),
             )
             after_refs = save_character_distribution_artifacts(
                 after_distribution,
                 analysis_dir,
                 prefix="character_class_distribution_after",
             )
+            mz_remaining_deficits = _step4_distribution_deficits(after_distribution)
+            mz_diversity_warnings = _step4_distribution_diversity_warnings(after_distribution)
+            if used_pending_balance_plan:
+                if mz_remaining_deficits:
+                    mz_completion_status = "TARGET_NOT_REACHED"
+                elif mz_diversity_warnings:
+                    mz_completion_status = "REPRESENTATION_OK_WITH_DIVERSITY_WARNING"
+                else:
+                    mz_completion_status = "REPRESENTATION_OK"
             val_test_after = build_character_dataset_file_fingerprint(augmented_dir, splits=("val", "test"))
             val_test_guard = compare_character_val_test_unchanged(val_test_before, val_test_after)
             if used_pending_balance_plan and generated > 0:
@@ -2933,9 +2996,17 @@ def _create_step4_augmented_dataset_variant(
                 },
                 base_dataset_sha_or_fingerprint=base_dataset_fingerprint,
                 val_test_unchanged=val_test_guard,
+                augmentation_mode=("mz_auto_representation" if used_pending_balance_plan else "manual_train_augmentation"),
+                requested_images=requested_extra,
+                planned_images=max(0, int(_step4_plan_attr(balance_plan, "planned_images", requested_extra) or requested_extra)),
+                generated_images=generated,
+                completion_status=(mz_completion_status or str(stats.get("completion_status") or "")),
+                stop_reason=str(stats.get("stop_reason") or ""),
             )
             mz_variant_manifest["augmentation"]["seed"] = int(getattr(profile, "seed", 42) or 42)
             mz_variant_manifest["augmentation"]["randomness_mode"] = str(getattr(profile, "randomness_mode", "") or "")
+            mz_variant_manifest["deficit_after"] = dict(mz_remaining_deficits)
+            mz_variant_manifest["diversity_warnings"] = list(mz_diversity_warnings)
             if used_pending_balance_plan:
                 mz_variant_manifest["approved_balance_plan"] = True
                 mz_variant_manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
@@ -2948,6 +3019,13 @@ def _create_step4_augmented_dataset_variant(
                 postprocess["message"] = (
                     str(postprocess.get("message") or "").strip()
                     + "\nWalidacja freeze: split val/test zmienił się podczas augmentacji."
+                ).strip()
+            if used_pending_balance_plan and mz_remaining_deficits:
+                missing_text = ", ".join(f"{symbol}: {count}" for symbol, count in sorted(mz_remaining_deficits.items()))
+                postprocess["ok"] = False
+                postprocess["message"] = (
+                    str(postprocess.get("message") or "").strip()
+                    + f"\nReprezentacja MZ po augmentacji nadal ma braki: {missing_text}."
                 ).strip()
         except Exception as exc:
             logger.exception("Nie udało się zapisać manifestu wariantu MZ")

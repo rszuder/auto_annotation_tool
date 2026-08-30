@@ -506,7 +506,7 @@ def _build_train_tab(self):
 
     self.btn_character_class_distribution = ttk.Button(
         self.train_dataset_section_frame,
-        text="Analizuj rozkład klas MZ",
+        text="Pokaż reprezentację MZ",
         command=self._open_character_class_distribution_dialog,
         style="WorkflowCard.TButton",
     )
