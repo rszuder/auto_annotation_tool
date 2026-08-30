@@ -21,6 +21,7 @@ from auto_annotation_tool.training.character_class_distribution import (
 )
 from auto_annotation_tool.training.dataset_augmentation import (
     _build_balance_augmented_source_state,
+    _finalize_train_augmentation_result,
     _select_augmentation_sample_pool,
 )
 
@@ -455,6 +456,20 @@ class CharacterClassDistributionTests(unittest.TestCase):
         )
 
         self.assertEqual([row["source_key"] for row in selected], ["high", "mid"])
+
+    def test_partial_train_augmentation_is_not_success(self):
+        ok, message = _finalize_train_augmentation_result(
+            {
+                "generated": 357,
+                "skipped": 4,
+                "stop_reason": "wyczerpano limit kandydatów",
+            },
+            1000,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("357 z 1000", message)
+        self.assertIn("nie zostanie oznaczony jako gotowy", message)
 
     def test_real_source_search_counts_unused_sources_for_deficit_symbol(self):
         with tempfile.TemporaryDirectory() as tmp:
