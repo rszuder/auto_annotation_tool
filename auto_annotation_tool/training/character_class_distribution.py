@@ -880,6 +880,12 @@ def build_character_training_variant_manifest(
         "max_augmented_variants_from_single_source": int(getattr(plan, "max_augmented_variants_from_single_source", 0) or 0),
         "mean_augmented_variants_per_used_source": float(getattr(plan, "mean_augmented_variants_per_used_source", 0.0) or 0.0),
         "max_augmented_variants_per_source": max_per_source,
+        "source_reuse_safety_guard": {
+            "enabled": bool(max_per_source > 0),
+            "max_augmented_variants_per_source": max_per_source,
+            "scope": "single_original_source",
+            "purpose": "prevent one plate crop from dominating MZ class balancing",
+        },
         "sources": source_counts,
         "before_distribution": _distribution_ref(before_distribution),
         "after_distribution": _distribution_ref(after_distribution) if after_distribution is not None else "",

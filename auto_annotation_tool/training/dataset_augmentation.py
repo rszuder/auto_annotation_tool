@@ -9235,7 +9235,11 @@ def augment_yolo_dataset_train_split(
             source_limits=source_limits,
         )
         if selected_record is None:
-            stats["stop_reason"] = "wyczerpano limit kandydatów albo kopii z jednego źródła"
+            stats["stop_reason"] = (
+                "source_reuse_safety_limit"
+                if bool(stats.get("balance_plan_enabled"))
+                else "wyczerpano limit kandydatów albo kopii z jednego źródła"
+            )
             break
         image_path = Path(selected_record["image_path"])
         label_path = Path(selected_record["label_path"])

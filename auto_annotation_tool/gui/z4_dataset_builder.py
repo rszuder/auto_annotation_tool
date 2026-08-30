@@ -2812,6 +2812,54 @@ def _step4_mz_completion_status_from_distribution(distribution) -> tuple[str, di
     return "REPRESENTATION_OK", deficits, diversity_warnings
 
 
+def _step4_mz_execution_status(generated: int, requested: int, *, generation_complete: bool | None = None) -> str:
+    generated = max(0, int(generated or 0))
+    requested = max(0, int(requested or 0))
+    if generation_complete is None:
+        generation_complete = bool(requested <= 0 or generated >= requested)
+    if bool(generation_complete):
+        return "COMPLETED"
+    if generated > 0:
+        return "PARTIAL"
+    return "NO_OUTPUT"
+
+
+def _step4_mz_freeze_status(val_test_guard: dict | None) -> str:
+    return "UNCHANGED" if bool((val_test_guard or {}).get("unchanged")) else "VAL_TEST_CHANGED"
+
+
+def _step4_mz_ready_for_training(
+    *,
+    execution_status: str,
+    representation_status: str,
+    freeze_status: str,
+) -> bool:
+    return (
+        str(execution_status or "").upper() == "COMPLETED"
+        and str(freeze_status or "").upper() == "UNCHANGED"
+        and str(representation_status or "").upper()
+        in {"REPRESENTATION_OK", "REPRESENTATION_OK_WITH_DIVERSITY_WARNING"}
+    )
+
+
+def _step4_mz_final_completion_status(
+    *,
+    representation_status: str,
+    freeze_status: str,
+    execution_status: str,
+    plan_feasible: bool = True,
+    generated: int = 0,
+    deficits: dict | None = None,
+) -> str:
+    if str(freeze_status or "").upper() != "UNCHANGED":
+        return "VAL_TEST_CHANGED"
+    if not bool(plan_feasible) and max(0, int(generated or 0)) <= 0 and dict(deficits or {}):
+        return "PLAN_NOT_FEASIBLE"
+    if str(execution_status or "").upper() not in {"", "COMPLETED"}:
+        return "PARTIAL_AUGMENTATION"
+    return str(representation_status or "").strip() or "TARGET_NOT_REACHED"
+
+
 def _format_step4_mz_plan_status(plan: object | None) -> str:
     if plan is None:
         return "Próg AUTO: do policzenia. Przelicz reprezentację MZ po wyborze źródła i proporcji splitu."
@@ -2939,16 +2987,35 @@ def _finalize_step4_mz_representation_variant(
 ) -> dict:
     dataset_dir = Path(dataset_path)
     counts = dict(counts or self._get_dataset_split_image_counts(dataset_dir))
+    generated = max(0, int(generated or 0))
+    requested_extra = max(0, int(requested_extra or 0))
     target_ratio = float(_step4_plan_attr(plan, "target_ratio", 0.50) or 0.50)
     base_fingerprint = build_character_dataset_file_fingerprint(dataset_dir)
     val_test_before = build_character_dataset_file_fingerprint(dataset_dir, splits=("val", "test"))
     before_distribution = analyze_character_class_distribution(dataset_dir, target_ratio=target_ratio)
     after_distribution = analyze_character_class_distribution(dataset_dir, target_ratio=target_ratio)
-    completion_status, remaining_deficits, diversity_warnings = _step4_mz_completion_status_from_distribution(after_distribution)
-    if remaining_deficits and not bool(_step4_plan_attr(plan, "feasible", True)) and generated <= 0:
-        completion_status = "PLAN_NOT_FEASIBLE"
     val_test_after = build_character_dataset_file_fingerprint(dataset_dir, splits=("val", "test"))
     val_test_guard = compare_character_val_test_unchanged(val_test_before, val_test_after)
+    representation_status, remaining_deficits, diversity_warnings = _step4_mz_completion_status_from_distribution(after_distribution)
+    freeze_status = _step4_mz_freeze_status(val_test_guard)
+    plan_feasible = bool(_step4_plan_attr(plan, "feasible", True))
+    if not plan_feasible and remaining_deficits and generated <= 0:
+        execution_status = "NOT_RUN"
+    else:
+        execution_status = _step4_mz_execution_status(generated, requested_extra)
+    completion_status = _step4_mz_final_completion_status(
+        representation_status=representation_status,
+        freeze_status=freeze_status,
+        execution_status=execution_status,
+        plan_feasible=plan_feasible,
+        generated=generated,
+        deficits=remaining_deficits,
+    )
+    ready_for_training = _step4_mz_ready_for_training(
+        execution_status=execution_status,
+        representation_status=representation_status,
+        freeze_status=freeze_status,
+    )
 
     analysis_dir = dataset_dir / "analysis"
     before_refs = save_character_distribution_artifacts(
@@ -2962,8 +3029,6 @@ def _finalize_step4_mz_representation_variant(
         prefix="character_class_distribution_after",
     )
 
-    generated = max(0, int(generated or 0))
-    requested_extra = max(0, int(requested_extra or 0))
     manifest = build_character_training_variant_manifest(
         base_dataset=dataset_dir,
         before_distribution=before_refs.get("json", {}).get("path", ""),
@@ -2989,6 +3054,10 @@ def _finalize_step4_mz_representation_variant(
     manifest["deficit_after"] = dict(remaining_deficits)
     manifest["diversity_warnings"] = list(diversity_warnings)
     manifest["approved_balance_plan"] = True
+    manifest["execution_status"] = execution_status
+    manifest["representation_status"] = representation_status
+    manifest["freeze_status"] = freeze_status
+    manifest["ready_for_training"] = bool(ready_for_training)
     if pending_real_sources:
         manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
     (dataset_dir / "mz_training_variant_manifest.json").write_text(
@@ -2996,9 +3065,7 @@ def _finalize_step4_mz_representation_variant(
         encoding="utf-8",
     )
 
-    ok = bool(val_test_guard.get("unchanged")) and not remaining_deficits
-    if not bool(val_test_guard.get("unchanged")):
-        completion_status = "VAL_TEST_CHANGED"
+    ok = bool(ready_for_training)
     if completion_status == "REPRESENTATION_OK":
         status_message = "Reprezentacja MZ: OK"
     elif completion_status == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
@@ -3290,17 +3357,34 @@ def _create_step4_augmented_dataset_variant(
                 analysis_dir,
                 prefix="character_class_distribution_after",
             )
-            mz_remaining_deficits = _step4_distribution_deficits(after_distribution)
-            mz_diversity_warnings = _step4_distribution_diversity_warnings(after_distribution)
-            if used_pending_balance_plan:
-                if mz_remaining_deficits:
-                    mz_completion_status = "TARGET_NOT_REACHED"
-                elif mz_diversity_warnings:
-                    mz_completion_status = "REPRESENTATION_OK_WITH_DIVERSITY_WARNING"
-                else:
-                    mz_completion_status = "REPRESENTATION_OK"
             val_test_after = build_character_dataset_file_fingerprint(augmented_dir, splits=("val", "test"))
             val_test_guard = compare_character_val_test_unchanged(val_test_before, val_test_after)
+            representation_status, mz_remaining_deficits, mz_diversity_warnings = _step4_mz_completion_status_from_distribution(after_distribution)
+            execution_status = _step4_mz_execution_status(
+                generated,
+                requested_extra,
+                generation_complete=generation_complete,
+            )
+            freeze_status = _step4_mz_freeze_status(val_test_guard)
+            if used_pending_balance_plan:
+                mz_completion_status = _step4_mz_final_completion_status(
+                    representation_status=representation_status,
+                    freeze_status=freeze_status,
+                    execution_status=execution_status,
+                    plan_feasible=bool(_step4_plan_attr(balance_plan, "feasible", True)),
+                    generated=generated,
+                    deficits=mz_remaining_deficits,
+                )
+                ready_for_training = _step4_mz_ready_for_training(
+                    execution_status=execution_status,
+                    representation_status=representation_status,
+                    freeze_status=freeze_status,
+                )
+            else:
+                mz_completion_status = str(stats.get("completion_status") or execution_status or "").strip()
+                if freeze_status != "UNCHANGED":
+                    mz_completion_status = "VAL_TEST_CHANGED"
+                ready_for_training = bool(postprocess.get("ok", True)) and bool(generation_complete) and freeze_status == "UNCHANGED"
             if used_pending_balance_plan and generated > 0:
                 _clear_pending_character_balance_plan(self)
             mz_variant_manifest = build_character_training_variant_manifest(
@@ -3328,6 +3412,12 @@ def _create_step4_augmented_dataset_variant(
             mz_variant_manifest["augmentation"]["randomness_mode"] = str(getattr(profile, "randomness_mode", "") or "")
             mz_variant_manifest["deficit_after"] = dict(mz_remaining_deficits)
             mz_variant_manifest["diversity_warnings"] = list(mz_diversity_warnings)
+            mz_variant_manifest["execution_status"] = execution_status
+            mz_variant_manifest["representation_status"] = representation_status
+            mz_variant_manifest["freeze_status"] = freeze_status
+            mz_variant_manifest["ready_for_training"] = bool(ready_for_training)
+            stats["completion_status"] = mz_completion_status
+            stats["completion_ok"] = bool(ready_for_training)
             if used_pending_balance_plan:
                 mz_variant_manifest["approved_balance_plan"] = True
                 mz_variant_manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
@@ -3657,9 +3747,14 @@ def _handle_step4_dataset_failure_result(
     message: str,
     target: str,
     critical: bool = False,
+    allow_pz2_override: bool | None = None,
 ):
     target_label = self._format_training_target_label(target)
-    allow_pz2 = self._can_open_pz2_after_dataset_result()
+    allow_pz2 = (
+        self._can_open_pz2_after_dataset_result()
+        if allow_pz2_override is None
+        else bool(allow_pz2_override)
+    )
     reason = str(message or "Nieznany błąd").strip()
     body = (
         "Dataset nie został utworzony.\n\n"
@@ -3947,6 +4042,7 @@ def _split_dataset_thread(self):
             message=str(source_info.get("message") or "Najpierw wskaż źródłowy dataset znaków."),
             target="char",
             critical=False,
+            allow_pz2_override=False,
         )
         return
     try:
@@ -4042,6 +4138,7 @@ def _split_dataset_thread(self):
                             message=msg,
                             target="char",
                             critical=False,
+                            allow_pz2_override=False,
                         )
                     )
                     return
@@ -4080,6 +4177,7 @@ def _split_dataset_thread(self):
                             message=msg,
                             target="char",
                             critical=False,
+                            allow_pz2_override=False,
                         )
                     )
                     return
@@ -4117,6 +4215,7 @@ def _split_dataset_thread(self):
                                 message=msg,
                                 target="char",
                                 critical=False,
+                                allow_pz2_override=False,
                             )
                         )
                         return
@@ -4145,6 +4244,7 @@ def _split_dataset_thread(self):
                                 message=msg,
                                 target="char",
                                 critical=False,
+                                allow_pz2_override=False,
                             )
                         )
                         return
@@ -4177,6 +4277,7 @@ def _split_dataset_thread(self):
                         message=msg,
                         target="char",
                         critical=False,
+                        allow_pz2_override=False,
                     )
                 )
 
@@ -4189,6 +4290,7 @@ def _split_dataset_thread(self):
                     message=err,
                     target="char",
                     critical=True,
+                    allow_pz2_override=False,
                 )
             )
 

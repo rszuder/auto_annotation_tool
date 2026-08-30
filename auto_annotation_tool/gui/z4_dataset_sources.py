@@ -47,6 +47,7 @@ from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
 from .dataset_display import build_dataset_display_ref
+from .z4_dataset_readiness import get_training_dataset_readiness
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -208,6 +209,9 @@ def _get_free_dataset_variant_choices(self) -> list[dict]:
     for path, target, stamp in candidates:
         if target != selected_target:
             continue
+        readiness = get_training_dataset_readiness(path, target=target)
+        if not bool(readiness.get("ok", True)):
+            continue
         counts = self._get_dataset_split_image_counts(path)
         total = int(counts.get("total", 0) or 0)
         if total <= 0:
@@ -292,6 +296,7 @@ def _refresh_dataset_variant_choices(self):
                 current_yaml.exists()
                 and current_key not in known_keys
                 and current_target == self._get_selected_training_target()
+                and bool(get_training_dataset_readiness(current_root, target=current_target).get("ok", True))
             ):
                 counts = self._get_dataset_split_image_counts(current_root)
                 display_ref = build_dataset_display_ref(current_root, target_hint=current_target, counts=counts)
@@ -556,6 +561,10 @@ def _build_step4_dataset_training_source(
                 inferred_target = ""
             if inferred_target in {"plate", "char"}:
                 normalized_target = inferred_target
+            readiness = get_training_dataset_readiness(root, target=normalized_target)
+            if not bool(readiness.get("ok", True)):
+                validated = False
+                message = str(readiness.get("message") or "Dataset nie jest gotowy do treningu.")
         else:
             message = "Dataset wymaga pliku data.yaml."
     except Exception:

@@ -719,13 +719,21 @@ class _CharacterClassDistributionDialog:
             self.plan_btn.configure(state=tk.NORMAL if self.result is not None else tk.DISABLED)
         if self.window is None or not self.window.winfo_exists():
             return
-        self.status_var.set("Plan uzupełnienia gotowy do podglądu.")
+        try:
+            preliminary_unsplit = str(getattr(self.result, "layout", "") or "").strip().lower() != "split"
+        except Exception:
+            preliminary_unsplit = False
+        self.status_var.set(
+            "Wstępna prognoza uzupełnienia gotowa do podglądu."
+            if preliminary_unsplit
+            else "Plan uzupełnienia gotowy do podglądu."
+        )
         bg = self.palette.get("bg", "#1e1f22")
         fg = self.palette.get("fg", "#f3f3f3")
         muted = self.palette.get("muted", "#b7bcc6")
         panel = self.palette.get("panel", "#25262b")
         dialog = tk.Toplevel(self.window)
-        dialog.title("Plan AUTO reprezentacji MZ")
+        dialog.title("Wstępna prognoza AUTO reprezentacji MZ" if preliminary_unsplit else "Plan AUTO reprezentacji MZ")
         dialog.minsize(820, 520)
         dialog.geometry("940x600")
         dialog.configure(bg=bg)
@@ -739,7 +747,7 @@ class _CharacterClassDistributionDialog:
         root.grid_rowconfigure(2, weight=1)
         tk.Label(
             root,
-            text="Plan AUTO dla reprezentacji znaków MZ",
+            text=("Wstępna prognoza AUTO reprezentacji znaków MZ" if preliminary_unsplit else "Plan AUTO dla reprezentacji znaków MZ"),
             bg=bg,
             fg=fg,
             font=("Segoe UI Semibold", 13),
@@ -749,11 +757,12 @@ class _CharacterClassDistributionDialog:
         deficient_symbols = list(dict(plan.deficit_by_symbol or {}).keys())
         real_total = sum(int(row.get("available_unused_real_sources", 0) or 0) for row in real_sources.values())
         planned_images = int(getattr(plan, "planned_images", 0) or 0)
+        plan_label = "Prognoza przed splitem" if preliminary_unsplit else "Plan wstępny"
         summary = (
             f"Próg AUTO: {int(getattr(plan, 'target_count', 0) or 0)} na klasę  |  "
             f"Niedoreprezentowane: {', '.join(deficient_symbols) if deficient_symbols else 'brak'}  |  "
             f"Brakuje łącznie: {total_deficit}  |  "
-            f"Plan wstępny: +{planned_images} obrazów train  |  "
+            f"{plan_label}: +{planned_images} obrazów train  |  "
             f"Dodatkowe realne źródła do rozważenia: {real_total}"
         )
         tk.Label(
@@ -820,7 +829,11 @@ class _CharacterClassDistributionDialog:
         footer.grid_columnconfigure(0, weight=1)
         tk.Label(
             footer,
-            text="Plan dotyczy tylko syntetycznego powiększenia train. Val i test pozostają bez zmian.",
+            text=(
+                "To jest analiza materiału źródłowego. Finalna wykonalność zostanie oceniona po utworzeniu splitu train/val/test."
+                if preliminary_unsplit
+                else "Plan dotyczy tylko syntetycznego powiększenia train. Val i test pozostają bez zmian."
+            ),
             bg=bg,
             fg=muted,
             font=("Segoe UI", 8),
@@ -829,7 +842,11 @@ class _CharacterClassDistributionDialog:
         plan_feasible = bool(getattr(plan, "feasible", True))
         ttk.Button(
             footer,
-            text=("Użyj planu w PZ1" if plan_feasible else "Plan niewykonalny"),
+            text=(
+                ("Użyj prognozy w PZ1" if preliminary_unsplit else "Użyj planu w PZ1")
+                if plan_feasible
+                else ("Oceń po finalnym splicie" if preliminary_unsplit else "Plan niewykonalny")
+            ),
             command=lambda: self._accept_balance_plan(dialog, plan, real_sources),
             state=(tk.NORMAL if plan_feasible else tk.DISABLED),
         ).grid(row=0, column=1, sticky="e", padx=(8, 6))
