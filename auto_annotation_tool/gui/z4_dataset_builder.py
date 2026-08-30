@@ -59,6 +59,7 @@ from ..training import (
     get_albumentations_status,
     install_albumentations,
     is_albumentations_available,
+    plan_character_train_augmentation,
     save_character_distribution_artifacts,
     update_yolo_dataset_class_names,
 )
@@ -356,6 +357,26 @@ def _update_ratio_labels(self):
         self.val_pct.set(val)
 
     test = max(5.0, 100.0 - train - val)
+    try:
+        normalized_mode = CONFIG.normalize_task_target(getattr(self, "_step4_dataset_mode", "plate"))
+    except Exception:
+        normalized_mode = "plate"
+    if normalized_mode == "char":
+        ratio_key = (round(train, 4), round(val, 4), round(test, 4))
+        previous_ratio_key = getattr(self, "_pending_character_balance_ratio_key", None)
+        try:
+            previous_ratio_key = tuple(previous_ratio_key) if previous_ratio_key is not None else None
+        except Exception:
+            previous_ratio_key = None
+        if previous_ratio_key is not None and previous_ratio_key != ratio_key:
+            _invalidate_pending_character_balance_plan(
+                self,
+                "Proporcje splitu zmieniły się - przelicz reprezentację MZ.",
+            )
+        try:
+            setattr(self, "_pending_character_balance_ratio_key", ratio_key)
+        except Exception:
+            pass
     for attr_name, value in (
         ("train_lbl", f"{train:.0f}%"),
         ("val_lbl", f"{val:.0f}%"),
@@ -2781,6 +2802,72 @@ def _step4_distribution_diversity_warnings(distribution) -> list[str]:
     return warnings
 
 
+def _step4_mz_completion_status_from_distribution(distribution) -> tuple[str, dict[str, int], list[str]]:
+    deficits = _step4_distribution_deficits(distribution)
+    diversity_warnings = _step4_distribution_diversity_warnings(distribution)
+    if deficits:
+        return "TARGET_NOT_REACHED", deficits, diversity_warnings
+    if diversity_warnings:
+        return "REPRESENTATION_OK_WITH_DIVERSITY_WARNING", deficits, diversity_warnings
+    return "REPRESENTATION_OK", deficits, diversity_warnings
+
+
+def _format_step4_mz_plan_status(plan: object | None) -> str:
+    if plan is None:
+        return "Próg AUTO: do policzenia. Przelicz reprezentację MZ po wyborze źródła i proporcji splitu."
+    target_count = int(_step4_plan_attr(plan, "target_count", 0) or 0)
+    planned_images = int(_step4_plan_attr(plan, "planned_images", 0) or 0)
+    deficits = dict(_step4_plan_attr(plan, "deficit_by_symbol", {}) or {})
+    if not deficits:
+        return f"Próg AUTO: {target_count}. Reprezentacja train jest już wystarczająca. Plan: +0 obrazów."
+    status = str(_step4_plan_attr(plan, "completion_status", "") or "").strip()
+    suffix = "" if status != "PLAN_NOT_FEASIBLE" else " Nie da się osiągnąć progu przy aktualnym materiale."
+    return (
+        f"Próg AUTO: {target_count}. "
+        f"Niedoreprezentowane: {', '.join(deficits.keys())}. "
+        f"Plan: +{planned_images} obrazów train.{suffix}"
+    )
+
+
+def _format_step4_mz_completion_label(status: str, deficits: dict | None = None, warnings: list | tuple | None = None) -> str:
+    normalized = str(status or "").strip().upper()
+    deficits = dict(deficits or {})
+    warnings = list(warnings or [])
+    if normalized == "REPRESENTATION_OK":
+        return "OK - próg AUTO spełniony"
+    if normalized == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
+        return "OK - próg spełniony, ale sprawdź różnorodność: " + (", ".join(map(str, warnings)) or "wybrane klasy")
+    if normalized == "PLAN_NOT_FEASIBLE":
+        return "Nieosiągalna przy aktualnym materiale"
+    if normalized == "TARGET_NOT_REACHED":
+        return "Nie osiągnięto progu: " + (", ".join(f"{key}: {value}" for key, value in sorted(deficits.items())) or "pozostały braki")
+    if normalized == "VAL_TEST_CHANGED":
+        return "Błąd freeze - zmienił się split val/test"
+    return "Status zapisany w manifeście"
+
+
+def _invalidate_pending_character_balance_plan(self, message: str | None = None) -> None:
+    _clear_pending_character_balance_plan(self)
+    for attr_name, value in (
+        ("split_aug_enabled_var", False),
+        ("split_aug_extra_var", 0),
+        ("split_aug_sample_var", 1),
+    ):
+        var = getattr(self, attr_name, None)
+        if var is None:
+            continue
+        try:
+            var.set(value)
+        except Exception:
+            pass
+    status_var = getattr(self, "split_mz_representation_status_var", None)
+    if status_var is not None:
+        try:
+            status_var.set(message or _format_step4_mz_plan_status(None))
+        except Exception:
+            pass
+
+
 def _step4_pending_plan_fingerprint_matches(plan: object, source_dir: Path) -> bool:
     expected = str(_step4_plan_attr(plan, "base_dataset_fingerprint_sha256", "") or "").strip()
     if not expected:
@@ -2808,7 +2895,11 @@ def _take_pending_character_balance_plan(self, source_dir: Path) -> tuple[object
     return plan, real_sources, True
 
 def _clear_pending_character_balance_plan(self) -> None:
-    for attr_name in ("_pending_character_balance_plan", "_pending_character_balance_real_sources"):
+    for attr_name in (
+        "_pending_character_balance_plan",
+        "_pending_character_balance_real_sources",
+        "_pending_character_balance_ratio_key",
+    ):
         try:
             setattr(self, attr_name, None)
         except Exception:
@@ -2833,6 +2924,124 @@ def _summarize_character_real_source_search(real_sources: dict) -> dict:
         "policy": "reported_only_requires_user_selection",
     }
 
+
+def _finalize_step4_mz_representation_variant(
+    self,
+    *,
+    dataset_path: str | Path,
+    plan: object,
+    profile: AugmentationProfile,
+    counts: dict | None = None,
+    generated: int = 0,
+    requested_extra: int = 0,
+    augmented: bool = False,
+    pending_real_sources: dict | None = None,
+) -> dict:
+    dataset_dir = Path(dataset_path)
+    counts = dict(counts or self._get_dataset_split_image_counts(dataset_dir))
+    target_ratio = float(_step4_plan_attr(plan, "target_ratio", 0.50) or 0.50)
+    base_fingerprint = build_character_dataset_file_fingerprint(dataset_dir)
+    val_test_before = build_character_dataset_file_fingerprint(dataset_dir, splits=("val", "test"))
+    before_distribution = analyze_character_class_distribution(dataset_dir, target_ratio=target_ratio)
+    after_distribution = analyze_character_class_distribution(dataset_dir, target_ratio=target_ratio)
+    completion_status, remaining_deficits, diversity_warnings = _step4_mz_completion_status_from_distribution(after_distribution)
+    if remaining_deficits and not bool(_step4_plan_attr(plan, "feasible", True)) and generated <= 0:
+        completion_status = "PLAN_NOT_FEASIBLE"
+    val_test_after = build_character_dataset_file_fingerprint(dataset_dir, splits=("val", "test"))
+    val_test_guard = compare_character_val_test_unchanged(val_test_before, val_test_after)
+
+    analysis_dir = dataset_dir / "analysis"
+    before_refs = save_character_distribution_artifacts(
+        before_distribution,
+        analysis_dir,
+        prefix="character_class_distribution_before",
+    )
+    after_refs = save_character_distribution_artifacts(
+        after_distribution,
+        analysis_dir,
+        prefix="character_class_distribution_after",
+    )
+
+    generated = max(0, int(generated or 0))
+    requested_extra = max(0, int(requested_extra or 0))
+    manifest = build_character_training_variant_manifest(
+        base_dataset=dataset_dir,
+        before_distribution=before_refs.get("json", {}).get("path", ""),
+        after_distribution=after_refs.get("json", {}).get("path", ""),
+        plan=plan,
+        sources={
+            "real": int(counts.get("train", 0) or 0),
+            "added_real": 0,
+            "augmented_real": generated,
+            "synthetic": 0,
+            "augmented_synthetic": 0,
+        },
+        base_dataset_sha_or_fingerprint=base_fingerprint,
+        val_test_unchanged=val_test_guard,
+        augmentation_mode="mz_auto_representation",
+        requested_images=requested_extra,
+        planned_images=max(0, int(_step4_plan_attr(plan, "planned_images", requested_extra) or 0)),
+        generated_images=generated,
+        completion_status=completion_status,
+    )
+    manifest["augmentation"]["seed"] = int(getattr(profile, "seed", 42) or 42)
+    manifest["augmentation"]["randomness_mode"] = str(getattr(profile, "randomness_mode", "") or "")
+    manifest["deficit_after"] = dict(remaining_deficits)
+    manifest["diversity_warnings"] = list(diversity_warnings)
+    manifest["approved_balance_plan"] = True
+    if pending_real_sources:
+        manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
+    (dataset_dir / "mz_training_variant_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    ok = bool(val_test_guard.get("unchanged")) and not remaining_deficits
+    if not bool(val_test_guard.get("unchanged")):
+        completion_status = "VAL_TEST_CHANGED"
+    if completion_status == "REPRESENTATION_OK":
+        status_message = "Reprezentacja MZ: OK"
+    elif completion_status == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
+        status_message = "Reprezentacja MZ: OK, ale sprawdź różnorodność klas " + ", ".join(diversity_warnings)
+    elif completion_status == "PLAN_NOT_FEASIBLE":
+        status_message = "Reprezentacja MZ: nieosiągalna przy aktualnym materiale"
+    else:
+        status_message = "Reprezentacja MZ: wymaga poprawy"
+    if remaining_deficits:
+        missing_text = ", ".join(f"{symbol}: {count}" for symbol, count in sorted(remaining_deficits.items()))
+        message = f"{status_message}. Pozostałe braki: {missing_text}."
+    else:
+        message = f"{status_message}. Próg AUTO: {int(_step4_plan_attr(plan, 'target_count', 0) or 0)}."
+    if not bool(val_test_guard.get("unchanged")):
+        message += " Walidacja freeze: split val/test zmienił się podczas finalizacji."
+
+    return {
+        "ok": ok,
+        "dataset_path": str(dataset_dir),
+        "message": message,
+        "counts": counts,
+        "augmentation_stats": {
+            "enabled": bool(augmented),
+            "generated": generated,
+            "requested": requested_extra,
+            "completion_ok": ok,
+            "completion_status": completion_status,
+        },
+        "augmented": bool(augmented),
+        "base_total": int(sum(int(counts.get(key, 0) or 0) for key in ("train", "val", "test"))),
+        "generated": generated,
+        "requested_extra": requested_extra,
+        "augmented_total": int(counts.get("total", 0) or 0),
+        "generation_complete": bool(generated >= requested_extra),
+        "status_message": message,
+        "synthetic_scope": "training_dataset_only",
+        "used_pending_character_balance_plan": True,
+        "synthetic_images_project_base": False,
+        "synthetic_images_next_iteration_base": False,
+        "mz_training_variant_manifest": manifest,
+    }
+
+
 def _create_step4_augmented_dataset_variant(
     self,
     *,
@@ -2841,10 +3050,87 @@ def _create_step4_augmented_dataset_variant(
     profile: AugmentationProfile,
     progress_var_name: str,
     status_attr_name: str,
+    balance_plan_override: object | None = None,
+    pending_real_sources_override: dict | None = None,
+    augmentation_mode: str | None = None,
 ) -> dict:
     source_dir = Path(source_dataset_path)
     profile = (profile or AugmentationProfile()).normalized()
+    normalized_target = CONFIG.normalize_task_target(target)
+    auto_representation_mode = str(augmentation_mode or "").strip() == "mz_auto_representation"
+    balance_plan = None
+    pending_real_sources: dict = {}
+    used_pending_balance_plan = False
     if not _step4_profile_requests_augmentation(profile):
+        if normalized_target == "char" and auto_representation_mode:
+            try:
+                if balance_plan_override is not None:
+                    balance_plan = balance_plan_override
+                    pending_real_sources = dict(pending_real_sources_override or {})
+                else:
+                    balance_plan, pending_real_sources, _used = _take_pending_character_balance_plan(
+                        self,
+                        source_dir,
+                    )
+                if balance_plan is None:
+                    return {
+                        "ok": False,
+                        "dataset_path": str(source_dir),
+                        "message": "PLAN_MISSING: brak planu reprezentacji MZ dla finalnego splitu.",
+                        "counts": self._get_dataset_split_image_counts(source_dir),
+                        "augmentation_stats": {},
+                        "augmented": False,
+                    }
+                if (
+                    not _step4_balance_plan_matches_dataset(balance_plan, source_dir)
+                    or not _step4_pending_plan_fingerprint_matches(balance_plan, source_dir)
+                ):
+                    return {
+                        "ok": False,
+                        "dataset_path": str(source_dir),
+                        "message": "PLAN_DATASET_MISMATCH: plan MZ nie pasuje do datasetu przekazanego do augmentacji.",
+                        "counts": self._get_dataset_split_image_counts(source_dir),
+                        "augmentation_stats": {},
+                        "augmented": False,
+                    }
+                planned_extra = max(0, int(_step4_plan_attr(balance_plan, "planned_images", 0) or 0))
+                if not bool(_step4_plan_attr(balance_plan, "feasible", True)):
+                    return _finalize_step4_mz_representation_variant(
+                        self,
+                        dataset_path=source_dir,
+                        plan=balance_plan,
+                        profile=profile,
+                        counts=self._get_dataset_split_image_counts(source_dir),
+                        generated=0,
+                        requested_extra=planned_extra,
+                        augmented=False,
+                        pending_real_sources=pending_real_sources,
+                    )
+                if planned_extra > 0:
+                    profile = replace(profile, enabled=True, extra_count=planned_extra).normalized()
+                    used_pending_balance_plan = True
+                else:
+                    return _finalize_step4_mz_representation_variant(
+                        self,
+                        dataset_path=source_dir,
+                        plan=balance_plan,
+                        profile=profile,
+                        counts=self._get_dataset_split_image_counts(source_dir),
+                        generated=0,
+                        requested_extra=0,
+                        augmented=False,
+                        pending_real_sources=pending_real_sources,
+                    )
+            except Exception as exc:
+                logger.exception("Nie udało się sfinalizować wariantu reprezentacji MZ bez augmentacji")
+                return {
+                    "ok": False,
+                    "dataset_path": str(source_dir),
+                    "message": f"Nie udało się sfinalizować wariantu reprezentacji MZ: {exc}",
+                    "counts": self._get_dataset_split_image_counts(source_dir),
+                    "augmentation_stats": {},
+                    "augmented": False,
+                }
         return {
             "ok": True,
             "dataset_path": str(source_dir),
@@ -2854,25 +3140,59 @@ def _create_step4_augmented_dataset_variant(
             "augmented": False,
         }
 
-    augmented_dir = self._build_step4_augmented_dataset_dir(source_dir, profile, target=target)
     requested_extra = max(0, int(getattr(profile, "extra_count", 0) or 0))
-    normalized_target = CONFIG.normalize_task_target(target)
-    balance_plan = None
-    pending_real_sources: dict = {}
-    used_pending_balance_plan = False
     before_distribution = None
     base_dataset_fingerprint: dict = {}
     val_test_before: dict = {}
     if normalized_target == "char":
         try:
-            balance_plan, pending_real_sources, used_pending_balance_plan = _take_pending_character_balance_plan(
-                self,
-                source_dir,
-            )
+            if balance_plan is None:
+                if balance_plan_override is not None:
+                    balance_plan = balance_plan_override
+                    pending_real_sources = dict(pending_real_sources_override or {})
+                    used_pending_balance_plan = True
+                else:
+                    balance_plan, pending_real_sources, used_pending_balance_plan = _take_pending_character_balance_plan(
+                        self,
+                        source_dir,
+                    )
+            if auto_representation_mode and balance_plan is None:
+                return {
+                    "ok": False,
+                    "dataset_path": str(source_dir),
+                    "message": "PLAN_MISSING: brak planu reprezentacji MZ dla finalnego splitu.",
+                    "counts": self._get_dataset_split_image_counts(source_dir),
+                    "augmentation_stats": {},
+                    "augmented": False,
+                }
+            if balance_plan is not None and (
+                not _step4_balance_plan_matches_dataset(balance_plan, source_dir)
+                or not _step4_pending_plan_fingerprint_matches(balance_plan, source_dir)
+            ):
+                return {
+                    "ok": False,
+                    "dataset_path": str(source_dir),
+                    "message": "PLAN_DATASET_MISMATCH: plan MZ nie pasuje do datasetu przekazanego do augmentacji.",
+                    "counts": self._get_dataset_split_image_counts(source_dir),
+                    "augmentation_stats": {},
+                    "augmented": False,
+                }
             target_ratio = float(_step4_plan_attr(balance_plan, "target_ratio", 0.50) or 0.50) if balance_plan is not None else 0.50
             before_distribution = analyze_character_class_distribution(source_dir, target_ratio=target_ratio)
             if balance_plan is not None:
                 planned_extra = max(0, int(_step4_plan_attr(balance_plan, "planned_images", 0) or 0))
+                if auto_representation_mode and not bool(_step4_plan_attr(balance_plan, "feasible", True)):
+                    return _finalize_step4_mz_representation_variant(
+                        self,
+                        dataset_path=source_dir,
+                        plan=balance_plan,
+                        profile=profile,
+                        counts=self._get_dataset_split_image_counts(source_dir),
+                        generated=0,
+                        requested_extra=planned_extra,
+                        augmented=False,
+                        pending_real_sources=pending_real_sources,
+                    )
                 if planned_extra > 0 and requested_extra != planned_extra:
                     profile = replace(profile, enabled=True, extra_count=planned_extra).normalized()
                     requested_extra = planned_extra
@@ -2888,6 +3208,7 @@ def _create_step4_augmented_dataset_variant(
                 "augmentation_stats": {},
                 "augmented": False,
             }
+    augmented_dir = self._build_step4_augmented_dataset_dir(source_dir, profile, target=target)
     try:
         self._ui(
             lambda requested=requested_extra: self._set_training_widget_text(
@@ -3263,6 +3584,21 @@ def _handle_step4_dataset_success_result(
         summary_rows.append(("Zakres syntetyków", "tylko train tego wariantu; nie baza kolejnej iteracji"))
     elif total_count > 0:
         summary_rows.append(("Razem", f"{total_count} obrazów"))
+    mz_manifest = result_meta.get("mz_training_variant_manifest") if isinstance(result_meta, dict) else None
+    if CONFIG.normalize_task_target(target) == "char" and isinstance(mz_manifest, dict) and mz_manifest:
+        status = str(mz_manifest.get("completion_status") or "").strip()
+        target_count = int(mz_manifest.get("target_count", 0) or 0)
+        planned_images = int(mz_manifest.get("planned_images", 0) or 0)
+        generated_images = int(mz_manifest.get("generated_images", 0) or 0)
+        deficits_after = dict(mz_manifest.get("deficit_after") or {})
+        diversity_warnings = list(mz_manifest.get("diversity_warnings") or [])
+        summary_rows.append((
+            "Reprezentacja MZ",
+            _format_step4_mz_completion_label(status, deficits_after, diversity_warnings),
+        ))
+        if target_count > 0:
+            summary_rows.append(("Próg AUTO", f"{target_count} znaków na klasę"))
+        summary_rows.append(("Plan AUTO", f"plan +{planned_images} | wykonano +{generated_images}"))
     if path_text:
         summary_rows.append(("Lokalizacja", path_text))
 
@@ -3693,13 +4029,75 @@ def _split_dataset_thread(self):
                 result_dataset_path = Path(out)
                 final_status_message = None
                 result_meta: dict = {}
-                if _step4_profile_requests_augmentation(augmentation_profile):
+                self._ui(lambda: self._set_training_widget_text(self.split_status, "Krok 2/3: liczę reprezentację znaków MZ dla finalnego splitu..."))
+                try:
+                    exact_balance_plan = plan_character_train_augmentation(out)
+                except Exception as exc:
+                    failure_msg = f"Nie udało się policzyć planu reprezentacji MZ dla finalnego splitu: {exc}"
+                    logger.exception(failure_msg)
+                    self._ui(lambda: self._style_training_error_label(self.split_status))
+                    self._ui(lambda msg=failure_msg: self._set_training_widget_text(self.split_status, msg))
+                    self._ui(
+                        lambda msg=failure_msg: self._handle_step4_dataset_failure_result(
+                            message=msg,
+                            target="char",
+                            critical=False,
+                        )
+                    )
+                    return
+                exact_planned_images = max(0, int(getattr(exact_balance_plan, "planned_images", 0) or 0))
+                exact_feasible = bool(getattr(exact_balance_plan, "feasible", True))
+                self._ui(
+                    lambda plan=exact_balance_plan: self._set_training_widget_text(
+                        self.split_status,
+                        _format_step4_mz_plan_status(plan),
+                    )
+                )
+                try:
+                    _clear_pending_character_balance_plan(self)
+                except Exception:
+                    pass
+                if not exact_feasible:
+                    try:
+                        result_meta = _finalize_step4_mz_representation_variant(
+                            self,
+                            dataset_path=out,
+                            plan=exact_balance_plan,
+                            profile=augmentation_profile,
+                            counts=dataset_counts,
+                            generated=0,
+                            requested_extra=exact_planned_images,
+                            augmented=False,
+                        )
+                    except Exception as exc:
+                        logger.exception("Nie udało się zapisać manifestu niewykonalnego planu MZ")
+                        result_meta = {"message": f"Nie można osiągnąć reprezentacji MZ i nie udało się zapisać manifestu: {exc}"}
+                    failure_msg = str(result_meta.get("message") or "Nie można osiągnąć progu reprezentacji MZ przy aktualnym materiale.")
+                    self._ui(lambda: self._style_training_error_label(self.split_status))
+                    self._ui(lambda msg=failure_msg: self._set_training_widget_text(self.split_status, msg))
+                    self._ui(
+                        lambda msg=failure_msg: self._handle_step4_dataset_failure_result(
+                            message=msg,
+                            target="char",
+                            critical=False,
+                        )
+                    )
+                    return
+
+                if exact_planned_images > 0:
+                    augmentation_profile = replace(
+                        augmentation_profile,
+                        enabled=True,
+                        extra_count=exact_planned_images,
+                    ).normalized()
                     variant = self._create_step4_augmented_dataset_variant(
                         source_dataset_path=out,
                         target="char",
                         profile=augmentation_profile,
                         progress_var_name="split_progress_var",
                         status_attr_name="split_status",
+                        balance_plan_override=exact_balance_plan,
+                        augmentation_mode="mz_auto_representation",
                     )
                     if str(variant.get("message") or "").strip():
                         msg = f"{msg}\n{variant.get('message')}"
@@ -3723,15 +4121,33 @@ def _split_dataset_thread(self):
                         )
                         return
                 else:
-                    postprocess = self._apply_step4_dataset_postprocessing(
+                    variant = _finalize_step4_mz_representation_variant(
+                        self,
                         dataset_path=out,
-                        target="char",
+                        plan=exact_balance_plan,
                         profile=augmentation_profile,
-                        progress_var_name="split_progress_var",
-                        status_attr_name="split_status",
+                        counts=dataset_counts,
+                        generated=0,
+                        requested_extra=0,
+                        augmented=False,
                     )
-                    if str(postprocess.get("message") or "").strip():
-                        msg = f"{msg}\n{postprocess.get('message')}"
+                    if str(variant.get("message") or "").strip():
+                        msg = f"{msg}\n{variant.get('message')}"
+                    if bool(variant.get("ok", True)):
+                        result_meta = dict(variant)
+                        final_status_message = str(variant.get("status_message") or "").strip() or None
+                    else:
+                        failure_msg = str(variant.get("message") or "Reprezentacja MZ nie została potwierdzona.")
+                        self._ui(lambda: self._style_training_error_label(self.split_status))
+                        self._ui(lambda msg=failure_msg: self._set_training_widget_text(self.split_status, msg))
+                        self._ui(
+                            lambda msg=failure_msg: self._handle_step4_dataset_failure_result(
+                                message=msg,
+                                target="char",
+                                critical=False,
+                            )
+                        )
+                        return
                 self._ui(lambda: self._style_training_success_label(self.split_status))
                 self._ui(
                     lambda counts=dict(dataset_counts), final_msg=final_status_message: self._set_training_widget_text(

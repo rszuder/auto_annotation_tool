@@ -5,6 +5,8 @@ import random
 import tempfile
 import unittest
 
+from auto_annotation_tool.gui import z4_dataset_builder
+from auto_annotation_tool.training import AugmentationProfile, DatasetSplitter
 from auto_annotation_tool.training.character_class_distribution import (
     CHARACTER_BALANCE_ALPHABET,
     CHARACTER_REPRESENTATION_THRESHOLD_POLICY,
@@ -25,6 +27,68 @@ from auto_annotation_tool.training.dataset_augmentation import (
     _finalize_train_augmentation_result,
     _select_augmentation_sample_pool,
 )
+
+
+class _ValueVar:
+    def __init__(self, value=None):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class _Step4BuilderHost:
+    def __init__(self):
+        self.train_pct = _ValueVar(80.0)
+        self.val_pct = _ValueVar(10.0)
+        self._step4_dataset_mode = "char"
+        self.split_aug_enabled_var = _ValueVar(True)
+        self.split_aug_extra_var = _ValueVar(1)
+        self.split_aug_sample_var = _ValueVar(1)
+        self.split_mz_representation_status_var = _ValueVar("")
+
+    def _get_dataset_split_image_counts(self, dataset_dir):
+        root = Path(dataset_dir)
+        counts = {}
+        for split_name in ("train", "val", "test"):
+            total = 0
+            for image_dir in (root / "images" / split_name, root / split_name / "images"):
+                if image_dir.exists():
+                    total += sum(1 for path in image_dir.iterdir() if path.is_file())
+            counts[split_name] = total
+        counts["total"] = sum(counts.values())
+        return counts
+
+
+def _write_balanced_char_dataset(root: Path, repeats: int = 2) -> None:
+    (root / "labels" / "train").mkdir(parents=True)
+    (root / "images" / "train").mkdir(parents=True)
+    (root / "labels" / "val").mkdir(parents=True)
+    (root / "images" / "val").mkdir(parents=True)
+    (root / "labels" / "test").mkdir(parents=True)
+    (root / "images" / "test").mkdir(parents=True)
+    (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+    for class_id, symbol in enumerate(CHARACTER_BALANCE_ALPHABET):
+        stem = f"{class_id:02d}_{symbol}"
+        (root / "labels" / "train" / f"{stem}.txt").write_text(
+            (f"{class_id} 0.5 0.5 0.1 0.1\n" * max(1, repeats)),
+            encoding="utf-8",
+        )
+        (root / "images" / "train" / f"{stem}.jpg").write_bytes(b"fake")
+
+
+def _write_split_source_dataset(root: Path) -> None:
+    (root / "labels").mkdir(parents=True)
+    (root / "images").mkdir(parents=True)
+    (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+    for index in range(18):
+        class_id = index % len(CHARACTER_BALANCE_ALPHABET)
+        stem = f"plate_{index:03d}"
+        (root / "labels" / f"{stem}.txt").write_text(f"{class_id} 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+        (root / "images" / f"{stem}.jpg").write_bytes(b"fake")
 
 
 def _names_list_yaml() -> str:
@@ -638,6 +702,125 @@ class CharacterClassDistributionTests(unittest.TestCase):
 
             with self.assertRaises(CharacterClassMapValidationError):
                 analyze_character_class_distribution(root)
+
+    def test_plan_is_calculated_for_exact_split_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            output = Path(tmp) / "split_output"
+            _write_split_source_dataset(source)
+
+            ok, message, _stats = DatasetSplitter(random_seed=7).split_dataset(
+                source,
+                output,
+                {"train": 0.80, "val": 0.10, "test": 0.10},
+            )
+
+            self.assertTrue(ok, message)
+            plan = plan_character_train_augmentation(output)
+            self.assertEqual(Path(plan.base_dataset).resolve(), output.resolve())
+            self.assertTrue(z4_dataset_builder._step4_balance_plan_matches_dataset(plan, output))
+            self.assertTrue(z4_dataset_builder._step4_pending_plan_fingerprint_matches(plan, output))
+
+    def test_auto_representation_fails_without_plan_instead_of_random_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            _write_balanced_char_dataset(root)
+            host = _Step4BuilderHost()
+
+            result = z4_dataset_builder._create_step4_augmented_dataset_variant(
+                host,
+                source_dataset_path=root,
+                target="char",
+                profile=AugmentationProfile(enabled=True, extra_count=1),
+                progress_var_name="split_progress_var",
+                status_attr_name="split_status",
+                augmentation_mode="mz_auto_representation",
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("PLAN_MISSING", result["message"])
+            self.assertEqual(len(list(root.parent.glob("*Aug*"))), 0)
+
+    def test_auto_representation_rejects_plan_from_different_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_a = Path(tmp) / "source_a"
+            source_b = Path(tmp) / "source_b"
+            _write_balanced_char_dataset(source_a)
+            _write_balanced_char_dataset(source_b)
+            plan = plan_character_train_augmentation(source_a)
+            host = _Step4BuilderHost()
+
+            result = z4_dataset_builder._create_step4_augmented_dataset_variant(
+                host,
+                source_dataset_path=source_b,
+                target="char",
+                profile=AugmentationProfile(enabled=True, extra_count=1),
+                progress_var_name="split_progress_var",
+                status_attr_name="split_status",
+                balance_plan_override=plan,
+                augmentation_mode="mz_auto_representation",
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("PLAN_DATASET_MISMATCH", result["message"])
+
+    def test_auto_representation_zero_plan_writes_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "balanced"
+            _write_balanced_char_dataset(root, repeats=3)
+            plan = plan_character_train_augmentation(root)
+            host = _Step4BuilderHost()
+
+            self.assertTrue(plan.feasible)
+            self.assertEqual(plan.planned_images, 0)
+            result = z4_dataset_builder._create_step4_augmented_dataset_variant(
+                host,
+                source_dataset_path=root,
+                target="char",
+                profile=AugmentationProfile(enabled=False, extra_count=0),
+                progress_var_name="split_progress_var",
+                status_attr_name="split_status",
+                balance_plan_override=plan,
+                augmentation_mode="mz_auto_representation",
+            )
+
+            manifest_path = root / "mz_training_variant_manifest.json"
+            self.assertTrue(result["ok"], result["message"])
+            self.assertTrue(manifest_path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["augmentation_mode"], "mz_auto_representation")
+            self.assertEqual(manifest["completion_status"], "REPRESENTATION_OK")
+            self.assertEqual(manifest["planned_images"], 0)
+            self.assertEqual(manifest["generated_images"], 0)
+
+    def test_plan_invalidation_clears_source_state_and_ui_flags(self):
+        host = _Step4BuilderHost()
+        host._pending_character_balance_plan = object()
+        host._pending_character_balance_real_sources = {"Q": {}}
+        host._pending_character_balance_ratio_key = (80.0, 10.0, 10.0)
+
+        z4_dataset_builder._invalidate_pending_character_balance_plan(host, "Źródło zmieniło się.")
+
+        self.assertIsNone(host._pending_character_balance_plan)
+        self.assertIsNone(host._pending_character_balance_real_sources)
+        self.assertIsNone(host._pending_character_balance_ratio_key)
+        self.assertFalse(host.split_aug_enabled_var.get())
+        self.assertEqual(host.split_aug_extra_var.get(), 0)
+        self.assertIn("Źródło", host.split_mz_representation_status_var.get())
+
+    def test_ratio_change_invalidates_pending_character_plan(self):
+        host = _Step4BuilderHost()
+        host.train_pct.set(70.0)
+        host.val_pct.set(20.0)
+        host._pending_character_balance_plan = object()
+        host._pending_character_balance_real_sources = {"Q": {}}
+        host._pending_character_balance_ratio_key = (80.0, 10.0, 10.0)
+
+        z4_dataset_builder._update_ratio_labels(host)
+
+        self.assertIsNone(host._pending_character_balance_plan)
+        self.assertFalse(host.split_aug_enabled_var.get())
+        self.assertIn("Proporcje", host.split_mz_representation_status_var.get())
 
 
 if __name__ == "__main__":

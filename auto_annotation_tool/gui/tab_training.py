@@ -3594,6 +3594,8 @@ class TrainingTab:
         return z4_dataset_builder._pick_dir(self, *args, **kwargs)
     def _update_ratio_labels(self, *args, **kwargs):
         return z4_dataset_builder._update_ratio_labels(self, *args, **kwargs)
+    def _invalidate_pending_character_balance_plan(self, *args, **kwargs):
+        return z4_dataset_builder._invalidate_pending_character_balance_plan(self, *args, **kwargs)
     def _on_base_model_change(self, *args, **kwargs):
         return z4_dataset_builder._on_base_model_change(self, *args, **kwargs)
     def _on_cvat_xml_source_changed(self, *args, **kwargs):

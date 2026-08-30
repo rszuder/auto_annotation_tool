@@ -430,7 +430,7 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
                 (
                     f"Próg AUTO: {int(getattr(pending_plan, 'target_count', 0) or 0)}. "
                     f"Niedoreprezentowane: {', '.join(dict(getattr(pending_plan, 'deficit_by_symbol', {}) or {}).keys()) or 'brak'}. "
-                    f"Plan: +{planned_images} obrazów train."
+                    f"Plan wstępny: +{planned_images} obrazów train."
                 )
                 if planned_images > 0
                 else (
@@ -1138,6 +1138,12 @@ def _build_splitter_ui(self):
             pass
         try:
             self._refresh_step4_creator_decision_summary()
+        except Exception:
+            pass
+        try:
+            self._invalidate_pending_character_balance_plan(
+                "Źródło zmieniło się - przelicz reprezentację MZ."
+            )
         except Exception:
             pass
 
