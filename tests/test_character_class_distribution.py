@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 from auto_annotation_tool.gui import z4_dataset_builder
+from auto_annotation_tool.gui.z4_dataset_readiness import get_training_dataset_readiness
+from auto_annotation_tool.config import CV2_AVAILABLE, cv2, np
 from auto_annotation_tool.training import AugmentationProfile, DatasetSplitter
 from auto_annotation_tool.training.character_class_distribution import (
     CHARACTER_BALANCE_ALPHABET,
@@ -26,6 +28,7 @@ from auto_annotation_tool.training.dataset_augmentation import (
     _build_balance_augmented_source_state,
     _finalize_train_augmentation_result,
     _select_augmentation_sample_pool,
+    is_albumentations_available,
 )
 
 
@@ -49,6 +52,10 @@ class _Step4BuilderHost:
         self.split_aug_extra_var = _ValueVar(1)
         self.split_aug_sample_var = _ValueVar(1)
         self.split_mz_representation_status_var = _ValueVar("")
+        self.split_progress_var = _ValueVar(0)
+        self.split_status = _ValueVar("")
+        self.captured_result_modals = []
+        self.opened_pz2 = False
 
     def _get_dataset_split_image_counts(self, dataset_dir):
         root = Path(dataset_dir)
@@ -61,6 +68,36 @@ class _Step4BuilderHost:
             counts[split_name] = total
         counts["total"] = sum(counts.values())
         return counts
+
+    def _build_step4_augmented_dataset_dir(self, source_dir, profile, target="char"):
+        source = Path(source_dir)
+        return source.parent / f"{source.name}_Aug_test"
+
+    def _ui(self, callback):
+        return callback()
+
+    def _set_training_widget_text(self, widget, text):
+        if hasattr(widget, "set"):
+            widget.set(text)
+
+    def _style_training_success_label(self, widget):
+        return None
+
+    def _apply_step4_dataset_postprocessing(self, *args, **kwargs):
+        return z4_dataset_builder._apply_step4_dataset_postprocessing(self, *args, **kwargs)
+
+    def _format_training_target_label(self, target):
+        return "Znaki" if str(target) == "char" else "Tablice"
+
+    def _can_open_pz2_after_dataset_result(self):
+        return True
+
+    def _show_step4_dataset_result_modal(self, **kwargs):
+        self.captured_result_modals.append(dict(kwargs))
+        return bool(kwargs.get("allow_pz2"))
+
+    def _open_pz2_from_dataset_result(self, *args, **kwargs):
+        self.opened_pz2 = True
 
 
 def _write_balanced_char_dataset(root: Path, repeats: int = 2) -> None:
@@ -89,6 +126,31 @@ def _write_split_source_dataset(root: Path) -> None:
         stem = f"plate_{index:03d}"
         (root / "labels" / f"{stem}.txt").write_text(f"{class_id} 0.5 0.5 0.1 0.1\n", encoding="utf-8")
         (root / "images" / f"{stem}.jpg").write_bytes(b"fake")
+
+
+def _write_valid_jpeg(path: Path, color: tuple[int, int, int] = (80, 90, 100)) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not CV2_AVAILABLE or cv2 is None or np is None:
+        path.write_bytes(b"fake")
+        return
+    image = np.full((32, 64, 3), color, dtype=np.uint8)
+    cv2.imwrite(str(path), image)
+
+
+def _write_char_split_source_with_one_q_deficit(root: Path) -> None:
+    (root / "labels").mkdir(parents=True)
+    (root / "images").mkdir(parents=True)
+    (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+    q_id = CHARACTER_BALANCE_ALPHABET.index("Q")
+    for class_id, symbol in enumerate(CHARACTER_BALANCE_ALPHABET):
+        safe_symbol = "Q_target" if class_id == q_id else f"{class_id:02d}_{symbol}"
+        repeat = 1 if class_id == q_id else 4
+        stem = f"plate_{safe_symbol}"
+        (root / "labels" / f"{stem}.txt").write_text(
+            (f"{class_id} 0.5 0.5 0.2 0.2\n" * repeat),
+            encoding="utf-8",
+        )
+        _write_valid_jpeg(root / "images" / f"{stem}.jpg", color=(40 + class_id % 80, 80, 130))
 
 
 def _names_list_yaml() -> str:
@@ -325,6 +387,8 @@ class CharacterClassDistributionTests(unittest.TestCase):
             self.assertEqual(manifest["sources"]["augmented_real"], 3)
             self.assertEqual(manifest["sources"]["synthetic"], 0)
             self.assertEqual(manifest["max_augmented_variants_per_source"], 4)
+            self.assertEqual(manifest["source_reuse_safety_guard"]["max_augmented_variants_per_source"], 4)
+            self.assertTrue(manifest["source_reuse_safety_guard"]["enabled"])
             self.assertEqual(manifest["augmentation"]["max_variants_per_source"], 4)
             self.assertTrue(manifest["before_distribution"]["path"].endswith("character_class_distribution_before.json"))
             self.assertRegex(manifest["before_distribution"]["sha256"], r"^[0-9a-f]{64}$")
@@ -792,6 +856,123 @@ class CharacterClassDistributionTests(unittest.TestCase):
             self.assertEqual(manifest["completion_status"], "REPRESENTATION_OK")
             self.assertEqual(manifest["planned_images"], 0)
             self.assertEqual(manifest["generated_images"], 0)
+            self.assertEqual(manifest["execution_status"], "COMPLETED")
+            self.assertEqual(manifest["representation_status"], "REPRESENTATION_OK")
+            self.assertEqual(manifest["freeze_status"], "UNCHANGED")
+            self.assertTrue(manifest["ready_for_training"])
+
+    def test_failed_mz_variant_is_not_ready_for_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "not_feasible"
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            zero_id = CHARACTER_BALANCE_ALPHABET.index("0")
+            one_id = CHARACTER_BALANCE_ALPHABET.index("1")
+            (root / "labels" / "train" / "heavy_zero.txt").write_text(
+                f"{zero_id} 0.5 0.5 0.2 0.2\n" * 12,
+                encoding="utf-8",
+            )
+            (root / "labels" / "train" / "heavy_one.txt").write_text(
+                f"{one_id} 0.5 0.5 0.2 0.2\n" * 12,
+                encoding="utf-8",
+            )
+            plan = plan_character_train_augmentation(root, target_ratio=1.0)
+            host = _Step4BuilderHost()
+
+            result = z4_dataset_builder._create_step4_augmented_dataset_variant(
+                host,
+                source_dataset_path=root,
+                target="char",
+                profile=AugmentationProfile(enabled=False, extra_count=0),
+                progress_var_name="split_progress_var",
+                status_attr_name="split_status",
+                balance_plan_override=plan,
+                augmentation_mode="mz_auto_representation",
+            )
+
+            self.assertFalse(result["ok"])
+            manifest = json.loads((root / "mz_training_variant_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["completion_status"], "PLAN_NOT_FEASIBLE")
+            self.assertEqual(manifest["execution_status"], "NOT_RUN")
+            self.assertEqual(manifest["representation_status"], "TARGET_NOT_REACHED")
+            self.assertFalse(manifest["ready_for_training"])
+            readiness = get_training_dataset_readiness(root, target="char")
+            self.assertFalse(readiness["ok"])
+
+    def test_legacy_manual_char_manifest_remains_selectable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "manual_augmented"
+            root.mkdir()
+            (root / "mz_training_variant_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "augmentation_mode": "manual_train_augmentation",
+                        "completion_status": "COMPLETED",
+                        "deficit_after": {"Q": 2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            readiness = get_training_dataset_readiness(root, target="char")
+
+            self.assertTrue(readiness["ok"])
+
+    def test_failure_result_can_block_pz2_transition(self):
+        host = _Step4BuilderHost()
+
+        z4_dataset_builder._handle_step4_dataset_failure_result(
+            host,
+            message="PLAN_NOT_FEASIBLE",
+            target="char",
+            critical=False,
+            allow_pz2_override=False,
+        )
+
+        self.assertFalse(host.captured_result_modals[-1]["allow_pz2"])
+        self.assertFalse(host.opened_pz2)
+
+    def test_full_split_plan_augment_marks_mz_variant_ready(self):
+        if not CV2_AVAILABLE or cv2 is None or np is None or not is_albumentations_available():
+            self.skipTest("OpenCV/Albumentations unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            split_out = Path(tmp) / "split"
+            _write_char_split_source_with_one_q_deficit(source)
+            ok, msg, _stats = DatasetSplitter(random_seed=7).split_dataset(
+                source,
+                split_out,
+                {"train": 1.0, "val": 0.0, "test": 0.0},
+            )
+            self.assertTrue(ok, msg)
+            plan = plan_character_train_augmentation(split_out)
+            self.assertTrue(plan.feasible)
+            self.assertGreater(plan.planned_images, 0)
+            host = _Step4BuilderHost()
+
+            result = z4_dataset_builder._create_step4_augmented_dataset_variant(
+                host,
+                source_dataset_path=split_out,
+                target="char",
+                profile=AugmentationProfile(enabled=True, extra_count=999, sample_size=1, seed=123),
+                progress_var_name="split_progress_var",
+                status_attr_name="split_status",
+                balance_plan_override=plan,
+                augmentation_mode="mz_auto_representation",
+            )
+
+            self.assertTrue(result["ok"], result["message"])
+            manifest = dict(result["mz_training_variant_manifest"])
+            self.assertEqual(manifest["completion_status"], "REPRESENTATION_OK")
+            self.assertEqual(manifest["execution_status"], "COMPLETED")
+            self.assertEqual(manifest["representation_status"], "REPRESENTATION_OK")
+            self.assertEqual(manifest["freeze_status"], "UNCHANGED")
+            self.assertTrue(manifest["ready_for_training"])
+            self.assertEqual(manifest["generated_images"], plan.planned_images)
+            self.assertTrue(result["augmentation_stats"]["balance_plan_enabled"])
+            self.assertEqual(result["generated"], plan.planned_images)
+            self.assertEqual(get_training_dataset_readiness(result["dataset_path"], target="char")["ok"], True)
 
     def test_plan_invalidation_clears_source_state_and_ui_flags(self):
         host = _Step4BuilderHost()

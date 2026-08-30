@@ -56,6 +56,7 @@ from .inertial_scroll import InertialScrollController
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
+from .z4_dataset_readiness import get_training_dataset_readiness
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
@@ -1619,6 +1620,13 @@ def _validate_active_training_source_for_pz2(self) -> dict:
             f"Aktywny {target_context}: {self._format_training_target_label(selected_target)}\n"
             f"Dataset: {self._format_training_target_label(inferred_target)}"
         )
+        return result
+
+    readiness = get_training_dataset_readiness(dataset_root, target=(inferred_target or selected_target))
+    if not bool(readiness.get("ok", True)):
+        result["message"] = str(readiness.get("message") or "Wybrany wariant datasetu nie jest gotowy do treningu.")
+        result["dataset_root"] = dataset_root
+        result["yaml_path"] = yaml_path
         return result
 
     def _safe_mtime(path: Path) -> float:
