@@ -9164,16 +9164,21 @@ def augment_yolo_dataset_train_split(
         "requested": int(profile.extra_count or 0),
         "attempts": 0,
         "completion_ok": False,
+        "completion_status": "PENDING",
         "stop_reason": "",
     }
 
     if not profile.enabled or profile.extra_count <= 0:
+        stats["completion_ok"] = True
+        stats["completion_status"] = "SKIPPED"
         return True, "Augmentacja train pominięta.", stats
 
     if not CV2_AVAILABLE or cv2 is None:
+        stats["completion_status"] = "FAILED"
         return False, "OpenCV jest niedostępny, więc augmentacja obrazów nie może zostać wykonana.", stats
 
     if not is_albumentations_available():
+        stats["completion_status"] = "FAILED"
         return False, "Albumentations nie jest zainstalowane. Zainstaluj pakiet albumentations albo wyłącz augmentację.", stats
 
     config = _load_dataset_config(dataset_dir)
@@ -9182,6 +9187,7 @@ def augment_yolo_dataset_train_split(
     items = _discover_train_items(dataset_dir)
     stats["train_before"] = len(items)
     if not items:
+        stats["completion_status"] = "FAILED"
         return False, "Brak obrazów z etykietami w train, nie ma czego augmentować.", stats
 
     rng = random.Random(profile.seed)
@@ -9200,11 +9206,13 @@ def augment_yolo_dataset_train_split(
     )
     stats["sample_pool"] = len(pool)
     if not pool:
+        stats["completion_status"] = "FAILED"
         return False, "Losowa próbka train jest pusta.", stats
 
     try:
         _build_transform(profile, has_keypoints=has_keypoints)
     except Exception as exc:
+        stats["completion_status"] = "FAILED"
         return False, f"Nie udało się przygotować pipeline Albumentations: {exc}", stats
 
     label_dir = dataset_dir / "labels" / "train"
@@ -9341,4 +9349,10 @@ def augment_yolo_dataset_train_split(
 
     ok, message = _finalize_train_augmentation_result(stats, profile.extra_count)
     stats["completion_ok"] = bool(ok)
+    if ok:
+        stats["completion_status"] = "COMPLETED"
+    elif int(stats.get("generated", 0) or 0) > 0:
+        stats["completion_status"] = "PARTIAL"
+    else:
+        stats["completion_status"] = "NO_OUTPUT"
     return ok, message, stats

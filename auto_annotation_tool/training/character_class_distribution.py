@@ -167,7 +167,7 @@ class CharacterBalancePlan:
     target_ratio: float
     target_count: int
     max_augmented_variants_per_source: int
-    selection_policy: str = "deficit_weighted"
+    selection_policy: str = "deficit_progressive_reuse_v1"
     threshold_policy: str = CHARACTER_REPRESENTATION_THRESHOLD_POLICY
     planned_images: int = 0
     predicted_deficit_after: dict[str, int] = field(default_factory=dict)
@@ -826,6 +826,12 @@ def build_character_training_variant_manifest(
     sources: Mapping[str, int] | None = None,
     base_dataset_sha_or_fingerprint: Mapping[str, Any] | str | None = None,
     val_test_unchanged: bool | Mapping[str, Any] | None = None,
+    augmentation_mode: str | None = None,
+    requested_images: int | None = None,
+    planned_images: int | None = None,
+    generated_images: int | None = None,
+    completion_status: str | None = None,
+    stop_reason: str | None = None,
 ) -> dict[str, Any]:
     """Create the research manifest skeleton for an MZ training variant."""
 
@@ -846,6 +852,10 @@ def build_character_training_variant_manifest(
         base_fingerprint_ref = str(base_dataset_sha_or_fingerprint)
     else:
         base_fingerprint_ref = build_character_dataset_file_fingerprint(base_dataset).get("sha256", "")
+    planned = int(planned_images if planned_images is not None else getattr(plan, "planned_images", 0) or 0)
+    generated = int(generated_images if generated_images is not None else source_counts.get("augmented_real", 0) or 0)
+    requested = int(requested_images if requested_images is not None else planned or generated or 0)
+    status = str(completion_status or getattr(plan, "completion_status", "") or "").strip()
     return {
         "schema": CHARACTER_TRAINING_VARIANT_SCHEMA,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -853,15 +863,32 @@ def build_character_training_variant_manifest(
         "base_dataset_sha_or_fingerprint": base_fingerprint_ref,
         "base_dataset_content_fingerprint": base_fingerprint_ref,
         "alphabet": CHARACTER_BALANCE_ALPHABET,
+        "augmentation_mode": str(augmentation_mode or "manual_train_augmentation"),
         "target_count": int(getattr(plan, "target_count", 0) or 0),
         "target_ratio": float(getattr(plan, "target_ratio", 0.50) or 0.50),
-        "selection_policy": str(getattr(plan, "selection_policy", "deficit_weighted") or "deficit_weighted"),
+        "selection_policy": str(getattr(plan, "selection_policy", "deficit_progressive_reuse_v1") or "deficit_progressive_reuse_v1"),
+        "threshold_policy": str(getattr(plan, "threshold_policy", CHARACTER_REPRESENTATION_THRESHOLD_POLICY) or CHARACTER_REPRESENTATION_THRESHOLD_POLICY),
+        "planned_images": max(0, planned),
+        "requested_images": max(0, requested),
+        "generated_images": max(0, generated),
+        "completion_status": status,
+        "stop_reason": str(stop_reason or ""),
+        "predicted_deficit_after": dict(getattr(plan, "predicted_deficit_after", {}) or {}),
+        "deficit_before": dict(getattr(plan, "deficit_by_symbol", {}) or {}),
+        "unique_real_sources_used": int(getattr(plan, "unique_real_sources_used", 0) or 0),
+        "reuse_rounds_used": int(getattr(plan, "reuse_rounds_used", 0) or 0),
+        "max_augmented_variants_from_single_source": int(getattr(plan, "max_augmented_variants_from_single_source", 0) or 0),
+        "mean_augmented_variants_per_used_source": float(getattr(plan, "mean_augmented_variants_per_used_source", 0.0) or 0.0),
         "max_augmented_variants_per_source": max_per_source,
         "sources": source_counts,
         "before_distribution": _distribution_ref(before_distribution),
         "after_distribution": _distribution_ref(after_distribution) if after_distribution is not None else "",
         "augmentation": {
             "max_variants_per_source": max_per_source,
+            "mode": str(augmentation_mode or "manual_train_augmentation"),
+            "planned_images": max(0, planned),
+            "requested_images": max(0, requested),
+            "generated_images": max(0, generated),
         },
         "balance_plan": plan.to_dict() if plan is not None else {},
         "val_test_unchanged": (

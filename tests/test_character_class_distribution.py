@@ -7,6 +7,7 @@ import unittest
 
 from auto_annotation_tool.training.character_class_distribution import (
     CHARACTER_BALANCE_ALPHABET,
+    CHARACTER_REPRESENTATION_THRESHOLD_POLICY,
     CHARACTER_TRAINING_VARIANT_SCHEMA,
     CharacterClassMapValidationError,
     analyze_character_class_distribution,
@@ -249,7 +250,12 @@ class CharacterClassDistributionTests(unittest.TestCase):
 
             self.assertEqual(manifest["schema"], CHARACTER_TRAINING_VARIANT_SCHEMA)
             self.assertEqual(manifest["alphabet"], CHARACTER_BALANCE_ALPHABET)
-            self.assertEqual(manifest["selection_policy"], "deficit_weighted")
+            self.assertEqual(manifest["selection_policy"], "deficit_progressive_reuse_v1")
+            self.assertEqual(manifest["threshold_policy"], CHARACTER_REPRESENTATION_THRESHOLD_POLICY)
+            self.assertEqual(manifest["planned_images"], plan.planned_images)
+            self.assertEqual(manifest["predicted_deficit_after"], plan.predicted_deficit_after)
+            self.assertEqual(manifest["unique_real_sources_used"], plan.unique_real_sources_used)
+            self.assertEqual(manifest["reuse_rounds_used"], plan.reuse_rounds_used)
             self.assertEqual(manifest["sources"]["real"], 7)
             self.assertEqual(manifest["sources"]["added_real"], 2)
             self.assertEqual(manifest["sources"]["augmented_real"], 3)
@@ -304,6 +310,63 @@ class CharacterClassDistributionTests(unittest.TestCase):
 
             self.assertEqual(sum(1 for candidate in plan.candidates if candidate.source_key == "plate_001"), 1)
             self.assertTrue(any("tylko kopie augmentowane" in warning for warning in plan.warnings))
+
+    def test_plan_uses_symbol_multiplicity_for_planned_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            zero_id = CHARACTER_BALANCE_ALPHABET.index("0")
+            one_id = CHARACTER_BALANCE_ALPHABET.index("1")
+            q_id = CHARACTER_BALANCE_ALPHABET.index("Q")
+            (root / "labels" / "train" / "zeros.txt").write_text(f"{zero_id} 0 0 0 0\n" * 10, encoding="utf-8")
+            (root / "labels" / "train" / "ones.txt").write_text(f"{one_id} 0 0 0 0\n" * 10, encoding="utf-8")
+            (root / "labels" / "train" / "qq1.txt").write_text(
+                f"{q_id} 0 0 0 0\n{q_id} 0 0 0 0\n{one_id} 0 0 0 0\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "train" / "qq1.jpg").write_bytes(b"fake")
+
+            plan = plan_character_train_augmentation(root, target_ratio=1.0)
+
+            self.assertEqual(plan.target_count, 10)
+            self.assertEqual(plan.deficit_by_symbol["Q"], 8)
+            self.assertEqual(plan.planned_images, 4)
+            self.assertEqual(plan.predicted_deficit_after.get("Q", 0), 0)
+            self.assertEqual(plan.candidates[0].source_key, "qq1")
+            self.assertEqual(plan.candidates[0].planned_variants, 4)
+
+    def test_plan_reports_not_feasible_when_deficit_has_no_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            zero_id = CHARACTER_BALANCE_ALPHABET.index("0")
+            one_id = CHARACTER_BALANCE_ALPHABET.index("1")
+            (root / "labels" / "train" / "zeros.txt").write_text(f"{zero_id} 0 0 0 0\n" * 10, encoding="utf-8")
+            (root / "labels" / "train" / "ones.txt").write_text(f"{one_id} 0 0 0 0\n" * 10, encoding="utf-8")
+
+            plan = plan_character_train_augmentation(root, target_ratio=1.0)
+
+            self.assertFalse(plan.feasible)
+            self.assertEqual(plan.completion_status, "PLAN_NOT_FEASIBLE")
+            self.assertEqual(plan.planned_images, 0)
+            self.assertGreater(plan.predicted_deficit_after.get("Q", 0), 0)
+
+    def test_manual_augmentation_state_has_no_balance_limit_without_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records, limits, _initial, stats = _build_balance_augmented_source_state(
+                root,
+                [(root / "images" / "train" / "a.jpg", root / "labels" / "train" / "a.txt")],
+                balance_plan=None,
+            )
+
+            self.assertEqual(len(records), 1)
+            self.assertFalse(stats["balance_plan_enabled"])
+            self.assertIsNone(limits["a"])
+            self.assertIsNone(stats["max_augmented_variants_per_source"])
 
     def test_executor_balance_state_respects_max_variants_per_source(self):
         with tempfile.TemporaryDirectory() as tmp:
