@@ -753,7 +753,7 @@ class _CharacterClassDistributionDialog:
             f"Próg AUTO: {int(getattr(plan, 'target_count', 0) or 0)} na klasę  |  "
             f"Niedoreprezentowane: {', '.join(deficient_symbols) if deficient_symbols else 'brak'}  |  "
             f"Brakuje łącznie: {total_deficit}  |  "
-            f"Plan: +{planned_images} obrazów train  |  "
+            f"Plan wstępny: +{planned_images} obrazów train  |  "
             f"Dodatkowe realne źródła do rozważenia: {real_total}"
         )
         tk.Label(
@@ -826,10 +826,12 @@ class _CharacterClassDistributionDialog:
             font=("Segoe UI", 8),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew")
+        plan_feasible = bool(getattr(plan, "feasible", True))
         ttk.Button(
             footer,
-            text="Użyj planu w PZ1",
+            text=("Użyj planu w PZ1" if plan_feasible else "Plan niewykonalny"),
             command=lambda: self._accept_balance_plan(dialog, plan, real_sources),
+            state=(tk.NORMAL if plan_feasible else tk.DISABLED),
         ).grid(row=0, column=1, sticky="e", padx=(8, 6))
         ttk.Button(footer, text="Zamknij", command=dialog.destroy).grid(row=0, column=2, sticky="e")
         try:
@@ -851,6 +853,13 @@ class _CharacterClassDistributionDialog:
         try:
             setattr(self.host, "_pending_character_balance_plan", plan)
             setattr(self.host, "_pending_character_balance_real_sources", dict(real_sources or {}))
+            try:
+                train = float(getattr(self.host, "train_pct").get())
+                val = float(getattr(self.host, "val_pct").get())
+                test = max(5.0, 100.0 - train - val)
+                setattr(self.host, "_pending_character_balance_ratio_key", (round(train, 4), round(val, 4), round(test, 4)))
+            except Exception:
+                pass
             enabled_var = getattr(self.host, "split_aug_enabled_var", None)
             extra_var = getattr(self.host, "split_aug_extra_var", None)
             sample_var = getattr(self.host, "split_aug_sample_var", None)
@@ -867,14 +876,15 @@ class _CharacterClassDistributionDialog:
                 status_var.set(
                     f"Próg AUTO: {target_count}. "
                     f"Niedoreprezentowane: {', '.join(deficits.keys()) if deficits else 'brak'}. "
-                    f"Plan: +{planned_images} obrazów train."
+                    f"Plan wstępny: +{planned_images} obrazów train. "
+                    "Finalny plan zostanie przeliczony na tworzonym wariancie."
                 )
             refresher = getattr(self.host, "_refresh_step4_augmentation_summary", None)
             if callable(refresher):
                 refresher("char")
         except Exception:
             pass
-        self.status_var.set("Plan MZ zapisany dla PZ1.")
+        self.status_var.set("Plan wstępny MZ zapisany dla PZ1.")
         try:
             dialog.destroy()
         except Exception:
