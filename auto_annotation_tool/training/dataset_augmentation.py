@@ -4239,6 +4239,7 @@ def _build_balance_augmented_source_state(
     allowed_sources: set[str] = set()
     source_limits: dict[str, int | None] = {}
     source_priorities: dict[str, float] = {}
+    source_planned_variants: dict[str, int] = {}
     for candidate in raw_candidates:
         source_key = str(_balance_candidate_attr(candidate, "source_key", "") or "").strip()
         if not source_key:
@@ -4255,14 +4256,25 @@ def _build_balance_augmented_source_state(
             limit = int(_balance_candidate_attr(candidate, "max_augmented_variants", default_limit) or default_limit)
         except Exception:
             limit = default_limit
+        try:
+            planned_variants_raw = _balance_candidate_attr(candidate, "planned_variants", None)
+            planned_variants = None if planned_variants_raw in (None, "") else max(0, int(planned_variants_raw or 0))
+        except Exception:
+            planned_variants = None
         source_limits[source_key] = None if limit < 0 else max(0, limit)
         source_priorities[source_key] = max(float(source_priorities.get(source_key, 0.0)), float(priority))
+        if planned_variants is not None:
+            source_planned_variants[source_key] = max(
+                int(source_planned_variants.get(source_key, 0) or 0),
+                int(planned_variants),
+            )
         label_key = _candidate_label_rel_key(candidate, dataset_dir, base_dataset)
         if label_key:
             plan_by_label[label_key] = {
                 "source_key": source_key,
                 "priority": max(0.0, float(priority)),
                 "limit": source_limits[source_key],
+                "planned_variants": planned_variants,
             }
 
     records: list[dict[str, Any]] = []
@@ -4279,6 +4291,7 @@ def _build_balance_augmented_source_state(
             initial_generated_by_source[source_key] = int(initial_generated_by_source.get(source_key, 0) or 0) + 1
         priority = float((plan_meta or {}).get("priority") or source_priorities.get(source_key, 1.0) or 1.0)
         limit = (plan_meta or {}).get("limit", source_limits.get(source_key))
+        planned_variants = (plan_meta or {}).get("planned_variants", source_planned_variants.get(source_key))
         if source_key not in source_limits:
             source_limits[source_key] = None if default_limit < 0 else max(0, default_limit)
         records.append(
@@ -4289,6 +4302,7 @@ def _build_balance_augmented_source_state(
                 "source_key": source_key,
                 "priority": max(0.0, float(priority)),
                 "limit": limit if limit is not None else source_limits.get(source_key),
+                "planned_variants": planned_variants,
                 "is_original": bool(is_original),
             }
         )
@@ -4314,6 +4328,8 @@ def _build_balance_augmented_source_state(
         "balance_plan_candidates": len(raw_candidates),
         "balance_pool": len(records),
         "max_augmented_variants_per_source": None if default_limit < 0 else max(0, default_limit),
+        "planned_images": sum(int(value or 0) for value in source_planned_variants.values()) if plan_enabled else None,
+        "planned_variants_by_source": dict(sorted(source_planned_variants.items())),
         "initial_generated_by_source": dict(sorted(initial_generated_by_source.items())),
     }
     return records, source_limits, initial_generated_by_source, stats
@@ -4354,6 +4370,13 @@ def _select_balance_record(
     weights: list[float] = []
     for record in pool:
         source_key = str(record.get("source_key") or "")
+        planned_variants = record.get("planned_variants")
+        if planned_variants not in (None, ""):
+            try:
+                if int(generated_by_source.get(source_key, 0) or 0) >= max(0, int(planned_variants or 0)):
+                    continue
+            except Exception:
+                pass
         limit = source_limits.get(source_key, record.get("limit"))
         total_generated = int(initial_generated_by_source.get(source_key, 0) or 0) + int(generated_by_source.get(source_key, 0) or 0)
         if limit is not None and total_generated >= int(limit):
@@ -4372,6 +4395,33 @@ def _select_balance_record(
         if marker <= upto:
             return record
     return eligible[-1]
+
+
+def _finalize_train_augmentation_result(stats: Mapping[str, Any], requested_extra: int) -> tuple[bool, str]:
+    requested = max(0, int(requested_extra or 0))
+    generated = max(0, int((stats or {}).get("generated", 0) or 0))
+    skipped = max(0, int((stats or {}).get("skipped", 0) or 0))
+    stop_reason = str((stats or {}).get("stop_reason") or "").strip()
+    suffix = f" Powód zatrzymania: {stop_reason}." if stop_reason else ""
+    if generated <= 0:
+        return (
+            False,
+            f"Zwiększanie syntetyczne train nie utworzyło żadnego obrazu z planowanych {requested}.{suffix}",
+        )
+    if requested > 0 and generated < requested:
+        return (
+            False,
+            (
+                "Zwiększanie syntetyczne train nie zostało ukończone: "
+                f"dodano {generated} z {requested} obrazów, pominięto {skipped}. "
+                "Wariant nie zostanie oznaczony jako gotowy, bo żądana liczba syntetyków nie została osiągnięta."
+                f"{suffix}"
+            ),
+        )
+    return (
+        True,
+        f"Zwiększanie syntetyczne train zakończone: dodano {generated} obrazów, pominięto {skipped}.",
+    )
 
 
 def _parse_yolo_label(label_path: Path, *, kpt_count: int, kpt_dim: int) -> list[YoloObject]:
@@ -9111,6 +9161,10 @@ def augment_yolo_dataset_train_split(
         "balance_plan_enabled": False,
         "max_augmented_variants_per_source": None,
         "generated_by_source": {},
+        "requested": int(profile.extra_count or 0),
+        "attempts": 0,
+        "completion_ok": False,
+        "stop_reason": "",
     }
 
     if not profile.enabled or profile.extra_count <= 0:
@@ -9173,6 +9227,7 @@ def augment_yolo_dataset_train_split(
             source_limits=source_limits,
         )
         if selected_record is None:
+            stats["stop_reason"] = "wyczerpano limit kandydatów albo kopii z jednego źródła"
             break
         image_path = Path(selected_record["image_path"])
         label_path = Path(selected_record["label_path"])
@@ -9268,6 +9323,9 @@ def augment_yolo_dataset_train_split(
             }
         )
 
+    stats["attempts"] = attempts
+    if stats["generated"] < profile.extra_count and not str(stats.get("stop_reason") or "").strip():
+        stats["stop_reason"] = "wyczerpano limit prób bez uzyskania żądanej liczby obrazów"
     stats["train_after"] = stats["train_before"] + stats["generated"]
     stats["generated_by_source"] = dict(sorted(generated_by_source.items()))
     stats["total_generated_variants_by_source"] = {
@@ -9281,24 +9339,6 @@ def augment_yolo_dataset_train_split(
     if callable(progress_callback):
         progress_callback(stats["generated"], profile.extra_count, "augmentacja zakończona")
 
-    if stats["generated"] <= 0:
-        return (
-            False,
-            f"Zwiększanie syntetyczne train nie utworzyło żadnego obrazu z planowanych {profile.extra_count}.",
-            stats,
-        )
-    if stats["generated"] < profile.extra_count:
-        return (
-            True,
-            (
-                "Zwiększanie syntetyczne train zakończone częściowo: "
-                f"dodano {stats['generated']} z {profile.extra_count} obrazów, "
-                f"pominięto {stats['skipped']}."
-            ),
-            stats,
-        )
-    return (
-        True,
-        f"Zwiększanie syntetyczne train zakończone: dodano {stats['generated']} obrazów, pominięto {stats['skipped']}.",
-        stats,
-    )
+    ok, message = _finalize_train_augmentation_result(stats, profile.extra_count)
+    stats["completion_ok"] = bool(ok)
+    return ok, message, stats

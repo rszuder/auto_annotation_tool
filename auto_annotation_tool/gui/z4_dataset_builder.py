@@ -2896,6 +2896,7 @@ def _create_step4_augmented_dataset_variant(
     generated = int(stats.get("generated", 0) or 0)
     base_total = int(base_counts.get("total", 0) or 0)
     augmented_total = int(augmented_counts.get("total", 0) or 0)
+    generation_complete = bool(requested_extra <= 0 or generated >= requested_extra)
     mz_variant_manifest: dict = {}
     if normalized_target == "char" and before_distribution is not None:
         try:
@@ -2955,15 +2956,16 @@ def _create_step4_augmented_dataset_variant(
                 str(postprocess.get("message") or "").strip()
                 + f"\nNie udało się zapisać manifestu wariantu MZ: {exc}"
             ).strip()
+    summary_prefix = "Wariant utworzono" if generation_complete else "Wariant nie został ukończony"
     summary = (
-        "Wariant utworzono: "
+        f"{summary_prefix}: "
         f"oryginalne={base_total}, syntetyczne={generated}/{requested_extra}, razem={augmented_total}.\n"
         f"Katalog: {augmented_dir.name}"
     )
     process_message = str(postprocess.get("message") or "").strip()
     message = summary if not process_message else f"{summary}\n{process_message}"
     status_message = (
-        "Wariant utworzono: "
+        f"{summary_prefix}: "
         f"oryginalne={base_total}, syntetyczne={generated}/{requested_extra}, razem={augmented_total}"
     )
     scope_meta = _write_step4_augmentation_scope_manifest(
@@ -2977,7 +2979,7 @@ def _create_step4_augmented_dataset_variant(
         augmented_total=augmented_total,
     )
     return {
-        "ok": bool(postprocess.get("ok", True)) and generated > 0,
+        "ok": bool(postprocess.get("ok", True)) and generated > 0 and generation_complete,
         "dataset_path": str(augmented_dir),
         "message": message,
         "counts": augmented_counts,
@@ -2987,6 +2989,7 @@ def _create_step4_augmented_dataset_variant(
         "generated": generated,
         "requested_extra": requested_extra,
         "augmented_total": augmented_total,
+        "generation_complete": generation_complete,
         "status_message": status_message,
         "synthetic_scope": "training_dataset_only",
         "used_pending_character_balance_plan": used_pending_balance_plan,
@@ -3100,7 +3103,7 @@ def _apply_step4_dataset_postprocessing(
         messages.append(str(aug_msg or "Zwiększanie syntetyczne train zakończone."))
     else:
         result["ok"] = False
-        messages.append(f"Zwiększanie syntetyczne train nie zostało wykonane: {aug_msg}")
+        messages.append(str(aug_msg or "Zwiększanie syntetyczne train nie zostało ukończone."))
     result["message"] = "\n".join([msg for msg in messages if str(msg or "").strip()])
     return result
 
