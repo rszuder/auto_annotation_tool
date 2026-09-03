@@ -18,6 +18,7 @@ from .config import CONFIG, logger
 from .campaign_project_registry import bind_campaign_project_registry_methods
 from .campaign_stage_state import bind_campaign_stage_state_methods
 from .campaign_project_history import bind_campaign_project_history_methods
+from .project_cache import PROJECT_CACHE
 
 
 class CampaignManager:
@@ -1078,6 +1079,14 @@ class CampaignManager:
             }
         if not run_id or iteration_num <= 0:
             return {"ready": False, "run_id": "", "target": "", "iteration": 0, "selection_confirmed": False, "model_path": ""}
+        selected_model_path = str(state.get("model_path", "") or "").strip()
+        if selected_model_path:
+            try:
+                selected_model_ready = bool(Path(selected_model_path).exists() and Path(selected_model_path).is_file())
+            except Exception:
+                selected_model_ready = bool(selected_model_path)
+            if selected_model_ready:
+                return state
 
         def _record_matches(record: Dict[str, Any] | None, *, allow_legacy: bool = False) -> bool:
             if not isinstance(record, dict):
@@ -1214,9 +1223,11 @@ class CampaignManager:
         removed_any = False
         for snapshot_name in (
             "annotation_ui_state.json",
+            "wizard_view_cache.json",
         ):
             snapshot_path = state_dir / snapshot_name
             try:
+                PROJECT_CACHE.invalidate_json(snapshot_path)
                 if snapshot_path.exists():
                     snapshot_path.unlink()
                     removed_any = True

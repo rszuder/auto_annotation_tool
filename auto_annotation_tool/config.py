@@ -146,8 +146,8 @@ class Config:
     """Centralna konfiguracja aplikacji."""
     
     # Wersja
-    VERSION: str = "4.0"
-    APP_NAME: str = "Auto-Annotation Tool dla CVAT"
+    VERSION: str = "4.5"
+    APP_NAME: str = "ALPR Desktop"
 
     # Progi kampanii
     CAMPAIGN_MIN_CHAR_IMAGES: int = 10

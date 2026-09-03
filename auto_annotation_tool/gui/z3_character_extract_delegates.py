@@ -17,6 +17,7 @@ from .z3_campaign_flow import (
     has_any_step3_export_outputs,
     resolve_step3_campaign_action_command,
     return_step3_result_to_wizard,
+    return_to_t05_work_after_step3_pz1,
     return_to_wizard_for_step3_rework,
     set_step3_finish_hint,
 )
@@ -282,6 +283,10 @@ def _return_to_wizard_for_step3_rework(self):
     return_to_wizard_for_step3_rework(self)
 
 
+def _return_to_t05_work_after_step3_pz1(self):
+    return_to_t05_work_after_step3_pz1(self)
+
+
 def _resolve_step3_campaign_action_command(self, command_id: str):
     return resolve_step3_campaign_action_command(self, command_id)
 
@@ -474,6 +479,7 @@ _INSTANCE_METHODS = (
     "_get_step3_finish_block_message",
     "_set_step3_finish_hint",
     "_has_any_step3_export_outputs",
+    "_return_to_t05_work_after_step3_pz1",
     "_return_to_wizard_for_step3_rework",
     "_resolve_step3_campaign_action_command",
     "_get_step3_pz3_path_selection_view_model",

@@ -5,6 +5,7 @@
 import tkinter as tk
 import tkinter.font as tkfont
 
+from .app_theme_definitions import DEFAULT_THEME_KEY, get_theme_palette
 from .web_slim_scrollbar import blend_hex_colors
 
 
@@ -13,27 +14,19 @@ def setup_style(app, theme_key: str = None):
     try:
         theme_key = theme_key or self.current_theme_key
         if theme_key not in self.themes:
-            theme_key = "dark_visual_cs"
+            theme_key = DEFAULT_THEME_KEY
 
         self.current_theme_key = theme_key
         self.current_theme_name = self.themes[theme_key]["label"]
-        self.palette = dict(self.themes[theme_key]["palette"])
+        self.palette = get_theme_palette(theme_key, self.themes)
         if hasattr(self, "theme_var"):
             self.theme_var.set(theme_key)
         palette = self.palette
         dark_theme = str(theme_key or "").strip().lower().startswith("dark")
-        dropdown_select_bg = (
-            palette.get("success", palette.get("accent", "#4ec9b0"))
-            if dark_theme
-            else palette.get("accent", "#006bb3")
-        )
-        dropdown_select_fg = (
-            palette.get("guide_text", "#111111")
-            if dark_theme
-            else palette.get("accent_text", "#ffffff")
-        )
+        dropdown_select_bg = palette["selection_bg"]
+        dropdown_select_fg = palette["selection_fg"]
         list_select_bg, list_select_fg = self.get_list_selection_colors()
-        scrollbar_track = palette.get("bg", "#1e1e1e")
+        scrollbar_track = palette["scrollbar_track"]
         _scroll_track, scrollbar_thumb, scrollbar_thumb_hover = self._get_scrollbar_colors(
             track_color=scrollbar_track,
         )
@@ -67,6 +60,8 @@ def setup_style(app, theme_key: str = None):
         self.root.option_add("*Entry.background", palette["field"])
         self.root.option_add("*Entry.foreground", palette["fg"])
         self.root.option_add("*Entry.insertBackground", palette["fg"])
+        self.root.option_add("*Entry.selectBackground", list_select_bg)
+        self.root.option_add("*Entry.selectForeground", list_select_fg)
         self.root.option_add("*Listbox.background", palette["field"])
         self.root.option_add("*Listbox.foreground", palette["fg"])
         self.root.option_add("*Listbox.selectBackground", list_select_bg)
@@ -78,13 +73,21 @@ def setup_style(app, theme_key: str = None):
         self.root.option_add("*Text.background", palette["field"])
         self.root.option_add("*Text.foreground", palette["fg"])
         self.root.option_add("*Text.insertBackground", palette["fg"])
+        self.root.option_add("*Text.selectBackground", list_select_bg)
+        self.root.option_add("*Text.selectForeground", list_select_fg)
+        self.root.option_add("*Button.background", palette["panel_alt"])
+        self.root.option_add("*Button.foreground", palette["fg"])
+        self.root.option_add("*Button.activeBackground", palette["button_hover"])
+        self.root.option_add("*Button.activeForeground", palette["fg"])
+        self.root.option_add("*Button.highlightBackground", palette["panel_border"])
+        self.root.option_add("*Button.highlightColor", palette["accent"])
         self.root.option_add("*Scrollbar.background", scrollbar_thumb)
         self.root.option_add("*Scrollbar.activeBackground", scrollbar_thumb_hover)
         self.root.option_add("*Scrollbar.troughColor", scrollbar_track)
         self.root.option_add("*Menu.background", palette["panel"])
         self.root.option_add("*Menu.foreground", palette["fg"])
         self.root.option_add("*Menu.activeBackground", palette["accent"])
-        self.root.option_add("*Menu.activeForeground", "#ffffff")
+        self.root.option_add("*Menu.activeForeground", palette["accent_text"])
 
         self.style.theme_use('clam')
 
@@ -100,8 +103,8 @@ def setup_style(app, theme_key: str = None):
             except Exception:
                 pass
 
-        control_arrow = palette.get("success", palette.get("accent", palette["fg"]))
-        control_arrow_disabled = palette.get("muted_dim", palette["fg"])
+        control_arrow = palette["success"]
+        control_arrow_disabled = palette["muted_dim"]
 
         safe_configure(
             '.',
@@ -115,9 +118,9 @@ def setup_style(app, theme_key: str = None):
         safe_configure(
             'Card.TFrame',
             background=palette["panel"],
-            bordercolor=palette.get("panel_border", palette["border"]),
-            lightcolor=palette.get("panel_border", palette["border"]),
-            darkcolor=palette.get("panel_border", palette["border"]),
+            bordercolor=palette["panel_border"],
+            lightcolor=palette["panel_border"],
+            darkcolor=palette["panel_border"],
             borderwidth=1,
             relief=tk.SOLID
         )
@@ -144,7 +147,7 @@ def setup_style(app, theme_key: str = None):
             ],
             foreground=[('disabled', palette["muted_dim"])],
             indicatorcolor=[
-                ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                ('selected', palette["success"]),
                 ('active', palette["field"]),
                 ('!selected', palette["field"]),
                 ('disabled', palette["panel_alt"]),
@@ -165,7 +168,7 @@ def setup_style(app, theme_key: str = None):
             ],
             foreground=[('disabled', palette["muted_dim"])],
             indicatorcolor=[
-                ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                ('selected', palette["success"]),
                 ('active', palette["field"]),
                 ('!selected', palette["field"]),
                 ('disabled', palette["panel_alt"]),
@@ -186,7 +189,7 @@ def setup_style(app, theme_key: str = None):
             ],
             foreground=[('disabled', palette["muted_dim"])],
             indicatorcolor=[
-                ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                ('selected', palette["success"]),
                 ('active', palette["field"]),
                 ('!selected', palette["field"]),
                 ('disabled', palette["panel_alt"]),
@@ -207,7 +210,7 @@ def setup_style(app, theme_key: str = None):
             ],
             foreground=[('disabled', palette["muted_dim"])],
             indicatorcolor=[
-                ('selected', palette.get("success", palette.get("accent", "#4ec9b0"))),
+                ('selected', palette["success"]),
                 ('active', palette["field"]),
                 ('!selected', palette["field"]),
                 ('disabled', palette["panel_alt"]),
@@ -216,7 +219,7 @@ def setup_style(app, theme_key: str = None):
         safe_configure(
             'Info.TLabel',
             background=palette["bg"],
-            foreground=palette.get("info", palette["accent"]),
+            foreground=palette["info"],
             padding=2
         )
         safe_configure(
@@ -228,7 +231,7 @@ def setup_style(app, theme_key: str = None):
         safe_configure(
             'PanelInfo.TLabel',
             background=palette["panel"],
-            foreground=palette.get("info", palette["accent"]),
+            foreground=palette["info"],
             padding=2
         )
         safe_configure(
@@ -259,7 +262,7 @@ def setup_style(app, theme_key: str = None):
         safe_configure(
             'PanelStatusInfo.TLabel',
             background=palette["panel"],
-            foreground=palette.get("info", palette["accent"]),
+            foreground=palette["info"],
             padding=2,
             font=('Segoe UI', 10, 'bold')
         )
@@ -287,9 +290,9 @@ def setup_style(app, theme_key: str = None):
         safe_configure(
             'TLabelframe',
             background=palette["panel"],
-            bordercolor=palette.get("panel_border", palette["border"]),
-            lightcolor=palette.get("panel_border", palette["border"]),
-            darkcolor=palette.get("panel_border", palette["border"]),
+            bordercolor=palette["panel_border"],
+            lightcolor=palette["panel_border"],
+            darkcolor=palette["panel_border"],
             borderwidth=1,
             relief=tk.SOLID
         )
@@ -301,19 +304,19 @@ def setup_style(app, theme_key: str = None):
         )
         safe_configure(
             'AccentPanel.Horizontal.TSeparator',
-            background=palette.get("surface_info", palette.get("accent", "#0e639c")),
-            troughcolor=palette.get("panel", "#252526"),
-            bordercolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
-            lightcolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
-            darkcolor=palette.get("surface_info", palette.get("accent", "#0e639c")),
+            background=palette["surface_info"],
+            troughcolor=palette["panel"],
+            bordercolor=palette["surface_info"],
+            lightcolor=palette["surface_info"],
+            darkcolor=palette["surface_info"],
         )
         safe_configure(
             'TNotebook',
             background=palette["panel"],
             borderwidth=1,
-            bordercolor=palette.get("panel_border", palette["border"]),
-            lightcolor=palette.get("panel_border", palette["border"]),
-            darkcolor=palette.get("panel_border", palette["border"]),
+            bordercolor=palette["panel_border"],
+            lightcolor=palette["panel_border"],
+            darkcolor=palette["panel_border"],
             tabmargins=[0, 0, 0, 0]
         )
         safe_configure(
@@ -321,9 +324,9 @@ def setup_style(app, theme_key: str = None):
             background=palette["panel_alt"],
             foreground=palette["muted"],
             borderwidth=1,
-            bordercolor=palette.get("panel_border", palette["border"]),
-            lightcolor=palette.get("panel_border", palette["border"]),
-            darkcolor=palette.get("panel_border", palette["border"]),
+            bordercolor=palette["panel_border"],
+            lightcolor=palette["panel_border"],
+            darkcolor=palette["panel_border"],
             relief=tk.SOLID,
             padding=[12, 5],
             font=('Segoe UI', 9, 'normal')
@@ -331,29 +334,29 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'TNotebook.Tab',
             background=[
-                ('disabled', palette.get("tab_disabled_bg", palette["bg"])),
+                ('disabled', palette["tab_disabled_bg"]),
                 ('selected', palette["panel"]),
                 ('active', palette["panel_alt"])
             ],
             foreground=[
-                ('disabled', palette.get("tab_disabled_fg", palette["muted_dim"])),
+                ('disabled', palette["tab_disabled_fg"]),
                 ('selected', palette["fg"]),
                 ('active', palette["fg"])
             ],
             bordercolor=[
-                ('disabled', palette.get("panel_border", palette["border"])),
+                ('disabled', palette["panel_border"]),
                 ('selected', palette["accent"]),
-                ('active', palette.get("panel_border", palette["border"]))
+                ('active', palette["panel_border"])
             ],
             lightcolor=[
-                ('disabled', palette.get("panel_border", palette["border"])),
+                ('disabled', palette["panel_border"]),
                 ('selected', palette["accent"]),
-                ('active', palette.get("panel_border", palette["border"]))
+                ('active', palette["panel_border"])
             ],
             darkcolor=[
-                ('disabled', palette.get("panel_border", palette["border"])),
+                ('disabled', palette["panel_border"]),
                 ('selected', palette["accent"]),
-                ('active', palette.get("panel_border", palette["border"]))
+                ('active', palette["panel_border"])
             ],
             padding=[
                 ('disabled', [12, 5]),
@@ -368,13 +371,13 @@ def setup_style(app, theme_key: str = None):
         )
         nav_button_font = ('Segoe UI Semibold', 10)
         cta_outline = blend_hex_colors(
-            palette.get("success", "#4ec9b0"),
-            palette.get("panel_border", palette["border"]),
+            palette["success"],
+            palette["panel_border"],
             0.18,
         )
         cta_outline_hover = blend_hex_colors(
-            palette.get("success", "#4ec9b0"),
-            palette.get("accent_hover", palette.get("accent", "#63c7ff")),
+            palette["success"],
+            palette["accent_hover"],
             0.24,
         )
         safe_configure(
@@ -391,7 +394,7 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'TButton',
             background=[
-                ('active', palette.get("button_hover", palette["panel_alt"])),
+                ('active', palette["button_hover"]),
                 ('pressed', palette["accent_selected"]),
                 ('disabled', palette["panel"])
             ],
@@ -427,8 +430,8 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'Accent.TButton',
             background=[
-                ('active', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                ('pressed', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
+                ('active', palette["surface_info"]),
+                ('pressed', palette["surface_info"]),
                 ('disabled', palette["panel"])
             ],
             foreground=[('disabled', palette["muted_dim"])],
@@ -463,8 +466,8 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'GuidedNeutral.TButton',
             background=[
-                ('active', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                ('pressed', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
+                ('active', palette["surface_info"]),
+                ('pressed', palette["surface_info"]),
                 ('disabled', palette["panel"])
             ],
             foreground=[('disabled', palette["muted_dim"])],
@@ -499,8 +502,8 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'GuidedAccent.TButton',
             background=[
-                ('active', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
-                ('pressed', palette.get("surface_info", palette.get("button_hover", palette["panel_alt"]))),
+                ('active', palette["surface_info"]),
+                ('pressed', palette["surface_info"]),
                 ('disabled', palette["panel"])
             ],
             foreground=[('disabled', palette["muted_dim"])],
@@ -620,24 +623,24 @@ def setup_style(app, theme_key: str = None):
         safe_map(
             'Treeview.Heading',
             background=[
-                ('active', palette.get("button_hover", palette["panel_alt"])),
-                ('pressed', palette.get("button_hover", palette["panel_alt"])),
+                ('active', palette["button_hover"]),
+                ('pressed', palette["button_hover"]),
             ],
             foreground=[
                 ('active', palette["fg"]),
                 ('pressed', palette["fg"]),
-                ('disabled', palette.get("tab_disabled_fg", palette["muted"])),
+                ('disabled', palette["tab_disabled_fg"]),
             ],
         )
         safe_configure(
             'Horizontal.TProgressbar',
-            background=palette["accent"],
-            troughcolor=palette["panel_alt"],
+            background=palette["progress_fill"],
+            troughcolor=palette["progress_trough"],
             bordercolor=palette["border"],
-            lightcolor=palette["accent"],
-            darkcolor=palette["accent"]
+            lightcolor=palette["progress_fill"],
+            darkcolor=palette["progress_fill"]
         )
-        self._ensure_horizontal_scale_style_assets(background=palette.get("panel", palette["bg"]))
+        self._ensure_horizontal_scale_style_assets(background=palette["panel"])
         safe_configure(
             'Vertical.TScrollbar',
             background=scrollbar_thumb,
@@ -671,4 +674,3 @@ def setup_style(app, theme_key: str = None):
             arrowcolor=[('active', control_arrow), ('disabled', control_arrow_disabled)]
         )
     except: pass
-

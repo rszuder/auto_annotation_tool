@@ -277,6 +277,13 @@ def _finish_step4_iteration(self):
         finish_iteration = 0
     finish_target = str(finish_state.get("target", "") or "").strip().lower()
     run_id = str(finish_state.get("run_id", "") or "").strip()
+    selected_model_path = str(finish_state.get("model_path", "") or "").strip()
+    try:
+        selected_model_ready = bool(
+            selected_model_path and Path(selected_model_path).exists() and Path(selected_model_path).is_file()
+        )
+    except Exception:
+        selected_model_ready = bool(selected_model_path)
     training_record = {}
     try:
         iteration_state = dict(CAMPAIGN.get_iteration_state(iteration_num=current_iteration) or {})
@@ -309,7 +316,7 @@ def _finish_step4_iteration(self):
         and run_id
         and finish_iteration == current_iteration
         and (not finish_target or not current_target or finish_target == current_target)
-        and record_ready
+        and (record_ready or selected_model_ready)
     )
     if not finish_ready:
         try:

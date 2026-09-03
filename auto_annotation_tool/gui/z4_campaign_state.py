@@ -354,6 +354,29 @@ def get_campaign_step4_finish_state(self, *, iteration_target: str | None = None
     stored_iteration = int(stored.get("iteration", 0) or 0)
     if stored_target not in ("char", "plate"):
         stored_target = target
+    stored_model_path = str(stored.get("model_path", "") or "").strip()
+    try:
+        stored_model_ready = bool(stored_model_path and Path(stored_model_path).exists() and Path(stored_model_path).is_file())
+    except Exception:
+        stored_model_ready = bool(stored_model_path)
+
+    if (
+        stored_ready
+        and stored_run_id
+        and bool(stored.get("selection_confirmed", True))
+        and stored_iteration == current_iteration
+        and (not stored_target or stored_target == target)
+        and stored_model_ready
+    ):
+        return {
+            "ready": True,
+            "run_id": stored_run_id,
+            "target": stored_target or target,
+            "iteration": current_iteration,
+            "model_path": stored_model_path,
+            "selection_confirmed": True,
+            "status": "completed",
+        }
 
     bundle_run_id = str(current_iteration_step4.get("run_id", "") or "").strip()
     bundle_target = str(current_iteration_step4.get("target", "") or "").strip().lower()

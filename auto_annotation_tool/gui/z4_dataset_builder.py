@@ -1923,7 +1923,28 @@ def _set_step4_augmentation_profile(self, target: str, profile: AugmentationProf
     if not isinstance(profiles, dict):
         profiles = {}
         self._step4_augmentation_profiles = profiles
-    profiles[normalized] = (profile or _default_step4_augmentation_profile(normalized)).normalized()
+    saved_profile = (profile or _default_step4_augmentation_profile(normalized)).normalized()
+    profiles[normalized] = saved_profile
+    prefix = _get_step4_augmentation_prefix(normalized)
+    for attr_name, value in (
+        (f"{prefix}_aug_enabled_var", bool(getattr(saved_profile, "extra_count", 0) or 0)),
+        (f"{prefix}_aug_extra_var", int(getattr(saved_profile, "extra_count", 0) or 0)),
+        (f"{prefix}_aug_sample_var", max(1, int(getattr(saved_profile, "sample_size", 1) or 1))),
+    ):
+        var = getattr(self, attr_name, None)
+        if var is None:
+            continue
+        try:
+            var.set(value)
+        except Exception:
+            pass
+    if normalized == "plate":
+        class_var = getattr(self, f"{prefix}_class_name_var", None)
+        if class_var is not None:
+            try:
+                class_var.set(str(getattr(saved_profile, "class_name", "") or "plate"))
+            except Exception:
+                pass
     self._refresh_step4_augmentation_summary(normalized)
 
 def _clear_step4_augmentation_profile(self, target: str):
@@ -1947,9 +1968,9 @@ def _clear_step4_augmentation_profile(self, target: str):
 
 def _format_step4_augmentation_summary(profile: AugmentationProfile, target: str) -> str:
     profile = (profile or _default_step4_augmentation_profile(target)).normalized()
-    if not (profile.enabled and profile.extra_count > 0):
+    if int(getattr(profile, "extra_count", 0) or 0) <= 0:
         return (
-            "Powi\u0119kszenie syntetyczne jest wy\u0142\u0105czone. "
+            "Syntetyki: 0. "
             "Dataset zostanie utworzony tylko z materia\u0142u \u017ar\u00f3d\u0142owego projektu."
         )
     class_suffix = ""
@@ -1963,8 +1984,50 @@ def _format_step4_augmentation_summary(profile: AugmentationProfile, target: str
         "Procenty splitu dotycz\u0105 bazy przed powi\u0119kszeniem; po dodaniu syntetyk\u00f3w finalny udzia\u0142 train wzro\u015bnie. "
         "Syntetyki pozostaj\u0105 tylko w tym wariancie treningowym i nie s\u0105 baz\u0105 kolejnej iteracji."
     )
+
+
+def _format_step4_synthetic_count_origin(self, target: str, extra_count: int) -> str:
+    normalized = CONFIG.normalize_task_target(target)
+    try:
+        extra_count = max(0, int(extra_count or 0))
+    except Exception:
+        extra_count = 0
+    if extra_count <= 0:
+        return "bez syntetyków"
+    if normalized != "char":
+        return "ręcznie"
+    pending_plan = getattr(self, "_pending_character_balance_plan", None)
+    try:
+        planned = max(0, int(getattr(pending_plan, "planned_images", 0) or 0))
+    except Exception:
+        planned = 0
+    if pending_plan is not None and planned > 0 and extra_count == planned:
+        return "z histogramu MZ"
+    if pending_plan is not None and planned > 0:
+        return "ręcznie po korekcie"
+    return "ręcznie"
+
+
+def _apply_step4_synthetic_count_state(self, target: str, extra_count: int) -> None:
+    normalized = CONFIG.normalize_task_target(target)
+    prefix = _get_step4_augmentation_prefix(normalized)
+    enabled_var = getattr(self, f"{prefix}_aug_enabled_var", None)
+    if enabled_var is not None:
+        try:
+            enabled_var.set(int(extra_count or 0) > 0)
+        except Exception:
+            pass
+    origin_var = getattr(self, f"{prefix}_aug_count_origin_var", None)
+    if origin_var is not None:
+        try:
+            origin_var.set(_format_step4_synthetic_count_origin(self, normalized, extra_count))
+        except Exception:
+            pass
+
+
+def _legacy_step4_augmentation_summary_details(profile: AugmentationProfile, target: str) -> str:
     parts = []
-    if profile.enabled and profile.extra_count > 0:
+    if profile.extra_count > 0:
         parts.append(f"włączone: +{profile.extra_count} dodatkowych obrazów train")
         parts.append(f"próbka {profile.sample_size}")
         if abs(profile.rotation_limit) > 0.001:
@@ -2020,7 +2083,7 @@ def _format_step4_augmentation_summary(profile: AugmentationProfile, target: str
                 f"łuk {getattr(profile, 'plate_reflect_curve_strength', 0.0):.2f}"
             )
     else:
-        return "Opcjonalnie: profil syntetycznego zwiększania nie został ustawiony."
+        return "Syntetyki: 0. Profil efektów nie zostanie użyty."
     if parts and "dodatkowych" in str(parts[0]):
         parts[0] = f"dataset train zostanie powi\u0119kszony o +{profile.extra_count} obraz\u00f3w"
     if CONFIG.normalize_task_target(target) == "plate" and profile.class_name:
@@ -2274,20 +2337,16 @@ def _refresh_step4_augmentation_summary(self, target: str | None = None):
             profile = self._get_step4_augmentation_profile(normalized)
             var.set(_format_step4_augmentation_summary(profile, normalized))
             _refresh_step4_augmentation_balance(self, normalized, profile)
+            extra_var = getattr(self, f"{prefix}_aug_extra_var", None)
+            try:
+                extra_count = int(float(extra_var.get())) if extra_var is not None else 0
+            except Exception:
+                extra_count = 0
+            _apply_step4_synthetic_count_state(self, normalized, extra_count)
             configure_button = getattr(self, f"{prefix}_aug_configure_button", None)
             if configure_button is not None:
-                enabled_var = getattr(self, f"{prefix}_aug_enabled_var", None)
-                extra_var = getattr(self, f"{prefix}_aug_extra_var", None)
-                try:
-                    checkbox_enabled = bool(enabled_var.get()) if enabled_var is not None else False
-                except Exception:
-                    checkbox_enabled = False
-                try:
-                    extra_count = int(float(extra_var.get())) if extra_var is not None else 0
-                except Exception:
-                    extra_count = 0
                 configure_button.configure(
-                    state=(tk.NORMAL if normalized == "char" or (checkbox_enabled and extra_count > 0) else tk.DISABLED)
+                    state=(tk.NORMAL if extra_count > 0 else tk.DISABLED)
                 )
             self._refresh_step4_creator_decision_summary()
         except Exception:
@@ -2412,17 +2471,26 @@ def _clamp_step4_augmentation_profile_to_pool(
 def _open_step4_augmentation_modal(self, target: str):
     normalized = CONFIG.normalize_task_target(target)
     prefix = _get_step4_augmentation_prefix(normalized)
-    enabled_var = getattr(self, f"{prefix}_aug_enabled_var", None)
-    try:
-        checkbox_enabled = bool(enabled_var.get()) if enabled_var is not None else False
-    except Exception:
-        checkbox_enabled = False
     extra_var = getattr(self, f"{prefix}_aug_extra_var", None)
     try:
         extra_count = int(float(extra_var.get())) if extra_var is not None else 0
     except Exception:
         extra_count = 0
-    if not checkbox_enabled or extra_count <= 0:
+    enabled_var = getattr(self, f"{prefix}_aug_enabled_var", None)
+    if enabled_var is not None:
+        try:
+            enabled_var.set(extra_count > 0)
+        except Exception:
+            pass
+    if extra_count <= 0:
+        try:
+            messagebox.showinfo(
+                "Syntetyczne powiększenie train",
+                "Wpisz liczbę syntetycznych obrazów train większą od zera. Wartość 0 oznacza wariant bez augmentacji.",
+                parent=getattr(self, "frame", None),
+            )
+        except Exception:
+            pass
         return
     profile = self._get_step4_augmentation_profile(normalized)
     sample_images = self._get_step4_augmentation_preview_images(normalized)
@@ -2584,19 +2652,21 @@ def _get_step4_augmentation_profile(self, target: str) -> AugmentationProfile:
     profiles = getattr(self, "_step4_augmentation_profiles", None)
     if isinstance(profiles, dict) and normalized_target in profiles:
         profile = (profiles.get(normalized_target) or _default_step4_augmentation_profile(normalized_target)).normalized()
+        extra_count = as_int(f"{prefix}_aug_extra_var", int(getattr(profile, "extra_count", 0) or 0))
         return replace(
             profile,
-            enabled=bool(_read_step4_var(self, f"{prefix}_aug_enabled_var", bool(profile.enabled))),
+            enabled=extra_count > 0,
             sample_size=as_int(f"{prefix}_aug_sample_var", int(getattr(profile, "sample_size", 1) or 1)),
-            extra_count=as_int(f"{prefix}_aug_extra_var", int(getattr(profile, "extra_count", 0) or 0)),
+            extra_count=extra_count,
             class_name=(class_name if normalized_target == "plate" else str(getattr(profile, "class_name", "") or "")),
             task_target=normalized_target,
         ).normalized()
 
+    extra_count = as_int(f"{prefix}_aug_extra_var", 0)
     return AugmentationProfile(
-        enabled=bool(_read_step4_var(self, f"{prefix}_aug_enabled_var", False)),
+        enabled=extra_count > 0,
         sample_size=as_int(f"{prefix}_aug_sample_var", 1),
-        extra_count=as_int(f"{prefix}_aug_extra_var", 0),
+        extra_count=extra_count,
         rotation_limit=as_float(f"{prefix}_aug_rotation_var", 0.0),
         translate_limit=0.0,
         scale_limit=0.0,
@@ -2665,7 +2735,7 @@ def _get_step4_augmentation_profile(self, target: str) -> AugmentationProfile:
 
 def _step4_profile_requests_augmentation(profile: AugmentationProfile | None) -> bool:
     profile = (profile or AugmentationProfile()).normalized()
-    return bool(profile.enabled and int(profile.extra_count or 0) > 0)
+    return int(profile.extra_count or 0) > 0
 
 def _build_step4_augmented_dataset_dir(
     self,
@@ -2862,18 +2932,29 @@ def _step4_mz_final_completion_status(
 
 def _format_step4_mz_plan_status(plan: object | None) -> str:
     if plan is None:
-        return "Próg AUTO: do policzenia. Przelicz reprezentację MZ po wyborze źródła i proporcji splitu."
+        return "Nie ustawiono syntetycznego podbicia znaków. Otwórz histogram MZ albo wpisz liczbę syntetyków ręcznie."
     target_count = int(_step4_plan_attr(plan, "target_count", 0) or 0)
     planned_images = int(_step4_plan_attr(plan, "planned_images", 0) or 0)
     deficits = dict(_step4_plan_attr(plan, "deficit_by_symbol", {}) or {})
+    requested_extras = dict(_step4_plan_attr(plan, "requested_extra_by_symbol", {}) or {})
+    if requested_extras:
+        requested_text = ", ".join(f"{key}+{value}" for key, value in sorted(requested_extras.items()))
+        remaining = dict(_step4_plan_attr(plan, "predicted_deficit_after", {}) or {})
+        suffix = ""
+        if remaining:
+            suffix = " Część znaków nie ma źródła w train: " + ", ".join(sorted(remaining.keys())) + "."
+        return (
+            f"Histogram MZ: {requested_text}. "
+            f"Planowane syntetyczne obrazy train: +{planned_images}.{suffix}"
+        )
     if not deficits:
-        return f"Próg AUTO: {target_count}. Reprezentacja train jest już wystarczająca. Plan: +0 obrazów."
+        return f"Miarka referencyjna: {target_count} przykładów znaku w train. Reprezentacja jest wystarczająca. Syntetyki: +0."
     status = str(_step4_plan_attr(plan, "completion_status", "") or "").strip()
-    suffix = "" if status != "PLAN_NOT_FEASIBLE" else " Nie da się osiągnąć progu przy aktualnym materiale."
+    suffix = "" if status != "PLAN_NOT_FEASIBLE" else " Przy aktualnym materiale nie da się osiągnąć tej miarki syntetycznie."
     return (
-        f"Próg AUTO: {target_count}. "
-        f"Niedoreprezentowane: {', '.join(deficits.keys())}. "
-        f"Plan: +{planned_images} obrazów train.{suffix}"
+        f"Miarka referencyjna: {target_count} przykładów znaku w train. "
+        f"Do uzupełnienia: {', '.join(deficits.keys())}. "
+        f"Syntetyczne uzupełnienie train: +{planned_images} obrazów.{suffix}"
     )
 
 
@@ -2914,6 +2995,12 @@ def _invalidate_pending_character_balance_plan(self, message: str | None = None)
             status_var.set(message or _format_step4_mz_plan_status(None))
         except Exception:
             pass
+    origin_var = getattr(self, "split_aug_count_origin_var", None)
+    if origin_var is not None:
+        try:
+            origin_var.set("bez syntetyków")
+        except Exception:
+            pass
 
 
 def _step4_pending_plan_fingerprint_matches(plan: object, source_dir: Path) -> bool:
@@ -2935,12 +3022,7 @@ def _take_pending_character_balance_plan(self, source_dir: Path) -> tuple[object
         or not _step4_pending_plan_fingerprint_matches(plan, source_dir)
     ):
         return None, {}, False
-    real_sources = getattr(self, "_pending_character_balance_real_sources", {}) or {}
-    try:
-        real_sources = dict(real_sources)
-    except Exception:
-        real_sources = {}
-    return plan, real_sources, True
+    return plan, {}, True
 
 def _clear_pending_character_balance_plan(self) -> None:
     for attr_name in (
@@ -3058,8 +3140,6 @@ def _finalize_step4_mz_representation_variant(
     manifest["representation_status"] = representation_status
     manifest["freeze_status"] = freeze_status
     manifest["ready_for_training"] = bool(ready_for_training)
-    if pending_real_sources:
-        manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
     (dataset_dir / "mz_training_variant_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -3161,7 +3241,7 @@ def _create_step4_augmented_dataset_variant(
                         "augmented": False,
                     }
                 planned_extra = max(0, int(_step4_plan_attr(balance_plan, "planned_images", 0) or 0))
-                if not bool(_step4_plan_attr(balance_plan, "feasible", True)):
+                if not bool(_step4_plan_attr(balance_plan, "feasible", True)) and planned_extra <= 0:
                     return _finalize_step4_mz_representation_variant(
                         self,
                         dataset_path=source_dir,
@@ -3248,7 +3328,7 @@ def _create_step4_augmented_dataset_variant(
             before_distribution = analyze_character_class_distribution(source_dir, target_ratio=target_ratio)
             if balance_plan is not None:
                 planned_extra = max(0, int(_step4_plan_attr(balance_plan, "planned_images", 0) or 0))
-                if auto_representation_mode and not bool(_step4_plan_attr(balance_plan, "feasible", True)):
+                if auto_representation_mode and not bool(_step4_plan_attr(balance_plan, "feasible", True)) and planned_extra <= 0:
                     return _finalize_step4_mz_representation_variant(
                         self,
                         dataset_path=source_dir,
@@ -3260,17 +3340,17 @@ def _create_step4_augmented_dataset_variant(
                         augmented=False,
                         pending_real_sources=pending_real_sources,
                     )
-                if planned_extra > 0 and requested_extra != planned_extra:
+                if auto_representation_mode and planned_extra > 0 and requested_extra != planned_extra:
                     profile = replace(profile, enabled=True, extra_count=planned_extra).normalized()
                     requested_extra = planned_extra
             base_dataset_fingerprint = build_character_dataset_file_fingerprint(source_dir)
             val_test_before = build_character_dataset_file_fingerprint(source_dir, splits=("val", "test"))
         except Exception as exc:
-            logger.exception("Nie udało się przygotować planu balansu MZ")
+            logger.exception("Nie udało się przygotować uzupełnienia reprezentacji MZ")
             return {
                 "ok": False,
                 "dataset_path": str(source_dir),
-                "message": f"Nie udało się przygotować planu balansu MZ: {exc}",
+                "message": f"Nie udało się przygotować uzupełnienia reprezentacji MZ: {exc}",
                 "counts": self._get_dataset_split_image_counts(source_dir),
                 "augmentation_stats": {},
                 "augmented": False,
@@ -3420,7 +3500,6 @@ def _create_step4_augmented_dataset_variant(
             stats["completion_ok"] = bool(ready_for_training)
             if used_pending_balance_plan:
                 mz_variant_manifest["approved_balance_plan"] = True
-                mz_variant_manifest["real_source_search"] = _summarize_character_real_source_search(pending_real_sources)
             (augmented_dir / "mz_training_variant_manifest.json").write_text(
                 json.dumps(mz_variant_manifest, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -3433,7 +3512,6 @@ def _create_step4_augmented_dataset_variant(
                 ).strip()
             if used_pending_balance_plan and mz_remaining_deficits:
                 missing_text = ", ".join(f"{symbol}: {count}" for symbol, count in sorted(mz_remaining_deficits.items()))
-                postprocess["ok"] = False
                 postprocess["message"] = (
                     str(postprocess.get("message") or "").strip()
                     + f"\nReprezentacja MZ po augmentacji nadal ma braki: {missing_text}."
@@ -3687,8 +3765,8 @@ def _handle_step4_dataset_success_result(
             _format_step4_mz_completion_label(status, deficits_after, diversity_warnings),
         ))
         if target_count > 0:
-            summary_rows.append(("Próg AUTO", f"{target_count} znaków na klasę"))
-        summary_rows.append(("Plan AUTO", f"plan +{planned_images} | wykonano +{generated_images}"))
+            summary_rows.append(("Miarka reprezentacji", f"{target_count} przykładów znaku w train"))
+        summary_rows.append(("Uzupełnienie train", f"ustawiono +{planned_images} | wygenerowano +{generated_images}"))
     if path_text:
         summary_rows.append(("Lokalizacja", path_text))
 
@@ -4072,6 +4150,31 @@ def _split_dataset_thread(self):
     }
 
     augmentation_profile = self._get_step4_augmentation_profile("char")
+    try:
+        profile_requested_extra = max(0, int(getattr(augmentation_profile, "extra_count", 0) or 0))
+    except Exception:
+        profile_requested_extra = 0
+    pending_balance_plan = getattr(self, "_pending_character_balance_plan", None)
+    try:
+        pending_planned_extra = max(0, int(getattr(pending_balance_plan, "planned_images", 0) or 0))
+    except Exception:
+        pending_planned_extra = 0
+    try:
+        pending_target_count_by_symbol = dict(getattr(pending_balance_plan, "target_count_by_symbol", {}) or {})
+    except Exception:
+        pending_target_count_by_symbol = {}
+    try:
+        pending_extra_count_by_symbol = dict(getattr(pending_balance_plan, "requested_extra_by_symbol", {}) or {})
+    except Exception:
+        pending_extra_count_by_symbol = {}
+    try:
+        pending_target_count = int(getattr(pending_balance_plan, "target_count", 0) or 0)
+    except Exception:
+        pending_target_count = 0
+    manual_augmentation_requested = bool(
+        _step4_profile_requests_augmentation(augmentation_profile)
+        and (pending_balance_plan is None or profile_requested_extra != pending_planned_extra)
+    )
 
     if not self._begin_step4_operation("z4.dataset.split", "Z4: przygotowanie wariantu treningowego znaków"):
         return
@@ -4087,6 +4190,7 @@ def _split_dataset_thread(self):
         pass
 
     def worker():
+        nonlocal augmentation_profile
         try:
             progress_state = {"last": 0}
 
@@ -4127,7 +4231,17 @@ def _split_dataset_thread(self):
                 result_meta: dict = {}
                 self._ui(lambda: self._set_training_widget_text(self.split_status, "Krok 2/3: liczę reprezentację znaków MZ dla finalnego splitu..."))
                 try:
-                    exact_balance_plan = plan_character_train_augmentation(out)
+                    exact_balance_plan = plan_character_train_augmentation(
+                        out,
+                        target_count=(
+                            0
+                            if pending_extra_count_by_symbol
+                            else (pending_target_count if pending_target_count > 0 else None)
+                        ),
+                        target_count_by_symbol=(None if pending_extra_count_by_symbol else (pending_target_count_by_symbol or None)),
+                        extra_count_by_symbol=pending_extra_count_by_symbol or None,
+                        respect_existing_augmented_variants=False,
+                    )
                 except Exception as exc:
                     failure_msg = f"Nie udało się policzyć planu reprezentacji MZ dla finalnego splitu: {exc}"
                     logger.exception(failure_msg)
@@ -4154,7 +4268,7 @@ def _split_dataset_thread(self):
                     _clear_pending_character_balance_plan(self)
                 except Exception:
                     pass
-                if not exact_feasible:
+                if not exact_feasible and exact_planned_images <= 0:
                     try:
                         result_meta = _finalize_step4_mz_representation_variant(
                             self,
@@ -4182,20 +4296,25 @@ def _split_dataset_thread(self):
                     )
                     return
 
-                if exact_planned_images > 0:
-                    augmentation_profile = replace(
-                        augmentation_profile,
-                        enabled=True,
-                        extra_count=exact_planned_images,
-                    ).normalized()
+                if manual_augmentation_requested or exact_planned_images > 0:
+                    augmentation_mode = "manual_train_augmentation"
+                    balance_plan_for_variant = None
+                    if not manual_augmentation_requested:
+                        augmentation_profile = replace(
+                            augmentation_profile,
+                            enabled=True,
+                            extra_count=exact_planned_images,
+                        ).normalized()
+                        augmentation_mode = "mz_auto_representation"
+                        balance_plan_for_variant = exact_balance_plan
                     variant = self._create_step4_augmented_dataset_variant(
                         source_dataset_path=out,
                         target="char",
                         profile=augmentation_profile,
                         progress_var_name="split_progress_var",
                         status_attr_name="split_status",
-                        balance_plan_override=exact_balance_plan,
-                        augmentation_mode="mz_auto_representation",
+                        balance_plan_override=balance_plan_for_variant,
+                        augmentation_mode=augmentation_mode,
                     )
                     if str(variant.get("message") or "").strip():
                         msg = f"{msg}\n{variant.get('message')}"

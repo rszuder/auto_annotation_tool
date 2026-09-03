@@ -63,6 +63,7 @@ from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .free_mode_assistant import get_mobile_export_assistant_context
+from .app_theme_definitions import normalize_theme_palette
 from .inertial_scroll import InertialScrollController
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
@@ -2025,6 +2026,16 @@ def _mobile_export_target_color(palette: dict, candidate: dict | None, *, select
     bg = palette.get("panel", "#252526")
     return blend_hex_colors(base, "#ffffff" if selected else bg, 0.12 if selected else 0.02)
 
+
+def _mobile_export_scrollbar_kwargs(palette: dict, track_bg: str | None = None) -> dict[str, str]:
+    resolved = normalize_theme_palette(palette)
+    return {
+        "track_color": str(resolved.get("scrollbar_track") or track_bg or resolved["field"]),
+        "thumb_color": str(resolved["scrollbar_thumb"]),
+        "thumb_hover_color": str(resolved["scrollbar_thumb_hover"]),
+    }
+
+
 def _mobile_export_contrast_text_color(hex_color: str, *, dark: str = "#101418", light: str = "#f7fbff") -> str:
     try:
         value = str(hex_color or "").strip().lstrip("#")
@@ -3938,6 +3949,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
         existing_dialog = getattr(self, "_mobile_export_center_dialog", None)
         if existing_dialog is not None and existing_dialog.winfo_exists():
             try:
+                register = getattr(getattr(self, "app", None), "_register_recoverable_toplevel", None)
+                if callable(register):
+                    register(existing_dialog, attr_name="_mobile_export_center_dialog")
+            except Exception:
+                pass
+            try:
                 setter = getattr(getattr(self, "app", None), "set_free_mode_assistant_context_override", None)
                 if callable(setter):
                     setter("mobile_export_center", get_mobile_export_assistant_context(), owner=existing_dialog)
@@ -4116,6 +4133,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
     except Exception:
         pass
     try:
+        register = getattr(getattr(self, "app", None), "_register_recoverable_toplevel", None)
+        if callable(register):
+            register(dialog, attr_name="_mobile_export_center_dialog")
+    except Exception:
+        pass
+    try:
         dialog.withdraw()
     except Exception:
         pass
@@ -4203,6 +4226,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 return
             if getattr(self, "_mobile_export_center_dialog", None) is dialog:
                 self._mobile_export_center_dialog = None
+            app_obj = getattr(self, "app", None)
+            if app_obj is not None and getattr(app_obj, "_mobile_export_center_dialog", None) is dialog:
+                app_obj._mobile_export_center_dialog = None
             clearer = getattr(getattr(self, "app", None), "clear_free_mode_assistant_context_override", None)
             if callable(clearer):
                 clearer("mobile_export_center")
@@ -5530,7 +5556,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidate_tree.column("Epoki", width=54, minwidth=38, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Metryka", width=86, minwidth=62, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Data", width=104, minwidth=72, stretch=True, anchor=tk.CENTER)
-    candidate_scroll = WebSlimScrollbar(candidates_table_shell, orient=tk.VERTICAL, command=candidate_tree.yview)
+    candidate_scroll = WebSlimScrollbar(
+        candidates_table_shell,
+        orient=tk.VERTICAL,
+        command=candidate_tree.yview,
+        **_mobile_export_scrollbar_kwargs(palette, card_bg),
+    )
     candidate_tree.configure(yscrollcommand=candidate_scroll.set)
     candidate_tree.grid(row=0, column=0, sticky="nsew")
     candidate_scroll.grid(row=0, column=1, sticky="ns")
@@ -6263,7 +6294,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
         header_canvas = tk.Canvas(shell, bg=header_bg, highlightthickness=0, bd=0, height=header_height)
         header_canvas.grid(row=0, column=0, sticky="ew", pady=(0, 3))
         canvas = tk.Canvas(shell, bg=bg_color, highlightthickness=0, bd=0, height=height)
-        scrollbar = WebSlimScrollbar(shell, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar = WebSlimScrollbar(
+            shell,
+            orient=tk.VERTICAL,
+            command=canvas.yview,
+            **_mobile_export_scrollbar_kwargs(palette, bg_color),
+        )
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=1, column=0, sticky="nsew")
         scrollbar.grid(row=1, column=1, sticky="ns")
@@ -6696,7 +6732,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
     form_shell.grid_columnconfigure(0, weight=1)
     form_shell.grid_rowconfigure(0, weight=1)
     form_canvas = tk.Canvas(form_shell, bg=card_bg, highlightthickness=0, bd=0)
-    form_scroll = WebSlimScrollbar(form_shell, orient=tk.VERTICAL, command=form_canvas.yview)
+    form_scroll = WebSlimScrollbar(
+        form_shell,
+        orient=tk.VERTICAL,
+        command=form_canvas.yview,
+        **_mobile_export_scrollbar_kwargs(palette, card_bg),
+    )
     form_canvas.configure(yscrollcommand=form_scroll.set)
     form_canvas.grid(row=0, column=0, sticky="nsew")
     form_scroll.grid(row=0, column=1, sticky="ns")
@@ -9876,7 +9917,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
         model_cards_shell.grid_columnconfigure(0, weight=1)
         model_cards_shell.grid_rowconfigure(0, weight=1)
         model_cards_canvas = tk.Canvas(model_cards_shell, bg=bg, highlightthickness=0, bd=0)
-        model_cards_scroll = ttk.Scrollbar(model_cards_shell, orient=tk.VERTICAL, command=model_cards_canvas.yview)
+        model_cards_scroll = WebSlimScrollbar(
+            model_cards_shell,
+            orient=tk.VERTICAL,
+            command=model_cards_canvas.yview,
+            **_mobile_export_scrollbar_kwargs(palette, bg),
+        )
         model_cards_canvas.configure(yscrollcommand=model_cards_scroll.set)
         model_cards_canvas.grid(row=0, column=0, sticky="nsew")
         model_cards_scroll.grid(row=0, column=1, sticky="ns", padx=(6, 0))

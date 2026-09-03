@@ -129,6 +129,11 @@ def compose_detection_run_model_info(host) -> tuple[str, str]:
     method_label = host._get_detection_method_status_label()
     pipeline_label = host._get_detection_pipeline_short_label(method_key)
     model_path = str(host._get_effective_yolo_model_path() or "").strip()
+    if uses_yolo and not (model_path and Path(model_path).exists()):
+        method_key = "OCR"
+        uses_yolo = False
+        method_label = "OCR"
+        pipeline_label = host._get_detection_pipeline_short_label("OCR")
 
     detector_label = "bez YOLO"
     map_label = "-"
@@ -161,13 +166,14 @@ def compose_detection_run_model_info(host) -> tuple[str, str]:
         detector_label = "brak wybranego modelu .pt"
         tone = "warning"
 
-    text = f"{method_label} ({pipeline_label}) | YOLO: {detector_label} | mAP50-95: {map_label}"
+    pipeline_suffix = f" ({pipeline_label})" if pipeline_label and pipeline_label != method_label else ""
+    text = f"{method_label}{pipeline_suffix} | YOLO: {detector_label} | mAP50-95: {map_label}"
     return text, tone
 
 
 def get_detection_pipeline_short_label(host, method_key: str | None = None) -> str:
     block_labels = {
-        "ocr_symbol": "O",
+        "ocr_symbol": "OCR",
         "yolo_box": "YB",
         "yolo_symbol": "YS",
     }
@@ -1006,5 +1012,3 @@ def show_last_detection_details(host) -> None:
         body_lines.extend(_section("Diagnostyka", technical_rows))
 
     return messagebox.showinfo("Szczegoly detekcji", "\n".join(body_lines))
-
-

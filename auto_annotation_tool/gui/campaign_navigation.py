@@ -1126,7 +1126,7 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
         pass
 
 
-def _step_goto_training(self):
+def _step_goto_training(self, preferred_subtab: str | None = None):
     if not CAMPAIGN.get_active_project_name() or CAMPAIGN.get_current_step() < 4:
         return
 
@@ -1134,13 +1134,16 @@ def _step_goto_training(self):
         iteration_target = self._get_iteration_target()
         if iteration_target not in {"plate", "char"}:
             iteration_target = "char"
+        requested_subtab = str(preferred_subtab or "").strip().lower()
+        if requested_subtab not in {"dataset", "train"}:
+            requested_subtab = ""
 
         tab_train = self.app.tabs.get("training")
         if not tab_train:
             logger.error("Nie znaleziono zakładki TrainingTab w app.tabs.")
             return
 
-        preferred_subtab = None
+        preferred_subtab = requested_subtab or None
         readiness = None
         try:
             if hasattr(tab_train, "get_campaign_step4_readiness"):
@@ -1152,6 +1155,17 @@ def _step_goto_training(self):
         if isinstance(readiness, dict) and not readiness.get("ok", False):
             reason = str(readiness.get("reason") or "").strip().lower()
             if reason == "stale_plate_dataset":
+                if requested_subtab == "train":
+                    warn_msg = str(readiness.get("message") or "").strip() or "Najpierw przebuduj wariant datasetu dla bieżącej iteracji."
+                    try:
+                        self.app.update_status(warn_msg, "warning")
+                    except Exception:
+                        pass
+                    try:
+                        messagebox.showwarning("Z4 jeszcze zablokowane", warn_msg, parent=self.frame)
+                    except Exception:
+                        pass
+                    return
                 preferred_subtab = "dataset"
                 warn_msg = str(readiness.get("message") or "").strip()
                 try:
@@ -1176,7 +1190,7 @@ def _step_goto_training(self):
                     except Exception:
                         can_open_char_dataset_stage = False
 
-                if can_open_char_dataset_stage:
+                if can_open_char_dataset_stage and requested_subtab != "train":
                     preferred_subtab = "dataset"
                 else:
                     warn_msg = str(readiness.get("message") or "").strip() or "Z4 nie jest jeszcze gotowe do otwarcia."
@@ -1203,7 +1217,11 @@ def _step_goto_training(self):
                 return
         elif isinstance(readiness, dict):
             reason = str(readiness.get("reason") or "").strip().lower()
-            if iteration_target == "char" and reason == "source_dataset_ready_for_split":
+            if requested_subtab == "dataset":
+                preferred_subtab = "dataset"
+            elif requested_subtab == "train":
+                preferred_subtab = "train"
+            elif iteration_target == "char" and reason == "source_dataset_ready_for_split":
                 preferred_subtab = "dataset"
             elif readiness.get("ok", False):
                 ready_dataset = str(readiness.get("ready_dataset") or "").strip()

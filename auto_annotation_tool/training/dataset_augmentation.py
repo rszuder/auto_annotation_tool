@@ -1922,8 +1922,10 @@ def _combined_scene_headlight_fields(profile: AugmentationProfile, height: int, 
             "field": np.clip(field, 0.0, 1.0).astype("float32"),
             "hotspot": np.clip(hotspot, 0.0, 1.0).astype("float32"),
             "specular": np.clip(specular, 0.0, 1.0).astype("float32"),
+            "color_accum": color_accum.astype("float32"),
             "color": np.clip(color, 0.0, 255.0).astype("float32"),
             "color_weight": np.clip(color_weight, 0.0, 1.0).astype("float32"),
+            "color_weight_raw": color_weight.astype("float32"),
             "ray_x": (ray_x / safe_weight).astype("float32"),
             "ray_y": (ray_y / safe_weight).astype("float32"),
             "incidence": np.clip(incidence / safe_weight, 0.0, 1.0).astype("float32"),
@@ -7086,26 +7088,55 @@ def _apply_traffic_headlight_effect(image, profile: AugmentationProfile, rng, di
                 1.0,
             )
             if manual_lights:
-                scene_color = np.zeros(3, dtype="float32")
-                scene_color_weight = 0.0
-                for _src, _target_center, local_strength, _local_warmth, local_rgb, _local_cone, _local_source_radius, _stable in manual_lights:
-                    local_weight = max(0.0, float(local_strength))
-                    scene_color += np.array(
-                        [
-                            float(local_rgb[2]) * 255.0,
-                            float(local_rgb[1]) * 255.0,
-                            float(local_rgb[0]) * 255.0,
-                        ],
+                scene_color_source = np.clip(scene_field * 0.78 + scene_hotspot * 0.54, 0.0, 1.0)
+                if scene_specular is not None:
+                    scene_color_source = np.maximum(scene_color_source, np.clip(scene_specular * 0.62, 0.0, 1.0))
+                try:
+                    raw_scene_color_accum = np.asarray(scene_lights.get("color_accum"), dtype="float32")
+                    raw_scene_color_weight = np.asarray(
+                        scene_lights.get("color_weight_raw", scene_lights.get("color_weight")),
                         dtype="float32",
-                    ) * local_weight
-                    scene_color_weight += local_weight
-                if scene_color_weight > 0.0001:
-                    scene_color /= scene_color_weight
-                    scene_color_source = np.clip(scene_field * 0.78 + scene_hotspot * 0.54, 0.0, 1.0)
-                    if scene_specular is not None:
-                        scene_color_source = np.maximum(scene_color_source, np.clip(scene_specular * 0.62, 0.0, 1.0))
-                    color_accum += scene_color_source[:, :, None] * scene_color
+                    )
+                    if raw_scene_color_accum.shape != (height, width, 3) or raw_scene_color_weight.shape != (height, width):
+                        raise ValueError("scene color map shape mismatch")
+                    scene_color_sigma = 0.8 + 2.0 * strength
+                    scene_color_weight = cv2.GaussianBlur(
+                        np.maximum(raw_scene_color_weight, 0.0),
+                        (0, 0),
+                        sigmaX=scene_color_sigma,
+                        sigmaY=scene_color_sigma,
+                    )
+                    scene_color_accum = raw_scene_color_accum.copy()
+                    for channel in range(3):
+                        scene_color_accum[:, :, channel] = cv2.GaussianBlur(
+                            scene_color_accum[:, :, channel],
+                            (0, 0),
+                            sigmaX=scene_color_sigma,
+                            sigmaY=scene_color_sigma,
+                        )
+                    scene_color = scene_color_accum / np.maximum(scene_color_weight[:, :, None], 0.0001)
+                    valid_color = scene_color_weight > 0.001
+                    scene_color_source = np.where(valid_color, scene_color_source, 0.0)
+                    color_accum += scene_color_source[:, :, None] * np.clip(scene_color, 0.0, 255.0)
                     color_weight += scene_color_source
+                except Exception:
+                    scene_color = np.zeros(3, dtype="float32")
+                    scene_color_weight = 0.0
+                    for _src, _target_center, local_strength, _local_warmth, local_rgb, _local_cone, _local_source_radius, _stable in manual_lights:
+                        local_weight = max(0.0, float(local_strength))
+                        scene_color += np.array(
+                            [
+                                float(local_rgb[2]) * 255.0,
+                                float(local_rgb[1]) * 255.0,
+                                float(local_rgb[0]) * 255.0,
+                            ],
+                            dtype="float32",
+                        ) * local_weight
+                        scene_color_weight += local_weight
+                    if scene_color_weight > 0.0001:
+                        scene_color /= scene_color_weight
+                        color_accum += scene_color_source[:, :, None] * scene_color
+                        color_weight += scene_color_source
             scene_relief = (
                 height_grad_x * np.asarray(scene_lights.get("ray_x"), dtype="float32")
                 + height_grad_y * np.asarray(scene_lights.get("ray_y"), dtype="float32")

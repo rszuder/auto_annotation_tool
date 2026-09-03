@@ -36,7 +36,7 @@ def main():
         # Ustawienia początkowe okna
         root.geometry("1400x900")
         root.minsize(1024, 768)
-        root.title(f"{CONFIG.APP_NAME} v{CONFIG.VERSION}")
+        root.title(f"{CONFIG.APP_NAME} ver. {CONFIG.VERSION}")
         
         # Odpalenie interfejsu
         app = AutoAnnotationApp(root)

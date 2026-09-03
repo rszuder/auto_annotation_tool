@@ -9,6 +9,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog
 
 from ..config import CONFIG, logger
+from .app_theme_definitions import THEME_PALETTE_CONTRACT
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 APP_AUTHOR = "R. Szuderski"
@@ -48,13 +49,13 @@ def style_guidance_frame(self, frame, background: str = None, emphasized: bool =
         return
 
     palette = self.palette
-    base_border = palette.get("panel_border", palette["border"])
+    base_border = palette["panel_border"]
     emphasis_border = blend_hex_colors(
-        palette.get("success", "#4ec9b0"),
-        palette.get("panel_border", palette["border"]),
+        palette["success"],
+        palette["panel_border"],
         0.18,
     )
-    bg = background or getattr(frame, "_guided_frame_bg", None) or palette.get("panel", palette["bg"])
+    bg = background or getattr(frame, "_guided_frame_bg", None) or palette["panel"]
     is_emphasized = getattr(frame, "_guided_frame_emphasized", False) if emphasized is None else bool(emphasized)
     border = emphasis_border if is_emphasized else base_border
 
@@ -300,10 +301,10 @@ def style_native_scrollbar(self, scrollbar, background: str = None, troughcolor:
         return
 
     palette = getattr(self, "palette", {})
-    trough = troughcolor or palette.get("panel", palette.get("bg", "#1e1e1e"))
+    trough = troughcolor or palette["panel"]
     _track, thumb, thumb_hover = self._get_scrollbar_colors(track_color=trough)
     bg = thumb if self.is_dark_theme() else (background or thumb)
-    border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    border = bordercolor or palette["panel_border"]
     active_bg = thumb_hover
 
     options = {
@@ -332,19 +333,8 @@ def is_dark_theme(self) -> bool:
 
 def _get_scrollbar_colors(self, track_color: str = None) -> tuple[str, str, str]:
     palette = getattr(self, "palette", {})
-    track = track_color or palette.get("panel", palette.get("bg", "#1e1e1e"))
-    if self.is_dark_theme():
-        thumb = palette.get("success", "#4ec9b0")
-        thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
-        return track, thumb, thumb_hover
-
-    thumb = blend_hex_colors(
-        palette.get("accent_hover", palette.get("accent", "#0e639c")),
-        palette.get("accent_text", "#ffffff"),
-        0.30,
-    )
-    thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
-    return track, thumb, thumb_hover
+    track = track_color or palette["scrollbar_track"]
+    return track, palette["scrollbar_thumb"], palette["scrollbar_thumb_hover"]
 
 def style_text_widget(self, widget, role: str = "default"):
     if widget is None:
@@ -354,17 +344,17 @@ def style_text_widget(self, widget, role: str = "default"):
     role_key = str(role or "default").strip().lower()
 
     if role_key == "console":
-        bg = palette.get("console_bg", "#252526")
-        fg = palette.get("console_fg", "#f3f3f3")
-        border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        bg = palette["console_bg"]
+        fg = palette["console_fg"]
+        border = palette["console_border"]
     elif role_key == "doc":
-        bg = palette.get("doc_bg", "#1f1f1f")
-        fg = palette.get("doc_fg", "#f3f3f3")
-        border = palette.get("console_border", palette.get("border", "#3c3c3c"))
+        bg = palette["doc_bg"]
+        fg = palette["doc_fg"]
+        border = palette["console_border"]
     else:
-        bg = palette.get("field", "#1a1a1a")
-        fg = palette.get("fg", "#f3f3f3")
-        border = palette.get("border", "#3c3c3c")
+        bg = palette["field"]
+        fg = palette["fg"]
+        border = palette["border"]
 
     options = {
         "bg": bg,
@@ -399,7 +389,7 @@ def style_text_widget(self, widget, role: str = "default"):
         else:
             self.style_native_scrollbar(
                 scrollbar,
-                background=palette.get("panel_alt", "#2d2d30"),
+                background=palette["panel_alt"],
                 troughcolor=bg,
                 bordercolor=border
             )
@@ -409,15 +399,15 @@ def style_listbox_widget(self, widget, bordercolor: str = None):
         return
 
     palette = getattr(self, "palette", {})
-    border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    border = bordercolor or palette["panel_border"]
     select_bg, select_fg = self.get_list_selection_colors()
 
     options = {
-        "bg": palette.get("field", "#1a1a1a"),
-        "fg": palette.get("fg", "#f3f3f3"),
+        "bg": palette["field"],
+        "fg": palette["fg"],
         "selectbackground": select_bg,
         "selectforeground": select_fg,
-        "disabledforeground": palette.get("muted_dim", "#9a9a9a"),
+        "disabledforeground": palette["muted_dim"],
         "highlightthickness": 1,
         "highlightbackground": border,
         "highlightcolor": border,
@@ -451,8 +441,8 @@ def style_canvas_widget(self, widget, background: str = None, bordercolor: str =
         return
 
     palette = getattr(self, "palette", {})
-    bg = background or palette.get("panel", "#252526")
-    border = bordercolor or palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    bg = background or palette["panel"]
+    border = bordercolor or palette["panel_border"]
 
     options = {
         "bg": bg,
@@ -473,12 +463,12 @@ def _get_scale_colors(self, background: str = None) -> tuple[str, str, str, str,
     palette = getattr(self, "palette", {})
     bg = self._coerce_color_hex(
         background,
-        fallback=palette.get("panel", palette.get("bg", "#252526")),
+        fallback=palette["panel"],
     )
-    success = palette.get("success", "#4ec9b0")
+    success = palette["progress_fill"]
     track = blend_hex_colors(success, bg, 0.45)
     thumb = success
-    thumb_hover = blend_hex_colors(thumb, palette.get("accent_text", "#ffffff"), 0.18)
+    thumb_hover = blend_hex_colors(thumb, palette["fg"], 0.18)
     # Keep disabled sliders visually consistent with enabled ones; the non-interactive
     # state is conveyed by behavior, not by washing out the green marker.
     thumb_disabled = thumb
@@ -528,26 +518,14 @@ def _style_token(value: str) -> str:
 def get_list_selection_colors(self) -> tuple[str, str]:
     """High-contrast selection colors for native list widgets."""
     palette = getattr(self, "palette", {})
-    bg = self._coerce_color_hex(
-        palette.get("field", palette.get("panel", "#252526")),
-        fallback=palette.get("panel", "#252526"),
-    )
-    try:
-        token = bg.lstrip("#")
-        red = int(token[0:2], 16) / 255.0
-        green = int(token[2:4], 16) / 255.0
-        blue = int(token[4:6], 16) / 255.0
-        luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
-    except Exception:
-        luminance = 0.0 if str(getattr(self, "current_theme_key", "")).startswith("dark") else 1.0
-
-    if luminance < 0.5:
-        return "#f8fafc", "#111827"
-    return "#111827", "#f8fafc"
+    return str(palette["selection_bg"]), str(palette["selection_fg"])
 
 def _coerce_color_hex(self, color: str = None, fallback: str = None) -> str:
-    palette = getattr(self, "palette", {})
-    default = str(fallback or palette.get("panel", palette.get("bg", "#252526")) or "#252526").strip()
+    palette = getattr(self, "palette", None) or THEME_PALETTE_CONTRACT
+    default = str(
+        fallback
+        or palette["panel"]
+    ).strip()
     raw = str(color or "").strip() or default
 
     def _normalize_hex(value: str):
@@ -578,11 +556,11 @@ def _coerce_color_hex(self, color: str = None, fallback: str = None) -> str:
     normalized_default = _normalize_hex(default)
     if normalized_default:
         return normalized_default
-    return "#252526"
+    return THEME_PALETTE_CONTRACT["panel"]
 
 def _resolve_widget_background(self, widget, fallback: str = None) -> str:
-    palette = getattr(self, "palette", {})
-    default_bg = self._coerce_color_hex(fallback, fallback=palette.get("panel", "#252526"))
+    palette = getattr(self, "palette", None) or THEME_PALETTE_CONTRACT
+    default_bg = self._coerce_color_hex(fallback, fallback=palette["panel"])
     current = widget
     visited: set[int] = set()
 
@@ -874,8 +852,8 @@ def style_ttk_labelframe_widget(self, widget, background: str = None, base_style
         fallback=self._resolve_widget_background(getattr(widget, "master", None), fallback=background),
     )
     palette = getattr(self, "palette", {})
-    border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-    fg = palette.get("fg", "#f3f3f3")
+    border = palette["panel_border"]
+    fg = palette["fg"]
     style_name = f"AutoBg_{self._style_token(resolved_bg)}.{resolved_base_style}"
     label_style_name = f"{style_name}.Label"
 
@@ -1181,7 +1159,7 @@ def style_panel_surface(self, root, background: str = None):
     palette = getattr(self, "palette", {})
     bg = self._coerce_color_hex(
         background,
-        fallback=palette.get("panel", "#252526"),
+        fallback=palette["panel"],
     )
     visited: set[int] = set()
 
@@ -1269,9 +1247,9 @@ def style_panel_surface(self, root, background: str = None):
             try:
                 widget.configure(
                     bg=local_bg,
-                    fg=palette.get("fg", "#f3f3f3"),
-                    highlightbackground=palette.get("panel_border", palette.get("border", "#3c3c3c")),
-                    highlightcolor=palette.get("panel_border", palette.get("border", "#3c3c3c")),
+                    fg=palette["fg"],
+                    highlightbackground=palette["panel_border"],
+                    highlightcolor=palette["panel_border"],
                 )
             except Exception:
                 pass
@@ -1385,9 +1363,33 @@ def _fit_dialog_to_content(
 
 def _build_themed_dialog_surface(self, dialog, *, tone: str = "info"):
     palette = self.palette
-    dialog.configure(bg=palette["panel"])
+    tone_key = str(tone or "info").strip().lower()
+    tone_surface = {
+        "info": palette["surface_info"],
+        "success": palette["surface_success"],
+        "warning": palette["surface_warning"],
+        "error": blend_hex_colors(
+            palette["surface_warning"],
+            palette["error"],
+            0.08,
+        ),
+    }.get(tone_key, palette["panel"])
+    border = {
+        "info": palette["accent"],
+        "success": palette["success"],
+        "warning": palette["warning"],
+        "error": palette["error"],
+    }.get(tone_key, palette["panel_border"])
+    dialog.configure(bg=tone_surface)
 
-    body = tk.Frame(dialog, bg=palette["panel"], bd=0, highlightthickness=0)
+    body = tk.Frame(
+        dialog,
+        bg=tone_surface,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=blend_hex_colors(border, tone_surface, 0.32),
+        highlightcolor=blend_hex_colors(border, tone_surface, 0.32),
+    )
     body.pack(fill=tk.BOTH, expand=True)
     return body
 
@@ -1412,7 +1414,7 @@ def themed_message_dialog(
     tk.Label(
         body,
         text=message,
-        bg=palette["panel"],
+        bg=str(body.cget("bg") or palette["panel"]),
         fg=palette["fg"],
         font=("Segoe UI", 10),
         wraplength=wraplength,
@@ -1422,7 +1424,7 @@ def themed_message_dialog(
 
     result = {"value": None}
 
-    btn_row = tk.Frame(body, bg=palette["panel"])
+    btn_row = tk.Frame(body, bg=str(body.cget("bg") or palette["panel"]))
     btn_row.pack(fill=tk.X, padx=18, pady=(0, 18))
 
     def close_with(value):
@@ -1544,7 +1546,7 @@ def themed_ask_string(
     tk.Label(
         body,
         text=prompt,
-        bg=palette["panel"],
+        bg=str(body.cget("bg") or palette["panel"]),
         fg=palette["fg"],
         font=("Segoe UI", 10),
         wraplength=440,
@@ -1567,7 +1569,7 @@ def themed_ask_string(
     def cancel():
         dialog.destroy()
 
-    btn_row = tk.Frame(body, bg=palette["panel"])
+    btn_row = tk.Frame(body, bg=str(body.cget("bg") or palette["panel"]))
     btn_row.pack(fill=tk.X, padx=18, pady=(0, 18))
     ttk.Button(btn_row, text=action_label, command=accept, style="Accent.TButton").pack(side=tk.RIGHT)
     ttk.Button(btn_row, text="Anuluj", command=cancel).pack(side=tk.RIGHT, padx=(0, 8))

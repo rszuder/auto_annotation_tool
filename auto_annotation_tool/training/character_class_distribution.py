@@ -170,6 +170,9 @@ class CharacterBalancePlan:
     selection_policy: str = "deficit_progressive_reuse_v1"
     threshold_policy: str = CHARACTER_REPRESENTATION_THRESHOLD_POLICY
     planned_images: int = 0
+    target_count_by_symbol: dict[str, int] = field(default_factory=dict)
+    requested_extra_by_symbol: dict[str, int] = field(default_factory=dict)
+    synthetic_count_by_symbol: dict[str, int] = field(default_factory=dict)
     predicted_deficit_after: dict[str, int] = field(default_factory=dict)
     feasible: bool = True
     completion_status: str = "REPRESENTATION_OK"
@@ -178,6 +181,7 @@ class CharacterBalancePlan:
     mean_augmented_variants_per_used_source: float = 0.0
     max_augmented_variants_from_single_source: int = 0
     source_diversity_warnings: tuple[str, ...] = field(default_factory=tuple)
+    train_sources_by_symbol: dict[str, int] = field(default_factory=dict)
     base_dataset_fingerprint_sha256: str = ""
     deficit_by_symbol: dict[str, int] = field(default_factory=dict)
     candidates: tuple[CharacterBalanceAugmentationCandidate, ...] = field(default_factory=tuple)
@@ -194,6 +198,9 @@ class CharacterBalancePlan:
             "selection_policy": self.selection_policy,
             "threshold_policy": self.threshold_policy,
             "planned_images": int(self.planned_images),
+            "target_count_by_symbol": dict(self.target_count_by_symbol),
+            "requested_extra_by_symbol": dict(self.requested_extra_by_symbol),
+            "synthetic_count_by_symbol": dict(self.synthetic_count_by_symbol),
             "predicted_deficit_after": dict(self.predicted_deficit_after),
             "feasible": bool(self.feasible),
             "completion_status": self.completion_status,
@@ -202,6 +209,7 @@ class CharacterBalancePlan:
             "mean_augmented_variants_per_used_source": float(self.mean_augmented_variants_per_used_source),
             "max_augmented_variants_from_single_source": int(self.max_augmented_variants_from_single_source),
             "source_diversity_warnings": list(self.source_diversity_warnings),
+            "train_sources_by_symbol": dict(self.train_sources_by_symbol),
             "base_dataset_fingerprint_sha256": self.base_dataset_fingerprint_sha256,
             "max_augmented_variants_per_source": int(self.max_augmented_variants_per_source),
             "deficit_by_symbol": dict(self.deficit_by_symbol),
@@ -479,7 +487,11 @@ def plan_character_train_augmentation(
     dataset_root: Path | str,
     *,
     target_ratio: float = 0.50,
+    target_count: int | None = None,
     max_augmented_variants_per_source: int = CHARACTER_REPRESENTATION_DEFAULT_MAX_VARIANTS_PER_SOURCE,
+    target_count_by_symbol: Mapping[str, int] | None = None,
+    extra_count_by_symbol: Mapping[str, int] | None = None,
+    respect_existing_augmented_variants: bool = True,
 ) -> CharacterBalancePlan:
     """Build a train-only MZ representation plan.
 
@@ -491,25 +503,55 @@ def plan_character_train_augmentation(
     root, _yaml_path = _normalize_dataset_root(dataset_root)
     distribution = analyze_character_class_distribution(root, target_ratio=target_ratio)
     target_ratio = float(distribution.summary.get("balance_target_ratio", target_ratio) or 0.50)
-    target_count = int(distribution.summary.get("target_class_count", 0) or 0)
+    resolved_target_count = int(distribution.summary.get("target_class_count", 0) or 0)
+    if target_count is not None:
+        try:
+            resolved_target_count = max(0, int(float(str(target_count).strip().replace(",", "."))))
+        except Exception:
+            resolved_target_count = int(distribution.summary.get("target_class_count", 0) or 0)
     max_per_source = max(0, int(max_augmented_variants_per_source or 0))
     base_fingerprint = build_character_dataset_file_fingerprint(root)
-    deficit_by_symbol = {
-        row.symbol: int(row.deficit_count)
+    manual_targets = _normalize_target_count_by_symbol(target_count_by_symbol)
+    manual_extras = _normalize_target_count_by_symbol(extra_count_by_symbol)
+    diagnostic_counts = {
+        row.symbol: int(row.train_count if distribution.diagnostic_split == "train" else row.total_count)
         for row in distribution.classes
-        if int(row.deficit_count) > 0
+    }
+    desired_counts = {}
+    for row in distribution.classes:
+        current_count = int(diagnostic_counts.get(row.symbol, 0) or 0)
+        desired = int(manual_targets.get(row.symbol, resolved_target_count))
+        if row.symbol in manual_extras:
+            desired = max(desired, current_count + int(manual_extras.get(row.symbol, 0) or 0))
+        desired_counts[row.symbol] = max(0, int(desired))
+    deficit_by_symbol = {
+        row.symbol: max(
+            0,
+            int(desired_counts.get(row.symbol, resolved_target_count)) - int(diagnostic_counts.get(row.symbol, 0) or 0),
+        )
+        for row in distribution.classes
+        if (int(desired_counts.get(row.symbol, resolved_target_count)) - int(diagnostic_counts.get(row.symbol, 0) or 0)) > 0
     }
     distribution_rows = {row.symbol: row for row in distribution.classes}
 
     split_dirs, layout = _discover_label_dirs(root)
+    planning_label_dirs, planning_scope = _character_augmentation_planning_label_dirs(split_dirs, layout)
     warnings: list[str] = []
-    if layout != "split" or not split_dirs.get("train"):
+    if not planning_label_dirs:
         warnings.append("Brak jawnego splitu train; plan augmentacji train-only nie wybiera źródeł.")
+    elif planning_scope == "unsplit":
+        warnings.append(
+            "Brak jawnego splitu train; używam płaskiego katalogu labels jako prognozy przed utworzeniem splitu."
+        )
 
     grouped_candidates: dict[str, list[CharacterBalanceAugmentationCandidate]] = {}
     source_map = _load_augmentation_source_map(root)
-    existing_augmented_by_source = _count_existing_augmented_variants_by_source(root, source_map)
-    for label_dir in split_dirs.get("train", []):
+    existing_augmented_by_source = (
+        _count_existing_augmented_variants_by_source(root, source_map)
+        if bool(respect_existing_augmented_variants)
+        else {}
+    )
+    for label_dir in planning_label_dirs:
         for label_path in _iter_label_files(label_dir):
             source_key = _normalize_source_plate_key(label_path.stem, source_map)
             symbol_counts = _symbol_counts_from_label_file(label_path)
@@ -586,6 +628,7 @@ def plan_character_train_augmentation(
             str(item.source_key),
         )
     )
+    synthetic_count_by_symbol = _synthetic_counts_from_planned_candidates(planned_candidates)
 
     missing_sources = [
         symbol
@@ -611,6 +654,10 @@ def plan_character_train_augmentation(
         )
 
     planned_images = sum(int(value or 0) for value in planned_by_source.values())
+    train_sources_by_symbol = {
+        symbol: sum(1 for candidate in source_candidates if int(candidate.symbol_counts.get(symbol, 0) or 0) > 0)
+        for symbol in deficit_by_symbol
+    }
     remaining_deficits = {
         symbol: int(value)
         for symbol, value in predicted_deficit_after.items()
@@ -636,7 +683,10 @@ def plan_character_train_augmentation(
         base_dataset=str(root),
         alphabet=CHARACTER_BALANCE_ALPHABET,
         target_ratio=target_ratio,
-        target_count=target_count,
+        target_count=resolved_target_count,
+        target_count_by_symbol={symbol: count for symbol, count in sorted(desired_counts.items()) if count > resolved_target_count},
+        requested_extra_by_symbol=manual_extras,
+        synthetic_count_by_symbol=dict(sorted(synthetic_count_by_symbol.items())),
         max_augmented_variants_per_source=max_per_source,
         selection_policy="deficit_progressive_reuse_v1",
         threshold_policy=CHARACTER_REPRESENTATION_THRESHOLD_POLICY,
@@ -649,11 +699,117 @@ def plan_character_train_augmentation(
         mean_augmented_variants_per_used_source=round(mean_reuse, 4),
         max_augmented_variants_from_single_source=max(used_counts) if used_counts else 0,
         source_diversity_warnings=source_diversity_warnings,
+        train_sources_by_symbol=train_sources_by_symbol,
         base_dataset_fingerprint_sha256=str(base_fingerprint.get("sha256") or ""),
         deficit_by_symbol=deficit_by_symbol,
         candidates=tuple(planned_candidates),
         warnings=tuple(warnings),
     )
+
+
+def collect_character_train_augmentation_source_pool(
+    dataset_root: Path | str,
+    *,
+    max_augmented_variants_per_source: int = CHARACTER_REPRESENTATION_DEFAULT_MAX_VARIANTS_PER_SOURCE,
+    respect_existing_augmented_variants: bool = True,
+) -> tuple[tuple[CharacterBalanceAugmentationCandidate, ...], dict[str, int]]:
+    """Collect train source candidates once for responsive histogram previews."""
+
+    root, _yaml_path = _normalize_dataset_root(dataset_root)
+    max_per_source = max(0, int(max_augmented_variants_per_source or 0))
+    split_dirs, layout = _discover_label_dirs(root)
+    planning_label_dirs, _planning_scope = _character_augmentation_planning_label_dirs(split_dirs, layout)
+    if not planning_label_dirs:
+        return (), {}
+
+    source_map = _load_augmentation_source_map(root)
+    existing_augmented_by_source = (
+        _count_existing_augmented_variants_by_source(root, source_map)
+        if bool(respect_existing_augmented_variants)
+        else {}
+    )
+    grouped_candidates: dict[str, list[CharacterBalanceAugmentationCandidate]] = {}
+    for label_dir in planning_label_dirs:
+        for label_path in _iter_label_files(label_dir):
+            source_key = _normalize_source_plate_key(label_path.stem, source_map)
+            symbol_counts = _symbol_counts_from_label_file(label_path)
+            symbols = tuple(symbol for symbol in CHARACTER_BALANCE_ALPHABET if int(symbol_counts.get(symbol, 0) or 0) > 0)
+            if not symbols:
+                continue
+            image_path = _resolve_image_for_label(root, label_path)
+            candidate = CharacterBalanceAugmentationCandidate(
+                source_key=source_key,
+                label_path=str(label_path),
+                image_path=str(image_path or ""),
+                symbols=symbols,
+                symbol_counts=symbol_counts,
+                priority=float(len(symbols)),
+                max_augmented_variants=max_per_source,
+                existing_augmented_variants=int(existing_augmented_by_source.get(source_key, 0) or 0),
+            )
+            grouped_candidates.setdefault(source_key, []).append(candidate)
+
+    source_candidates: list[CharacterBalanceAugmentationCandidate] = []
+    for source_key, group in grouped_candidates.items():
+        group.sort(
+            key=lambda item: (
+                0 if _is_original_source_label(Path(item.label_path), item.source_key, source_map) else 1,
+                str(Path(item.label_path).name).lower(),
+            )
+        )
+        source_candidates.append(group[0])
+    return tuple(source_candidates), dict(existing_augmented_by_source)
+
+
+def preview_character_train_synthetic_counts_from_pool(
+    extra_count_by_symbol: Mapping[str, int] | None,
+    source_candidates: tuple[CharacterBalanceAugmentationCandidate, ...] | list[CharacterBalanceAugmentationCandidate],
+    existing_augmented_by_source: Mapping[str, int] | None,
+    *,
+    max_augmented_variants_per_source: int = CHARACTER_REPRESENTATION_DEFAULT_MAX_VARIANTS_PER_SOURCE,
+    respect_existing_augmented_variants: bool = True,
+) -> dict[str, int]:
+    """Calculate visible per-symbol gains from a cached train source pool."""
+
+    manual_extras = _normalize_target_count_by_symbol(extra_count_by_symbol)
+    if not manual_extras:
+        return {}
+    max_per_source = max(0, int(max_augmented_variants_per_source or 0))
+    planned_by_source, _remaining = _allocate_character_representation_plan(
+        manual_extras,
+        list(source_candidates or ()),
+        existing_augmented_by_source=(
+            dict(existing_augmented_by_source or {})
+            if bool(respect_existing_augmented_variants)
+            else {}
+        ),
+        max_augmented_variants_per_source=max_per_source,
+    )
+    by_key = {
+        str(candidate.source_key): candidate
+        for candidate in source_candidates or ()
+        if str(getattr(candidate, "source_key", "") or "").strip()
+    }
+    planned_candidates: list[CharacterBalanceAugmentationCandidate] = []
+    for source_key, variants in planned_by_source.items():
+        candidate = by_key.get(str(source_key))
+        planned_variants = max(0, int(variants or 0))
+        if candidate is None or planned_variants <= 0:
+            continue
+        planned_candidates.append(
+            CharacterBalanceAugmentationCandidate(
+                source_key=candidate.source_key,
+                label_path=candidate.label_path,
+                image_path=candidate.image_path,
+                symbols=candidate.symbols,
+                symbol_counts=dict(candidate.symbol_counts or {}),
+                priority=float(candidate.priority),
+                max_augmented_variants=int(candidate.max_augmented_variants),
+                planned_variants=planned_variants,
+                existing_augmented_variants=int(candidate.existing_augmented_variants),
+            )
+        )
+    return _synthetic_counts_from_planned_candidates(planned_candidates)
 
 
 def find_character_real_source_candidates(
@@ -865,6 +1021,9 @@ def build_character_training_variant_manifest(
         "alphabet": CHARACTER_BALANCE_ALPHABET,
         "augmentation_mode": str(augmentation_mode or "manual_train_augmentation"),
         "target_count": int(getattr(plan, "target_count", 0) or 0),
+        "target_count_by_symbol": dict(getattr(plan, "target_count_by_symbol", {}) or {}),
+        "requested_extra_by_symbol": dict(getattr(plan, "requested_extra_by_symbol", {}) or {}),
+        "synthetic_count_by_symbol": dict(getattr(plan, "synthetic_count_by_symbol", {}) or {}),
         "target_ratio": float(getattr(plan, "target_ratio", 0.50) or 0.50),
         "selection_policy": str(getattr(plan, "selection_policy", "deficit_progressive_reuse_v1") or "deficit_progressive_reuse_v1"),
         "threshold_policy": str(getattr(plan, "threshold_policy", CHARACTER_REPRESENTATION_THRESHOLD_POLICY) or CHARACTER_REPRESENTATION_THRESHOLD_POLICY),
@@ -886,6 +1045,7 @@ def build_character_training_variant_manifest(
             "scope": "single_original_source",
             "purpose": "prevent one plate crop from dominating MZ class balancing",
         },
+        "train_sources_by_symbol": dict(getattr(plan, "train_sources_by_symbol", {}) or {}),
         "sources": source_counts,
         "before_distribution": _distribution_ref(before_distribution),
         "after_distribution": _distribution_ref(after_distribution) if after_distribution is not None else "",
@@ -992,6 +1152,24 @@ def _normalize_balance_target_ratio(value: Any) -> float:
     return max(0.0, min(2.0, ratio))
 
 
+def _normalize_target_count_by_symbol(value: Mapping[str, int] | None) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, int] = {}
+    for raw_symbol, raw_count in value.items():
+        symbol = str(raw_symbol or "").strip().upper()
+        if symbol not in CHARACTER_BALANCE_ALPHABET:
+            continue
+        try:
+            count = int(float(str(raw_count).strip().replace(",", ".")))
+        except Exception:
+            continue
+        if count <= 0:
+            continue
+        result[symbol] = max(0, count)
+    return dict(sorted(result.items()))
+
+
 def _iter_label_files(label_dir: Path) -> list[Path]:
     try:
         return sorted(
@@ -1005,6 +1183,19 @@ def _iter_label_files(label_dir: Path) -> list[Path]:
 def _symbols_from_label_file(label_path: Path) -> tuple[str, ...]:
     counts = _symbol_counts_from_label_file(label_path)
     return tuple(symbol for symbol in CHARACTER_BALANCE_ALPHABET if int(counts.get(symbol, 0) or 0) > 0)
+
+
+def _character_augmentation_planning_label_dirs(
+    split_dirs: Mapping[str, list[Path]],
+    layout: str,
+) -> tuple[list[Path], str]:
+    train_dirs = list(split_dirs.get("train") or [])
+    if train_dirs:
+        return train_dirs, "train"
+    unsplit_dirs = list(split_dirs.get("unsplit") or [])
+    if str(layout or "").strip().lower() == "flat" and unsplit_dirs:
+        return unsplit_dirs, "unsplit"
+    return [], "empty"
 
 
 def _symbol_counts_from_label_file(label_path: Path) -> dict[str, int]:
@@ -1024,9 +1215,10 @@ def _symbol_counts_from_label_file(label_path: Path) -> dict[str, int]:
 
 
 def _count_existing_augmented_variants_by_source(root: Path, source_map: dict[str, str]) -> dict[str, int]:
-    split_dirs, _layout = _discover_label_dirs(root)
+    split_dirs, layout = _discover_label_dirs(root)
+    planning_label_dirs, _planning_scope = _character_augmentation_planning_label_dirs(split_dirs, layout)
     result: dict[str, int] = {}
-    for label_dir in split_dirs.get("train", []):
+    for label_dir in planning_label_dirs:
         for label_path in _iter_label_files(label_dir):
             source_key = _normalize_source_plate_key(label_path.stem, source_map)
             if _is_original_source_label(label_path, source_key, source_map):
@@ -1060,23 +1252,34 @@ def _allocate_character_representation_plan(
         if str(candidate.source_key or "").strip()
     }
     planned: dict[str, int] = {source_key: 0 for source_key in by_key}
+    candidate_rows: list[tuple[str, int, dict[str, int]]] = []
+    for source_key, candidate in by_key.items():
+        raw_symbol_counts = dict(candidate.symbol_counts or {})
+        symbol_counts = {
+            symbol: max(0, int(raw_symbol_counts.get(symbol, 0) or 0))
+            for symbol in remaining
+        }
+        symbol_counts = {symbol: count for symbol, count in symbol_counts.items() if count > 0}
+        if not symbol_counts:
+            continue
+        existing = max(0, int(existing_augmented_by_source.get(source_key, 0) or 0))
+        candidate_rows.append((source_key, existing, symbol_counts))
 
     while any(int(value or 0) > 0 for value in remaining.values()):
         best_key = ""
         best_score: tuple[int, int, str] | None = None
         best_gain = 0
-        for source_key, candidate in by_key.items():
-            existing = max(0, int(existing_augmented_by_source.get(source_key, 0) or 0))
+        best_counts: dict[str, int] | None = None
+        for source_key, existing, symbol_counts in candidate_rows:
             already_planned = max(0, int(planned.get(source_key, 0) or 0))
             if existing + already_planned >= max_per_source:
                 continue
-            symbol_counts = dict(candidate.symbol_counts or {})
             gain = sum(
                 min(
                     max(0, int(remaining.get(symbol, 0) or 0)),
-                    max(0, int(symbol_counts.get(symbol, 0) or 0)),
+                    int(count),
                 )
-                for symbol in remaining
+                for symbol, count in symbol_counts.items()
             )
             if gain <= 0:
                 continue
@@ -1087,17 +1290,36 @@ def _allocate_character_representation_plan(
                 best_score = score
                 best_key = source_key
                 best_gain = int(gain)
+                best_counts = symbol_counts
         if not best_key or best_gain <= 0:
             break
-        selected = by_key[best_key]
-        symbol_counts = dict(selected.symbol_counts or {})
         planned[best_key] = int(planned.get(best_key, 0) or 0) + 1
-        for symbol in list(remaining.keys()):
-            remaining[symbol] = max(0, int(remaining.get(symbol, 0) or 0) - int(symbol_counts.get(symbol, 0) or 0))
+        for symbol, count in dict(best_counts or {}).items():
+            if symbol in remaining:
+                remaining[symbol] = max(0, int(remaining.get(symbol, 0) or 0) - int(count or 0))
 
     planned = {key: int(value) for key, value in planned.items() if int(value or 0) > 0}
     remaining = {key: int(value) for key, value in remaining.items() if int(value or 0) > 0}
     return planned, remaining
+
+
+def _synthetic_counts_from_planned_candidates(
+    candidates: list[CharacterBalanceAugmentationCandidate] | tuple[CharacterBalanceAugmentationCandidate, ...],
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for candidate in candidates or ():
+        variants = max(0, int(getattr(candidate, "planned_variants", 0) or 0))
+        if variants <= 0:
+            continue
+        for symbol, count in dict(getattr(candidate, "symbol_counts", {}) or {}).items():
+            amount = max(0, int(count or 0)) * variants
+            if amount <= 0:
+                continue
+            symbol_key = str(symbol or "").strip().upper()
+            if not symbol_key:
+                continue
+            result[symbol_key] = int(result.get(symbol_key, 0) or 0) + amount
+    return dict(sorted(result.items()))
 
 
 def _resolve_image_for_label(root: Path, label_path: Path) -> Path | None:

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from .app_theme_definitions import THEME_PALETTE_CONTRACT, get_theme_palette
+
 
 def blend_hex_colors(color_a: str, color_b: str, ratio: float) -> str:
     def _to_rgb(raw: str) -> tuple[int, int, int]:
@@ -31,6 +33,13 @@ def blend_hex_colors(color_a: str, color_b: str, ratio: float) -> str:
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
 
+def _default_scrollbar_palette() -> dict:
+    try:
+        return get_theme_palette()
+    except Exception:
+        return dict(THEME_PALETTE_CONTRACT)
+
+
 class WebSlimScrollbar(tk.Canvas):
     def __init__(
         self,
@@ -42,11 +51,15 @@ class WebSlimScrollbar(tk.Canvas):
         min_thumb_size: int = 13,
         auto_hide: bool = True,
         thumb_scale: float = 0.5,
-        track_color: str = "#252526",
-        thumb_color: str = "#6fb8ff",
-        thumb_hover_color: str = "#8ec9ff",
+        track_color: str | None = None,
+        thumb_color: str | None = None,
+        thumb_hover_color: str | None = None,
         **kwargs,
     ):
+        default_palette = _default_scrollbar_palette()
+        track_color = str(track_color or default_palette["scrollbar_track"])
+        thumb_color = str(thumb_color or default_palette["scrollbar_thumb"])
+        thumb_hover_color = str(thumb_hover_color or default_palette["scrollbar_thumb_hover"])
         self._orient = tk.VERTICAL if str(orient).lower().startswith("v") else tk.HORIZONTAL
         thickness = max(6, int(thickness))
 

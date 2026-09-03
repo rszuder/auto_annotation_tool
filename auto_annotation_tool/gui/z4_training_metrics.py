@@ -1822,7 +1822,7 @@ def _format_pinned_step4_result_detail(self, state: dict) -> str:
         run_display = ""
     run_part = f" Run: {run_display}." if run_display else ""
     return (
-        f"{iteration_label} • {target_label}: {model_name}.{run_part} "
+        f"★ WYNIK T06 PODPIĘTY | {iteration_label} • {target_label}: {model_name}.{run_part} "
         "Ten model jest wynikiem bramki, więc split, model startowy, parametry i nowy trening są zablokowane. "
         "Aby zmienić decyzję, odepnij wynik w sekcji wyboru wyniku bramki."
     )
@@ -1892,7 +1892,7 @@ def _refresh_step4_pinned_result_ui(self, pinned_state: dict | None = None) -> d
         try:
             if locked:
                 if title_label is not None:
-                    title_label.configure(text="Konfiguracja zablokowana")
+                    title_label.configure(text="★ Wynik bramki T06 jest podpięty")
                 if detail_label is not None:
                     detail_label.configure(text=_format_pinned_step4_result_detail(self, state))
                 if not str(shell.winfo_manager()):

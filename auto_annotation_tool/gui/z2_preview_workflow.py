@@ -82,6 +82,8 @@ from .z2_free_mode_flow import (
 from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
+    build_campaign_gate_focus_state,
+    format_campaign_quality_goal_value,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
     campaign_gate_id_for_edge,
     campaign_visible_gate_id,
@@ -189,18 +191,10 @@ def _build_t06_counter_rows(
     quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
     next_quality_label = str(quality_info.get("next_label", "") or "").strip()
     missing_next_quality = max(0, int(quality_info.get("missing_next", 0) or 0))
-    if missing_open > 0:
-        missing_label = T06_LABEL_MISSING
-        missing_text = f"{missing_open} tablic zatwierdzonych [OK]"
-        missing_tone = "warning"
-    elif missing_next_quality > 0 and next_quality_label:
-        missing_label = f"Do progu {next_quality_label} brakuje"
-        missing_text = f"{missing_next_quality} tablic zatwierdzonych [OK]"
-        missing_tone = "warning"
-    else:
-        missing_label = "Progi jakości"
-        missing_text = T06_TOP_QUALITY_TEXT
-        missing_tone = "success"
+    focus_state = build_campaign_gate_focus_state(missing_open, quality_info)
+    missing_label = str(focus_state.get("row_label") or T06_LABEL_MISSING)
+    missing_text = str(focus_state.get("text") or "")
+    missing_tone = str(focus_state.get("tone") or "warning")
     delta_tone = "success" if session_images > 0 or session_plates > 0 else (
         "warning" if session_images < 0 or session_plates < 0 else "muted"
     )
@@ -434,6 +428,12 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
         cache_labels = tuple(cache.get("labels") or ()) if isinstance(cache, dict) else ()
         if not isinstance(cache, dict) or len(cache_labels) < 4:
             return False
+        if any(
+            str(label or "").strip().lower().startswith("do progu")
+            or str(label or "").strip().lower() == "do kolejnego progu"
+            for label in cache_labels
+        ):
+            return False
         try:
             approval_context = dict(self._get_campaign_step2_approval_context() or {})
         except Exception:
@@ -500,6 +500,8 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
             except Exception:
                 effective_plates = int(approved_plates or 0)
         missing_plates = max(0, int(required_plates or 0) - int(effective_plates or 0))
+        if missing_plates <= 0 and any("otwarcia bramki" in str(label or "").lower() for label in cache_labels):
+            return False
         try:
             current_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
         except Exception:
@@ -520,28 +522,15 @@ def _try_update_campaign_right_panel_counts_after_approval(self) -> bool:
         quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
         next_quality_label = str(quality_info.get("next_label", "") or "").strip()
         missing_next_quality = max(0, int(quality_info.get("missing_next", 0) or 0))
-        if missing_plates > 0:
-            missing_label = "Do otwarcia bramki brakuje"
-            missing_text = f"{missing_plates} tablic zatwierdzonych [OK]"
-            missing_tone = "warning"
-        elif missing_next_quality > 0 and next_quality_label:
-            missing_label = f"Do progu {next_quality_label} brakuje"
-            missing_text = f"{missing_next_quality} tablic zatwierdzonych [OK]"
-            missing_tone = "warning"
-        else:
-            missing_label = "Progi jakości"
-            missing_text = "Osiągnięto najwyższy próg jakości"
-            missing_tone = "success"
+        focus_state = build_campaign_gate_focus_state(missing_plates, quality_info)
+        missing_label = str(focus_state.get("row_label") or "Do otwarcia bramki brakuje")
+        missing_text = str(focus_state.get("text") or "")
+        missing_tone = str(focus_state.get("tone") or "warning")
         xml_text = "UTWORZONY" if xml_exists else ("WYMAGANY - BRAK" if xml_required else "BRAK")
         xml_tone = "success" if xml_exists else "warning"
         min_text = f"{missing_plates} tablic" + (" / XML" if xml_missing else "")
         min_tone = "success" if missing_plates == 0 and not xml_missing else "warning"
-        if missing_next_quality > 0 and next_quality_label:
-            quality_next_text = f"Brakuje {missing_next_quality} tablic do progu {next_quality_label}"
-            quality_next_tone = "warning"
-        else:
-            quality_next_text = "Osiągnięto najwyższy próg jakości"
-            quality_next_tone = "success"
+        quality_next_text, quality_next_tone = format_campaign_quality_goal_value(quality_info)
         if (
             len(cache_labels) == 8
             and "Już zatwierdzone w projekcie" in cache_labels

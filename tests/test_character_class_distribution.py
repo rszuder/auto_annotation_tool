@@ -17,9 +17,11 @@ from auto_annotation_tool.training.character_class_distribution import (
     analyze_character_class_distribution,
     build_character_training_variant_manifest,
     build_character_dataset_file_fingerprint,
+    collect_character_train_augmentation_source_pool,
     compare_character_val_test_unchanged,
     find_character_real_source_candidates,
     plan_character_train_augmentation,
+    preview_character_train_synthetic_counts_from_pool,
     save_character_distribution_artifacts,
     save_character_class_distribution_csv,
     save_character_class_distribution_json,
@@ -27,6 +29,7 @@ from auto_annotation_tool.training.character_class_distribution import (
 from auto_annotation_tool.training.dataset_augmentation import (
     _build_balance_augmented_source_state,
     _finalize_train_augmentation_result,
+    _apply_traffic_headlight_effect,
     _select_augmentation_sample_pool,
     is_albumentations_available,
 )
@@ -163,6 +166,56 @@ def _names_dict_yaml() -> str:
     lines = ["path: .", "names:"]
     lines.extend(f"  {index}: \"{symbol}\"" for index, symbol in enumerate(CHARACTER_BALANCE_ALPHABET))
     return "\n".join(lines) + "\n"
+
+
+class DatasetAugmentationLightingTests(unittest.TestCase):
+    @unittest.skipUnless(CV2_AVAILABLE and np is not None, "requires OpenCV and numpy")
+    def test_scene_headlights_keep_independent_color_maps(self):
+        image = np.full((80, 240, 3), 60, dtype=np.uint8)
+        common = {
+            "night_light_strength": 0.0,
+            "light_normal_strength": 0.0,
+            "dark_relief_strength": 0.0,
+            "traffic_headlight_1_cone": 0.12,
+            "traffic_headlight_2_cone": 0.12,
+            "traffic_headlight_1_source_radius": 0.0,
+            "traffic_headlight_2_source_radius": 0.0,
+            "traffic_headlight_source_world_x": -0.34,
+            "traffic_headlight_source_world_y": 0.0,
+            "traffic_headlight_source_world_z": 0.62,
+            "traffic_headlight_target_world_x": -0.34,
+            "traffic_headlight_target_world_y": 0.0,
+            "traffic_headlight_2_source_world_x": 0.34,
+            "traffic_headlight_2_source_world_y": 0.0,
+            "traffic_headlight_2_source_world_z": 0.62,
+            "traffic_headlight_2_target_world_x": 0.34,
+            "traffic_headlight_2_target_world_y": 0.0,
+            "traffic_headlight_1_r": 1.0,
+            "traffic_headlight_1_g": 1.0,
+            "traffic_headlight_1_b": 0.0,
+            "traffic_headlight_2_r": 1.0,
+            "traffic_headlight_2_g": 0.0,
+            "traffic_headlight_2_b": 0.0,
+        }
+        red_only = AugmentationProfile(
+            **common,
+            traffic_headlight_strength=0.0,
+            traffic_headlight_2_strength=0.85,
+        )
+        red_with_yellow_left = AugmentationProfile(
+            **common,
+            traffic_headlight_strength=0.85,
+            traffic_headlight_2_strength=0.85,
+        )
+
+        red_only_image = _apply_traffic_headlight_effect(image, red_only, np.random.default_rng(1))
+        combined_image = _apply_traffic_headlight_effect(image, red_with_yellow_left, np.random.default_rng(1))
+        sample_x, sample_y = 201, 40
+        red_only_patch = red_only_image[sample_y - 2 : sample_y + 3, sample_x - 2 : sample_x + 3].mean(axis=(0, 1))
+        combined_patch = combined_image[sample_y - 2 : sample_y + 3, sample_x - 2 : sample_x + 3].mean(axis=(0, 1))
+
+        self.assertLessEqual(abs(float(combined_patch[1]) - float(red_only_patch[1])), 4.0)
+        self.assertGreater(float(combined_patch[2]) - float(combined_patch[1]), 70.0)
 
 
 class CharacterClassDistributionTests(unittest.TestCase):
@@ -465,6 +518,202 @@ class CharacterClassDistributionTests(unittest.TestCase):
             self.assertEqual(plan.candidates[0].source_key, "qq1")
             self.assertEqual(plan.candidates[0].planned_variants, 4)
 
+    def test_plan_accepts_manual_target_for_single_symbol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_balanced_char_dataset(root, repeats=2)
+
+            plan = plan_character_train_augmentation(
+                root,
+                target_ratio=1.0,
+                target_count_by_symbol={"Q": 5},
+            )
+
+            self.assertEqual(plan.target_count, 2)
+            self.assertEqual(plan.target_count_by_symbol, {"Q": 5})
+            self.assertEqual(plan.deficit_by_symbol, {"Q": 3})
+            self.assertEqual(plan.train_sources_by_symbol, {"Q": 1})
+            self.assertEqual(plan.planned_images, 2)
+            self.assertEqual(plan.predicted_deficit_after, {})
+            self.assertEqual([candidate.source_key for candidate in plan.candidates], ["26_Q"])
+            self.assertEqual(plan.candidates[0].planned_variants, 2)
+
+    def test_plan_accepts_common_manual_target_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_balanced_char_dataset(root, repeats=2)
+
+            plan = plan_character_train_augmentation(
+                root,
+                target_ratio=1.0,
+                target_count=5,
+            )
+
+            self.assertEqual(plan.target_count, 5)
+            self.assertEqual(plan.deficit_by_symbol["Q"], 3)
+            self.assertEqual(plan.planned_images, 72)
+            self.assertEqual(plan.predicted_deficit_after, {})
+
+    def test_plan_counts_incidental_symbols_from_selected_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            a_id = CHARACTER_BALANCE_ALPHABET.index("A")
+            k_id = CHARACTER_BALANCE_ALPHABET.index("K")
+
+            (root / "labels" / "train" / "ak_source.txt").write_text(
+                f"{a_id} 0.35 0.5 0.1 0.1\n{k_id} 0.65 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "train" / "ak_source.jpg").write_bytes(b"fake")
+
+            plan = plan_character_train_augmentation(
+                root,
+                target_count=0,
+                extra_count_by_symbol={"A": 3},
+                max_augmented_variants_per_source=10,
+            )
+
+            self.assertEqual(plan.deficit_by_symbol, {"A": 3})
+            self.assertEqual(plan.requested_extra_by_symbol, {"A": 3})
+            self.assertEqual(plan.synthetic_count_by_symbol, {"A": 3, "K": 3})
+            self.assertEqual(plan.planned_images, 3)
+            self.assertEqual(len(plan.candidates), 1)
+            self.assertEqual(plan.candidates[0].symbol_counts.get("A"), 1)
+            self.assertEqual(plan.candidates[0].symbol_counts.get("K"), 1)
+            self.assertEqual(plan.candidates[0].planned_variants, 3)
+
+    def test_preview_counts_incidental_symbols_from_source_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            a_id = CHARACTER_BALANCE_ALPHABET.index("A")
+            k_id = CHARACTER_BALANCE_ALPHABET.index("K")
+
+            (root / "labels" / "train" / "ak_source.txt").write_text(
+                f"{a_id} 0.35 0.5 0.1 0.1\n{k_id} 0.65 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "train" / "ak_source.jpg").write_bytes(b"fake")
+
+            candidates, existing = collect_character_train_augmentation_source_pool(
+                root,
+                max_augmented_variants_per_source=10,
+            )
+            preview = preview_character_train_synthetic_counts_from_pool(
+                {"A": 3},
+                candidates,
+                existing,
+                max_augmented_variants_per_source=10,
+            )
+
+            self.assertEqual(preview, {"A": 3, "K": 3})
+
+    def test_flat_pz1_preview_counts_incidental_symbols_before_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels").mkdir(parents=True)
+            (root / "images").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            a_id = CHARACTER_BALANCE_ALPHABET.index("A")
+            k_id = CHARACTER_BALANCE_ALPHABET.index("K")
+
+            (root / "labels" / "ak_source.txt").write_text(
+                f"{a_id} 0.35 0.5 0.1 0.1\n{k_id} 0.65 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "ak_source.jpg").write_bytes(b"fake")
+
+            candidates, existing = collect_character_train_augmentation_source_pool(
+                root,
+                max_augmented_variants_per_source=10,
+            )
+            preview = preview_character_train_synthetic_counts_from_pool(
+                {"A": 3},
+                candidates,
+                existing,
+                max_augmented_variants_per_source=10,
+            )
+            plan = plan_character_train_augmentation(
+                root,
+                target_count=0,
+                extra_count_by_symbol={"A": 3},
+                max_augmented_variants_per_source=10,
+            )
+
+            self.assertEqual(preview, {"A": 3, "K": 3})
+            self.assertEqual(plan.synthetic_count_by_symbol, {"A": 3, "K": 3})
+            self.assertEqual(plan.planned_images, 3)
+            self.assertEqual(plan.train_sources_by_symbol, {"A": 1})
+
+    def test_manual_pz1_preview_can_ignore_existing_augmented_variants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            a_id = CHARACTER_BALANCE_ALPHABET.index("A")
+            k_id = CHARACTER_BALANCE_ALPHABET.index("K")
+
+            (root / "labels" / "train" / "ak_source.txt").write_text(
+                f"{a_id} 0.35 0.5 0.1 0.1\n{k_id} 0.65 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "labels" / "train" / "ak_source__aug_001.txt").write_text(
+                f"{a_id} 0.35 0.5 0.1 0.1\n{k_id} 0.65 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "train" / "ak_source.jpg").write_bytes(b"fake")
+            (root / "augmentation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "generated_files": [
+                            {
+                                "source_label": "labels/train/ak_source.txt",
+                                "label": "labels/train/ak_source__aug_001.txt",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            blocked = plan_character_train_augmentation(
+                root,
+                target_count=0,
+                extra_count_by_symbol={"A": 1},
+                max_augmented_variants_per_source=1,
+            )
+            self.assertEqual(blocked.planned_images, 0)
+
+            plan = plan_character_train_augmentation(
+                root,
+                target_count=0,
+                extra_count_by_symbol={"A": 1},
+                max_augmented_variants_per_source=1,
+                respect_existing_augmented_variants=False,
+            )
+            candidates, existing = collect_character_train_augmentation_source_pool(
+                root,
+                max_augmented_variants_per_source=1,
+                respect_existing_augmented_variants=False,
+            )
+            preview = preview_character_train_synthetic_counts_from_pool(
+                {"A": 1},
+                candidates,
+                existing,
+                max_augmented_variants_per_source=1,
+                respect_existing_augmented_variants=False,
+            )
+
+            self.assertEqual(plan.planned_images, 1)
+            self.assertEqual(plan.synthetic_count_by_symbol, {"A": 1, "K": 1})
+            self.assertEqual(preview, {"A": 1, "K": 1})
+
     def test_plan_reports_not_feasible_when_deficit_has_no_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -481,6 +730,36 @@ class CharacterClassDistributionTests(unittest.TestCase):
             self.assertEqual(plan.completion_status, "PLAN_NOT_FEASIBLE")
             self.assertEqual(plan.planned_images, 0)
             self.assertGreater(plan.predicted_deficit_after.get("Q", 0), 0)
+
+    def test_plan_keeps_available_synthetics_when_another_symbol_has_no_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels" / "train").mkdir(parents=True)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "data.yaml").write_text(_names_list_yaml(), encoding="utf-8")
+            a_id = CHARACTER_BALANCE_ALPHABET.index("A")
+
+            (root / "labels" / "train" / "a_source.txt").write_text(
+                f"{a_id} 0.5 0.5 0.1 0.1\n",
+                encoding="utf-8",
+            )
+            (root / "images" / "train" / "a_source.jpg").write_bytes(b"fake")
+
+            plan = plan_character_train_augmentation(
+                root,
+                target_count=0,
+                extra_count_by_symbol={"A": 4, "K": 5},
+                max_augmented_variants_per_source=10,
+            )
+
+            self.assertFalse(plan.feasible)
+            self.assertEqual(plan.deficit_by_symbol["A"], 4)
+            self.assertEqual(plan.deficit_by_symbol["K"], 5)
+            self.assertEqual(plan.requested_extra_by_symbol, {"A": 4, "K": 5})
+            self.assertEqual(plan.synthetic_count_by_symbol, {"A": 4})
+            self.assertEqual(plan.train_sources_by_symbol, {"A": 1, "K": 0})
+            self.assertEqual(plan.planned_images, 4)
+            self.assertEqual(plan.predicted_deficit_after, {"K": 5})
 
     def test_manual_augmentation_state_has_no_balance_limit_without_plan(self):
         with tempfile.TemporaryDirectory() as tmp:

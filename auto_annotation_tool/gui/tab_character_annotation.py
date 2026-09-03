@@ -75,6 +75,7 @@ from .z3_campaign_flow import (
     resolve_step3_campaign_action_command,
     restore_campaign_step3_mode,
     return_step3_result_to_wizard,
+    return_to_t05_work_after_step3_pz1,
     return_to_wizard_from_step3_pz2,
     return_to_wizard_for_step3_rework,
     set_step3_finish_hint,
@@ -727,10 +728,10 @@ DETECTION_METHOD_CARD_META = {
 }
 DETECTION_PIPELINE_BLOCK_LIBRARY = {
     "ocr_symbol": {
-        "badge": "O",
-        "title": "OCR znak",
-        "subtitle": "czyta znak lub cały napis",
-        "desc": "OCR odpowiada za odczyt tekstu. Może czytać cały napis albo crop pojedynczego znaku.",
+        "badge": "OCR",
+        "title": "OCR",
+        "subtitle": "czyta napis i segmentuje znaki",
+        "desc": "OCR odczytuje cały napis tablicy i tworzy techniczne segmenty znaków bez użycia modelu YOLO.",
         "tone": "ocr",
     },
     "yolo_box": {
@@ -751,7 +752,7 @@ DETECTION_PIPELINE_BLOCK_LIBRARY = {
 DETECTION_PIPELINE_PRESET_META = {
     "OCR": {
         "label": "OCR",
-        "desc": "OCR odczytuje tekst i sam segmentuje znaki.",
+        "desc": "OCR odczytuje napis i sam tworzy segmenty znaków.",
     },
     "YOLO": {
         "label": "YOLO",
@@ -3493,9 +3494,9 @@ class CharacterAnnotationTab:
 
         go_to_substep_2_free_mode(self)
 
-    def go_to_substep_3(self):
+    def go_to_substep_3(self, *, force: bool = False):
         if self._step3_linear_mode and CAMPAIGN.get_active_project_name():
-            go_to_substep_3_campaign(self)
+            go_to_substep_3_campaign(self, force=force)
             return
         if self._step3_linear_mode:
             self.ensure_free_mode_context_ready()
@@ -3528,6 +3529,7 @@ class CharacterAnnotationTab:
         back_to_substep_2_free_mode(self)
 
     _persist_step3_progress = persist_step3_progress
+    _return_to_t05_work_after_step3_pz1 = return_to_t05_work_after_step3_pz1
     _return_to_wizard_from_step3_pz2 = return_to_wizard_from_step3_pz2
     restore_campaign_step3_mode = restore_campaign_step3_mode
     can_restore_step3_substep = z3_navigation_runtime.can_restore_step3_substep

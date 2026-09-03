@@ -349,9 +349,14 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
     prefix = "creator" if normalized_target == "plate" else "split"
     target_label = "tablic" if normalized_target == "plate" else "znaków"
 
+    section_title = (
+        " 3. Syntetyczne uzupełnienie train "
+        if normalized_target == "char"
+        else f" 3. Syntetyczne powiększenie liczby {target_label} zbioru train "
+    )
     frame = ttk.LabelFrame(
         parent,
-        text=f" 3. Syntetyczne powiększenie liczby {target_label} zbioru train ",
+        text=section_title,
         padding=10,
         style="Step4PZ1Section.TLabelframe",
     )
@@ -362,13 +367,15 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
         self._ensure_step4_augmentation_profile(normalized_target)
     except Exception:
         pass
+    table_colors = _get_step4_table_colors(self)
 
-    augmentation_intro_label = ttk.Label(
+    augmentation_intro_label = tk.Label(
         frame,
         text=(
             (
-                "Najpierw sprawdź reprezentację znaków MZ. PZ1 wyliczy próg AUTO i planowaną liczbę "
-                "nowych obrazów train; val i test pozostają bez zmian."
+                "Opcjonalnie sprawdź niedoreprezentowane znaki MZ. Histogram może ustawić liczbę "
+                "syntetyków, ale ostatecznym przełącznikiem jest pole liczby syntetycznych obrazów train. "
+                "Val i test pozostają bez zmian."
             )
             if normalized_target == "char"
             else (
@@ -377,10 +384,27 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
                 "projektu i nie są bazą kolejnej iteracji. Val i test pozostają oryginalne."
             )
         ),
+        bg=table_colors["row"],
+        fg=table_colors["fg"],
         justify=tk.LEFT,
         wraplength=700,
+        anchor=tk.W,
+        padx=10,
+        pady=8,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=table_colors["border"],
+        highlightcolor=table_colors["border"],
     )
     augmentation_intro_label.grid(row=0, column=0, columnspan=3, sticky=tk.EW, pady=(0, 6))
+    augmentation_intro_label.bind(
+        "<Configure>",
+        lambda event, label=augmentation_intro_label: (
+            label.configure(wraplength=max(360, int(event.width) - 24))
+            if int(float(label.cget("wraplength") or 0)) != max(360, int(event.width) - 24)
+            else None
+        ),
+    )
 
     try:
         augmentation_profile = self._ensure_step4_augmentation_profile(normalized_target)
@@ -388,8 +412,8 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
         augmentation_profile = None
     initial_extra = max(0, int(getattr(augmentation_profile, "extra_count", 0) or 0))
     initial_sample = max(1, int(getattr(augmentation_profile, "sample_size", 1) or 1))
-    enabled_var = tk.BooleanVar(value=bool(getattr(augmentation_profile, "enabled", False) and initial_extra > 0))
-    extra_var = tk.IntVar(value=initial_extra)
+    enabled_var = tk.BooleanVar(value=initial_extra > 0)
+    extra_var = tk.StringVar(value=str(initial_extra))
     sample_var = tk.IntVar(value=initial_sample)
     class_var = tk.StringVar(value=str(getattr(augmentation_profile, "class_name", "") or ("plate" if normalized_target == "plate" else "")))
     setattr(self, f"{prefix}_aug_enabled_var", enabled_var)
@@ -400,11 +424,15 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
 
     def _on_plan_change(*_args):
         try:
+            enabled_var.set(int(float(extra_var.get() or 0)) > 0)
+        except Exception:
+            enabled_var.set(False)
+        try:
             self._refresh_step4_augmentation_summary(normalized_target)
         except Exception:
             pass
 
-    for plan_var in (enabled_var, extra_var, class_var):
+    for plan_var in (extra_var, class_var):
         try:
             plan_var.trace_add("write", _on_plan_change)
         except Exception:
@@ -416,30 +444,36 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
     plan_frame.columnconfigure(2, weight=0)
     plan_frame.columnconfigure(3, weight=1)
     if normalized_target == "char":
-        table_colors = _get_step4_table_colors(self)
         pending_plan = getattr(self, "_pending_character_balance_plan", None)
         planned_images = max(0, int(getattr(pending_plan, "planned_images", 0) or 0)) if pending_plan is not None else 0
         try:
-            enabled_var.set(planned_images > 0)
-            extra_var.set(planned_images)
-            sample_var.set(max(1, planned_images))
+            pending_requested_extras = dict(getattr(pending_plan, "requested_extra_by_symbol", {}) or {})
         except Exception:
-            pass
+            pending_requested_extras = {}
+        if pending_plan is not None:
+            try:
+                enabled_var.set(planned_images > 0)
+                extra_var.set(planned_images)
+                sample_var.set(max(1, planned_images))
+            except Exception:
+                pass
         mz_status_var = tk.StringVar(
             value=(
                 (
-                    f"Próg AUTO: {int(getattr(pending_plan, 'target_count', 0) or 0)}. "
-                    f"Niedoreprezentowane: {', '.join(dict(getattr(pending_plan, 'deficit_by_symbol', {}) or {}).keys()) or 'brak'}. "
-                    f"Plan wstępny: +{planned_images} obrazów train."
+                    "Histogram MZ: "
+                    f"{', '.join(f'{key}+{value}' for key, value in sorted(pending_requested_extras.items())) or 'bez ręcznych dodatków'}. "
+                    f"Ustawiono +{planned_images} syntetycznych obrazów train."
                 )
-                if planned_images > 0
+                if planned_images > 0 or pending_requested_extras
                 else (
-                    "Próg AUTO: do policzenia. Niedoreprezentowane klasy i liczba nowych obrazów "
-                    "pojawią się po analizie reprezentacji MZ."
+                    "Nie ustawiono syntetycznego podbicia znaków. Histogram MZ pozwala wskazać, "
+                    "które znaki podnieść syntetycznie."
                 )
             )
         )
         setattr(self, "split_mz_representation_status_var", mz_status_var)
+        count_origin_var = tk.StringVar(value="bez syntetyków")
+        setattr(self, "split_aug_count_origin_var", count_origin_var)
 
         def _open_char_representation_plan():
             try:
@@ -476,27 +510,74 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
             highlightthickness=1,
             highlightbackground=table_colors["border"],
         ).grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 6))
+        tk.Label(
+            plan_frame,
+            text="1. Doreprezentowanie znaków MZ (opcjonalne)",
+            bg=table_colors["panel"],
+            fg=table_colors["accent"],
+            font=("Segoe UI Semibold", 9),
+            anchor=tk.W,
+        ).grid(row=1, column=0, columnspan=4, sticky=tk.EW, pady=(2, 2))
         ttk.Button(
             plan_frame,
-            text="Analizuj / przelicz reprezentację MZ",
+            text="Sprawdź niedoreprezentowane znaki",
             command=_open_char_representation_plan,
-        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=2)
-    else:
-        ttk.Checkbutton(
+        ).grid(row=2, column=0, sticky=tk.W, pady=(0, 6))
+        ttk.Label(
             plan_frame,
-            text="W\u0142\u0105cz syntetyczne powi\u0119kszenie train",
-            variable=enabled_var,
-        ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4))
-        ttk.Label(plan_frame, text="Generuj dodatkowo").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
-        ttk.Spinbox(plan_frame, from_=0, to=100000, textvariable=extra_var, width=9).grid(row=1, column=1, sticky=tk.W, pady=2)
-        ttk.Label(plan_frame, text="obraz\u00f3w train").grid(row=1, column=2, sticky=tk.W, padx=(8, 0), pady=2)
+            text="Histogram może policzyć propozycję. Ten krok można pominąć.",
+            foreground=table_colors["muted"],
+            wraplength=520,
+            justify=tk.LEFT,
+        ).grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=(10, 0), pady=(0, 6))
+        tk.Label(
+            plan_frame,
+            text="2. Liczba syntetyków train",
+            bg=table_colors["panel"],
+            fg=table_colors["accent"],
+            font=("Segoe UI Semibold", 9),
+            anchor=tk.W,
+        ).grid(row=3, column=0, columnspan=4, sticky=tk.EW, pady=(4, 2))
+        ttk.Label(plan_frame, text="Generuj dodatkowo").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        ttk.Spinbox(plan_frame, from_=0, to=100000, textvariable=extra_var, width=9).grid(row=4, column=1, sticky=tk.W, pady=2)
+        ttk.Label(plan_frame, text="syntetycznych obrazów train").grid(row=4, column=2, sticky=tk.W, padx=(8, 0), pady=2)
+        tk.Label(
+            plan_frame,
+            textvariable=count_origin_var,
+            anchor=tk.CENTER,
+            padx=10,
+            pady=4,
+            bg=table_colors["header"],
+            fg=table_colors["accent"],
+            font=("Segoe UI Semibold", 8),
+            highlightthickness=1,
+            highlightbackground=table_colors["border"],
+        ).grid(row=4, column=3, sticky=tk.W, padx=(12, 0), pady=2)
+        ttk.Label(
+            plan_frame,
+            text="Wpisz 0, aby pominąć syntetyki. Jeśli zmienisz wartość po histogramie, traktujemy ją jako ręczną korektę.",
+            foreground=table_colors["muted"],
+            wraplength=620,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(2, 4))
+    else:
+        ttk.Label(plan_frame, text="Generuj dodatkowo").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        ttk.Spinbox(plan_frame, from_=0, to=100000, textvariable=extra_var, width=9).grid(row=0, column=1, sticky=tk.W, pady=2)
+        ttk.Label(plan_frame, text="syntetycznych obrazów train").grid(row=0, column=2, sticky=tk.W, padx=(8, 0), pady=2)
+        ttk.Label(
+            plan_frame,
+            text="Wpisz 0, aby utworzyć wariant bez syntetycznego powiększenia train.",
+            foreground=table_colors["muted"],
+            wraplength=620,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(2, 4))
     if normalized_target == "plate":
         ttk.Label(plan_frame, text="Klasa YOLO").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=(4, 0))
         ttk.Entry(plan_frame, textvariable=class_var, width=18).grid(row=2, column=1, sticky=tk.W, pady=(4, 0))
         ttk.Label(
             plan_frame,
             text="Etykieta klasy zapisana w data.yaml, np. plate albo pl.",
-            foreground="#6b7280",
+            foreground=table_colors["muted"],
         ).grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(2, 0))
 
     balance_vars = {
@@ -552,18 +633,64 @@ def _build_step4_augmentation_controls(self, parent, *, target: str):
         ).grid(row=1, column=column, sticky=tk.EW)
 
     summary_var = tk.StringVar(
-        value="Powiększenie syntetyczne jest wyłączone. Dataset powstanie tylko z materiału źródłowego projektu."
+        value="Syntetyki: 0. Dataset powstanie tylko z materiału źródłowego projektu."
     )
     setattr(self, f"{prefix}_aug_summary_var", summary_var)
-    ttk.Label(frame, textvariable=summary_var, justify=tk.LEFT, wraplength=520).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(0, 6))
+    summary_label = tk.Label(
+        frame,
+        textvariable=summary_var,
+        justify=tk.LEFT,
+        wraplength=700,
+        anchor=tk.W,
+        bg=table_colors["row_alt"],
+        fg=table_colors["fg"],
+        padx=10,
+        pady=8,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=table_colors["border"],
+        highlightcolor=table_colors["border"],
+    )
+    summary_label.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=(0, 8))
+    summary_label.bind(
+        "<Configure>",
+        lambda event, label=summary_label: (
+            label.configure(wraplength=max(360, int(event.width) - 24))
+            if int(float(label.cget("wraplength") or 0)) != max(360, int(event.width) - 24)
+            else None
+        ),
+    )
     configure_aug_button = ttk.Button(
         plan_frame,
         text="Skonfiguruj powiększenie",
         command=lambda t=normalized_target: self._open_step4_augmentation_modal(t),
     )
-    configure_aug_button.grid(row=1, column=3, sticky=tk.W, padx=(12, 0), pady=2)
-    configure_aug_button.configure(text="Edytuj efekty bazowe")
-    configure_aug_button.configure(state=(tk.NORMAL if normalized_target == "char" or (bool(enabled_var.get()) and int(extra_var.get() or 0) > 0) else tk.DISABLED))
+    if normalized_target == "char":
+        tk.Label(
+            plan_frame,
+            text="3. Efekty syntetyków",
+            bg=table_colors["panel"],
+            fg=table_colors["accent"],
+            font=("Segoe UI Semibold", 9),
+            anchor=tk.W,
+        ).grid(row=6, column=0, columnspan=4, sticky=tk.EW, pady=(6, 2))
+        configure_aug_button.grid(row=7, column=0, sticky=tk.W, pady=(0, 2))
+        ttk.Label(
+            plan_frame,
+            text="Efekty zostaną użyte tylko dla syntetycznych obrazów train.",
+            foreground=table_colors["muted"],
+            wraplength=520,
+            justify=tk.LEFT,
+        ).grid(row=7, column=1, columnspan=3, sticky=tk.W, padx=(10, 0), pady=(0, 2))
+        configure_aug_button.configure(text="Edytuj efekty syntetyków")
+    else:
+        configure_aug_button.grid(row=0, column=3, sticky=tk.W, padx=(12, 0), pady=2)
+        configure_aug_button.configure(text="Edytuj efekty bazowe")
+    try:
+        initial_extra_count = int(float(extra_var.get() or 0))
+    except Exception:
+        initial_extra_count = 0
+    configure_aug_button.configure(state=(tk.NORMAL if initial_extra_count > 0 else tk.DISABLED))
     setattr(self, f"{prefix}_aug_configure_button", configure_aug_button)
     frame.columnconfigure(0, weight=1)
     try:

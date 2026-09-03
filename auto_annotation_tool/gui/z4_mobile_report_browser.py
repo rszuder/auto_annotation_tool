@@ -304,6 +304,182 @@ class _TreeTable:
             self.tree.insert("", tk.END, iid=f"row_{index}", values=tuple(str(value) for value in values), tags=(tag,) if tag else ())
 
 
+class _WrappedLabelTable:
+    def __init__(
+        self,
+        parent,
+        columns: tuple[str, ...],
+        headings: tuple[str, ...],
+        widths: tuple[int, ...],
+        *,
+        palette: dict[str, str],
+        height: int = 10,
+    ):
+        self._columns = tuple(columns)
+        self._widths = tuple(max(1, int(width)) for width in widths)
+        self._total_width = max(1, sum(self._widths))
+        self._palette = dict(palette or {})
+        self._panel = self._palette.get("panel", "#252526")
+        self._bg = self._palette.get("bg", self._panel)
+        self._fg = self._palette.get("fg", "#f3f3f3")
+        self._muted = self._palette.get("muted", "#c7c7c7")
+        self._border = self._palette.get("border", "#4a4a4a")
+        self._accent = self._palette.get("accent", "#4f8de3")
+        self._row_labels: list[tk.Label] = []
+
+        self.shell = tk.Frame(parent, bg=self._panel)
+        self.shell.grid_columnconfigure(0, weight=1)
+        self.shell.grid_rowconfigure(1, weight=1)
+
+        header_bg = blend_hex_colors(self._panel, self._accent, 0.08)
+        self._header = tk.Frame(self.shell, bg=header_bg)
+        self._header.grid(row=0, column=0, sticky="ew", pady=(0, 3))
+        self._header_labels: list[tk.Label] = []
+
+        for index, column in enumerate(self._columns):
+            weight = self._widths[index] if index < len(self._widths) else 1
+            self._header.grid_columnconfigure(index, weight=weight, uniform="mobile_report_wrapped")
+            label = tk.Label(
+                self._header,
+                text=headings[index] if index < len(headings) else column,
+                bg=header_bg,
+                fg=self._fg,
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=6,
+                anchor=tk.W,
+                justify=tk.LEFT,
+            )
+            label.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 1, 0))
+            self._header_labels.append(label)
+
+        self._canvas = tk.Canvas(
+            self.shell,
+            bg=self._panel,
+            highlightthickness=1,
+            highlightbackground=blend_hex_colors(self._border, self._panel, 0.28),
+            bd=0,
+            height=max(120, int(height) * 30),
+        )
+        self._scroll = WebSlimScrollbar(
+            self.shell,
+            orient=tk.VERTICAL,
+            command=self._canvas.yview,
+            track_color=self._palette.get("scrollbar_track", self._panel),
+            thumb_color=self._palette.get("scrollbar_thumb", self._accent),
+            thumb_hover_color=self._palette.get("scrollbar_thumb_hover", self._palette.get("accent_hover", self._accent)),
+        )
+        self._canvas.configure(yscrollcommand=self._scroll.set)
+        self._canvas.grid(row=1, column=0, sticky="nsew")
+        self._scroll.grid(row=1, column=1, sticky="ns")
+
+        self._content = tk.Frame(self._canvas, bg=self._panel)
+        self._window_id = self._canvas.create_window((0, 0), window=self._content, anchor=tk.NW)
+        for index, width in enumerate(self._widths):
+            self._content.grid_columnconfigure(index, weight=width, uniform="mobile_report_wrapped")
+
+        self._canvas.bind("<Configure>", self._sync_width, add="+")
+        self._content.bind("<Configure>", self._sync_scrollregion, add="+")
+        self._bind_mousewheel(self._canvas)
+        self._bind_mousewheel(self._content)
+
+    def _tag_color(self, tag: str) -> str:
+        return {
+            "success": self._palette.get("success", "#2ecc71"),
+            "warning": self._palette.get("warning", "#f1c40f"),
+            "error": self._palette.get("error", "#e74c3c"),
+            "muted": self._palette.get("muted", "#c7c7c7"),
+        }.get(str(tag or ""), self._fg)
+
+    def _bind_mousewheel(self, widget) -> None:
+        try:
+            widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+            widget.bind("<Button-4>", self._on_mousewheel, add="+")
+            widget.bind("<Button-5>", self._on_mousewheel, add="+")
+        except Exception:
+            pass
+
+    def _on_mousewheel(self, event):
+        try:
+            if getattr(event, "num", None) == 4:
+                units = -3
+            elif getattr(event, "num", None) == 5:
+                units = 3
+            else:
+                units = -max(-6, min(6, int(getattr(event, "delta", 0) / 120))) or 0
+            if units:
+                self._canvas.yview_scroll(units, "units")
+        except Exception:
+            pass
+        return "break"
+
+    def _sync_scrollregion(self, _event=None) -> None:
+        try:
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _column_wraplengths(self, width: int) -> list[int]:
+        content_width = max(120, int(width or self._canvas.winfo_width() or 1))
+        return [
+            max(42, int((content_width * (column_width / self._total_width)) - 18))
+            for column_width in self._widths
+        ]
+
+    def _sync_width(self, event=None) -> None:
+        try:
+            width = max(1, int(getattr(event, "width", 0) or self._canvas.winfo_width() or 1))
+            self._canvas.itemconfigure(self._window_id, width=width)
+            wraplengths = self._column_wraplengths(width)
+            for index, label in enumerate(self._header_labels):
+                label.configure(wraplength=wraplengths[index] if index < len(wraplengths) else 90)
+            for index, label in enumerate(self._row_labels):
+                column_index = int(getattr(label, "_mobile_report_column_index", 0) or 0)
+                label.configure(wraplength=wraplengths[column_index] if column_index < len(wraplengths) else 90)
+            self._sync_scrollregion()
+            self._canvas.after_idle(self._sync_scrollregion)
+        except Exception:
+            pass
+
+    def set_rows(self, rows: list[tuple[Any, ...]] | tuple[tuple[Any, ...], ...]) -> None:
+        for child in self._content.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        self._row_labels = []
+
+        for row_index, row in enumerate(rows or []):
+            tag = ""
+            values = row
+            if row and isinstance(row[-1], dict):
+                options = row[-1]
+                values = row[:-1]
+                tag = str(options.get("tag") or "")
+            row_bg = self._panel if row_index % 2 == 0 else blend_hex_colors(self._panel, self._bg, 0.28)
+            fg = self._tag_color(tag)
+            for column_index, _column in enumerate(self._columns):
+                value = values[column_index] if column_index < len(values) else ""
+                label = tk.Label(
+                    self._content,
+                    text=str(value if value not in (None, "") else "-"),
+                    bg=row_bg,
+                    fg=fg,
+                    font=("Segoe UI", 8),
+                    padx=8,
+                    pady=7,
+                    anchor=tk.NW,
+                    justify=tk.LEFT,
+                    relief=tk.FLAT,
+                )
+                setattr(label, "_mobile_report_column_index", column_index)
+                label.grid(row=row_index, column=column_index, sticky="nsew", padx=(0 if column_index == 0 else 1, 0), pady=(0, 1))
+                self._bind_mousewheel(label)
+                self._row_labels.append(label)
+        self._sync_width()
+        self._canvas.after_idle(self._sync_scrollregion)
+
+
 class MobileReportBrowser:
     def __init__(self, owner, parent=None):
         self.owner = owner
@@ -332,6 +508,13 @@ class MobileReportBrowser:
         self.window.configure(bg=self.bg)
         self.window.title("Raporty z telefonu")
         self._configure_window()
+        try:
+            app_obj = getattr(owner, "app", None)
+            register = getattr(app_obj, "_register_recoverable_toplevel", None)
+            if callable(register):
+                register(self.window, attr_name="_mobile_report_browser_dialog")
+        except Exception:
+            pass
         self._build()
         self._refresh_report_list()
         try:
@@ -376,6 +559,12 @@ class MobileReportBrowser:
         try:
             if getattr(self.owner, "_mobile_report_browser_dialog", None) is self.window:
                 setattr(self.owner, "_mobile_report_browser_dialog", None)
+        except Exception:
+            pass
+        try:
+            app_obj = getattr(self.owner, "app", None)
+            if app_obj is not None and getattr(app_obj, "_mobile_report_browser_dialog", None) is self.window:
+                setattr(app_obj, "_mobile_report_browser_dialog", None)
         except Exception:
             pass
 
@@ -541,7 +730,7 @@ class MobileReportBrowser:
             return frame
 
         summary = tab_frame()
-        self.summary_table = _TreeTable(
+        self.summary_table = _WrappedLabelTable(
             summary,
             ("Pole", "Wartość", "Opis"),
             ("Pole", "Wartość", "Opis"),
@@ -553,7 +742,7 @@ class MobileReportBrowser:
         self.notebook.add(summary, text="Podsumowanie")
 
         comparison = tab_frame()
-        self.comparison_table = _TreeTable(
+        self.comparison_table = _WrappedLabelTable(
             comparison,
             ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
             ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
@@ -565,7 +754,7 @@ class MobileReportBrowser:
         self.notebook.add(comparison, text="Porównywalność")
 
         config = tab_frame()
-        self.config_table = _TreeTable(
+        self.config_table = _WrappedLabelTable(
             config,
             ("Sekcja", "Wartość", "Opis"),
             ("Sekcja", "Wartość", "Opis"),
@@ -594,7 +783,7 @@ class MobileReportBrowser:
         self.notebook.add(latency, text="Opóźnienia")
 
         artifacts = tab_frame()
-        self.artifacts_table = _TreeTable(
+        self.artifacts_table = _WrappedLabelTable(
             artifacts,
             ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
             ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
@@ -606,7 +795,7 @@ class MobileReportBrowser:
         self.notebook.add(artifacts, text="Artefakty")
 
         quality = tab_frame()
-        self.quality_table = _TreeTable(
+        self.quality_table = _WrappedLabelTable(
             quality,
             ("Metryka", "Wartość", "Komentarz"),
             ("Metryka", "Wartość", "Komentarz"),
@@ -621,7 +810,7 @@ class MobileReportBrowser:
         diagnostics.grid_columnconfigure(0, weight=1)
         diagnostics.grid_rowconfigure(0, weight=1)
         diagnostics.grid_rowconfigure(1, weight=1)
-        self.diagnostics_table = _TreeTable(
+        self.diagnostics_table = _WrappedLabelTable(
             diagnostics,
             ("Obszar", "Wartość", "Opis"),
             ("Obszar", "Wartość", "Opis"),
@@ -1611,6 +1800,13 @@ def open_mobile_report_browser(owner, parent=None):
     try:
         existing = getattr(owner, "_mobile_report_browser_dialog", None)
         if existing is not None and existing.winfo_exists():
+            try:
+                app_obj = getattr(owner, "app", None)
+                register = getattr(app_obj, "_register_recoverable_toplevel", None)
+                if callable(register):
+                    register(existing, attr_name="_mobile_report_browser_dialog")
+            except Exception:
+                pass
             existing.deiconify()
             existing.lift()
             existing.focus_force()

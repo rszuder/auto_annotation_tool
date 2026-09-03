@@ -203,6 +203,47 @@ def _on_main_nb_tab_changed(self, event=None):
     except Exception:
         selected_tab = ""
 
+    campaign_context = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    if campaign_context:
+        force_pz2_entry = bool(getattr(self, "_campaign_force_pz2_entry", False))
+        force_pz3_entry = bool(getattr(self, "_campaign_force_pz3_entry", False))
+        if selected_tab == str(getattr(self, "tab_detect", "")) and not (force_pz2_entry or force_pz3_entry):
+            try:
+                self._set_subtab_state(self.tab_extract, "normal")
+                self._set_subtab_state(self.tab_detect, "disabled")
+                self._set_subtab_state(self.tab_dataset, "disabled")
+                self.main_nb.select(str(self.tab_extract))
+            except Exception:
+                pass
+            try:
+                self.app.update_status(
+                    "PZ2 w kampanii otwieramy przez modal pracy bramki T05. Najpierw zatwierdź PZ1 i wybierz kolejny krok w T05.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+        if selected_tab == str(getattr(self, "tab_dataset", "")) and not force_pz3_entry:
+            try:
+                fallback = self.tab_detect if force_pz2_entry else self.tab_extract
+                self._set_subtab_state(self.tab_dataset, "disabled")
+                if fallback is self.tab_detect:
+                    self._set_subtab_state(self.tab_detect, "normal")
+                else:
+                    self._set_subtab_state(self.tab_extract, "normal")
+                    self._set_subtab_state(self.tab_detect, "disabled")
+                self.main_nb.select(str(fallback))
+            except Exception:
+                pass
+            try:
+                self.app.update_status(
+                    "PZ3 w kampanii otwieramy przez modal pracy bramki T05, po jawnie zakończonym kroku PZ2.",
+                    "warning",
+                )
+            except Exception:
+                pass
+            return
+
     if selected_tab == str(getattr(self, "tab_dataset", "")):
         try:
             can_open_dataset = bool(self._can_open_step3_dataset_from_current_context())
