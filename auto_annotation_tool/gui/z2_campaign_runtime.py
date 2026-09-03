@@ -82,6 +82,7 @@ from .z2_free_mode_flow import (
 from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
+    build_campaign_gate_focus_state,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
     campaign_gate_id_for_edge,
     campaign_visible_gate_id,
@@ -3709,32 +3710,12 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     except Exception:
         missing_next_quality = 0
 
-    def _short_quality_goal_label(label: str) -> str:
-        normalized = str(label or "").strip().upper()
-        if normalized == "BARDZO DOBRY":
-            return "B. DOBRY"
-        if normalized == "PRZECIĘTNY":
-            return "PRZEC."
-        return normalized or "PROGU"
-
-    if missing_to_open > 0:
-        missing_focus_label = "DO MIN."
-        missing_focus_row_label = "Do otwarcia bramki brakuje"
-        missing_focus_value = int(missing_to_open)
-        missing_focus_text = f"{missing_to_open} tablic zatwierdzonych [OK]"
-        missing_focus_tone = "warning"
-    elif missing_next_quality > 0 and next_quality_label:
-        missing_focus_label = f"DO {_short_quality_goal_label(next_quality_label)}"
-        missing_focus_row_label = f"Do progu {next_quality_label} brakuje"
-        missing_focus_value = int(missing_next_quality)
-        missing_focus_text = f"{missing_next_quality} tablic zatwierdzonych [OK]"
-        missing_focus_tone = "warning"
-    else:
-        missing_focus_label = "PROGI"
-        missing_focus_row_label = "Progi jakości"
-        missing_focus_value = 0
-        missing_focus_text = "Osiągnięto najwyższy próg jakości"
-        missing_focus_tone = "success"
+    focus_state = build_campaign_gate_focus_state(missing_to_open, quality_info)
+    missing_focus_label = str(focus_state.get("label") or "DO MIN.")
+    missing_focus_row_label = str(focus_state.get("row_label") or "Do otwarcia bramki brakuje")
+    missing_focus_value = int(focus_state.get("value") or 0)
+    missing_focus_text = str(focus_state.get("text") or "")
+    missing_focus_tone = str(focus_state.get("tone") or "warning")
     if ready:
         if graph_gate_is_t05_repair_from_t07:
             message = "Materiał tablic jest gotowy; wróć do bramki T07."

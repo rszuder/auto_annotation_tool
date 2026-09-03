@@ -82,6 +82,7 @@ from .z2_free_mode_flow import (
 from .z2_shared_ui import (
     apply_z2_workflow_cta_ui as dispatch_apply_z2_workflow_cta_ui,
     apply_z2_workflow_left_layout as dispatch_apply_z2_workflow_left_layout,
+    build_campaign_gate_focus_state,
     build_z2_workflow_base_context as dispatch_build_z2_workflow_base_context,
     campaign_gate_id_for_edge,
     campaign_visible_gate_id,
@@ -615,32 +616,12 @@ def _force_render_campaign_graph_t06_right_panel(
     except Exception:
         missing_next_quality = 0
 
-    def _short_quality_goal_label(label: str) -> str:
-        normalized = str(label or "").strip().upper()
-        if normalized == "BARDZO DOBRY":
-            return "B. DOBRY"
-        if normalized == "PRZECIĘTNY":
-            return "PRZEC."
-        return normalized or "PROGU"
-
-    if missing_plates > 0:
-        missing_focus_label = "DO MIN."
-        missing_focus_row_label = "Do otwarcia bramki brakuje"
-        missing_focus_value = missing_plates
-        missing_focus_text = f"{missing_plates} tablic zatwierdzonych [OK]"
-        missing_focus_tone = "warning"
-    elif missing_next_quality > 0 and next_quality_label:
-        missing_focus_label = f"DO {_short_quality_goal_label(next_quality_label)}"
-        missing_focus_row_label = f"Do progu {next_quality_label} brakuje"
-        missing_focus_value = missing_next_quality
-        missing_focus_text = f"{missing_next_quality} tablic zatwierdzonych [OK]"
-        missing_focus_tone = "warning"
-    else:
-        missing_focus_label = "PROGI"
-        missing_focus_row_label = "Progi jakości"
-        missing_focus_value = 0
-        missing_focus_text = "Osiągnięto najwyższy próg jakości"
-        missing_focus_tone = "success"
+    focus_state = build_campaign_gate_focus_state(missing_plates, quality_info)
+    missing_focus_label = str(focus_state.get("label") or "DO MIN.")
+    missing_focus_row_label = str(focus_state.get("row_label") or "Do otwarcia bramki brakuje")
+    missing_focus_value = int(focus_state.get("value") or 0)
+    missing_focus_text = str(focus_state.get("text") or "")
+    missing_focus_tone = str(focus_state.get("tone") or "warning")
     _mark_phase("build_rows")
 
     gate_label = str(graph_context.get("graph_gate_label") or CHAR_WORK_GATE_DISPLAY_ID).strip()
@@ -910,9 +891,23 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
     missing_focus_text = str(gate_state.get("missing_focus_text") or "").strip()
     missing_focus_tone = str(gate_state.get("missing_focus_tone") or "").strip().lower()
     if not missing_focus_row_label or not missing_focus_text:
-        missing_focus_row_label = "Do otwarcia bramki brakuje"
-        missing_focus_text = f"{missing_plates} tablic zatwierdzonych [OK]"
-        missing_focus_tone = "success" if missing_plates <= 0 else "warning"
+        try:
+            fallback_quality_info = CONFIG.describe_yolo_pose_dataset_quality(int(effective_approved_plates or 0))
+        except Exception:
+            fallback_quality_info = {}
+        focus_state = build_campaign_gate_focus_state(missing_plates, fallback_quality_info)
+        missing_focus_row_label = str(focus_state.get("row_label") or "Do otwarcia bramki brakuje")
+        missing_focus_text = str(focus_state.get("text") or "")
+        missing_focus_tone = str(focus_state.get("tone") or "warning")
+    elif missing_plates <= 0 and "otwarcia bramki" in missing_focus_row_label.lower():
+        try:
+            fallback_quality_info = CONFIG.describe_yolo_pose_dataset_quality(int(effective_approved_plates or 0))
+        except Exception:
+            fallback_quality_info = {}
+        focus_state = build_campaign_gate_focus_state(0, fallback_quality_info)
+        missing_focus_row_label = str(focus_state.get("row_label") or "Minimum bramki")
+        missing_focus_text = str(focus_state.get("text") or "Spełnione")
+        missing_focus_tone = str(focus_state.get("tone") or "success")
 
     gate_label = str(
         graph_context.get("graph_gate_label")
@@ -1857,12 +1852,10 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
         next_quality_label = str(quality_info.get("next_label", "") or "").strip()
         missing_next_quality = max(0, int(quality_info.get("missing_next", 0) or 0))
-        if missing_next_quality > 0 and next_quality_label:
-            quality_next_text = f"Brakuje {missing_next_quality} tablic do progu {next_quality_label}"
-            quality_next_tone = "warning"
-        else:
-            quality_next_text = "Osiągnięto najwyższy próg jakości"
-            quality_next_tone = "success"
+        quality_goal_state = build_campaign_gate_focus_state(0, quality_info)
+        quality_next_label = str(quality_goal_state.get("row_label") or "Cel jakości")
+        quality_next_text = str(quality_goal_state.get("text") or "MAX")
+        quality_next_tone = str(quality_goal_state.get("tone") or "success")
         approve_hint_title_text = f"Bramka {graph_display_gate_id}" if graph_gate_known else "Bramka grafu"
         approve_hint_text = ""
         approve_hint_table_rows = [
@@ -1895,7 +1888,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 quality_tone,
             ),
             (
-                "Do kolejnego progu",
+                quality_next_label,
                 quality_next_text,
                 quality_next_tone,
             ),
@@ -1924,12 +1917,10 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
         quality_tone = str(quality_info.get("tone", "error") or "error").strip().lower()
         next_quality_label = str(quality_info.get("next_label", "") or "").strip()
         missing_next_quality = max(0, int(quality_info.get("missing_next", 0) or 0))
-        if missing_next_quality > 0 and next_quality_label:
-            quality_next_text = f"Brakuje {missing_next_quality} tablic do progu {next_quality_label}"
-            quality_next_tone = "warning"
-        else:
-            quality_next_text = "Osiągnięto najwyższy próg jakości"
-            quality_next_tone = "success"
+        quality_goal_state = build_campaign_gate_focus_state(0, quality_info)
+        quality_next_label = str(quality_goal_state.get("row_label") or "Cel jakości")
+        quality_next_text = str(quality_goal_state.get("text") or "MAX")
+        quality_next_tone = str(quality_goal_state.get("tone") or "success")
         approve_hint_title_text = f"Bramka {graph_gate_id}" if graph_gate_known else "Bramka grafu"
         approve_hint_text = ""
         approve_hint_table_rows = [
@@ -1972,7 +1963,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 quality_tone,
             ),
             (
-                "Do kolejnego progu",
+                quality_next_label,
                 quality_next_text,
                 quality_next_tone,
             ),
@@ -2254,6 +2245,17 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                     gate_state.get("missing_focus_tone")
                     or ("success" if fallback_missing_plates <= 0 else "warning")
                 ).strip().lower()
+                if fallback_missing_plates <= 0 and "otwarcia bramki" in fallback_missing_row_label.lower():
+                    try:
+                        fallback_quality_info = CONFIG.describe_yolo_pose_dataset_quality(
+                            int(gate_state.get("approved_plates", 0) or 0)
+                        )
+                    except Exception:
+                        fallback_quality_info = {}
+                    focus_state = build_campaign_gate_focus_state(0, fallback_quality_info)
+                    fallback_missing_row_label = str(focus_state.get("row_label") or "Minimum bramki")
+                    fallback_missing_text = str(focus_state.get("text") or "Spełnione")
+                    fallback_missing_tone = str(focus_state.get("tone") or "success")
                 approve_hint_table_rows = [
                     (
                         "Status bramki",

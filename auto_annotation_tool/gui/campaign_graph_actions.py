@@ -510,6 +510,25 @@ def _execute_open_z4(host: Any, _payload: Mapping[str, Any]) -> CampaignGraphAct
     )
 
 
+def _execute_open_z4_training(host: Any, payload: Mapping[str, Any]) -> CampaignGraphActionResult:
+    method = getattr(host, "_step_goto_training", None)
+    if not callable(method):
+        return CampaignGraphActionResult(False, "open_z4", "Brak akcji: _step_goto_training.")
+    preferred_subtab = str(payload.get("preferred_subtab") or payload.get("subtab") or "train").strip().lower()
+    if preferred_subtab not in {"dataset", "train"}:
+        preferred_subtab = "train"
+    try:
+        method(preferred_subtab=preferred_subtab)
+    except Exception as exc:
+        logger.error(f"Nie udaĹ‚o siÄ™ wykonaÄ‡ akcji grafu open_z4: {exc}")
+        return CampaignGraphActionResult(False, "open_z4", "Nie udaĹ‚o siÄ™ otworzyÄ‡ treningu w Z4.")
+    return CampaignGraphActionResult(
+        True,
+        "open_z4",
+        "Z4/PZ2 przekazano do treningu i wyboru wyniku bramki.",
+    )
+
+
 def _execute_open_z4_dataset(host: Any, _payload: Mapping[str, Any]) -> CampaignGraphActionResult:
     return _execute_host_method(
         host,
@@ -614,6 +633,12 @@ def _current_step4_training_finish_ready(host: Any) -> bool:
         return False
     if finish_target and current_target and finish_target != current_target:
         return False
+    selected_model_path = str(finish_state.get("model_path", "") or "").strip()
+    if bool(finish_state.get("selection_confirmed", True)) and selected_model_path:
+        try:
+            return bool(Path(selected_model_path).exists() and Path(selected_model_path).is_file())
+        except Exception:
+            return bool(selected_model_path)
     training_record = _current_iteration_step4_training_record()
     if not training_record:
         return False
@@ -835,7 +860,7 @@ def execute_campaign_graph_action(
         "open_z3": _execute_open_z3,
         "open_z3_detect": _execute_open_z3_detect,
         "approve_step3": _execute_approve_step3,
-        "open_z4": _execute_open_z4,
+        "open_z4": _execute_open_z4_training,
         "open_z4_dataset": _execute_open_z4_dataset,
         "prepare_step4_without_training": _execute_prepare_step4_without_training,
         "approve_step4": _execute_approve_step4,

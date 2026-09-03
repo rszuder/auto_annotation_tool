@@ -84,7 +84,10 @@ def _mark_t06_z3_work_session(
         "closed",
         "complete",
         "completed",
+        "abandoned",
         "paused",
+        "ready_for_pz2",
+        "waiting_for_pz2",
         "ready_for_pz3",
         "waiting_for_pz3",
     }
@@ -119,6 +122,18 @@ def _mark_t06_z3_work_session(
         CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
     except Exception as exc:
         logger.debug(f"Nie udało się zapisać sesji pracy T06/Z3: {exc}")
+
+
+def _invalidate_step3_campaign_ui_caches() -> None:
+    """Drop campaign UI caches after a T05/PZ2/PZ3 contract transition."""
+    try:
+        CAMPAIGN.invalidate_step3_char_source_state_cache()
+    except Exception:
+        pass
+    try:
+        CAMPAIGN.clear_project_iteration_ui_snapshots()
+    except Exception:
+        pass
 
 
 def mark_step3_work_interrupted_on_app_close(host: "CharacterAnnotationTab") -> bool:
@@ -196,10 +211,7 @@ def mark_step3_work_interrupted_on_app_close(host: "CharacterAnnotationTab") -> 
         reason="app_closed_from_z3",
         force=True,
     )
-    try:
-        CAMPAIGN.invalidate_step3_char_source_state_cache()
-    except Exception:
-        pass
+    _invalidate_step3_campaign_ui_caches()
     return True
 
 
@@ -215,6 +227,7 @@ def _mark_t06_contract(
         return
     contract = dict(payload or {})
     contract.setdefault("fulfilled", True)
+    contract.setdefault("project", str(CAMPAIGN.get_active_project_name() or "").strip())
     contract.setdefault("iteration", int(CAMPAIGN.get_current_iteration_num() or 1))
     contract.setdefault("updated_at", datetime.now().isoformat(timespec="seconds"))
     try:
@@ -603,6 +616,138 @@ def return_to_wizard_for_step3_rework(host: "CharacterAnnotationTab") -> None:
         logger.debug(f"Nie udało się wrócić do grafu dla kroku 3: {e}")
 
 
+def _step3_preview_ready_for_pz2(host: "CharacterAnnotationTab") -> bool:
+    try:
+        return bool(host.can_restore_step3_substep(2))
+    except Exception:
+        pass
+
+    preview_dir_raw = ""
+    try:
+        preview_dir_raw = str(host.preview_dir_var.get() or "").strip()
+    except Exception:
+        preview_dir_raw = ""
+    if not preview_dir_raw:
+        try:
+            preview_dir_raw = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
+        except Exception:
+            preview_dir_raw = ""
+    if not preview_dir_raw:
+        return False
+    try:
+        return bool(
+            host._is_usable_step3_preview_dir(
+                preview_dir_raw,
+                require_plates=True,
+                check_campaign_inflated=False,
+            )
+        )
+    except TypeError:
+        try:
+            return bool(host._is_usable_step3_preview_dir(preview_dir_raw, require_plates=True))
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _request_t05_work_modal_on_campaign_graph(
+    host: "CharacterAnnotationTab",
+    *,
+    reason: str = "",
+) -> None:
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+    except Exception:
+        campaign_tab = None
+    if campaign_tab is None:
+        return
+    try:
+        campaign_tab._pending_gate_action_modal_edge_key = "e3_to_e4"
+        campaign_tab._pending_gate_action_modal_reason = str(reason or "step3_return_to_t05_work").strip()
+        campaign_tab._pending_gate_action_modal_attempts = 12
+        campaign_tab._campaign_graph_selected_edge_key = "e3_to_e4"
+        if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
+            CAMPAIGN.set_graph_selected_edge_key("e3_to_e4")
+    except Exception:
+        pass
+
+
+def return_to_t05_work_after_step3_pz1(host: "CharacterAnnotationTab") -> None:
+    """Finish campaign PZ1 and hand the next choice back to the T05 work modal."""
+    try:
+        host._hide_campaign_detect_splash()
+    except Exception:
+        pass
+    try:
+        host._cancel_preview_char_label_interaction()
+    except Exception:
+        pass
+
+    ready_for_pz2 = _step3_preview_ready_for_pz2(host)
+    try:
+        CAMPAIGN.set_current_step(3)
+        CAMPAIGN.set_step3_substep(1)
+        CAMPAIGN.set_step3_stage1_done(bool(ready_for_pz2))
+        CAMPAIGN.set_step3_stage2_done(False)
+        CAMPAIGN.set_step3_pending()
+    except Exception as exc:
+        logger.debug(f"Nie udało się zapisać stanu PZ1 przed powrotem do T05: {exc}")
+
+    try:
+        host._campaign_force_pz2_entry = False
+        host._campaign_force_pz3_entry = False
+        host._campaign_force_detect_entry = False
+        host._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+
+    try:
+        _mark_t06_z3_work_session(
+            host,
+            state="ready_for_pz2" if ready_for_pz2 else "waiting_for_pz2",
+            substep=1,
+            reason="pz1_ready_return_to_t05_work" if ready_for_pz2 else "pz1_return_to_t05_without_preview",
+            force=True,
+        )
+    except Exception:
+        pass
+    _invalidate_step3_campaign_ui_caches()
+
+    _request_t05_work_modal_on_campaign_graph(
+        host,
+        reason="pz1_ready_return_to_t05_work" if ready_for_pz2 else "pz1_return_to_t05_without_preview",
+    )
+
+    try:
+        campaign_tab = host.app.tabs.get("campaign")
+        if campaign_tab:
+            try:
+                campaign_tab.request_wizard_stage_focus(step_num=3)
+            except Exception:
+                pass
+            campaign_tab._rebuild_roadmap_ui()
+            campaign_tab._refresh_dashboard()
+    except Exception as exc:
+        logger.debug(f"Nie udało się odświeżyć grafu po PZ1: {exc}")
+
+    try:
+        host.app.open_controlled_tab("campaign")
+        host.app.update_campaign_tab_access()
+        if ready_for_pz2:
+            host.app.update_status(
+                f"PZ1 jest zatwierdzone. W pracy bramki {CHAR_WORK_GATE_DISPLAY_ID} wybierz kolejny krok: PZ2.",
+                "success",
+            )
+        else:
+            host.app.update_status(
+                f"PZ1 nie ma jeszcze gotowego zestawu tablic. Wróć do pracy bramki {CHAR_WORK_GATE_DISPLAY_ID}.",
+                "warning",
+            )
+    except Exception as exc:
+        logger.debug(f"Nie udało się wrócić do grafu po PZ1: {exc}")
+
+
 def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
     try:
         host._hide_campaign_detect_splash()
@@ -659,6 +804,15 @@ def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
         pass
 
     try:
+        host._campaign_force_pz2_entry = False
+        host._campaign_force_pz3_entry = False
+        host._campaign_force_detect_entry = False
+        host._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+    _invalidate_step3_campaign_ui_caches()
+
+    try:
         campaign_tab = host.app.tabs.get("campaign")
         if campaign_tab:
             try:
@@ -712,6 +866,15 @@ def return_step3_result_to_wizard(host: "CharacterAnnotationTab", summary: dict)
             f"Wracasz do grafu w trybie poprawy pracy {CHAR_WORK_GATE_DISPLAY_ID}."
         )
         status_kind = "warning"
+
+    try:
+        host._campaign_force_pz2_entry = False
+        host._campaign_force_pz3_entry = False
+        host._campaign_force_detect_entry = False
+        host._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+    _invalidate_step3_campaign_ui_caches()
 
     try:
         campaign_tab = host.app.tabs.get("campaign")
@@ -1399,7 +1562,7 @@ def open_campaign_step3_entry(
             except Exception:
                 pass
             try:
-                host.go_to_substep_3()
+                host.go_to_substep_3(force=True)
                 _refresh_forced_pz3_dataset_surface()
             except Exception as exc:
                 logger.debug(f"Nie udalo sie wymusic wejscia T06 do PZ3: {exc}")
@@ -1422,7 +1585,7 @@ def open_campaign_step3_entry(
                             CAMPAIGN.set_step3_stage2_done(True)
                         except Exception:
                             pass
-                        host.go_to_substep_3()
+                        host.go_to_substep_3(force=True)
                         _refresh_forced_pz3_dataset_surface()
                     elif host.can_restore_step3_substep(2):
                         host.go_to_substep_2(force=True)
@@ -1497,6 +1660,22 @@ def auto_progress_campaign_step3_entry(
     host: "CharacterAnnotationTab",
     preferred_source_context: dict | None = None,
 ) -> dict:
+    source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
+    try:
+        target_substep_hint = str(
+            source_context.get("target_substep")
+            or source_context.get("graph_target_substep")
+            or source_context.get("preferred_substep")
+            or ""
+        ).strip().lower()
+    except Exception:
+        target_substep_hint = ""
+    explicit_pz2_entry = bool(
+        source_context.get("force_pz2")
+        or getattr(host, "_campaign_force_pz2_entry", False)
+        or target_substep_hint in {"2", "detect", "pz2", "z3_pz2"}
+    )
+
     plan = get_campaign_step3_entry_flow_view_model(
         host,
         preferred_source_context=preferred_source_context,
@@ -1559,7 +1738,7 @@ def auto_progress_campaign_step3_entry(
         try:
             if hasattr(host.app, "update_status"):
                 host.app.update_status(
-                    "Przygotowuję tablice dla Z3. Wyodrębnianie uruchomi się automatycznie, a po nim otworzę PZ2.",
+                    "Przygotowuję tablice dla Z3. Po wyodrębnieniu wrócisz do pracy bramki T05 i wybierzesz kolejny krok.",
                     "info",
                 )
         except Exception:
@@ -1586,6 +1765,23 @@ def auto_progress_campaign_step3_entry(
 
     target_substep = int(getattr(plan, "target_substep", 0) or 0)
     if mode == "open_detect" or target_substep == 2:
+        if not explicit_pz2_entry:
+            try:
+                host._set_extraction_status(
+                    "PZ1 jest gotowe. PZ2 otwieramy teraz wyłącznie przez modal pracy bramki T05.",
+                    "success",
+                )
+            except Exception:
+                pass
+            try:
+                if hasattr(host.app, "update_status"):
+                    host.app.update_status(
+                        "PZ1 jest gotowe. W pracy bramki T05 wybierz PZ2 jako następny krok.",
+                        "info",
+                    )
+            except Exception:
+                pass
+            return result
         try:
             host._set_extraction_status(
                 "Wyodrębnione tablice są już gotowe. Otwieram od razu PZ2 do pracy nad znakami.",
@@ -2279,6 +2475,8 @@ def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = Fa
         btn = getattr(host, "btn_to_detect", None)
         if btn is not None and str(btn.cget("state")) != "normal":
             return
+        return_to_t05_work_after_step3_pz1(host)
+        return
     else:
         try:
             host._set_button_state("btn_to_detect", True)
@@ -2399,7 +2597,7 @@ def go_to_substep_2_campaign(host: "CharacterAnnotationTab", *, force: bool = Fa
             pass
 
 
-def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
+def go_to_substep_3_campaign(host: "CharacterAnnotationTab", *, force: bool = False):
     try:
         host._hide_campaign_detect_splash()
     except Exception:
@@ -2408,6 +2606,10 @@ def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
         host._cancel_preview_char_label_interaction()
     except Exception:
         pass
+    if not force:
+        _request_t05_work_modal_on_campaign_graph(host, reason="pz2_direct_pz3_blocked_return_to_t05")
+        return_to_wizard_from_step3_pz2(host)
+        return
     try:
         if not bool(host._can_open_step3_dataset_from_current_context()):
             host._set_button_state("btn_to_dataset", False)
@@ -2424,7 +2626,13 @@ def go_to_substep_3_campaign(host: "CharacterAnnotationTab"):
         pass
     btn = getattr(host, "btn_to_dataset", None)
     if btn is not None and str(btn.cget("state")) != "normal":
-        return
+        if force:
+            try:
+                host._set_button_state("btn_to_dataset", True)
+            except Exception:
+                pass
+        else:
+            return
 
     try:
         host._restore_preview_context_from_project(require_plates=True)
@@ -2530,7 +2738,25 @@ def persist_step3_progress(host: "CharacterAnnotationTab"):
         current_substep = 1
 
     CAMPAIGN.set_step3_substep(current_substep)
-    _mark_t06_z3_work_session(host, state="active", substep=current_substep, reason="persist_progress", force=True)
+    preserve_t05_session = False
+    try:
+        session = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_work_session") or {})
+        session_state = str(session.get("state") or "").strip().lower()
+        session_gate = str(session.get("working_gate_id") or "").strip().upper()
+        session_area = str(session.get("work_area") or "").strip().lower()
+        if session_gate in CHAR_WORK_GATE_SESSION_IDS and session_area == "z3":
+            if session_state in {"ready_for_pz2", "waiting_for_pz2"} and current_substep <= 1:
+                preserve_t05_session = True
+            elif (
+                session_state in {"resolved", "closed", "complete", "completed"}
+                and current_substep >= 3
+                and _read_ready_step3_export_summary(host)
+            ):
+                preserve_t05_session = True
+    except Exception:
+        preserve_t05_session = False
+    if not preserve_t05_session:
+        _mark_t06_z3_work_session(host, state="active", substep=current_substep, reason="persist_progress", force=True)
 
     stage1_done = False
     stage2_done = False
@@ -2570,9 +2796,12 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
     stage1_done = CAMPAIGN.is_step3_stage1_done()
     stage2_done = CAMPAIGN.is_step3_stage2_done()
     force_detect_entry = bool(getattr(host, "_campaign_force_detect_entry", False))
+    force_dataset_entry = bool(getattr(host, "_campaign_force_pz3_entry", False))
+    gate_forced_entry = bool(force_detect_entry or force_dataset_entry)
     hold_pz2_after_reextract = _campaign_step3_hold_pz2_after_reextract(host)
     if hold_pz2_after_reextract:
         force_detect_entry = True
+        gate_forced_entry = True
         stage2_done = False
 
     try:
@@ -2633,22 +2862,28 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
         pass
 
     try:
-        if force_detect_entry and saved_substep >= 3 and can_restore_substep_2:
-            saved_substep = 2
-        if saved_substep < 2 and can_restore_substep_2:
-            saved_substep = 2
-        if hold_pz2_after_reextract and saved_substep >= 3:
-            saved_substep = 2
-        if (
-            not force_detect_entry
-            and not hold_pz2_after_reextract
-            and saved_substep < 3
-            and can_restore_substep_3
-        ):
-            saved_substep = 3
+        if not gate_forced_entry and not hold_pz2_after_reextract:
+            saved_substep = 1
+        else:
+            if force_detect_entry and saved_substep >= 3 and can_restore_substep_2:
+                saved_substep = 2
+            if saved_substep < 2 and can_restore_substep_2:
+                saved_substep = 2
+            if hold_pz2_after_reextract and saved_substep >= 3:
+                saved_substep = 2
+            if (
+                force_dataset_entry
+                and not force_detect_entry
+                and not hold_pz2_after_reextract
+                and saved_substep < 3
+                and can_restore_substep_3
+            ):
+                saved_substep = 3
     except Exception:
         pass
-    if saved_substep == 2:
+    if not gate_forced_entry and not hold_pz2_after_reextract:
+        can_restore_saved_substep = True
+    elif saved_substep == 2:
         can_restore_saved_substep = can_restore_substep_2
     elif saved_substep >= 3:
         can_restore_saved_substep = can_restore_substep_3
@@ -2667,8 +2902,13 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
         except Exception:
             pass
 
-    host._set_button_state("btn_to_detect", stage1_done)
-    host._set_button_state("btn_to_dataset", stage2_done)
+    display_stage1_done = bool(stage1_done)
+    display_stage2_done = bool(stage2_done)
+    if not gate_forced_entry and not hold_pz2_after_reextract:
+        display_stage2_done = False
+
+    host._set_button_state("btn_to_detect", display_stage1_done)
+    host._set_button_state("btn_to_dataset", display_stage2_done)
 
     if saved_substep <= 1:
         host._set_subtab_state(host.tab_extract, "normal")
@@ -2719,12 +2959,16 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
         host._set_subtab_state(host.tab_dataset, "normal")
         host._select_subtab(host.tab_dataset)
 
+    if gate_forced_entry or hold_pz2_after_reextract:
+        display_stage1_done = bool(stage1_done)
+        display_stage2_done = bool(stage2_done)
+
     host._set_button_emphasis("btn_run_detection_frame", False)
     host._set_button_emphasis("btn_to_dataset_frame", False)
 
-    if saved_substep == 2 and not stage2_done:
+    if saved_substep == 2 and not display_stage2_done:
         host._set_button_emphasis("btn_run_detection_frame", True)
-    elif saved_substep == 2 and stage2_done:
+    elif saved_substep == 2 and display_stage2_done:
         host._set_button_emphasis("btn_to_dataset_frame", True)
     elif saved_substep == 3:
         host._update_step3_finish_button_state()
@@ -2749,10 +2993,11 @@ def restore_campaign_step3_mode(host: "CharacterAnnotationTab"):
     except Exception:
         pass
 
-    try:
-        persist_step3_progress(host)
-    except Exception:
-        pass
+    if gate_forced_entry or hold_pz2_after_reextract:
+        try:
+            persist_step3_progress(host)
+        except Exception:
+            pass
 
     try:
         host._update_step3_finish_button_state()
@@ -2788,7 +3033,7 @@ def build_step3_campaign_navigation_view_model(
         splash_visible=splash_visible,
         show_detect_back_to_extract=not in_campaign,
         show_detect_return_to_graph=in_campaign and (not splash_visible),
-        show_detect_to_dataset=(not in_campaign) or (not splash_visible),
+        show_detect_to_dataset=not in_campaign,
         show_dataset_back_to_detect=True,
     )
 

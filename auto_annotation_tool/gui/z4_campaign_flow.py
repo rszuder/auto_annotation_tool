@@ -696,7 +696,7 @@ def open_campaign_step4_entry(
     else:
         _perf_mark("source_fast")
 
-    if target == "char" and readiness_reason == "source_dataset_ready_for_split":
+    if target == "char" and readiness_reason == "source_dataset_ready_for_split" and preferred_subtab != "train":
         preferred_subtab = "dataset"
         if source_dataset_text:
             try:
@@ -766,12 +766,12 @@ def open_campaign_step4_entry(
     _perf_mark("model_selection")
 
     try:
-        if preferred_subtab == "dataset":
-            host.main_nb.select(host.tab_dataset)
-        elif preferred_subtab == "train" and bool(getattr(host, "_step4_train_unlocked", False)):
+        if preferred_subtab == "train":
             host._ensure_step4_train_tab_built()
             host.main_nb.select(host.tab_train)
             host._select_step4_analysis_tab(host.hist_tab)
+        elif preferred_subtab == "dataset":
+            host.main_nb.select(host.tab_dataset)
         elif bool(getattr(host, "_step4_train_unlocked", False)):
             host._ensure_step4_train_tab_built()
             host.main_nb.select(host.tab_train)

@@ -29,7 +29,7 @@ from .free_mode_assistant import (
 from .lazy_notebook_tab import _LazyNotebookTab
 from .app_delegates import bind_app_delegates
 from .app_theme_runtime import bind_app_theme_runtime
-from .app_theme_definitions import THEME_DEFINITIONS
+from .app_theme_definitions import THEME_DEFINITIONS, get_theme_palette
 
 try:
     from .tab_help import HelpTab
@@ -209,7 +209,7 @@ class AutoAnnotationApp:
     def __init__(self, root):
         self.root = root
         self._faulthandler_stream = None
-        self.root.title(f"{CONFIG.APP_NAME} v{CONFIG.VERSION}")
+        self.root.title(f"{CONFIG.APP_NAME} ver. {CONFIG.VERSION}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.bind("<Unmap>", self._on_root_unmap, add="+")
         self.root.bind("<Map>", self._on_root_map, add="+")
@@ -223,7 +223,7 @@ class AutoAnnotationApp:
         self.themes = THEME_DEFINITIONS
         self.current_theme_key = self._load_theme_preference()
         self.current_theme_name = self.themes[self.current_theme_key]["label"]
-        self.palette = dict(self.themes[self.current_theme_key]["palette"])
+        self.palette = get_theme_palette(self.current_theme_key, self.themes)
         self.theme_var = tk.StringVar(master=root, value=self.current_theme_key)
         self.global_yolo_device_var = tk.StringVar(
             master=root,
@@ -334,7 +334,8 @@ class AutoAnnotationApp:
         
         # Panel pomocy musi powstać przed notebookiem, aby poprawnie zakotwiczyć go na dole okna.
         self._set_startup_progress(34, "Inicjalizacja panelu pomocy...")
-        self.info_panel_frame = tk.Frame(root, bg="#050505", bd=0, highlightthickness=0)
+        status_bg = self.palette["console_bg"]
+        self.info_panel_frame = tk.Frame(root, bg=status_bg, bd=0, highlightthickness=0)
         self.info_panel_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
         self._global_terminal_toggle_btn = tk.Button(
@@ -349,10 +350,10 @@ class AutoAnnotationApp:
             padx=6,
             pady=2,
             font=("Consolas", 9, "bold"),
-            bg="#050505",
-            activebackground="#050505",
-            fg=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
-            activeforeground=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
+            bg=status_bg,
+            activebackground=status_bg,
+            fg=self.palette["guide"],
+            activeforeground=self.palette["guide"],
         )
         self._global_terminal_toggle_btn.pack(side=tk.LEFT, padx=(8, 0), pady=4)
 
@@ -368,10 +369,10 @@ class AutoAnnotationApp:
             padx=6,
             pady=2,
             font=("Segoe UI", 9, "bold"),
-            bg="#050505",
-            activebackground="#050505",
-            fg=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
-            activeforeground=self.palette.get("guide", self.palette.get("warning", "#f0b44c")),
+            bg=status_bg,
+            activebackground=status_bg,
+            fg=self.palette["guide"],
+            activeforeground=self.palette["guide"],
         )
         self._free_mode_assistant_toggle_btn.pack(side=tk.LEFT, padx=(4, 0), pady=4)
         self._bind_simple_tooltip(self._global_terminal_toggle_btn, "Terminal")
@@ -381,12 +382,12 @@ class AutoAnnotationApp:
 
         self.status_text = tk.Text(
             self.info_panel_frame, height=1, wrap=tk.NONE, 
-            bg="#050505",
+            bg=status_bg,
             bd=0,
             relief=tk.FLAT,
             font=("Segoe UI", 10),
-            fg="#f7f7f7",
-            insertbackground="#f7f7f7",
+            fg=self.palette["console_fg"],
+            insertbackground=self.palette["console_fg"],
             highlightthickness=0
         )
         self.status_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 10), pady=4)
@@ -396,11 +397,11 @@ class AutoAnnotationApp:
         HELP.bind_help(self.status_text, "app_help_panel")
         self.help_overlay_frame = tk.Frame(
             root,
-            bg="#112235",
+            bg=self.palette["surface_info"],
             bd=0,
             highlightthickness=1,
-            highlightbackground="#4aa3ff",
-            highlightcolor="#4aa3ff"
+            highlightbackground=self.palette["accent"],
+            highlightcolor=self.palette["accent"]
         )
         self.help_overlay_title_lbl = tk.Label(
             self.help_overlay_frame,
@@ -408,8 +409,8 @@ class AutoAnnotationApp:
             anchor="w",
             justify=tk.LEFT,
             font=("Segoe UI", 9, "bold"),
-            bg="#112235",
-            fg="#dcefff",
+            bg=self.palette["surface_info"],
+            fg=self.palette["fg"],
             bd=0,
             highlightthickness=0
         )
@@ -420,8 +421,8 @@ class AutoAnnotationApp:
             anchor="w",
             justify=tk.LEFT,
             font=("Segoe UI", 10),
-            bg="#112235",
-            fg="#f7f7f7",
+            bg=self.palette["surface_info"],
+            fg=self.palette["fg"],
             width=560,
             padx=0,
             pady=0
@@ -807,7 +808,7 @@ class AutoAnnotationApp:
             return value.replace("T", " ")
 
     def refresh_window_title(self):
-        base_title = f"{CONFIG.APP_NAME} v{CONFIG.VERSION}"
+        base_title = f"{CONFIG.APP_NAME} ver. {CONFIG.VERSION}"
 
         try:
             from ..campaign_manager import CAMPAIGN
@@ -818,8 +819,9 @@ class AutoAnnotationApp:
                 self.root.title(base_title)
                 return
 
+            project_title = str(active_project).strip()
             self._refresh_menu_badge()
-            self.root.title(str(active_project).strip() or base_title)
+            self.root.title(f"{base_title} | {project_title}" if project_title else base_title)
         except Exception:
             self._refresh_menu_badge()
             self.root.title(base_title)
@@ -1197,11 +1199,11 @@ class AutoAnnotationApp:
             shell.pack(side=tk.LEFT, padx=(0, 2), pady=0)
             normal_bg = palette["panel"]
             hover_bg = blend_hex_colors(
-                palette.get("panel_alt", palette["panel"]),
-                palette.get("accent", "#4fc1ff"),
+                palette["panel_alt"],
+                palette["accent"],
                 0.08,
             )
-            active_fg = palette.get("fg", "#f3f3f3")
+            active_fg = palette["fg"]
 
             btn = tk.Button(
                 shell,
@@ -1330,11 +1332,11 @@ class AutoAnnotationApp:
     def _paint_mobile_export_menu_loader(self, loader: tk.Toplevel, progress_canvas: tk.Canvas, progress: float) -> None:
         try:
             palette = getattr(self, "palette", {})
-            bg = palette.get("panel", "#252526")
-            fg = palette.get("fg", "#f3f3f3")
-            accent = palette.get("accent", "#4f8de3")
-            success = palette.get("success", "#2ecc71")
-            border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+            bg = palette["panel"]
+            fg = palette["fg"]
+            accent = palette["accent"]
+            success = palette["success"]
+            border = palette["panel_border"]
             width = max(320, int(progress_canvas.winfo_width() or 420))
             height = max(12, int(progress_canvas.winfo_height() or 14))
             value = max(0.0, min(100.0, float(progress or 0.0)))
@@ -1377,10 +1379,10 @@ class AutoAnnotationApp:
             pass
         try:
             palette = getattr(self, "palette", {})
-            bg = palette.get("panel", "#252526")
-            fg = palette.get("fg", "#f3f3f3")
-            muted = palette.get("muted", "#c7c7c7")
-            accent = palette.get("accent", "#4f8de3")
+            bg = palette["panel"]
+            fg = palette["fg"]
+            muted = palette["muted"]
+            accent = palette["accent"]
             card_bg = blend_hex_colors(bg, accent, 0.045)
             border = blend_hex_colors(accent, bg, 0.38)
             loader = tk.Toplevel(self.root)
@@ -1938,11 +1940,14 @@ class AutoAnnotationApp:
             return
 
         self._help_panel_apply_in_progress = True
+        palette = self.palette
         expanded = bool(getattr(self, "_help_overlay_forced_visible", False))
         self._help_panel_expanded = expanded
 
-        panel_bg = "#07111a" if expanded else "#050505"
-        text_fg = "#f7f7f7"
+        panel_bg = palette["surface_info"] if expanded else palette["console_bg"]
+        overlay_bg = palette["surface_info"]
+        overlay_border = palette["accent"]
+        text_fg = palette["console_fg"]
         try:
             try:
                 frame.configure(bg=panel_bg)
@@ -1962,9 +1967,9 @@ class AutoAnnotationApp:
 
             try:
                 overlay.configure(
-                    bg="#112235",
-                    highlightbackground="#4aa3ff",
-                    highlightcolor="#4aa3ff",
+                    bg=overlay_bg,
+                    highlightbackground=overlay_border,
+                    highlightcolor=overlay_border,
                 )
             except Exception:
                 pass
@@ -1972,8 +1977,8 @@ class AutoAnnotationApp:
             try:
                 if overlay_title is not None:
                     overlay_title.configure(
-                        bg="#112235",
-                        fg="#dcefff",
+                        bg=overlay_bg,
+                        fg=palette["fg"],
                         text="Rozwinięta pomoc  |  ESC",
                     )
             except Exception:
@@ -1987,8 +1992,8 @@ class AutoAnnotationApp:
                         else (getattr(self, "_status_full_text", "") or self.default_status_message)
                     )
                     overlay_text.configure(
-                        bg="#112235",
-                        fg="#f7f7f7",
+                        bg=overlay_bg,
+                        fg=palette["fg"],
                         text=overlay_body,
                     )
             except Exception:
@@ -2007,10 +2012,10 @@ class AutoAnnotationApp:
         if btn is None:
             return
 
-        palette = getattr(self, "palette", {})
-        base_bg = "#050505"
-        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        fg = palette.get("guide", palette.get("warning", "#f0b44c"))
+        palette = self.palette
+        base_bg = palette["console_bg"]
+        border = palette["panel_border"]
+        fg = palette["guide"]
 
         try:
             btn.configure(
@@ -2045,17 +2050,17 @@ class AutoAnnotationApp:
         if btn is None:
             return
 
-        palette = getattr(self, "palette", {})
-        base_bg = "#050505"
-        border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-        success = palette.get("success", palette.get("accent", "#4ec9b0"))
-        guide = palette.get("guide", palette.get("warning", "#f0b44c"))
-        muted = palette.get("muted_dim", palette.get("muted", "#9a9a9a"))
+        palette = self.palette
+        base_bg = palette["console_bg"]
+        border = palette["panel_border"]
+        success = palette["success"]
+        guide = palette["guide"]
+        muted = palette["muted_dim"]
         if available is None:
             available = self._is_free_mode_assistant_available(context)
         active = bool(getattr(self, "_free_mode_assistant_enabled", False)) and available
-        bg = blend_hex_colors(success, base_bg, 0.20) if active else base_bg
-        fg = guide if available else muted
+        bg = success if active else base_bg
+        fg = palette["accent_text"] if active else (guide if available else muted)
 
         try:
             btn.configure(
@@ -2068,6 +2073,7 @@ class AutoAnnotationApp:
                 disabledforeground=muted,
                 highlightbackground=border,
                 highlightcolor=border,
+                highlightthickness=1 if active else 0,
                 relief=tk.SUNKEN if active else tk.FLAT,
             )
         except Exception:

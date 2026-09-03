@@ -19,6 +19,30 @@ def _with_summary_location(summary: dict, summary_path: Path) -> dict:
     return enriched
 
 
+def _path_is_inside(path_like, root_like) -> bool:
+    if not path_like or not root_like:
+        return True
+    try:
+        Path(path_like).resolve().relative_to(Path(root_like).resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _summary_matches_active_project(summary: dict, *, active_project: str = "", project_root=None) -> bool:
+    if not active_project:
+        return True
+    data = dict(summary or {})
+    summary_project = str(data.get("project", "") or "").strip()
+    if summary_project and summary_project != active_project:
+        return False
+    for key in ("gold_dataset_path", "_summary_path", "_summary_dir"):
+        raw = str(data.get(key) or "").strip()
+        if raw and not _path_is_inside(raw, project_root):
+            return False
+    return True
+
+
 def build_step3_export_summary(
     host,
     gold_dataset_path: str | None = None,
@@ -39,8 +63,18 @@ def build_step3_export_summary(
         campaign_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
     except Exception:
         campaign_iteration = 0
+    try:
+        campaign_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+    except Exception:
+        campaign_project = ""
+    try:
+        campaign_project_root = str(CAMPAIGN.get_active_project_root_dir() or "")
+    except Exception:
+        campaign_project_root = ""
 
     return {
+        "project": campaign_project,
+        "project_root": campaign_project_root,
         "gold_dataset_created": gold_exists,
         "gold_dataset_path": str(gold_dataset_path or ""),
         "review_pack_created": review_exists,
@@ -72,23 +106,39 @@ def write_step3_export_summary(host, summary: dict) -> Path:
 
 
 def read_step3_export_summary(host) -> dict:
+    try:
+        in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+    except Exception:
+        in_campaign = False
+    try:
+        active_project = str(CAMPAIGN.get_active_project_name() or "").strip() if in_campaign else ""
+    except Exception:
+        active_project = ""
+    try:
+        project_root = CAMPAIGN.get_active_project_root_dir() if in_campaign else None
+    except Exception:
+        project_root = None
+
     summary_path = host._get_step3_summary_dir() / "export_summary.json"
     try:
         if summary_path.exists():
             loaded = json.loads(summary_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict) and loaded:
-                return _with_summary_location(loaded, summary_path)
+                enriched = _with_summary_location(loaded, summary_path)
+                if _summary_matches_active_project(
+                    enriched,
+                    active_project=active_project,
+                    project_root=project_root,
+                ):
+                    return enriched
     except Exception:
         pass
 
     try:
-        in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
-    except Exception:
-        in_campaign = False
-
-    try:
         campaign_chars_dir = getattr(host, "_campaign_chars_dir", None)
-        if campaign_chars_dir:
+        if campaign_chars_dir and (
+            not in_campaign or _path_is_inside(campaign_chars_dir, project_root)
+        ):
             chars_root = Path(campaign_chars_dir)
         elif in_campaign:
             chars_root = CAMPAIGN.get_dir("chars")
@@ -117,7 +167,13 @@ def read_step3_export_summary(host) -> dict:
         if not isinstance(loaded, dict) or not loaded:
             continue
         if bool(loaded.get("gold_dataset_created")) and bool(loaded.get("gold_dataset_valid", True)):
-            return _with_summary_location(loaded, candidate)
+            enriched = _with_summary_location(loaded, candidate)
+            if _summary_matches_active_project(
+                enriched,
+                active_project=active_project,
+                project_root=project_root,
+            ):
+                return enriched
     return {}
 
 

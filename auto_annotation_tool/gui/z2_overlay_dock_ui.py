@@ -492,7 +492,16 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                     gate_status_fill = success if ready else error
                     status_text = "#111111" if owner._legend_color_is_light(gate_status_fill) else "#ffffff"
                     have_fill = blend_hex_colors(success, fill, 0.36)
-                    missing_base = success if missing_focus_tone == "success" else warning if missing_focus_tone == "warning" else error
+                    info_color = str(palette.get("info", palette.get("accent", "#4aa3ff")))
+                    missing_base = (
+                        success
+                        if missing_focus_tone == "success"
+                        else warning
+                        if missing_focus_tone == "warning"
+                        else info_color
+                        if missing_focus_tone == "info"
+                        else error
+                    )
                     missing_fill = blend_hex_colors(missing_base, fill, 0.36)
                     have_text = "#111111" if owner._legend_color_is_light(have_fill) else "#ffffff"
                     missing_text = "#111111" if owner._legend_color_is_light(missing_fill) else "#ffffff"
@@ -687,7 +696,16 @@ def render_preview_campaign_gate_overlay(owner, state: dict, *, force_render: bo
         missing_focus_value = int(state.get("missing_focus_value", missing_to_open) or 0)
     except Exception:
         missing_focus_value = int(missing_to_open or 0)
-    missing_base = success if missing_focus_tone == "success" else warning if missing_focus_tone == "warning" else error
+    info_color = str(palette.get("info", palette.get("accent", "#4aa3ff")))
+    missing_base = (
+        success
+        if missing_focus_tone == "success"
+        else warning
+        if missing_focus_tone == "warning"
+        else info_color
+        if missing_focus_tone == "info"
+        else error
+    )
     missing_fill = blend_hex_colors(missing_base, body_fill, 0.32)
     missing_text_fill = "#111111" if owner._legend_color_is_light(missing_fill) else "#ffffff"
     gate_metric = str(state.get("gate_metric") or "images").strip().lower()

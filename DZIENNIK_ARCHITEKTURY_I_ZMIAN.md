@@ -2558,3 +2558,39 @@ Testy:
 Ograniczenie swiadome przed freeze:
 
 - wyszukiwanie dodatkowych realnych zrodel jest raportowane i zapisywane w sladzie, ale zrodla te nie sa dolaczane automatycznie do train; ich wlaczenie wymaga jawnego wyboru uzytkownika, zeby nie zmieniac materialu badawczego bez kontroli.
+
+### 23. Uproszczenie PZ1 MZ do syntetycznego doreprezentowania znakow
+
+Problem:
+
+- PZ1 zaczal mieszac dwie rozne decyzje: syntetyczne powiekszanie train oraz realne uzupelnianie brakujacych znakow;
+- dla operatora bylo niejasne, czy plan uzupelniania ma szukac nowych realnych tablic, czy tylko policzyc ile syntetykow trzeba wygenerowac;
+- w kontekscie freeze PZ1 powinien byc prosty: jezeli znak istnieje w train, mozna zwiekszyc jego reprezentacje syntetycznie; jezeli nie istnieje, PZ1 nie ma materialu, z ktorego moze go wytworzyc.
+
+Decyzja:
+
+- PZ1 dla MZ odpowiada wylacznie za syntetyczne doreprezentowanie znakow w `train`;
+- histogram reprezentacji znakow pozwala ustawic cel liczebnosci per znak przez przeciaganie slupka;
+- po zmianie slupka operator uruchamia przeliczenie syntetykow, a system rozdziela augmentacje po tablicach zrodlowych zawierajacych dany znak;
+- jezeli kilka tablic zawiera niedoreprezentowany znak, planner rozklada prace progresywnie po zrodlach zamiast nadmiernie eksploatowac jedna tablice;
+- jezeli znak nie wystepuje w `train`, system oznacza plan jako niewykonalny syntetycznie i nie udaje, ze augmentacja rozwiaze brak danych.
+
+Zmiana:
+
+- `CharacterBalancePlan` przenosi teraz `target_count_by_symbol` oraz `train_sources_by_symbol`;
+- `plan_character_train_augmentation(...)` przyjmuje reczne cele per znak i liczy deficyt wzgledem tych celow;
+- finalne przeliczenie po utworzeniu splitu zachowuje reczne cele ustawione na histogramie;
+- manifest wariantu MZ zapisuje cele per znak oraz liczbe tablic zrodlowych w `train`;
+- nowy przeplyw PZ1 nie zapisuje juz sekcji `real_source_search`, bo realne uzupelnianie nie jest odpowiedzialnoscia tego kroku.
+
+Uzasadnienie:
+
+- syntetyki sa dobrym narzedziem do podbicia reprezentacji znaku, ktory juz istnieje w materiale treningowym;
+- syntetyki nie sa wiarygodnym sposobem na wprowadzenie znaku, ktorego nie ma w `train`, bo brak jest realnego zrodla ksztaltu i kontekstu;
+- rozdzielenie odpowiedzialnosci obniza ryzyko regresji kampanijnej: PZ1 tworzy wariant treningowy, a realne braki wracaja do procesu zbierania/oznaczania materialu w kolejnych iteracjach.
+
+Testy:
+
+- `python -m py_compile auto_annotation_tool\training\character_class_distribution.py auto_annotation_tool\gui\z4_character_balance.py auto_annotation_tool\gui\z4_dataset_panels.py auto_annotation_tool\gui\z4_dataset_builder.py`;
+- `git diff --check` dla zmienionych plikow PZ1/MZ;
+- szybki test planera na datasecie `pisto` potwierdzil, ze reczny cel per znak jest uwzgledniany, a brak znaku w `train` blokuje wykonalnosc planu syntetycznego.

@@ -10,6 +10,7 @@ eksporcie oraz eksperymentach badawczych.
 import tkinter as tk
 from tkinter import ttk
 
+from ..config import CONFIG
 from .inertial_scroll import InertialScrollController
 from .web_slim_scrollbar import WebSlimScrollbar
 
@@ -46,7 +47,7 @@ class HelpTab:
         ttk.Label(
             header,
             text=(
-                "Mapa programu: kampania, zasoby, PZ2/PZ3/PZ4, "
+                f"{CONFIG.APP_NAME} ver. {CONFIG.VERSION}: kampania, zasoby, PZ2/PZ3/PZ4, "
                 "ranking, eksport mobilny i zasady testów."
             ),
         ).pack(anchor=tk.W, pady=(4, 0))
@@ -557,10 +558,10 @@ Workspace/
         self._bullet_list(
             widget,
             [
-                "Pojedynczy model może być eksportowany jako alpr.model.v1: MT albo MZ.",
-                "Pełny wariant demonstracyjny powinien być pakietem alpr.package.v1, zwykle MT+MZ.",
-                "Model pojazdów MP jest pomocniczy i może być dostarczony po stronie aplikacji mobilnej, bo nie jest głównym wynikiem treningu ALPR.",
-                "Paczka .alprmodel jest archiwum z manifestem, wariantami modelu, etykietami, progami, metadanymi i sumami SHA-256.",
+                "Pojedynczy model może być eksportowany jako alpr.model.v1: MP, MT albo MZ.",
+                "Pakiet alpr.package.v1 może zawierać jeden model, parę MT+MZ albo komplet MP+MT+MZ.",
+                "MP jest opcjonalnym detektorem pojazdów. Jeśli ma trafić do paczki, ALPR Desktop pobiera lub wskazuje model i wykonuje konwersję przed przekazaniem go do Androida.",
+                "Paczka .alprmodel jest archiwum z manifestem, wariantami modeli, etykietami, progami, metadanymi i sumami SHA-256.",
             ],
         )
 

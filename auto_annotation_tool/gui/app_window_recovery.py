@@ -5,6 +5,215 @@
 from ..config import logger
 
 
+def _safe_widget_exists(widget) -> bool:
+    try:
+        return widget is not None and bool(widget.winfo_exists())
+    except Exception:
+        return False
+
+
+def _safe_toplevel(widget):
+    if not _safe_widget_exists(widget):
+        return None
+    try:
+        return widget.winfo_toplevel()
+    except Exception:
+        return None
+
+
+def _safe_window_state(window) -> str:
+    try:
+        return str(window.state() or "")
+    except Exception:
+        return ""
+
+
+def _append_recoverable_toplevel(app, window, result: list, seen: set[str]) -> None:
+    top = _safe_toplevel(window)
+    if top is None or top is getattr(app, "root", None):
+        return
+    if not _safe_widget_exists(top):
+        return
+    key = str(top)
+    if key in seen:
+        return
+    seen.add(key)
+    result.append(top)
+
+
+def iter_recoverable_toplevels(app) -> list:
+    """Return modeless app windows that should follow root activation."""
+
+    result = []
+    seen: set[str] = set()
+
+    for attr_name in (
+        "_global_terminal_window",
+        "_mobile_export_center_dialog",
+        "_mobile_report_browser_dialog",
+        "_free_mode_assistant_context_override_owner",
+    ):
+        _append_recoverable_toplevel(app, getattr(app, attr_name, None), result, seen)
+
+    host = getattr(app, "_mobile_export_menu_host", None)
+    if host is not None:
+        for attr_name in ("_mobile_export_center_dialog", "_mobile_report_browser_dialog"):
+            _append_recoverable_toplevel(app, getattr(host, attr_name, None), result, seen)
+
+    try:
+        tabs = list(app._iter_loaded_tabs())
+    except Exception:
+        tabs = []
+    for tab in tabs:
+        for attr_name in ("_mobile_export_center_dialog", "_mobile_report_browser_dialog"):
+            _append_recoverable_toplevel(app, getattr(tab, attr_name, None), result, seen)
+
+    try:
+        root_children = list(app.root.winfo_children())
+    except Exception:
+        root_children = []
+    for child in root_children:
+        top = _safe_toplevel(child)
+        if top is child:
+            _append_recoverable_toplevel(app, child, result, seen)
+
+    return result
+
+
+def _release_stale_grab(app) -> None:
+    try:
+        grabbed = app.root.grab_current()
+    except Exception:
+        grabbed = None
+    if grabbed is None:
+        return
+    top = _safe_toplevel(grabbed)
+    state = _safe_window_state(top)
+    try:
+        visible = bool(top.winfo_viewable()) if top is not None else False
+    except Exception:
+        visible = False
+    if state in {"withdrawn", "iconic"} or not visible:
+        try:
+            grabbed.grab_release()
+        except Exception:
+            pass
+
+
+def restore_app_window_stack(app, *, active_window=None, force_topmost: bool = False) -> None:
+    """Raise root plus registered modeless windows without making them modal."""
+
+    root = getattr(app, "root", None)
+    if not _safe_widget_exists(root):
+        return
+
+    _release_stale_grab(app)
+
+    windows = []
+    for window in iter_recoverable_toplevels(app):
+        if not _safe_widget_exists(window):
+            continue
+        state = _safe_window_state(window)
+        if state == "withdrawn":
+            continue
+        windows.append(window)
+
+    try:
+        root.deiconify()
+    except Exception:
+        pass
+    try:
+        root.lift()
+    except Exception:
+        pass
+
+    for window in windows:
+        try:
+            if _safe_window_state(window) == "iconic":
+                window.deiconify()
+        except Exception:
+            pass
+        try:
+            window.lift(root)
+        except Exception:
+            try:
+                window.lift()
+            except Exception:
+                pass
+
+    if force_topmost:
+        to_toggle = [root] + windows
+        for window in to_toggle:
+            try:
+                window.attributes("-topmost", True)
+            except Exception:
+                pass
+
+        def _unset_topmost(targets=tuple(to_toggle)) -> None:
+            for target in targets:
+                try:
+                    if _safe_widget_exists(target):
+                        target.attributes("-topmost", False)
+                except Exception:
+                    pass
+
+        try:
+            if app._window_restore_topmost_after_id is not None:
+                root.after_cancel(app._window_restore_topmost_after_id)
+        except Exception:
+            pass
+        try:
+            app._window_restore_topmost_after_id = root.after(180, _unset_topmost)
+        except Exception:
+            _unset_topmost()
+
+    focus_target = active_window if _safe_widget_exists(active_window) else root
+    try:
+        focus_target.focus_force()
+    except Exception:
+        try:
+            focus_target.focus_set()
+        except Exception:
+            pass
+
+
+def register_recoverable_toplevel(app, window, *, attr_name: str = "") -> None:
+    """Remember a detached tool window so it returns with the main app."""
+
+    if not _safe_widget_exists(window):
+        return
+    if attr_name:
+        try:
+            setattr(app, attr_name, window)
+        except Exception:
+            pass
+    try:
+        setattr(window, "_aat_recover_with_app", True)
+    except Exception:
+        pass
+    try:
+        window.group(app.root)
+    except Exception:
+        pass
+
+    def _restore_from_tool_window(event=None) -> None:
+        try:
+            if getattr(event, "widget", None) is not window:
+                return
+        except Exception:
+            pass
+        try:
+            restore_app_window_stack(app, active_window=window)
+        except Exception:
+            pass
+
+    try:
+        window.bind("<FocusIn>", _restore_from_tool_window, add="+")
+        window.bind("<Map>", _restore_from_tool_window, add="+")
+    except Exception:
+        pass
+
+
 def close_floating_overlays_for_window_state(app):
     closer = getattr(app, "_close_menu_dropdown", None)
     if callable(closer):
@@ -39,6 +248,7 @@ def release_window_grabs_for_recovery(app):
             getattr(app, "_global_terminal_window", None),
         ]
     )
+    candidates.extend(iter_recoverable_toplevels(app))
     try:
         candidates.extend(list(app.root.winfo_children()))
     except Exception:
@@ -115,6 +325,7 @@ def on_root_focus_in(app, event=None):
     if getattr(event, "widget", None) is not app.root:
         return None
     if not bool(getattr(app, "_window_restore_pending", False)) and int(getattr(app, "_window_restore_attempts", 0) or 0) <= 0:
+        restore_app_window_stack(app)
         return None
     schedule_root_recovery(app, delay_ms=30)
     return None
@@ -169,17 +380,13 @@ def recover_root_after_map(app):
         pass
 
     try:
+        restore_app_window_stack(app, force_topmost=False)
+    except Exception:
+        pass
+
+    try:
         if str(app.root.tk.call("tk", "windowingsystem")).lower() == "win32":
-            app.root.attributes("-topmost", True)
-            try:
-                if app._window_restore_topmost_after_id is not None:
-                    app.root.after_cancel(app._window_restore_topmost_after_id)
-            except Exception:
-                pass
-            app._window_restore_topmost_after_id = app.root.after(
-                180,
-                lambda: app.root.attributes("-topmost", False),
-            )
+            restore_app_window_stack(app, force_topmost=True)
     except Exception:
         pass
 

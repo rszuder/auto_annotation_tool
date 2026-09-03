@@ -44,6 +44,79 @@ def campaign_gate_id_for_edge(edge_key: str | None, fallback_gate_id: str | None
     return campaign_visible_gate_id(fallback_gate_id)
 
 
+def short_campaign_quality_label(label: str) -> str:
+    normalized = str(label or "").strip().upper()
+    if normalized == "BARDZO DOBRY":
+        return "B. DOBRY"
+    if normalized == "PRZECIĘTNY":
+        return "PRZEC."
+    return normalized or "PROGU"
+
+
+def build_campaign_gate_focus_state(
+    missing_to_open: int,
+    quality_info: dict | None,
+    *,
+    unit_label: str = "tablic",
+) -> dict[str, object]:
+    """Return concise, unambiguous Z2 gate/quality counter copy.
+
+    The campaign gate minimum is a hard condition. Dataset quality thresholds
+    are optional guidance and must not be described as gate-opening blockers.
+    """
+    try:
+        missing_open = max(0, int(missing_to_open or 0))
+    except Exception:
+        missing_open = 0
+    if missing_open > 0:
+        return {
+            "label": "DO MIN.",
+            "row_label": "Do otwarcia bramki brakuje",
+            "value": int(missing_open),
+            "text": f"{missing_open} {unit_label} [OK]",
+            "tone": "warning",
+        }
+
+    info = dict(quality_info or {})
+    next_quality_label = str(info.get("next_label", "") or "").strip()
+    try:
+        missing_next = max(0, int(info.get("missing_next", 0) or 0))
+    except Exception:
+        missing_next = 0
+    if missing_next > 0 and next_quality_label:
+        return {
+            "label": f"CEL {short_campaign_quality_label(next_quality_label)}",
+            "row_label": f"Cel jakości: {next_quality_label}",
+            "value": int(missing_next),
+            "text": f"+{missing_next} {unit_label} [OK]",
+            "tone": "info",
+        }
+
+    return {
+        "label": "PROGI",
+        "row_label": "Progi jakości",
+        "value": 0,
+        "text": "Najwyższy próg jakości",
+        "tone": "success",
+    }
+
+
+def format_campaign_quality_goal_value(
+    quality_info: dict | None,
+    *,
+    unit_label: str = "tablic",
+) -> tuple[str, str]:
+    info = dict(quality_info or {})
+    next_quality_label = str(info.get("next_label", "") or "").strip()
+    try:
+        missing_next = max(0, int(info.get("missing_next", 0) or 0))
+    except Exception:
+        missing_next = 0
+    if missing_next > 0 and next_quality_label:
+        return f"+{missing_next} {unit_label} [OK]", "info"
+    return "MAX", "success"
+
+
 def get_campaign_display_gate_id(host: "AnnotationTab") -> str:
     try:
         graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})

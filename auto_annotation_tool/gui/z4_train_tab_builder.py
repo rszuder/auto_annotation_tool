@@ -765,7 +765,7 @@ def _build_train_tab(self):
     self.step4_pinned_result_title_lbl = tk.Label(
         pinned_title_row,
         text="Konfiguracja zablokowana",
-        font=("Segoe UI Semibold", 9),
+        font=("Segoe UI Semibold", 10),
         anchor=tk.W,
         justify=tk.LEFT,
         bg=pinned_bg,
@@ -1497,7 +1497,7 @@ def _build_train_tab(self):
     self.campaign_training_result_status_lbl = tk.Label(
         result_title_row,
         text="SPRAWDZAM",
-        font=("Segoe UI Semibold", 8),
+        font=("Segoe UI Semibold", 9),
         anchor=tk.CENTER,
         justify=tk.CENTER,
         bg=palette.get("panel", "#252526"),
@@ -1506,7 +1506,7 @@ def _build_train_tab(self):
         highlightthickness=1,
         highlightbackground=result_border,
         highlightcolor=result_border,
-        padx=9,
+        padx=10,
         pady=3,
     )
     self.campaign_training_result_status_lbl.grid(row=0, column=1, sticky="e", padx=(8, 0))

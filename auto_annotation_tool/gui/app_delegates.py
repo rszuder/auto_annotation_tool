@@ -20,6 +20,8 @@ from .app_style_setup import setup_style
 _INSTANCE_METHODS = (
     ("_release_window_grabs_for_recovery", app_window_recovery.release_window_grabs_for_recovery),
     ("_release_preview_fullscreens_for_recovery", app_window_recovery.release_preview_fullscreens_for_recovery),
+    ("_register_recoverable_toplevel", app_window_recovery.register_recoverable_toplevel),
+    ("_restore_app_window_stack", app_window_recovery.restore_app_window_stack),
     ("_on_root_unmap", app_window_recovery.on_root_unmap),
     ("_on_root_map", app_window_recovery.on_root_map),
     ("_on_root_visibility", app_window_recovery.on_root_visibility),

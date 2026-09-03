@@ -1710,7 +1710,54 @@ def _looks_like_campaign_char_dataset_dir(self, dataset_dir: Path | None) -> boo
         return False
 
 
+def _path_is_inside_project_root(path_like, project_root) -> bool:
+    if not path_like or not project_root:
+        return True
+    try:
+        Path(path_like).resolve().relative_to(Path(project_root).resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _active_campaign_project_context() -> tuple[str, Path | None]:
+    try:
+        project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+    except Exception:
+        project_name = ""
+    try:
+        project_root = CAMPAIGN.get_active_project_root_dir() if project_name else None
+    except Exception:
+        project_root = None
+    return project_name, project_root
+
+
+def _payload_matches_campaign_project(
+    payload: dict | None,
+    *,
+    project_name: str = "",
+    project_root=None,
+    extra_paths: list[object] | tuple[object, ...] | None = None,
+) -> bool:
+    if not project_name:
+        return True
+    data = dict(payload or {})
+    payload_project = str(data.get("project", "") or "").strip()
+    if payload_project and payload_project != project_name:
+        return False
+    path_values = list(extra_paths or [])
+    for key in ("dataset_path", "gold_dataset_path", "summary_path", "summary_dir", "_summary_path", "_summary_dir"):
+        raw = str(data.get(key) or "").strip()
+        if raw:
+            path_values.append(raw)
+    for raw in path_values:
+        if raw and not _path_is_inside_project_root(raw, project_root):
+            return False
+    return True
+
+
 def _read_latest_campaign_step3_export_summary() -> dict:
+    active_project, active_project_root = _active_campaign_project_context()
     try:
         chars_root = CAMPAIGN.get_dir("chars")
     except Exception:
@@ -1722,6 +1769,8 @@ def _read_latest_campaign_step3_export_summary() -> dict:
     except Exception:
         return {}
     if not root.exists():
+        return {}
+    if active_project and not _path_is_inside_project_root(root, active_project_root):
         return {}
     try:
         candidates = sorted(
@@ -1752,7 +1801,13 @@ def _read_latest_campaign_step3_export_summary() -> dict:
             continue
         loaded["_summary_path"] = str(candidate)
         loaded["_summary_dir"] = str(candidate.parent)
-        return loaded
+        if _payload_matches_campaign_project(
+            loaded,
+            project_name=active_project,
+            project_root=active_project_root,
+            extra_paths=(dataset_path, candidate, candidate.parent),
+        ):
+            return loaded
     return {}
 
 
@@ -1774,6 +1829,7 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
     }
 
     try:
+        active_project, active_project_root = _active_campaign_project_context()
         contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
         pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
         pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
@@ -1781,6 +1837,22 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
         dataset_path_raw = str(pz3_contract.get("dataset_path") or "").strip()
         dataset_path = Path(dataset_path_raw) if dataset_path_raw else None
         pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+        if dataset_path_raw and not _payload_matches_campaign_project(
+            pz3_contract,
+            project_name=active_project,
+            project_root=active_project_root,
+            extra_paths=(dataset_path_raw,),
+        ):
+            result.update(
+                reason="stale_char_dataset",
+                message=(
+                    "Kontrakt PZ3 wskazuje dataset spoza bieżącego projektu. "
+                    "Wróć do pracy bramki i utwórz dataset znaków w PZ3 dla aktualnego projektu."
+                ),
+                ready_dataset=dataset_path_raw,
+                dataset_hint=dataset_path_raw,
+            )
+            return result
         if pz3_reason == "approve_step3_backfill":
             result.update(
                 reason="stale_char_dataset",
@@ -1806,11 +1878,34 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                 summary_dataset is None
                 or not summary_dataset.exists()
                 or not self._looks_like_campaign_char_dataset_dir(summary_dataset)
+                or not _payload_matches_campaign_project(
+                    summary,
+                    project_name=active_project,
+                    project_root=active_project_root,
+                    extra_paths=(summary_dataset,),
+                )
             ):
+                return {}
+            try:
+                current_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+            except Exception:
+                current_iteration = 1
+            try:
+                summary_iteration = int(
+                    summary.get("source_iteration")
+                    or summary.get("created_iteration")
+                    or summary.get("produced_iteration")
+                    or summary.get("iteration")
+                    or 0
+                )
+            except Exception:
+                summary_iteration = 0
+            if summary_iteration <= 0 or summary_iteration != current_iteration:
                 return {}
             now = datetime.now().isoformat(timespec="seconds")
             contract = {
                 "fulfilled": True,
+                "project": active_project,
                 "product": "char_yolo_dataset",
                 "source": "PZ3",
                 "reason": str(reason or "summary_backfill"),
@@ -1820,6 +1915,10 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                 "perfect_count": int(summary.get("perfect_count", summary.get("exportable_plate_count", 0)) or 0),
                 "gold_dataset_valid": bool(summary.get("gold_dataset_valid", True)),
                 "summary_path": str(summary.get("_summary_path") or ""),
+                "summary_dir": str(summary.get("_summary_dir") or ""),
+                "iteration": int(summary_iteration or 0),
+                "source_iteration": int(summary_iteration or 0),
+                "created_iteration": int(summary_iteration or 0),
                 "fulfilled_at": now,
                 "updated_at": now,
             }
@@ -1906,6 +2005,8 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                         if previous_interrupted_at:
                             session.setdefault("resolved_interrupted_at", previous_interrupted_at)
                         CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
+                        CAMPAIGN.invalidate_step3_char_source_state_cache()
+                        CAMPAIGN.clear_project_iteration_ui_snapshots()
                     except Exception as exc:
                         logger.debug(f"Nie udalo sie domknac sesji T06/Z3 po summary: {exc}")
                     stale_after_session = False
@@ -1925,12 +2026,22 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
             and dataset_path is not None
             and dataset_path.exists()
             and self._looks_like_campaign_char_dataset_dir(dataset_path)
+            and _payload_matches_campaign_project(
+                pz3_contract,
+                project_name=active_project,
+                project_root=active_project_root,
+                extra_paths=(dataset_path,),
+            )
         ):
+            session_covered_by_dataset = bool(
+                not session_targets_pz2
+                or (pz3_time > 0.0 and (session_time <= 0.0 or session_time <= pz3_time + 0.001))
+            )
             if (
                 session_gate in char_work_gate_session_ids
                 and session_active
                 and str(session.get("work_area") or "").strip().lower() == "z3"
-                and not session_targets_pz2
+                and session_covered_by_dataset
                 and session_state not in {"resolved", "closed", "complete", "completed"}
             ):
                 try:
@@ -1947,6 +2058,8 @@ def _detect_campaign_char_ready_dataset_state(self) -> dict:
                     if previous_interrupted_at:
                         session.setdefault("resolved_interrupted_at", previous_interrupted_at)
                     CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
+                    CAMPAIGN.invalidate_step3_char_source_state_cache()
+                    CAMPAIGN.clear_project_iteration_ui_snapshots()
                 except Exception as exc:
                     logger.debug(f"Nie udalo sie domknac gotowej sesji T06/Z3: {exc}")
             result.update(

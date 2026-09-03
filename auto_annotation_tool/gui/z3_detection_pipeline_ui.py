@@ -21,6 +21,46 @@ def _is_step3_campaign_runtime(host: "CharacterAnnotationTab") -> bool:
         return False
 
 
+def _pipeline_requires_yolo(blocks_or_compiled) -> bool:
+    if isinstance(blocks_or_compiled, dict):
+        if bool(blocks_or_compiled.get("requires_yolo")):
+            return True
+        blocks = blocks_or_compiled.get("blocks", [])
+    else:
+        blocks = blocks_or_compiled
+    try:
+        return any(str(block or "").strip().lower().startswith("yolo") for block in (blocks or []))
+    except Exception:
+        return False
+
+
+def _method_requires_yolo(method_key: str | None) -> bool:
+    return str(method_key or "").strip().upper() in {"YOLO", "BOTH", "YOLO_OCR", "YOLO_BOX", "YOLO_SYMBOL"}
+
+
+def _host_has_configured_yolo_detection_model(host) -> bool:
+    checker = getattr(host, "_has_configured_yolo_detection_model", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    try:
+        model_path = str(getattr(host, "_get_effective_yolo_model_path")() or "").strip()
+        return bool(model_path and Path(model_path).exists())
+    except Exception:
+        return False
+
+
+def _pipeline_allowed_in_current_context(host, blocks) -> bool:
+    compiled = compile_detection_pipeline_blocks(blocks)
+    if not bool(compiled.get("valid")):
+        return False
+    if _pipeline_requires_yolo(compiled) and not _host_has_configured_yolo_detection_model(host):
+        return False
+    return True
+
+
 def get_detection_pipeline_blocks(host, method_key: str | None, method_labels: dict, key_by_label: dict) -> list[str]:
     current_method = normalize_detection_method_key(
         host._get_detection_method_key(),
@@ -41,6 +81,8 @@ def get_detection_pipeline_blocks(host, method_key: str | None, method_labels: d
                 return saved_blocks
 
     resolved_method = requested_method
+    if _method_requires_yolo(resolved_method) and not _host_has_configured_yolo_detection_model(host):
+        resolved_method = "OCR"
     if resolved_method == "YOLO":
         return ["yolo_box", "yolo_symbol"]
     if resolved_method == "YOLO_BOX":
@@ -78,7 +120,7 @@ def compile_detection_pipeline_blocks(blocks=None, method_card_meta: dict | None
             "requires_yolo": any(block.startswith("yolo") for block in prepared),
             "status_text": (
                 "Ten łańcuch nie jest jeszcze wspierany. "
-                "Dozwolone układy: O | YB | YS | YB->YS | O->YB | O->YB->YS | YB->O."
+                "Dozwolone układy: OCR | YB | YS | YB->YS | OCR->YB | OCR->YB->YS | YB->OCR."
             ),
         }
 
@@ -120,6 +162,8 @@ def get_saved_detection_pipeline_blocks(host) -> list[str]:
     blocks = normalize_detection_pipeline_blocks(raw)
     compiled = compile_detection_pipeline_blocks(blocks)
     if bool(compiled.get("valid")):
+        if _pipeline_requires_yolo(compiled) and not _host_has_configured_yolo_detection_model(host):
+            return []
         return blocks
     return []
 
@@ -129,6 +173,9 @@ def save_detection_pipeline_blocks(host, blocks) -> None:
     compiled = compile_detection_pipeline_blocks(prepared)
     if not bool(compiled.get("valid")):
         return
+    if _pipeline_requires_yolo(compiled) and not _host_has_configured_yolo_detection_model(host):
+        prepared = ["ocr_symbol"]
+        compiled = compile_detection_pipeline_blocks(prepared)
     method_key = str(compiled.get("method_key") or "").strip().upper()
     try:
         host._detection_pipeline_last_blocks = list(prepared)
@@ -151,6 +198,8 @@ def get_detection_workflow_text(host, method_key: str | None, method_labels: dic
         method_labels,
         key_by_label,
     )
+    if _method_requires_yolo(resolved_method) and not _host_has_configured_yolo_detection_model(host):
+        resolved_method = "OCR"
     if resolved_method == "YOLO":
         return "Pipeline: model detekcji YOLO wykrywa ramki i klasy znaków."
     if resolved_method == "YOLO_BOX":
@@ -1136,7 +1185,7 @@ def refresh_detection_pipeline_builder(host) -> None:
             badges = [host._get_detection_pipeline_block_meta(block).get("badge", "?") for block in blocks]
             hint_text = "Aktualny łańcuch: " + " -> ".join(badges)
         else:
-            hint_text = "Dodaj klocki O, YB i YS, aby złożyć metodę detekcji."
+            hint_text = "Dodaj klocki OCR, YB i YS, aby złożyć metodę detekcji."
         try:
             hint_var.set(hint_text)
         except Exception:
@@ -1697,7 +1746,7 @@ def draw_detection_pipeline_builder_canvas(host):
         canvas.create_text(
             width / 2.0,
             center_y + 14.0,
-            text="Dodaj klocki O, YB i YS lub kliknij preset u góry.",
+            text="Dodaj klocki OCR, YB i YS lub kliknij preset u góry.",
             fill=muted,
             font=("Segoe UI", 10),
             anchor="center",
@@ -1820,6 +1869,8 @@ def open_detection_pipeline_builder(host, initial_method=None, detection_pipelin
     self = host
     preset_meta = detection_pipeline_preset_meta or {}
     initial_mode = self._normalize_detection_method_key(initial_method or self._get_detection_method_key())
+    if _method_requires_yolo(initial_mode) and not _host_has_configured_yolo_detection_model(self):
+        initial_mode = "OCR"
     existing = getattr(self, "_detection_pipeline_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -1892,6 +1943,8 @@ def open_detection_pipeline_builder(host, initial_method=None, detection_pipelin
     self._detection_pipeline_hint_var = tk.StringVar(value="")
     self._detection_pipeline_advanced_open = {}
     remembered_blocks = normalize_detection_pipeline_blocks(getattr(self, "_detection_pipeline_last_blocks", []) or [])
+    if not _pipeline_allowed_in_current_context(self, remembered_blocks):
+        remembered_blocks = []
     initial_blocks = remembered_blocks or self._get_detection_pipeline_blocks(initial_mode)
     self._set_detection_pipeline_builder_blocks(initial_blocks, selected_index=0)
 
@@ -1910,9 +1963,9 @@ def open_detection_pipeline_builder(host, initial_method=None, detection_pipelin
     intro = ttk.Label(
         root,
         text=(
-            "Ułóż liniowy łańcuch klocków O, YB i YS. System na żywo sprawdzi, "
+            "Ułóż liniowy łańcuch klocków OCR, YB i YS. System na żywo sprawdzi, "
             "czy taki pipeline jest wspierany przez obecny backend i do jakiego trybu się mapuje. "
-            "Jeżeli pipeline używa YOLO, model wybierasz raz dla całego układu."
+            "Jeżeli pipeline używa YOLO, najpierw wskaż model detekcji znaków."
         ),
         style="PanelMuted.TLabel",
         wraplength=960,
@@ -2026,7 +2079,7 @@ def open_detection_pipeline_builder(host, initial_method=None, detection_pipelin
 
     controls_row = ttk.Frame(canvas_shell)
     controls_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 12))
-    ttk.Button(controls_row, text="+ O", command=lambda: self._append_detection_pipeline_builder_block("ocr_symbol")).pack(side=tk.LEFT)
+    ttk.Button(controls_row, text="+ OCR", command=lambda: self._append_detection_pipeline_builder_block("ocr_symbol")).pack(side=tk.LEFT)
     ttk.Button(controls_row, text="+ YB", command=lambda: self._append_detection_pipeline_builder_block("yolo_box")).pack(side=tk.LEFT, padx=(6, 0))
     ttk.Button(controls_row, text="+ YS", command=lambda: self._append_detection_pipeline_builder_block("yolo_symbol")).pack(side=tk.LEFT, padx=(6, 0))
     ttk.Button(controls_row, text="Przesuń w lewo", command=lambda: self._move_detection_pipeline_builder_selected_block(-1)).pack(side=tk.LEFT, padx=(16, 0))
@@ -2099,5 +2152,3 @@ def open_detection_pipeline_builder(host, initial_method=None, detection_pipelin
     self._detection_pipeline_confirm_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
     self._refresh_detection_pipeline_builder()
-
-

@@ -80,7 +80,6 @@ from .campaign_models import WizardStageStatus
 T07_GRAPH_EDGE_KEYS = {"e4_to_e1", "e4t_to_e1", "e4z_to_e1"}
 CHAR_WORK_GATE_DISPLAY_ID = "T05"
 CHAR_WORK_GATE_SESSION_IDS = {CHAR_WORK_GATE_DISPLAY_ID, "T06"}
-GATE_WORK_INFOGRAPHIC_INK = "#111827"
 
 
 def _format_gate_work_suggestion_text(value) -> str:
@@ -375,24 +374,24 @@ def _show_project_loading_overlay(
         return
 
     palette = getattr(self.app, "palette", {})
-    panel_bg = palette.get("panel", "#252526")
-    fg = palette.get("fg", "#f3f3f3")
+    panel_bg = palette["panel"]
+    fg = palette["fg"]
     tone_key = str(tone or "info").strip().lower()
     # Loading overlays should not change personality mid-flight.  A final
     # "success" state used to repaint the whole splash green, which looked like
     # a second, unrelated component. Keep loading visually steady.
     visual_tone_key = "info" if tone_key == "success" else tone_key
     if visual_tone_key == "error":
-        accent = palette.get("error", "#e74c3c")
+        accent = palette["error"]
     elif visual_tone_key == "warning":
-        accent = palette.get("warning", palette.get("accent", "#4f8de3"))
+        accent = palette["warning"]
     else:
-        accent = palette.get("accent", "#4f8de3")
+        accent = palette["accent"]
 
-    muted = palette.get("muted", "#c7c7c7")
-    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.18)
+    muted = palette["muted"]
+    overlay_bg = blend_hex_colors(panel_bg, palette["blend_dark"], 0.18)
     card_bg = blend_hex_colors(panel_bg, accent, 0.045)
-    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.28)
+    border_color = blend_hex_colors(accent, palette["panel_border"], 0.28)
 
     try:
         try:
@@ -721,14 +720,19 @@ def _build_active_project_dashboard_state(self) -> dict:
     if (
         iteration_target == "char"
         and curr_step == 3
-        and step3_status in {"pending", "needs_rework"}
         and not lightweight_open
     ):
         try:
             readiness = self._detect_campaign_char_ready_dataset_state()
-            if bool(readiness.get("ok")) and int(readiness.get("perfect_count", 0) or 0) > 0:
+            ready_dataset_ok = bool(readiness.get("ok")) and bool(
+                str(readiness.get("ready_dataset") or readiness.get("dataset_hint") or "").strip()
+            )
+            if step3_status in {"pending", "needs_rework"} and ready_dataset_ok:
                 CAMPAIGN.set_step3_ready()
                 step3_status = "ready"
+            elif step3_status == "ready" and not ready_dataset_ok:
+                CAMPAIGN.set_step3_pending()
+                step3_status = "pending"
         except Exception as e:
             logger.debug(f"Nie udało się zaktualizować stanu gotowosci E3 z datasetu znaków: {e}")
 
@@ -766,13 +770,13 @@ def _refresh_active_project_wizard_only(self) -> None:
         pass
 
     palette = getattr(self.app, "palette", {})
-    header_bg = palette.get("panel", "#252526")
-    accent = palette.get("accent", "#2980b9")
-    success = palette.get("success", "#27ae60")
-    warning = palette.get("warning", "#d35400")
-    surface_info = palette.get("surface_info", palette.get("panel_alt", "#252526"))
-    surface_success = palette.get("surface_success", palette.get("panel_alt", "#1f3320"))
-    surface_warning = palette.get("surface_warning", palette.get("panel_alt", "#3a2323"))
+    header_bg = palette["panel"]
+    accent = palette["accent"]
+    success = palette["success"]
+    warning = palette["warning"]
+    surface_info = palette["surface_info"]
+    surface_success = palette["surface_success"]
+    surface_warning = palette["surface_warning"]
 
     curr_step = int(active_state.get("current_step", 1) or 1)
     step1_status = str(active_state.get("step1_status", "pending") or "pending")
@@ -1302,19 +1306,19 @@ def _render_step1_route_actions(self, frame):
         return
 
     palette = getattr(self.app, "palette", {})
-    card_bg = str(frame.cget("bg") or palette.get("panel", "#252526"))
-    fg = palette.get("fg", "#f3f3f3")
-    muted = palette.get("muted", "#c7c7c7")
-    muted_dim = palette.get("muted_dim", "#9a9a9a")
-    success = palette.get("success", "#27ae60")
-    warning = palette.get("warning", "#f39c12")
-    error = palette.get("error", "#c0392b")
-    accent = palette.get("accent", "#4fc1ff")
-    graph_canvas_bg = palette.get("campaign_graph_bg", blend_hex_colors(card_bg, "#0f172a", 0.06))
-    edge_route_color = palette.get("campaign_edge", "#386d83")
-    active_edge_color = palette.get("campaign_active_edge", "#6652c7")
-    border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
-    field_bg = palette.get("field", "#1a1a1a")
+    card_bg = str(frame.cget("bg") or palette["panel"])
+    fg = palette["fg"]
+    muted = palette["muted"]
+    muted_dim = palette["muted_dim"]
+    success = palette["success"]
+    warning = palette["warning"]
+    error = palette["error"]
+    accent = palette["accent"]
+    graph_canvas_bg = palette["campaign_graph_bg"]
+    edge_route_color = palette["campaign_edge"]
+    active_edge_color = palette["campaign_active_edge"]
+    border = palette["panel_border"]
+    field_bg = palette["field"]
 
     for widget in frame.winfo_children():
         widget.destroy()
@@ -1911,14 +1915,15 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             pass
         try:
-            card_success = "#126f3f"
-            card_surface = "#edf0f2"
+            card_success = palette["campaign_card_success"]
+            card_surface = palette["campaign_gate_surface"]
+            card_text = palette["campaign_card_text"]
             canvas.itemconfigure(
                 "gate_approve_blink_rect",
                 fill=blend_hex_colors(card_surface, card_success, 0.16),
                 outline=blend_hex_colors(card_success, card_bg, 0.18),
             )
-            canvas.itemconfigure("gate_approve_blink_text", fill="#101316")
+            canvas.itemconfigure("gate_approve_blink_text", fill=card_text)
         except Exception:
             pass
         self._campaign_graph_approve_blink_after_id = None
@@ -1960,16 +1965,18 @@ def _render_step1_route_actions(self, frame):
                 return
             phase = not bool(getattr(self, "_campaign_graph_approve_blink_phase", False))
             self._campaign_graph_approve_blink_phase = phase
-            card_success = "#126f3f"
-            card_surface = "#edf0f2"
+            card_success = palette["campaign_card_success"]
+            card_surface = palette["campaign_gate_surface"]
+            card_text = palette["campaign_card_text"]
+            card_text_inverse = palette["campaign_graph_bg"]
             if phase:
                 rect_fill = blend_hex_colors(card_surface, card_success, 0.34)
-                rect_outline = blend_hex_colors(card_success, "#101316", 0.10)
-                text_fill = "#ffffff"
+                rect_outline = blend_hex_colors(card_success, card_bg, 0.10)
+                text_fill = card_text_inverse
             else:
                 rect_fill = blend_hex_colors(card_surface, card_success, 0.16)
                 rect_outline = blend_hex_colors(card_success, card_bg, 0.18)
-                text_fill = "#101316"
+                text_fill = card_text
             canvas.itemconfigure("gate_approve_blink_rect", fill=rect_fill, outline=rect_outline)
             canvas.itemconfigure("gate_approve_blink_text", fill=text_fill)
             self._campaign_graph_approve_blink_after_id = canvas.after(520, _pulse_gate_approve_fields)
@@ -2178,16 +2185,16 @@ def _render_step1_route_actions(self, frame):
                 box_y0 = mid_y - box_size / 2.0
                 box_y1 = mid_y + box_size / 2.0
                 split_x = box_cx
-                off_fill = blend_hex_colors("#0b1215", card_bg, 0.18)
-                left_fill = "#35d878" if phase == 0 else off_fill
-                right_fill = off_fill if phase == 0 else "#ff4b42"
-                border = blend_hex_colors("#9fb6bc", card_bg, 0.34)
+                off_fill = blend_hex_colors(palette["campaign_electrode_off"], card_bg, 0.18)
+                left_fill = palette["campaign_electrode_left"] if phase == 0 else off_fill
+                right_fill = off_fill if phase == 0 else palette["campaign_electrode_right"]
+                border = blend_hex_colors(palette["campaign_electrode_border"], card_bg, 0.34)
                 canvas.create_rectangle(
                     box_x0,
                     box_y0,
                     box_x1,
                     box_y1,
-                    fill=blend_hex_colors(off_fill, "#ffffff", 0.04),
+                    fill=blend_hex_colors(off_fill, palette["blend_light"], 0.04),
                     outline=border,
                     width=max(1, int(round(0.8 * local_zoom))),
                     state=tk.DISABLED,
@@ -2580,6 +2587,16 @@ def _render_step1_route_actions(self, frame):
             return {}
         if finish_target and active_target and finish_target != active_target:
             return {}
+        selected_model_path = str(finish_state.get("model_path", "") or "").strip()
+        if bool(finish_state.get("selection_confirmed", True)) and selected_model_path:
+            try:
+                selected_model_ready = bool(Path(selected_model_path).exists() and Path(selected_model_path).is_file())
+            except Exception:
+                selected_model_ready = bool(selected_model_path)
+            if selected_model_ready:
+                finish_state["iteration"] = finish_iteration
+                finish_state["target"] = finish_target or active_target
+                return dict(finish_state)
         run_id = str(finish_state.get("run_id", "") or "").strip()
         training_record = _current_iteration_step4_training_record()
         if not training_record:
@@ -3056,6 +3073,14 @@ def _render_step1_route_actions(self, frame):
             session = {}
         dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
         pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+        try:
+            active_project_root = CAMPAIGN.get_active_project_root_dir()
+        except Exception:
+            active_project_root = None
+        try:
+            active_project_value = str(CAMPAIGN.get_active_project_name() or active_project_name or "").strip()
+        except Exception:
+            active_project_value = str(active_project_name or "").strip()
         t06_backfill_reasons = {
             "approve_step3_backfill",
             "graph_backfill_from_pz3_summary",
@@ -3071,6 +3096,33 @@ def _render_step1_route_actions(self, frame):
                 or normalized.startswith("graph_backfill")
                 or normalized.startswith("summary_backfill")
             )
+
+        def _path_inside_active_project(path_like) -> bool:
+            raw = str(path_like or "").strip()
+            if not raw or not active_project_root:
+                return True
+            try:
+                Path(raw).resolve().relative_to(Path(active_project_root).resolve())
+                return True
+            except Exception:
+                return False
+
+        def _payload_belongs_to_active_project(payload: dict | None, *paths: object) -> bool:
+            if not active_project_value:
+                return True
+            data = dict(payload or {})
+            payload_project = str(data.get("project", "") or "").strip()
+            if payload_project and payload_project != active_project_value:
+                return False
+            path_values = list(paths or [])
+            for key in ("dataset_path", "gold_dataset_path", "summary_path", "summary_dir", "_summary_path", "_summary_dir"):
+                raw = str(data.get(key) or "").strip()
+                if raw:
+                    path_values.append(raw)
+            for raw in path_values:
+                if raw and not _path_inside_active_project(raw):
+                    return False
+            return True
 
         def _summary_int(summary: dict, *keys: str) -> int:
             for key in keys:
@@ -3107,6 +3159,12 @@ def _render_step1_route_actions(self, frame):
                     dataset_path.exists()
                     and dataset_path.is_dir()
                     and self._looks_like_campaign_char_dataset_dir(dataset_path)
+                    and _payload_belongs_to_active_project(
+                        data,
+                        dataset_path,
+                        data.get("_summary_path"),
+                        data.get("_summary_dir"),
+                    )
                 ):
                     return dataset_path
             except Exception:
@@ -3211,7 +3269,21 @@ def _render_step1_route_actions(self, frame):
                 return
             current_substep = str(current.get("substep") or current.get("target_substep") or "").strip().lower()
             if current_substep in {"2", "detect", "pz2", "z3_pz2"}:
-                return
+                def _event_time(payload: dict) -> float:
+                    for field in ("fulfilled_at", "updated_at", "interrupted_at", "started_at"):
+                        raw = str((payload or {}).get(field) or "").strip()
+                        if not raw:
+                            continue
+                        try:
+                            return float(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+                        except Exception:
+                            continue
+                    return 0.0
+
+                pz3_event_time = _event_time(pz3_contract)
+                session_event_time = _event_time(current)
+                if pz3_event_time > 0.0 and session_event_time > pz3_event_time + 0.001:
+                    return
             current_state = str(current.get("state") or "").strip().lower()
             if (
                 not bool(current.get("active"))
@@ -3261,17 +3333,20 @@ def _render_step1_route_actions(self, frame):
                 current_iter_for_session = int(CAMPAIGN.get_current_iteration_num() or current_iteration or 1)
             except Exception:
                 current_iter_for_session = 1
-            resolving_interrupted_session = (
-                str(reason or "").strip().lower() == "graph_resolve_interrupted_pz3_export"
-            )
             if (
-                resolving_interrupted_session
-                and source_iteration > 0
-                and source_iteration != current_iter_for_session
+                source_iteration <= 0
+                or source_iteration != current_iter_for_session
+                or not _payload_belongs_to_active_project(
+                    summary,
+                    dataset_path,
+                    summary.get("_summary_path"),
+                    summary.get("_summary_dir"),
+                )
             ):
                 return {}
             contract = {
                 "fulfilled": True,
+                "project": active_project_value,
                 "product": "char_yolo_dataset",
                 "source": "PZ3",
                 "reason": str(reason or "pz3_export_summary").strip() or "pz3_export_summary",
@@ -3299,6 +3374,19 @@ def _render_step1_route_actions(self, frame):
                 logger.debug(f"Nie udało się odbudować kontraktu T06/PZ3 z aktywnego podsumowania: {exc}")
             return {}
 
+        if dataset_raw and not _payload_belongs_to_active_project(pz3_contract, dataset_raw):
+            foreign = dict(missing)
+            foreign.update(
+                reason="stale_char_dataset",
+                message=(
+                    f"Kontrakt PZ3 {CHAR_WORK_GATE_DISPLAY_ID} wskazuje dataset spoza bieżącego projektu. "
+                    "Wróć do pracy bramki i utwórz dataset znaków w PZ3 dla aktualnego projektu."
+                ),
+                ready_dataset=dataset_raw,
+                dataset_hint=dataset_raw,
+            )
+            return foreign
+
         if pz3_reason == "approve_step3_backfill":
             if _backfill_pz3_contract_from_character_tab("replace_approve_backfill_with_pz3_export"):
                 pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
@@ -3315,13 +3403,20 @@ def _render_step1_route_actions(self, frame):
                 )
                 return invalid_source
         if not (bool(pz3_contract.get("fulfilled")) and dataset_raw):
-            if not _backfill_pz3_contract_from_character_tab("graph_backfill_from_pz3_summary"):
-                try:
-                    fallback = dict(self._detect_campaign_char_ready_dataset_state() or {})
-                except Exception:
-                    fallback = {}
-                if bool(fallback.get("ok")) and str(fallback.get("ready_dataset") or fallback.get("dataset_hint") or "").strip():
-                    return fallback
+            session_state_raw = str(session.get("state") or "").strip().lower()
+            session_gate_raw = str(session.get("working_gate_id") or "").strip().upper()
+            session_substep_raw = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
+            session_targets_pz3_raw = session_substep_raw in {"3", "dataset", "pz3", "z3_pz3"}
+            session_active_raw = bool(session.get("active")) or session_state_raw in {"active", "started", "interrupted", "dirty"}
+            can_backfill_after_pz3_session = bool(
+                session_gate_raw in CHAR_WORK_GATE_SESSION_IDS
+                and session_targets_pz3_raw
+                and session_active_raw
+                and session_state_raw not in {"resolved", "closed", "complete", "completed"}
+            )
+            if can_backfill_after_pz3_session and _backfill_pz3_contract_from_character_tab("summary_backfill_after_pz3_session"):
+                pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
+            else:
                 return dict(missing)
 
         def _contract_time(payload: dict) -> float:
@@ -3406,12 +3501,6 @@ def _render_step1_route_actions(self, frame):
                     if not stale_after_session:
                         stale_after_pz2 = False
             if stale_after_pz2 or stale_after_session:
-                try:
-                    fallback = dict(self._detect_campaign_char_ready_dataset_state() or {})
-                except Exception:
-                    fallback = {}
-                if bool(fallback.get("ok")) and str(fallback.get("ready_dataset") or fallback.get("dataset_hint") or "").strip():
-                    return fallback
                 stale = dict(missing)
                 stale.update(
                     reason="stale_char_dataset",
@@ -3964,6 +4053,17 @@ def _render_step1_route_actions(self, frame):
         if _t06_interrupted_work_cache is not None:
             return dict(_t06_interrupted_work_cache)
         _t06_interrupted_work_cache = {}
+        non_interrupted_z3_states = {
+            "resolved",
+            "closed",
+            "complete",
+            "completed",
+            "abandoned",
+            "ready_for_pz2",
+            "waiting_for_pz2",
+            "ready_for_pz3",
+            "waiting_for_pz3",
+        }
         context_is_char_step = False
         try:
             context_is_char_step = bool(
@@ -3995,7 +4095,7 @@ def _render_step1_route_actions(self, frame):
         session_touched_t05_z3 = bool(
             session_gate_id in CHAR_WORK_GATE_SESSION_IDS
             and session_work_area == "z3"
-            and session_state not in {"resolved", "closed", "complete", "completed"}
+            and session_state not in non_interrupted_z3_states
         )
         session_substep_hint = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
         session_targets_pz2_hint = session_substep_hint in {"2", "detect", "pz2", "z3_pz2"}
@@ -4096,6 +4196,42 @@ def _render_step1_route_actions(self, frame):
                     and session_targets_pz2
                     and session_state not in {"resolved", "closed", "complete", "completed"}
                 ):
+                    def _event_time(payload: dict) -> float:
+                        for field in ("fulfilled_at", "updated_at", "interrupted_at", "started_at"):
+                            raw = str((payload or {}).get(field) or "").strip()
+                            if not raw:
+                                continue
+                            try:
+                                return float(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+                            except Exception:
+                                continue
+                        return 0.0
+
+                    pz3_time = _event_time(pz3_contract)
+                    session_time = _event_time(session)
+                    if pz3_time > 0.0 and (session_time <= 0.0 or session_time <= pz3_time + 0.001):
+                        now = datetime.now().isoformat(timespec="seconds")
+                        previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
+                        session.update(
+                            {
+                                "active": False,
+                                "state": "completed",
+                                "working_gate_id": CHAR_WORK_GATE_DISPLAY_ID,
+                                "reason": "pz3_dataset_ready",
+                                "closed_at": now,
+                                "updated_at": now,
+                            }
+                        )
+                        if previous_interrupted_at:
+                            session.setdefault("resolved_interrupted_at", previous_interrupted_at)
+                        try:
+                            CAMPAIGN.upsert_iteration_state(updates={"t06_work_session": session})
+                            CAMPAIGN.invalidate_step3_char_source_state_cache()
+                            CAMPAIGN.clear_project_iteration_ui_snapshots()
+                        except Exception as exc:
+                            logger.debug(f"Nie udaĹ‚o siÄ™ domknÄ…Ä‡ sesji T05/PZ2 po eksporcie PZ3: {exc}")
+                        _t06_interrupted_work_cache = {}
+                        return {}
                     _t06_interrupted_work_cache = {
                         "interrupted_work": True,
                         "interrupted_kind": "z3",
@@ -4125,7 +4261,7 @@ def _render_step1_route_actions(self, frame):
                     session_work_area == "z3"
                     or str(session.get("substep") or "").strip() in {"2", "3", "pz2", "pz3"}
                 )
-                and session_state not in {"resolved", "closed", "complete", "completed"}
+                and session_state not in non_interrupted_z3_states
             )
             missing_z3_export_interrupted = bool(
                 not pz3_export_ready_current
@@ -4544,13 +4680,10 @@ def _render_step1_route_actions(self, frame):
             },
         )
 
-        if bool(getattr(self, "_project_open_lightweight_refresh", False)):
+        try:
+            char_gate = dict(_t06_exported_char_dataset_state() or {})
+        except Exception:
             char_gate = {}
-        else:
-            try:
-                char_gate = dict(_t06_exported_char_dataset_state() or {})
-            except Exception:
-                char_gate = {}
         char_source, char_validation, char_tone, char_counter = _format_char_dataset_resource_status(char_gate)
         try:
             char_source_iteration = int(char_gate.get("source_iteration", char_gate.get("iteration", 0)) or 0)
@@ -5324,10 +5457,176 @@ def _render_step1_route_actions(self, frame):
             return ""
         return f"BEZ PRZYROSTU IT{current_iter}"
 
+    def _edge_t01_work_compact_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key != "e1_to_e2":
+            return ""
+        try:
+            if _edge_completed(edge):
+                return ""
+        except Exception:
+            pass
+        try:
+            has_images = bool(_transition_resource_present("images") or int(image_count or 0) > 0)
+        except Exception:
+            has_images = False
+        if not has_images:
+            return ""
+        path = normalize_iteration_path(explicit_selected_path or selected_path)
+        if path in {"plate_training", "char_from_images"}:
+            try:
+                if _edge_ready(edge):
+                    return "ZATWIERDŹ -> Z2"
+            except Exception:
+                pass
+            return "UZUPEŁNIJ ZASOBY"
+        return "WYBIERZ TOR PRACY"
+
+    def _edge_t02_work_compact_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key != "e1_to_e3":
+            return ""
+        try:
+            if _edge_completed(edge):
+                return ""
+        except Exception:
+            pass
+        try:
+            if _edge_ready(edge):
+                return "ZATWIERDŹ -> Z3"
+        except Exception:
+            pass
+        try:
+            if _transition_resource_present("plate_run"):
+                return "KONTROLUJ AT"
+        except Exception:
+            pass
+        return ""
+
+    def _edge_step2_work_compact_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key not in {"e2_to_e3", "e2_to_e4"}:
+            return ""
+        try:
+            if _edge_completed(edge):
+                return ""
+        except Exception:
+            pass
+        target_label = "Z3" if edge_key == "e2_to_e3" else "Z4"
+        try:
+            if _edge_ready(edge):
+                return f"ZATWIERDŹ -> {target_label}"
+        except Exception:
+            pass
+        return "PRACUJ W Z2"
+
+    def _edge_t06_work_compact_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key != "e3_to_e4":
+            return ""
+        try:
+            if _edge_completed(edge):
+                return ""
+        except Exception:
+            pass
+        try:
+            pending_t06 = dict(_t06_interrupted_work_state() or {})
+        except Exception:
+            pending_t06 = {}
+        if pending_t06:
+            work_area = str(pending_t06.get("work_area") or pending_t06.get("interrupted_kind") or "").strip().lower()
+            try:
+                session = dict(pending_t06.get("t06_work_session") or {})
+            except Exception:
+                session = {}
+            substep = str(
+                pending_t06.get("substep")
+                or pending_t06.get("target_substep")
+                or session.get("substep")
+                or session.get("target_substep")
+                or ""
+            ).strip().lower()
+            if work_area == "z3" and substep in {"3", "dataset", "pz3", "z3_pz3"}:
+                return "WZNÓW PZ3"
+            if work_area == "z3":
+                return "WZNÓW PZ2"
+            try:
+                pending_images = int(pending_t06.get("unpromoted_approved_images", 0) or 0)
+            except Exception:
+                pending_images = 0
+            if pending_images > 0:
+                return "ROZLICZ [OK]"
+            return "WZNÓW PRACĘ"
+
+        try:
+            gate = dict(_t06_exported_char_dataset_state() or {})
+        except Exception:
+            gate = {}
+        ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+        if bool(gate.get("ok")) and ready_dataset:
+            return _edge_current_iteration_work_status(edge)
+
+        try:
+            current_iter = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
+        except Exception:
+            current_iter = 1
+        try:
+            contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
+            pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
+            pz2_iteration = 0
+            for field in ("source_iteration", "created_iteration", "produced_iteration", "fulfilled_iteration", "iteration"):
+                try:
+                    pz2_iteration = int(pz2_contract.get(field, 0) or 0)
+                except Exception:
+                    pz2_iteration = 0
+                if pz2_iteration > 0:
+                    break
+            pz2_reason = str(pz2_contract.get("reason") or "").strip().lower()
+            pz2_backfill = bool(
+                pz2_reason in {
+                    "approve_step3_backfill",
+                    "graph_backfill_from_pz3_summary",
+                    "summary_backfill",
+                    "summary_backfill_after_pz3_session",
+                    "replace_approve_backfill_with_pz3_export",
+                }
+                or pz2_reason.startswith("graph_backfill")
+                or pz2_reason.startswith("summary_backfill")
+            )
+            pz2_current_ready = bool(
+                pz2_contract.get("fulfilled")
+                and not pz2_backfill
+                and pz2_iteration > 0
+                and pz2_iteration == current_iter
+            )
+        except Exception:
+            pz2_current_ready = False
+
+        reason = str(gate.get("reason") or "").strip().lower()
+        if pz2_current_ready:
+            return "UTWÓRZ AZ W PZ3"
+        if reason in {"stale_char_dataset", "invalid_char_dataset"}:
+            return "NAPRAW: PZ2 -> PZ3"
+        if reason in {"missing_char_dataset", "missing_char_boxes", "missing_perfect_plates"}:
+            return "START: PZ2 -> PZ3"
+        return "PRACA: PZ2 -> PZ3"
+
     def _edge_work_compact_status(edge) -> str:
         review_label = _edge_pending_resource_review_label(edge)
         if review_label:
             return review_label
+        t01_status = _edge_t01_work_compact_status(edge)
+        if t01_status:
+            return t01_status
+        t02_status = _edge_t02_work_compact_status(edge)
+        if t02_status:
+            return t02_status
+        step2_status = _edge_step2_work_compact_status(edge)
+        if step2_status:
+            return step2_status
+        t06_status = _edge_t06_work_compact_status(edge)
+        if t06_status:
+            return t06_status
         return _edge_current_iteration_work_status(edge)
 
     def _edge_status(edge) -> tuple[str, str]:
@@ -5367,30 +5666,6 @@ def _render_step1_route_actions(self, frame):
             except Exception:
                 gate = {}
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
-            if not (bool(gate.get("ok")) and ready_dataset):
-                try:
-                    contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
-                    pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
-                    ready_dataset = str(pz3_contract.get("dataset_path") or "").strip()
-                    if bool(pz3_contract.get("fulfilled")) and ready_dataset:
-                        dataset_path = Path(ready_dataset)
-                        if (
-                            dataset_path.exists()
-                            and dataset_path.is_dir()
-                            and self._looks_like_campaign_char_dataset_dir(dataset_path)
-                        ):
-                            gate = {
-                                "ok": True,
-                                "ready_dataset": ready_dataset,
-                                "source_iteration": int(
-                                    pz3_contract.get("source_iteration")
-                                    or pz3_contract.get("created_iteration")
-                                    or pz3_contract.get("iteration")
-                                    or 0
-                                ),
-                            }
-                except Exception:
-                    pass
             if bool(gate.get("ok")) and ready_dataset:
                 def _infer_badge_dataset_iteration(dataset_value: str) -> int:
                     dataset_token = ""
@@ -5947,10 +6222,10 @@ def _render_step1_route_actions(self, frame):
             try:
                 canvas.delete("all")
                 bg = str(canvas.cget("bg") or field_bg)
-                ink = "#05070a"
-                icon_bg = blend_hex_colors(tone_color, "#ffffff", 0.28)
+                ink = palette["ink_deep"]
+                icon_bg = blend_hex_colors(tone_color, palette["blend_light"], 0.28)
                 icon_outline = blend_hex_colors(ink, tone_color, 0.08)
-                check_color = palette.get("success", "#2ecc71")
+                check_color = palette["success"]
                 canvas.create_rectangle(2, 2, 30, 30, fill=icon_bg, outline=icon_outline, width=2)
                 canvas.create_line(7, 9, 20, 9, fill=ink, width=2)
                 canvas.create_line(7, 15, 18, 15, fill=ink, width=2)
@@ -6506,7 +6781,7 @@ def _render_step1_route_actions(self, frame):
         tk.Label(
             header,
             text=f"Bramka: {status_badge_text}",
-            fg="#ffffff" if status_text else muted_dim,
+            fg=palette["accent_text"] if status_text else muted_dim,
             bg=blend_hex_colors(status_color if status_text else muted_dim, field_bg, 0.26),
             font=("Segoe UI", 8, "bold"),
             padx=10,
@@ -6538,7 +6813,7 @@ def _render_step1_route_actions(self, frame):
             tk.Label(
                 notice,
                 text="!",
-                fg=GATE_WORK_INFOGRAPHIC_INK,
+                fg=palette["campaign_infographic_ink"],
                 bg=mark_bg,
                 font=("Segoe UI Semibold", 10),
                 width=2,
@@ -6727,7 +7002,7 @@ def _render_step1_route_actions(self, frame):
             tk.Label(
                 mark_shell,
                 text=mark_text,
-                fg=GATE_WORK_INFOGRAPHIC_INK,
+                fg=palette["campaign_infographic_ink"],
                 bg=mark_bg,
                 font=("Segoe UI Semibold", 7),
                 anchor="center",
@@ -7421,7 +7696,7 @@ def _render_step1_route_actions(self, frame):
         tk.Label(
             header,
             text=display_gate_id,
-            fg="#ffffff",
+            fg=palette["accent_text"],
             bg=blend_hex_colors(success, field_bg, 0.25),
             font=("Segoe UI", 8, "bold"),
             padx=10,
@@ -7620,7 +7895,7 @@ def _render_step1_route_actions(self, frame):
             status_shell.columnconfigure(1, weight=1)
             mark_tone = str(status.get("mark_tone") or status_tone)
             mark_bg = blend_hex_colors(mark_tone, status_bg, 0.36 if mark_tone == error else 0.18)
-            mark_fg = GATE_WORK_INFOGRAPHIC_INK
+            mark_fg = palette["campaign_infographic_ink"]
             mark_shell = tk.Frame(status_shell, width=18, height=18, bg=mark_bg)
             mark_shell.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 6), pady=(1, 0))
             mark_shell.grid_propagate(False)
@@ -7898,17 +8173,6 @@ def _render_step1_route_actions(self, frame):
                     return True
             except Exception:
                 pass
-            contracts = _t06_contracts()
-            pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
-            pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
-            dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
-            if bool(pz3_contract.get("fulfilled")) and dataset_raw and pz3_reason != "approve_step3_backfill":
-                try:
-                    dataset_path = Path(dataset_raw)
-                    if dataset_path.exists() and dataset_path.is_dir() and self._looks_like_campaign_char_dataset_dir(dataset_path):
-                        return True
-                except Exception:
-                    return True
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             return bool(gate.get("ok") and ready_dataset)
@@ -7916,20 +8180,6 @@ def _render_step1_route_actions(self, frame):
         def _t06_pz3_contract_ready_current() -> bool:
             contracts = _t06_contracts()
             pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
-            pz3_reason = str(pz3_contract.get("reason") or "").strip().lower()
-            dataset_raw = str(pz3_contract.get("dataset_path") or "").strip()
-            if (
-                bool(pz3_contract.get("fulfilled"))
-                and dataset_raw
-                and pz3_reason != "approve_step3_backfill"
-                and _t06_contract_is_current_user_work(pz3_contract)
-            ):
-                try:
-                    dataset_path = Path(dataset_raw)
-                    if dataset_path.exists() and dataset_path.is_dir() and self._looks_like_campaign_char_dataset_dir(dataset_path):
-                        return True
-                except Exception:
-                    return True
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
             try:
@@ -8215,6 +8465,7 @@ def _render_step1_route_actions(self, frame):
                 return _t06_recommendation_for(pz2_label)
             gate = _t06_char_gate()
             ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+            reason = str(gate.get("reason") or "").strip().lower()
             if bool(gate.get("ok")) and ready_dataset:
                 origin = _t06_char_dataset_origin_label()
                 if _t06_pz3_contract_ready_current():
@@ -8234,6 +8485,30 @@ def _render_step1_route_actions(self, frame):
                     return (
                         f"Bramka może być zatwierdzona na podstawie AZ z {origin or 'poprzedniej iteracji'}, "
                         "ale w bieżącej iteracji brakuje nowego eksportu AZ.",
+                        z3_label,
+                    )
+            if reason in {"stale_char_dataset", "invalid_char_dataset"}:
+                if not _t06_pz2_contract_ready_current() and pz2_label:
+                    return (
+                        "Wykryty dataset AZ nie może otworzyć tej bramki. Zacznij od PZ2, "
+                        "a potem utwórz świeży dataset znaków w PZ3 dla bieżącego projektu.",
+                        pz2_label,
+                    )
+                if z3_label:
+                    return (
+                        "Wykryty dataset AZ nie może otworzyć tej bramki. Utwórz poprawny dataset znaków "
+                        "w PZ3 dla bieżącego projektu.",
+                        z3_label,
+                    )
+            if reason in {"missing_char_dataset", "missing_char_boxes", "missing_perfect_plates"}:
+                if not _t06_pz2_contract_ready_current() and pz2_label:
+                    return (
+                        "Bramka potrzebuje najpierw anotacji znaków w PZ2, a potem eksportu datasetu AZ w PZ3.",
+                        pz2_label,
+                    )
+                if z3_label:
+                    return (
+                        "Anotacje znaków są gotowe do rozliczenia. Następny krok to eksport datasetu AZ w PZ3.",
                         z3_label,
                     )
             if not _t06_pz2_contract_ready_current() and pz2_label:
@@ -8259,7 +8534,7 @@ def _render_step1_route_actions(self, frame):
         tk.Label(
             header,
             text=CHAR_WORK_GATE_DISPLAY_ID,
-            fg="#ffffff",
+            fg=palette["accent_text"],
             bg=blend_hex_colors(success, field_bg, 0.25),
             font=("Segoe UI", 8, "bold"),
             padx=10,
@@ -8938,7 +9213,7 @@ def _render_step1_route_actions(self, frame):
             status_shell.columnconfigure(1, weight=1)
             mark_tone = str(status.get("mark_tone") or status_tone)
             mark_bg = blend_hex_colors(mark_tone, status_bg, 0.36 if mark_tone == error else 0.18)
-            mark_fg = GATE_WORK_INFOGRAPHIC_INK
+            mark_fg = palette["campaign_infographic_ink"]
             mark_shell = tk.Frame(status_shell, width=18, height=18, bg=mark_bg)
             mark_shell.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 6), pady=(1, 0))
             mark_shell.grid_propagate(False)
@@ -9225,7 +9500,6 @@ def _render_step1_route_actions(self, frame):
                 except Exception:
                     legacy_pz2_done = False
                 pz2_contract_ok = bool(pz2_contract.get("fulfilled") or legacy_pz2_done)
-                pz3_contract_ok = bool(pz3_contract.get("fulfilled"))
 
                 def _contract_iteration(payload: dict) -> int:
                     if not isinstance(payload, dict):
@@ -9248,6 +9522,18 @@ def _render_step1_route_actions(self, frame):
                 reason = str(gate.get("reason") or "").strip().lower()
                 annotation_reason = str(annotation_gate.get("reason") or "").strip().lower()
                 ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
+                pz3_contract_dataset_path = str(pz3_contract.get("dataset_path") or "").strip()
+                pz3_contract_ok = bool(pz3_contract.get("fulfilled") and gate.get("ok") and ready_dataset)
+                if pz3_contract_ok and pz3_contract_dataset_path:
+                    try:
+                        pz3_contract_ok = bool(
+                            Path(pz3_contract_dataset_path).resolve() == Path(ready_dataset).resolve()
+                        )
+                    except Exception:
+                        pz3_contract_ok = bool(
+                            pz3_contract_dataset_path.replace("\\", "/").casefold()
+                            == ready_dataset.replace("\\", "/").casefold()
+                        )
                 exportable_plates = max(
                     _safe_counter(annotation_gate.get("exportable_plate_count")),
                     _safe_counter(gate.get("exportable_plate_count")),
@@ -9267,9 +9553,9 @@ def _render_step1_route_actions(self, frame):
                 )
                 pz2_plate_count = max(exportable_plates, perfect_plates)
                 missing_pz2 = max(0, min_plates - pz2_plate_count)
-                pz3_dataset_path = str(pz3_contract.get("dataset_path") or ready_dataset or "").strip()
+                pz3_dataset_path = str(pz3_contract_dataset_path if pz3_contract_ok else ready_dataset).strip()
                 pz3_contract_dataset_ok = False
-                if pz3_contract_ok and pz3_dataset_path:
+                if bool(gate.get("ok")) and pz3_contract_ok and pz3_dataset_path:
                     try:
                         pz3_contract_path = Path(pz3_dataset_path)
                         pz3_contract_dataset_ok = bool(
@@ -9573,7 +9859,7 @@ def _render_step1_route_actions(self, frame):
                 tone_colors = {
                     "success": success,
                     "warning": warning,
-                    "error": palette.get("danger", "#ff5a5f"),
+                    "error": palette["danger"],
                     "info": accent,
                     "muted": muted,
                 }
@@ -9714,7 +10000,7 @@ def _render_step1_route_actions(self, frame):
                 tone_colors = {
                     "success": success,
                     "warning": warning,
-                    "error": palette.get("danger", "#ff5a5f"),
+                    "error": palette["danger"],
                     "info": accent,
                     "muted": muted,
                 }
@@ -10431,7 +10717,7 @@ def _render_step1_route_actions(self, frame):
             resource_tree.tag_configure("missing", foreground=warning)
             resource_tree.tag_configure("ready", foreground=success)
             resource_tree.tag_configure("review_pending", foreground=warning)
-            resource_tree.tag_configure("required_missing", foreground=palette.get("danger", palette.get("error", "#ff5a5f")))
+            resource_tree.tag_configure("required_missing", foreground=palette["danger"])
             resource_tree.tag_configure("required_ready", foreground=success)
             resource_tree.tag_configure("active_resource", background=blend_hex_colors(field_bg, success, 0.12))
         except Exception:
@@ -13688,7 +13974,7 @@ def _render_step1_route_actions(self, frame):
                     if normalized == "success":
                         base = success
                     elif normalized in {"error", "warning"}:
-                        base = palette.get("danger", palette.get("error", "#ff5a5f")) if normalized == "error" else warning
+                        base = palette["danger"] if normalized == "error" else warning
                     elif normalized == "info":
                         base = accent
                     else:
@@ -14316,7 +14602,7 @@ def _render_step1_route_actions(self, frame):
             tone_colors = {
                 "success": success,
                 "warning": warning,
-                "error": palette.get("danger", "#ff5a5f"),
+                "error": palette["danger"],
                 "muted": muted,
                 "info": accent,
             }
@@ -14912,6 +15198,11 @@ def _render_step1_route_actions(self, frame):
             nonlocal selected_path, current_target, selected_edge_key
             action_payload = dict(action_spec.payload or {})
             graph_action = str(getattr(action_spec, "graph_action", "") or "").strip()
+            if _is_t07_graph_edge(current_edge_key):
+                if graph_action == "open_z4":
+                    action_payload.setdefault("preferred_subtab", "train")
+                elif graph_action == "open_z4_dataset":
+                    action_payload.setdefault("preferred_subtab", "dataset")
             if _is_t07_graph_edge(current_edge_key) and graph_action == "open_z4" and _t07_blocks_training_before_dataset():
                 try:
                     self.app.update_status(
@@ -15453,7 +15744,88 @@ def _render_step1_route_actions(self, frame):
                             action_spec.tone,
                         )
                     )
+        def _t01_work_notice(current_edge=None) -> dict | None:
+            if str(edge_key or "").strip() != "e1_to_e2":
+                return None
+            try:
+                has_images = bool(_transition_resource_present("images") or int(image_count or 0) > 0)
+            except Exception:
+                has_images = False
+            path = normalize_iteration_path(explicit_selected_path or selected_path)
+            if not has_images:
+                return {
+                    "title": "Najpierw zasoby",
+                    "text": (
+                        "W polu Zasoby wskaż katalog obrazów. Dopiero wtedy T01 może poprowadzić "
+                        "do pracy w Z2 nad anotacjami tablic AT."
+                    ),
+                    "tone": "warning",
+                }
+            if path in {"plate_training", "char_from_images"}:
+                try:
+                    ready = bool(current_edge is not None and _edge_ready(current_edge))
+                except Exception:
+                    ready = False
+                if ready:
+                    return {
+                        "title": "Następny krok",
+                        "text": (
+                            "Zasoby i tor są gotowe. Zatwierdź T01 na bramce, aby otworzyć Z2 "
+                            "i rozpocząć przygotowanie anotacji tablic AT."
+                        ),
+                        "tone": "info",
+                    }
+            return {
+                "title": "Zasoby wybrane",
+                "text": (
+                    "Masz obrazy wejściowe. Wybierz tor pracy: AT dla modelu tablic albo AT dla modelu znaków. "
+                    "Po wyborze toru zatwierdź T01, aby przejść do Z2."
+                ),
+                "tone": "info",
+            }
+
+        def _step2_work_notice(current_edge=None) -> dict | None:
+            current_edge_key = str(edge_key or "").strip()
+            if current_edge_key not in {"e2_to_e3", "e2_to_e4"}:
+                return None
+            try:
+                ready = bool(current_edge is not None and _edge_ready(current_edge))
+            except Exception:
+                ready = False
+            target_label = "Z3" if current_edge_key == "e2_to_e3" else "Z4"
+            if ready:
+                return {
+                    "title": "Następny krok",
+                    "text": (
+                        f"Masz wystarczającą pulę zatwierdzonych anotacji tablic AT. "
+                        f"Możesz zatwierdzić bramkę i przejść do {target_label}, albo wejść do Z2, "
+                        "jeśli chcesz dodać jeszcze materiał w tej iteracji."
+                    ),
+                    "tone": "info",
+                }
+            return {
+                "title": "Wykonaj pracę w Z2",
+                "text": (
+                    "Po T01 jesteś w etapie tablic. Otwórz Z2, przygotuj lub skontroluj anotacje tablic AT "
+                    "i oznacz poprawne pozycje jako [OK]. Dopiero zatwierdzone AT otworzą dalszą bramkę."
+                ),
+                "tone": "warning",
+            }
+
         def _action_modal_body_text() -> str:
+            if str(edge_key or "").strip() == "e1_to_e2":
+                path = normalize_iteration_path(explicit_selected_path or selected_path)
+                if path in {"plate_training", "char_from_images"}:
+                    return campaign_ui_helpers._repair_polish_text(
+                        "T01 ma wybrany tor pracy od obrazów. Jeśli zasoby są gotowe, następny ruch to zatwierdzenie bramki i praca w Z2."
+                    )
+                return campaign_ui_helpers._repair_polish_text(
+                    "T01 prowadzi od obrazów do pracy w Z2. Wybierz, czy przygotowujesz AT dla modelu tablic, czy dla modelu znaków."
+                )
+            if str(edge_key or "").strip() in {"e2_to_e3", "e2_to_e4"}:
+                return campaign_ui_helpers._repair_polish_text(
+                    "Ta bramka korzysta z wyniku pracy w Z2. Jeśli brakuje zatwierdzonych anotacji tablic AT, najpierw wykonaj pracę w Z2."
+                )
             return campaign_ui_helpers._repair_polish_text(
                 "Wybierz akcję. Zatwierdzanie zostaje na bramce grafu."
             )
@@ -15502,6 +15874,10 @@ def _render_step1_route_actions(self, frame):
                 "Praca bramki",
                 body_text,
                 spec_buttons,
+                notice=(
+                    _t01_work_notice(CAMPAIGN_TRANSITION_GRAPH.get_edge(edge_key))
+                    or _step2_work_notice(CAMPAIGN_TRANSITION_GRAPH.get_edge(edge_key))
+                ),
             )
             return
     def _approve(edge_key: str) -> None:
@@ -15758,19 +16134,19 @@ def _render_step1_route_actions(self, frame):
         zoom_for_fonts = _graph_zoom()
         graph_zoom_scale = max(0.001, float(zoom_for_fonts or 1.0))
         graph_base_font_scale = 1.22
-        graph_card_text = palette.get("campaign_card_text", "#161b22")
-        graph_card_muted = palette.get("campaign_card_muted", "#4a5660")
-        graph_card_disabled = palette.get("campaign_card_disabled", "#87919a")
-        graph_node_surface = palette.get("campaign_node_surface", "#e4ebef")
-        graph_gate_surface = palette.get("campaign_gate_surface", "#eee2d0")
-        graph_node_outline = palette.get("campaign_node_outline", "#6f8793")
-        graph_gate_outline = palette.get("campaign_gate_outline", "#987646")
-        graph_shadow = blend_hex_colors(graph_canvas_bg, "#000000", 0.18)
-        graph_card_success = palette.get("campaign_card_success", "#1f7a4d")
-        graph_card_warning = palette.get("campaign_card_warning", "#956318")
-        graph_card_error = palette.get("campaign_card_error", "#a13a32")
-        graph_card_accent = palette.get("campaign_card_accent", "#245f82")
-        graph_card_active = palette.get("campaign_card_active", "#5f50c8")
+        graph_card_text = palette["campaign_card_text"]
+        graph_card_muted = palette["campaign_card_muted"]
+        graph_card_disabled = palette["campaign_card_disabled"]
+        graph_node_surface = palette["campaign_node_surface"]
+        graph_gate_surface = palette["campaign_gate_surface"]
+        graph_node_outline = palette["campaign_node_outline"]
+        graph_gate_outline = palette["campaign_gate_outline"]
+        graph_shadow = blend_hex_colors(graph_canvas_bg, palette["blend_dark"], 0.18)
+        graph_card_success = palette["campaign_card_success"]
+        graph_card_warning = palette["campaign_card_warning"]
+        graph_card_error = palette["campaign_card_error"]
+        graph_card_accent = palette["campaign_card_accent"]
+        graph_card_active = palette["campaign_card_active"]
 
         def _graph_card_contrast_color(color: str) -> str:
             token = str(color or "").strip().lower()
@@ -15861,8 +16237,8 @@ def _render_step1_route_actions(self, frame):
                 hy = sy0 + 2.0 * overlay_scale
                 grip_color = _graph_card_contrast_color(color)
                 fill = blend_hex_colors(base_fill, grip_color, 0.16)
-                outline = blend_hex_colors(grip_color, "#111820", 0.10)
-                dot_fill = "#172027"
+                outline = blend_hex_colors(grip_color, palette["graph_icon_outline"], 0.10)
+                dot_fill = blend_hex_colors(base_fill, grip_color, 0.68)
                 canvas.create_rectangle(
                     hx,
                     hy,
@@ -15898,7 +16274,7 @@ def _render_step1_route_actions(self, frame):
                 zy = _screen_y(top_y, height_value) + 19.0 * overlay_scale
                 icon_color = _graph_card_contrast_color(color)
                 fill = blend_hex_colors(base_fill, icon_color, 0.12)
-                outline = blend_hex_colors(icon_color, "#111820", 0.12)
+                outline = blend_hex_colors(icon_color, palette["graph_icon_outline"], 0.12)
                 canvas.create_rectangle(
                     zx,
                     zy,
@@ -17612,7 +17988,7 @@ def _render_step1_route_actions(self, frame):
                     base_x - px * half,
                     base_y - py * half,
                     fill=fill,
-                    outline=blend_hex_colors(fill, "#ffffff", 0.16),
+                    outline=blend_hex_colors(fill, palette["blend_light"], 0.16),
                     width=1,
                     tags=(tag, "graph_edge_arrow", "graph_structure"),
                 )
@@ -18178,7 +18554,7 @@ def _render_step1_route_actions(self, frame):
                 x0 + 9,
                 (y0 + y1) / 2,
                 text=label,
-                fill=blend_hex_colors(accent, "#ffffff", 0.10),
+                fill=blend_hex_colors(accent, palette["blend_light"], 0.10),
                 anchor="w",
                 font=label_font,
                 tags=(tag, "gate_button", fixed_tag),
@@ -18214,7 +18590,7 @@ def _render_step1_route_actions(self, frame):
                 x0 + 9,
                 (y0 + y1) / 2,
                 text=label,
-                fill=blend_hex_colors(color, "#ffffff", 0.10),
+                fill=blend_hex_colors(color, palette["blend_light"], 0.10),
                 anchor="w",
                 font=label_font,
                 tags=(tag, "gate_button", fixed_tag),
@@ -18392,7 +18768,7 @@ def _render_step1_route_actions(self, frame):
                     cursor_x + button_w / 2,
                     button_y + button_h / 2,
                     text=label,
-                    fill=blend_hex_colors(color, "#ffffff", 0.10) if clickable else color,
+                    fill=blend_hex_colors(color, palette["blend_light"], 0.10) if clickable else color,
                     anchor="center",
                     font=spec.get("font"),
                     tags=button_tags,
@@ -19302,7 +19678,7 @@ def _render_step1_route_actions(self, frame):
                     selector_mid_y - tip_r,
                     tip_x + tip_r,
                     selector_mid_y + tip_r,
-                    fill=blend_hex_colors(electrode_color, "#ffffff", 0.08 if selected else 0.0),
+                    fill=blend_hex_colors(electrode_color, palette["blend_light"], 0.08 if selected else 0.0),
                     outline="",
                     tags=selector_tags,
                 )
@@ -19538,9 +19914,9 @@ def _render_step1_route_actions(self, frame):
                         pill_x0 = pill_x1 - pill_w
                         pill_y0 = y0 + (current_row_h - pill_h) / 2
                         pill_y1 = pill_y0 + pill_h
-                        pill_fill = "#e8edf0"
-                        pill_outline = blend_hex_colors(value_color, "#d8dee3", 0.38)
-                        pill_text = "#101316"
+                        pill_fill = palette["campaign_pill_fill"]
+                        pill_outline = blend_hex_colors(value_color, palette["campaign_pill_outline_base"], 0.38)
+                        pill_text = palette["campaign_pill_text"]
                         canvas.create_rectangle(
                             pill_x0,
                             pill_y0,
@@ -19920,7 +20296,7 @@ def _render_step1_route_actions(self, frame):
                 glow_width = 3 if index == 0 else 2
                 core_width = 2 if index == 0 else 1
                 glow_color = blend_hex_colors(color, card_bg, 0.18 + min(index, 3) * 0.08)
-                core_color = blend_hex_colors(color, "#ffffff", 0.16 if index == 0 else 0.04)
+                core_color = blend_hex_colors(color, palette["blend_light"], 0.16 if index == 0 else 0.04)
                 x0 = x - ux * half_len
                 y0 = y - uy * half_len
                 x1 = x + ux * half_len
@@ -20281,7 +20657,7 @@ def _render_step1_route_actions(self, frame):
                 x1 - 1,
                 y1 - 1,
                 fill="",
-                outline=blend_hex_colors(color, "#ffffff", 0.10),
+                outline=blend_hex_colors(color, palette["blend_light"], 0.10),
                 width=2,
                 state=tk.DISABLED,
                 tags=("gate_field_hover",),
@@ -20291,7 +20667,7 @@ def _render_step1_route_actions(self, frame):
                 y0 + 3,
                 x0 + 3,
                 y1 - 3,
-                fill=blend_hex_colors(color, "#ffffff", 0.20),
+                fill=blend_hex_colors(color, palette["blend_light"], 0.20),
                 width=2,
                 state=tk.DISABLED,
                 tags=("gate_field_hover",),
@@ -21175,6 +21551,55 @@ def _render_step1_route_actions(self, frame):
         except Exception:
             logger.exception("Błąd wiązania interaktywnych tagów grafu kampanii")
 
+    def _open_pending_gate_action_modal() -> None:
+        pending_edge_key = str(getattr(self, "_pending_gate_action_modal_edge_key", "") or "").strip()
+        if not pending_edge_key:
+            return
+        try:
+            attempts_left = int(getattr(self, "_pending_gate_action_modal_attempts", 0) or 0)
+        except Exception:
+            attempts_left = 0
+        if attempts_left <= 0:
+            try:
+                self._pending_gate_action_modal_edge_key = ""
+                self._pending_gate_action_modal_reason = ""
+            except Exception:
+                pass
+            return
+        try:
+            self._pending_gate_action_modal_attempts = attempts_left - 1
+        except Exception:
+            pass
+        try:
+            if _graph_modal_activity_active():
+                canvas.after(180, _open_pending_gate_action_modal)
+                return
+        except Exception:
+            pass
+        edge = CAMPAIGN_TRANSITION_GRAPH.get_edge(pending_edge_key)
+        if edge is None:
+            try:
+                self._pending_gate_action_modal_edge_key = ""
+                self._pending_gate_action_modal_reason = ""
+            except Exception:
+                pass
+            return
+        if not _edge_actions_enabled(edge):
+            try:
+                canvas.after(180, _open_pending_gate_action_modal)
+            except Exception:
+                pass
+            return
+        try:
+            self._pending_gate_action_modal_edge_key = ""
+            self._pending_gate_action_modal_reason = ""
+        except Exception:
+            pass
+        try:
+            _open_actions(pending_edge_key)
+        except Exception:
+            logger.exception("Nie udało się automatycznie otworzyć pracy bramki po powrocie do grafu")
+
     def _request_graph_redraw(delay_ms: int = 18, *, restart: bool = False) -> None:
         try:
             pending_after_id = graph_redraw_state.get("after_id")
@@ -21494,6 +21919,11 @@ def _render_step1_route_actions(self, frame):
         frame.after_idle(_schedule_draw)
     except Exception:
         _schedule_draw()
+    try:
+        if str(getattr(self, "_pending_gate_action_modal_edge_key", "") or "").strip():
+            frame.after(220, _open_pending_gate_action_modal)
+    except Exception:
+        pass
 
     HELP.bind_help(frame, "camp_step1")
     HELP.bind_help(canvas, "camp_step1")
@@ -21541,16 +21971,16 @@ def _refresh_dashboard(self):
         self._refresh_projects_list()
 
     palette = getattr(self.app, "palette", {})
-    fg = palette.get("fg", "#f3f3f3")
-    muted = palette.get("muted", "#c7c7c7")
-    muted_dim = palette.get("muted_dim", "#9a9a9a")
-    accent = palette.get("accent", "#2980b9")
-    success = palette.get("success", "#27ae60")
-    warning = palette.get("warning", "#d35400")
-    surface_info = palette.get("surface_info", palette.get("panel_alt", "#252526"))
-    surface_success = palette.get("surface_success", palette.get("panel_alt", "#1f3320"))
-    surface_warning = palette.get("surface_warning", palette.get("panel_alt", "#3a2323"))
-    header_bg = palette.get("panel", "#252526")
+    fg = palette["fg"]
+    muted = palette["muted"]
+    muted_dim = palette["muted_dim"]
+    accent = palette["accent"]
+    success = palette["success"]
+    warning = palette["warning"]
+    surface_info = palette["surface_info"]
+    surface_success = palette["surface_success"]
+    surface_warning = palette["surface_warning"]
+    header_bg = palette["panel"]
 
     active_proj = CAMPAIGN.get_active_project_name()
     has_project = bool(active_proj)

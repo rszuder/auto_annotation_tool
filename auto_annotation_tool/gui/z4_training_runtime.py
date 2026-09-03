@@ -783,9 +783,9 @@ def _configure_history_tree_tags(self):
     palette = getattr(getattr(self, "app", None), "palette", {}) or {}
     success = palette.get("success", "#2ecc71")
     panel = palette.get("panel", "#252526")
-    pinned_bg = palette.get("surface_success", blend_hex_colors(success, panel, 0.88))
+    pinned_bg = blend_hex_colors(success, panel, 0.76)
     try:
-        tree.tag_configure("pinned_result", foreground=success, background=pinned_bg, font=("Segoe UI", 9, "bold"))
+        tree.tag_configure("pinned_result", foreground=success, background=pinned_bg, font=("Segoe UI Semibold", 9, "bold"))
     except Exception:
         try:
             tree.tag_configure("pinned_result", foreground=success, background=pinned_bg)
@@ -994,6 +994,11 @@ def _load_history(self):
             or (best_model_key and best_model_key in pinned_model_keys)
         )
         row_tags = ("pinned_result",) if row_is_pinned else ()
+        status_label = self._format_history_run_status_label(run)
+        if row_is_pinned:
+            gate_label = _step4_finish_gate_display_id()
+            model_label = f"★ WYNIK {gate_label} | {model_label}"
+            status_label = f"★ PODPIĘTY | {status_label}"
 
         self.tree.insert("", tk.END, iid=str(run.id), values=(
             target_label,
@@ -1001,7 +1006,7 @@ def _load_history(self):
             dataset_label,
             run_label,
             started_short,
-            self._format_history_run_status_label(run),
+            status_label,
             f"{run.current_epoch}/{run.epochs}",
             f"{float(best_map):.3f}",
         ), tags=row_tags)
@@ -1180,6 +1185,7 @@ def _refresh_campaign_training_result_selector(self):
         selector = getattr(self, "campaign_training_result_combo", None)
     dropdown_btn = getattr(self, "campaign_training_result_dropdown_btn", None)
     dropdown_menu = getattr(self, "campaign_training_result_menu", None)
+    title_lbl = getattr(self, "campaign_training_result_title_lbl", None)
     status_lbl = getattr(self, "campaign_training_result_status_lbl", None)
     detail_lbl = getattr(self, "campaign_training_result_detail_lbl", None)
     action_btn = getattr(self, "btn_use_campaign_training_result", None)
@@ -1203,6 +1209,18 @@ def _refresh_campaign_training_result_selector(self):
                 fg=fg,
                 highlightbackground=blend_hex_colors(color, panel, 0.35),
                 highlightcolor=blend_hex_colors(color, panel, 0.35),
+            )
+        except Exception:
+            pass
+
+    def _set_title(pinned: bool) -> None:
+        if title_lbl is None:
+            return
+        gate_label = _step4_finish_gate_display_id()
+        try:
+            title_lbl.configure(
+                text=(f"★ Wynik bramki {gate_label}: model podpięty" if pinned else f"Wynik bramki {gate_label}"),
+                fg=success,
             )
         except Exception:
             pass
@@ -1257,6 +1275,7 @@ def _refresh_campaign_training_result_selector(self):
             pass
 
     if not CAMPAIGN.get_active_project_name():
+        _set_title(False)
         _rebuild_campaign_result_menu([])
         _set_selector_enabled(False)
         if detail_lbl is not None:
@@ -1331,6 +1350,7 @@ def _refresh_campaign_training_result_selector(self):
             selected_run = None
 
     if not labels:
+        _set_title(False)
         if detail_lbl is not None:
             detail_lbl.configure(text=f"Brak ukończonych runów pasujących do aktywnego toru bramki {_step4_finish_gate_display_id()}.")
         if action_btn is not None:
@@ -1344,24 +1364,29 @@ def _refresh_campaign_training_result_selector(self):
 
     detail_text = _campaign_training_result_detail_text(self, selected_run)
     if selected_run_id and selected_run_id == finish_run_id:
+        _set_title(True)
         if action_btn is not None:
             action_btn.configure(state=tk.NORMAL, text="Odepnij wynik", command=self._clear_pinned_step4_result)
-        _set_status("WYNIK WYBRANY", "success")
+        _set_status(f"★ WYNIK {_step4_finish_gate_display_id()} WYBRANY", "success")
         if detail_text:
             detail_text = (
+                f"★ Ten model jest podpięty jako wynik bramki {_step4_finish_gate_display_id()}.\n"
                 f"{detail_text}\n"
-                f"Model jest przypięty jako wynik {_step4_finish_gate_display_id()}. Jeśli chcesz zmienić decyzję, odepnij go tutaj."
+                "Jeśli chcesz zmienić decyzję, odepnij wynik tutaj."
             )
     elif finish_run_id:
+        _set_title(True)
         if action_btn is not None:
             action_btn.configure(state=tk.NORMAL, text="Odepnij wynik", command=self._clear_pinned_step4_result)
-        _set_status("WYNIK PRZYPIĘTY", "success")
+        _set_status(f"★ WYNIK {_step4_finish_gate_display_id()} PODPIĘTY", "success")
         if detail_text:
             detail_text = (
+                f"★ Inny model jest już podpięty jako wynik bramki {_step4_finish_gate_display_id()}.\n"
                 f"{detail_text}\n"
-                "Inny model możesz wskazać dopiero po odpięciu aktualnego wyniku w tej sekcji."
+                "Nowy model możesz wskazać dopiero po odpięciu aktualnego wyniku w tej sekcji."
             )
     else:
+        _set_title(False)
         if action_btn is not None:
             action_btn.configure(
                 state=tk.NORMAL,

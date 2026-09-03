@@ -113,8 +113,8 @@ def _ensure_campaign_detect_splash_widgets(host):
 
     return_btn = ttk.Button(
         card,
-        text="Wróć do grafu",
-        command=getattr(host, "_return_to_wizard_for_step3_rework", lambda: None),
+        text="Zatwierdź PZ1 i wróć do pracy T05",
+        command=getattr(host, "_return_to_t05_work_after_step3_pz1", lambda: None),
     )
     return_btn.grid(row=3, column=0, sticky="w", pady=(14, 0))
     return_btn.grid_remove()
@@ -1535,18 +1535,28 @@ def show_extract_completed_modal(host, plate_count: int, run_dir: Path) -> None:
         parent = getattr(host.app, "root", None)
 
     try:
+        in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        if in_campaign:
+            tail = (
+                "Zatwierdź powyższą pracę przyciskiem w lewym dolnym rogu. "
+                "Wrócisz do pracy bramki T05, gdzie wybierzesz kolejny krok: PZ2."
+            )
+        else:
+            tail = (
+                "Przycisk „Wyodrębnij tablice do PZ2” został wyłączony dla tego zestawu. "
+                "Po potwierdzeniu otworzę PZ2, gdzie odbywa się dalsza praca na wyodrębnionych tablicach."
+            )
         messagebox.showinfo(
             "Wyodrębnianie zakończone",
             (
                 "Tablice zostały wyodrębnione poprawnie i zestaw PZ2 jest gotowy.\n\n"
                 f"Liczba wyodrębnionych tablic: {int(plate_count or 0)}.\n"
                 f"Run PZ2: {Path(run_dir).name}\n\n"
-                "Przycisk „Wyodrębnij tablice do PZ2” został wyłączony dla tego zestawu. "
-                "Po potwierdzeniu otworzę PZ2, gdzie odbywa się dalsza praca na wyodrębnionych tablicach."
+                f"{tail}"
             ),
             parent=parent,
         )
-        if not bool(getattr(host, "_step3_linear_mode", False)):
+        if not in_campaign:
             host.go_to_substep_2()
     except Exception:
         pass
@@ -2066,15 +2076,15 @@ def run_extraction(host) -> None:
         if campaign_step3_active:
             try:
                 self._set_extraction_status(
-                    "Tablice są już wyodrębnione. Otwieram PZ2 do pracy nad znakami.",
+                    "Tablice są już wyodrębnione. Wracam do pracy bramki T05, gdzie wybierzesz kolejny krok.",
                     "success",
                 )
             except Exception:
                 pass
             try:
-                self.go_to_substep_2(force=True)
+                self._return_to_t05_work_after_step3_pz1()
             except Exception as exc:
-                logger.debug(f"Nie udało się otworzyć PZ2 po gotowym wyodrębnieniu kampanii: {exc}")
+                logger.debug(f"Nie udało się wrócić do pracy T05 po gotowym PZ1 kampanii: {exc}")
             return
         if bool(getattr(self, "_campaign_detect_splash_visible", False)):
             try:
@@ -2368,12 +2378,11 @@ def run_extraction(host) -> None:
                         lambda count=generated_count, path=run_dir: self._show_campaign_extract_below_minimum_modal(count, path),
                     )
                 elif campaign_step3_active:
-                    campaign_success_to_pz2 = True
                     try:
                         self._campaign_step3_hold_pz2_after_reextract = False
                     except Exception:
                         pass
-                    def _commit_preview_and_open_pz2(path=run_dir):
+                    def _commit_preview_and_return_t05(path=run_dir):
                         preview_dir_raw = str(path or "").strip()
                         if preview_dir_raw:
                             try:
@@ -2395,9 +2404,9 @@ def run_extraction(host) -> None:
                                 self._force_save_all()
                             except Exception:
                                 pass
-                        self.go_to_substep_2(force=True)
+                        self._return_to_t05_work_after_step3_pz1()
 
-                    self.frame.after(0, _commit_preview_and_open_pz2)
+                    self.frame.after(0, _commit_preview_and_return_t05)
                 else:
                     self.frame.after(0, self.unlock_detection_subtab)
                 if generated_count > 0 and not campaign_below_minimum and not campaign_step3_active:
@@ -2409,7 +2418,7 @@ def run_extraction(host) -> None:
                     self.frame.after(
                         0,
                         lambda: self.app.update_status(
-                            "Wyodrębnianie tablic zakończone. Otwieram PZ2 do pracy nad znakami.",
+                            "Wyodrębnianie tablic zakończone. W pracy bramki T05 wybierz PZ2 jako następny krok.",
                             "success",
                         ) if hasattr(self.app, "update_status") else None,
                     )
@@ -3333,13 +3342,17 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     self.btn_back_to_wizard_step3 = ttk.Button(
         self.extract_tab_nav_row,
         text="← Wstecz",
-        command=self._return_to_wizard_for_step3_rework,
+        command=self._return_to_t05_work_after_step3_pz1,
         state=tk.DISABLED,
         style="WorkflowCard.TButton"
     )
     self.btn_back_to_wizard_step3.grid(row=0, column=0, sticky="w")
     self.btn_back_to_wizard_step3.grid_remove()
-    self.btn_back_to_wizard_step3.configure(text="Wróć do grafu", padding=(8, 2), width=NAV_BUTTON_WIDTH)
+    self.btn_back_to_wizard_step3.configure(
+        text="Zatwierdź powyższą pracę i przejdź do następnego kroku",
+        padding=(8, 2),
+        width=max(NAV_BUTTON_WIDTH, 42),
+    )
 
     self.btn_to_detect_frame = tk.Frame(self.extract_tab_nav_row, bd=0, highlightthickness=0)
     self.btn_to_detect_frame.grid(row=0, column=2, sticky="e")
@@ -3367,7 +3380,10 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
 
     self.btn_to_detect.config(text="Dalej do PZ2", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
-    self.btn_back_to_wizard_step3.config(text="Wróć do grafu", width=NAV_BUTTON_WIDTH)
+    self.btn_back_to_wizard_step3.config(
+        text="Zatwierdź powyższą pracę i przejdź do następnego kroku",
+        width=max(NAV_BUTTON_WIDTH, 42),
+    )
     HELP.bind_help(self.extract_step_nav_row, "t2_extract_nav")
     HELP.bind_help(self.extract_step_back_btn, "t2_extract_nav")
     HELP.bind_help(self.extract_step_next_btn, "t2_extract_nav")
