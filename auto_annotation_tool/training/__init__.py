@@ -71,8 +71,11 @@ from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .model_provenance import (
     PROVENANCE_VERSION,
     TOTAL_EPOCHS_SCOPE,
+    build_checkpoint_training_snapshot,
     build_dataset_training_provenance,
     build_model_training_provenance,
+    build_output_checkpoint_training_snapshot,
+    build_training_dataset_snapshot,
 )
 from .resource_monitor import TrainingResourceMonitor, format_resource_sample_line
 
@@ -141,8 +144,11 @@ __all__ = [
     'TrainingStatus',
     'PROVENANCE_VERSION',
     'TOTAL_EPOCHS_SCOPE',
+    'build_checkpoint_training_snapshot',
     'build_dataset_training_provenance',
     'build_model_training_provenance',
+    'build_output_checkpoint_training_snapshot',
+    'build_training_dataset_snapshot',
     'TrainingResourceMonitor',
     'format_resource_sample_line',
 ]

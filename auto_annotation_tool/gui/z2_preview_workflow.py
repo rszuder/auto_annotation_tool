@@ -3432,23 +3432,23 @@ def _update_preview_edit_status(
         self.preview_edit_status_var.set(
             f"{ann.filename} | tryb rysowania aktywny{dirty_note}. "
             f"Kliknij w {next_corner} tablicy ({next_idx}/4). "
-            f"Po zaznaczeniu 4 punktow polygon domknie sie automatycznie. D anuluje rysowanie.{vehicle_hint}"
+            f"Po kliknięciu 4 wierzchołków ramka domknie się automatycznie. D anuluje rysowanie.{vehicle_hint}"
         )
     elif self._preview_delete_mode:
         if self._preview_delete_candidate_idx is not None:
             self.preview_edit_status_var.set(
-                f"{ann.filename} | tryb usuwania aktywny{dirty_note}. Polygon {int(self._preview_delete_candidate_idx) + 1}/{len(plates)} jest zaznaczony na czerwono. "
-                "Kliknij PPM, aby go usunac, albo nacisnij S, aby anulowac tryb usuwania."
+                f"{ann.filename} | tryb usuwania aktywny{dirty_note}. Ramka {int(self._preview_delete_candidate_idx) + 1}/{len(plates)} jest zaznaczona na czerwono. "
+                "Kliknij PPM, aby ją usunąć, albo naciśnij S, aby anulować tryb usuwania."
             )
         else:
             self.preview_edit_status_var.set(
-                f"{ann.filename} | tryb usuwania aktywny{dirty_note}. Kliknij wewnątrz polygonu, aby zaznaczyć tablicę do usunięcia. "
-                "PPM usuwa zaznaczony polygon, S anuluje tryb."
+                f"{ann.filename} | tryb usuwania aktywny{dirty_note}. Kliknij wewnątrz ramki, aby zaznaczyć anotację tablicy do usunięcia. "
+                "PPM usuwa zaznaczoną ramkę, S anuluje tryb."
             )
     elif not plates:
         self.preview_edit_status_var.set(
-            f"{ann.filename} | brak wykrytej tablicy{dirty_note}. "
-            f"Użyj 'Nowy polygon 4 pkt (D)', aby dodać ręczną anotację.{vehicle_hint}"
+            f"{ann.filename} | brak ramki tablicy{dirty_note}. "
+            f"Naciśnij D, a potem kliknij pierwszy wierzchołek ramki na obrazie.{vehicle_hint}"
         )
     else:
         selected_idx = self._get_selected_plate_index_for_ann(ann)
@@ -3460,10 +3460,10 @@ def _update_preview_edit_status(
         )
         self.preview_edit_status_var.set(
             f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
-            "Kliknij polygon, aby go wybrać, przeciągnij róg, aby poprawić geometrię. "
+            "Kliknij ramkę, aby ją wybrać; przeciągnij róg, aby poprawić geometrię. "
             f"{nav_hint}"
         )
-        drag_hint = "Przytrzymaj W i przeciągnij róg, aby poprawić geometrię."
+        drag_hint = "Przytrzymaj W i przeciągnij róg ramki, aby poprawić geometrię."
         super_hint = (
             "Y wyłącza super korektę."
             if bool(getattr(self, "_preview_super_correction_active", False))
@@ -3476,8 +3476,8 @@ def _update_preview_edit_status(
         )
         self.preview_edit_status_var.set(
             f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
-            f"Kliknij polygon, aby go wybrać. {drag_hint} "
-            f"{nav_hint} A przełącza tablice lokalnie, Spacja zatwierdza lub cofa zatwierdzenie zdjęcia, R kadruje aktywny polygon, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz do okna podglądu, D rysuje nowy polygon, S uzbraja usuwanie, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
+            f"Kliknij ramkę, aby ją wybrać. {drag_hint} "
+            f"{nav_hint} A przełącza tablice lokalnie, Spacja zatwierdza lub cofa zatwierdzenie zdjęcia, R kadruje aktywną ramkę, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz do okna podglądu, D uzbraja rysowanie nowej ramki, S uzbraja usuwanie ramki, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
             f"{self._preview_campaign_reuse_manual_note(ann, editable=True)}"
         )
 

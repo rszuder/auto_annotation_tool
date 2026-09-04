@@ -9,6 +9,7 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -28,6 +29,11 @@ from ..config import (
 )
 from ..utils import cleanup_gpu_memory, safe_load_yaml
 from .dataset_augmentation import ensure_yolo_dataset_yaml_points_to_root
+from .model_provenance import (
+    build_checkpoint_training_snapshot,
+    build_output_checkpoint_training_snapshot,
+    build_training_dataset_snapshot,
+)
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
 from .resource_monitor import format_resource_sample_line, sample_system_memory
@@ -1012,6 +1018,46 @@ class YOLOPoseTrainer:
 
         return True, "Dataset OK", stats
 
+    def _resolve_best_epoch_for_snapshot(self, run: TrainingRun) -> Optional[int]:
+        metrics = getattr(run, "metrics_history", None) or []
+        best_epoch = None
+        best_score = None
+        if isinstance(metrics, list):
+            for row in metrics:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    epoch = int(float(str(row.get("epoch") or row.get("Epoch") or "").strip()))
+                except Exception:
+                    continue
+                score_95 = self._safe_float(
+                    row.get("map50_95")
+                    or row.get("box_map50_95")
+                    or row.get("pose_map50_95")
+                    or row.get("metrics/mAP50-95(B)")
+                    or row.get("metrics/mAP50-95"),
+                    -1.0,
+                )
+                score_50 = self._safe_float(
+                    row.get("map50")
+                    or row.get("box_map50")
+                    or row.get("pose_map50")
+                    or row.get("metrics/mAP50(B)")
+                    or row.get("metrics/mAP50"),
+                    -1.0,
+                )
+                score = (float(score_95), float(score_50))
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_epoch = max(0, epoch)
+        if best_epoch is not None:
+            return best_epoch
+        try:
+            current_epoch = int(getattr(run, "current_epoch", 0) or 0)
+            return current_epoch if current_epoch > 0 else None
+        except Exception:
+            return None
+
     def start_training(
         self,
         name: str,
@@ -1063,9 +1109,25 @@ class YOLOPoseTrainer:
             "parent_dataset_path",
             "parent_best_map50",
             "parent_best_map50_95",
+            "training_target",
         ):
             if key in kwargs:
                 run_metadata[key] = kwargs.get(key)
+        training_target = str(run_metadata.get("training_target") or run_metadata.get("parent_model_target") or "").strip()
+        try:
+            training_target = CONFIG.normalize_task_target(training_target) if training_target else ""
+        except Exception:
+            training_target = str(training_target or "").strip().lower()
+        if not training_target:
+            lowered_context = " ".join(str(item or "").lower() for item in (dataset_path, model_file, name))
+            if "vehicle" in lowered_context or "pojazd" in lowered_context:
+                training_target = "vehicle"
+            elif "plate" in lowered_context or "tablic" in lowered_context or "pose" in lowered_context:
+                training_target = "plate"
+            elif "char" in lowered_context or "znak" in lowered_context:
+                training_target = "char"
+        if training_target:
+            run_metadata["training_target"] = training_target
 
         if resume_from:
             run_id = self._resolve_run_id_from_resume_checkpoint(resume_from)
@@ -1084,6 +1146,31 @@ class YOLOPoseTrainer:
                 error_message="",
             )
         else:
+            checkpoint_kind = "custom_parent" if run_metadata.get("parent_model_path") else "custom_base"
+            if not run_metadata.get("parent_model_path"):
+                model_name = Path(str(model_file or "")).name.lower()
+                if base_model in AVAILABLE_POSE_MODELS or re.match(r"^yolo(v?\d+|\d+)[a-z0-9_-]*(?:-pose)?(?:\.pt)?$", model_name):
+                    checkpoint_kind = "pretrained_base"
+            try:
+                run_metadata["training_dataset_snapshot"] = build_training_dataset_snapshot(
+                    dataset_path,
+                    target=training_target,
+                )
+            except Exception as snapshot_error:
+                logger.warning(f"Nie udało się zamrozić snapshotu datasetu treningowego: {snapshot_error}")
+                run_metadata["training_dataset_snapshot"] = {
+                    "schema": "alpr.training_dataset_snapshot.v1",
+                    "captured_at": datetime.now().isoformat(),
+                    "target": training_target,
+                    "local_path_hint": str(dataset_path or ""),
+                    "provenance_status": "partial",
+                    "error": str(snapshot_error),
+                }
+            run_metadata["input_checkpoint_snapshot"] = build_checkpoint_training_snapshot(
+                model_file,
+                name=Path(str(model_file or "")).name,
+                kind=checkpoint_kind,
+            )
             self.current_run = self.history.create_run(
                 name=name,
                 dataset_path=str(dataset_path),
@@ -1539,6 +1626,12 @@ class YOLOPoseTrainer:
             train_dir = Path(run.output_dir) / "train"
             best_weights = train_dir / "weights" / "best.pt"
             last_weights = train_dir / "weights" / "last.pt"
+            history_run_for_snapshot = self.history.get_run(run.id) or run
+            output_checkpoint_snapshot = build_output_checkpoint_training_snapshot(
+                best_checkpoint=best_weights if best_weights.exists() else None,
+                last_checkpoint=last_weights if last_weights.exists() else None,
+                best_epoch=self._resolve_best_epoch_for_snapshot(history_run_for_snapshot),
+            )
 
             self.history.update_run(
                 run.id,
@@ -1547,6 +1640,7 @@ class YOLOPoseTrainer:
                 best_weights=str(best_weights) if best_weights.exists() else "",
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=max(epochs, self._resolve_runtime_epoch()),
+                output_checkpoint_snapshot=output_checkpoint_snapshot,
             )
             self._export_training_report_artifacts(self.history.get_run(run.id) or run)
             # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.

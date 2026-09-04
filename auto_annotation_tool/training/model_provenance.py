@@ -9,6 +9,7 @@ this payload, but must not reconstruct parent runs or epoch totals.
 from __future__ import annotations
 
 import hashlib
+import datetime as _dt
 import json
 import re
 import zipfile
@@ -20,7 +21,7 @@ from ..config import CONFIG
 from ..utils import safe_load_yaml
 
 
-PROVENANCE_VERSION = 1
+PROVENANCE_VERSION = 2
 TOTAL_EPOCHS_SCOPE = "project_training_after_pretrained_base"
 _RUN_ID_RE = re.compile(r"(20\d{6}_\d{6})")
 _IMAGE_SUFFIXES = {str(ext).lower() for ext in getattr(CONFIG, "IMAGE_EXTENSIONS", (".jpg", ".jpeg", ".png", ".bmp", ".webp"))}
@@ -67,12 +68,13 @@ def build_model_training_provenance(
     if not run:
         run = _legacy_run_from_sidecar(sidecar)
 
-    resolved_target = _normalize_target(target or _value(run, "parent_model_target") or _infer_target_from_text(
+    resolved_target = _normalize_target(target or _value(run, "training_target") or _value(run, "parent_model_target") or _infer_target_from_text(
         " ".join(str(_value(run, key, "")) for key in ("dataset_path", "base_model", "name", "output_dir"))
     ))
     resolved_dataset_path = str(dataset_path or _value(run, "dataset_path", "") or "").strip()
-    dataset = build_dataset_training_provenance(
-        resolved_dataset_path,
+    dataset, provenance_capture = _dataset_provenance_for_run(
+        run,
+        fallback_dataset_path=resolved_dataset_path,
         target=resolved_target,
         include_content_fingerprint=include_dataset_fingerprint,
     )
@@ -99,12 +101,67 @@ def build_model_training_provenance(
     pretrained_origin = _pretrained_origin(run)
     status = lineage_result.provenance_status
     warnings = list(lineage_result.warnings)
+    dataset_status = str(dataset.get("provenance_status") or "").strip().lower()
+    if provenance_capture != "frozen_at_training_start":
+        status = _weaken_status(status)
+        if provenance_capture == "reconstructed_at_export":
+            warnings.append("Dataset treningowy odtworzono z aktualnego katalogu podczas eksportu.")
+        elif provenance_capture == "reconstructed_from_training_artifacts":
+            warnings.append("Dataset treningowy odtworzono z historycznych artefaktow, nie z zamrozonego snapshotu.")
+        elif provenance_capture == "legacy_unknown":
+            status = "legacy_unknown" if not run else _weaken_status(status)
+            warnings.append("Brak wiarygodnego snapshotu datasetu treningowego.")
+    if dataset_status == "legacy_unknown":
+        status = "legacy_unknown" if not run else _weaken_status(status)
+    elif dataset_status == "partial":
+        status = _weaken_status(status)
     if resolved_dataset_path and not dataset.get("manifest_sha256"):
         status = _weaken_status(status)
         warnings.append("Dataset treningowy nie ma jawnego manifestu generatora.")
     if include_dataset_fingerprint and resolved_dataset_path and not dataset.get("split_sha256"):
         status = _weaken_status(status)
         warnings.append("Nie udało się policzyć fingerprintu splitu datasetu treningowego.")
+
+    input_checkpoint_snapshot = _checkpoint_snapshot_from_run(run, "input_checkpoint_snapshot")
+    output_checkpoint_snapshot = _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+    input_sha = _checkpoint_snapshot_sha(input_checkpoint_snapshot) or _file_sha256(
+        _path_or_none(_value(run, "parent_model_path") or _value(run, "base_model"))
+    )
+    if run and not input_sha:
+        status = _weaken_status(status)
+        warnings.append("Nie udalo sie zamrozic sumy SHA-256 wejsciowego checkpointu.")
+    output_mismatch_warning = _checkpoint_mismatch_warning(
+        output_checkpoint_snapshot,
+        checkpoint_path,
+        label="best.pt",
+    )
+    if output_mismatch_warning:
+        status = _weaken_status(status)
+        warnings.append(output_mismatch_warning)
+    frozen_best_sha = _checkpoint_snapshot_sha(output_checkpoint_snapshot, key="best") or _checkpoint_snapshot_sha(output_checkpoint_snapshot)
+    frozen_last_sha = _checkpoint_snapshot_sha(output_checkpoint_snapshot, key="last")
+    current_best_sha = _file_sha256(checkpoint_path)
+    current_last_sha = _file_sha256(_path_or_none(_value(run, "last_weights")))
+    output_best_sha = frozen_best_sha or current_best_sha
+    output_last_sha = frozen_last_sha or current_last_sha
+    if run and not frozen_best_sha and current_best_sha:
+        status = _weaken_status(status)
+        warnings.append("SHA-256 checkpointu best.pt odtworzono z aktualnego pliku, bez zamrozonego snapshotu po treningu.")
+    elif run and not output_best_sha:
+        status = _weaken_status(status)
+        warnings.append("Brak wiarygodnego SHA-256 checkpointu wynikowego best.pt.")
+
+    run_train_images = _train_images_from_dataset(dataset)
+    run_nominal_sample_presentations = _nominal_sample_presentations(run_train_images, run_epochs_completed if run else None)
+    (
+        lineage_nominal_sample_presentations,
+        sample_presentations_known,
+        known_sample_presentations_minimum,
+    ) = _lineage_sample_presentation_summary(lineage_result.lineage)
+    if not lineage_result.total_epochs_known:
+        sample_presentations_known = False
+        lineage_nominal_sample_presentations = None
+    best_epoch = _best_epoch_from_run(run)
 
     parent_run_id = _explicit_parent_run_id(run)
     payload = {
@@ -117,20 +174,35 @@ def build_model_training_provenance(
         "run_epochs_completed": run_epochs_completed if run else None,
         "epochs": run_epochs_planned,
         "current_epoch": run_epochs_completed if run else None,
+        "best_epoch": best_epoch,
         "total_epochs": lineage_result.total_epochs,
         "total_epochs_known": bool(lineage_result.total_epochs_known),
         "total_epochs_scope": TOTAL_EPOCHS_SCOPE,
         "known_epochs_minimum": int(lineage_result.known_epochs_minimum or 0),
+        "lineage_total_epochs": lineage_result.total_epochs,
+        "lineage_total_epochs_known": bool(lineage_result.total_epochs_known),
         "pretrained": bool(pretrained_origin),
         "pretrained_origin": pretrained_origin,
         "parent_run_id": parent_run_id,
         "parent_model_path": str(_value(run, "parent_model_path", "") or ""),
         "parent_model_name": str(_value(run, "parent_model_name", "") or ""),
         "lineage_depth": len(lineage_result.lineage),
+        "lineage_stage_count": len(lineage_result.lineage),
+        "run_train_images": run_train_images,
+        "run_nominal_sample_presentations": run_nominal_sample_presentations,
+        "lineage_nominal_sample_presentations": lineage_nominal_sample_presentations,
+        "sample_presentations_known": bool(sample_presentations_known),
+        "known_sample_presentations_minimum": int(known_sample_presentations_minimum or 0),
+        "provenance_capture": provenance_capture,
         "lineage": lineage_result.lineage,
         "dataset": dataset,
         "dataset_id": str(dataset.get("dataset_id") or ""),
         "dataset_path": str(dataset.get("local_path_hint") or resolved_dataset_path),
+        "input_checkpoint": input_checkpoint_snapshot,
+        "input_checkpoint_sha256": input_sha,
+        "output_checkpoint": output_checkpoint_snapshot,
+        "best_checkpoint_sha256": output_best_sha,
+        "last_checkpoint_sha256": output_last_sha,
         "base_model": str(_value(run, "base_model", "") or ""),
         "img_size": _int_or_none(_value(run, "img_size")),
         "batch_size": _int_or_none(_value(run, "batch_size")),
@@ -201,6 +273,140 @@ def build_dataset_training_provenance(
     )
 
 
+def build_training_dataset_snapshot(
+    dataset_path: Path | str | None,
+    *,
+    target: str = "",
+) -> dict[str, Any]:
+    """Freeze dataset identity before training starts."""
+
+    snapshot = dict(
+        build_dataset_training_provenance(
+            dataset_path,
+            target=target,
+            include_content_fingerprint=True,
+        )
+        or {}
+    )
+    snapshot.setdefault("schema", "alpr.training_dataset_snapshot.v1")
+    snapshot.setdefault("captured_at", _utc_now_iso())
+    snapshot.setdefault("snapshot_source", "frozen_at_training_start")
+    return _json_safe(snapshot)
+
+
+def build_checkpoint_training_snapshot(
+    checkpoint_path: Path | str | None,
+    *,
+    name: str = "",
+    kind: str = "",
+) -> dict[str, Any]:
+    """Freeze a checkpoint reference without using the path as identity."""
+
+    path = _path_or_none(checkpoint_path)
+    exists = bool(path is not None and path.exists() and path.is_file())
+    sha = _file_sha256(path)
+    size = _file_size(path) if exists and path is not None else 0
+    payload = {
+        "schema": "alpr.training_checkpoint_snapshot.v1",
+        "captured_at": _utc_now_iso(),
+        "name": str(name or (path.name if path is not None else "") or "").strip(),
+        "kind": str(kind or "unknown").strip() or "unknown",
+        "path_hint": str(path or ""),
+        "sha256": sha,
+        "size": size,
+        "exists_at_capture": exists,
+        "provenance_status": "complete" if sha else "partial",
+    }
+    return _json_safe(payload)
+
+
+def build_output_checkpoint_training_snapshot(
+    *,
+    best_checkpoint: Path | str | None = None,
+    last_checkpoint: Path | str | None = None,
+    best_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Freeze output checkpoint hashes after training finishes."""
+
+    best_snapshot = build_checkpoint_training_snapshot(best_checkpoint, name="best.pt", kind="best_checkpoint")
+    last_snapshot = build_checkpoint_training_snapshot(last_checkpoint, name="last.pt", kind="last_checkpoint")
+    best_sha = str(best_snapshot.get("sha256") or "")
+    last_sha = str(last_snapshot.get("sha256") or "")
+    payload = {
+        "schema": "alpr.output_checkpoint_snapshot.v1",
+        "captured_at": _utc_now_iso(),
+        "best": best_snapshot,
+        "last": last_snapshot,
+        "best_checkpoint_sha256": best_sha,
+        "last_checkpoint_sha256": last_sha,
+        "best_epoch": _int_or_none(best_epoch),
+        "provenance_status": "complete" if best_sha or last_sha else "partial",
+    }
+    return _json_safe(payload)
+
+
+def _dataset_provenance_for_run(
+    run: Mapping[str, Any],
+    *,
+    fallback_dataset_path: Path | str | None = None,
+    target: str = "",
+    include_content_fingerprint: bool = True,
+) -> tuple[dict[str, Any], str]:
+    snapshot = _mapping_copy(_value(run, "training_dataset_snapshot"))
+    if snapshot:
+        return _normalized_dataset_snapshot(snapshot, target=target), "frozen_at_training_start"
+
+    embedded = _mapping_copy(_value(run, "dataset"))
+    if embedded and (
+        embedded.get("dataset_id")
+        or embedded.get("train_images") is not None
+        or embedded.get("split_sha256")
+        or embedded.get("manifest_sha256")
+    ):
+        capture = str(embedded.get("provenance_capture") or embedded.get("snapshot_source") or "").strip()
+        if capture not in {
+            "frozen_at_training_start",
+            "reconstructed_from_training_artifacts",
+            "reconstructed_at_export",
+            "legacy_unknown",
+        }:
+            capture = "reconstructed_from_training_artifacts"
+        return _normalized_dataset_snapshot(embedded, target=target), capture
+
+    dataset_path = str(fallback_dataset_path or _value(run, "dataset_path", "") or "").strip()
+    if dataset_path:
+        return (
+            build_dataset_training_provenance(
+                dataset_path,
+                target=target,
+                include_content_fingerprint=include_content_fingerprint,
+            ),
+            "reconstructed_at_export",
+        )
+    return (
+        _normalized_dataset_snapshot(
+            {
+                "dataset_id": "",
+                "name": "",
+                "target": _normalize_target(target),
+                "provenance_status": "legacy_unknown",
+            },
+            target=target,
+        ),
+        "legacy_unknown",
+    )
+
+
+def _normalized_dataset_snapshot(snapshot: Mapping[str, Any], *, target: str = "") -> dict[str, Any]:
+    payload = dict(snapshot or {})
+    payload.setdefault("schema", "alpr.training_dataset_snapshot.v1")
+    if not payload.get("target"):
+        payload["target"] = _normalize_target(target)
+    if not payload.get("provenance_status"):
+        payload["provenance_status"] = "complete" if payload.get("manifest_sha256") and payload.get("split_sha256") else "partial"
+    return _json_safe(payload)
+
+
 def _lineage_total_epochs(
     run: dict[str, Any],
     *,
@@ -243,6 +449,11 @@ def _lineage_total_epochs(
                             "mode": "external_known",
                             "epochs_completed": parent_total,
                             "dataset_id": "",
+                            "dataset_manifest_sha256": "",
+                            "dataset_split_sha256": "",
+                            "train_images": None,
+                            "nominal_sample_presentations": None,
+                            "dataset_snapshot_source": "legacy_unknown",
                             "output_checkpoint_sha256": _file_sha256(_path_or_none(_value(run, "parent_model_path"))),
                         },
                         entry,
@@ -260,6 +471,11 @@ def _lineage_total_epochs(
                             "mode": "external_partial",
                             "epochs_completed": parent_total,
                             "dataset_id": "",
+                            "dataset_manifest_sha256": "",
+                            "dataset_split_sha256": "",
+                            "train_images": None,
+                            "nominal_sample_presentations": None,
+                            "dataset_snapshot_source": "legacy_unknown",
                             "output_checkpoint_sha256": _file_sha256(_path_or_none(_value(run, "parent_model_path"))),
                         },
                         entry,
@@ -338,15 +554,20 @@ def _lineage_total_epochs(
 
 
 def _lineage_entry(run: Mapping[str, Any], completed: int, *, checkpoint: Path | None) -> dict[str, Any]:
-    target = _normalize_target(_value(run, "parent_model_target", "")) or _infer_target_from_text(
+    target = _normalize_target(_value(run, "training_target", "") or _value(run, "parent_model_target", "")) or _infer_target_from_text(
         " ".join(str(_value(run, key, "")) for key in ("dataset_path", "base_model", "name", "output_dir"))
     )
-    dataset = build_dataset_training_provenance(
-        _value(run, "dataset_path", ""),
+    dataset, dataset_capture = _dataset_provenance_for_run(
+        run,
+        fallback_dataset_path=_value(run, "dataset_path", ""),
         target=target,
         include_content_fingerprint=False,
     )
-    input_checkpoint = _path_or_none(_value(run, "parent_model_path"))
+    train_images = _train_images_from_dataset(dataset)
+    nominal_presentations = _nominal_sample_presentations(train_images, completed)
+    input_snapshot = _checkpoint_snapshot_from_run(run, "input_checkpoint_snapshot")
+    output_snapshot = _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+    input_checkpoint = _path_or_none(_value(run, "parent_model_path") or _value(run, "base_model"))
     output_checkpoint = checkpoint or _path_or_none(_value(run, "best_weights") or _value(run, "last_weights"))
     return _json_safe(
         {
@@ -355,8 +576,15 @@ def _lineage_entry(run: Mapping[str, Any], completed: int, *, checkpoint: Path |
             "epochs_completed": completed,
             "dataset_id": str(dataset.get("dataset_id") or ""),
             "dataset_manifest_sha256": str(dataset.get("manifest_sha256") or ""),
-            "input_checkpoint_sha256": _file_sha256(input_checkpoint),
-            "output_checkpoint_sha256": _file_sha256(output_checkpoint),
+            "dataset_split_sha256": str(dataset.get("split_sha256") or ""),
+            "train_images": train_images,
+            "nominal_sample_presentations": nominal_presentations,
+            "dataset_snapshot_source": dataset_capture,
+            "input_checkpoint_sha256": _checkpoint_snapshot_sha(input_snapshot) or _file_sha256(input_checkpoint),
+            "output_checkpoint_sha256": _checkpoint_snapshot_sha(output_snapshot, key="best")
+            or _checkpoint_snapshot_sha(output_snapshot, key="last")
+            or _checkpoint_snapshot_sha(output_snapshot)
+            or _file_sha256(output_checkpoint),
         }
     )
 
@@ -446,6 +674,118 @@ def _training_payload_total_epochs(training: Any) -> tuple[bool, int | None]:
     if minimum is not None and minimum > 0:
         return False, minimum
     return False, None
+
+
+def _mapping_copy(value: Any) -> dict[str, Any]:
+    return dict(value or {}) if isinstance(value, Mapping) else {}
+
+
+def _train_images_from_dataset(dataset: Mapping[str, Any]) -> int | None:
+    parsed = _int_or_none(_value(dataset, "train_images"))
+    if parsed is None:
+        return None
+    return max(0, parsed)
+
+
+def _nominal_sample_presentations(train_images: int | None, epochs_completed: int | None) -> int | None:
+    if train_images is None or epochs_completed is None:
+        return None
+    if train_images < 0 or epochs_completed < 0:
+        return None
+    return int(train_images) * int(epochs_completed)
+
+
+def _lineage_sample_presentation_summary(lineage: list[dict[str, Any]]) -> tuple[int | None, bool, int]:
+    if not lineage:
+        return None, False, 0
+    known = True
+    total = 0
+    minimum = 0
+    for entry in lineage:
+        value = _int_or_none(entry.get("nominal_sample_presentations"))
+        if value is None:
+            known = False
+            continue
+        value = max(0, int(value))
+        total += value
+        minimum += value
+    return (total if known else None), known, minimum
+
+
+def _checkpoint_snapshot_from_run(run: Mapping[str, Any], key: str) -> dict[str, Any]:
+    return _mapping_copy(_value(run, key))
+
+
+def _checkpoint_snapshot_sha(snapshot: Mapping[str, Any], *, key: str = "") -> str:
+    if not isinstance(snapshot, Mapping):
+        return ""
+    if key:
+        nested = snapshot.get(key)
+        if isinstance(nested, Mapping):
+            value = str(nested.get("sha256") or "").strip()
+            if value:
+                return value
+        direct = str(snapshot.get(f"{key}_checkpoint_sha256") or "").strip()
+        if direct:
+            return direct
+    return str(snapshot.get("sha256") or "").strip()
+
+
+def _checkpoint_mismatch_warning(snapshot: Mapping[str, Any], checkpoint_path: Path | None, *, label: str) -> str:
+    if not isinstance(snapshot, Mapping) or checkpoint_path is None:
+        return ""
+    frozen = _checkpoint_snapshot_sha(snapshot, key="best") or _checkpoint_snapshot_sha(snapshot)
+    if not frozen:
+        return ""
+    current = _file_sha256(checkpoint_path)
+    if current and current != frozen:
+        return f"Ostrzezenie: {label} nie odpowiada checkpointowi zarejestrowanemu po treningu."
+    return ""
+
+
+def _best_epoch_from_run(run: Mapping[str, Any]) -> int | None:
+    output_snapshot = _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+    best_epoch = _int_or_none(output_snapshot.get("best_epoch")) if output_snapshot else None
+    if best_epoch is not None:
+        return max(0, best_epoch)
+    explicit = _int_or_none(_value(run, "best_epoch"))
+    if explicit is not None:
+        return max(0, explicit)
+
+    metrics = _value(run, "metrics_history", [])
+    if not isinstance(metrics, list):
+        return None
+    best_score: tuple[float, float] | None = None
+    best_row_epoch: int | None = None
+    for row in metrics:
+        if not isinstance(row, Mapping):
+            continue
+        epoch = _int_or_none(row.get("epoch") or row.get("Epoch"))
+        if epoch is None:
+            continue
+        score_95 = _float_or_none(
+            row.get("map50_95")
+            or row.get("box_map50_95")
+            or row.get("pose_map50_95")
+            or row.get("metrics/mAP50-95(B)")
+            or row.get("metrics/mAP50-95")
+        )
+        score_50 = _float_or_none(
+            row.get("map50")
+            or row.get("box_map50")
+            or row.get("pose_map50")
+            or row.get("metrics/mAP50(B)")
+            or row.get("metrics/mAP50")
+        )
+        score = (float(score_95 if score_95 is not None else -1.0), float(score_50 if score_50 is not None else -1.0))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_row_epoch = max(0, int(epoch))
+    return best_row_epoch
+
+
+def _utc_now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _sidecar_candidates(model_path: Path) -> list[Path]:
@@ -779,6 +1119,7 @@ def _run_like_dict(run_like: Any) -> dict[str, Any]:
         "batch_size",
         "img_size",
         "current_epoch",
+        "best_epoch",
         "best_map50",
         "best_map50_95",
         "output_dir",
@@ -793,6 +1134,10 @@ def _run_like_dict(run_like: Any) -> dict[str, Any]:
         "parent_model_name",
         "parent_model_target",
         "parent_dataset_path",
+        "training_target",
+        "training_dataset_snapshot",
+        "input_checkpoint_snapshot",
+        "output_checkpoint_snapshot",
     ):
         try:
             value = getattr(run_like, key)
@@ -812,6 +1157,16 @@ def _int_or_none(value: Any) -> int | None:
         if not text:
             return None
         return int(float(text))
+    except Exception:
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        text = str(value if value is not None else "").strip()
+        if not text:
+            return None
+        return float(text)
     except Exception:
         return None
 

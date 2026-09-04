@@ -2146,10 +2146,122 @@ def _mobile_export_total_epochs_for_run_like(run_like, fallback=None) -> int:
                 return parsed
     return total
 
+def _mobile_export_candidate_training_provenance(
+    candidate: dict | None,
+    *,
+    include_dataset_fingerprint: bool = False,
+) -> dict:
+    """Return cached canonical provenance for one export candidate."""
+
+    if not isinstance(candidate, dict):
+        return {}
+    cached = candidate.get("training_provenance")
+    cached_version = _mobile_export_int_or_none(cached.get("provenance_version")) if isinstance(cached, dict) else None
+    if isinstance(cached, dict) and cached_version is not None and cached_version >= 2:
+        return cached
+    if candidate.get("_training_provenance_loaded"):
+        return cached if isinstance(cached, dict) else {}
+
+    metadata = candidate.get("model_metadata") if isinstance(candidate.get("model_metadata"), dict) else {}
+    raw = metadata.get("raw") if isinstance(metadata.get("raw"), dict) else {}
+    raw_training = raw.get("training") if isinstance(raw.get("training"), dict) else {}
+    raw_run_snapshot = raw.get("run_snapshot") if isinstance(raw.get("run_snapshot"), dict) else {}
+    history_snapshot = candidate.get("history_snapshot") if isinstance(candidate.get("history_snapshot"), dict) else {}
+    run_like = candidate.get("run") or raw_run_snapshot or history_snapshot or raw_training
+    provenance = _mobile_export_build_training_provenance(
+        run_like,
+        target=str(candidate.get("target") or ""),
+        checkpoint=candidate.get("best_weights"),
+        dataset_path=str(candidate.get("dataset_path") or ""),
+        model_metadata=metadata,
+        include_dataset_fingerprint=include_dataset_fingerprint,
+    )
+    if not provenance and isinstance(raw_training, dict) and raw_training.get("provenance_version"):
+        provenance = dict(raw_training)
+
+    candidate["_training_provenance_loaded"] = True
+    if isinstance(provenance, dict):
+        candidate["training_provenance"] = provenance
+        display_total = _mobile_export_provenance_display_total(provenance)
+        if display_total > 0:
+            candidate["total_epochs"] = display_total
+        known_total = _mobile_export_provenance_known_total(provenance)
+        candidate["total_epochs_known"] = known_total is not None
+        if provenance.get("known_epochs_minimum") is not None:
+            candidate["known_epochs_minimum"] = _mobile_export_int_or_none(provenance.get("known_epochs_minimum"))
+        if provenance.get("provenance_status"):
+            candidate["provenance_status"] = str(provenance.get("provenance_status") or "")
+        dataset = provenance.get("dataset") if isinstance(provenance.get("dataset"), dict) else {}
+        dataset_id = str(dataset.get("dataset_id") or "").strip()
+        if dataset_id:
+            candidate["dataset_label"] = dataset_id
+    return provenance if isinstance(provenance, dict) else {}
+
+
+def _mobile_export_candidate_training_int(candidate: dict | None, key: str) -> int | None:
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    value = _mobile_export_int_or_none(provenance.get(key))
+    if value is not None:
+        return value
+    if isinstance(candidate, dict):
+        return _mobile_export_int_or_none(candidate.get(key))
+    return None
+
+
+def _mobile_export_candidate_lineage_stage_count(candidate: dict | None) -> int:
+    value = _mobile_export_candidate_training_int(candidate, "lineage_stage_count")
+    if value is not None and value > 0:
+        return value
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    lineage = provenance.get("lineage") if isinstance(provenance, dict) else None
+    if isinstance(lineage, list) and lineage:
+        return len(lineage)
+    return 0
+
+
+def _mobile_export_known_or_minimum_label(value, *, known: bool | None, minimum=None) -> str:
+    parsed = _mobile_export_int_or_none(value)
+    minimum_value = _mobile_export_int_or_none(minimum)
+    if known is False:
+        if minimum_value is not None and minimum_value > 0:
+            return f"co najmniej {_format_mobile_export_int(minimum_value)}"
+        return "-"
+    if parsed is not None and parsed > 0:
+        return _format_mobile_export_int(parsed)
+    if minimum_value is not None and minimum_value > 0:
+        return f"co najmniej {_format_mobile_export_int(minimum_value)}"
+    return "-"
+
+
+def _mobile_export_provenance_capture_label(value) -> str:
+    capture = str(value or "").strip()
+    labels = {
+        "frozen_at_training_start": "zamrożony przed treningiem",
+        "reconstructed_from_training_artifacts": "odtworzony z artefaktów treningu",
+        "reconstructed_at_export": "odtworzony podczas eksportu",
+        "legacy_unknown": "historyczny, niepełny",
+    }
+    return labels.get(capture, capture or "-")
+
+
+def _mobile_export_provenance_status_label(provenance: dict | None) -> str:
+    if not isinstance(provenance, dict) or not provenance:
+        return "dane historyczne niepełne"
+    status = str(provenance.get("provenance_status") or "").strip().lower()
+    capture = str(provenance.get("provenance_capture") or "").strip()
+    if status == "complete" and capture == "frozen_at_training_start":
+        return "pełny"
+    if status == "complete":
+        return "pełny, ale odtworzony"
+    if status == "legacy_unknown":
+        return "historyczny, niepełny"
+    return "częściowy"
+
+
 def _mobile_export_candidate_total_epochs(candidate: dict | None) -> int:
     if not isinstance(candidate, dict):
         return 0
-    provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+    provenance = _mobile_export_candidate_training_provenance(candidate)
     provenance_total = _mobile_export_provenance_display_total(provenance)
     if provenance_total > 0:
         return provenance_total
@@ -2181,26 +2293,27 @@ def _mobile_export_candidate_total_epochs(candidate: dict | None) -> int:
 def _mobile_export_epoch_profile(candidate: dict | None) -> tuple[float | None, str] | None:
     if not isinstance(candidate, dict):
         return None
-    current_epoch = candidate.get("current_epoch")
-    epochs = candidate.get("epochs")
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    current_epoch = provenance.get("run_epochs_completed") if provenance else candidate.get("current_epoch")
+    epochs = provenance.get("run_epochs_planned") if provenance else candidate.get("epochs")
     total_epochs = _mobile_export_candidate_total_epochs(candidate)
     run = candidate.get("run")
     if run is not None:
-        current_epoch = getattr(run, "current_epoch", current_epoch)
-        epochs = getattr(run, "epochs", epochs)
+        current_epoch = current_epoch if current_epoch not in (None, "") else getattr(run, "current_epoch", None)
+        epochs = epochs if epochs not in (None, "") else getattr(run, "epochs", None)
 
     current_value = _mobile_export_int_or_none(current_epoch)
     planned_value = _mobile_export_int_or_none(epochs)
     if planned_value is None or planned_value <= 0:
         if total_epochs > 0:
-            return None, f"Linia modelu: {total_epochs} znanych epok treningu"
+            return None, f"Łącznie w rodowodzie: {total_epochs} znanych epok treningu"
         return None
 
     done_value = max(0, current_value or 0)
     ratio = max(0.0, min(1.0, float(done_value) / max(1.0, float(planned_value))))
-    text = f"Ostatni run: {done_value} z {planned_value} epok"
+    text = f"Ostatni etap: wykonano {done_value} z {planned_value} epok"
     if total_epochs > 0 and total_epochs != done_value:
-        text = f"{text}; łącznie epok: {total_epochs}"
+        text = f"{text}; łącznie w rodowodzie: {total_epochs}"
     return ratio, text
 
 def _mobile_export_target_marker(candidate: dict | None) -> str:
@@ -3309,6 +3422,68 @@ def _mobile_export_candidate_matches_run(candidate: dict, run) -> bool:
             return True
     return False
 
+
+def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> list[tuple[str, str]]:
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    if not provenance:
+        return [
+            ("Pochodzenie treningowe", "dane historyczne niepełne"),
+            ("Etapy treningu", "-"),
+            ("Prezentacje próbek", "-"),
+        ]
+
+    total_known = _mobile_export_bool_or_none(provenance.get("lineage_total_epochs_known"))
+    if total_known is None:
+        total_known = _mobile_export_bool_or_none(provenance.get("total_epochs_known"))
+    sample_known = _mobile_export_bool_or_none(provenance.get("sample_presentations_known"))
+    stages = _mobile_export_candidate_lineage_stage_count(candidate)
+    if total_known is False and stages > 0:
+        stage_label = f"co najmniej {_format_mobile_export_int(stages)}"
+    else:
+        stage_label = _format_mobile_export_int(stages) if stages > 0 else "-"
+
+    run_done = _mobile_export_int_or_none(provenance.get("run_epochs_completed"))
+    run_plan = _mobile_export_int_or_none(provenance.get("run_epochs_planned"))
+    if run_done is not None and run_plan is not None and run_plan > 0:
+        last_stage_label = f"wykonano {_format_mobile_export_int(run_done)} z {_format_mobile_export_int(run_plan)} epok"
+    elif run_done is not None:
+        last_stage_label = f"wykonano {_format_mobile_export_int(run_done)} epok"
+    else:
+        last_stage_label = "-"
+
+    total_epochs_label = _mobile_export_known_or_minimum_label(
+        provenance.get("lineage_total_epochs") if provenance.get("lineage_total_epochs") is not None else provenance.get("total_epochs"),
+        known=total_known,
+        minimum=provenance.get("known_epochs_minimum"),
+    )
+    run_train_images = _format_mobile_export_int(provenance.get("run_train_images"))
+    run_presentations = _format_mobile_export_int(provenance.get("run_nominal_sample_presentations"))
+    lineage_presentations = _mobile_export_known_or_minimum_label(
+        provenance.get("lineage_nominal_sample_presentations"),
+        known=sample_known,
+        minimum=provenance.get("known_sample_presentations_minimum"),
+    )
+    best_epoch = _mobile_export_int_or_none(provenance.get("best_epoch"))
+    if best_epoch is not None and run_done is not None and run_done > 0:
+        best_label = f"epoka {_format_mobile_export_int(best_epoch)} z {_format_mobile_export_int(run_done)} wykonanych"
+    elif best_epoch is not None:
+        best_label = f"epoka {_format_mobile_export_int(best_epoch)}"
+    else:
+        best_label = "-"
+
+    return [
+        ("Pochodzenie treningowe", _mobile_export_provenance_status_label(provenance)),
+        ("Etapy treningu", stage_label),
+        ("Ostatni etap", last_stage_label),
+        ("Epoki łącznie", total_epochs_label),
+        ("Obrazy train ostatniego", run_train_images),
+        ("Prezentacje ostatniego", run_presentations),
+        ("Prezentacje łącznie", lineage_presentations),
+        ("Snapshot danych", _mobile_export_provenance_capture_label(provenance.get("provenance_capture"))),
+        ("Najlepszy checkpoint", best_label),
+    ]
+
+
 def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str]]:
     if not candidate:
         return []
@@ -3321,10 +3496,9 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         "MZ": "MZ: znaki",
     }
     role_label = role_labels.get(marker, marker or "-")
-    total_epochs = _mobile_export_candidate_total_epochs(candidate)
-    total_epochs_label = _format_mobile_export_int(total_epochs) if total_epochs > 0 else "-"
     params_m, params_source = _mobile_export_candidate_params_millions(candidate)
     params_label = _format_mobile_export_params(params_m, source=params_source, include_source=True)
+    training_rows = _mobile_export_candidate_training_detail_rows(candidate)
     if run is None:
         return [
             ("Model eksportowany", str(candidate.get("model_label") or "-")),
@@ -3335,7 +3509,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
             ("Parametry modelu", params_label),
             ("Rodzina modelu", str(info.get("architecture_label") or info.get("yolo_variant") or "-")),
             ("Dataset treningowy", str(candidate.get("dataset_label") or "-")),
-            ("Łącznie epok", total_epochs_label),
+            *training_rows,
             ("Obraz wejściowy", f"{_format_mobile_export_int(candidate.get('img_size'))} px"),
             ("Najlepsza epoka", _format_mobile_export_int(candidate.get("best_epoch"))),
             ("mAP50", _format_mobile_export_metric(candidate.get("best_map50"))),
@@ -3351,7 +3525,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         ("Wersja YOLO", str(candidate.get("model_version") or "-")),
         ("Parametry modelu", params_label),
         ("Dataset treningowy", str(candidate.get("dataset_label") or "-")),
-        ("Łącznie epok", total_epochs_label),
+        *training_rows,
         ("Obraz wejściowy", f"{_format_mobile_export_int(getattr(run, 'img_size', None))} px"),
         ("Najlepsza epoka", _format_mobile_export_int(candidate.get("best_epoch"))),
         ("mAP50", _format_mobile_export_metric(candidate.get("best_map50"))),
@@ -3392,6 +3566,7 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         checkpoint = str(candidate.get("best_weights") or "")
     marker = _mobile_export_target_marker(candidate)
     params_m, params_source = _mobile_export_candidate_params_millions(candidate)
+    training_provenance = _mobile_export_candidate_training_provenance(candidate)
     snapshot = {
         "schema": "alpr.export.candidate_snapshot.v1",
         "marker": marker,
@@ -3424,7 +3599,14 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "total_epochs_known": _mobile_export_bool_or_none(candidate.get("total_epochs_known")) if "total_epochs_known" in candidate else None,
         "known_epochs_minimum": candidate.get("known_epochs_minimum"),
         "provenance_status": str(candidate.get("provenance_status") or ""),
-        "training_provenance": candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {},
+        "lineage_stage_count": training_provenance.get("lineage_stage_count") if isinstance(training_provenance, dict) else None,
+        "run_train_images": training_provenance.get("run_train_images") if isinstance(training_provenance, dict) else None,
+        "run_nominal_sample_presentations": training_provenance.get("run_nominal_sample_presentations") if isinstance(training_provenance, dict) else None,
+        "lineage_nominal_sample_presentations": training_provenance.get("lineage_nominal_sample_presentations") if isinstance(training_provenance, dict) else None,
+        "sample_presentations_known": training_provenance.get("sample_presentations_known") if isinstance(training_provenance, dict) else None,
+        "known_sample_presentations_minimum": training_provenance.get("known_sample_presentations_minimum") if isinstance(training_provenance, dict) else None,
+        "provenance_capture": str(training_provenance.get("provenance_capture") or "") if isinstance(training_provenance, dict) else "",
+        "training_provenance": training_provenance if isinstance(training_provenance, dict) else {},
         "best_epoch": candidate.get("best_epoch"),
         "best_map50": candidate.get("best_map50"),
         "best_map50_95": candidate.get("best_map50_95"),
@@ -4064,7 +4246,20 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             value = candidate.get(key)
             if value not in (None, ""):
                 training_payload.setdefault(key, value)
-        candidate_provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+        candidate_provenance = _mobile_export_candidate_training_provenance(candidate)
+        for key in (
+            "lineage_total_epochs",
+            "lineage_total_epochs_known",
+            "lineage_stage_count",
+            "run_train_images",
+            "run_nominal_sample_presentations",
+            "lineage_nominal_sample_presentations",
+            "sample_presentations_known",
+            "known_sample_presentations_minimum",
+            "provenance_capture",
+        ):
+            if isinstance(candidate_provenance, dict) and candidate_provenance.get(key) not in (None, ""):
+                training_payload.setdefault(key, candidate_provenance.get(key))
         known_total = _mobile_export_provenance_known_total(training_payload) or _mobile_export_provenance_known_total(candidate_provenance)
         if known_total is not None:
             training_payload["total_epochs"] = known_total
@@ -5914,7 +6109,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidates_table_shell.grid(row=2, column=0, sticky="nsew")
     candidates_table_shell.grid_columnconfigure(0, weight=1)
     candidates_table_shell.grid_rowconfigure(0, weight=1)
-    candidate_columns = ("Eksport", "Model", "Projekt", "YOLO", "Epoki", "Metryka", "Data")
+    candidate_columns = ("Eksport", "Model", "Projekt", "YOLO", "Etapy", "Epoki", "Metryka", "Data")
     candidate_tree_style = "MobileExportCandidates.Treeview"
     try:
         tree_style = ttk.Style(dialog)
@@ -5947,6 +6142,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidate_tree.column("Model", width=46, minwidth=38, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Projekt", width=82, minwidth=54, stretch=False, anchor=tk.W)
     candidate_tree.column("YOLO", width=64, minwidth=44, stretch=False, anchor=tk.W)
+    candidate_tree.column("Etapy", width=48, minwidth=36, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Epoki", width=54, minwidth=38, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Metryka", width=78, minwidth=58, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Data", width=82, minwidth=56, stretch=True, anchor=tk.CENTER)
@@ -5972,21 +6168,22 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 return
             width = max(300, int(width_hint or candidate_tree.winfo_width() or 420) - 16)
             if width >= 430:
-                fixed = {"Eksport": 54, "Model": 44, "Projekt": 80, "YOLO": 58, "Epoki": 48, "Metryka": 76, "Data": 70}
+                fixed = {"Eksport": 54, "Model": 44, "Projekt": 74, "YOLO": 56, "Etapy": 42, "Epoki": 48, "Metryka": 70, "Data": 64}
             elif width >= 360:
-                fixed = {"Eksport": 50, "Model": 40, "Projekt": 58, "YOLO": 52, "Epoki": 44, "Metryka": 66, "Data": 50}
+                fixed = {"Eksport": 50, "Model": 40, "Projekt": 52, "YOLO": 48, "Etapy": 40, "Epoki": 44, "Metryka": 62, "Data": 48}
             else:
                 remaining = width
                 fixed = {
                     "Eksport": 46,
                     "Model": 36,
-                    "Projekt": max(48, int(remaining * 0.18)),
-                    "YOLO": max(44, int(remaining * 0.16)),
-                    "Epoki": max(36, int(remaining * 0.13)),
-                    "Metryka": max(58, int(remaining * 0.22)),
+                    "Projekt": max(42, int(remaining * 0.15)),
+                    "YOLO": max(40, int(remaining * 0.14)),
+                    "Etapy": max(36, int(remaining * 0.11)),
+                    "Epoki": max(36, int(remaining * 0.12)),
+                    "Metryka": max(52, int(remaining * 0.19)),
                     "Data": max(50, remaining),
                 }
-                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["Projekt"] - fixed["YOLO"] - fixed["Epoki"] - fixed["Metryka"])
+                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["Projekt"] - fixed["YOLO"] - fixed["Etapy"] - fixed["Epoki"] - fixed["Metryka"])
             fixed_sum = sum(fixed.values())
             if fixed_sum != width and fixed:
                 fixed["Data"] = max(46, fixed["Data"] + width - fixed_sum)
@@ -5994,6 +6191,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             candidate_tree.column("Model", width=max(38, fixed["Model"]), minwidth=34, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Projekt", width=max(54, fixed["Projekt"]), minwidth=48, stretch=False, anchor=tk.W)
             candidate_tree.column("YOLO", width=max(44, fixed["YOLO"]), minwidth=38, stretch=False, anchor=tk.W)
+            candidate_tree.column("Etapy", width=max(36, fixed["Etapy"]), minwidth=32, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Epoki", width=max(38, fixed["Epoki"]), minwidth=32, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Metryka", width=max(58, fixed["Metryka"]), minwidth=50, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Data", width=max(56, fixed["Data"]), minwidth=48, stretch=True, anchor=tk.CENTER)
@@ -6148,6 +6346,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return _mobile_export_project_label(candidate, empty="").casefold()
         if column == "YOLO":
             return _mobile_export_compact_yolo_label(candidate.get("model_version")).casefold()
+        if column == "Etapy":
+            return _mobile_export_candidate_lineage_stage_count(candidate)
         if column == "Epoki":
             return _mobile_export_candidate_total_epochs(candidate)
         if column == "Metryka":
@@ -6192,13 +6392,15 @@ def _open_mobile_model_export_center(self, initial_run=None):
         title = "mAP50-95" if label == "m95" else "mAP50"
         return f"{title} {_format_mobile_export_metric(value)}"
 
-    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str]:
+    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str, str]:
         total_epochs = _mobile_export_candidate_total_epochs(candidate)
+        stage_count = _mobile_export_candidate_lineage_stage_count(candidate)
         return (
             _candidate_export_checkbox(candidate),
             _mobile_export_target_marker(candidate),
             _mobile_export_project_label(candidate, empty="-"),
             _mobile_export_compact_yolo_label(candidate.get("model_version")),
+            _format_mobile_export_int(stage_count) if stage_count > 0 else "-",
             _format_mobile_export_int(total_epochs) if total_epochs > 0 else "-",
             _candidate_metric_cell(candidate),
             _format_mobile_export_datetime(
@@ -6254,7 +6456,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             candidate_sort_state["descending"] = not bool(candidate_sort_state.get("descending"))
         else:
             candidate_sort_state["column"] = column
-            candidate_sort_state["descending"] = column in {"Eksport", "Epoki", "Metryka", "Data"}
+            candidate_sort_state["descending"] = column in {"Eksport", "Etapy", "Epoki", "Metryka", "Data"}
         _populate_candidate_tree(refresh_selection=True)
 
     def _selected_export_candidates() -> list[dict]:
@@ -9458,7 +9660,20 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 value = candidate.get(key)
                 if value not in (None, ""):
                     training_payload.setdefault(key, value)
-            candidate_provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+            candidate_provenance = _mobile_export_candidate_training_provenance(candidate)
+            for key in (
+                "lineage_total_epochs",
+                "lineage_total_epochs_known",
+                "lineage_stage_count",
+                "run_train_images",
+                "run_nominal_sample_presentations",
+                "lineage_nominal_sample_presentations",
+                "sample_presentations_known",
+                "known_sample_presentations_minimum",
+                "provenance_capture",
+            ):
+                if isinstance(candidate_provenance, dict) and candidate_provenance.get(key) not in (None, ""):
+                    training_payload.setdefault(key, candidate_provenance.get(key))
             known_total = _mobile_export_provenance_known_total(training_payload) or _mobile_export_provenance_known_total(candidate_provenance)
             if known_total is not None:
                 training_payload["total_epochs"] = known_total
