@@ -76,6 +76,8 @@ from .model_provenance import (
     build_model_training_provenance,
     build_output_checkpoint_training_snapshot,
     build_training_dataset_snapshot,
+    normalize_epoch_index_to_completed_epoch,
+    training_dataset_snapshots_match,
 )
 from .resource_monitor import TrainingResourceMonitor, format_resource_sample_line
 
@@ -149,6 +151,8 @@ __all__ = [
     'build_model_training_provenance',
     'build_output_checkpoint_training_snapshot',
     'build_training_dataset_snapshot',
+    'normalize_epoch_index_to_completed_epoch',
+    'training_dataset_snapshots_match',
     'TrainingResourceMonitor',
     'format_resource_sample_line',
 ]

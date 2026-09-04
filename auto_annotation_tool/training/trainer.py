@@ -23,6 +23,7 @@ from ..config import (
     logger,
     YOLO_AVAILABLE,
     AVAILABLE_POSE_MODELS,
+    AVAILABLE_DETECT_MODELS,
     get_torch_module,
     get_yolo_class,
     is_cuda_available,
@@ -33,6 +34,8 @@ from .model_provenance import (
     build_checkpoint_training_snapshot,
     build_output_checkpoint_training_snapshot,
     build_training_dataset_snapshot,
+    normalize_epoch_index_to_completed_epoch,
+    training_dataset_snapshots_match,
 )
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
@@ -327,10 +330,7 @@ class YOLOPoseTrainer:
             raw_epoch = checkpoint.get("epoch")
             if raw_epoch is None:
                 return None
-            epoch_index = int(raw_epoch)
-            if epoch_index < 0:
-                return 0
-            return epoch_index + 1
+            return normalize_epoch_index_to_completed_epoch(raw_epoch)
         except Exception as e:
             logger.debug(f"Nie udało się odczytać epoki z checkpointu {path}: {e}")
             return None
@@ -340,6 +340,143 @@ class YOLOPoseTrainer:
             except Exception:
                 pass
             gc.collect()
+
+    @staticmethod
+    def _metric_rows_completed_epoch(rows) -> Optional[int]:
+        if not isinstance(rows, list) or not rows:
+            return None
+        parsed_epochs = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            raw_epoch = row.get("epoch")
+            if raw_epoch is None:
+                raw_epoch = row.get("Epoch")
+            try:
+                parsed = int(float(str(raw_epoch).strip()))
+            except Exception:
+                parsed = index
+            parsed_epochs.append(max(0, parsed))
+        if not parsed_epochs:
+            return None
+        if min(parsed_epochs) == 0:
+            return max(parsed_epochs) + 1
+        return max(parsed_epochs)
+
+    def _resolve_finished_run_completed_epoch(self, run: TrainingRun, *, last_checkpoint: Path | None = None) -> int:
+        candidates: list[int] = []
+        runtime_epoch = self._resolve_runtime_epoch()
+        if runtime_epoch > 0:
+            candidates.append(runtime_epoch)
+
+        metrics_epoch = self._metric_rows_completed_epoch(getattr(run, "metrics_history", None) or [])
+        if metrics_epoch is not None:
+            candidates.append(metrics_epoch)
+
+        checkpoint_epoch = self._resolve_completed_epoch_from_checkpoint(last_checkpoint) if last_checkpoint else None
+        if checkpoint_epoch is not None:
+            candidates.append(checkpoint_epoch)
+
+        return max((max(0, int(value)) for value in candidates), default=0)
+
+    def _is_official_pretrained_base(self, base_model: str, model_file: str) -> bool:
+        raw_base = str(base_model or "").strip()
+        file_name = Path(str(model_file or raw_base or "")).name.lower()
+        catalog_files = {
+            str(info.get("file") or "").strip().lower()
+            for catalog in (AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS)
+            for info in catalog.values()
+            if isinstance(info, dict)
+        }
+        catalog_keys = {
+            str(key or "").strip().lower()
+            for catalog in (AVAILABLE_POSE_MODELS, AVAILABLE_DETECT_MODELS)
+            for key in catalog.keys()
+        }
+        if raw_base.lower() in catalog_keys or file_name in catalog_files:
+            return True
+        return bool(re.match(r"^yolo(v?\d+|\d+)[a-z0-9_-]*(?:-pose)?(?:\.pt)?$", file_name))
+
+    def _materialize_official_pretrained_checkpoint(
+        self,
+        base_model: str,
+        model_file: str,
+        *,
+        training_target: str = "",
+    ) -> str:
+        if not self._is_official_pretrained_base(base_model, model_file):
+            return str(model_file)
+
+        file_name = Path(str(model_file or base_model or "")).name
+        if not file_name.lower().endswith(".pt"):
+            file_name = f"{file_name}.pt"
+
+        direct = Path(str(model_file or ""))
+        if direct.exists() and direct.is_file():
+            return str(direct)
+
+        target = CONFIG.normalize_task_target(training_target or "")
+        if not target:
+            target = "plate" if "-pose" in file_name.lower() else "char"
+        target_path = Path(CONFIG.get_base_models_dir(target)) / file_name
+        if target_path.exists() and target_path.is_file():
+            return str(target_path)
+
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            from ultralytics.utils.downloads import attempt_download_asset  # type: ignore
+
+            downloaded = Path(attempt_download_asset(str(target_path)))
+            if downloaded.exists() and downloaded.is_file():
+                return str(downloaded)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Nie można przygotować oficjalnego checkpointu pretrained {file_name}: {exc}"
+            ) from exc
+
+        if target_path.exists() and target_path.is_file():
+            return str(target_path)
+        raise RuntimeError(f"Nie można przygotować oficjalnego checkpointu pretrained {file_name}.")
+
+    def _validate_resume_dataset_contract(
+        self,
+        run: TrainingRun,
+        dataset_path: str,
+        *,
+        training_target: str = "",
+        require_snapshot: bool = False,
+    ) -> bool:
+        stored_snapshot = getattr(run, "training_dataset_snapshot", None) or {}
+        if not stored_snapshot:
+            message = (
+                "Run nie ma zamrożonego snapshotu datasetu. "
+                "Nie można formalnie potwierdzić, że resume dotyczy tego samego zbioru."
+            )
+            if require_snapshot:
+                logger.error(message)
+                return False
+            logger.warning(message + " Dopuszczam legacy resume, provenance pozostanie częściowe.")
+            return True
+
+        try:
+            current_snapshot = build_training_dataset_snapshot(dataset_path, target=training_target)
+        except Exception as exc:
+            logger.error(f"Nie można wznowić treningu: nie udało się zbudować aktualnego snapshotu datasetu: {exc}")
+            return False
+
+        matches, reason = training_dataset_snapshots_match(stored_snapshot, current_snapshot)
+        if matches:
+            logger.info(f"Resume dataset guard: {reason}")
+            return True
+
+        logger.error(
+            "Nie można wznowić tego przebiegu treningowego.\n\n"
+            "Zbiór danych różni się od zbioru użytego przed przerwaniem treningu.\n"
+            "Wznowienie zmieniłoby warunki tego samego przebiegu.\n\n"
+            "Jeżeli chcesz trenować na zmienionym zbiorze, uruchom nowy etap dotrenowania (fine-tune).\n"
+            f"Szczegóły: {reason}"
+        )
+        return False
 
     @staticmethod
     def _is_training_memory_error(error: Exception) -> bool:
@@ -1018,7 +1155,7 @@ class YOLOPoseTrainer:
 
         return True, "Dataset OK", stats
 
-    def _resolve_best_epoch_for_snapshot(self, run: TrainingRun) -> Optional[int]:
+    def _resolve_best_epoch_for_snapshot(self, run: TrainingRun) -> tuple[Optional[int], str]:
         metrics = getattr(run, "metrics_history", None) or []
         best_epoch = None
         best_score = None
@@ -1051,12 +1188,12 @@ class YOLOPoseTrainer:
                     best_score = score
                     best_epoch = max(0, epoch)
         if best_epoch is not None:
-            return best_epoch
+            return best_epoch, "metrics_history"
         try:
             current_epoch = int(getattr(run, "current_epoch", 0) or 0)
-            return current_epoch if current_epoch > 0 else None
+            return (current_epoch, "run_state") if current_epoch > 0 else (None, "unknown")
         except Exception:
-            return None
+            return None, "unknown"
 
     def start_training(
         self,
@@ -1136,6 +1273,18 @@ class YOLOPoseTrainer:
             if not self.current_run:
                 logger.error(f"Nie znaleziono runu: {run_id}")
                 return None
+            require_resume_snapshot = bool(
+                kwargs.get("controlled_experiment")
+                or kwargs.get("controlled_comparison")
+                or kwargs.get("require_resume_dataset_snapshot")
+            )
+            if not self._validate_resume_dataset_contract(
+                self.current_run,
+                dataset_path,
+                training_target=training_target,
+                require_snapshot=require_resume_snapshot,
+            ):
+                return None
 
             self.history.update_run(
                 run_id,
@@ -1149,8 +1298,17 @@ class YOLOPoseTrainer:
             checkpoint_kind = "custom_parent" if run_metadata.get("parent_model_path") else "custom_base"
             if not run_metadata.get("parent_model_path"):
                 model_name = Path(str(model_file or "")).name.lower()
-                if base_model in AVAILABLE_POSE_MODELS or re.match(r"^yolo(v?\d+|\d+)[a-z0-9_-]*(?:-pose)?(?:\.pt)?$", model_name):
+                if self._is_official_pretrained_base(base_model, model_file):
                     checkpoint_kind = "pretrained_base"
+                    try:
+                        model_file = self._materialize_official_pretrained_checkpoint(
+                            base_model,
+                            model_file,
+                            training_target=training_target,
+                        )
+                    except Exception as exc:
+                        logger.error(f"Nie można uruchomić treningu badawczego bez SHA checkpointu pretrained: {exc}")
+                        return None
             try:
                 run_metadata["training_dataset_snapshot"] = build_training_dataset_snapshot(
                     dataset_path,
@@ -1627,10 +1785,16 @@ class YOLOPoseTrainer:
             best_weights = train_dir / "weights" / "best.pt"
             last_weights = train_dir / "weights" / "last.pt"
             history_run_for_snapshot = self.history.get_run(run.id) or run
+            completed_epoch = self._resolve_finished_run_completed_epoch(
+                history_run_for_snapshot,
+                last_checkpoint=last_weights if last_weights.exists() else None,
+            )
+            best_epoch, best_epoch_source = self._resolve_best_epoch_for_snapshot(history_run_for_snapshot)
             output_checkpoint_snapshot = build_output_checkpoint_training_snapshot(
                 best_checkpoint=best_weights if best_weights.exists() else None,
                 last_checkpoint=last_weights if last_weights.exists() else None,
-                best_epoch=self._resolve_best_epoch_for_snapshot(history_run_for_snapshot),
+                best_epoch=best_epoch,
+                best_epoch_source=best_epoch_source,
             )
 
             self.history.update_run(
@@ -1639,7 +1803,7 @@ class YOLOPoseTrainer:
                 finished_at=datetime.now().isoformat(),
                 best_weights=str(best_weights) if best_weights.exists() else "",
                 last_weights=str(last_weights) if last_weights.exists() else "",
-                current_epoch=max(epochs, self._resolve_runtime_epoch()),
+                current_epoch=completed_epoch,
                 output_checkpoint_snapshot=output_checkpoint_snapshot,
             )
             self._export_training_report_artifacts(self.history.get_run(run.id) or run)

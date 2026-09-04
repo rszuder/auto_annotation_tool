@@ -408,6 +408,14 @@ def _model_provenance_entry_from_manifest(
             "lineage_total_epochs": training.get("lineage_total_epochs", ref_training.get("lineage_total_epochs")),
             "lineage_total_epochs_known": training.get("lineage_total_epochs_known", ref_training.get("lineage_total_epochs_known")),
             "lineage_stage_count": training.get("lineage_stage_count", ref_training.get("lineage_stage_count")),
+            "lineage_stage_count_known": training.get(
+                "lineage_stage_count_known",
+                ref_training.get("lineage_stage_count_known"),
+            ),
+            "known_stage_count_minimum": training.get(
+                "known_stage_count_minimum",
+                ref_training.get("known_stage_count_minimum"),
+            ),
             "run_train_images": training.get("run_train_images", ref_training.get("run_train_images")),
             "run_nominal_sample_presentations": training.get(
                 "run_nominal_sample_presentations",
@@ -423,6 +431,7 @@ def _model_provenance_entry_from_manifest(
                 ref_training.get("known_sample_presentations_minimum"),
             ),
             "provenance_capture": str(training.get("provenance_capture") or ref_training.get("provenance_capture") or ""),
+            "best_epoch_source": str(training.get("best_epoch_source") or ref_training.get("best_epoch_source") or ""),
             "dataset": {
                 "dataset_id": str(dataset.get("dataset_id") or training.get("dataset_id") or ""),
                 "manifest_sha256": str(dataset.get("manifest_sha256") or ""),

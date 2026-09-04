@@ -113,11 +113,14 @@ class MobileReportFullRowsTests(unittest.TestCase):
                     "lineage_total_epochs": 40,
                     "lineage_total_epochs_known": True,
                     "lineage_stage_count": 2,
+                    "lineage_stage_count_known": True,
+                    "known_stage_count_minimum": 2,
                     "run_train_images": 900,
                     "run_nominal_sample_presentations": 9000,
                     "lineage_nominal_sample_presentations": 32000,
                     "sample_presentations_known": True,
                     "known_sample_presentations_minimum": 32000,
+                    "best_epoch_source": "checkpoint",
                     "provenance_capture": "frozen_at_training_start",
                     "provenance_status": "complete",
                     "dataset": {
@@ -158,11 +161,14 @@ class MobileReportFullRowsTests(unittest.TestCase):
             self.assertEqual(bundle.model_refs["plate"]["package_sha256"], "package-sha")
             self.assertEqual(provenance["training"]["total_epochs"], 40)
             self.assertEqual(provenance["training"]["lineage_stage_count"], 2)
+            self.assertTrue(provenance["training"]["lineage_stage_count_known"])
+            self.assertEqual(provenance["training"]["known_stage_count_minimum"], 2)
             self.assertEqual(provenance["training"]["run_train_images"], 900)
             self.assertEqual(provenance["training"]["run_nominal_sample_presentations"], 9000)
             self.assertEqual(provenance["training"]["lineage_nominal_sample_presentations"], 32000)
             self.assertTrue(provenance["training"]["sample_presentations_known"])
             self.assertEqual(provenance["training"]["known_sample_presentations_minimum"], 32000)
+            self.assertEqual(provenance["training"]["best_epoch_source"], "checkpoint")
             self.assertEqual(provenance["training"]["provenance_capture"], "frozen_at_training_start")
             self.assertEqual(provenance["training"]["dataset"]["dataset_id"], "DS-MT-ABC")
             self.assertEqual(provenance["variant_id"], "tflite-int8")
