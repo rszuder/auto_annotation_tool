@@ -2189,6 +2189,10 @@ def _mobile_export_candidate_training_provenance(
         candidate["total_epochs_known"] = known_total is not None
         if provenance.get("known_epochs_minimum") is not None:
             candidate["known_epochs_minimum"] = _mobile_export_int_or_none(provenance.get("known_epochs_minimum"))
+        if provenance.get("lineage_stage_count_known") is not None:
+            candidate["lineage_stage_count_known"] = _mobile_export_bool_or_none(provenance.get("lineage_stage_count_known"))
+        if provenance.get("known_stage_count_minimum") is not None:
+            candidate["known_stage_count_minimum"] = _mobile_export_int_or_none(provenance.get("known_stage_count_minimum"))
         if provenance.get("provenance_status"):
             candidate["provenance_status"] = str(provenance.get("provenance_status") or "")
         dataset = provenance.get("dataset") if isinstance(provenance.get("dataset"), dict) else {}
@@ -2217,6 +2221,15 @@ def _mobile_export_candidate_lineage_stage_count(candidate: dict | None) -> int:
     if isinstance(lineage, list) and lineage:
         return len(lineage)
     return 0
+
+
+def _mobile_export_candidate_lineage_stage_count_known(candidate: dict | None) -> bool | None:
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    if isinstance(provenance, dict) and provenance.get("lineage_stage_count_known") is not None:
+        return _mobile_export_bool_or_none(provenance.get("lineage_stage_count_known"))
+    if isinstance(candidate, dict) and candidate.get("lineage_stage_count_known") is not None:
+        return _mobile_export_bool_or_none(candidate.get("lineage_stage_count_known"))
+    return None
 
 
 def _mobile_export_known_or_minimum_label(value, *, known: bool | None, minimum=None) -> str:
@@ -3435,10 +3448,12 @@ def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> lis
     total_known = _mobile_export_bool_or_none(provenance.get("lineage_total_epochs_known"))
     if total_known is None:
         total_known = _mobile_export_bool_or_none(provenance.get("total_epochs_known"))
+    stage_count_known = _mobile_export_candidate_lineage_stage_count_known(candidate)
     sample_known = _mobile_export_bool_or_none(provenance.get("sample_presentations_known"))
     stages = _mobile_export_candidate_lineage_stage_count(candidate)
-    if total_known is False and stages > 0:
-        stage_label = f"co najmniej {_format_mobile_export_int(stages)}"
+    stage_minimum = _mobile_export_int_or_none(provenance.get("known_stage_count_minimum"))
+    if stage_count_known is False:
+        stage_label = f"co najmniej {_format_mobile_export_int(stage_minimum or stages)}" if (stage_minimum or stages) > 0 else "-"
     else:
         stage_label = _format_mobile_export_int(stages) if stages > 0 else "-"
 
@@ -3470,6 +3485,15 @@ def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> lis
         best_label = f"epoka {_format_mobile_export_int(best_epoch)}"
     else:
         best_label = "-"
+    best_source = str(provenance.get("best_epoch_source") or "").strip()
+    if best_label != "-" and best_source:
+        source_labels = {
+            "checkpoint": "checkpoint",
+            "metrics_history": "metryki",
+            "run_state": "stan runu",
+            "unknown": "nieznane źródło",
+        }
+        best_label = f"{best_label} | źródło: {source_labels.get(best_source, best_source)}"
 
     return [
         ("Pochodzenie treningowe", _mobile_export_provenance_status_label(provenance)),
@@ -3600,11 +3624,14 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "known_epochs_minimum": candidate.get("known_epochs_minimum"),
         "provenance_status": str(candidate.get("provenance_status") or ""),
         "lineage_stage_count": training_provenance.get("lineage_stage_count") if isinstance(training_provenance, dict) else None,
+        "lineage_stage_count_known": training_provenance.get("lineage_stage_count_known") if isinstance(training_provenance, dict) else None,
+        "known_stage_count_minimum": training_provenance.get("known_stage_count_minimum") if isinstance(training_provenance, dict) else None,
         "run_train_images": training_provenance.get("run_train_images") if isinstance(training_provenance, dict) else None,
         "run_nominal_sample_presentations": training_provenance.get("run_nominal_sample_presentations") if isinstance(training_provenance, dict) else None,
         "lineage_nominal_sample_presentations": training_provenance.get("lineage_nominal_sample_presentations") if isinstance(training_provenance, dict) else None,
         "sample_presentations_known": training_provenance.get("sample_presentations_known") if isinstance(training_provenance, dict) else None,
         "known_sample_presentations_minimum": training_provenance.get("known_sample_presentations_minimum") if isinstance(training_provenance, dict) else None,
+        "best_epoch_source": str(training_provenance.get("best_epoch_source") or "") if isinstance(training_provenance, dict) else "",
         "provenance_capture": str(training_provenance.get("provenance_capture") or "") if isinstance(training_provenance, dict) else "",
         "training_provenance": training_provenance if isinstance(training_provenance, dict) else {},
         "best_epoch": candidate.get("best_epoch"),
@@ -4251,11 +4278,14 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             "lineage_total_epochs",
             "lineage_total_epochs_known",
             "lineage_stage_count",
+            "lineage_stage_count_known",
+            "known_stage_count_minimum",
             "run_train_images",
             "run_nominal_sample_presentations",
             "lineage_nominal_sample_presentations",
             "sample_presentations_known",
             "known_sample_presentations_minimum",
+            "best_epoch_source",
             "provenance_capture",
         ):
             if isinstance(candidate_provenance, dict) and candidate_provenance.get(key) not in (None, ""):
@@ -9665,11 +9695,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 "lineage_total_epochs",
                 "lineage_total_epochs_known",
                 "lineage_stage_count",
+                "lineage_stage_count_known",
+                "known_stage_count_minimum",
                 "run_train_images",
                 "run_nominal_sample_presentations",
                 "lineage_nominal_sample_presentations",
                 "sample_presentations_known",
                 "known_sample_presentations_minimum",
+                "best_epoch_source",
                 "provenance_capture",
             ):
                 if isinstance(candidate_provenance, dict) and candidate_provenance.get(key) not in (None, ""):

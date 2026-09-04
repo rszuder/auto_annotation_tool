@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import datetime as _dt
+import csv
 import json
 import re
 import zipfile
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..config import CONFIG
+from ..config import CONFIG, get_torch_module
 from ..utils import safe_load_yaml
 
 
@@ -46,6 +47,8 @@ class _EpochLineageResult:
     total_epochs: int | None
     known_epochs_minimum: int
     total_epochs_known: bool
+    lineage_stage_count_known: bool
+    known_stage_count_minimum: int
     provenance_status: str
     lineage: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -90,6 +93,8 @@ def build_model_training_provenance(
         total_epochs=None,
         known_epochs_minimum=0,
         total_epochs_known=False,
+        lineage_stage_count_known=False,
+        known_stage_count_minimum=0,
         provenance_status="legacy_unknown",
         lineage=[],
         warnings=["Brak historii runu treningowego dla modelu."],
@@ -162,6 +167,7 @@ def build_model_training_provenance(
         sample_presentations_known = False
         lineage_nominal_sample_presentations = None
     best_epoch = _best_epoch_from_run(run)
+    best_epoch_source = _best_epoch_source_from_run(run)
 
     parent_run_id = _explicit_parent_run_id(run)
     payload = {
@@ -175,6 +181,7 @@ def build_model_training_provenance(
         "epochs": run_epochs_planned,
         "current_epoch": run_epochs_completed if run else None,
         "best_epoch": best_epoch,
+        "best_epoch_source": best_epoch_source,
         "total_epochs": lineage_result.total_epochs,
         "total_epochs_known": bool(lineage_result.total_epochs_known),
         "total_epochs_scope": TOTAL_EPOCHS_SCOPE,
@@ -188,6 +195,8 @@ def build_model_training_provenance(
         "parent_model_name": str(_value(run, "parent_model_name", "") or ""),
         "lineage_depth": len(lineage_result.lineage),
         "lineage_stage_count": len(lineage_result.lineage),
+        "lineage_stage_count_known": bool(lineage_result.lineage_stage_count_known),
+        "known_stage_count_minimum": int(lineage_result.known_stage_count_minimum or 0),
         "run_train_images": run_train_images,
         "run_nominal_sample_presentations": run_nominal_sample_presentations,
         "lineage_nominal_sample_presentations": lineage_nominal_sample_presentations,
@@ -245,7 +254,13 @@ def build_dataset_training_provenance(
         split_sha = str(split_fingerprint.get("sha256") or "")
         split_file_count = int(split_fingerprint.get("file_count", 0) or 0)
     augmentation_meta = _dataset_augmentation_summary(root, manifests)
-    identity_seed = manifest_sha or data_yaml_sha or split_sha or str(root.resolve() if root.exists() else root)
+    identity_payload = {
+        "target": resolved_target or "unknown",
+        "manifest_sha256": manifest_sha,
+        "data_yaml_sha256": data_yaml_sha,
+        "split_sha256": split_sha,
+    }
+    identity_seed = _json_sha256(identity_payload) or str(root.resolve() if root.exists() else root)
     dataset_id = f"DS-{_target_code(resolved_target)}-{identity_seed[:10].upper()}" if identity_seed else ""
     total_images = int(counts.get("train", 0) or 0) + int(counts.get("val", 0) or 0) + int(counts.get("test", 0) or 0)
     return _json_safe(
@@ -268,6 +283,7 @@ def build_dataset_training_provenance(
             "manifests": manifests,
             "local_path_hint": str(root),
             "data_yaml": str(yaml_path) if yaml_path.exists() else "",
+            "dataset_id_strategy": "composite_v2",
             "provenance_status": "complete" if manifest_sha and split_sha else "partial",
         }
     )
@@ -292,6 +308,40 @@ def build_training_dataset_snapshot(
     snapshot.setdefault("captured_at", _utc_now_iso())
     snapshot.setdefault("snapshot_source", "frozen_at_training_start")
     return _json_safe(snapshot)
+
+
+def training_dataset_snapshots_match(
+    stored_snapshot: Mapping[str, Any] | None,
+    current_snapshot: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    """Compare the frozen dataset identity with the current dataset identity."""
+
+    stored = dict(stored_snapshot or {}) if isinstance(stored_snapshot, Mapping) else {}
+    current = dict(current_snapshot or {}) if isinstance(current_snapshot, Mapping) else {}
+    if not stored:
+        return False, "Brak zamrozonego snapshotu datasetu w historii runu."
+    if not current:
+        return False, "Nie udalo sie zbudowac aktualnego snapshotu datasetu."
+
+    stored_split = str(stored.get("split_sha256") or "").strip()
+    current_split = str(current.get("split_sha256") or "").strip()
+    if not stored_split:
+        return False, "Historyczny run nie ma fingerprintu splitu datasetu."
+    if not current_split:
+        return False, "Aktualny dataset nie ma fingerprintu splitu."
+    if stored_split != current_split:
+        return False, "Fingerprint splitu datasetu jest inny niz przed przerwaniem treningu."
+
+    for key, label in (
+        ("manifest_sha256", "manifest datasetu"),
+        ("data_yaml_sha256", "data.yaml"),
+    ):
+        left = str(stored.get(key) or "").strip()
+        right = str(current.get(key) or "").strip()
+        if (left or right) and left != right:
+            return False, f"Fingerprint {label} jest inny niz przed przerwaniem treningu."
+
+    return True, "Dataset zgodny z zamrozonym snapshotem."
 
 
 def build_checkpoint_training_snapshot(
@@ -320,11 +370,23 @@ def build_checkpoint_training_snapshot(
     return _json_safe(payload)
 
 
+def normalize_epoch_index_to_completed_epoch(raw_epoch: Any) -> int | None:
+    """Convert a zero-based checkpoint epoch index to completed epoch count."""
+
+    parsed = _int_or_none(raw_epoch)
+    if parsed is None:
+        return None
+    if parsed < 0:
+        return 0
+    return int(parsed) + 1
+
+
 def build_output_checkpoint_training_snapshot(
     *,
     best_checkpoint: Path | str | None = None,
     last_checkpoint: Path | str | None = None,
     best_epoch: int | None = None,
+    best_epoch_source: str = "",
 ) -> dict[str, Any]:
     """Freeze output checkpoint hashes after training finishes."""
 
@@ -332,6 +394,11 @@ def build_output_checkpoint_training_snapshot(
     last_snapshot = build_checkpoint_training_snapshot(last_checkpoint, name="last.pt", kind="last_checkpoint")
     best_sha = str(best_snapshot.get("sha256") or "")
     last_sha = str(last_snapshot.get("sha256") or "")
+    checkpoint_best_epoch = _checkpoint_completed_epoch(best_checkpoint)
+    resolved_best_epoch = checkpoint_best_epoch if checkpoint_best_epoch is not None else _int_or_none(best_epoch)
+    resolved_best_epoch_source = "checkpoint" if checkpoint_best_epoch is not None else str(best_epoch_source or "").strip()
+    if not resolved_best_epoch_source:
+        resolved_best_epoch_source = "metrics_history" if resolved_best_epoch is not None else "unknown"
     payload = {
         "schema": "alpr.output_checkpoint_snapshot.v1",
         "captured_at": _utc_now_iso(),
@@ -339,7 +406,8 @@ def build_output_checkpoint_training_snapshot(
         "last": last_snapshot,
         "best_checkpoint_sha256": best_sha,
         "last_checkpoint_sha256": last_sha,
-        "best_epoch": _int_or_none(best_epoch),
+        "best_epoch": resolved_best_epoch,
+        "best_epoch_source": resolved_best_epoch_source,
         "provenance_status": "complete" if best_sha or last_sha else "partial",
     }
     return _json_safe(payload)
@@ -420,6 +488,8 @@ def _lineage_total_epochs(
             total_epochs=None,
             known_epochs_minimum=0,
             total_epochs_known=False,
+            lineage_stage_count_known=False,
+            known_stage_count_minimum=0,
             provenance_status="partial",
             lineage=[],
             warnings=[f"Wykryto cykl rodowodu treningu przy runie {run_id}."],
@@ -442,7 +512,9 @@ def _lineage_total_epochs(
                     total_epochs=parent_total + completed,
                     known_epochs_minimum=parent_total + completed,
                     total_epochs_known=True,
-                    provenance_status="complete",
+                    lineage_stage_count_known=False,
+                    known_stage_count_minimum=2,
+                    provenance_status="partial",
                     lineage=[
                         {
                             "run_id": parent_id,
@@ -458,12 +530,15 @@ def _lineage_total_epochs(
                         },
                         entry,
                     ],
+                    warnings=[f"Rodzic fine-tune ma znaną sumę epok, ale niepełny rodowód etapów: {parent_id or 'nieznany'}."],
                 )
             if parent_total > 0:
                 return _EpochLineageResult(
                     total_epochs=None,
                     known_epochs_minimum=parent_total + completed,
                     total_epochs_known=False,
+                    lineage_stage_count_known=False,
+                    known_stage_count_minimum=2,
                     provenance_status="partial",
                     lineage=[
                         {
@@ -486,6 +561,8 @@ def _lineage_total_epochs(
                 total_epochs=None,
                 known_epochs_minimum=completed,
                 total_epochs_known=False,
+                lineage_stage_count_known=False,
+                known_stage_count_minimum=1,
                 provenance_status="partial",
                 lineage=[entry],
                 warnings=[f"Brak rodzica fine-tune: {parent_id or 'nieznany'}."],
@@ -510,6 +587,8 @@ def _lineage_total_epochs(
             total_epochs=total,
             known_epochs_minimum=known_minimum,
             total_epochs_known=known,
+            lineage_stage_count_known=bool(parent_result.lineage_stage_count_known),
+            known_stage_count_minimum=int(parent_result.known_stage_count_minimum or len(parent_result.lineage)) + 1,
             provenance_status=status,
             lineage=[*parent_result.lineage, entry],
             warnings=list(parent_result.warnings),
@@ -520,6 +599,8 @@ def _lineage_total_epochs(
             total_epochs=completed,
             known_epochs_minimum=completed,
             total_epochs_known=True,
+            lineage_stage_count_known=True,
+            known_stage_count_minimum=1,
             provenance_status="complete",
             lineage=[entry],
         )
@@ -531,14 +612,19 @@ def _lineage_total_epochs(
             total_epochs=parent_total + completed,
             known_epochs_minimum=parent_total + completed,
             total_epochs_known=True,
-            provenance_status="complete",
+            lineage_stage_count_known=False,
+            known_stage_count_minimum=2,
+            provenance_status="partial",
             lineage=[entry],
+            warnings=["Run startuje z niestandardowego checkpointu o znanej sumie epok, ale niepełnym rodowodzie etapów."],
         )
     if parent_total > 0:
         return _EpochLineageResult(
             total_epochs=None,
             known_epochs_minimum=parent_total + completed,
             total_epochs_known=False,
+            lineage_stage_count_known=False,
+            known_stage_count_minimum=2,
             provenance_status="partial",
             lineage=[entry],
             warnings=["Run startuje z niestandardowego checkpointu o częściowo znanym rodowodzie."],
@@ -547,6 +633,8 @@ def _lineage_total_epochs(
         total_epochs=None,
         known_epochs_minimum=completed,
         total_epochs_known=False,
+        lineage_stage_count_known=False,
+        known_stage_count_minimum=1,
         provenance_status="partial",
         lineage=[entry],
         warnings=["Run startuje z niestandardowego checkpointu bez znanego rodowodu."],
@@ -589,28 +677,90 @@ def _lineage_entry(run: Mapping[str, Any], completed: int, *, checkpoint: Path |
     )
 
 
+def _metric_rows_completed_epoch(rows: Any) -> int | None:
+    if not isinstance(rows, list) or not rows:
+        return None
+    parsed_epochs: list[int] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        raw_epoch = row.get("epoch")
+        if raw_epoch is None:
+            raw_epoch = row.get("Epoch")
+        parsed = _int_or_none(raw_epoch)
+        if parsed is not None:
+            parsed_epochs.append(max(0, parsed))
+        elif any(str(value or "").strip() for value in row.values()):
+            parsed_epochs.append(index)
+    if not parsed_epochs:
+        return None
+    if min(parsed_epochs) == 0:
+        return max(parsed_epochs) + 1
+    return max(parsed_epochs)
+
+
+def _results_csv_completed_epoch(run: Mapping[str, Any]) -> int | None:
+    output_dir = str(_value(run, "output_dir", "") or "").strip()
+    if not output_dir:
+        return None
+    results_path = Path(output_dir) / "train" / "results.csv"
+    if not results_path.exists() or not results_path.is_file():
+        return None
+    rows: list[dict[str, Any]] = []
+    try:
+        with results_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for raw in reader:
+                rows.append({str(key or "").strip(): value for key, value in dict(raw or {}).items()})
+    except Exception:
+        return None
+    return _metric_rows_completed_epoch(rows)
+
+
+def _checkpoint_completed_epoch(checkpoint_path: Path | str | None) -> int | None:
+    path = _path_or_none(checkpoint_path)
+    if path is None or not path.exists() or not path.is_file():
+        return None
+    torch = get_torch_module()
+    if torch is None:
+        return None
+    checkpoint = None
+    try:
+        try:
+            checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(str(path), map_location="cpu")
+        if not isinstance(checkpoint, Mapping):
+            return None
+        return normalize_epoch_index_to_completed_epoch(checkpoint.get("epoch"))
+    except Exception:
+        return None
+    finally:
+        try:
+            del checkpoint
+        except Exception:
+            pass
+
+
 def _completed_epoch_count(run: Mapping[str, Any]) -> int:
-    values: list[int] = []
     for key in ("current_epoch", "completed_epochs", "trained_epochs"):
         value = _int_or_none(_value(run, key))
         if value is not None:
-            values.append(max(0, value))
-    metrics = _value(run, "metrics_history", [])
-    if isinstance(metrics, list):
-        metric_epochs = [
-            max(0, parsed)
-            for row in metrics
-            if isinstance(row, Mapping)
-            for parsed in (_int_or_none(row.get("epoch") or row.get("Epoch")),)
-            if parsed is not None
-        ]
-        if metric_epochs:
-            values.append(max(metric_epochs))
-    status = str(_value(run, "status", "") or "").strip().lower()
-    planned = _int_or_none(_value(run, "epochs"))
-    if status in {"completed", "complete", "finished"} and planned is not None:
-        values.append(max(0, planned))
-    return max(values, default=0)
+            return max(0, value)
+
+    csv_epoch = _results_csv_completed_epoch(run)
+    if csv_epoch is not None:
+        return max(0, csv_epoch)
+
+    metric_epoch = _metric_rows_completed_epoch(_value(run, "metrics_history", []))
+    if metric_epoch is not None:
+        return max(0, metric_epoch)
+
+    checkpoint_epoch = _checkpoint_completed_epoch(_value(run, "last_weights") or _value(run, "best_weights"))
+    if checkpoint_epoch is not None:
+        return max(0, checkpoint_epoch)
+
+    return 0
 
 
 def _legacy_run_from_sidecar(sidecar: Mapping[str, Any]) -> dict[str, Any]:
@@ -782,6 +932,19 @@ def _best_epoch_from_run(run: Mapping[str, Any]) -> int | None:
             best_score = score
             best_row_epoch = max(0, int(epoch))
     return best_row_epoch
+
+
+def _best_epoch_source_from_run(run: Mapping[str, Any]) -> str:
+    output_snapshot = _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+    source = str(output_snapshot.get("best_epoch_source") or "").strip() if output_snapshot else ""
+    if source:
+        return source
+    if _int_or_none(_value(run, "best_epoch")) is not None:
+        return "run_state"
+    metrics = _value(run, "metrics_history", [])
+    if isinstance(metrics, list) and any(isinstance(row, Mapping) for row in metrics):
+        return "metrics_history"
+    return "unknown"
 
 
 def _utc_now_iso() -> str:

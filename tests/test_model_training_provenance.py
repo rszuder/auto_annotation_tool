@@ -2,15 +2,20 @@ import json
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
+from auto_annotation_tool.config import get_torch_module
 from auto_annotation_tool.training.model_provenance import (
     TOTAL_EPOCHS_SCOPE,
     build_checkpoint_training_snapshot,
     build_model_training_provenance,
     build_output_checkpoint_training_snapshot,
     build_training_dataset_snapshot,
+    training_dataset_snapshots_match,
 )
+from auto_annotation_tool.training.trainer import YOLOPoseTrainer
+from auto_annotation_tool.training.training_history import TrainingRun
 
 
 def _write_file(path: Path, data: bytes | str = b"x") -> None:
@@ -307,6 +312,121 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertNotEqual(frozen_sha, "")
             self.assertTrue(any("best.pt" in warning for warning in provenance["warnings"]))
             self.assertEqual(provenance["provenance_status"], "partial")
+
+    def test_resume_dataset_snapshot_allows_same_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            stored = build_training_dataset_snapshot(dataset, target="plate")
+            current = build_training_dataset_snapshot(dataset, target="plate")
+
+            matches, reason = training_dataset_snapshots_match(stored, current)
+
+            self.assertTrue(matches, reason)
+
+    def test_resume_dataset_snapshot_blocks_changed_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            stored = build_training_dataset_snapshot(dataset, target="plate")
+            _write_file(dataset / "images" / "train" / "train_999.jpg", b"changed")
+            _write_file(dataset / "labels" / "train" / "train_999.txt", "0 0.5 0.5 0.2 0.2\n")
+            current = build_training_dataset_snapshot(dataset, target="plate")
+
+            matches, reason = training_dataset_snapshots_match(stored, current)
+
+            self.assertFalse(matches)
+            self.assertIn("splitu", reason)
+
+    def test_trainer_resume_guard_blocks_changed_dataset_for_controlled_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = TrainingRun(
+                id="20260911_080000",
+                name="Run resume guard",
+                created_at="2026-09-11T08:00:00",
+                dataset_path=str(dataset),
+                training_target="plate",
+            )
+            run.training_dataset_snapshot = build_training_dataset_snapshot(dataset, target="plate")
+            _write_file(dataset / "images" / "train" / "train_999.jpg", b"changed")
+            _write_file(dataset / "labels" / "train" / "train_999.txt", "0 0.5 0.5 0.2 0.2\n")
+            trainer = YOLOPoseTrainer.__new__(YOLOPoseTrainer)
+
+            allowed = trainer._validate_resume_dataset_contract(
+                run,
+                str(dataset),
+                training_target="plate",
+                require_snapshot=True,
+            )
+
+            self.assertFalse(allowed)
+
+    def test_early_stop_uses_completed_epochs_not_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = _run("20260911_090000", dataset, epochs=200, current_epoch=143)
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["run_epochs_planned"], 200)
+            self.assertEqual(provenance["run_epochs_completed"], 143)
+            self.assertEqual(provenance["run_nominal_sample_presentations"], 143)
+            self.assertEqual(provenance["total_epochs"], 143)
+
+    def test_external_parent_known_epochs_does_not_mean_known_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = _make_dataset(root)
+            parent_package = root / "external_parent.alprmodel"
+            with zipfile.ZipFile(parent_package, "w") as archive:
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(
+                        {
+                            "training": {
+                                "total_epochs": 70,
+                                "total_epochs_known": True,
+                            }
+                        }
+                    ),
+                )
+            run = _run(
+                "20260912_090000",
+                dataset,
+                epochs=10,
+                lineage_mode="fine_tune",
+                parent_run_id="",
+                base_model=str(root / "child_start.pt"),
+            )
+            run["parent_model_path"] = str(parent_package)
+            run["base_model"] = str(parent_package)
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["total_epochs"], 80)
+            self.assertTrue(provenance["total_epochs_known"])
+            self.assertEqual(provenance["lineage_stage_count"], 2)
+            self.assertFalse(provenance["lineage_stage_count_known"])
+            self.assertEqual(provenance["known_stage_count_minimum"], 2)
+            self.assertEqual(provenance["provenance_status"], "partial")
+            self.assertIsNone(provenance["lineage_nominal_sample_presentations"])
+            self.assertFalse(provenance["sample_presentations_known"])
+
+    def test_best_epoch_prefers_checkpoint_epoch_when_available(self):
+        torch = get_torch_module()
+        if torch is None:
+            self.skipTest("PyTorch niedostępny")
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "best.pt"
+            torch.save({"epoch": 6}, checkpoint)
+
+            snapshot = build_output_checkpoint_training_snapshot(
+                best_checkpoint=checkpoint,
+                best_epoch=3,
+                best_epoch_source="metrics_history",
+            )
+
+            self.assertEqual(snapshot["best_epoch"], 7)
+            self.assertEqual(snapshot["best_epoch_source"], "checkpoint")
 
 
 if __name__ == "__main__":
