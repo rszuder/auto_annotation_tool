@@ -2305,7 +2305,12 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     )
     self.preview_save_btn.pack(side=tk.RIGHT)
 
-    canvas_frame = ttk.Frame(preview_lf)
+    canvas_frame = tk.Frame(
+        preview_lf,
+        bg=palette.get("panel", "#252526"),
+        bd=0,
+        highlightthickness=0,
+    )
     self.canvas_frame = canvas_frame
     canvas_frame.pack(fill=tk.BOTH, expand=True)
     canvas_frame.bind(
@@ -2317,13 +2322,14 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         canvas_frame,
         bg=palette.get("panel", "#252526"),
         bd=0,
-        highlightthickness=0,
+        highlightthickness=1,
     )
     self.preview_hint_frame = preview_hint_frame
     preview_hint_frame.bind("<ButtonPress-1>", self._on_preview_controls_legend_press, add="+")
     preview_hint_frame.bind("<B1-Motion>", self._on_preview_controls_legend_drag, add="+")
     preview_hint_frame.bind("<ButtonRelease-1>", self._on_preview_controls_legend_release, add="+")
     preview_hint_frame.bind("<Motion>", self._on_preview_controls_legend_motion, add="+")
+    preview_hint_frame.bind("<Enter>", self._on_preview_controls_legend_enter, add="+")
     preview_hint_frame.bind("<Leave>", self._on_preview_controls_legend_leave, add="+")
     preview_hint_frame.bind("<MouseWheel>", self._on_preview_controls_legend_mousewheel, add="+")
     preview_hint_frame.bind("<Button-4>", self._on_preview_controls_legend_mousewheel, add="+")
@@ -2331,7 +2337,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self.preview_controls_canvas = tk.Canvas(
         preview_hint_frame,
         height=84,
-        bg="#14181d",
+        bg=palette.get("panel", "#252526"),
         bd=0,
         highlightthickness=0
     )
@@ -2343,14 +2349,15 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         auto_hide=False,
         thickness=6,
         thumb_scale=0.42,
-        track_color=palette.get("panel", "#252526"),
-        thumb_color="#2ecc71",
-        thumb_hover_color="#56f29d",
+        track_color=palette.get("scrollbar_track", palette.get("panel", "#252526")),
+        thumb_color=palette.get("scrollbar_thumb", palette.get("success", "#2ecc71")),
+        thumb_hover_color=palette.get("scrollbar_thumb_hover", palette.get("accent", "#56f29d")),
     )
     self.preview_controls_vbar.bind("<MouseWheel>", self._on_preview_controls_legend_mousewheel, add="+")
     self.preview_controls_vbar.bind("<Button-4>", self._on_preview_controls_legend_mousewheel, add="+")
     self.preview_controls_vbar.bind("<Button-5>", self._on_preview_controls_legend_mousewheel, add="+")
-    self.preview_controls_canvas.configure(yscrollcommand=self.preview_controls_vbar.set)
+    self.preview_controls_vbar.bind("<Enter>", self._on_preview_controls_legend_enter, add="+")
+    self.preview_controls_canvas.configure(takefocus=1)
     self.preview_controls_canvas.bind(
         "<Configure>",
         self._on_preview_controls_legend_configure,
@@ -2360,11 +2367,21 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self.preview_controls_canvas.bind("<B1-Motion>", self._on_preview_controls_legend_drag, add="+")
     self.preview_controls_canvas.bind("<ButtonRelease-1>", self._on_preview_controls_legend_release, add="+")
     self.preview_controls_canvas.bind("<Motion>", self._on_preview_controls_legend_motion, add="+")
+    self.preview_controls_canvas.bind("<Enter>", self._on_preview_controls_legend_enter, add="+")
     self.preview_controls_canvas.bind("<Leave>", self._on_preview_controls_legend_leave, add="+")
     self.preview_controls_canvas.bind("<MouseWheel>", self._on_preview_controls_legend_mousewheel, add="+")
     self.preview_controls_canvas.bind("<Button-4>", self._on_preview_controls_legend_mousewheel, add="+")
     self.preview_controls_canvas.bind("<Button-5>", self._on_preview_controls_legend_mousewheel, add="+")
-    self.preview_canvas = ZoomableCanvas(canvas_frame, bg="#1e1e1e", highlightthickness=0)
+    if not bool(getattr(self, "_preview_controls_global_wheel_bound", False)):
+        self.frame.bind_all("<MouseWheel>", self._on_preview_controls_legend_mousewheel, add="+")
+        self.frame.bind_all("<Button-4>", self._on_preview_controls_legend_mousewheel, add="+")
+        self.frame.bind_all("<Button-5>", self._on_preview_controls_legend_mousewheel, add="+")
+        self._preview_controls_global_wheel_bound = True
+    self.preview_canvas = ZoomableCanvas(
+        canvas_frame,
+        bg=palette.get("panel_alt", palette.get("panel", "#1e1e1e")),
+        highlightthickness=0,
+    )
     self.preview_canvas.pack(fill=tk.BOTH, expand=True)
     self.preview_canvas.show_info = False
     self.preview_canvas.reset_shortcut_enabled = False
@@ -2519,12 +2536,12 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
-        font=("Segoe UI Semibold", 6),
-        padx=7,
-        pady=4,
+        font=("Segoe UI Semibold", 8),
+        padx=10,
+        pady=7,
         cursor="arrow",
     )
-    self.preview_overlay_dock_actions_title_lbl.pack(fill=tk.X)
+    self.preview_overlay_dock_actions_title_lbl.pack(fill=tk.X, padx=6, pady=(0, 6))
     self.preview_overlay_dock_actions_frame = tk.Frame(
         self.preview_overlay_dock_body,
         bd=0,
@@ -2538,18 +2555,18 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
-        font=("Segoe UI Semibold", 6),
-        padx=7,
-        pady=3,
+        font=("Segoe UI Semibold", 8),
+        padx=10,
+        pady=7,
         cursor="arrow",
     )
-    self.preview_overlay_dock_status_title_lbl.pack(fill=tk.X)
+    # Status pracy bramki jest renderowany niżej przez gate overlay.
+    # Nie pakujemy tu statusów przełączników, żeby szuflada nie dublowała treści.
     self.preview_overlay_dock_status_frame = tk.Frame(
         self.preview_overlay_dock_body,
         bd=0,
         highlightthickness=0,
     )
-    self.preview_overlay_dock_status_frame.pack(fill=tk.X)
     for tool_key, icon_text, label_text in (
         ("legend", "KP", "Kompas"),
         ("super", "SK", "Super"),
@@ -2613,7 +2630,6 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
             except Exception:
                 pass
         status_row = tk.Frame(self.preview_overlay_dock_status_frame, bd=0, highlightthickness=0, cursor="arrow")
-        status_row.pack(fill=tk.X, padx=7, pady=(0, 2))
         status_dot_lbl = tk.Label(
             status_row,
             text="●",

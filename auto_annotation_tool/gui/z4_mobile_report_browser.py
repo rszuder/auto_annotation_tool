@@ -8,11 +8,13 @@ import json
 import hashlib
 import statistics
 import threading
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
 from ..config import CONFIG, logger
 from ..ranking import (
@@ -23,6 +25,30 @@ from ..ranking import (
     score_mobile_report,
 )
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+
+MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT = 24
+MOBILE_REPORT_RAW_STORAGE_LIST_LIMIT = 8
+MOBILE_REPORT_RAW_PREVIEW_TEXT_LIMIT = 3600
+MOBILE_REPORT_RAW_STORAGE_TEXT_LIMIT = 1200
+MOBILE_REPORT_RAW_TEXT_LIMIT = 160_000
+
+_HEAVY_MOBILE_REPORT_RAW_KEYS = {
+    "application_log",
+    "annotations",
+    "crops",
+    "event_stream",
+    "events",
+    "frame_flow",
+    "images",
+    "log",
+    "records",
+    "samples",
+    "thermal",
+    "thermal_samples",
+    "thermal_trace",
+    "trace",
+    "traces",
+}
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -143,6 +169,199 @@ def _short_text(value: Any, limit: int = 120) -> str:
     if len(text) > limit:
         return text[: max(0, limit - 1)].rstrip() + "…"
     return text or "-"
+
+
+def _compact_mobile_report_payload(
+    value: Any,
+    *,
+    list_limit: int = MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT,
+    text_limit: int = MOBILE_REPORT_RAW_PREVIEW_TEXT_LIMIT,
+    depth: int = 0,
+) -> Any:
+    """Keep report previews useful without feeding huge payloads into Tk widgets."""
+    if depth > 6:
+        return _short_text(value, min(480, max(80, int(text_limit))))
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key or "")
+            lower_key = key_text.lower()
+            if lower_key in _HEAVY_MOBILE_REPORT_RAW_KEYS:
+                result[key_text] = _summarize_mobile_report_heavy_value(
+                    child,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                    depth=depth + 1,
+                )
+            else:
+                result[key_text] = _compact_mobile_report_payload(
+                    child,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                    depth=depth + 1,
+                )
+        return result
+    if isinstance(value, (list, tuple)):
+        values = list(value)
+        preview = [
+            _compact_mobile_report_payload(
+                item,
+                list_limit=list_limit,
+                text_limit=text_limit,
+                depth=depth + 1,
+            )
+            for item in values[:list_limit]
+        ]
+        if len(values) <= list_limit:
+            return preview
+        return {
+            "_preview_items": preview,
+            "_total_items": len(values),
+            "_omitted_items": len(values) - len(preview),
+        }
+    if isinstance(value, str) and len(value) > text_limit:
+        return {
+            "_preview_text": value[:text_limit],
+            "_total_chars": len(value),
+            "_omitted_chars": len(value) - text_limit,
+        }
+    return value
+
+
+def _summarize_mobile_report_heavy_value(
+    value: Any,
+    *,
+    list_limit: int,
+    text_limit: int,
+    depth: int,
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        records = None
+        for key in ("records", "rows", "samples", "events", "traces", "data"):
+            if isinstance(value.get(key), list):
+                records = value.get(key)
+                break
+        if records is not None:
+            return {
+                "_kind": "records",
+                "_total_items": len(records),
+                "_preview_items": [
+                    _compact_mobile_report_payload(
+                        item,
+                        list_limit=list_limit,
+                        text_limit=text_limit,
+                        depth=depth + 1,
+                    )
+                    for item in records[:list_limit]
+                ],
+            }
+        return {
+            "_kind": "object",
+            "_preview": _compact_mobile_report_payload(
+                value,
+                list_limit=list_limit,
+                text_limit=text_limit,
+                depth=depth + 1,
+            ),
+        }
+    if isinstance(value, (list, tuple)):
+        values = list(value)
+        return {
+            "_kind": "list",
+            "_total_items": len(values),
+            "_preview_items": [
+                _compact_mobile_report_payload(
+                    item,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                    depth=depth + 1,
+                )
+                for item in values[:list_limit]
+            ],
+            "_omitted_items": max(0, len(values) - min(len(values), list_limit)),
+        }
+    if isinstance(value, str):
+        return {
+            "_kind": "text",
+            "_preview_text": value[:text_limit],
+            "_total_chars": len(value),
+            "_omitted_chars": max(0, len(value) - text_limit),
+        }
+    return {"_kind": type(value).__name__, "_value": _compact_mobile_report_payload(value, list_limit=list_limit, text_limit=text_limit, depth=depth + 1)}
+
+
+def _compact_mobile_report_for_store(report: MobileBenchmarkReport) -> MobileBenchmarkReport:
+    try:
+        compact_raw = _compact_mobile_report_payload(
+            report.raw,
+            list_limit=MOBILE_REPORT_RAW_STORAGE_LIST_LIMIT,
+            text_limit=MOBILE_REPORT_RAW_STORAGE_TEXT_LIMIT,
+        )
+        return replace(report, raw=compact_raw)
+    except Exception:
+        return report
+
+
+def _mobile_report_preview_dict(report: MobileBenchmarkReport) -> dict[str, Any]:
+    data = report.to_dict()
+    data["raw"] = _compact_mobile_report_payload(
+        getattr(report, "raw", {}) or {},
+        list_limit=MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT,
+        text_limit=MOBILE_REPORT_RAW_PREVIEW_TEXT_LIMIT,
+    )
+    return data
+
+
+def _mobile_report_bundle_preview_dict(bundle: MobileReportBundle | None) -> dict[str, Any] | None:
+    if bundle is None:
+        return None
+
+    def _rows_preview(rows: tuple[dict[str, str], ...], total: int, columns: tuple[str, ...]) -> dict[str, Any]:
+        row_list = list(rows or ())
+        return {
+            "total": int(total or len(row_list)),
+            "preview_rows": row_list[:MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT],
+            "preview_count": min(len(row_list), MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT),
+            "columns": list(columns or ()),
+        }
+
+    try:
+        validation = bundle.validation.to_dict()
+    except Exception:
+        validation = {}
+    entries = list(bundle.entries or ())
+    return {
+        "path": bundle.path,
+        "source_archive_sha256": bundle.source_archive_sha256,
+        "bundle_kind": bundle.bundle_kind,
+        "bundle_schema": bundle.bundle_schema,
+        "validation": validation,
+        "experiment_session": _compact_mobile_report_payload(bundle.experiment_session or {}),
+        "manifest": _compact_mobile_report_payload(bundle.manifest or {}),
+        "metadata": _compact_mobile_report_payload(bundle.metadata or {}),
+        "pipeline_manifests": _compact_mobile_report_payload(getattr(bundle, "pipeline_manifests", {}) or {}),
+        "model_refs": _compact_mobile_report_payload(getattr(bundle, "model_refs", {}) or {}),
+        "report_payload_preview": _compact_mobile_report_payload(bundle.report_payload or {}),
+        "artifacts": {
+            "traces": _rows_preview(bundle.trace_rows, bundle.trace_total, bundle.trace_columns),
+            "thermal": _rows_preview(bundle.thermal_rows, bundle.thermal_total, bundle.thermal_columns),
+            "frame_flow": _rows_preview(bundle.frame_flow_rows, bundle.frame_flow_total, bundle.frame_flow_columns),
+            "events": _rows_preview(bundle.event_rows, bundle.event_total, bundle.event_columns),
+            "samples": {
+                "total": int(bundle.sample_total or len(bundle.sample_rows or ())),
+                "preview_rows": list(bundle.sample_rows or ())[:MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT],
+                "preview_count": min(len(bundle.sample_rows or ()), MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT),
+            },
+            "crops": int(bundle.crop_count or 0),
+            "annotations": int(bundle.annotation_count or 0),
+            "log_preview_chars": len(bundle.log_preview or ""),
+        },
+        "archive_entries": {
+            "total": len(entries),
+            "preview": [entry.to_dict() for entry in entries[:80]],
+            "omitted": max(0, len(entries) - 80),
+        },
+    }
 
 
 def _flatten_rows(data: Any, *, prefix: str = "", limit: int = 90) -> list[tuple[str, str, str]]:
@@ -499,7 +718,15 @@ class MobileReportBrowser:
         self.report_by_iid: dict[str, MobileBenchmarkReport] = {}
         self.bundle_by_report_id: dict[str, MobileReportBundle] = {}
         self.current_bundle: MobileReportBundle | None = None
+        self._closing = False
+        self._import_in_progress = False
+        self._import_cancel_requested = False
+        self._suppress_report_select = False
         self.window = tk.Toplevel(self.parent)
+        try:
+            setattr(self.window, "_aat_skip_window_recovery", True)
+        except Exception:
+            pass
         try:
             setattr(owner, "_mobile_report_browser_dialog", self.window)
         except Exception:
@@ -508,21 +735,18 @@ class MobileReportBrowser:
         self.window.configure(bg=self.bg)
         self.window.title("Raporty z telefonu")
         self._configure_window()
-        try:
-            app_obj = getattr(owner, "app", None)
-            register = getattr(app_obj, "_register_recoverable_toplevel", None)
-            if callable(register):
-                register(self.window, attr_name="_mobile_report_browser_dialog")
-        except Exception:
-            pass
         self._build()
-        self._refresh_report_list()
+        self._show_empty()
         try:
             self.window.deiconify()
             self.window.lift()
             self.window.focus_force()
         except Exception:
             pass
+        try:
+            self.window.after(80, lambda: self._refresh_report_list(auto_select=False))
+        except Exception:
+            self._refresh_report_list(auto_select=False)
 
     def _configure_window(self) -> None:
         try:
@@ -552,10 +776,17 @@ class MobileReportBrowser:
             self.window.bind("<Destroy>", self._on_destroy, add="+")
         except Exception:
             pass
+        try:
+            self.window.protocol("WM_DELETE_WINDOW", self._request_close)
+        except Exception:
+            pass
 
     def _on_destroy(self, event=None) -> None:
         if getattr(event, "widget", None) is not self.window:
             return
+        self._closing = True
+        self._import_cancel_requested = True
+        self._import_in_progress = False
         try:
             if getattr(self.owner, "_mobile_report_browser_dialog", None) is self.window:
                 setattr(self.owner, "_mobile_report_browser_dialog", None)
@@ -567,6 +798,393 @@ class MobileReportBrowser:
                 setattr(app_obj, "_mobile_report_browser_dialog", None)
         except Exception:
             pass
+
+    def _window_alive(self) -> bool:
+        try:
+            return bool(self.window.winfo_exists())
+        except Exception:
+            return False
+
+    def _run_on_ui(self, callback) -> bool:
+        if self._closing or not self._window_alive():
+            return False
+
+        def guarded_callback() -> None:
+            if self._closing or not self._window_alive():
+                return
+            callback()
+
+        try:
+            self.window.after(0, guarded_callback)
+            return True
+        except Exception:
+            return False
+
+    def _request_close(self) -> None:
+        self._closing = True
+        self._import_cancel_requested = True
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
+    def _set_import_controls(self, running: bool) -> None:
+        self._import_in_progress = bool(running)
+        for attr, state in (
+            ("btn_import_reports", tk.DISABLED if running else tk.NORMAL),
+            ("btn_refresh_reports", tk.DISABLED if running else tk.NORMAL),
+        ):
+            button = getattr(self, attr, None)
+            if button is None:
+                continue
+            try:
+                button.configure(state=state)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_mobile_report_file(path: Path) -> bool:
+        if Path(path).name.lower() == MobilePackageExperimentStore.FILE_NAME.lower():
+            return False
+        return str(path.suffix or "").lower() in {".alprsession", ".zip", ".json"}
+
+    @staticmethod
+    def _format_file_size(path: Path) -> str:
+        try:
+            size = int(path.stat().st_size)
+        except Exception:
+            return "-"
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    @staticmethod
+    def _format_file_mtime(path: Path) -> str:
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "-"
+
+    def _ask_mobile_report_paths(self, initial_dir: Path) -> tuple[Path, ...]:
+        """Stable in-app multi-file picker for mobile reports.
+
+        Native Windows file dialogs fight with our modeless Tk windows on some
+        machines, so report import uses a small Tk picker instead.
+        """
+
+        start_dir = Path(initial_dir or Path.home())
+        if not start_dir.exists() or not start_dir.is_dir():
+            start_dir = Path.home()
+
+        selected_paths: list[Path] = []
+        state: dict[str, Any] = {"dir": start_dir}
+        entries: list[dict[str, Any]] = []
+
+        dialog = tk.Toplevel(self.window)
+        dialog.withdraw()
+        dialog.title("Wybierz raporty z telefonu")
+        dialog.configure(bg=self.bg)
+        try:
+            dialog.geometry("920x620")
+            dialog.minsize(760, 500)
+            dialog.resizable(True, True)
+        except Exception:
+            pass
+
+        shell = tk.Frame(dialog, bg=self.bg, padx=14, pady=12)
+        shell.pack(fill=tk.BOTH, expand=True)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(3, weight=1)
+
+        title = tk.Label(
+            shell,
+            text="Wybierz jeden lub kilka raportów z aplikacji mobilnej",
+            bg=self.bg,
+            fg=self.fg,
+            font=("Segoe UI", 13, "bold"),
+            anchor=tk.W,
+        )
+        title.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        subtitle = tk.Label(
+            shell,
+            text="Obsługiwane formaty: .alprsession, .zip, .json. Zaznacz wiele pozycji klawiszem Ctrl albo Shift.",
+            bg=self.bg,
+            fg=self.muted,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=820,
+        )
+        subtitle.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        path_row = tk.Frame(shell, bg=self.bg)
+        path_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        path_row.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            path_row,
+            text="Folder:",
+            bg=self.bg,
+            fg=self.fg,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        path_var = tk.StringVar(value=str(start_dir))
+        path_entry = tk.Entry(
+            path_row,
+            textvariable=path_var,
+            bg=self.panel,
+            fg=self.fg,
+            insertbackground=self.fg,
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.border,
+            highlightcolor=self.accent,
+            font=("Segoe UI", 9),
+        )
+        path_entry.grid(row=0, column=1, sticky="ew", ipady=5)
+
+        list_shell = tk.Frame(
+            shell,
+            bg=self.panel,
+            highlightthickness=1,
+            highlightbackground=self.border,
+            highlightcolor=self.border,
+        )
+        list_shell.grid(row=3, column=0, sticky="nsew")
+        list_shell.grid_columnconfigure(0, weight=1)
+        list_shell.grid_rowconfigure(1, weight=1)
+
+        header = tk.Frame(list_shell, bg=blend_hex_colors(self.panel, self.accent, 0.1))
+        header.grid(row=0, column=0, sticky="ew")
+        for column, (text, width) in enumerate((("Nazwa", 52), ("Typ", 12), ("Rozmiar", 12), ("Data", 18))):
+            header.grid_columnconfigure(column, weight=width)
+            tk.Label(
+                header,
+                text=text,
+                bg=header.cget("bg"),
+                fg=self.fg,
+                font=("Segoe UI", 8, "bold"),
+                anchor=tk.W,
+                padx=8,
+                pady=6,
+            ).grid(row=0, column=column, sticky="ew")
+
+        body = tk.Frame(list_shell, bg=self.panel)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        listbox = tk.Listbox(
+            body,
+            selectmode=tk.EXTENDED,
+            exportselection=False,
+            activestyle="dotbox",
+            bg=self.panel,
+            fg=self.fg,
+            selectbackground=blend_hex_colors(self.accent, self.panel, 0.28),
+            selectforeground=self.fg,
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0,
+            font=("Consolas", 10),
+        )
+        scrollbar = WebSlimScrollbar(
+            body,
+            orient=tk.VERTICAL,
+            command=listbox.yview,
+            track_color=self.palette.get("scrollbar_track", self.panel),
+            thumb_color=self.palette.get("scrollbar_thumb", self.accent),
+            thumb_hover_color=self.palette.get("scrollbar_thumb_hover", self.palette.get("accent_hover", self.accent)),
+        )
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        status_var = tk.StringVar(value="")
+        status = tk.Label(
+            shell,
+            textvariable=status_var,
+            bg=self.bg,
+            fg=self.muted,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        status.grid(row=4, column=0, sticky="ew", pady=(8, 8))
+
+        actions = tk.Frame(shell, bg=self.bg)
+        actions.grid(row=5, column=0, sticky="ew")
+        actions.grid_columnconfigure(6, weight=1)
+
+        def _display_row(name: str, kind: str, size: str, mtime: str) -> str:
+            return f"{name[:60]:<62} {kind[:10]:<10} {size[:10]:>10}  {mtime[:16]:<16}"
+
+        def _set_status(text: str, tone: str = "info") -> None:
+            status_var.set(text)
+            color = {
+                "error": self.error,
+                "warning": self.warning,
+                "success": self.success,
+            }.get(tone, self.muted)
+            try:
+                status.configure(fg=color)
+            except Exception:
+                pass
+
+        def _load_dir(path: Path | str) -> None:
+            try:
+                target = Path(str(path or "")).expanduser()
+                if not target.exists() or not target.is_dir():
+                    _set_status("Ten folder nie istnieje albo nie jest dostępny.", "error")
+                    return
+                target = target.resolve()
+            except Exception as exc:
+                _set_status(f"Nie udało się otworzyć folderu: {exc}", "error")
+                return
+
+            entries.clear()
+            listbox.delete(0, tk.END)
+            state["dir"] = target
+            path_var.set(str(target))
+
+            try:
+                children = list(target.iterdir())
+            except Exception as exc:
+                _set_status(f"Nie udało się odczytać folderu: {exc}", "error")
+                return
+
+            if target.parent != target:
+                entries.append({"path": target.parent, "dir": True, "report": False})
+                listbox.insert(tk.END, _display_row("..", "folder", "", ""))
+
+            dirs = sorted((child for child in children if child.is_dir()), key=lambda p: p.name.lower())
+            files = sorted(
+                (child for child in children if child.is_file() and self._is_mobile_report_file(child)),
+                key=lambda p: p.name.lower(),
+            )
+            for child in dirs:
+                entries.append({"path": child, "dir": True, "report": False})
+                listbox.insert(tk.END, _display_row(child.name, "folder", "", self._format_file_mtime(child)))
+            for child in files:
+                entries.append({"path": child, "dir": False, "report": True})
+                listbox.insert(
+                    tk.END,
+                    _display_row(child.name, child.suffix.lower().lstrip(".") or "plik", self._format_file_size(child), self._format_file_mtime(child)),
+                )
+
+            _set_status(
+                f"Folder: {target} | Raporty: {len(files)} | Podfoldery: {len(dirs)}",
+                "info",
+            )
+
+        def _selected_report_paths() -> list[Path]:
+            result: list[Path] = []
+            for raw_index in listbox.curselection():
+                try:
+                    entry = entries[int(raw_index)]
+                except Exception:
+                    continue
+                path = Path(entry.get("path"))
+                if entry.get("report") and path.exists() and path.is_file():
+                    result.append(path)
+            return result
+
+        def _open_or_accept(_event=None):
+            selection = list(listbox.curselection())
+            if len(selection) == 1:
+                try:
+                    entry = entries[int(selection[0])]
+                except Exception:
+                    entry = {}
+                if entry.get("dir"):
+                    _load_dir(Path(entry.get("path")))
+                    return "break"
+            _accept()
+            return "break"
+
+        def _accept() -> None:
+            reports = _selected_report_paths()
+            if not reports:
+                _set_status("Zaznacz przynajmniej jeden raport. Folder otworzysz podwójnym kliknięciem.", "warning")
+                return
+            selected_paths[:] = reports
+            _close()
+
+        def _close() -> None:
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def _go_up() -> None:
+            current = Path(state.get("dir") or start_dir)
+            if current.parent != current:
+                _load_dir(current.parent)
+
+        quick_dirs = [
+            ("Raporty", start_dir),
+            ("Pobrane", Path.home() / "Downloads"),
+            ("Pulpit", Path.home() / "Desktop"),
+        ]
+        for index, (label, folder) in enumerate(quick_dirs):
+            ttk.Button(actions, text=label, command=lambda p=folder: _load_dir(p)).grid(
+                row=0,
+                column=index,
+                sticky="w",
+                padx=(0, 6),
+                ipadx=6,
+                ipady=2,
+            )
+        ttk.Button(actions, text="Folder wyżej", command=_go_up).grid(row=0, column=3, sticky="w", padx=(8, 6), ipadx=6, ipady=2)
+        ttk.Button(actions, text="Odśwież", command=lambda: _load_dir(Path(state.get("dir") or start_dir))).grid(
+            row=0,
+            column=4,
+            sticky="w",
+            padx=(0, 6),
+            ipadx=6,
+            ipady=2,
+        )
+        ttk.Button(actions, text="Anuluj", command=_close).grid(row=0, column=7, sticky="e", padx=(8, 6), ipadx=8, ipady=2)
+        ttk.Button(actions, text="Importuj zaznaczone", command=_accept).grid(row=0, column=8, sticky="e", ipadx=10, ipady=2)
+
+        path_entry.bind("<Return>", lambda _event: (_load_dir(path_var.get()), "break")[-1], add="+")
+        listbox.bind("<Double-Button-1>", _open_or_accept, add="+")
+        listbox.bind("<Return>", _open_or_accept, add="+")
+        dialog.bind("<Escape>", lambda _event: (_close(), "break")[-1], add="+")
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+
+        _load_dir(start_dir)
+        try:
+            dialog.update_idletasks()
+            parent_x = int(self.window.winfo_rootx())
+            parent_y = int(self.window.winfo_rooty())
+            parent_w = int(self.window.winfo_width() or 920)
+            parent_h = int(self.window.winfo_height() or 620)
+            width = min(940, max(760, int(parent_w * 0.86)))
+            height = min(660, max(500, int(parent_h * 0.82)))
+            x = parent_x + max(18, int((parent_w - width) / 2))
+            y = parent_y + max(18, int((parent_h - height) / 2))
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+        try:
+            dialog.deiconify()
+            dialog.lift()
+            dialog.focus_force()
+            dialog.grab_set()
+            listbox.focus_set()
+        except Exception:
+            pass
+        try:
+            dialog.wait_window()
+        except Exception:
+            pass
+        return tuple(selected_paths)
 
     def _build(self) -> None:
         root = tk.Frame(self.window, bg=self.bg, padx=12, pady=10)
@@ -602,13 +1220,15 @@ class MobileReportBrowser:
         actions = tk.Frame(root, bg=self.bg)
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         actions.grid_columnconfigure(3, weight=1)
-        ttk.Button(actions, text="Importuj raporty z Androida", command=self.import_report).grid(
+        self.btn_import_reports = ttk.Button(actions, text="Importuj raporty z Androida", command=self.import_report)
+        self.btn_import_reports.grid(
             row=0, column=0, sticky="w", padx=(0, 8), ipadx=10, ipady=2
         )
-        ttk.Button(actions, text="Odśwież zapisane", command=self._refresh_report_list).grid(
+        self.btn_refresh_reports = ttk.Button(actions, text="Odśwież zapisane", command=self._refresh_report_list)
+        self.btn_refresh_reports.grid(
             row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2
         )
-        ttk.Button(actions, text="Zamknij", command=self.window.destroy).grid(row=0, column=4, sticky="e", ipadx=8, ipady=2)
+        ttk.Button(actions, text="Zamknij", command=self._request_close).grid(row=0, column=4, sticky="e", ipadx=8, ipady=2)
 
         self.status_var = tk.StringVar(value="Gotowe. Wskaż raport lub kilka raportów z telefonu albo wybierz zapisany raport z listy.")
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=150)
@@ -901,9 +1521,13 @@ class MobileReportBrowser:
         except Exception:
             pass
 
-    def _refresh_report_list(self, select_report_id: str = "") -> None:
+    def _refresh_report_list(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
         try:
             self.store._load()
+        except Exception:
+            pass
+        try:
+            self.store.reports = [_compact_mobile_report_for_store(report) for report in self.store.reports]
         except Exception:
             pass
         self.report_by_iid = {}
@@ -919,7 +1543,7 @@ class MobileReportBrowser:
         # TreeTable generates row_ indexes, so map them back to report objects.
         ordered_reports = sorted(self.store.reports, key=lambda item: str(item.measured_at or ""), reverse=True)
         self.report_by_iid = {f"row_{index}": report for index, report in enumerate(ordered_reports)}
-        if ordered_reports:
+        if ordered_reports and (auto_select or select_report_id):
             if select_report_id:
                 selected_iid = next(
                     (iid for iid, report in self.report_by_iid.items() if report.report_id == select_report_id),
@@ -927,18 +1551,27 @@ class MobileReportBrowser:
                 )
             else:
                 selected_iid = "row_0"
+            self._suppress_report_select = True
             try:
                 self.report_table.tree.selection_set(selected_iid)
                 self.report_table.tree.focus(selected_iid)
                 self.report_table.tree.see(selected_iid)
             except Exception:
                 pass
-            self._show_report(self.report_by_iid.get(selected_iid))
+            finally:
+                self._suppress_report_select = False
+            selected_report = self.report_by_iid.get(selected_iid)
+            selected_bundle = self.bundle_by_report_id.get(selected_report.report_id) if selected_report else None
+            self._show_report(selected_report, selected_bundle)
+        elif ordered_reports:
+            self._show_report_hint(len(ordered_reports))
         else:
             self._show_empty()
         self._set_status(f"Zapisane raporty: {len(ordered_reports)}.", "info")
 
     def _on_report_selected(self, _event=None) -> None:
+        if self._suppress_report_select:
+            return
         try:
             selected = self.report_table.tree.selection()
         except Exception:
@@ -950,27 +1583,26 @@ class MobileReportBrowser:
             self._show_report(report, self.bundle_by_report_id.get(report.report_id))
 
     def import_report(self) -> None:
+        if self._import_in_progress:
+            self._set_status("Import raportów już trwa. Poczekaj na zakończenie albo zamknij okno, aby przerwać odświeżanie UI.", "warning")
+            return
+        self._import_cancel_requested = False
         initial_dir = Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS / "mobile_packages"))
         try:
             initial_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        path_values = filedialog.askopenfilenames(
-            parent=self.window,
-            title="Wybierz raporty z aplikacji Android",
-            initialdir=str(initial_dir),
-            filetypes=(
-                ("Raporty ALPR", "*.alprsession *.zip *.json"),
-                ("Sesja ALPR", "*.alprsession"),
-                ("Archiwum ZIP", "*.zip"),
-                ("Raport JSON", "*.json"),
-                ("Wszystkie pliki", "*.*"),
-            ),
-        )
+        self._set_import_controls(True)
+        self._set_status("Otwieram wybór raportów z telefonu...", "info")
+        path_values = self._ask_mobile_report_paths(initial_dir)
         if not path_values:
+            self._set_import_controls(False)
+            self._set_status("Import anulowany. Nie wybrano plików raportów.", "warning")
             return
         report_paths = [Path(value) for value in path_values if str(value or "").strip()]
         if not report_paths:
+            self._set_import_controls(False)
+            self._set_status("Import anulowany. Nie wybrano poprawnych plików.", "warning")
             return
         total_files = len(report_paths)
         if total_files == 1:
@@ -982,59 +1614,72 @@ class MobileReportBrowser:
 
         def worker() -> None:
             bundles: list[tuple[Path, MobileReportBundle]] = []
+            invalid: list[tuple[Path, MobileReportBundle]] = []
             failures: list[tuple[Path, str]] = []
+            saved = 0
+            last_saved_report_id = ""
+            save_error = ""
             try:
                 for index, report_path in enumerate(report_paths, start=1):
-                    try:
-                        self.window.after(
-                            0,
-                            lambda i=index, p=report_path: (
-                                self._set_status(f"Czytam plik {i}/{total_files}: {p.name}...", "info"),
-                                self._set_loading_progress(i - 1, maximum=total_files) if total_files > 1 else None,
-                            ),
+                    if self._import_cancel_requested:
+                        break
+                    self._run_on_ui(
+                        lambda i=index, p=report_path: (
+                            self._set_status(f"Czytam plik {i}/{total_files}: {p.name}...", "info"),
+                            self._set_loading_progress(i - 1, maximum=total_files) if total_files > 1 else None,
                         )
-                    except Exception:
-                        pass
+                    )
                     try:
                         for bundle in read_mobile_report_bundles(report_path):
+                            if self._import_cancel_requested:
+                                break
                             bundles.append((report_path, bundle))
+                            if bundle.validation.ok:
+                                try:
+                                    self.store.reports = [
+                                        _compact_mobile_report_for_store(report)
+                                        for report in self.store.reports
+                                    ]
+                                    self.store.add_report(_compact_mobile_report_for_store(bundle.report), save=False)
+                                except Exception as exc:
+                                    failures.append((report_path, f"Raport odczytany, ale nie udało się go przygotować do zapisu: {exc}"))
+                                    continue
+                                saved += 1
+                                last_saved_report_id = bundle.report.report_id
+                            else:
+                                invalid.append((report_path, bundle))
                     except Exception as exc:
                         failures.append((report_path, str(exc)))
                         logger.exception(f"Nie udało się odczytać raportu mobilnego: {report_path}")
+                    if total_files > 1:
+                        self._run_on_ui(lambda i=index: self._set_loading_progress(i, maximum=total_files))
+
+                if saved and not self._import_cancel_requested:
                     try:
-                        if total_files > 1:
-                            self.window.after(0, lambda i=index: self._set_loading_progress(i, maximum=total_files))
-                    except Exception:
-                        pass
+                        self._run_on_ui(lambda: self._set_status("Zapisuję magazyn raportów...", "info"))
+                        self.store.reports = [
+                            _compact_mobile_report_for_store(report)
+                            for report in self.store.reports
+                        ]
+                        self.store.save()
+                    except Exception as exc:
+                        save_error = str(exc)
+                        logger.exception("Nie udało się zapisać raportu mobilnego")
 
                 def done() -> None:
+                    self._set_import_controls(False)
                     self._set_loading(False)
-                    saved = 0
-                    invalid: list[tuple[Path, MobileReportBundle]] = []
-                    last_saved_report_id = ""
+                    if self._import_cancel_requested:
+                        self._set_status("Import przerwany. Okno można bezpiecznie zamknąć.", "warning")
+                        return
                     for path, bundle in bundles:
                         self.current_bundle = bundle
                         self.bundle_by_report_id[bundle.report.report_id] = bundle
-                        if bundle.validation.ok:
-                            try:
-                                self.store.add_report(bundle.report, save=False)
-                            except Exception as exc:
-                                failures.append((path, f"Raport odczytany, ale nie udało się go przygotować do zapisu: {exc}"))
-                                continue
-                            saved += 1
-                            last_saved_report_id = bundle.report.report_id
-                        else:
-                            invalid.append((path, bundle))
-
-                    if saved:
-                        try:
-                            self.store.save()
-                        except Exception as exc:
-                            logger.exception("Nie udało się zapisać raportu mobilnego")
-                            self._set_status(f"Raporty odczytane, ale nie udało się zapisać magazynu: {exc}", "warning")
-                            if bundles:
-                                self._show_report(bundles[-1][1].report, bundles[-1][1])
-                            return
+                    if save_error:
+                        self._set_status(f"Raporty odczytane, ale nie udało się zapisać magazynu: {save_error}", "warning")
+                        if bundles:
+                            self._show_report(bundles[-1][1].report, bundles[-1][1])
+                        return
 
                     if saved:
                         self._refresh_report_list(last_saved_report_id)
@@ -1073,20 +1718,18 @@ class MobileReportBrowser:
                     if details:
                         messagebox.showerror("Import raportów", "\n".join(details), parent=self.window)
 
-                self.window.after(0, done)
+                self._run_on_ui(done)
             except Exception as exc:
                 error_text = str(exc)
                 logger.exception("Nie udało się zaimportować raportów mobilnych")
 
                 def failed() -> None:
+                    self._set_import_controls(False)
                     self._set_loading(False)
                     self._set_status(f"Import nieudany: {error_text}", "error")
                     messagebox.showerror("Błąd importu raportu", error_text, parent=self.window)
 
-                try:
-                    self.window.after(0, failed)
-                except Exception:
-                    pass
+                self._run_on_ui(failed)
 
         threading.Thread(target=worker, name="mobile-report-import", daemon=True).start()
 
@@ -1095,6 +1738,30 @@ class MobileReportBrowser:
         for var in self.card_vars.values():
             var.set("-")
         self.summary_table.set_rows([("Brak raportów", "Importuj raport z Androida", "Obsługiwane są .alprsession, ZIP benchmarku i JSON.")])
+        self.comparison_table.set_rows([])
+        self.config_table.set_rows([])
+        self.latency_table.set_rows([])
+        self.artifacts_table.set_rows([])
+        self.quality_table.set_rows([])
+        self.diagnostics_table.set_rows([])
+        self.crops_table.set_rows([])
+        self._replace_text(self.log_text, "")
+        self._replace_text(self.raw_text, "")
+        self._draw_latency_chart()
+
+    def _show_report_hint(self, report_count: int) -> None:
+        self.current_bundle = None
+        for var in self.card_vars.values():
+            var.set("-")
+        self.summary_table.set_rows(
+            [
+                (
+                    "Raporty gotowe",
+                    str(max(0, int(report_count or 0))),
+                    "Wybierz raport z listy po lewej, aby załadować szczegóły, wykresy i surowy podgląd.",
+                )
+            ]
+        )
         self.comparison_table.set_rows([])
         self.config_table.set_rows([])
         self.latency_table.set_rows([])
@@ -1712,13 +2379,19 @@ class MobileReportBrowser:
 
     def _populate_raw(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
         payload = {
-            "bundle": bundle.to_dict() if bundle else None,
-            "report": report.to_dict(),
+            "note": "Podgląd jest celowo ograniczony, żeby przeglądarka raportów pozostawała responsywna. Pełny artefakt pozostaje w pliku źródłowym raportu.",
+            "bundle": _mobile_report_bundle_preview_dict(bundle),
+            "report": _mobile_report_preview_dict(report),
         }
         try:
             text = json.dumps(payload, ensure_ascii=False, indent=2)
         except Exception:
             text = str(payload)
+        if len(text) > MOBILE_REPORT_RAW_TEXT_LIMIT:
+            text = (
+                text[:MOBILE_REPORT_RAW_TEXT_LIMIT].rstrip()
+                + f"\n\n... podgląd ucięty po {MOBILE_REPORT_RAW_TEXT_LIMIT} znakach, aby nie blokować interfejsu ..."
+            )
         self._replace_text(self.raw_text, text)
 
     def _replace_text(self, widget: tk.Text, text: str) -> None:
@@ -1800,13 +2473,6 @@ def open_mobile_report_browser(owner, parent=None):
     try:
         existing = getattr(owner, "_mobile_report_browser_dialog", None)
         if existing is not None and existing.winfo_exists():
-            try:
-                app_obj = getattr(owner, "app", None)
-                register = getattr(app_obj, "_register_recoverable_toplevel", None)
-                if callable(register):
-                    register(existing, attr_name="_mobile_report_browser_dialog")
-            except Exception:
-                pass
             existing.deiconify()
             existing.lift()
             existing.focus_force()

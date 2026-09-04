@@ -35,6 +35,7 @@ MOBILE_REPORT_MAX_TEXT_BYTES = 32 * 1024 * 1024
 MOBILE_REPORT_MAX_TOTAL_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MOBILE_REPORT_MAX_ENTRIES = 50000
 MOBILE_REPORT_TRACE_PREVIEW_ROWS = 5000
+MOBILE_PACKAGE_EXPERIMENT_STORE_FILE_NAME = "mobile_package_experiments.json"
 
 DEFAULT_SCORE_WEIGHTS = {
     "quality": 0.50,
@@ -86,6 +87,21 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(parsed)
     except Exception:
         return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "tak", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "nie", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _clamp01(value: Any, default: float = 0.0) -> float:
@@ -240,6 +256,8 @@ class MobileReportBundle:
     manifest: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     report_payload: dict[str, Any] = field(default_factory=dict)
+    pipeline_manifests: dict[str, Any] = field(default_factory=dict)
+    model_refs: dict[str, Any] = field(default_factory=dict)
     trace_columns: tuple[str, ...] = field(default_factory=tuple)
     trace_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
     trace_total: int = 0
@@ -273,6 +291,8 @@ class MobileReportBundle:
             "experiment_session": dict(self.experiment_session or {}),
             "manifest": dict(self.manifest or {}),
             "metadata": dict(self.metadata or {}),
+            "pipeline_manifests": dict(self.pipeline_manifests or {}),
+            "model_refs": dict(self.model_refs or {}),
             "trace_columns": list(self.trace_columns),
             "trace_rows": [dict(row) for row in self.trace_rows],
             "trace_total": self.trace_total,
@@ -319,6 +339,85 @@ def _compact_json_text(value: Any, *, limit: int = 900) -> str:
     if len(text) > limit:
         return text[: max(0, limit - 1)].rstrip() + "…"
     return text
+
+
+def _model_provenance_from_pipeline_manifests(
+    pipeline_manifests: dict[str, Any],
+    model_refs: dict[str, Any],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    role_keys = (("vehicle", "vehicle"), ("plate", "plate"), ("character", "character"))
+    for role, manifest_key in role_keys:
+        manifest = pipeline_manifests.get(manifest_key)
+        manifest = dict(manifest) if isinstance(manifest, dict) else {}
+        ref = model_refs.get(role)
+        ref = dict(ref) if isinstance(ref, dict) else {}
+        if not manifest and not ref:
+            continue
+        result[role] = _model_provenance_entry_from_manifest(role, manifest, ref)
+    return result
+
+
+def _model_provenance_entry_from_manifest(
+    role: str,
+    manifest: dict[str, Any],
+    ref: dict[str, Any],
+) -> dict[str, Any]:
+    source = dict(manifest.get("source") or {})
+    model = dict(manifest.get("model") or {})
+    training = dict(manifest.get("training") or {})
+    ref_training = dict(ref.get("training") or {}) if isinstance(ref.get("training"), dict) else {}
+    metrics = dict(manifest.get("metrics") or {})
+    dataset = training.get("dataset") if isinstance(training.get("dataset"), dict) else {}
+    variants = [dict(variant) for variant in list(manifest.get("variants") or []) if isinstance(variant, dict)]
+    primary_variant = variants[0] if variants else {}
+    variant_hashes = ref.get("variant_artifact_sha256")
+    if not isinstance(variant_hashes, list):
+        variant_hashes = []
+        sha_map = primary_variant.get("sha256") if isinstance(primary_variant.get("sha256"), dict) else {}
+        for digest in dict(sha_map or {}).values():
+            text = str(digest or "").strip()
+            if text:
+                variant_hashes.append(text)
+    return {
+        "model_id": str(ref.get("model_id") or manifest.get("model_id") or ""),
+        "role": role,
+        "architecture": str(
+            model.get("architecture_label")
+            or model.get("family")
+            or source.get("architecture_label")
+            or source.get("source_model_name")
+            or ""
+        ),
+        "parameter_count": _safe_int(source.get("parameter_count") or model.get("parameter_count")),
+        "checkpoint_sha256": str(ref.get("checkpoint_sha256") or source.get("checkpoint_sha256") or ""),
+        "package_sha256": str(ref.get("package_sha256") or ""),
+        "installed_model_fingerprint": str(ref.get("installed_model_fingerprint") or ""),
+        "variant_id": str(ref.get("variant_id") or primary_variant.get("id") or ""),
+        "variant_artifact_sha256": [str(item) for item in variant_hashes if str(item or "").strip()],
+        "runtime": str(ref.get("runtime") or primary_variant.get("runtime") or ""),
+        "precision": str(ref.get("precision") or primary_variant.get("precision") or ""),
+        "task": str(manifest.get("task") or ref.get("task") or ""),
+        "training": {
+            "run_id": str(training.get("run_id") or ref_training.get("run_id") or ""),
+            "run_epochs_completed": training.get("run_epochs_completed", ref_training.get("run_epochs_completed")),
+            "total_epochs": training.get("total_epochs", ref_training.get("total_epochs")),
+            "total_epochs_known": training.get("total_epochs_known", ref_training.get("total_epochs_known")),
+            "known_epochs_minimum": training.get("known_epochs_minimum", ref_training.get("known_epochs_minimum")),
+            "total_epochs_scope": str(training.get("total_epochs_scope") or ref_training.get("total_epochs_scope") or ""),
+            "dataset": {
+                "dataset_id": str(dataset.get("dataset_id") or training.get("dataset_id") or ""),
+                "manifest_sha256": str(dataset.get("manifest_sha256") or ""),
+                "split_sha256": str(dataset.get("split_sha256") or ""),
+                "data_yaml_sha256": str(dataset.get("data_yaml_sha256") or ""),
+                "train_images": dataset.get("train_images"),
+                "val_images": dataset.get("val_images"),
+                "test_images": dataset.get("test_images"),
+            },
+        },
+        "metrics": metrics,
+        "provenance_status": str(training.get("provenance_status") or ref_training.get("provenance_status") or ref.get("provenance_status") or ""),
+    }
 
 
 def _report_payload_from_thesis_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -384,6 +483,11 @@ class ReportBundleReader:
             raise ValueError(f"Plik raportu JSON jest za duży do bezpiecznego podglądu: {size} B")
         source_hash = _file_sha256(path)
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(payload, dict) and str(payload.get("schema") or "") == MOBILE_PACKAGE_EXPERIMENT_SCHEMA:
+            raise ValueError(
+                "Wybrany plik jest wewnetrznym magazynem eksperymentow desktopa, "
+                "a nie raportem z aplikacji mobilnej."
+            )
         payloads = self._json_report_payloads(payload)
         return tuple(self._json_payload_to_bundle(path, item, source_hash) for item in payloads)
 
@@ -528,6 +632,16 @@ class ReportBundleReader:
                     "Archiwum deklaruje zbyt duży rozmiar po rozpakowaniu: "
                     f"{total_uncompressed / (1024 * 1024):.1f} MB."
                 )
+            embedded_model_entries = [
+                name
+                for name in normalized_names
+                if name.lower().endswith((".pt", ".tflite", ".onnx", ".param", ".bin", ".alprmodel"))
+            ]
+            if embedded_model_entries:
+                warnings.append(
+                    "Raport zawiera binarne artefakty modeli. Nowy lekki standard .alprsession "
+                    "powinien przechowywać tylko manifesty pipeline i referencje SHA-256."
+                )
 
             def read_text(name: str, *, optional: bool = False, limit: int | None = None) -> str:
                 info = normalized_names.get(name)
@@ -562,8 +676,36 @@ class ReportBundleReader:
             if not report_payload and metadata:
                 report_payload = _report_payload_from_thesis_metadata(metadata)
 
+            pipeline_manifests: dict[str, Any] = {}
+            for key, entry_name in (
+                ("package", "pipeline/package_manifest.json"),
+                ("vehicle", "pipeline/vehicle_manifest.json"),
+                ("plate", "pipeline/plate_manifest.json"),
+                ("character", "pipeline/character_manifest.json"),
+            ):
+                payload = read_json(entry_name, optional=True)
+                if payload:
+                    pipeline_manifests[key] = payload
+            model_refs = read_json("pipeline/model_refs.json", optional=True)
+            if not model_refs:
+                package_manifest = pipeline_manifests.get("package")
+                if isinstance(package_manifest, dict) and isinstance(package_manifest.get("model_refs"), dict):
+                    model_refs = dict(package_manifest.get("model_refs") or {})
+
             if not report_payload:
                 errors.append("Archiwum nie zawiera czytelnego report.json ani metadata.json.")
+            elif not isinstance(report_payload.get("model_provenance"), dict):
+                rebuilt_provenance = _model_provenance_from_pipeline_manifests(
+                    pipeline_manifests,
+                    model_refs,
+                )
+                if rebuilt_provenance:
+                    report_payload = dict(report_payload)
+                    report_payload["model_provenance"] = rebuilt_provenance
+                    warnings.append("Uzupełniono model_provenance na podstawie manifestów pipeline.")
+            if report_payload and model_refs and not isinstance(report_payload.get("pipeline_model_refs"), dict):
+                report_payload = dict(report_payload)
+                report_payload["pipeline_model_refs"] = dict(model_refs)
 
             report_schema = str(report_payload.get("schema") or "")
             if report_payload and report_schema != MOBILE_BENCHMARK_REPORT_SCHEMA:
@@ -709,6 +851,8 @@ class ReportBundleReader:
                 manifest=manifest,
                 metadata=metadata,
                 report_payload=report_payload,
+                pipeline_manifests=pipeline_manifests,
+                model_refs=model_refs,
                 trace_columns=tuple(trace_columns),
                 trace_rows=tuple(traces),
                 trace_total=trace_total,
@@ -1231,6 +1375,16 @@ class ExperimentModelRef:
     file_size_mb: float = 0.0
     best_epoch: int = 0
     total_epochs: int = 0
+    total_epochs_known: bool = False
+    known_epochs_minimum: int = 0
+    provenance_status: str = ""
+    dataset_manifest_sha256: str = ""
+    dataset_split_sha256: str = ""
+    checkpoint_sha256: str = ""
+    package_sha256: str = ""
+    installed_model_fingerprint: str = ""
+    variant_id: str = ""
+    variant_artifact_sha256: tuple[str, ...] = field(default_factory=tuple)
     created_at: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -1261,6 +1415,16 @@ class ExperimentModelRef:
             file_size_mb=float(_safe_float(payload.get("file_size_mb"), 0.0) or 0.0),
             best_epoch=_safe_int(payload.get("best_epoch")),
             total_epochs=_safe_int(payload.get("total_epochs")),
+            total_epochs_known=_safe_bool(payload.get("total_epochs_known")),
+            known_epochs_minimum=_safe_int(payload.get("known_epochs_minimum")),
+            provenance_status=str(payload.get("provenance_status") or ""),
+            dataset_manifest_sha256=str(payload.get("dataset_manifest_sha256") or ""),
+            dataset_split_sha256=str(payload.get("dataset_split_sha256") or ""),
+            checkpoint_sha256=str(payload.get("checkpoint_sha256") or ""),
+            package_sha256=str(payload.get("package_sha256") or ""),
+            installed_model_fingerprint=str(payload.get("installed_model_fingerprint") or ""),
+            variant_id=str(payload.get("variant_id") or ""),
+            variant_artifact_sha256=tuple(str(item) for item in payload.get("variant_artifact_sha256") or ()),
             created_at=str(payload.get("created_at") or ""),
             metrics=dict(payload.get("metrics") or {}),
             metadata=dict(payload.get("metadata") or {}),
@@ -1272,6 +1436,8 @@ class ExperimentModelRef:
         run = candidate.get("run")
         metadata = candidate.get("model_metadata") if isinstance(candidate.get("model_metadata"), dict) else {}
         info = candidate.get("model_info") if isinstance(candidate.get("model_info"), dict) else {}
+        provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+        dataset = provenance.get("dataset") if isinstance(provenance.get("dataset"), dict) else {}
         best_weights = candidate.get("best_weights")
         checkpoint = str(best_weights or candidate.get("checkpoint") or "").strip()
         model_id = str(candidate.get("model_label") or Path(checkpoint).stem or "model")
@@ -1285,7 +1451,7 @@ class ExperimentModelRef:
             checkpoint=checkpoint,
             run_id=str(getattr(run, "id", "") or candidate.get("run_id") or ""),
             run_label=str(candidate.get("run_label") or getattr(run, "name", "") or ""),
-            dataset_id=str(candidate.get("dataset_label") or ""),
+            dataset_id=str(dataset.get("dataset_id") or candidate.get("dataset_label") or ""),
             dataset_path=str(candidate.get("dataset_path") or getattr(run, "dataset_path", "") or ""),
             yolo_family=str(info.get("architecture_label") or info.get("yolo_variant") or ""),
             yolo_version=str(candidate.get("model_version") or info.get("version") or ""),
@@ -1293,9 +1459,14 @@ class ExperimentModelRef:
             file_size_mb=float(_safe_float(candidate.get("file_size_mb"), 0.0) or 0.0),
             best_epoch=_safe_int(candidate.get("best_epoch")),
             total_epochs=_safe_int(candidate.get("total_epochs") or getattr(run, "current_epoch", 0)),
+            total_epochs_known=_safe_bool(candidate.get("total_epochs_known"), _safe_bool(provenance.get("total_epochs_known"))),
+            known_epochs_minimum=_safe_int(candidate.get("known_epochs_minimum") or provenance.get("known_epochs_minimum")),
+            provenance_status=str(candidate.get("provenance_status") or provenance.get("provenance_status") or ""),
+            dataset_manifest_sha256=str(dataset.get("manifest_sha256") or ""),
+            dataset_split_sha256=str(dataset.get("split_sha256") or ""),
             created_at=str(candidate.get("created_at") or getattr(run, "created_at", "") or ""),
             metrics=metrics,
-            metadata={"source": "mobile_export_candidate", **metadata},
+            metadata={"source": "mobile_export_candidate", "training_provenance": provenance, **metadata},
         )
 
     @classmethod
@@ -1304,6 +1475,10 @@ class ExperimentModelRef:
         source = dict(manifest.get("source") or {})
         metrics = dict(manifest.get("metrics") or {})
         model = dict(manifest.get("model") or {})
+        dataset = training.get("dataset") if isinstance(training.get("dataset"), dict) else {}
+        variants = [dict(variant) for variant in list(manifest.get("variants") or []) if isinstance(variant, dict)]
+        primary_variant = variants[0] if variants else {}
+        variant_hashes = primary_variant.get("sha256") if isinstance(primary_variant.get("sha256"), dict) else {}
         checkpoint = str(source.get("checkpoint") or "").strip()
         return cls(
             model_id=_safe_id(str(manifest.get("model_id") or Path(checkpoint).stem or "model")),
@@ -1312,17 +1487,25 @@ class ExperimentModelRef:
             package_path=str(package_path or ""),
             run_id=str(training.get("run_id") or training.get("id") or ""),
             run_label=str(training.get("run_label") or training.get("name") or ""),
-            dataset_id=str(training.get("dataset_id") or training.get("dataset_label") or ""),
+            dataset_id=str(dataset.get("dataset_id") or training.get("dataset_id") or training.get("dataset_label") or ""),
             dataset_path=str(training.get("dataset_path") or ""),
             yolo_family=str(model.get("family") or model.get("architecture_label") or source.get("architecture_label") or ""),
             yolo_version=str(model.get("version") or source.get("model_version") or ""),
             parameter_count=_safe_int(source.get("parameter_count") or model.get("parameter_count")),
             file_size_mb=float(_safe_float(source.get("file_size_mb"), 0.0) or 0.0),
             best_epoch=_safe_int(metrics.get("best_epoch")),
-            total_epochs=_safe_int(training.get("total_epochs") or training.get("current_epoch") or training.get("epochs")),
+            total_epochs=_safe_int(training.get("total_epochs") or training.get("known_epochs_minimum") or training.get("current_epoch") or training.get("epochs")),
+            total_epochs_known=_safe_bool(training.get("total_epochs_known")),
+            known_epochs_minimum=_safe_int(training.get("known_epochs_minimum")),
+            provenance_status=str(training.get("provenance_status") or ""),
+            dataset_manifest_sha256=str(dataset.get("manifest_sha256") or ""),
+            dataset_split_sha256=str(dataset.get("split_sha256") or ""),
+            checkpoint_sha256=str(source.get("checkpoint_sha256") or ""),
+            variant_id=str(primary_variant.get("id") or ""),
+            variant_artifact_sha256=tuple(str(item) for item in dict(variant_hashes or {}).values() if str(item or "").strip()),
             created_at=str(source.get("exported_at") or training.get("finished_at") or training.get("created_at") or ""),
             metrics=metrics,
-            metadata={"source": "manifest", "manifest_schema": manifest.get("schema", "")},
+            metadata={"source": "manifest", "manifest_schema": manifest.get("schema", ""), "training_provenance": training},
         )
 
 
@@ -1472,20 +1655,7 @@ class MobileBenchmarkReport:
 
     @property
     def identity(self) -> tuple[str, ...]:
-        source_hash = str(self.source_archive_sha256 or "").strip().lower()
-        if source_hash:
-            return ("source_sha256", source_hash, self.report_id, str(self.measured_at or ""))
-        device_name = str(self.device.get("name") or self.device.get("device_name") or "").strip()
-        return (
-            "report",
-            self.report_id,
-            self.package_id,
-            self.variant_id,
-            device_name,
-            str(self.runtime or ""),
-            str(self.delegate or ""),
-            str(self.measured_at or ""),
-        )
+        return _mobile_report_dedupe_key(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1560,6 +1730,75 @@ class MobileBenchmarkReport:
             errors=errors,
             raw=raw_payload,
         )
+
+
+def _mobile_report_device_name(report: MobileBenchmarkReport) -> str:
+    try:
+        device = dict(report.device or {})
+    except Exception:
+        device = {}
+    return str(device.get("name") or device.get("device_name") or "").strip()
+
+
+def _mobile_report_dedupe_key(report: MobileBenchmarkReport) -> tuple[str, ...]:
+    return (
+        "report",
+        str(report.report_id or "").strip(),
+        str(report.package_id or "").strip(),
+        str(report.variant_id or "").strip(),
+        _mobile_report_device_name(report),
+        str(report.runtime or "").strip(),
+        str(report.delegate or "").strip(),
+        str(report.measured_at or "").strip(),
+    )
+
+
+def _mobile_report_source_path(report: MobileBenchmarkReport) -> str:
+    raw = dict(report.raw or {}) if isinstance(report.raw, dict) else {}
+    ingest = dict(raw.get("desktop_ingest") or {}) if isinstance(raw.get("desktop_ingest"), dict) else {}
+    return str(report.source_path or ingest.get("source_path") or "").strip()
+
+
+def _mobile_report_source_is_internal_store(report: MobileBenchmarkReport) -> bool:
+    source_path = _mobile_report_source_path(report)
+    if not source_path:
+        return False
+    try:
+        return Path(source_path).name.lower() == MOBILE_PACKAGE_EXPERIMENT_STORE_FILE_NAME.lower()
+    except Exception:
+        return source_path.lower().endswith(MOBILE_PACKAGE_EXPERIMENT_STORE_FILE_NAME.lower())
+
+
+def _mobile_report_keep_rank(report: MobileBenchmarkReport) -> tuple[int, int, int, int]:
+    source_path = _mobile_report_source_path(report)
+    source_hash = str(report.source_archive_sha256 or "").strip()
+    raw = dict(report.raw or {}) if isinstance(report.raw, dict) else {}
+    try:
+        raw_size = len(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+    except Exception:
+        raw_size = len(str(raw))
+    return (
+        0 if _mobile_report_source_is_internal_store(report) else 1,
+        1 if source_path else 0,
+        1 if source_hash else 0,
+        raw_size,
+    )
+
+
+def deduplicate_mobile_reports(
+    reports: list[MobileBenchmarkReport] | tuple[MobileBenchmarkReport, ...],
+) -> list[MobileBenchmarkReport]:
+    selected: dict[tuple[str, ...], MobileBenchmarkReport] = {}
+    order: list[tuple[str, ...]] = []
+    for report in list(reports or []):
+        key = _mobile_report_dedupe_key(report)
+        if key not in selected:
+            selected[key] = report
+            order.append(key)
+            continue
+        if _mobile_report_keep_rank(report) > _mobile_report_keep_rank(selected[key]):
+            selected[key] = report
+    return [selected[key] for key in order if key in selected]
 
 
 @dataclass(frozen=True)
@@ -1946,7 +2185,7 @@ def score_mobile_report(
 class MobilePackageExperimentStore:
     """Persistent storage for package candidates and Android reports."""
 
-    FILE_NAME = "mobile_package_experiments.json"
+    FILE_NAME = MOBILE_PACKAGE_EXPERIMENT_STORE_FILE_NAME
 
     def __init__(self, root_dir: Path | None = None):
         default_root = getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS / "mobile_packages")
@@ -1970,10 +2209,14 @@ class MobilePackageExperimentStore:
                     for item in list(data.get("candidates") or [])
                 )
             }
-            self.reports = [
+            loaded_reports = [
                 MobileBenchmarkReport.from_dict(item)
                 for item in list(data.get("reports") or [])
             ]
+            self.reports = deduplicate_mobile_reports(loaded_reports)
+            removed_count = len(loaded_reports) - len(self.reports)
+            if removed_count > 0:
+                logger.info(f"Usunieto logiczne duplikaty raportow mobilnych z widoku: {removed_count}")
         except Exception as exc:
             logger.error(f"Could not load mobile package experiments: {exc}")
             self.candidates = {}
@@ -1990,6 +2233,7 @@ class MobilePackageExperimentStore:
 
     def save(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.reports = deduplicate_mobile_reports(self.reports)
         tmp_path = self.file_path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(self.file_path)
@@ -2004,8 +2248,8 @@ class MobilePackageExperimentStore:
         return candidate
 
     def add_report(self, report: MobileBenchmarkReport, *, save: bool = True) -> MobileBenchmarkReport:
-        identity = report.identity
-        self.reports = [existing for existing in self.reports if existing.identity != identity]
+        identity = _mobile_report_dedupe_key(report)
+        self.reports = [existing for existing in self.reports if _mobile_report_dedupe_key(existing) != identity]
         self.reports.append(report)
         if save:
             self.save()

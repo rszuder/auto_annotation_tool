@@ -312,6 +312,8 @@ class AnnotationTab:
         self._preview_metrics_overlay_render_key = None
         self._preview_metrics_overlay_current_width = 0.0
         self._preview_metrics_overlay_current_height = 0.0
+        self._preview_bottom_hint_drag_state = None
+        self._preview_bottom_hint_manual_position = None
         self._preview_super_correction_badge_visible = False
         self._preview_overlay_dock_expanded = True
         self._preview_overlay_dock_render_key = None
@@ -2592,6 +2594,10 @@ class AnnotationTab:
         return z2_canvas_overlays._on_preview_controls_legend_configure(self, *args, **kwargs)
     def _on_preview_controls_legend_mousewheel(self, *args, **kwargs):
         return z2_canvas_overlays._on_preview_controls_legend_mousewheel(self, *args, **kwargs)
+    def _handle_preview_canvas_overlay_mousewheel(self, *args, **kwargs):
+        return z2_canvas_overlays._handle_preview_canvas_overlay_mousewheel(self, *args, **kwargs)
+    def _on_preview_controls_legend_enter(self, *args, **kwargs):
+        return z2_canvas_overlays._on_preview_controls_legend_enter(self, *args, **kwargs)
     def _on_preview_controls_scrollbar_command(self, *args, **kwargs):
         return z2_canvas_overlays._on_preview_controls_scrollbar_command(self, *args, **kwargs)
     def _build_preview_legend_sections(self, *args, **kwargs):

@@ -5503,6 +5503,143 @@ def _render_step1_route_actions(self, frame):
             pass
         return ""
 
+    _step2_plate_opportunity_cache: dict | None = None
+
+    def _step2_plate_opportunity_state() -> dict:
+        nonlocal _step2_plate_opportunity_cache
+        if _step2_plate_opportunity_cache is not None:
+            return dict(_step2_plate_opportunity_cache)
+
+        try:
+            iteration_num = max(1, int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1))
+        except Exception:
+            iteration_num = 1
+        try:
+            minimum_plates = max(1, int(min_plates or getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10))
+        except Exception:
+            minimum_plates = 10
+
+        def _int_from(payload: dict, key: str) -> int:
+            try:
+                return max(0, int((payload or {}).get(key, 0) or 0))
+            except Exception:
+                return 0
+
+        def _normalize_image_name(raw_value) -> str:
+            raw_text = str(raw_value or "").strip()
+            if not raw_text:
+                return ""
+            try:
+                normalized = CAMPAIGN._normalize_image_set_name(raw_text)
+            except Exception:
+                try:
+                    normalized = Path(raw_text.replace("\\", "/")).name
+                except Exception:
+                    normalized = raw_text.replace("\\", "/").rsplit("/", 1)[-1]
+            return str(normalized or "").strip().lower()
+
+        try:
+            iteration_stats = dict(CAMPAIGN.get_plate_approved_set_iteration_stats(iteration_num, active_project_name or None) or {})
+        except Exception:
+            iteration_stats = {}
+        try:
+            project_stats = dict(CAMPAIGN.get_plate_approved_set_stats(active_project_name or None) or {})
+        except Exception:
+            project_stats = {}
+
+        current_images = _int_from(iteration_stats, "images")
+        current_plates = _int_from(iteration_stats, "plates")
+        project_images = _int_from(project_stats, "images")
+        project_plates = _int_from(project_stats, "plates")
+        previous_images = max(0, project_images - current_images)
+        previous_plates = max(0, project_plates - current_plates)
+
+        source_names: set[str] = set()
+        try:
+            source_count = max(0, int(CAMPAIGN.get_iteration_image_count(iteration_num, active_project_name or None) or 0))
+        except Exception:
+            try:
+                source_count = max(0, int(image_count or 0))
+            except Exception:
+                source_count = 0
+        try:
+            manifest = dict(CAMPAIGN.load_ingest_manifest(iteration_num, active_project_name or None) or {})
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            for item in list(manifest.get("selected_images") or []):
+                if isinstance(item, dict):
+                    raw_name = item.get("name") or item.get("image_name") or item.get("source_path") or ""
+                else:
+                    raw_name = item
+                normalized = _normalize_image_name(raw_name)
+                if normalized:
+                    source_names.add(normalized)
+            if not source_count:
+                try:
+                    source_count = max(0, int(manifest.get("selected_count", 0) or 0))
+                except Exception:
+                    source_count = 0
+        if not source_count and source_names:
+            source_count = len(source_names)
+
+        approved_names: set[str] = set()
+        try:
+            for entry in list(CAMPAIGN.list_plate_approved_entries(active_project_name or None) or []):
+                if not isinstance(entry, dict):
+                    continue
+                for raw_name in (entry.get("image_name", ""), entry.get("entry_key", "")):
+                    normalized = _normalize_image_name(raw_name)
+                    if normalized:
+                        approved_names.add(normalized)
+        except Exception:
+            approved_names = set()
+
+        approved_in_source = len(source_names & approved_names) if source_names else current_images
+        already_done_images = max(approved_in_source, current_images)
+        remaining_images = max(0, int(source_count or 0) - int(already_done_images or 0))
+        ready_from_previous = bool(
+            previous_plates >= minimum_plates
+            and project_plates >= minimum_plates
+            and current_plates < minimum_plates
+        )
+
+        _step2_plate_opportunity_cache = {
+            "iteration": int(iteration_num),
+            "minimum_plates": int(minimum_plates),
+            "source_images": int(source_count),
+            "remaining_images": int(remaining_images),
+            "current_images": int(current_images),
+            "current_plates": int(current_plates),
+            "project_images": int(project_images),
+            "project_plates": int(project_plates),
+            "previous_images": int(previous_images),
+            "previous_plates": int(previous_plates),
+            "ready_from_previous": bool(ready_from_previous),
+            "has_optional_work": bool(remaining_images > 0),
+        }
+        return dict(_step2_plate_opportunity_cache)
+
+    def _edge_step2_resource_origin_status(edge) -> str:
+        edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key != "e2_to_e4":
+            return ""
+        try:
+            if _edge_completed(edge) or not _edge_ready(edge):
+                return ""
+        except Exception:
+            return ""
+        state = _step2_plate_opportunity_state()
+        if not bool(state.get("ready_from_previous")):
+            return ""
+        current_plates_count = int(state.get("current_plates", 0) or 0)
+        remaining_count = int(state.get("remaining_images", 0) or 0)
+        if current_plates_count > 0:
+            return f"AT z poprzednich iteracji +{current_plates_count} AT w IT{int(state.get('iteration', 0) or 0)}"
+        if remaining_count > 0:
+            return f"AT z poprzednich iteracji | +{remaining_count} obrazów w Z2"
+        return "AT z poprzednich iteracji"
+
     def _edge_step2_work_compact_status(edge) -> str:
         edge_key = str(getattr(edge, "key", "") or "").strip()
         if edge_key not in {"e2_to_e3", "e2_to_e4"}:
@@ -5515,6 +5652,13 @@ def _render_step1_route_actions(self, frame):
         target_label = "Z3" if edge_key == "e2_to_e3" else "Z4"
         try:
             if _edge_ready(edge):
+                if edge_key == "e2_to_e4":
+                    opportunity = _step2_plate_opportunity_state()
+                    remaining_count = int(opportunity.get("remaining_images", 0) or 0)
+                    if remaining_count > 0:
+                        return f"DODAJ +{remaining_count} W Z2"
+                    if bool(opportunity.get("ready_from_previous")):
+                        return "GOTOWE Z POPRZ. ITERACJI"
                 return f"ZATWIERDŹ -> {target_label}"
         except Exception:
             pass
@@ -5660,6 +5804,10 @@ def _render_step1_route_actions(self, frame):
         if _edge_requires_explicit_selection(edge) and not _edge_selected(edge):
             return ""
         edge_key = str(getattr(edge, "key", "") or "").strip()
+        if edge_key == "e2_to_e4":
+            step2_origin_status = _edge_step2_resource_origin_status(edge)
+            if step2_origin_status:
+                return step2_origin_status
         if edge_key == "e3_to_e4":
             try:
                 gate = dict(_t06_exported_char_dataset_state() or {})
@@ -6764,6 +6912,19 @@ def _render_step1_route_actions(self, frame):
             and not pending_t05_work
             and (int(t05_pool_images or 0) > 0 or int(t05_pool_plates or 0) > 0)
         )
+        try:
+            t05_min_plates = max(1, int(min_plates or getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10))
+        except Exception:
+            t05_min_plates = 10
+        t05_previous_pool_images = max(0, int(t05_project_pool_images or 0) - int(t05_pool_images or 0))
+        t05_previous_pool_plates = max(0, int(t05_project_pool_plates or 0) - int(t05_pool_plates or 0))
+        t05_ready_from_previous_iterations = bool(
+            approve_available
+            and not pending_t05_work
+            and int(t05_previous_pool_plates or 0) >= int(t05_min_plates or 10)
+            and int(t05_pool_plates or 0) < int(t05_min_plates or 10)
+        )
+        t05_extra_work_recommended = bool(t05_ready_from_previous_iterations and int(t05_remaining_images or 0) > 0)
 
         header = tk.Frame(body, bg=body_bg)
         header.pack(fill=tk.X, padx=16, pady=(14, 8))
@@ -6797,6 +6958,55 @@ def _render_step1_route_actions(self, frame):
             anchor="w",
             wraplength=560,
         ).pack(fill=tk.X, padx=16, pady=(0, 12))
+
+        if t05_extra_work_recommended:
+            recommend_bg = blend_hex_colors(field_bg, warning, 0.11)
+            recommend = tk.Frame(
+                body,
+                bg=recommend_bg,
+                highlightthickness=1,
+                highlightbackground=blend_hex_colors(warning, field_bg, 0.38),
+                highlightcolor=blend_hex_colors(warning, field_bg, 0.38),
+            )
+            recommend.pack(fill=tk.X, padx=16, pady=(0, 10))
+            recommend.columnconfigure(1, weight=1)
+            mark_bg = blend_hex_colors(warning, recommend_bg, 0.34)
+            tk.Label(
+                recommend,
+                text="+",
+                fg=palette["campaign_infographic_ink"],
+                bg=mark_bg,
+                font=("Segoe UI Semibold", 10),
+                width=2,
+                anchor="center",
+                padx=2,
+                pady=2,
+            ).grid(row=0, column=0, rowspan=2, sticky="nsw", padx=(8, 8), pady=8)
+            tk.Label(
+                recommend,
+                text="Warto dopisać materiał w tej iteracji",
+                fg=warning,
+                bg=recommend_bg,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(7, 0))
+            tk.Label(
+                recommend,
+                text=campaign_ui_helpers._repair_polish_text(
+                    f"Bramka jest otwarta dzięki puli z poprzednich iteracji: "
+                    f"{t05_previous_pool_images} zdjęć / {t05_previous_pool_plates} tablic. "
+                    f"W bieżącej iteracji dodano {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic. "
+                    f"W aktualnym źródle zostało jeszcze około {t05_remaining_images} obrazów do sprawdzenia w Z2. "
+                    f"Jeśli chcesz wzmocnić model tablic, wybierz akcję poniżej; jeśli świadomie idziesz dalej, "
+                    f"zamknij modal i użyj pola Zatwierdź na bramce {visible_gate_id}."
+                ),
+                fg=fg,
+                bg=recommend_bg,
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=540,
+            ).grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
 
         if pending_t05_work:
             notice_bg = blend_hex_colors(field_bg, warning, 0.12)
@@ -6870,7 +7080,7 @@ def _render_step1_route_actions(self, frame):
             done_box.pack(fill=tk.X, pady=(0, 9))
             tk.Label(
                 done_box,
-                text="Materiał Z2 został już przekazany",
+                text="Materiał Z2 jest już w puli YOLO",
                 fg=success,
                 bg=done_bg,
                 font=("Segoe UI", 10, "bold"),
@@ -6880,8 +7090,9 @@ def _render_step1_route_actions(self, frame):
                 done_box,
                 text=campaign_ui_helpers._repair_polish_text(
                     f"W tej iteracji w puli YOLO jest już {t05_pool_images} zdjęć [OK] / "
-                    f"{t05_pool_plates} tablic. Lista Z2 nie ma już materiału do rozliczenia; "
-                    f"zamknij ten modal i użyj pola Zatwierdź na bramce {visible_gate_id}.\n"
+                    f"{t05_pool_plates} tablic. Możesz zatwierdzić bramkę {visible_gate_id}, "
+                    f"albo wejść ponownie do Z2 przez CTA poniżej, jeśli chcesz sprawdzić "
+                    f"lub dopisać kolejne anotacje przed treningiem.\n"
                     f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                 ),
                 fg=fg,
@@ -6897,8 +7108,6 @@ def _render_step1_route_actions(self, frame):
         action_name_wrap = 245
 
         for index, (label, command, _tone) in enumerate(buttons, start=1):
-            if t05_material_already_transferred:
-                continue
             tone_color = success
             if pending_t05_work:
                 if approve_available:
@@ -6914,6 +7123,13 @@ def _render_step1_route_actions(self, frame):
                         f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                     )
                 action_status_color = warning
+            elif t05_extra_work_recommended:
+                action_status = (
+                    "Zalecane: dodaj materiał z bieżącej iteracji w Z2\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
+                action_status_color = warning
+                tone_color = warning
             elif t05_pool_images > 0 or t05_pool_plates > 0:
                 action_status = (
                     f"Pula YOLO: {t05_pool_images} zdjęć [OK] / {t05_pool_plates} tablic\n"
@@ -6939,6 +7155,13 @@ def _render_step1_route_actions(self, frame):
                         f"Wr\u00f3\u0107 do Z2: {pending_t05_images} zdj\u0119\u0107 [OK] / {pending_t05_plates} tablic.\n"
                         f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
                     )
+            elif t05_extra_work_recommended:
+                action_title = "ZALECANE: DOPISZ"
+                action_detail = (
+                    f"Poprzednie iteracje otwierają bramkę, ale IT{current_iteration} może jeszcze dodać "
+                    f"około {t05_remaining_images} obrazów w Z2.\n"
+                    f"{t05_pool_summary_text}\n{t05_potential_summary_text}"
+                )
             elif t05_pool_images > 0 or t05_pool_plates > 0:
                 action_title = "PULA YOLO"
                 action_detail = (

@@ -43,6 +43,8 @@ class ZoomableCanvas(tk.Canvas):
         self._deferred_display_fast_mode = False
         self._final_quality_after_id = None
         self._zoom_animation_after_id = None
+        self._zoom_animation_target_zoom = None
+        self._interaction_fast_rendering = False
         self._middle_click_zoom_restore_state = None
         self._middle_click_zoom_last_trigger_at = 0.0
         self._middle_click_zoom_ignore_release_until = 0.0
@@ -497,6 +499,7 @@ class ZoomableCanvas(tk.Canvas):
             except Exception:
                 pass
         self._zoom_animation_after_id = None
+        self._zoom_animation_target_zoom = None
 
     def _get_wheel_zoom_base(self) -> float:
         zoom = max(0.01, float(self.zoom_level))
@@ -546,34 +549,47 @@ class ZoomableCanvas(tk.Canvas):
         if self.original_image is None:
             return
 
+        delegate = getattr(self, "interaction_delegate", None)
+        overlay_wheel_handler = getattr(delegate, "_handle_preview_canvas_overlay_mousewheel", None)
+        if callable(overlay_wheel_handler):
+            try:
+                overlay_result = overlay_wheel_handler(event)
+                if overlay_result == "break":
+                    return "break"
+            except Exception:
+                pass
+
         try:
             self.focus_set()
         except Exception:
             pass
-        self._cancel_zoom_animation()
         event = self._normalize_pointer_event(event)
         anchor_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
         anchor_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
-        img_x, img_y = self.canvas_to_image_coords(anchor_x, anchor_y, clamp=False)
 
         raw_delta = event.delta if hasattr(event, 'delta') else (-event.num + 5) * 120
         steps = max(1, int(abs(raw_delta) / 120)) if raw_delta else 1
+        steps = min(4, steps)
         zoom_factor = float(self._get_wheel_zoom_base()) ** steps
+        base_zoom = float(self.zoom_level)
+        pending_target = getattr(self, "_zoom_animation_target_zoom", None)
+        if pending_target is not None:
+            try:
+                base_zoom = float(pending_target)
+            except (TypeError, ValueError):
+                base_zoom = float(self.zoom_level)
 
         if raw_delta < 0:
-            new_zoom = float(self.zoom_level) / zoom_factor
+            new_zoom = base_zoom / zoom_factor
         else:
-            new_zoom = float(self.zoom_level) * zoom_factor
+            new_zoom = base_zoom * zoom_factor
 
         new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
         if abs(new_zoom - float(self.zoom_level)) < 1e-9:
             return "break"
 
-        self.zoom_level = new_zoom
-        self.pan_data['x'] = anchor_x - (float(img_x) * float(self.zoom_level))
-        self.pan_data['y'] = anchor_y - (float(img_y) * float(self.zoom_level))
-        self._apply_clamped_pan()
-        self._schedule_deferred_display(delay_ms=16, interaction_fast=True)
+        duration_ms = min(140, 82 + (steps * 14))
+        self._animate_zoom_to(anchor_x, anchor_y, new_zoom, duration_ms=duration_ms)
         self._delegate_interaction("zoom", event)
         return "break"
 
@@ -618,8 +634,10 @@ class ZoomableCanvas(tk.Canvas):
             return
 
         anchor_img_x, anchor_img_y = self.canvas_to_image_coords(anchor_canvas_x, anchor_canvas_y, clamp=False)
-        frame_count = max(5, min(12, int(max(1, duration_ms) / 16)))
+        frame_interval_ms = 12
+        frame_count = max(7, min(20, int(max(1, duration_ms) / frame_interval_ms)))
         frame_index = 0
+        self._zoom_animation_target_zoom = float(target_zoom)
 
         def _run_frame():
             nonlocal frame_index
@@ -634,14 +652,16 @@ class ZoomableCanvas(tk.Canvas):
 
             if frame_index >= frame_count:
                 self._zoom_animation_after_id = None
+                self._zoom_animation_target_zoom = None
                 self._update_display(interaction_fast=False)
                 return
 
             self._update_display(interaction_fast=True)
             try:
-                self._zoom_animation_after_id = self.after(14, _run_frame)
+                self._zoom_animation_after_id = self.after(frame_interval_ms, _run_frame)
             except Exception:
                 self._zoom_animation_after_id = None
+                self._zoom_animation_target_zoom = None
                 self._update_display(interaction_fast=False)
 
         _run_frame()
@@ -697,8 +717,10 @@ class ZoomableCanvas(tk.Canvas):
 
         start_center_x, start_center_y, start_zoom = current_center
         target_center_x, target_center_y, target_zoom = target_center
-        frame_count = max(5, min(12, int(max(1, duration_ms) / 16)))
+        frame_interval_ms = 12
+        frame_count = max(7, min(20, int(max(1, duration_ms) / frame_interval_ms)))
         frame_index = 0
+        self._zoom_animation_target_zoom = float(target_zoom)
 
         def _run_frame():
             nonlocal frame_index
@@ -718,14 +740,16 @@ class ZoomableCanvas(tk.Canvas):
 
             if frame_index >= frame_count:
                 self._zoom_animation_after_id = None
+                self._zoom_animation_target_zoom = None
                 self._update_display(interaction_fast=False)
                 return
 
             self._update_display(interaction_fast=True)
             try:
-                self._zoom_animation_after_id = self.after(14, _run_frame)
+                self._zoom_animation_after_id = self.after(frame_interval_ms, _run_frame)
             except Exception:
                 self._zoom_animation_after_id = None
+                self._zoom_animation_target_zoom = None
                 self._update_display(interaction_fast=False)
 
         _run_frame()
@@ -990,7 +1014,12 @@ class ZoomableCanvas(tk.Canvas):
             )
         )
         mark_phase("scrollregion")
-        self._draw_overlay()
+        previous_fast_rendering = bool(getattr(self, "_interaction_fast_rendering", False))
+        self._interaction_fast_rendering = bool(interaction_fast)
+        try:
+            self._draw_overlay()
+        finally:
+            self._interaction_fast_rendering = previous_fast_rendering
         mark_phase("overlay")
         elapsed_ms = max(0.0, (time.perf_counter() - started_at) * 1000.0)
         if self._perf_probe_active() or elapsed_ms >= 90.0:

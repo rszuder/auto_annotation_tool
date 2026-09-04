@@ -254,14 +254,102 @@ def _step_goto_auto_annotation(
             pass
         return
 
+    nav_started = perf_counter()
+    nav_phase_started = nav_started
+    nav_phases: list[str] = []
+    nav_overlay_visible = False
+    splash_title = "Ładuję kontrolę AT w Z2" if t02_at_review else "Ładuję pracę Z2"
+    splash_body = (
+        "Wczytuję import anotacji tablic do kontroli. Lista i podgląd pojawią się po nałożeniu runu."
+        if t02_at_review
+        else "Przygotowuję kontekst pracy bramki i listę obrazów."
+    )
+
+    def _mark_nav_phase(name: str) -> None:
+        nonlocal nav_phase_started
+        try:
+            now = perf_counter()
+            elapsed_ms = (now - nav_phase_started) * 1000.0
+            if elapsed_ms >= 80.0:
+                nav_phases.append(f"{name}={elapsed_ms:.0f}ms")
+            nav_phase_started = now
+        except Exception:
+            pass
+
+    def _log_nav_preopen(reason: str) -> None:
+        try:
+            total_ms = (perf_counter() - nav_started) * 1000.0
+            if total_ms < 350.0 and not nav_phases:
+                return
+            phases = ", ".join(nav_phases) if nav_phases else "ok"
+            logger.info(
+                "[Z2 NAV PERF] prepare_graph_to_z2 total="
+                f"{total_ms:.0f}ms target={iteration_target} "
+                f"force={int(bool(force_annotation_tab))} "
+                f"t02_review={int(bool(t02_at_review))} "
+                f"reason={reason} phases=[{phases}]"
+            )
+        except Exception:
+            pass
+
+    def _show_nav_overlay(progress: float | None, phase: str) -> None:
+        nonlocal nav_overlay_visible
+        show_overlay = getattr(self, "_show_project_loading_overlay", None)
+        if not callable(show_overlay):
+            return
+        try:
+            body = splash_body
+            phase_text = str(phase or "").strip()
+            if phase_text:
+                body = f"{splash_body}\n{phase_text}"
+            show_overlay(
+                title=splash_title,
+                body=body,
+                eyebrow="PRZEJŚCIE DO Z2",
+                tone="info",
+                progress=progress,
+            )
+            nav_overlay_visible = True
+            try:
+                self.frame.update_idletasks()
+                self.frame.update()
+            except Exception:
+                try:
+                    root = getattr(self.app, "root", None)
+                    if root is not None:
+                        root.update_idletasks()
+                        root.update()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _hide_nav_overlay() -> None:
+        nonlocal nav_overlay_visible
+        if not nav_overlay_visible:
+            return
+        try:
+            hide_overlay = getattr(self, "_hide_project_loading_overlay", None)
+            if callable(hide_overlay):
+                hide_overlay()
+        except Exception:
+            pass
+        nav_overlay_visible = False
+
+    _show_nav_overlay(6.0, "Sprawdzam zasoby wejściowe i ostatni stan pracy.")
+
     raw_dir = CAMPAIGN.get_dir("raw")
     auto_out = CAMPAIGN.get_staging_dir("auto_ann")
     if auto_out is not None:
         Path(auto_out).mkdir(parents=True, exist_ok=True)
+    _mark_nav_phase("dirs")
 
     if raw_dir is None or auto_out is None:
+        _hide_nav_overlay()
+        _log_nav_preopen("missing_dirs")
         return
 
+    _show_nav_overlay(18.0, "Odtwarzam katalog obrazów bieżącej iteracji.")
     iter_num = CAMPAIGN.get_current_iteration_num()
     try:
         input_dir = CAMPAIGN.get_iteration_image_source_dir(iter_num) or Path(raw_dir)
@@ -270,6 +358,7 @@ def _step_goto_auto_annotation(
         input_dir = folder if folder.exists() else raw_dir
     v_mod = CAMPAIGN.get_global_model("vehicle")
     p_mod = CAMPAIGN.get_global_model("plate")
+    _show_nav_overlay(28.0, "Sprawdzam model tablic i źródła poprzedniej pracy.")
     plate_source_state = self._get_annotation_step2_source_state("plate")
     plate_model_ready = bool(plate_source_state.get("plate_model_ready"))
     if plate_model_ready and (not p_mod or not Path(p_mod).exists()):
@@ -280,8 +369,10 @@ def _step_goto_auto_annotation(
     char_source_state = {}
     char_has_existing_source = False
     if iteration_target == "char" and not force_annotation_tab:
+        _show_nav_overlay(36.0, "Sprawdzam źródło tablic dla toru znaków.")
         char_source_state = self._get_char_route_source_state()
         char_has_existing_source = bool(char_source_state.get("has_source"))
+    _mark_nav_phase("source_state")
 
     if iteration_target == "char" and not force_annotation_tab:
         # STEP2-P1 is an entry into Z2, not an implicit approval of E2.
@@ -303,15 +394,19 @@ def _step_goto_auto_annotation(
     tab_ann = self.app.tabs.get("annotation")
     if tab_ann is None or not callable(getattr(tab_ann, "open_campaign_step2_entry", None)):
         try:
+            _show_nav_overlay(46.0, "Ładuję moduł Z2 i przygotowuję okno pracy.")
             loader = getattr(self.app, "_ensure_tab_loaded", None)
             if callable(loader):
                 tab_ann = loader("annotation", select=False)
+            _mark_nav_phase("ensure_tab_loaded")
         except Exception as exc:
             logger.error(f"Nie udało się dociągnąć zakładki Z2 przed wejściem z grafu: {exc}")
             tab_ann = None
     if tab_ann is None or not callable(getattr(tab_ann, "open_campaign_step2_entry", None)):
         if bool(getattr(self.app, "_lazy_tab_load_in_progress", False)):
             try:
+                _hide_nav_overlay()
+                _log_nav_preopen("lazy_retry")
                 self.frame.after(
                     250,
                     lambda: _step_goto_auto_annotation(
@@ -327,6 +422,8 @@ def _step_goto_auto_annotation(
                 pass
             return
         try:
+            _hide_nav_overlay()
+            _log_nav_preopen("tab_unavailable")
             self.app.update_status("Nie udało się przygotować karty Z2 dla pracy tej bramki.", "warning")
         except Exception:
             pass
@@ -334,21 +431,8 @@ def _step_goto_auto_annotation(
 
     defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")
     splash_token = 0
-    splash_title = "Ładuję kontrolę AT w Z2" if t02_at_review else "Ładuję pracę Z2"
-    splash_body = (
-        "Wczytuję import anotacji tablic do kontroli. Lista i podgląd pojawią się po nałożeniu runu."
-        if t02_at_review
-        else "Przygotowuję kontekst pracy bramki i listę obrazów."
-    )
-    try:
-        splash_token = tab_ann._show_campaign_step2_splash(
-            title=splash_title,
-            body=splash_body,
-            tone="info",
-            progress=None,
-        )
-    except Exception:
-        splash_token = 0
+    _show_nav_overlay(62.0, "Przygotowuję bezpieczne przełączenie widoku.")
+    _mark_nav_phase("z2_splash_prepare")
 
     try:
         self.app.campaign_free_mode = False
@@ -361,6 +445,7 @@ def _step_goto_auto_annotation(
         entry_elapsed_ms = 0.0
         switch_elapsed_ms = 0.0
         try:
+            _show_nav_overlay(74.0, "Otwieram właściwy kontekst Z2. Lista i podgląd zostaną doładowane po przełączeniu.")
             entry_started = perf_counter()
             result = tab_ann.open_campaign_step2_entry(
                 iteration_target=iteration_target,
@@ -373,6 +458,8 @@ def _step_goto_auto_annotation(
             entry_elapsed_ms = (perf_counter() - entry_started) * 1000.0
         except Exception as e:
             logger.error(f"Nie udało się otworzyc punktu startowego Z2: {e}")
+            _hide_nav_overlay()
+            _log_nav_preopen("entry_exception")
             try:
                 tab_ann._hide_campaign_step2_splash(token=splash_token)
             except Exception:
@@ -380,6 +467,8 @@ def _step_goto_auto_annotation(
             return
 
         if not result.get("ok"):
+            _hide_nav_overlay()
+            _log_nav_preopen("entry_not_ok")
             try:
                 tab_ann._hide_campaign_step2_splash(token=splash_token)
             except Exception:
@@ -400,25 +489,21 @@ def _step_goto_auto_annotation(
             pass
 
         try:
+            _show_nav_overlay(88.0, "Przełączam widok na Z2.")
             switch_started = perf_counter()
             self.app.open_controlled_tab("annotation")
             try:
                 self.app.root.update_idletasks()
             except Exception:
                 pass
-            if splash_token:
-                try:
-                    tab_ann._show_campaign_step2_splash(
-                        title=splash_title,
-                        body=splash_body,
-                        tone="info",
-                        progress=None,
-                    )
-                except Exception:
-                    pass
             switch_elapsed_ms = (perf_counter() - switch_started) * 1000.0
+            _hide_nav_overlay()
+            _mark_nav_phase("switch_to_z2")
+            _log_nav_preopen("z2_visible")
         except Exception as e:
             logger.error(f"Nie udało się przelaczyc na Z2 po przygotowaniu wejscia: {e}")
+            _hide_nav_overlay()
+            _log_nav_preopen("switch_exception")
             return
 
         try:
@@ -431,6 +516,7 @@ def _step_goto_auto_annotation(
         plate_bootstrap_model = str(result.get("plate_model_path") or "").strip()
         input_source = str(result.get("input_source") or "raw").strip()
         opened_existing_run = bool(result.get("opened_existing_run"))
+        manual_prepare_deferred_to_user = bool(result.get("manual_prepare_deferred_to_user"))
 
         try:
             if iteration_target == "plate":
@@ -498,13 +584,22 @@ def _step_goto_auto_annotation(
                     extra_hint += " Wykorzystano run tablic podpiety na starcie projektu."
                 elif input_source == "project_imported_images":
                     extra_hint += " Jako wejście ustawiono obrazy wskazane przy starcie projektu."
-                self.app.update_status(
-                    f"Auto-ustawiono Z2 dla toru tablic: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
-                    + (
-                        "Tryb ręczny utworzy annotations.xml, a nowe polygony zapisza się z etykieta 'plate'."
-                        if manual_template
-                        else "Możesz uruchomic autoanotacje tablic aktywnym modelem projektu i ręcznie poprawiać wynik."
+                if manual_prepare_deferred_to_user:
+                    workflow_hint = (
+                        "Z2 czeka na Twoją decyzję: przygotuj roboczy XML ręcznie albo uruchom autoanotację "
+                        "dopiero po świadomym wyborze akcji w Z2."
                     )
+                elif manual_template:
+                    workflow_hint = (
+                        "Tryb ręczny utworzy annotations.xml, a nowe polygony zapiszą się z etykietą 'plate'."
+                    )
+                else:
+                    workflow_hint = (
+                        "Możesz uruchomić autoanotację tablic aktywnym modelem projektu i ręcznie poprawiać wynik."
+                    )
+                self.app.update_status(
+                    f"Ustawiono Z2 dla toru tablic: IN={Path(input_dir_local).name} | OUT={Path(auto_out_local).name}. "
+                    + workflow_hint
                     + extra_hint,
                     "info"
                 )

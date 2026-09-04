@@ -3,8 +3,14 @@
 """Render helpers for the Z2 canvas overlay dock."""
 
 import tkinter as tk
+from pathlib import Path
 
-from ..config import CONFIG
+from ..config import CONFIG, logger
+from .z2_shared_ui import (
+    build_campaign_gate_focus_state,
+    campaign_gate_id_for_edge,
+    campaign_visible_gate_id,
+)
 from .web_slim_scrollbar import blend_hex_colors
 
 
@@ -26,6 +32,16 @@ def get_preview_overlay_dock_theme(owner) -> dict:
     hidden_fill = blend_hex_colors(outline, fill, 0.06)
     status_on_fill = blend_hex_colors(active, fill, 0.40)
     status_off_fill = blend_hex_colors(outline, fill, 0.32)
+    try:
+        fill_is_light = bool(owner._legend_color_is_light(fill))
+    except Exception:
+        fill_is_light = False
+    section_fill = blend_hex_colors(accent, fill, 0.42 if fill_is_light else 0.30)
+    try:
+        section_is_light = bool(owner._legend_color_is_light(section_fill))
+    except Exception:
+        section_is_light = fill_is_light
+    section_text = "#07130d" if section_is_light else "#f8fafc"
     return {
         "fill": fill,
         "outline": outline,
@@ -45,7 +61,8 @@ def get_preview_overlay_dock_theme(owner) -> dict:
         "action_outline": blend_hex_colors(outline, fill, 0.18),
         "action_hover_fill": blend_hex_colors(accent, fill, 0.28),
         "action_hover_outline": blend_hex_colors(accent, fill, 0.62),
-        "section_fill": blend_hex_colors(outline, fill, 0.05),
+        "section_fill": section_fill,
+        "section_text": section_text,
     }
 
 
@@ -159,11 +176,11 @@ def _ensure_preview_dock_gate_widgets(owner, body):
             justify=tk.LEFT,
             bd=0,
             highlightthickness=0,
-            font=("Segoe UI Semibold", 6),
-            padx=7,
-            pady=4,
+            font=("Segoe UI Semibold", 8),
+            padx=10,
+            pady=7,
         )
-        title.pack(fill=tk.X)
+        title.pack(fill=tk.X, padx=6, pady=(0, 6))
         approval = tk.Label(
             frame,
             text="",
@@ -252,6 +269,105 @@ def _ensure_preview_dock_gate_widgets(owner, body):
         return None
 
 
+def _build_preview_dock_fallback_gate(owner) -> dict:
+    """Build a compact progress snapshot for fullscreen when the main gate state is not ready yet."""
+    try:
+        from ..campaign_manager import CAMPAIGN
+
+        if not bool(CAMPAIGN.get_active_project_name()):
+            return {}
+        iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
+        current_iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
+        approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats() or {})
+    except Exception:
+        return {}
+
+    graph_context = {}
+    try:
+        graph_context = dict(getattr(owner, "_campaign_graph_entry_context", {}) or {})
+    except Exception:
+        graph_context = {}
+    graph_gate_id = campaign_gate_id_for_edge(
+        graph_context.get("graph_edge_key"),
+        graph_context.get("graph_gate_id"),
+    )
+    graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) or graph_gate_id or ""
+    if iteration_target not in {"plate", "char"}:
+        iteration_target = "char" if graph_display_gate_id in {"T05", "T06"} else "plate"
+
+    project_approved_images = int(approved_stats.get("images", 0) or 0)
+    project_approved_plates = int(approved_stats.get("plates", 0) or 0)
+    run_ok_images = 0
+    run_ok_plates = 0
+    try:
+        if getattr(owner, "current_annotations", None):
+            run_ok_images, run_ok_plates = owner._get_current_preview_plate_approved_counts()
+    except Exception:
+        run_ok_images, run_ok_plates = 0, 0
+    if int(run_ok_images or 0) <= 0 and int(run_ok_plates or 0) <= 0:
+        try:
+            run_ok_images, run_ok_plates = owner._get_run_plate_approved_counts(
+                getattr(owner, "current_annotation_run_dir", None)
+            )
+        except Exception:
+            run_ok_images, run_ok_plates = 0, 0
+
+    effective_images = max(0, project_approved_images + int(run_ok_images or 0))
+    effective_plates = max(0, project_approved_plates + int(run_ok_plates or 0))
+    required_plates = int(
+        getattr(
+            CONFIG,
+            "CAMPAIGN_MIN_CHAR_PLATES" if iteration_target == "char" else "CAMPAIGN_MIN_PLATE_ANNOTATIONS",
+            10,
+        )
+        or 10
+    )
+    missing_plates = max(0, required_plates - effective_plates)
+    xml_required = bool(current_iteration_num <= 1)
+    xml_exists = False
+    try:
+        xml_path = getattr(owner, "current_annotation_xml_path", None)
+        xml_exists = bool(xml_path and Path(xml_path).exists())
+    except Exception:
+        xml_exists = False
+    if not xml_exists:
+        try:
+            run_dir = getattr(owner, "current_annotation_run_dir", None)
+            xml_exists = bool(run_dir and (Path(run_dir) / "annotations.xml").exists())
+        except Exception:
+            xml_exists = False
+    ready = bool(effective_plates >= required_plates and (xml_exists or not xml_required))
+    quality_info = CONFIG.describe_yolo_pose_dataset_quality(max(0, effective_plates))
+    focus_state = build_campaign_gate_focus_state(missing_plates, quality_info)
+    gate_title = f"BRAMKA {graph_display_gate_id}" if graph_display_gate_id else "BRAMKA GRAFU"
+    instruction = "" if ready else "Zatwierdzaj obrazy z poprawnymi ramkami tablic jako OK."
+    return {
+        "visible": True,
+        "ready": ready,
+        "tone": "success" if ready else "warning",
+        "title": gate_title,
+        "gate_id": graph_display_gate_id,
+        "source_gate_id": graph_gate_id,
+        "status": "OTWARTA" if ready else "W TRAKCIE",
+        "instruction": instruction,
+        "approved_images": int(effective_images),
+        "approved_plates": int(effective_plates),
+        "required_images": 0,
+        "required_plates": int(required_plates),
+        "missing_images": 0,
+        "missing_plates": int(missing_plates),
+        "missing_to_open": int(missing_plates),
+        "missing_focus_label": str(focus_state.get("label") or "DO MIN."),
+        "missing_focus_row_label": str(focus_state.get("row_label") or "Do otwarcia bramki brakuje"),
+        "missing_focus_value": int(focus_state.get("value") or 0),
+        "missing_focus_text": str(focus_state.get("text") or ""),
+        "missing_focus_tone": str(focus_state.get("tone") or ("success" if ready else "warning")),
+        "gate_metric": "plates",
+        "xml": "XML: OK" if xml_exists else ("XML: wymagany" if xml_required else "XML: brak"),
+        "iteration": int(current_iteration_num),
+    }
+
+
 def _build_preview_dock_inline_gate(owner) -> dict:
     if not bool(getattr(owner, "_preview_fullscreen_active", False)):
         return {"visible": False}
@@ -259,6 +375,19 @@ def _build_preview_dock_inline_gate(owner) -> dict:
         state = dict(owner._build_campaign_z2_gate_overlay_state() or {})
     except Exception:
         state = {}
+    if bool(state.get("visible")):
+        try:
+            owner._campaign_step2_gate_overlay_state = dict(state)
+        except Exception:
+            pass
+        return state
+    try:
+        cached_state = dict(getattr(owner, "_campaign_step2_gate_overlay_state", {}) or {})
+    except Exception:
+        cached_state = {}
+    if bool(cached_state.get("visible")):
+        return cached_state
+    state = _build_preview_dock_fallback_gate(owner)
     if not bool(state.get("visible")):
         return {"visible": False}
     return state
@@ -280,6 +409,7 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
     expanded = True
     owner._preview_overlay_dock_expanded = True
     theme = get_preview_overlay_dock_theme(owner)
+    palette = getattr(getattr(owner, "app", None), "palette", {}) or {}
     tool_states = owner._get_preview_overlay_dock_tools_state()
     hover_rows = getattr(owner, "_preview_overlay_dock_hover_rows", set())
     if not isinstance(hover_rows, set):
@@ -304,24 +434,28 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
         except Exception:
             approval_key = ("", 0, 0)
 
-    pre_gate_key = (int(expanded), tool_state_key, hover_key, approval_key, theme_key)
-    cached_size = getattr(owner, "_preview_overlay_dock_size", None)
-    cached_pre_gate_key = getattr(owner, "_preview_overlay_dock_pre_gate_key", None)
-    if (
-        not bool(force_render)
-        and pre_gate_key == cached_pre_gate_key
-        and isinstance(cached_size, (tuple, list))
-        and len(cached_size) >= 2
-    ):
-        try:
-            return int(cached_size[0]), int(cached_size[1])
-        except Exception:
-            pass
-
+    fullscreen = bool(getattr(owner, "_preview_fullscreen_active", False))
     cached_inline_gate = getattr(owner, "_preview_overlay_dock_inline_gate_state", None)
-    if bool(force_render) or not isinstance(cached_inline_gate, dict):
+    inline_gate_source_key = (
+        int(fullscreen),
+        approval_key,
+        str(getattr(owner, "current_annotation_run_dir", "") or ""),
+        int(len(getattr(owner, "current_annotations", []) or [])),
+    )
+    cached_inline_gate_source_key = getattr(owner, "_preview_overlay_dock_inline_gate_source_key", None)
+    if not fullscreen:
+        inline_gate = {"visible": False}
+        owner._preview_overlay_dock_inline_gate_state = {}
+        owner._preview_overlay_dock_inline_gate_source_key = None
+    elif (
+        bool(force_render)
+        or not isinstance(cached_inline_gate, dict)
+        or not bool(cached_inline_gate.get("visible"))
+        or cached_inline_gate_source_key != inline_gate_source_key
+    ):
         inline_gate = _build_preview_dock_inline_gate(owner)
         owner._preview_overlay_dock_inline_gate_state = dict(inline_gate or {})
+        owner._preview_overlay_dock_inline_gate_source_key = inline_gate_source_key
     else:
         inline_gate = dict(cached_inline_gate)
     inline_gate_key = ()
@@ -337,14 +471,20 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                 "approved_plates",
                 "missing_images",
                 "missing_to_open",
+                "missing_plates",
                 "missing_focus_label",
+                "missing_focus_row_label",
                 "missing_focus_value",
+                "missing_focus_text",
                 "missing_focus_tone",
+                "required_plates",
                 "gate_metric",
                 "instruction",
                 "xml",
             )
         )
+    pre_gate_key = (int(expanded), tool_state_key, hover_key, approval_key, inline_gate_key, theme_key)
+    cached_size = getattr(owner, "_preview_overlay_dock_size", None)
     size_key = (
         int(expanded),
         tool_state_key,
@@ -395,9 +535,19 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                 if not str(body.winfo_manager()):
                     body.pack(fill="x")
             if actions_title is not None:
-                actions_title.configure(bg=theme["section_fill"], fg=muted, text="AKCJE")
+                actions_title.configure(
+                    bg=theme["section_fill"],
+                    fg=theme.get("section_text", text_fill),
+                    text="PRZEŁĄCZNIKI",
+                    anchor="w",
+                    font=("Segoe UI Semibold", 8),
+                    padx=10,
+                    pady=7,
+                )
                 if not str(actions_title.winfo_manager()):
-                    actions_title.pack(fill="x")
+                    actions_title.pack(fill="x", padx=6, pady=(0, 6))
+                else:
+                    actions_title.pack_configure(padx=6, pady=(0, 6))
             if actions_frame is not None:
                 actions_frame.configure(bg=fill)
                 if not str(actions_frame.winfo_manager()):
@@ -451,8 +601,6 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
         if gate_frame is not None:
             if bool(inline_gate.get("visible")):
                 try:
-                    if not str(gate_frame.winfo_manager()):
-                        gate_frame.pack(fill="x", pady=(2, 0))
                     gate_changed = bool(force_render) or gate_render_key != getattr(
                         owner, "_preview_overlay_dock_gate_render_key", None
                     )
@@ -470,11 +618,23 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                     text_fill = theme["text"]
                     muted = theme["muted"]
                     ready = bool(inline_gate.get("ready"))
-                    gate_metric = str(inline_gate.get("gate_metric") or "images").strip().lower()
                     approved_images = int(inline_gate.get("approved_images", 0) or 0)
                     approved_plates = int(inline_gate.get("approved_plates", 0) or 0)
                     missing_images = int(inline_gate.get("missing_images", 0) or 0)
-                    missing_to_open = int(inline_gate.get("missing_to_open", missing_images) or 0)
+                    missing_to_open = int(
+                        inline_gate.get(
+                            "missing_to_open",
+                            inline_gate.get("missing_plates", missing_images),
+                        )
+                        or 0
+                    )
+                    gate_metric = str(inline_gate.get("gate_metric") or "").strip().lower()
+                    if gate_metric not in {"images", "plates"}:
+                        gate_metric = "plates" if (
+                            approved_plates
+                            or int(inline_gate.get("required_plates", 0) or 0)
+                            or int(inline_gate.get("missing_plates", 0) or 0)
+                        ) else "images"
                     missing_focus_label = str(inline_gate.get("missing_focus_label") or "BRAKUJE").strip().upper()
                     missing_focus_value_raw = inline_gate.get("missing_focus_value", missing_to_open)
                     missing_focus_tone = str(inline_gate.get("missing_focus_tone") or "").strip().lower()
@@ -507,19 +667,27 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                     missing_text = "#111111" if owner._legend_color_is_light(missing_fill) else "#ffffff"
                     quality_text = "#111111" if owner._legend_color_is_light(quality_color) else "#ffffff"
                     instruction = str(inline_gate.get("instruction") or "").strip()
-                    if not instruction:
-                        instruction = "Bramka gotowa do zamknięcia." if ready else "Oznaczaj dalej."
+                    if not instruction and not ready:
+                        instruction = "Oznaczaj dalej."
 
                     ann = owner._get_preview_annotation()
                     approved = bool(owner._preview_annotation_is_explicitly_approved(ann)) if ann is not None else False
                     approval_fill = success if approved else error
                     approval_text = "#111111" if owner._legend_color_is_light(approval_fill) else "#ffffff"
                     getattr(owner, "preview_overlay_dock_gate_frame").configure(bg=fill)
-                    getattr(owner, "preview_overlay_dock_gate_title_lbl").configure(
+                    gate_title_lbl = getattr(owner, "preview_overlay_dock_gate_title_lbl")
+                    gate_title_lbl.configure(
                         bg=theme["section_fill"],
-                        fg=muted,
-                        text=str(inline_gate.get("title") or "BRAMKA GRAFU").strip().upper(),
+                        fg=theme.get("section_text", muted),
+                        font=("Segoe UI Semibold", 8),
+                        padx=10,
+                        pady=7,
+                        text="STATUS PRACY",
                     )
+                    try:
+                        gate_title_lbl.pack_configure(padx=6, pady=(0, 6))
+                    except Exception:
+                        pass
                     getattr(owner, "preview_overlay_dock_gate_approval_lbl").configure(
                         bg=approval_fill,
                         fg=approval_text,
@@ -532,7 +700,10 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                         fg=status_text,
                         highlightbackground=blend_hex_colors(gate_status_fill, fill, 0.12),
                         highlightcolor=blend_hex_colors(gate_status_fill, fill, 0.12),
-                        text=str(inline_gate.get("status") or ""),
+                        text=(
+                            f"{str(inline_gate.get('title') or 'BRAMKA GRAFU').strip().upper()}\n"
+                            f"{str(inline_gate.get('status') or '').strip().upper()}"
+                        ),
                     )
                     getattr(owner, "preview_overlay_dock_gate_counters_frame").configure(bg=fill)
                     getattr(owner, "preview_overlay_dock_gate_have_lbl").configure(
@@ -552,15 +723,41 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
                         highlightcolor=blend_hex_colors(quality_color, fill, 0.12),
                         text=f"JAKOŚĆ ZBIORU\n{quality_label}",
                     )
-                    getattr(owner, "preview_overlay_dock_gate_info_lbl").configure(
-                        bg=body_fill,
-                        fg=text_fill,
-                        text=instruction,
-                        wraplength=150,
-                    )
+                    info_lbl = getattr(owner, "preview_overlay_dock_gate_info_lbl")
+                    if ready or not instruction:
+                        if str(info_lbl.winfo_manager()):
+                            info_lbl.pack_forget()
+                    else:
+                        if not str(info_lbl.winfo_manager()):
+                            info_lbl.pack(fill=tk.X, padx=6, pady=(0, 6))
+                        info_lbl.configure(
+                            bg=body_fill,
+                            fg=text_fill,
+                            text=instruction,
+                            wraplength=214,
+                        )
+                    if str(gate_frame.winfo_manager()):
+                        try:
+                            gate_frame.pack_forget()
+                        except Exception:
+                            pass
+                    if not str(gate_frame.winfo_manager()):
+                        pack_options = {"fill": "x", "pady": (6, 0)}
+                        if actions_frame is not None and str(actions_frame.winfo_manager()):
+                            pack_options["after"] = actions_frame
+                        gate_frame.pack(**pack_options)
                     owner._preview_overlay_dock_gate_render_key = gate_render_key
                 except Exception:
-                    pass
+                    try:
+                        logger.debug("Nie udało się wyrenderować statusu pracy w szufladzie Z2.", exc_info=True)
+                    except Exception:
+                        pass
+                    try:
+                        if str(gate_frame.winfo_manager()):
+                            gate_frame.pack_forget()
+                    except Exception:
+                        pass
+                    owner._preview_overlay_dock_gate_render_key = None
             elif str(gate_frame.winfo_manager()):
                 try:
                     gate_frame.pack_forget()
@@ -577,9 +774,34 @@ def render_preview_overlay_dock(owner, *, force_render: bool = False) -> tuple[i
     except Exception:
         width = 118 if expanded else 42
         height = 178 if expanded else 32
-    max_height = 430 if bool(inline_gate.get("visible")) else 230
-    max_width = 190 if bool(inline_gate.get("visible")) else 160
-    size = int(max(38, min(max_width, width))), int(max(30, min(max_height, height)))
+    if bool(fullscreen):
+        debug_key = (
+            bool(inline_gate.get("visible")),
+            str(inline_gate.get("title") or ""),
+            str(inline_gate.get("status") or ""),
+            str(inline_gate.get("approved_images") or ""),
+            str(inline_gate.get("approved_plates") or ""),
+            str(inline_gate.get("missing_to_open") or inline_gate.get("missing_plates") or ""),
+        )
+        if debug_key != getattr(owner, "_preview_overlay_dock_inline_gate_debug_key", None):
+            owner._preview_overlay_dock_inline_gate_debug_key = debug_key
+            try:
+                logger.info(
+                    "[Z2 DOCK] fullscreen=%s gate_visible=%s title=%s status=%s ok_images=%s ok_plates=%s missing=%s",
+                    bool(fullscreen),
+                    bool(inline_gate.get("visible")),
+                    str(inline_gate.get("title") or ""),
+                    str(inline_gate.get("status") or ""),
+                    str(inline_gate.get("approved_images") or ""),
+                    str(inline_gate.get("approved_plates") or ""),
+                    str(inline_gate.get("missing_to_open") or inline_gate.get("missing_plates") or ""),
+                )
+            except Exception:
+                pass
+    max_height = 520 if bool(inline_gate.get("visible")) else 230
+    max_width = 270 if bool(inline_gate.get("visible")) else 174
+    min_width = 250 if bool(inline_gate.get("visible")) else 174
+    size = int(max(min_width, min(max_width, width))), int(max(30, min(max_height, height)))
     owner._preview_overlay_dock_size = size
     owner._preview_overlay_dock_size_key = size_key
     owner._preview_overlay_dock_pre_gate_key = pre_gate_key
@@ -689,7 +911,9 @@ def render_preview_campaign_gate_overlay(owner, state: dict, *, force_render: bo
     approved_images = int(state.get("approved_images", 0) or 0)
     approved_plates = int(state.get("approved_plates", 0) or 0)
     missing_images = int(state.get("missing_images", 0) or 0)
-    missing_to_open = int(state.get("missing_to_open", missing_images) or 0)
+    missing_to_open = int(
+        state.get("missing_to_open", state.get("missing_plates", missing_images)) or 0
+    )
     missing_focus_label = str(state.get("missing_focus_label") or "BRAKUJE").strip().upper()
     missing_focus_tone = str(state.get("missing_focus_tone") or "").strip().lower()
     try:
@@ -708,7 +932,13 @@ def render_preview_campaign_gate_overlay(owner, state: dict, *, force_render: bo
     )
     missing_fill = blend_hex_colors(missing_base, body_fill, 0.32)
     missing_text_fill = "#111111" if owner._legend_color_is_light(missing_fill) else "#ffffff"
-    gate_metric = str(state.get("gate_metric") or "images").strip().lower()
+    gate_metric = str(state.get("gate_metric") or "").strip().lower()
+    if gate_metric not in {"images", "plates"}:
+        gate_metric = "plates" if (
+            approved_plates
+            or int(state.get("required_plates", 0) or 0)
+            or int(state.get("missing_plates", 0) or 0)
+        ) else "images"
     xml_text = str(state.get("xml") or "").strip()
     quality_score = max(0, approved_plates) if gate_metric == "plates" else min(max(0, approved_images), max(0, approved_plates))
     quality_info = CONFIG.describe_yolo_pose_dataset_quality(quality_score)
@@ -728,7 +958,7 @@ def render_preview_campaign_gate_overlay(owner, state: dict, *, force_render: bo
     instruction_text = str(state.get("instruction") or "").strip()
     if not instruction_text:
         if ready:
-            instruction_text = "Bramka gotowa do zamknięcia."
+            instruction_text = ""
         elif "wymagany" in xml_text.lower() and missing_to_open > 0:
             instruction_text = "Utwórz XML i oznaczaj dalej."
         elif "wymagany" in xml_text.lower():
@@ -812,14 +1042,17 @@ def render_preview_campaign_gate_overlay(owner, state: dict, *, force_render: bo
                     wraplength=128,
                 )
             if info is not None:
-                if not str(info.winfo_manager()):
-                    info.pack(fill="x", padx=5, pady=(0, 5))
-                info.configure(
-                    bg=body_fill,
-                    fg=body_text_fill,
-                    text=instruction_text,
-                    wraplength=128,
-                )
+                if instruction_text:
+                    if not str(info.winfo_manager()):
+                        info.pack(fill="x", padx=5, pady=(0, 5))
+                    info.configure(
+                        bg=body_fill,
+                        fg=body_text_fill,
+                        text=instruction_text,
+                        wraplength=128,
+                    )
+                elif str(info.winfo_manager()):
+                    info.pack_forget()
         except Exception:
             pass
         owner._preview_campaign_gate_overlay_render_key = render_key

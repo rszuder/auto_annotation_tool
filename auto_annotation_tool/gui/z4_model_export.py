@@ -58,7 +58,14 @@ from ..validators import (
     read_model_metadata_sidecar,
     write_model_metadata_sidecar,
 )
-from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
+from ..training import (
+    YOLOPoseTrainer,
+    TrainingHistory,
+    TrainingStatus,
+    DatasetCreator,
+    DatasetSplitter,
+    build_model_training_provenance,
+)
 from ..ranking import ModelRanking
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
@@ -671,7 +678,19 @@ def _mobile_export_run_snapshot_index() -> dict[str, dict]:
             index.setdefault(key, snapshot)
 
     try:
-        for path in Path(CONFIG.DIR_5_RUNS).rglob("training_history.json"):
+        runs_root = Path(CONFIG.DIR_5_RUNS)
+        direct_history_files = [runs_root / "training_history.json"]
+        for target in ("plate", "char", "vehicle"):
+            try:
+                direct_history_files.append(Path(CONFIG.get_training_runs_dir(target)) / "training_history.json")
+            except Exception:
+                pass
+        seen_history_files: set[str] = set()
+        for path in direct_history_files:
+            key = _mobile_export_safe_path_key(path)
+            if not key or key in seen_history_files:
+                continue
+            seen_history_files.add(key)
             read_history(path)
     except Exception:
         pass
@@ -986,7 +1005,7 @@ def _mobile_export_pose_validation_message(info: dict | None) -> tuple[bool, str
         f"Liczba punktów kluczowych: {kpt_label}. Upewnij się, że punkty opisują narożniki tablicy.",
     )
 
-def _mobile_export_ultralytics_detect_catalog() -> dict[str, dict]:
+def _mobile_export_ultralytics_detect_catalog(*, include_runtime_assets: bool = True) -> dict[str, dict]:
     catalog: dict[str, dict] = {}
     for key, raw_info in dict(AVAILABLE_DETECT_MODELS or {}).items():
         model_key = str(key or "").strip()
@@ -997,6 +1016,8 @@ def _mobile_export_ultralytics_detect_catalog() -> dict[str, dict]:
         info.setdefault("name", model_key)
         info.setdefault("source", "config")
         catalog[model_key] = info
+    if not include_runtime_assets:
+        return catalog
     try:
         from ultralytics.utils import downloads as ultralytics_downloads  # type: ignore
 
@@ -1032,7 +1053,7 @@ def _mobile_export_ultralytics_detect_catalog() -> dict[str, dict]:
 def _mobile_export_ultralytics_catalog_for_target(target: str) -> dict[str, dict]:
     # Katalogowy importer w centrum eksportu obsluguje tylko MP. MT powstaje
     # w torze projektu/treningu i nie jest tu traktowany jako asset Ultralytics.
-    return _mobile_export_ultralytics_detect_catalog()
+    return _mobile_export_ultralytics_detect_catalog(include_runtime_assets=True)
 
 def _mobile_export_catalog_validation_message(info: dict | None, target: str) -> tuple[bool, str]:
     normalized_target = CONFIG.normalize_task_target(target)
@@ -1133,23 +1154,69 @@ def _mobile_export_find_local_catalog_model(file_name: str, *, target: str = "pl
                 pass
     return None
 
+def _mobile_export_local_catalog_model_index(*, target: str = "vehicle") -> dict[str, Path]:
+    normalized_target = CONFIG.normalize_task_target(target)
+    roots: list[Path] = []
+    try:
+        roots.append(Path(CONFIG.get_base_models_dir(normalized_target)))
+    except Exception:
+        pass
+    for value in (
+        getattr(CONFIG, "DIR_6_MODELS_BASE_POSE", None) if normalized_target == "plate" else None,
+        getattr(CONFIG, "DIR_6_MODELS_BASE_DETECT", None) if normalized_target == "vehicle" else None,
+    ):
+        if value:
+            try:
+                roots.append(Path(value))
+            except Exception:
+                pass
+
+    index: dict[str, Path] = {}
+    seen_roots: set[str] = set()
+    for root in roots:
+        root_key = _mobile_export_safe_path_key(root)
+        if not root_key or root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        try:
+            if root.exists() and root.is_file() and root.suffix.lower() == ".pt":
+                index.setdefault(root.name.lower(), root)
+                continue
+            if not root.exists() or not root.is_dir():
+                continue
+            for model_path in root.rglob("*.pt"):
+                index.setdefault(model_path.name.lower(), model_path)
+        except Exception:
+            continue
+    return index
+
 def _mobile_export_catalog_import_destination(file_name: str, *, target: str = "plate") -> Path:
     safe_file = Path(str(file_name or "").strip()).name or "yolo_pose.pt"
     if not safe_file.lower().endswith(".pt"):
         safe_file = f"{safe_file}.pt"
     return Path(CONFIG.get_base_models_dir(target)) / "ultralytics" / safe_file
 
-def _mobile_export_artifact_sources(self) -> list[tuple[Path, str, str]]:
-    sources: list[tuple[Path, str, str]] = []
+def _mobile_export_artifact_sources(self) -> list[tuple[Path, str, str, str, str]]:
+    sources: list[tuple[Path, str, str, str, str]] = []
     seen: set[str] = set()
 
-    def add_source(path_value, target: str, label: str) -> None:
+    def add_source(
+        path_value,
+        target: str,
+        label: str,
+        *,
+        project_name: str = "",
+        project_root: str = "",
+    ) -> None:
         if not path_value:
             return
         try:
             path = Path(path_value)
         except Exception:
             return
+        inferred_project_name, inferred_project_root = _mobile_export_project_identity_from_path(path)
+        project_name = str(project_name or inferred_project_name or "").strip()
+        project_root = str(project_root or inferred_project_root or "").strip()
         try:
             key = str(path.resolve()).lower()
         except Exception:
@@ -1157,16 +1224,28 @@ def _mobile_export_artifact_sources(self) -> list[tuple[Path, str, str]]:
         if not key or key in seen:
             return
         seen.add(key)
-        sources.append((path, CONFIG.normalize_task_target(target), label))
+        sources.append((path, CONFIG.normalize_task_target(target), label, project_name, project_root))
 
     try:
         project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
         project_root = CAMPAIGN.get_active_project_root_dir() if project_name else None
         if project_root:
             project_models = Path(project_root) / "6_models" / "trained"
-            add_source(project_models / "plates", "plate", f"Projekt {project_name}: modele tablic")
-            add_source(project_models / "chars", "char", f"Projekt {project_name}: modele znaków")
-            add_source(project_models / "vehicles", "vehicle", f"Projekt {project_name}: modele pojazdów")
+            add_source(project_models / "plates", "plate", f"Projekt {project_name}: modele tablic", project_name=project_name, project_root=str(project_root))
+            add_source(project_models / "chars", "char", f"Projekt {project_name}: modele znaków", project_name=project_name, project_root=str(project_root))
+            add_source(project_models / "vehicles", "vehicle", f"Projekt {project_name}: modele pojazdów", project_name=project_name, project_root=str(project_root))
+    except Exception:
+        pass
+
+    try:
+        projects_root = Path(CONFIG.DIR_9_PROJECTS)
+        if projects_root.exists() and projects_root.is_dir():
+            for project_root in sorted((path for path in projects_root.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
+                project_name = project_root.name
+                project_models = project_root / "6_models" / "trained"
+                add_source(project_models / "plates", "plate", f"Projekt {project_name}: modele tablic", project_name=project_name, project_root=str(project_root))
+                add_source(project_models / "chars", "char", f"Projekt {project_name}: modele znaków", project_name=project_name, project_root=str(project_root))
+                add_source(project_models / "vehicles", "vehicle", f"Projekt {project_name}: modele pojazdów", project_name=project_name, project_root=str(project_root))
     except Exception:
         pass
 
@@ -1179,13 +1258,29 @@ def _mobile_export_artifact_sources(self) -> list[tuple[Path, str, str]]:
     add_source(getattr(CONFIG, "DIR_6_MODELS_CHARS", None), "char", "Globalne modele znaków")
     return sources
 
-def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, scope_label: str) -> dict:
+def _mobile_export_candidate_from_artifact(
+    self,
+    model_path: Path,
+    target: str,
+    scope_label: str,
+    *,
+    project_name: str = "",
+    project_root: str = "",
+) -> dict:
     safe_path = Path(model_path)
     target = CONFIG.normalize_task_target(target)
     role = _mobile_role_from_training_target(target)
     task = "pose" if role == "plate" else "detect"
+    inferred_project_name, inferred_project_root = _mobile_export_project_identity_from_path(safe_path)
+    project_name = str(project_name or inferred_project_name or "").strip()
+    project_root = str(project_root or inferred_project_root or "").strip()
     metadata = _mobile_export_read_model_metadata(safe_path)
     raw_payload = metadata.get("raw") if isinstance(metadata.get("raw"), dict) else {}
+    if not project_name and isinstance(raw_payload, dict):
+        project_payload = raw_payload.get("project") if isinstance(raw_payload.get("project"), dict) else {}
+        source_payload = raw_payload.get("source") if isinstance(raw_payload.get("source"), dict) else {}
+        project_name = str(project_payload.get("name") or source_payload.get("project_name") or "").strip()
+        project_root = str(project_payload.get("root") or source_payload.get("project_root") or project_root or "").strip()
     info = metadata.get("info") if isinstance(metadata.get("info"), dict) else {}
     history_snapshot = _mobile_export_run_snapshot_for_reference(safe_path.name)
     try:
@@ -1315,9 +1410,8 @@ def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, 
         )
     )
     if total_epochs is None or total_epochs <= 0:
-        total_epochs = _mobile_export_total_epochs_for_run_like(
-            run_snapshot or history_snapshot,
-            fallback=_mobile_export_nested_value(
+        total_epochs = _mobile_export_int_or_none(
+            _mobile_export_nested_value(
                 {"training": training_root, "run": run_snapshot, "history": history_snapshot},
                 "training.current_epoch",
                 "run.current_epoch",
@@ -1325,12 +1419,25 @@ def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, 
                 "training.epochs",
                 "run.epochs",
                 "history.epochs",
-            ),
+            )
         )
+    training_provenance = dict(training_root) if isinstance(training_root, dict) and training_root.get("provenance_version") else {}
+    known_total = _mobile_export_provenance_known_total(training_provenance)
+    if known_total is not None:
+        total_epochs = known_total
+    elif total_epochs is None or total_epochs <= 0:
+        total_epochs = _mobile_export_provenance_display_total(training_provenance)
+    dataset_provenance = training_provenance.get("dataset") if isinstance(training_provenance.get("dataset"), dict) else {}
+    dataset_label = (
+        str(dataset_provenance.get("dataset_id") or "").strip()
+        or _mobile_export_dataset_label(dataset_path, target)
+    )
 
     return {
         "history_dir": "",
         "scope": scope_label,
+        "project_name": project_name,
+        "project_root": project_root,
         "run": None,
         "target": target,
         "target_label": self._format_training_target_label(target),
@@ -1340,7 +1447,7 @@ def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, 
         "run_label": "gotowy model",
         "model_label": model_label,
         "model_version": model_version,
-        "dataset_label": _mobile_export_dataset_label(dataset_path, target),
+        "dataset_label": dataset_label,
         "dataset_path": dataset_path,
         "best_map50": best_map50,
         "best_map50_95": best_map50_95,
@@ -1358,6 +1465,10 @@ def _mobile_export_candidate_from_artifact(self, model_path: Path, target: str, 
         "epochs": _mobile_export_nested_value({"training": training_root, "run": run_snapshot, "history": history_snapshot}, "training.epochs", "run.epochs", "history.epochs"),
         "current_epoch": _mobile_export_nested_value({"training": training_root, "run": run_snapshot, "history": history_snapshot}, "training.current_epoch", "run.current_epoch", "history.current_epoch"),
         "total_epochs": total_epochs,
+        "total_epochs_known": _mobile_export_bool_or_none(training_provenance.get("total_epochs_known")) is True if training_provenance else False,
+        "known_epochs_minimum": _mobile_export_int_or_none(training_provenance.get("known_epochs_minimum")) if training_provenance else None,
+        "provenance_status": str(training_provenance.get("provenance_status") or ("complete" if known_total else "legacy_unknown")),
+        "training_provenance": training_provenance,
         "batch_size": _mobile_export_nested_value({"training": training_root, "run": run_snapshot, "history": history_snapshot}, "training.batch_size", "run.batch_size", "history.batch_size"),
         "base_model": base_model,
         "history_snapshot": history_snapshot,
@@ -1401,7 +1512,7 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
     model_metadata = _mobile_export_read_model_metadata(Path(best_weights))
     model_info = model_metadata.get("info") if isinstance(model_metadata.get("info"), dict) else {}
     raw_model_metadata = model_metadata.get("raw") if isinstance(model_metadata.get("raw"), dict) else {}
-    total_epochs = _mobile_export_total_epochs_for_run_like(run)
+    project_name, project_root = _mobile_export_project_identity_from_path(best_weights)
     if run is None:
         filename_metric = _mobile_export_metric_from_filename(best_weights)
         if metric_summary.get("best_map50") is None:
@@ -1412,25 +1523,62 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
         run_snapshot = run.to_dict() if hasattr(run, "to_dict") else {}
     except Exception:
         run_snapshot = {}
-    if isinstance(run_snapshot, dict) and total_epochs > 0:
-        run_snapshot["total_epochs"] = total_epochs
+    raw_training = raw_model_metadata.get("training") if isinstance(raw_model_metadata.get("training"), dict) else {}
+    raw_run_snapshot = raw_model_metadata.get("run_snapshot") if isinstance(raw_model_metadata.get("run_snapshot"), dict) else {}
+    history_snapshot = _mobile_export_run_snapshot_for_reference(best_weights)
+    if not isinstance(run_snapshot, dict) or not run_snapshot:
+        run_snapshot = dict(raw_run_snapshot or history_snapshot or {})
+    provenance_source = run if run is not None else (run_snapshot or raw_training)
+    dataset_hint = (
+        str(getattr(run, "dataset_path", "") or "").strip()
+        or str(raw_training.get("dataset_path") or "").strip()
+        or str(run_snapshot.get("dataset_path") or "").strip()
+        or str(history_snapshot.get("dataset_path") or "").strip()
+    )
+    if run is None and isinstance(raw_training, dict) and raw_training.get("provenance_version"):
+        training_payload = dict(raw_training)
+    else:
+        training_payload = _mobile_export_build_training_provenance(
+            provenance_source,
+            target=target,
+            checkpoint=best_weights,
+            dataset_path=dataset_hint,
+            model_metadata=model_metadata,
+            include_dataset_fingerprint=True,
+        )
+        if not training_payload and isinstance(raw_training, dict):
+            training_payload = dict(raw_training)
+    compatibility_defaults = {
+        "run_id": str(getattr(run, "id", "") or raw_training.get("run_id") or run_snapshot.get("id") or ""),
+        "run_name": str(getattr(run, "name", "") or raw_training.get("run_name") or raw_training.get("name") or run_snapshot.get("name") or ""),
+        "target": target,
+        "target_label": self._format_training_target_label(target),
+        "dataset_path": dataset_hint,
+        "base_model": str(getattr(run, "base_model", "") or raw_training.get("base_model") or run_snapshot.get("base_model") or ""),
+        "img_size": getattr(run, "img_size", None) if run is not None else (raw_training.get("img_size") or run_snapshot.get("img_size")),
+        "epochs": getattr(run, "epochs", None) if run is not None else (raw_training.get("epochs") or run_snapshot.get("epochs")),
+        "current_epoch": getattr(run, "current_epoch", None) if run is not None else (raw_training.get("current_epoch") or run_snapshot.get("current_epoch")),
+        "batch_size": getattr(run, "batch_size", None) if run is not None else (raw_training.get("batch_size") or run_snapshot.get("batch_size")),
+        "started_at": str(getattr(run, "started_at", "") or raw_training.get("started_at") or run_snapshot.get("started_at") or ""),
+        "finished_at": str(getattr(run, "finished_at", "") or raw_training.get("finished_at") or run_snapshot.get("finished_at") or ""),
+    }
+    for key, value in compatibility_defaults.items():
+        if value not in (None, ""):
+            training_payload.setdefault(key, value)
+    if _mobile_export_bool_or_none(training_payload.get("total_epochs_known")) is False:
+        training_payload["total_epochs"] = None
+    known_total = _mobile_export_provenance_known_total(training_payload)
+    if isinstance(run_snapshot, dict):
+        if known_total is not None:
+            run_snapshot["total_epochs"] = known_total
+        else:
+            minimum = _mobile_export_int_or_none(training_payload.get("known_epochs_minimum"))
+            if minimum is not None and minimum > 0:
+                run_snapshot["known_epochs_minimum"] = minimum
+                run_snapshot["total_epochs_known"] = False
     return self._json_safe_training_value(
         {
-            "training": {
-                "run_id": str(getattr(run, "id", "") or ""),
-                "run_name": str(getattr(run, "name", "") or ""),
-                "target": target,
-                "target_label": self._format_training_target_label(target),
-                "dataset_path": str(getattr(run, "dataset_path", "") or ""),
-                "base_model": str(getattr(run, "base_model", "") or ""),
-                "img_size": getattr(run, "img_size", None),
-                "epochs": getattr(run, "epochs", None),
-                "current_epoch": getattr(run, "current_epoch", None),
-                "total_epochs": total_epochs or None,
-                "batch_size": getattr(run, "batch_size", None),
-                "started_at": str(getattr(run, "started_at", "") or ""),
-                "finished_at": str(getattr(run, "finished_at", "") or ""),
-            },
+            "training": training_payload,
             "metrics": {
                 "best_map50": metric_summary.get("best_map50"),
                 "best_map50_95": metric_summary.get("best_map50_95"),
@@ -1443,6 +1591,12 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
                 "run_output_dir": str(getattr(run, "output_dir", "") or ""),
                 "training_history_dir": str(getattr(getattr(self, "history", None), "history_dir", "") or ""),
                 "model_metadata_json": str(model_metadata.get("metadata_json") or ""),
+                "project_name": project_name,
+                "project_root": project_root,
+            },
+            "project": {
+                "name": project_name,
+                "root": project_root,
             },
             "model": {
                 "file_name": Path(best_weights).name,
@@ -1808,6 +1962,20 @@ def _mobile_export_int_or_none(value) -> int | None:
     except Exception:
         return None
 
+def _mobile_export_bool_or_none(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "tak", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "nie", "no", "n", "off"}:
+        return False
+    return None
+
 def _mobile_export_run_like_value(run_like, key: str, default=None):
     if isinstance(run_like, dict):
         return run_like.get(key, default)
@@ -1889,7 +2057,60 @@ def _mobile_export_parent_run_id(run_like) -> str:
             return run_id
     return ""
 
+def _mobile_export_build_training_provenance(
+    run_like,
+    *,
+    target: str = "",
+    checkpoint: Path | str | None = None,
+    dataset_path: str | Path | None = None,
+    model_metadata: dict | None = None,
+    include_dataset_fingerprint: bool = False,
+) -> dict:
+    """Build canonical provenance, keeping legacy callers non-fatal."""
+
+    try:
+        return build_model_training_provenance(
+            run_like,
+            history_index=_mobile_export_run_snapshot_index(),
+            checkpoint=checkpoint,
+            dataset_path=dataset_path,
+            target=target,
+            model_sidecar=model_metadata if isinstance(model_metadata, dict) else None,
+            include_dataset_fingerprint=include_dataset_fingerprint,
+        )
+    except Exception as exc:
+        try:
+            logger.warning("Nie udało się zbudować provenance modelu mobilnego: %s", exc)
+        except Exception:
+            pass
+        return {}
+
+def _mobile_export_provenance_known_total(provenance: dict | None) -> int | None:
+    if not isinstance(provenance, dict):
+        return None
+    total = _mobile_export_int_or_none(provenance.get("total_epochs"))
+    known_flag = _mobile_export_bool_or_none(provenance.get("total_epochs_known"))
+    has_contract = bool(provenance.get("provenance_version"))
+    if total is not None and total > 0 and known_flag is not False and (known_flag is True or has_contract):
+        return total
+    return None
+
+def _mobile_export_provenance_display_total(provenance: dict | None) -> int:
+    total = _mobile_export_provenance_known_total(provenance)
+    if total is not None:
+        return total
+    minimum = _mobile_export_int_or_none((provenance or {}).get("known_epochs_minimum") if isinstance(provenance, dict) else None)
+    return int(minimum or 0)
+
 def _mobile_export_total_epochs_for_run_like(run_like, fallback=None) -> int:
+    provenance = _mobile_export_build_training_provenance(
+        run_like,
+        include_dataset_fingerprint=False,
+    )
+    provenance_total = _mobile_export_provenance_display_total(provenance)
+    if provenance_total > 0:
+        return provenance_total
+
     total = 0
     seen: set[str] = set()
     cursor = _mobile_export_run_like_dict(run_like)
@@ -1928,6 +2149,10 @@ def _mobile_export_total_epochs_for_run_like(run_like, fallback=None) -> int:
 def _mobile_export_candidate_total_epochs(candidate: dict | None) -> int:
     if not isinstance(candidate, dict):
         return 0
+    provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+    provenance_total = _mobile_export_provenance_display_total(provenance)
+    if provenance_total > 0:
+        return provenance_total
     explicit = _mobile_export_int_or_none(candidate.get("total_epochs"))
     if explicit is not None and explicit > 0:
         return explicit
@@ -2007,6 +2232,7 @@ def _mobile_export_target_tooltip(candidate: dict | None) -> str:
     return (
         f"{marker}: {target_label}\n"
         f"Rola Android: {role} / {task}\n"
+        f"Projekt: {_mobile_export_project_label(candidate, empty='-')}\n"
         f"Model: {candidate.get('model_label') or '-'}\n"
         f"Run: {candidate.get('run_label') or '-'}"
     )
@@ -2014,11 +2240,11 @@ def _mobile_export_target_tooltip(candidate: dict | None) -> str:
 def _mobile_export_target_base_color(palette: dict, candidate: dict | None) -> str:
     marker = _mobile_export_target_marker(candidate)
     if marker == "MT":
-        return palette.get("warning", "#d9822b")
+        return palette.get("model_role_plate", palette.get("warning", "#d9822b"))
     if marker == "MZ":
-        return palette.get("accent", "#3f8cff")
+        return palette.get("model_role_character", palette.get("accent", "#3f8cff"))
     if marker == "MP":
-        return "#00c2a8"
+        return palette.get("model_role_vehicle", palette.get("success", "#00c2a8"))
     return palette.get("muted", "#9aa0a6")
 
 def _mobile_export_target_color(palette: dict, candidate: dict | None, *, selected: bool = False) -> str:
@@ -2641,6 +2867,36 @@ def _mobile_export_safe_path_key(path_value) -> str:
     except Exception:
         return str(path_value or "").strip().lower()
 
+def _mobile_export_project_identity_from_path(path_value) -> tuple[str, str]:
+    try:
+        raw_path = Path(path_value)
+    except Exception:
+        return "", ""
+    try:
+        resolved = raw_path.resolve()
+    except Exception:
+        resolved = raw_path
+    try:
+        projects_root = Path(CONFIG.DIR_9_PROJECTS).resolve()
+    except Exception:
+        return "", ""
+    try:
+        relative = resolved.relative_to(projects_root)
+    except Exception:
+        return "", ""
+    if not relative.parts:
+        return "", ""
+    project_name = str(relative.parts[0] or "").strip()
+    if not project_name:
+        return "", ""
+    return project_name, str(projects_root / project_name)
+
+def _mobile_export_project_label(candidate: dict | None, *, empty: str = "") -> str:
+    if not isinstance(candidate, dict):
+        return empty
+    project_name = str(candidate.get("project_name") or "").strip()
+    return project_name or empty
+
 def _mobile_export_candidate_dedupe_key(candidate: dict | None) -> str:
     if not isinstance(candidate, dict):
         return ""
@@ -2670,7 +2926,7 @@ def _mobile_export_candidate_preference(candidate: dict | None) -> tuple:
         return (0, 0, 0.0, 0)
     scope = str(candidate.get("scope") or "").strip().lower()
     priority = 0
-    if scope.startswith("projekt "):
+    if scope.startswith("projekt"):
         priority += 80
     if "lokalne modele pojazdów" in scope:
         priority += 70
@@ -2726,22 +2982,25 @@ def _mobile_export_dataset_label(dataset_path: str, target: str) -> str:
         except Exception:
             return text
 
-def _mobile_export_history_sources(self) -> list[tuple[Path, str]]:
-    sources: list[tuple[Path, str]] = []
+def _mobile_export_history_sources(self) -> list[tuple[Path, str, str, str]]:
+    sources: list[tuple[Path, str, str, str]] = []
     seen: set[str] = set()
 
-    def add_source(path_value, label: str) -> None:
+    def add_source(path_value, label: str, *, project_name: str = "", project_root: str = "") -> None:
         if not path_value:
             return
         try:
             path = Path(path_value)
         except Exception:
             return
+        inferred_project_name, inferred_project_root = _mobile_export_project_identity_from_path(path)
+        project_name = str(project_name or inferred_project_name or "").strip()
+        project_root = str(project_root or inferred_project_root or "").strip()
         key = _mobile_export_safe_path_key(path)
         if not key or key in seen:
             return
         seen.add(key)
-        sources.append((path, label))
+        sources.append((path, label, project_name, project_root))
 
     current_history = getattr(self, "history", None)
     add_source(getattr(current_history, "history_dir", None), "Aktywna historia")
@@ -2750,7 +3009,20 @@ def _mobile_export_history_sources(self) -> list[tuple[Path, str]]:
         project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
         project_root = CAMPAIGN.get_active_project_root_dir() if project_name else None
         if project_root:
-            add_source(Path(project_root) / "5_training_runs", f"Projekt: {project_name}")
+            add_source(Path(project_root) / "5_training_runs", f"Projekt: {project_name}", project_name=project_name, project_root=str(project_root))
+    except Exception:
+        pass
+
+    try:
+        projects_root = Path(CONFIG.DIR_9_PROJECTS)
+        if projects_root.exists() and projects_root.is_dir():
+            for project_root in sorted((path for path in projects_root.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
+                add_source(
+                    project_root / "5_training_runs",
+                    f"Projekt: {project_root.name}",
+                    project_name=project_root.name,
+                    project_root=str(project_root),
+                )
     except Exception:
         pass
 
@@ -2763,14 +3035,59 @@ def _mobile_export_history_sources(self) -> list[tuple[Path, str]]:
 
     return sources
 
+def _mobile_export_candidates_source_signature(self) -> tuple:
+    items: list[tuple] = []
+
+    def add_stat(kind: str, path_value, *extra) -> None:
+        try:
+            path = Path(path_value)
+        except Exception:
+            return
+        key = _mobile_export_safe_path_key(path)
+        try:
+            stat = path.stat()
+            mtime_ns = int(getattr(stat, "st_mtime_ns", 0) or 0)
+            size = int(getattr(stat, "st_size", 0) or 0)
+            exists = 1
+        except Exception:
+            mtime_ns = 0
+            size = 0
+            exists = 0
+        items.append((kind, key, exists, mtime_ns, size, *extra))
+
+    try:
+        for history_dir, _label, project_name, _project_root in _mobile_export_history_sources(self):
+            history_file = Path(history_dir) / getattr(TrainingHistory, "HISTORY_FILE", "training_history.json")
+            add_stat("history", history_file, project_name)
+    except Exception:
+        pass
+
+    try:
+        for models_dir, target, _label, project_name, _project_root in _mobile_export_artifact_sources(self):
+            add_stat("models", models_dir, target, project_name)
+    except Exception:
+        pass
+
+    return tuple(items)
+
 def _collect_mobile_export_candidates(self) -> list[dict]:
+    cache_signature = _mobile_export_candidates_source_signature(self)
+    try:
+        cache = getattr(self, "_mobile_export_candidates_cache", None)
+        if isinstance(cache, dict) and cache.get("signature") == cache_signature:
+            cached_candidates = cache.get("candidates")
+            if isinstance(cached_candidates, list):
+                return [dict(candidate) for candidate in cached_candidates if isinstance(candidate, dict)]
+    except Exception:
+        pass
+
     candidates: list[dict] = []
     seen: set[str] = set()
 
     current_history = getattr(self, "history", None)
     current_history_key = _mobile_export_safe_path_key(getattr(current_history, "history_dir", ""))
 
-    for history_dir, scope_label in _mobile_export_history_sources(self):
+    for history_dir, scope_label, project_name, project_root in _mobile_export_history_sources(self):
         history_key = _mobile_export_safe_path_key(history_dir)
         try:
             history = current_history if history_key and history_key == current_history_key else TrainingHistory(history_dir=history_dir)
@@ -2825,6 +3142,12 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                 metric_summary = self._build_history_run_metric_summary(run)
                 model_metadata = _mobile_export_read_model_metadata(best_weights)
                 model_info = model_metadata.get("info") if isinstance(model_metadata.get("info"), dict) else {}
+                candidate_project_name = str(project_name or "").strip()
+                candidate_project_root = str(project_root or "").strip()
+                if not candidate_project_name:
+                    inferred_project_name, inferred_project_root = _mobile_export_project_identity_from_path(best_weights)
+                    candidate_project_name = inferred_project_name
+                    candidate_project_root = inferred_project_root
                 run_ref = build_run_display_ref(run, kind_hint="training")
                 try:
                     model_ref = build_model_display_ref(
@@ -2838,11 +3161,17 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                     model_label = Path(best_weights).name or "model"
 
                 dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
-                total_epochs = _mobile_export_total_epochs_for_run_like(run)
+                training_provenance = {}
+                total_epochs = _mobile_export_int_or_none(getattr(run, "total_epochs", None))
+                if total_epochs is None or total_epochs <= 0:
+                    total_epochs = _mobile_export_completed_epoch_count(run)
+                dataset_provenance = {}
                 candidates.append(
                     {
                         "history_dir": str(history_dir),
                         "scope": scope_label,
+                        "project_name": candidate_project_name,
+                        "project_root": candidate_project_root,
                         "run": run,
                         "target": target,
                         "target_label": self._format_training_target_label(target),
@@ -2859,7 +3188,7 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                             getattr(run, "name", ""),
                             best_weights,
                         ),
-                        "dataset_label": _mobile_export_dataset_label(dataset_path, target),
+                        "dataset_label": str(dataset_provenance.get("dataset_id") or "").strip() or _mobile_export_dataset_label(dataset_path, target),
                         "dataset_path": dataset_path,
                         "best_map50": metric_summary.get("best_map50"),
                         "best_map50_95": metric_summary.get("best_map50_95"),
@@ -2870,6 +3199,10 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                         "epochs": getattr(run, "epochs", None),
                         "current_epoch": getattr(run, "current_epoch", None),
                         "total_epochs": total_epochs,
+                        "total_epochs_known": _mobile_export_bool_or_none(getattr(run, "total_epochs_known", None)) is True,
+                        "known_epochs_minimum": _mobile_export_int_or_none(getattr(run, "known_epochs_minimum", None)),
+                        "provenance_status": "deferred_until_export",
+                        "training_provenance": training_provenance,
                         "batch_size": getattr(run, "batch_size", None),
                         "img_size": getattr(run, "img_size", None),
                         "base_model": getattr(run, "base_model", ""),
@@ -2881,7 +3214,7 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
             except Exception:
                 continue
 
-    for models_dir, target, scope_label in _mobile_export_artifact_sources(self):
+    for models_dir, target, scope_label, project_name, project_root in _mobile_export_artifact_sources(self):
         try:
             root = Path(models_dir)
         except Exception:
@@ -2900,7 +3233,14 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                 best_key = _mobile_export_safe_path_key(model_path)
                 if not best_key or best_key in seen:
                     continue
-                candidate = _mobile_export_candidate_from_artifact(self, Path(model_path), target, scope_label)
+                candidate = _mobile_export_candidate_from_artifact(
+                    self,
+                    Path(model_path),
+                    target,
+                    scope_label,
+                    project_name=project_name,
+                    project_root=project_root,
+                )
                 seen.add(best_key)
                 candidates.append(candidate)
             except Exception:
@@ -2909,9 +3249,10 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
     # MP from the Ultralytics/base detector catalog is not produced by our training history,
     # so we explicitly surface already downloaded detector checkpoints as export candidates.
     try:
-        for model_key, info in _mobile_export_ultralytics_detect_catalog().items():
+        local_vehicle_catalog = _mobile_export_local_catalog_model_index(target="vehicle")
+        for model_key, info in _mobile_export_ultralytics_detect_catalog(include_runtime_assets=False).items():
             file_name = str((info or {}).get("file") or f"{model_key}.pt").strip()
-            local_model = _mobile_export_find_local_catalog_model(file_name, target="vehicle")
+            local_model = local_vehicle_catalog.get(Path(file_name).name.lower())
             if not local_model or not Path(local_model).exists():
                 continue
             best_key = _mobile_export_safe_path_key(local_model)
@@ -2937,7 +3278,20 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
         )
         return (timestamp, str(getattr(run, "id", "") or ""), str(candidate.get("model_label") or ""))
 
-    return sorted(_dedupe_mobile_export_candidates(candidates), key=sort_key, reverse=True)
+    result = sorted(_dedupe_mobile_export_candidates(candidates), key=sort_key, reverse=True)
+    try:
+        setattr(
+            self,
+            "_mobile_export_candidates_cache",
+            {
+                "signature": cache_signature,
+                "candidates": [dict(candidate) for candidate in result if isinstance(candidate, dict)],
+                "created_at": time.time(),
+            },
+        )
+    except Exception:
+        pass
+    return result
 
 def _mobile_export_candidate_matches_run(candidate: dict, run) -> bool:
     if not candidate or run is None:
@@ -2975,6 +3329,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         return [
             ("Model eksportowany", str(candidate.get("model_label") or "-")),
             ("Rola w paczce", role_label),
+            ("Projekt", _mobile_export_project_label(candidate, empty="-")),
             ("Źródło", "Gotowy plik .pt z listy modeli"),
             ("Wersja YOLO", str(candidate.get("model_version") or "-")),
             ("Parametry modelu", params_label),
@@ -2992,6 +3347,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         ("Model eksportowany", str(candidate.get("model_label") or "-")),
         ("Run treningu", f"{candidate.get('run_label') or '-'} | {getattr(run, 'name', '') or '-'}"),
         ("Rola w paczce", role_label),
+        ("Projekt", _mobile_export_project_label(candidate, empty="-")),
         ("Wersja YOLO", str(candidate.get("model_version") or "-")),
         ("Parametry modelu", params_label),
         ("Dataset treningowy", str(candidate.get("dataset_label") or "-")),
@@ -3044,6 +3400,12 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "target": str(candidate.get("target") or ""),
         "target_label": str(candidate.get("target_label") or ""),
         "scope": str(candidate.get("scope") or ""),
+        "project_name": str(candidate.get("project_name") or ""),
+        "project_root": str(candidate.get("project_root") or ""),
+        "project": {
+            "name": str(candidate.get("project_name") or ""),
+            "root": str(candidate.get("project_root") or ""),
+        },
         "candidate_iid": str(candidate.get("iid") or ""),
         "model_label": str(candidate.get("model_label") or ""),
         "model_version": str(candidate.get("model_version") or ""),
@@ -3059,6 +3421,10 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "epochs_last_run": candidate.get("epochs"),
         "current_epoch_last_run": candidate.get("current_epoch"),
         "total_epochs": _mobile_export_candidate_total_epochs(candidate),
+        "total_epochs_known": _mobile_export_bool_or_none(candidate.get("total_epochs_known")) if "total_epochs_known" in candidate else None,
+        "known_epochs_minimum": candidate.get("known_epochs_minimum"),
+        "provenance_status": str(candidate.get("provenance_status") or ""),
+        "training_provenance": candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {},
         "best_epoch": candidate.get("best_epoch"),
         "best_map50": candidate.get("best_map50"),
         "best_map50_95": candidate.get("best_map50_95"),
@@ -3077,7 +3443,19 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
 
 def _build_exported_model_metadata(self, run, target: str, source_path: Path, destination_path: Path) -> dict:
     metric_summary = self._build_history_run_metric_summary(run)
-    total_epochs = _mobile_export_total_epochs_for_run_like(run)
+    source_metadata = _mobile_export_read_model_metadata(Path(source_path))
+    project_name, project_root = _mobile_export_project_identity_from_path(source_path)
+    training_payload = _mobile_export_build_training_provenance(
+        run,
+        target=target,
+        checkpoint=source_path,
+        dataset_path=str(getattr(run, "dataset_path", "") or ""),
+        model_metadata=source_metadata,
+        include_dataset_fingerprint=True,
+    )
+    total_epochs = _mobile_export_provenance_display_total(training_payload)
+    if total_epochs <= 0:
+        total_epochs = _mobile_export_total_epochs_for_run_like(run)
     run_dict = {}
     try:
         if hasattr(run, "to_dict"):
@@ -3114,8 +3492,24 @@ def _build_exported_model_metadata(self, run, target: str, source_path: Path, de
                 "plots_dir",
             )
         }
-    if total_epochs > 0:
+    if total_epochs > 0 and _mobile_export_bool_or_none(training_payload.get("total_epochs_known")) is not False:
         run_dict["total_epochs"] = total_epochs
+    elif total_epochs > 0:
+        run_dict["known_epochs_minimum"] = total_epochs
+        run_dict["total_epochs_known"] = False
+    for key, value in {
+        "target": target,
+        "target_label": self._format_training_target_label(target),
+        "status": str(getattr(run, "status", "") or ""),
+        "device": str(getattr(run, "device", "") or ""),
+        "lr0": getattr(run, "lr0", None),
+        "report_html": str(getattr(run, "report_html", "") or ""),
+        "plots_dir": str(getattr(run, "plots_dir", "") or ""),
+    }.items():
+        if value not in (None, ""):
+            training_payload.setdefault(key, value)
+    if _mobile_export_bool_or_none(training_payload.get("total_epochs_known")) is False:
+        training_payload["total_epochs"] = None
 
     validation_ok = False
     validation_message = ""
@@ -3148,26 +3542,14 @@ def _build_exported_model_metadata(self, run, target: str, source_path: Path, de
                 "best_weights": str(source_path),
                 "run_output_dir": str(getattr(run, "output_dir", "") or ""),
                 "training_history_dir": str(getattr(getattr(self, "history", None), "history_dir", "") or ""),
+                "project_name": project_name,
+                "project_root": project_root,
             },
-            "training": {
-                "run_id": str(getattr(run, "id", "") or ""),
-                "run_name": str(getattr(run, "name", "") or ""),
-                "status": str(getattr(run, "status", "") or ""),
-                "created_at": str(getattr(run, "created_at", "") or ""),
-                "started_at": str(getattr(run, "started_at", "") or ""),
-                "finished_at": str(getattr(run, "finished_at", "") or ""),
-                "dataset_path": str(getattr(run, "dataset_path", "") or ""),
-                "base_model": str(getattr(run, "base_model", "") or ""),
-                "epochs": getattr(run, "epochs", None),
-                "current_epoch": getattr(run, "current_epoch", None),
-                "total_epochs": total_epochs or None,
-                "batch_size": getattr(run, "batch_size", None),
-                "img_size": getattr(run, "img_size", None),
-                "device": str(getattr(run, "device", "") or ""),
-                "lr0": getattr(run, "lr0", None),
-                "report_html": str(getattr(run, "report_html", "") or ""),
-                "plots_dir": str(getattr(run, "plots_dir", "") or ""),
+            "project": {
+                "name": project_name,
+                "root": project_root,
             },
+            "training": training_payload,
             "metrics": {
                 "best_map50": metric_summary.get("best_map50"),
                 "best_map50_95": metric_summary.get("best_map50_95"),
@@ -3682,9 +4064,18 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             value = candidate.get(key)
             if value not in (None, ""):
                 training_payload.setdefault(key, value)
-        total_epochs = _mobile_export_candidate_total_epochs(candidate)
-        if total_epochs > 0:
-            training_payload["total_epochs"] = total_epochs
+        candidate_provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+        known_total = _mobile_export_provenance_known_total(training_payload) or _mobile_export_provenance_known_total(candidate_provenance)
+        if known_total is not None:
+            training_payload["total_epochs"] = known_total
+            training_payload["total_epochs_known"] = True
+        else:
+            minimum = _mobile_export_candidate_total_epochs(candidate)
+            if minimum > 0:
+                training_payload.setdefault("known_epochs_minimum", minimum)
+            training_payload["total_epochs"] = None
+            training_payload["total_epochs_known"] = False
+            training_payload.setdefault("provenance_status", candidate.get("provenance_status") or "partial")
         export_metadata["training"] = training_payload
         export_metadata["candidate"] = _mobile_export_candidate_manifest_snapshot(candidate)
         if role == "vehicle":
@@ -3949,9 +4340,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         existing_dialog = getattr(self, "_mobile_export_center_dialog", None)
         if existing_dialog is not None and existing_dialog.winfo_exists():
             try:
-                register = getattr(getattr(self, "app", None), "_register_recoverable_toplevel", None)
-                if callable(register):
-                    register(existing_dialog, attr_name="_mobile_export_center_dialog")
+                setattr(existing_dialog, "_aat_skip_window_recovery", True)
             except Exception:
                 pass
             try:
@@ -4129,13 +4518,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
     dialog_build_state["dialog_created"] = True
     dialog = tk.Toplevel(dialog_parent, bg=bg)
     try:
+        setattr(dialog, "_aat_skip_window_recovery", True)
+    except Exception:
+        pass
+    try:
         self._mobile_export_center_dialog = dialog
     except Exception:
         pass
     try:
-        register = getattr(getattr(self, "app", None), "_register_recoverable_toplevel", None)
-        if callable(register):
-            register(dialog, attr_name="_mobile_export_center_dialog")
+        app_obj = getattr(self, "app", None)
+        if app_obj is not None:
+            app_obj._mobile_export_center_dialog = dialog
     except Exception:
         pass
     try:
@@ -5470,8 +5863,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     workspace = tk.Frame(root, bg=bg)
     workspace.grid(row=2, column=0, sticky="nsew")
-    workspace.grid_columnconfigure(0, weight=1, minsize=430)
-    workspace.grid_columnconfigure(1, weight=2, minsize=620)
+    workspace.grid_columnconfigure(0, weight=3, minsize=500)
+    workspace.grid_columnconfigure(1, weight=2, minsize=540)
     workspace.grid_rowconfigure(0, weight=1)
 
     candidates_shell = tk.Frame(
@@ -5521,7 +5914,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidates_table_shell.grid(row=2, column=0, sticky="nsew")
     candidates_table_shell.grid_columnconfigure(0, weight=1)
     candidates_table_shell.grid_rowconfigure(0, weight=1)
-    candidate_columns = ("Eksport", "Model", "YOLO", "Epoki", "Metryka", "Data")
+    candidate_columns = ("Eksport", "Model", "Projekt", "YOLO", "Epoki", "Metryka", "Data")
     candidate_tree_style = "MobileExportCandidates.Treeview"
     try:
         tree_style = ttk.Style(dialog)
@@ -5552,10 +5945,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
         candidate_tree.heading(column, text=column, command=lambda col=column: _set_candidate_sort(col))
     candidate_tree.column("Eksport", width=58, minwidth=48, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Model", width=46, minwidth=38, stretch=False, anchor=tk.CENTER)
-    candidate_tree.column("YOLO", width=72, minwidth=48, stretch=False, anchor=tk.W)
+    candidate_tree.column("Projekt", width=82, minwidth=54, stretch=False, anchor=tk.W)
+    candidate_tree.column("YOLO", width=64, minwidth=44, stretch=False, anchor=tk.W)
     candidate_tree.column("Epoki", width=54, minwidth=38, stretch=False, anchor=tk.CENTER)
-    candidate_tree.column("Metryka", width=86, minwidth=62, stretch=False, anchor=tk.CENTER)
-    candidate_tree.column("Data", width=104, minwidth=72, stretch=True, anchor=tk.CENTER)
+    candidate_tree.column("Metryka", width=78, minwidth=58, stretch=False, anchor=tk.CENTER)
+    candidate_tree.column("Data", width=82, minwidth=56, stretch=True, anchor=tk.CENTER)
     candidate_scroll = WebSlimScrollbar(
         candidates_table_shell,
         orient=tk.VERTICAL,
@@ -5578,29 +5972,31 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 return
             width = max(300, int(width_hint or candidate_tree.winfo_width() or 420) - 16)
             if width >= 430:
-                fixed = {"Eksport": 58, "Model": 48, "YOLO": 76, "Epoki": 54, "Metryka": 86, "Data": 104}
+                fixed = {"Eksport": 54, "Model": 44, "Projekt": 80, "YOLO": 58, "Epoki": 48, "Metryka": 76, "Data": 70}
             elif width >= 360:
-                fixed = {"Eksport": 54, "Model": 44, "YOLO": 68, "Epoki": 50, "Metryka": 76, "Data": 86}
+                fixed = {"Eksport": 50, "Model": 40, "Projekt": 58, "YOLO": 52, "Epoki": 44, "Metryka": 66, "Data": 50}
             else:
                 remaining = width
                 fixed = {
-                    "Eksport": 48,
-                    "Model": 40,
-                    "YOLO": max(48, int(remaining * 0.22)),
-                    "Epoki": max(38, int(remaining * 0.16)),
-                    "Metryka": max(62, int(remaining * 0.25)),
+                    "Eksport": 46,
+                    "Model": 36,
+                    "Projekt": max(48, int(remaining * 0.18)),
+                    "YOLO": max(44, int(remaining * 0.16)),
+                    "Epoki": max(36, int(remaining * 0.13)),
+                    "Metryka": max(58, int(remaining * 0.22)),
                     "Data": max(50, remaining),
                 }
-                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["YOLO"] - fixed["Epoki"] - fixed["Metryka"])
+                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["Projekt"] - fixed["YOLO"] - fixed["Epoki"] - fixed["Metryka"])
             fixed_sum = sum(fixed.values())
             if fixed_sum != width and fixed:
                 fixed["Data"] = max(46, fixed["Data"] + width - fixed_sum)
             candidate_tree.column("Eksport", width=max(48, fixed["Eksport"]), minwidth=44, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Model", width=max(38, fixed["Model"]), minwidth=34, stretch=False, anchor=tk.CENTER)
-            candidate_tree.column("YOLO", width=max(48, fixed["YOLO"]), minwidth=40, stretch=False, anchor=tk.W)
+            candidate_tree.column("Projekt", width=max(54, fixed["Projekt"]), minwidth=48, stretch=False, anchor=tk.W)
+            candidate_tree.column("YOLO", width=max(44, fixed["YOLO"]), minwidth=38, stretch=False, anchor=tk.W)
             candidate_tree.column("Epoki", width=max(38, fixed["Epoki"]), minwidth=32, stretch=False, anchor=tk.CENTER)
-            candidate_tree.column("Metryka", width=max(62, fixed["Metryka"]), minwidth=52, stretch=False, anchor=tk.CENTER)
-            candidate_tree.column("Data", width=max(72, fixed["Data"]), minwidth=58, stretch=True, anchor=tk.CENTER)
+            candidate_tree.column("Metryka", width=max(58, fixed["Metryka"]), minwidth=50, stretch=False, anchor=tk.CENTER)
+            candidate_tree.column("Data", width=max(56, fixed["Data"]), minwidth=48, stretch=True, anchor=tk.CENTER)
         except Exception:
             pass
 
@@ -5714,12 +6110,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     def _configure_candidate_role_tags() -> None:
         role_specs = (
-            ("mobile_export_role_mt", {"role": "plate"}, palette.get("warning", "#d9822b"), "#2f2517"),
-            ("mobile_export_role_mz", {"role": "character"}, palette.get("accent", "#3f8cff"), "#17263f"),
-            ("mobile_export_role_mp", {"role": "vehicle"}, "#2fffe6", "#063e39"),
-            ("mobile_export_role_unknown", {}, muted, blend_hex_colors(card_bg, muted, 0.10)),
+            ("mobile_export_role_mt", {"role": "plate"}),
+            ("mobile_export_role_mz", {"role": "character"}),
+            ("mobile_export_role_mp", {"role": "vehicle"}),
+            ("mobile_export_role_unknown", {}),
         )
-        for tag_name, marker_candidate, fg_color, bg_color in role_specs:
+        for tag_name, marker_candidate in role_specs:
+            fg_color = _mobile_export_target_base_color(palette, marker_candidate) if marker_candidate else muted
+            bg_color = blend_hex_colors(card_bg, fg_color, 0.16 if marker_candidate else 0.08)
             try:
                 candidate_tree.tag_configure(
                     tag_name,
@@ -5746,6 +6144,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return 1 if str(export_selection_state.get(marker) or "") == str(candidate.get("iid") or "") else 0
         if column in {"Typ", "Model"}:
             return f"{_mobile_export_target_marker(candidate)} {_mobile_export_model_cell_label(candidate)}".casefold()
+        if column == "Projekt":
+            return _mobile_export_project_label(candidate, empty="").casefold()
         if column == "YOLO":
             return _mobile_export_compact_yolo_label(candidate.get("model_version")).casefold()
         if column == "Epoki":
@@ -5792,11 +6192,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
         title = "mAP50-95" if label == "m95" else "mAP50"
         return f"{title} {_format_mobile_export_metric(value)}"
 
-    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str]:
+    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str]:
         total_epochs = _mobile_export_candidate_total_epochs(candidate)
         return (
             _candidate_export_checkbox(candidate),
             _mobile_export_target_marker(candidate),
+            _mobile_export_project_label(candidate, empty="-"),
             _mobile_export_compact_yolo_label(candidate.get("model_version")),
             _format_mobile_export_int(total_epochs) if total_epochs > 0 else "-",
             _candidate_metric_cell(candidate),
@@ -6138,8 +6539,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     main = tk.Frame(workspace, bg=bg)
     main.grid(row=0, column=1, sticky="nsew")
-    main.grid_columnconfigure(0, weight=2, minsize=360)
-    main.grid_columnconfigure(1, weight=2, minsize=280)
+    main.grid_columnconfigure(0, weight=3, minsize=320)
+    main.grid_columnconfigure(1, weight=2, minsize=220)
     main.grid_rowconfigure(0, weight=0)
     main.grid_rowconfigure(1, weight=1, uniform="mobile_export_info")
     main.grid_rowconfigure(2, weight=1, uniform="mobile_export_info")
@@ -9045,16 +9446,42 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 if params_source == "metadata":
                     model_payload["parameter_count"] = int(round(float(params_m) * 1_000_000))
             export_metadata["model"] = model_payload
+            project_name = str(candidate.get("project_name") or "").strip()
+            project_root = str(candidate.get("project_root") or "").strip()
+            export_metadata["project"] = {"name": project_name, "root": project_root}
+            source_payload = dict(export_metadata.get("source") or {})
+            source_payload["project_name"] = project_name
+            source_payload["project_root"] = project_root
+            export_metadata["source"] = source_payload
             training_payload = dict(export_metadata.get("training") or {}) if isinstance(export_metadata, dict) else {}
             for key in ("dataset_path", "base_model", "img_size", "epochs", "current_epoch", "batch_size", "started_at", "finished_at"):
                 value = candidate.get(key)
                 if value not in (None, ""):
                     training_payload.setdefault(key, value)
-            total_epochs = _mobile_export_candidate_total_epochs(candidate)
-            if total_epochs > 0:
-                training_payload["total_epochs"] = total_epochs
+            candidate_provenance = candidate.get("training_provenance") if isinstance(candidate.get("training_provenance"), dict) else {}
+            known_total = _mobile_export_provenance_known_total(training_payload) or _mobile_export_provenance_known_total(candidate_provenance)
+            if known_total is not None:
+                training_payload["total_epochs"] = known_total
+                training_payload["total_epochs_known"] = True
+            else:
+                minimum = _mobile_export_candidate_total_epochs(candidate)
+                if minimum > 0:
+                    training_payload.setdefault("known_epochs_minimum", minimum)
+                training_payload["total_epochs"] = None
+                training_payload["total_epochs_known"] = False
+                training_payload.setdefault("provenance_status", candidate.get("provenance_status") or "partial")
             export_metadata["training"] = training_payload
-            export_metadata["candidate"] = _mobile_export_candidate_manifest_snapshot(candidate)
+            candidate_snapshot_source = dict(candidate)
+            candidate_snapshot_source["training_provenance"] = training_payload
+            known_snapshot_total = _mobile_export_provenance_known_total(training_payload)
+            if known_snapshot_total is not None:
+                candidate_snapshot_source["total_epochs"] = known_snapshot_total
+                candidate_snapshot_source["total_epochs_known"] = True
+            else:
+                candidate_snapshot_source["known_epochs_minimum"] = training_payload.get("known_epochs_minimum")
+                candidate_snapshot_source["total_epochs_known"] = False
+            candidate_snapshot_source["provenance_status"] = training_payload.get("provenance_status") or candidate.get("provenance_status") or ""
+            export_metadata["candidate"] = _mobile_export_candidate_manifest_snapshot(candidate_snapshot_source)
         if role == "vehicle":
             vehicle_payload = _mobile_export_vehicle_class_payload(
                 candidate,
@@ -10651,6 +11078,18 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         },
                         "selected_models": {
                             marker: _state_export_manifest_snapshot(state)
+                            for marker, state in (
+                                ("MP", vehicle_state),
+                                ("MT", plate_state),
+                                ("MZ", char_state),
+                            )
+                            if state is not None
+                        },
+                        "projects": {
+                            marker: {
+                                "name": str(state["candidate"].get("project_name") or ""),
+                                "root": str(state["candidate"].get("project_root") or ""),
+                            }
                             for marker, state in (
                                 ("MP", vehicle_state),
                                 ("MT", plate_state),

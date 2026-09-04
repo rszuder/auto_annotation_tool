@@ -86,12 +86,71 @@ class MobileReportFullRowsTests(unittest.TestCase):
             self.assertEqual(len(bundle.event_rows), 5000)
             self.assertEqual(bundle.sample_total, 12000)
             self.assertEqual(len(bundle.sample_rows), 1000)
-
             self.assertEqual(sum(1 for _ in iter_full_trace_rows(bundle)), 12000)
             self.assertEqual(sum(1 for _ in iter_full_thermal_rows(bundle)), 12000)
             self.assertEqual(sum(1 for _ in iter_full_frame_flow_rows(bundle)), 12000)
             self.assertEqual(sum(1 for _ in iter_full_event_rows(bundle)), 12000)
             self.assertEqual(sum(1 for _ in iter_full_sample_rows(bundle)), 12000)
+
+    def test_pipeline_manifests_build_model_provenance_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "android-report.alprsession"
+            plate_manifest = {
+                "schema": "alpr.model.v1",
+                "model_id": "mt-test",
+                "role": "plate",
+                "task": "pose",
+                "model": {"architecture_label": "YOLO26n Pose"},
+                "source": {"checkpoint_sha256": "checkpoint-sha", "parameter_count": 2446959},
+                "training": {
+                    "provenance_version": 1,
+                    "run_id": "20260904_120000",
+                    "run_epochs_completed": 10,
+                    "total_epochs": 40,
+                    "total_epochs_known": True,
+                    "known_epochs_minimum": 40,
+                    "total_epochs_scope": "project_training_after_pretrained_base",
+                    "provenance_status": "complete",
+                    "dataset": {
+                        "dataset_id": "DS-MT-ABC",
+                        "manifest_sha256": "manifest-sha",
+                        "split_sha256": "split-sha",
+                    },
+                },
+                "metrics": {"best_map50": 0.9},
+                "variants": [
+                    {
+                        "id": "tflite-int8",
+                        "runtime": "tflite",
+                        "precision": "int8",
+                        "sha256": {"model.tflite": "variant-sha"},
+                    }
+                ],
+            }
+            model_refs = {
+                "plate": {
+                    "model_id": "mt-test",
+                    "installed_model_fingerprint": "installed-sha",
+                    "checkpoint_sha256": "checkpoint-sha",
+                    "package_sha256": "package-sha",
+                    "variant_id": "tflite-int8",
+                    "variant_artifact_sha256": ["variant-sha"],
+                }
+            }
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("report.json", json.dumps(_report_payload(), ensure_ascii=False))
+                archive.writestr("pipeline/plate_manifest.json", json.dumps(plate_manifest, ensure_ascii=False))
+                archive.writestr("pipeline/model_refs.json", json.dumps(model_refs, ensure_ascii=False))
+
+            bundle = read_mobile_report_bundle(path, max_trace_rows=10)
+            provenance = bundle.report_payload["model_provenance"]["plate"]
+
+            self.assertEqual(bundle.pipeline_manifests["plate"]["model_id"], "mt-test")
+            self.assertEqual(bundle.model_refs["plate"]["package_sha256"], "package-sha")
+            self.assertEqual(provenance["training"]["total_epochs"], 40)
+            self.assertEqual(provenance["training"]["dataset"]["dataset_id"], "DS-MT-ABC")
+            self.assertEqual(provenance["variant_id"], "tflite-int8")
+            self.assertEqual(provenance["variant_artifact_sha256"], ["variant-sha"])
 
     def test_json_file_can_hold_many_reports(self):
         with tempfile.TemporaryDirectory() as tmp:

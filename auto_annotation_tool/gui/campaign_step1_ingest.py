@@ -1314,6 +1314,241 @@ def _mark_ingest_plan_generation_pending(self, master_pool: Path) -> None:
         pass
 
 
+def _show_ingest_plan_progress_dialog(
+    self,
+    master_pool: Path | str | None = None,
+    parent=None,
+    *,
+    title: str = "Przygotowanie zbioru obrazów O",
+    eyebrow: str = "DODAWANIE OBRAZÓW",
+    initial_detail: str = "Weryfikuję wskazany katalog i przygotowuję analizę.",
+) -> None:
+    existing = getattr(self, "_ingest_plan_progress_dialog", None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            try:
+                getattr(self, "_ingest_plan_progress_title_var", None).set(
+                    campaign_ui_helpers._repair_polish_text(str(title or "").strip())
+                )
+                getattr(self, "_ingest_plan_progress_detail_var", None).set(
+                    campaign_ui_helpers._repair_polish_text(str(initial_detail or "").strip())
+                )
+                getattr(self, "_ingest_plan_progress_step_var", None).set(
+                    campaign_ui_helpers._repair_polish_text("Start przetwarzania...")
+                )
+                getattr(self, "_ingest_plan_progress_var", None).set(4.0)
+            except Exception:
+                pass
+            existing.lift()
+            return
+    except Exception:
+        pass
+
+    owner = parent or getattr(self, "frame", None)
+    palette = getattr(getattr(self, "app", None), "palette", {}) or {}
+    bg = palette.get("panel", "#102016")
+    panel = blend_hex_colors(bg, palette.get("accent", "#8fbf79"), 0.045)
+    border = blend_hex_colors(palette.get("accent", "#8fbf79"), palette.get("panel_border", "#314233"), 0.28)
+    fg = palette.get("fg", "#e8f2dc")
+    muted = palette.get("muted", "#bac8ae")
+    accent = palette.get("accent", "#8fbf79")
+
+    try:
+        dialog = tk.Toplevel(owner)
+    except Exception:
+        return
+    dialog.withdraw()
+    dialog.title(campaign_ui_helpers._repair_polish_text("Przetwarzanie obrazów"))
+    dialog.configure(bg=bg)
+    dialog.resizable(False, False)
+    try:
+        dialog.overrideredirect(True)
+    except Exception:
+        pass
+    try:
+        dialog.attributes("-toolwindow", True)
+    except Exception:
+        pass
+    try:
+        dialog.transient(owner)
+    except Exception:
+        pass
+    try:
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+    except Exception:
+        pass
+
+    shell = tk.Frame(
+        dialog,
+        bg=panel,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+    )
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.grid_columnconfigure(1, weight=1)
+    tk.Frame(shell, width=3, bg=accent, bd=0, highlightthickness=0).grid(row=0, column=0, sticky="nsw")
+    content = tk.Frame(shell, bg=panel, bd=0, highlightthickness=0, padx=24, pady=20)
+    content.grid(row=0, column=1, sticky="nsew")
+    content.grid_columnconfigure(0, weight=1)
+
+    title_var = tk.StringVar(master=dialog, value=campaign_ui_helpers._repair_polish_text(str(title or "").strip()))
+    detail_var = tk.StringVar(master=dialog, value=campaign_ui_helpers._repair_polish_text(str(initial_detail or "").strip()))
+    step_var = tk.StringVar(master=dialog, value=campaign_ui_helpers._repair_polish_text("Start przetwarzania..."))
+    progress_var = tk.DoubleVar(master=dialog, value=4.0)
+
+    tk.Label(
+        content,
+        text=campaign_ui_helpers._repair_polish_text(str(eyebrow or "").strip() or "DODAWANIE OBRAZÓW"),
+        bg=panel,
+        fg=blend_hex_colors(accent, fg, 0.10),
+        font=("Segoe UI", 8, "bold"),
+        anchor=tk.W,
+    ).grid(row=0, column=0, sticky="ew")
+    tk.Label(
+        content,
+        textvariable=title_var,
+        bg=panel,
+        fg=fg,
+        font=("Segoe UI Semibold", 15),
+        anchor=tk.W,
+    ).grid(row=1, column=0, sticky="ew", pady=(7, 0))
+    tk.Label(
+        content,
+        textvariable=detail_var,
+        bg=panel,
+        fg=fg,
+        font=("Segoe UI", 9),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        wraplength=430,
+    ).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    ttk.Progressbar(
+        content,
+        mode="determinate",
+        maximum=100.0,
+        variable=progress_var,
+        style="Horizontal.TProgressbar",
+    ).grid(row=3, column=0, sticky="ew", pady=(16, 0))
+    tk.Label(
+        content,
+        textvariable=step_var,
+        bg=panel,
+        fg=muted,
+        font=("Segoe UI", 9),
+        anchor=tk.W,
+        justify=tk.LEFT,
+        wraplength=430,
+    ).grid(row=4, column=0, sticky="ew", pady=(8, 0))
+
+    width = 520
+    height = 190
+    dialog.geometry(f"{width}x{height}")
+    center_dialog = getattr(getattr(self, "app", None), "_center_dialog_window", None)
+    if callable(center_dialog):
+        try:
+            center_dialog(dialog, parent=owner, width=width, height=height)
+        except Exception:
+            pass
+    try:
+        dialog.deiconify()
+        dialog.lift()
+        dialog.update_idletasks()
+    except Exception:
+        pass
+
+    self._ingest_plan_progress_dialog = dialog
+    self._ingest_plan_progress_var = progress_var
+    self._ingest_plan_progress_title_var = title_var
+    self._ingest_plan_progress_detail_var = detail_var
+    self._ingest_plan_progress_step_var = step_var
+    try:
+        if master_pool:
+            _update_ingest_plan_progress_dialog(
+                self,
+                4,
+                "Weryfikuję katalog obrazów.",
+                f"Źródło: {Path(master_pool).name or master_pool}",
+            )
+    except Exception:
+        pass
+
+
+def _update_ingest_plan_progress_dialog(
+    self,
+    progress: float | int | None,
+    message: str = "",
+    detail: str = "",
+) -> None:
+    dialog = getattr(self, "_ingest_plan_progress_dialog", None)
+    try:
+        if dialog is None or not dialog.winfo_exists():
+            return
+    except Exception:
+        return
+
+    try:
+        value = max(0.0, min(100.0, float(progress if progress is not None else 0.0)))
+    except Exception:
+        value = 0.0
+    try:
+        getattr(self, "_ingest_plan_progress_var", None).set(value)
+    except Exception:
+        pass
+    try:
+        if message:
+            getattr(self, "_ingest_plan_progress_detail_var", None).set(
+                campaign_ui_helpers._repair_polish_text(str(message))
+            )
+    except Exception:
+        pass
+    try:
+        visible_value = int(round(value))
+        step_text = str(detail or "").strip()
+        if step_text:
+            step_text = f"{visible_value}% · {step_text}"
+        else:
+            step_text = f"{visible_value}%"
+        getattr(self, "_ingest_plan_progress_step_var", None).set(
+            campaign_ui_helpers._repair_polish_text(step_text)
+        )
+    except Exception:
+        pass
+    try:
+        dialog.lift()
+        dialog.update_idletasks()
+    except Exception:
+        pass
+
+
+def _hide_ingest_plan_progress_dialog(self, *, delay_ms: int = 0) -> None:
+    target_dialog = getattr(self, "_ingest_plan_progress_dialog", None)
+
+    def _destroy() -> None:
+        dialog = getattr(self, "_ingest_plan_progress_dialog", None)
+        if target_dialog is not None and dialog is not target_dialog:
+            return
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+        self._ingest_plan_progress_dialog = None
+        self._ingest_plan_progress_var = None
+        self._ingest_plan_progress_title_var = None
+        self._ingest_plan_progress_detail_var = None
+        self._ingest_plan_progress_step_var = None
+
+    if int(delay_ms or 0) > 0:
+        try:
+            self.frame.after(int(delay_ms), _destroy)
+            return
+        except Exception:
+            pass
+    _destroy()
+
+
 def _same_ingest_source_path(left, right) -> bool:
     try:
         return Path(left).resolve() == Path(right).resolve()
@@ -1380,7 +1615,7 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
         pass
 
 
-def _generate_ingest_plan(self, *, async_mode: bool = True):
+def _generate_ingest_plan(self, *, async_mode: bool = True, parent=None):
     if not CAMPAIGN.get_active_project_name():
         return
 
@@ -1406,7 +1641,39 @@ def _generate_ingest_plan(self, *, async_mode: bool = True):
             master_token_path = str(master_pool)
         token = (project_name, int(iteration_num or 1), master_token_path, perf_counter())
         self._ingest_plan_generation_token = token
+        _show_ingest_plan_progress_dialog(self, master_pool, parent=parent)
+        _update_ingest_plan_progress_dialog(
+            self,
+            10,
+            "Przygotowuję analizę wybranego zbioru obrazów.",
+            "Sprawdzam stan projektu przed skanowaniem katalogu.",
+        )
         _mark_ingest_plan_generation_pending(self, master_pool)
+
+        last_progress_emit = 0.0
+
+        def _emit_progress(
+            progress: float,
+            message: str = "",
+            *,
+            detail: str = "",
+            force: bool = False,
+        ) -> None:
+            nonlocal last_progress_emit
+            now = perf_counter()
+            if not force and now - last_progress_emit < 0.12:
+                return
+            last_progress_emit = now
+
+            def _apply() -> None:
+                if getattr(self, "_ingest_plan_generation_token", None) != token:
+                    return
+                _update_ingest_plan_progress_dialog(self, progress, message, detail)
+
+            try:
+                self.frame.after(0, _apply)
+            except Exception:
+                pass
 
         def _worker() -> None:
             started = perf_counter()
@@ -1414,10 +1681,29 @@ def _generate_ingest_plan(self, *, async_mode: bool = True):
             plan_result: dict = {}
             error_text = ""
             try:
+                _emit_progress(
+                    18,
+                    "Liczenie dotychczasowego bilansu projektu.",
+                    detail="Odczytuję istniejące obrazy i rozkład znaków.",
+                    force=True,
+                )
                 snapshot_result = CAMPAIGN.refresh_ingest_balance_snapshot(project_name) or {}
+                _emit_progress(
+                    26,
+                    "Skanowanie nowego zbioru obrazów.",
+                    detail="Szukam plików graficznych w wybranym katalogu.",
+                    force=True,
+                )
                 plan_result = self._build_main_pack_plan(
                     master_pool_dir=master_pool,
                     current_balance=(snapshot_result or {}).get("char_balance", {}),
+                    progress_callback=_emit_progress,
+                )
+                _emit_progress(
+                    94,
+                    "Finalizuję plan wejścia E1.",
+                    detail="Zapisuję podsumowanie i odświeżam zasoby bramki.",
+                    force=True,
                 )
             except Exception as exc:
                 error_text = str(exc)
@@ -1445,6 +1731,7 @@ def _generate_ingest_plan(self, *, async_mode: bool = True):
                     or int(active_iter or 0) != int(iteration_num or 1)
                     or not _same_ingest_source_path(active_pool, master_pool)
                 ):
+                    _hide_ingest_plan_progress_dialog(self)
                     return
                 try:
                     logger.info(
@@ -1457,13 +1744,29 @@ def _generate_ingest_plan(self, *, async_mode: bool = True):
                 except Exception:
                     pass
                 if error_text:
+                    _hide_ingest_plan_progress_dialog(self)
                     try:
                         self._refresh_ingest_panel(snapshot_override=snapshot_result)
                     except Exception:
                         pass
                     messagebox.showerror("Błąd ładowania wybranego folderu zdjęć E1", error_text)
                     return
+                selected_total = int((plan_result or {}).get("selected_total", 0) or 0)
+                if selected_total <= 0:
+                    _hide_ingest_plan_progress_dialog(self)
+                    _finish_generated_ingest_plan(self, plan_result, snapshot_result)
+                    return
                 _finish_generated_ingest_plan(self, plan_result, snapshot_result)
+                _update_ingest_plan_progress_dialog(
+                    self,
+                    100,
+                    "Zbiór obrazów został przeanalizowany.",
+                    (
+                        f"Gotowe: {int((plan_result or {}).get('selected_total', 0) or 0)} "
+                        f"z {int((plan_result or {}).get('raw_total', 0) or 0)} obrazów trafi do kontroli tej iteracji."
+                    ),
+                )
+                _hide_ingest_plan_progress_dialog(self, delay_ms=650)
 
             try:
                 self.frame.after(0, _finish)
@@ -1473,17 +1776,36 @@ def _generate_ingest_plan(self, *, async_mode: bool = True):
         threading.Thread(target=_worker, daemon=True, name="campaign-e1-ingest-plan").start()
         return
 
+    _show_ingest_plan_progress_dialog(self, master_pool, parent=parent)
+    _update_ingest_plan_progress_dialog(
+        self,
+        18,
+        "Liczenie dotychczasowego bilansu projektu.",
+        "Odczytuję istniejące obrazy i rozkład znaków.",
+    )
     snapshot = CAMPAIGN.refresh_ingest_balance_snapshot()
 
     try:
         plan = self._build_main_pack_plan(
             master_pool_dir=master_pool,
             current_balance=(snapshot or {}).get("char_balance", {}),
+            progress_callback=lambda value, message="", **kwargs: _update_ingest_plan_progress_dialog(
+                self,
+                value,
+                message,
+                str(kwargs.get("detail", "") or ""),
+            ),
         )
     except Exception as e:
+        _hide_ingest_plan_progress_dialog(self)
         messagebox.showerror("Błąd ładowania wybranego folderu zdjęć E1", str(e))
         return
 
+    if int((plan or {}).get("selected_total", 0) or 0) <= 0:
+        _hide_ingest_plan_progress_dialog(self)
+    else:
+        _update_ingest_plan_progress_dialog(self, 100, "Zbiór obrazów został przeanalizowany.", "Gotowe.")
+        _hide_ingest_plan_progress_dialog(self, delay_ms=450)
     _finish_generated_ingest_plan(self, plan, snapshot)
 
 def _should_reuse_step1_source_despite_duplicate_plan(self, plan: dict) -> bool:
@@ -1877,12 +2199,35 @@ def _apply_current_ingest_plan(self):
             )
             if not should_approve:
                 return
-            self._approve_current_iteration_package(
-                target_iter_dir=target_iter_dir,
-                source_dir=source_dir,
-                selected_source_files=selected_images,
-                selection_mode=selection_mode,
+            _show_ingest_plan_progress_dialog(
+                self,
+                source_dir,
+                parent=self.frame,
+                title="Zatwierdzanie E1",
+                eyebrow="ZATWIERDZANIE E1",
+                initial_detail="Zapisuję manifest obrazów i aktualizuję graf kampanii.",
             )
+            try:
+                self._approve_current_iteration_package(
+                    target_iter_dir=target_iter_dir,
+                    source_dir=source_dir,
+                    selected_source_files=selected_images,
+                    selection_mode=selection_mode,
+                    progress_callback=lambda value, message="", **kwargs: _update_ingest_plan_progress_dialog(
+                        self,
+                        value,
+                        message,
+                        str(kwargs.get("detail", "") or ""),
+                    ),
+                )
+                _update_ingest_plan_progress_dialog(
+                    self,
+                    100,
+                    "E1 zatwierdzone.",
+                    "Manifest został zapisany, a graf odświeżony.",
+                )
+            finally:
+                _hide_ingest_plan_progress_dialog(self, delay_ms=650)
         return
 
     selected_items = list(self.current_ingest_plan.get("selected", []) or [])
@@ -1907,14 +2252,48 @@ def _apply_current_ingest_plan(self):
     target_iter_dir = CAMPAIGN.get_iteration_raw_dir(iter_num) or (Path(raw_dir) / f"Iteracja_{iter_num:03d}")
     target_iter_dir.mkdir(parents=True, exist_ok=True)
 
+    _show_ingest_plan_progress_dialog(
+        self,
+        self.current_ingest_plan.get("master_pool_dir") or CAMPAIGN.get_master_pool_dir() or target_iter_dir,
+        parent=self.frame,
+        title="Zatwierdzanie E1",
+        eyebrow="ZATWIERDZANIE E1",
+        initial_detail="Przygotowuję manifest wybranego zbioru obrazów.",
+    )
+    _update_ingest_plan_progress_dialog(
+        self,
+        6,
+        "Przygotowuję listę obrazów do manifestu.",
+        f"Do sprawdzenia: {len(selected_items)} pozycji z planu E1.",
+    )
     selected_source_files = []
-    for item in selected_items:
+    last_source_progress = perf_counter()
+    for processed_count, item in enumerate(selected_items, start=1):
         source_path = Path(str(item.get("source_path", "") or "").strip())
         if not source_path.exists() or not source_path.is_file():
+            now = perf_counter()
+            if processed_count == 1 or processed_count == len(selected_items) or processed_count % 250 == 0 or now - last_source_progress >= 0.35:
+                last_source_progress = now
+                _update_ingest_plan_progress_dialog(
+                    self,
+                    6.0 + 10.0 * (processed_count / max(1, len(selected_items))),
+                    "Przygotowuję listę obrazów do manifestu.",
+                    f"Sprawdzono {processed_count}/{len(selected_items)}. Poprawne: {len(selected_source_files)}.",
+                )
             continue
         selected_source_files.append(source_path)
+        now = perf_counter()
+        if processed_count == 1 or processed_count == len(selected_items) or processed_count % 250 == 0 or now - last_source_progress >= 0.35:
+            last_source_progress = now
+            _update_ingest_plan_progress_dialog(
+                self,
+                6.0 + 10.0 * (processed_count / max(1, len(selected_items))),
+                "Przygotowuję listę obrazów do manifestu.",
+                f"Sprawdzono {processed_count}/{len(selected_items)}. Poprawne: {len(selected_source_files)}.",
+            )
 
     if not selected_source_files:
+        _hide_ingest_plan_progress_dialog(self)
         messagebox.showwarning(
             "Brak obrazów w manifeście E1",
             "Nie udało się odczytać obrazów z wybranego katalogu zdjęć. Wybierz katalog ponownie.",
@@ -1931,25 +2310,41 @@ def _apply_current_ingest_plan(self):
             source_dir = selected_source_files[0].parent
     except Exception:
         source_dir = selected_source_files[0].parent
-    self._approve_current_iteration_package(
-        target_iter_dir=target_iter_dir,
-        source_dir=source_dir,
-        selected_source_files=selected_source_files,
-        selection_mode=selection_mode,
-        proposal_summary={
-            "planner_version": self.current_ingest_plan.get("planner_version", ""),
-            "generated_at": self.current_ingest_plan.get("generated_at", ""),
-            "source_total": self.current_ingest_plan.get("raw_total", 0),
-            "selected_total": self.current_ingest_plan.get("selected_total", 0),
-            "current_iteration_package_count": self.current_ingest_plan.get("selected_total", 0),
-            "batch_size": self.current_ingest_plan.get("batch_size", 0),
-            "skipped_duplicate_filenames": self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)),
-            "skipped_duplicate_approved_filenames": self.current_ingest_plan.get("skipped_duplicate_approved_filenames", 0),
-            "project_overlap_filenames": self.current_ingest_plan.get("project_overlap_filenames", 0),
-            "new_to_project_count": self.current_ingest_plan.get("new_to_project_total", 0),
-            "skipped_invalid_ground_truth": self.current_ingest_plan.get("skipped_invalid_ground_truth", 0),
-        },
-    )
+    try:
+        self._approve_current_iteration_package(
+            target_iter_dir=target_iter_dir,
+            source_dir=source_dir,
+            selected_source_files=selected_source_files,
+            selection_mode=selection_mode,
+            selected_source_metadata=selected_items,
+            proposal_summary={
+                "planner_version": self.current_ingest_plan.get("planner_version", ""),
+                "generated_at": self.current_ingest_plan.get("generated_at", ""),
+                "source_total": self.current_ingest_plan.get("raw_total", 0),
+                "selected_total": self.current_ingest_plan.get("selected_total", 0),
+                "current_iteration_package_count": self.current_ingest_plan.get("selected_total", 0),
+                "batch_size": self.current_ingest_plan.get("batch_size", 0),
+                "skipped_duplicate_filenames": self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)),
+                "skipped_duplicate_approved_filenames": self.current_ingest_plan.get("skipped_duplicate_approved_filenames", 0),
+                "project_overlap_filenames": self.current_ingest_plan.get("project_overlap_filenames", 0),
+                "new_to_project_count": self.current_ingest_plan.get("new_to_project_total", 0),
+                "skipped_invalid_ground_truth": self.current_ingest_plan.get("skipped_invalid_ground_truth", 0),
+            },
+            progress_callback=lambda value, message="", **kwargs: _update_ingest_plan_progress_dialog(
+                self,
+                value,
+                message,
+                str(kwargs.get("detail", "") or ""),
+            ),
+        )
+        _update_ingest_plan_progress_dialog(
+            self,
+            100,
+            "E1 zatwierdzone.",
+            "Manifest został zapisany, a graf odświeżony.",
+        )
+    finally:
+        _hide_ingest_plan_progress_dialog(self)
 
     try:
         self.app.update_status(

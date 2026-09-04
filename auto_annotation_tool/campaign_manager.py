@@ -3800,6 +3800,8 @@ class CampaignManager:
         selection_mode: str = "manual",
         proposal_summary: Dict[str, Any] | None = None,
         project_name: str = None,
+        progress_callback=None,
+        selected_source_metadata: List[Dict[str, Any]] | None = None,
     ) -> Path | None:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
@@ -3822,16 +3824,73 @@ class CampaignManager:
 
         selected_images = []
         total_hist: Dict[str, int] = {ch: 0 for ch in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+        total_files = int(len(selected_source_files or []) or 0)
+        last_progress_emit = perf_counter()
+        metadata_by_name: Dict[str, Dict[str, Any]] = {}
+        metadata_by_path: Dict[str, Dict[str, Any]] = {}
+        for raw_meta in list(selected_source_metadata or []):
+            if not isinstance(raw_meta, dict):
+                continue
+            name_key = str(raw_meta.get("name") or "").strip().lower()
+            if name_key:
+                metadata_by_name[name_key] = raw_meta
+            path_key = str(raw_meta.get("source_path") or "").strip()
+            if path_key:
+                try:
+                    metadata_by_path[str(Path(path_key).resolve()).lower()] = raw_meta
+                except Exception:
+                    metadata_by_path[path_key.lower()] = raw_meta
 
-        for item in selected_source_files:
+        def _progress(value: float, message: str = "", detail: str = "", *, force: bool = False) -> None:
+            nonlocal last_progress_emit
+            if not callable(progress_callback):
+                return
+            now = perf_counter()
+            if not force and now - last_progress_emit < 0.12:
+                return
+            last_progress_emit = now
+            try:
+                progress_callback(value, message, detail=detail, force=force)
+            except TypeError:
+                try:
+                    progress_callback(value, message)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        _progress(
+            6,
+            "Przygotowuję manifest obrazów E1.",
+            f"Do zapisania: {total_files} obrazów.",
+            force=True,
+        )
+
+        for processed_count, item in enumerate(selected_source_files, start=1):
             source_path = Path(item)
             if not source_path.is_absolute():
                 source_path = source_dir / source_path.name
             if not source_path.exists() or not source_path.is_file():
+                _progress(
+                    6.0 + 74.0 * (processed_count / max(1, total_files)),
+                    "Przygotowuję manifest obrazów E1.",
+                    f"Przetworzono {processed_count}/{total_files}. Do manifestu: {len(selected_images)}.",
+                )
                 continue
 
-            true_texts = planner.extract_true_texts_from_filename(source_path.name)
-            char_hist = planner.build_char_histogram(true_texts)
+            try:
+                resolved_source_path = source_path.resolve()
+            except Exception:
+                resolved_source_path = source_path.absolute()
+            meta = metadata_by_name.get(str(source_path.name or "").strip().lower())
+            if meta is None:
+                meta = metadata_by_path.get(str(resolved_source_path).lower())
+            true_texts = list((meta or {}).get("ground_truth_texts") or [])
+            if not true_texts:
+                true_texts = planner.extract_true_texts_from_filename(source_path.name)
+            char_hist = dict((meta or {}).get("char_histogram") or {})
+            if not char_hist:
+                char_hist = planner.build_char_histogram(true_texts)
             for ch, value in char_hist.items():
                 total_hist[ch] = total_hist.get(ch, 0) + int(value)
 
@@ -3839,15 +3898,26 @@ class CampaignManager:
             actual_image_path = logical_target_path if logical_target_path.exists() else source_path
             selected_images.append({
                 "name": source_path.name,
-                "source_path": str(source_path.resolve()),
-                "source_key": planner.make_source_key(source_path, master_pool_dir=master_pool_dir),
+                "source_path": str(resolved_source_path),
+                "source_key": str((meta or {}).get("source_key") or "").strip() or planner.make_source_key(source_path, master_pool_dir=master_pool_dir),
                 "target_path": str(actual_image_path.resolve()),
                 "iteration_target_path": str(logical_target_path.resolve()),
                 "ground_truth_texts": true_texts,
                 "char_histogram": char_hist,
             })
+            _progress(
+                6.0 + 74.0 * (processed_count / max(1, total_files)),
+                "Przygotowuję manifest obrazów E1.",
+                f"Przetworzono {processed_count}/{total_files}. Do manifestu: {len(selected_images)}.",
+            )
 
         normalized_selection_mode = str(selection_mode or "manual").strip() or "manual"
+        _progress(
+            84,
+            "Buduję plik manifestu E1.",
+            f"Manifest obejmie {len(selected_images)} obrazów.",
+            force=True,
+        )
         manifest = {
             "project": project_name,
             "iteration": iteration,
@@ -3866,7 +3936,20 @@ class CampaignManager:
             "proposal_summary": proposal_summary or {},
         }
 
-        return self.save_ingest_manifest(manifest, iteration, project_name)
+        _progress(
+            92,
+            "Zapisuję manifest E1 na dysku.",
+            "Kończę zapis JSON i odświeżam pamięć podręczną projektu.",
+            force=True,
+        )
+        manifest_path = self.save_ingest_manifest(manifest, iteration, project_name)
+        _progress(
+            100,
+            "Manifest E1 zapisany.",
+            f"Zapisano {len(selected_images)} obrazów.",
+            force=True,
+        )
+        return manifest_path
 
 # Singleton Menadżera
 bind_campaign_project_registry_methods(CampaignManager)
