@@ -1208,6 +1208,22 @@ class YOLOPoseTrainer:
         resume_from: str = None,
         **kwargs,
     ) -> Optional[str]:
+        progress_callback = kwargs.pop("progress_callback", None)
+        preflight_started = time.perf_counter()
+        preflight_timings: list[tuple[str, float]] = []
+
+        def report_preflight(stage: str, progress: float, detail: str = "") -> None:
+            if callable(progress_callback):
+                try:
+                    progress_callback(stage, float(progress), detail)
+                except Exception as exc:
+                    logger.debug(f"Callback postępu preflightu treningu nie powiódł się: {exc}")
+
+        def finish_phase(name: str, started_at: float) -> None:
+            elapsed = max(0.0, time.perf_counter() - started_at)
+            preflight_timings.append((name, elapsed))
+            logger.info(f"[PREFLIGHT] {name:<24} {elapsed:.2f} s")
+
         if not YOLO_AVAILABLE:
             logger.error("YOLO niedostępny")
             return None
@@ -1221,7 +1237,10 @@ class YOLOPoseTrainer:
             logger.warning("Trening już trwa")
             return None
 
+        phase_started = time.perf_counter()
+        report_preflight("Waliduję zbiór danych", 10.0, str(dataset_path))
         is_valid, msg, _ = self.validate_dataset(Path(dataset_path))
+        finish_phase("validate_dataset", phase_started)
         if not is_valid:
             logger.error(f"Dataset: {msg}")
             return None
@@ -1273,6 +1292,8 @@ class YOLOPoseTrainer:
             if not self.current_run:
                 logger.error(f"Nie znaleziono runu: {run_id}")
                 return None
+            phase_started = time.perf_counter()
+            report_preflight("Sprawdzam warunki wznowienia", 72.0, str(run_id or ""))
             require_resume_snapshot = bool(
                 kwargs.get("controlled_experiment")
                 or kwargs.get("controlled_comparison")
@@ -1284,8 +1305,12 @@ class YOLOPoseTrainer:
                 training_target=training_target,
                 require_snapshot=require_resume_snapshot,
             ):
+                finish_phase("resume_guard", phase_started)
                 return None
+            finish_phase("resume_guard", phase_started)
 
+            phase_started = time.perf_counter()
+            report_preflight("Tworzę zapis przebiegu", 85.0, str(run_id or ""))
             self.history.update_run(
                 run_id,
                 status=TrainingStatus.RUNNING.value,
@@ -1294,12 +1319,15 @@ class YOLOPoseTrainer:
                 finished_at=None,
                 error_message="",
             )
+            finish_phase("create_run", phase_started)
         else:
             checkpoint_kind = "custom_parent" if run_metadata.get("parent_model_path") else "custom_base"
             if not run_metadata.get("parent_model_path"):
                 model_name = Path(str(model_file or "")).name.lower()
                 if self._is_official_pretrained_base(base_model, model_file):
                     checkpoint_kind = "pretrained_base"
+                    phase_started = time.perf_counter()
+                    report_preflight("Przygotowuję model bazowy", 30.0, str(model_file or base_model or ""))
                     try:
                         model_file = self._materialize_official_pretrained_checkpoint(
                             base_model,
@@ -1307,14 +1335,20 @@ class YOLOPoseTrainer:
                             training_target=training_target,
                         )
                     except Exception as exc:
+                        finish_phase("pretrained_materialize", phase_started)
                         logger.error(f"Nie można uruchomić treningu badawczego bez SHA checkpointu pretrained: {exc}")
                         return None
+                    finish_phase("pretrained_materialize", phase_started)
             try:
+                phase_started = time.perf_counter()
+                report_preflight("Zamrażam fingerprint zbioru", 45.0, str(dataset_path))
                 run_metadata["training_dataset_snapshot"] = build_training_dataset_snapshot(
                     dataset_path,
                     target=training_target,
                 )
+                finish_phase("dataset_snapshot", phase_started)
             except Exception as snapshot_error:
+                finish_phase("dataset_snapshot", phase_started)
                 logger.warning(f"Nie udało się zamrozić snapshotu datasetu treningowego: {snapshot_error}")
                 run_metadata["training_dataset_snapshot"] = {
                     "schema": "alpr.training_dataset_snapshot.v1",
@@ -1324,11 +1358,16 @@ class YOLOPoseTrainer:
                     "provenance_status": "partial",
                     "error": str(snapshot_error),
                 }
+            phase_started = time.perf_counter()
+            report_preflight("Liczę SHA-256 checkpointu", 60.0, str(model_file or ""))
             run_metadata["input_checkpoint_snapshot"] = build_checkpoint_training_snapshot(
                 model_file,
                 name=Path(str(model_file or "")).name,
                 kind=checkpoint_kind,
             )
+            finish_phase("checkpoint_sha256", phase_started)
+            phase_started = time.perf_counter()
+            report_preflight("Tworzę zapis przebiegu", 85.0, str(name or ""))
             self.current_run = self.history.create_run(
                 name=name,
                 dataset_path=str(dataset_path),
@@ -1340,33 +1379,36 @@ class YOLOPoseTrainer:
                 lr0=lr0,
                 **run_metadata,
             )
+            finish_phase("create_run", phase_started)
 
+        phase_started = time.perf_counter()
+        report_preflight("Uruchamiam proces treningowy", 95.0, str(getattr(self.current_run, "id", "") or ""))
         self.is_training = True
         self.should_pause = False
         self.should_stop = False
-        ipc_paths = self._prepare_worker_ipc(self.current_run)
-        job_payload = {
-            "history_dir": str(self.history.history_dir),
-            "run_id": str(self.current_run.id),
-            "model_file": str(model_file),
-            "dataset_path": str(dataset_path),
-            "epochs": int(epochs),
-            "batch_size": int(batch_size),
-            "img_size": int(img_size),
-            "device": device,
-            "lr0": float(lr0),
-            "resume_from": str(resume_from or ""),
-            "event_file": ipc_paths["event_file"],
-            "control_file": ipc_paths["control_file"],
-            "resource_interval_s": 2.0,
-        }
-        Path(ipc_paths["job_file"]).write_text(
-            json.dumps(job_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        worker_module = "auto_annotation_tool.training.training_worker"
         try:
+            ipc_paths = self._prepare_worker_ipc(self.current_run)
+            job_payload = {
+                "history_dir": str(self.history.history_dir),
+                "run_id": str(self.current_run.id),
+                "model_file": str(model_file),
+                "dataset_path": str(dataset_path),
+                "epochs": int(epochs),
+                "batch_size": int(batch_size),
+                "img_size": int(img_size),
+                "device": device,
+                "lr0": float(lr0),
+                "resume_from": str(resume_from or ""),
+                "event_file": ipc_paths["event_file"],
+                "control_file": ipc_paths["control_file"],
+                "resource_interval_s": 2.0,
+            }
+            Path(ipc_paths["job_file"]).write_text(
+                json.dumps(job_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            worker_module = "auto_annotation_tool.training.training_worker"
             stdout_handle = open(ipc_paths["stdout_log"], "a", encoding="utf-8", errors="replace")
             env = os.environ.copy()
             env.setdefault("PYTHONFAULTHANDLER", "1")
@@ -1377,8 +1419,18 @@ class YOLOPoseTrainer:
                 stderr=subprocess.STDOUT,
                 env=env,
             )
-        except Exception:
+        except Exception as exc:
             self.is_training = False
+            if self.current_run is not None:
+                try:
+                    self.history.update_run(
+                        self.current_run.id,
+                        status=TrainingStatus.FAILED.value,
+                        finished_at=datetime.now().isoformat(),
+                        error_message=str(exc),
+                    )
+                except Exception:
+                    pass
             self._close_worker_stdout_handle()
             self._reset_worker_ipc_state()
             raise
@@ -1389,6 +1441,14 @@ class YOLOPoseTrainer:
         self._worker_monitor_thread = monitor
         monitor.start()
 
+        finish_phase("spawn_worker", phase_started)
+        total_elapsed = max(0.0, time.perf_counter() - preflight_started)
+        logger.info(
+            "[PREFLIGHT] TOTAL "
+            f"{total_elapsed:.2f} s | "
+            + ", ".join(f"{name}={elapsed:.2f}s" for name, elapsed in preflight_timings)
+        )
+        report_preflight("Trening uruchomiony", 100.0, str(self.current_run.id))
         return self.current_run.id
 
     def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from):
@@ -2046,7 +2106,7 @@ class YOLOPoseTrainer:
         self._reset_worker_ipc_state()
         self._reset_runtime_state()
 
-    def resume_training(self, run_id: str) -> Optional[str]:
+    def resume_training(self, run_id: str, *, progress_callback=None) -> Optional[str]:
         run = self.history.get_run(run_id)
         if not run:
             return None
@@ -2107,4 +2167,5 @@ class YOLOPoseTrainer:
             device=run.device,
             lr0=run.lr0,
             resume_from=last_weights,
+            progress_callback=progress_callback,
         )

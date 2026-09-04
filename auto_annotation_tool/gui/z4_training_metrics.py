@@ -2118,7 +2118,8 @@ def _refresh_training_start_state(self):
     try:
         pinned_state = _get_pinned_step4_result_state(self)
         _ensure_new_training_uses_final_base_model(self)
-        ready = bool(not pinned_state and self._is_training_configuration_ready())
+        preparing = bool(getattr(self, "_training_start_in_progress", False))
+        ready = bool(not preparing and not pinned_state and self._is_training_configuration_ready())
         button.configure(state=(tk.NORMAL if ready else tk.DISABLED))
     except Exception:
         pass

@@ -151,7 +151,71 @@ def _release_gpu_resources_before_training(self):
             + ", ".join(released_tabs)
         )
 
+def _set_training_preparing_ui_state(self, *, text: str = "Przygotowanie treningu...", progress: float = 5.0):
+    self._training_start_in_progress = True
+    for attr, state in (
+        ("btn_start_train", tk.DISABLED),
+        ("btn_pause_train", tk.DISABLED),
+        ("btn_stop_train", tk.DISABLED),
+    ):
+        try:
+            getattr(self, attr).configure(state=state)
+        except Exception:
+            pass
+    try:
+        self._set_train_progress_values(overall=max(0.0, min(100.0, float(progress))), epoch=0.0)
+    except Exception:
+        pass
+    try:
+        self._set_training_widget_text(self.train_progress_label, text)
+        self.train_progress_label.configure(foreground="#d35400")
+    except Exception:
+        pass
+
+def _update_training_preflight_progress(self, stage: str, progress: float, detail: str = ""):
+    stage_text = str(stage or "Przygotowanie treningu").strip()
+    detail_text = str(detail or "").strip()
+    label = f"Przygotowanie treningu: {stage_text}"
+    if detail_text:
+        label = f"{label} | {detail_text}"
+    _set_training_preparing_ui_state(self, text=label, progress=progress)
+    try:
+        self._append_train_log(f"[PREFLIGHT] {stage_text}" + (f" | {detail_text}" if detail_text else ""))
+    except Exception:
+        pass
+
+def _finish_training_preflight_failure(self, *, title: str, message: str):
+    self._training_start_in_progress = False
+    self._training_preflight_thread = None
+    try:
+        self._end_step4_operation("z4.training.run")
+    except Exception:
+        pass
+    self._pending_campaign_model_type = None
+    try:
+        self._set_train_progress_values(overall=0.0, epoch=0.0)
+    except Exception:
+        pass
+    try:
+        self.train_progress_label.configure(
+            text="Nie udało się uruchomić treningu.",
+            foreground="#c0392b",
+        )
+    except Exception:
+        pass
+    try:
+        self._append_train_log("[START] Trening nie wystartował. Sprawdź dataset, model startowy i log powyżej.")
+    except Exception:
+        pass
+    messagebox.showerror(title, message)
+    try:
+        self._refresh_training_start_state()
+    except Exception:
+        pass
+
 def _start_training(self):
+    if bool(getattr(self, "_training_start_in_progress", False)):
+        return
     if not YOLO_AVAILABLE:
         return messagebox.showerror("Błąd", "Brak ultralytics.")
 
@@ -397,110 +461,142 @@ def _start_training(self):
     except Exception:
         pass
     self._append_train_log("=" * 70)
-    self._release_gpu_resources_before_training()
 
-    if not self._begin_step4_operation("z4.training.run", "Z4: trening modelu"):
+    if not self._begin_step4_operation("z4.training.run", "Z4: przygotowanie treningu"):
         return
 
-    try:
-        run_id = self.trainer.start_training(
-            name=self.name_var.get(),
-            dataset_path=dataset_path,
-            base_model=base_model,
-            epochs=self._safe_training_int_value("epochs_var", default=100, minimum=1),
-            batch_size=self._safe_training_int_value("batch_var", default=16, minimum=1),
-            img_size=self._safe_training_int_value("imgsz_var", default=640, minimum=32),
-            device=device,
-            lr0=self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001),
-            training_target=selected_target,
-            **fine_tune_metadata,
-        )
-    except Exception as e:
-        self._end_step4_operation("z4.training.run")
-        logger.exception("Nie udało się wystartować treningu")
-        return messagebox.showerror("Błąd", f"Nie udało się uruchomić treningu:\n{e}")
+    request = {
+        "name": str(self.name_var.get() or ""),
+        "dataset_path": dataset_path,
+        "base_model": base_model,
+        "epochs": self._safe_training_int_value("epochs_var", default=100, minimum=1),
+        "batch_size": self._safe_training_int_value("batch_var", default=16, minimum=1),
+        "img_size": self._safe_training_int_value("imgsz_var", default=640, minimum=32),
+        "device": device,
+        "lr0": self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001),
+        "training_target": selected_target,
+        **dict(fine_tune_metadata or {}),
+    }
+    _set_training_preparing_ui_state(self, text="Przygotowanie treningu: waliduję i zamrażam dane...", progress=5.0)
 
-    if not run_id:
-        self._end_step4_operation("z4.training.run")
-        self._pending_campaign_model_type = None
-        self._set_train_progress_values(overall=0.0, epoch=0.0)
-        self.train_progress_label.configure(
-            text="Nie udało się uruchomić treningu.",
-            foreground="#c0392b"
-        )
-        self._append_train_log("[START] Trening nie wystartował. Sprawdź dataset, model startowy i log powyżej.")
-        return messagebox.showerror(
-            "Nie udało się uruchomić treningu",
-            "Trening nie wystartował.\n\nSprawdź poprawność datasetu, modelu startowego i log w terminalu procesu."
-        )
-
-    self.current_run_id = run_id
-    self._last_training_completion_summary_run_id = None
-    try:
-        self._remember_campaign_plate_training_source(dataset_root)
-    except Exception as e:
-        logger.debug(f"Nie udało się zapamiętać źródła treningu tablic: {e}")
-    self._step4_campaign_finish_ready = False
-    try:
-        if CAMPAIGN.get_active_project_name():
-            CAMPAIGN.set_step4_finish_state(False)
-    except Exception:
-        pass
-    self._set_train_progress_values(overall=0.0, epoch=0.0)
-    self._reset_training_runtime_progress()
-    self._set_train_live_metrics(None)
-    try:
-        self._set_training_widget_text(getattr(self, "train_resource_label", None), "Zasoby w czasie treningu")
-        self._set_training_resource_sample(None)
-    except Exception:
-        pass
-    try:
-        run_display = build_run_display_ref({"run_id": run_id}, kind_hint="training").id
-    except Exception:
-        run_display = str(run_id or "").strip()
-    self._set_training_running_ui_state(
-        run_id,
-        status_text=f"Uruchomiono run treningowy: {run_display}",
-    )
-    self._training_started_monotonic = time.perf_counter()
-    self._training_started_wall_clock = datetime.datetime.now()
-
-    try:
-        self._remember_campaign_training_run_in_registry(
-            run_id=str(run_id or "").strip(),
-            status=TrainingStatus.RUNNING.value,
-            target=self.get_campaign_training_target(),
-        )
-    except Exception:
-        pass
-
-    try:
-        self._refresh_step4_campaign_navigation_ui()
-    except Exception:
-        pass
-
-    if CAMPAIGN.get_active_project_name():
-        self._pending_campaign_model_type = self.get_campaign_training_target()
+    def progress_callback(stage, progress, detail=""):
+        safe_stage = str(stage or "").strip()
+        safe_detail = str(detail or "").strip()
         try:
-            label = "znaków" if self._pending_campaign_model_type == "char" else "tablic"
-            self._append_train_log(
-                f"[TARGET] Ten trening utworzy kandydata na model {label}. "
-                "Wynikiem bramki stanie się dopiero po jawnym wyborze w sekcji wyniku."
+            safe_progress = float(progress)
+        except Exception:
+            safe_progress = 0.0
+        self._ui(
+            lambda s=safe_stage, p=safe_progress, d=safe_detail: _update_training_preflight_progress(
+                self,
+                s,
+                p,
+                d,
+            )
+        )
+
+    def finish_success(run_id):
+        self._training_start_in_progress = False
+        self._training_preflight_thread = None
+        self.current_run_id = run_id
+        self._last_training_completion_summary_run_id = None
+        try:
+            self._remember_campaign_plate_training_source(dataset_root)
+        except Exception as e:
+            logger.debug(f"Nie udało się zapamiętać źródła treningu tablic: {e}")
+        self._step4_campaign_finish_ready = False
+        try:
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
+        self._set_train_progress_values(overall=0.0, epoch=0.0)
+        self._reset_training_runtime_progress()
+        self._set_train_live_metrics(None)
+        try:
+            self._set_training_widget_text(getattr(self, "train_resource_label", None), "Zasoby w czasie treningu")
+            self._set_training_resource_sample(None)
+        except Exception:
+            pass
+        try:
+            run_display = build_run_display_ref({"run_id": run_id}, kind_hint="training").id
+        except Exception:
+            run_display = str(run_id or "").strip()
+        self._set_training_running_ui_state(
+            run_id,
+            status_text=f"Uruchomiono run treningowy: {run_display}",
+        )
+        self._training_started_monotonic = time.perf_counter()
+        self._training_started_wall_clock = datetime.datetime.now()
+
+        try:
+            self._remember_campaign_training_run_in_registry(
+                run_id=str(run_id or "").strip(),
+                status=TrainingStatus.RUNNING.value,
+                target=self.get_campaign_training_target(),
             )
         except Exception:
             pass
-    else:
-        self._pending_campaign_model_type = None
 
-    # Uruchom polling zakończenia treningu, aby odblokować dalszy workflow.
-    if self._training_completion_poll_job is not None:
         try:
-            self.frame.after_cancel(self._training_completion_poll_job)
+            self._refresh_step4_campaign_navigation_ui()
         except Exception:
             pass
-        self._training_completion_poll_job = None
 
-    self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+        if CAMPAIGN.get_active_project_name():
+            self._pending_campaign_model_type = self.get_campaign_training_target()
+            try:
+                label = "znaków" if self._pending_campaign_model_type == "char" else "tablic"
+                self._append_train_log(
+                    f"[TARGET] Ten trening utworzy kandydata na model {label}. "
+                    "Wynikiem bramki stanie się dopiero po jawnym wyborze w sekcji wyniku."
+                )
+            except Exception:
+                pass
+        else:
+            self._pending_campaign_model_type = None
+
+        if self._training_completion_poll_job is not None:
+            try:
+                self.frame.after_cancel(self._training_completion_poll_job)
+            except Exception:
+                pass
+            self._training_completion_poll_job = None
+
+        self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+
+    def finish_failure(error_text=""):
+        message = (
+            "Trening nie wystartował.\n\n"
+            "Sprawdź poprawność datasetu, modelu startowego i log w terminalu procesu."
+        )
+        if str(error_text or "").strip():
+            message = f"{message}\n\nSzczegóły:\n{str(error_text).strip()}"
+        _finish_training_preflight_failure(
+            self,
+            title="Nie udało się uruchomić treningu",
+            message=message,
+        )
+
+    def worker():
+        run_id = None
+        error_text = ""
+        try:
+            self._release_gpu_resources_before_training()
+            run_id = self.trainer.start_training(**request, progress_callback=progress_callback)
+        except Exception as e:
+            logger.exception("Nie udało się wystartować treningu")
+            error_text = str(e)
+
+        self._ui(
+            lambda rid=run_id, err=error_text: (
+                finish_success(rid) if rid else finish_failure(err)
+            )
+        )
+
+    thread = threading.Thread(target=worker, name="Z4TrainingPreflight", daemon=True)
+    self._training_preflight_thread = thread
+    thread.start()
 
 def _pause_training(self):
     self.trainer.pause_training()
@@ -1568,6 +1664,8 @@ def _promote_selected_run_model_to_campaign(self):
     )
 
 def _resume_selected_run(self):
+    if bool(getattr(self, "_training_start_in_progress", False)):
+        return
     run = self._selected_run()
     if run is None:
         return
@@ -1609,99 +1707,140 @@ def _resume_selected_run(self):
             "Tego treningu nie da się wznowić od miejsca pauzy."
         )
 
-    if not self._begin_step4_operation("z4.training.run", "Z4: wznowienie treningu"):
+    if not self._begin_step4_operation("z4.training.run", "Z4: przygotowanie wznowienia treningu"):
         return
 
-    try:
-        resumed_run_id = self.trainer.resume_training(str(run.id))
-    except Exception as e:
-        self._end_step4_operation("z4.training.run")
-        logger.exception("Nie udało się wznowić treningu")
-        return messagebox.showerror("Błąd wznowienia", f"Nie udało się wznowić treningu:\n{e}")
+    run_id_to_resume = str(run.id)
+    _set_training_preparing_ui_state(self, text="Przygotowanie wznowienia treningu...", progress=5.0)
 
-    if not resumed_run_id:
-        self._end_step4_operation("z4.training.run")
-        return messagebox.showerror(
-            "Nie udało się wznowić treningu",
+    def progress_callback(stage, progress, detail=""):
+        safe_stage = str(stage or "").strip()
+        safe_detail = str(detail or "").strip()
+        try:
+            safe_progress = float(progress)
+        except Exception:
+            safe_progress = 0.0
+        self._ui(
+            lambda s=safe_stage, p=safe_progress, d=safe_detail: _update_training_preflight_progress(
+                self,
+                s,
+                p,
+                d,
+            )
+        )
+
+    def finish_success(resumed_run_id):
+        self._training_start_in_progress = False
+        self._training_preflight_thread = None
+        self.current_run_id = resumed_run_id
+        refreshed_run = run
+        try:
+            self._reload_history_snapshot_from_disk()
+            history_run = self.history.get_run(str(resumed_run_id))
+            if history_run is not None:
+                refreshed_run = history_run
+        except Exception:
+            pass
+        try:
+            resumed_run_display = build_run_display_ref(refreshed_run, kind_hint="training").id
+        except Exception:
+            resumed_run_display = str(resumed_run_id or "").strip()
+        self._last_training_completion_summary_run_id = None
+        self._step4_campaign_finish_ready = False
+        try:
+            if CAMPAIGN.get_active_project_name():
+                CAMPAIGN.set_step4_finish_state(False)
+        except Exception:
+            pass
+        self._set_training_running_ui_state(
+            resumed_run_id,
+            status_text=f"Wznowiono run treningu: {resumed_run_display}",
+        )
+
+        try:
+            previous_metrics = [
+                dict(row)
+                for row in list(getattr(refreshed_run, "metrics_history", []) or [])
+                if isinstance(row, dict)
+            ]
+        except Exception:
+            previous_metrics = []
+        self._current_training_metric_history = previous_metrics
+        self._latest_training_metrics = dict(previous_metrics[-1]) if previous_metrics else {}
+        try:
+            self._set_train_progress_values(overall=0.0, epoch=0.0)
+            self._reset_training_runtime_progress()
+            self._set_train_live_metrics(self._latest_training_metrics or None)
+            self._set_training_metric_interpretation(
+                self._build_training_best_epoch_summary(self._latest_training_metrics or None)
+            )
+        except Exception as e:
+            logger.debug(f"Nie udalo sie odtworzyc metryk UI po wznowieniu treningu: {e}")
+        self._set_training_running_ui_state(
+            resumed_run_id,
+            status_text=f"Wznowiono run treningu: {resumed_run_display}",
+        )
+        self._training_started_monotonic = time.perf_counter()
+        self._training_started_wall_clock = datetime.datetime.now()
+        self._append_train_log(f"[RESUME] Wznowiono trening z checkpointu: {last_weights}")
+        if CAMPAIGN.get_active_project_name():
+            self._pending_campaign_model_type = self.get_campaign_training_target()
+            try:
+                self._remember_campaign_training_run_in_registry(
+                    run_id=str(resumed_run_id or "").strip(),
+                    status=TrainingStatus.RUNNING.value,
+                    target=self._pending_campaign_model_type,
+                )
+            except Exception:
+                pass
+        else:
+            self._pending_campaign_model_type = None
+
+        try:
+            self._refresh_step4_campaign_navigation_ui()
+        except Exception:
+            pass
+
+        if self._training_completion_poll_job is not None:
+            try:
+                self.frame.after_cancel(self._training_completion_poll_job)
+            except Exception:
+                pass
+            self._training_completion_poll_job = None
+        self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+
+    def finish_failure(error_text=""):
+        message = (
             "Wznowienie treningu nie wystartowało.\n\n"
             "Sprawdź, czy run nadal ma poprawny checkpoint `last.pt`."
         )
-
-    self.current_run_id = resumed_run_id
-    try:
-        self._reload_history_snapshot_from_disk()
-        refreshed_run = self.history.get_run(str(resumed_run_id))
-        if refreshed_run is not None:
-            run = refreshed_run
-    except Exception:
-        pass
-    try:
-        resumed_run_display = build_run_display_ref(run, kind_hint="training").id
-    except Exception:
-        resumed_run_display = str(resumed_run_id or "").strip()
-    self._last_training_completion_summary_run_id = None
-    self._step4_campaign_finish_ready = False
-    try:
-        if CAMPAIGN.get_active_project_name():
-            CAMPAIGN.set_step4_finish_state(False)
-    except Exception:
-        pass
-    self._set_training_running_ui_state(
-        resumed_run_id,
-        status_text=f"Wznowiono run treningu: {resumed_run_display}",
-    )
-
-    try:
-        previous_metrics = [
-            dict(row)
-            for row in list(getattr(run, "metrics_history", []) or [])
-            if isinstance(row, dict)
-        ]
-    except Exception:
-        previous_metrics = []
-    self._current_training_metric_history = previous_metrics
-    self._latest_training_metrics = dict(previous_metrics[-1]) if previous_metrics else {}
-    try:
-        self._set_train_progress_values(overall=0.0, epoch=0.0)
-        self._reset_training_runtime_progress()
-        self._set_train_live_metrics(self._latest_training_metrics or None)
-        self._set_training_metric_interpretation(
-            self._build_training_best_epoch_summary(self._latest_training_metrics or None)
+        if str(error_text or "").strip():
+            message = f"{message}\n\nSzczegóły:\n{str(error_text).strip()}"
+        _finish_training_preflight_failure(
+            self,
+            title="Nie udało się wznowić treningu",
+            message=message,
         )
-    except Exception as e:
-        logger.debug(f"Nie udalo sie odtworzyc metryk UI po wznowieniu treningu: {e}")
-    self._set_training_running_ui_state(
-        resumed_run_id,
-        status_text=f"Wznowiono run treningu: {resumed_run_display}",
-    )
-    self._training_started_monotonic = time.perf_counter()
-    self._training_started_wall_clock = datetime.datetime.now()
-    self._append_train_log(f"[RESUME] Wznowiono trening z checkpointu: {last_weights}")
-    if CAMPAIGN.get_active_project_name():
-        self._pending_campaign_model_type = self.get_campaign_training_target()
+
+    def worker():
+        resumed_run_id = None
+        error_text = ""
         try:
-            self._remember_campaign_training_run_in_registry(
-                run_id=str(resumed_run_id or "").strip(),
-                status=TrainingStatus.RUNNING.value,
-                target=self._pending_campaign_model_type,
+            self._release_gpu_resources_before_training()
+            resumed_run_id = self.trainer.resume_training(run_id_to_resume, progress_callback=progress_callback)
+        except Exception as e:
+            logger.exception("Nie udało się wznowić treningu")
+            error_text = str(e)
+
+        self._ui(
+            lambda rid=resumed_run_id, err=error_text: (
+                finish_success(rid) if rid else finish_failure(err)
             )
-        except Exception:
-            pass
-    else:
-        self._pending_campaign_model_type = None
+        )
 
-    try:
-        self._refresh_step4_campaign_navigation_ui()
-    except Exception:
-        pass
-
-    if self._training_completion_poll_job is not None:
-        try:
-            self.frame.after_cancel(self._training_completion_poll_job)
-        except Exception:
-            pass
-        self._training_completion_poll_job = None
-    self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
+    thread = threading.Thread(target=worker, name="Z4TrainingResumePreflight", daemon=True)
+    self._training_preflight_thread = thread
+    thread.start()
 
 def _show_history_context_menu(self, event=None):
     if event is None or not hasattr(self, "tree"):

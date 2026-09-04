@@ -745,7 +745,7 @@ def _checkpoint_completed_epoch(checkpoint_path: Path | str | None) -> int | Non
 def _completed_epoch_count(run: Mapping[str, Any]) -> int:
     for key in ("current_epoch", "completed_epochs", "trained_epochs"):
         value = _int_or_none(_value(run, key))
-        if value is not None:
+        if value is not None and value > 0:
             return max(0, value)
 
     csv_epoch = _results_csv_completed_epoch(run)

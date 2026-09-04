@@ -4,8 +4,9 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from auto_annotation_tool.config import get_torch_module
+from auto_annotation_tool.config import CONFIG, get_torch_module
 from auto_annotation_tool.training.model_provenance import (
     TOTAL_EPOCHS_SCOPE,
     build_checkpoint_training_snapshot,
@@ -15,7 +16,7 @@ from auto_annotation_tool.training.model_provenance import (
     training_dataset_snapshots_match,
 )
 from auto_annotation_tool.training.trainer import YOLOPoseTrainer
-from auto_annotation_tool.training.training_history import TrainingRun
+from auto_annotation_tool.training.training_history import TrainingHistory, TrainingRun
 
 
 def _write_file(path: Path, data: bytes | str = b"x") -> None:
@@ -371,6 +372,101 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertEqual(provenance["run_epochs_completed"], 143)
             self.assertEqual(provenance["run_nominal_sample_presentations"], 143)
             self.assertEqual(provenance["total_epochs"], 143)
+
+    def test_zero_current_epoch_falls_back_to_results_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            output_dir = Path(tmp) / "training_runs" / "run_csv"
+            rows = ["epoch,metrics/mAP50(B)\n"]
+            rows.extend(f"{index},0.{index % 10}\n" for index in range(17))
+            _write_file(output_dir / "train" / "results.csv", "".join(rows))
+            run = _run("20260911_100000", dataset, epochs=200, current_epoch=0)
+            run["output_dir"] = str(output_dir)
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["run_epochs_planned"], 200)
+            self.assertEqual(provenance["run_epochs_completed"], 17)
+            self.assertEqual(provenance["total_epochs"], 17)
+
+    def test_zero_current_epoch_falls_back_to_last_checkpoint(self):
+        torch = get_torch_module()
+        if torch is None:
+            self.skipTest("PyTorch niedostępny")
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            checkpoint = Path(tmp) / "last.pt"
+            torch.save({"epoch": 16}, checkpoint)
+            run = _run("20260911_110000", dataset, epochs=200, current_epoch=0)
+            run["last_weights"] = str(checkpoint)
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["run_epochs_planned"], 200)
+            self.assertEqual(provenance["run_epochs_completed"], 17)
+            self.assertEqual(provenance["total_epochs"], 17)
+
+    def test_materialize_official_pretrained_downloads_before_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_dir = root / "base_models" / "plates"
+
+            def fake_download(target):
+                path = Path(target)
+                _write_file(path, b"downloaded checkpoint")
+                return str(path)
+
+            trainer = YOLOPoseTrainer.__new__(YOLOPoseTrainer)
+            with patch.object(CONFIG, "get_base_models_dir", return_value=str(base_dir)):
+                with patch("ultralytics.utils.downloads.attempt_download_asset", side_effect=fake_download):
+                    materialized = Path(
+                        trainer._materialize_official_pretrained_checkpoint(
+                            "yolo11n-pose",
+                            "yolo11n-pose.pt",
+                            training_target="plate",
+                        )
+                    )
+
+            snapshot = build_checkpoint_training_snapshot(
+                materialized,
+                name=materialized.name,
+                kind="pretrained_base",
+            )
+
+            self.assertTrue(materialized.exists())
+            self.assertTrue(snapshot["exists_at_capture"])
+            self.assertNotEqual(snapshot["sha256"], "")
+            self.assertEqual(snapshot["kind"], "pretrained_base")
+
+    def test_pretrained_materialize_failure_does_not_create_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            history = TrainingHistory(Path(tmp) / "history")
+            trainer = YOLOPoseTrainer(history=history)
+            trainer.validate_dataset = lambda _path: (True, "Dataset OK", {})
+            trainer._reset_runtime_state = lambda: None
+            trainer._reset_worker_ipc_state = lambda: None
+
+            with patch("auto_annotation_tool.training.trainer.YOLO_AVAILABLE", True):
+                with patch("auto_annotation_tool.training.trainer.get_yolo_class", return_value=object):
+                    with patch.object(CONFIG, "get_base_models_dir", return_value=str(Path(tmp) / "base_models")):
+                        with patch(
+                            "ultralytics.utils.downloads.attempt_download_asset",
+                            side_effect=RuntimeError("offline"),
+                        ):
+                            run_id = trainer.start_training(
+                                name="Pretrained failure",
+                                dataset_path=str(dataset),
+                                base_model="yolo11n-pose",
+                                epochs=1,
+                                batch_size=1,
+                                img_size=256,
+                                device="cpu",
+                                training_target="plate",
+                            )
+
+            self.assertIsNone(run_id)
+            self.assertEqual(history.runs, {})
 
     def test_external_parent_known_epochs_does_not_mean_known_lineage(self):
         with tempfile.TemporaryDirectory() as tmp:
