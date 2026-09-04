@@ -412,6 +412,7 @@ def _start_training(self):
             img_size=self._safe_training_int_value("imgsz_var", default=640, minimum=32),
             device=device,
             lr0=self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001),
+            training_target=selected_target,
             **fine_tune_metadata,
         )
     except Exception as e:

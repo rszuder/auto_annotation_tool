@@ -103,13 +103,22 @@ class MobileReportFullRowsTests(unittest.TestCase):
                 "model": {"architecture_label": "YOLO26n Pose"},
                 "source": {"checkpoint_sha256": "checkpoint-sha", "parameter_count": 2446959},
                 "training": {
-                    "provenance_version": 1,
+                    "provenance_version": 2,
                     "run_id": "20260904_120000",
                     "run_epochs_completed": 10,
                     "total_epochs": 40,
                     "total_epochs_known": True,
                     "known_epochs_minimum": 40,
                     "total_epochs_scope": "project_training_after_pretrained_base",
+                    "lineage_total_epochs": 40,
+                    "lineage_total_epochs_known": True,
+                    "lineage_stage_count": 2,
+                    "run_train_images": 900,
+                    "run_nominal_sample_presentations": 9000,
+                    "lineage_nominal_sample_presentations": 32000,
+                    "sample_presentations_known": True,
+                    "known_sample_presentations_minimum": 32000,
+                    "provenance_capture": "frozen_at_training_start",
                     "provenance_status": "complete",
                     "dataset": {
                         "dataset_id": "DS-MT-ABC",
@@ -148,6 +157,13 @@ class MobileReportFullRowsTests(unittest.TestCase):
             self.assertEqual(bundle.pipeline_manifests["plate"]["model_id"], "mt-test")
             self.assertEqual(bundle.model_refs["plate"]["package_sha256"], "package-sha")
             self.assertEqual(provenance["training"]["total_epochs"], 40)
+            self.assertEqual(provenance["training"]["lineage_stage_count"], 2)
+            self.assertEqual(provenance["training"]["run_train_images"], 900)
+            self.assertEqual(provenance["training"]["run_nominal_sample_presentations"], 9000)
+            self.assertEqual(provenance["training"]["lineage_nominal_sample_presentations"], 32000)
+            self.assertTrue(provenance["training"]["sample_presentations_known"])
+            self.assertEqual(provenance["training"]["known_sample_presentations_minimum"], 32000)
+            self.assertEqual(provenance["training"]["provenance_capture"], "frozen_at_training_start")
             self.assertEqual(provenance["training"]["dataset"]["dataset_id"], "DS-MT-ABC")
             self.assertEqual(provenance["variant_id"], "tflite-int8")
             self.assertEqual(provenance["variant_artifact_sha256"], ["variant-sha"])

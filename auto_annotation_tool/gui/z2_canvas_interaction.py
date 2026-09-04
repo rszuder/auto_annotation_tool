@@ -1050,7 +1050,7 @@ def _on_preview_focus_toggle_shortcut(self, event=None):
         return None
     if self._preview_draw_mode:
         self._update_preview_edit_status(
-            "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem R."
+            "Dokończ albo anuluj rysowanie nowej ramki przed użyciem R."
         )
         return "break"
 
@@ -1058,14 +1058,14 @@ def _on_preview_focus_toggle_shortcut(self, event=None):
         self._preview_focus_zoom_click_stage = 0
         self._preview_focus_zoom_history = []
         self._restore_preview_focus_view(
-            "Przywrócono poprzedni kadr. R ponownie zbliża aktywny polygon."
+            "Przywrócono poprzedni kadr. R ponownie zbliża aktywną ramkę."
         )
         return "break"
 
     ann = self._get_preview_annotation()
     plates = self._get_plate_detections(ann)
     if not plates:
-        self._update_preview_edit_status("Na tym obrazie nie ma polygonu tablicy do zblizenia klawiszem R.")
+        self._update_preview_edit_status("Na tym obrazie nie ma ramki tablicy do zbliżenia klawiszem R.")
         return "break"
 
     selected_idx = self._get_selected_plate_index_for_ann(ann)
@@ -1074,14 +1074,14 @@ def _on_preview_focus_toggle_shortcut(self, event=None):
         store_restore=True,
         push_debug=True,
         status_message=(
-            "Widok został dopasowany do aktywnego polygonu. "
+            "Widok został dopasowany do aktywnej ramki. "
             + (
                 "Q/E przechodzą po tablicach globalnie, A przełącza lokalnie, Y wyłącza super korektę."
                 if bool(getattr(self, "_preview_super_correction_active", False))
                 else "R wraca do poprzedniego kadru, A przełącza tablice."
             )
         ),
-    ) or self._update_preview_edit_status("Nie udalo sie dopasowac widoku do aktywnego polygonu.")
+    ) or self._update_preview_edit_status("Nie udało się dopasować widoku do aktywnej ramki.")
     self._preview_focus_zoom_click_stage = 0
     self._preview_focus_zoom_history = []
     return "break"
@@ -1097,14 +1097,14 @@ def _on_preview_cycle_plate_shortcut(self, event=None):
         pass
     if self._preview_draw_mode:
         self._update_preview_edit_status(
-            "Dokoncz albo anuluj rysowanie nowego polygonu przed uzyciem A."
+            "Dokończ albo anuluj rysowanie nowej ramki przed użyciem A."
         )
         return "break"
 
     ann = self._get_preview_annotation()
     plates = self._get_plate_detections(ann)
     if not plates:
-        self._update_preview_edit_status("Na tym obrazie nie ma polygonów tablicy do przełączania klawiszem A.")
+        self._update_preview_edit_status("Na tym obrazie nie ma ramek tablic do przełączania klawiszem A.")
         return "break"
 
     super_mode = bool(getattr(self, "_preview_super_correction_active", False))
@@ -1157,7 +1157,7 @@ def _on_preview_cycle_plate_shortcut(self, event=None):
             + (
                 "Q/E przechodzą po tablicach globalnie, A przełącza lokalnie, Y wyłącza super korektę."
                 if super_mode
-                else "A przełącza kolejne polygony, R wraca do poprzedniego kadru."
+                else "A przełącza kolejne ramki, R wraca do poprzedniego kadru."
             )
         ),
     ):
@@ -1170,7 +1170,7 @@ def _toggle_preview_super_correction(self, event=None):
     self._preview_super_correction_badge_visible = False
     if self._preview_draw_mode:
         self._update_preview_edit_status(
-            "Dokoncz albo anuluj rysowanie nowego polygonu przed użyciem Y."
+            "Dokończ albo anuluj rysowanie nowej ramki przed użyciem Y."
         )
         return "break"
     if self._preview_delete_mode:
@@ -1229,7 +1229,7 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
         return "break"
     if self._preview_draw_mode:
         self._update_preview_edit_status(
-            "Dokończ albo anuluj rysowanie nowego polygonu przed zmianą statusu OK spacją."
+            "Dokończ albo anuluj rysowanie nowej ramki przed zmianą statusu OK spacją."
         )
         return "break"
 
@@ -1980,7 +1980,7 @@ def _toggle_preview_delete_mode(self):
 
     plates = self._get_plate_detections(ann)
     if not self._preview_delete_mode and not plates:
-        self._update_preview_edit_status("Na tym obrazie nie ma polygonu tablicy do usunięcia.")
+        self._update_preview_edit_status("Na tym obrazie nie ma ramki tablicy do usunięcia.")
         return
 
     if self._preview_delete_mode:
@@ -2006,7 +2006,7 @@ def _toggle_preview_delete_mode(self):
             self._preview_delete_candidate_idx = None
             self._refresh_preview_canvas_light()
             self._update_preview_edit_status(
-                "Najedz kursorem na wnetrze polygonu i nacisnij S, aby od razu uzbroic usuwanie tej tablicy.",
+                "Najedź kursorem na wnętrze ramki i naciśnij S, aby uzbroić usuwanie tej anotacji tablicy.",
                 refresh_toolbar=False,
                 refresh_debug=False,
             )
@@ -2374,7 +2374,7 @@ def _undo_preview_edit(self, event=None):
     target_snapshot = undo_stack.pop()
     self._restore_preview_annotation_history_snapshot(
         target_snapshot,
-        action_label="Cofnieto ostatnia zmiane polygonow tablic.",
+        action_label="Cofnięto ostatnią zmianę ramek tablic.",
     )
     return "break"
 
@@ -2393,7 +2393,7 @@ def _redo_preview_edit(self, event=None):
     target_snapshot = redo_stack.pop()
     self._restore_preview_annotation_history_snapshot(
         target_snapshot,
-        action_label="Przywrócono ostatnią cofniętą zmianę polygonów tablic.",
+        action_label="Przywrócono ostatnią cofniętą zmianę ramek tablic.",
     )
     return "break"
 

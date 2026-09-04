@@ -405,6 +405,24 @@ def _model_provenance_entry_from_manifest(
             "total_epochs_known": training.get("total_epochs_known", ref_training.get("total_epochs_known")),
             "known_epochs_minimum": training.get("known_epochs_minimum", ref_training.get("known_epochs_minimum")),
             "total_epochs_scope": str(training.get("total_epochs_scope") or ref_training.get("total_epochs_scope") or ""),
+            "lineage_total_epochs": training.get("lineage_total_epochs", ref_training.get("lineage_total_epochs")),
+            "lineage_total_epochs_known": training.get("lineage_total_epochs_known", ref_training.get("lineage_total_epochs_known")),
+            "lineage_stage_count": training.get("lineage_stage_count", ref_training.get("lineage_stage_count")),
+            "run_train_images": training.get("run_train_images", ref_training.get("run_train_images")),
+            "run_nominal_sample_presentations": training.get(
+                "run_nominal_sample_presentations",
+                ref_training.get("run_nominal_sample_presentations"),
+            ),
+            "lineage_nominal_sample_presentations": training.get(
+                "lineage_nominal_sample_presentations",
+                ref_training.get("lineage_nominal_sample_presentations"),
+            ),
+            "sample_presentations_known": training.get("sample_presentations_known", ref_training.get("sample_presentations_known")),
+            "known_sample_presentations_minimum": training.get(
+                "known_sample_presentations_minimum",
+                ref_training.get("known_sample_presentations_minimum"),
+            ),
+            "provenance_capture": str(training.get("provenance_capture") or ref_training.get("provenance_capture") or ""),
             "dataset": {
                 "dataset_id": str(dataset.get("dataset_id") or training.get("dataset_id") or ""),
                 "manifest_sha256": str(dataset.get("manifest_sha256") or ""),

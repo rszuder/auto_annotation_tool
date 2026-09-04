@@ -1,11 +1,15 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from auto_annotation_tool.training.model_provenance import (
     TOTAL_EPOCHS_SCOPE,
+    build_checkpoint_training_snapshot,
     build_model_training_provenance,
+    build_output_checkpoint_training_snapshot,
+    build_training_dataset_snapshot,
 )
 
 
@@ -41,6 +45,20 @@ def _make_dataset(root: Path, name: str = "dataset") -> Path:
     return dataset
 
 
+def _set_train_image_count(dataset: Path, count: int) -> None:
+    image_dir = dataset / "images" / "train"
+    label_dir = dataset / "labels" / "train"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    label_dir.mkdir(parents=True, exist_ok=True)
+    for path in list(image_dir.glob("*")):
+        path.unlink()
+    for path in list(label_dir.glob("*")):
+        path.unlink()
+    for index in range(1, count + 1):
+        _write_file(image_dir / f"train_{index:03d}.jpg", b"image")
+        _write_file(label_dir / f"train_{index:03d}.txt", "0 0.5 0.5 0.2 0.2\n")
+
+
 def _run(
     run_id: str,
     dataset: Path,
@@ -50,19 +68,41 @@ def _run(
     lineage_mode: str = "new",
     parent_run_id: str = "",
     base_model: str = "yolo26n.pt",
+    target: str = "plate",
+    with_snapshots: bool = True,
 ) -> dict:
-    return {
+    best_weights = dataset.parent / f"{run_id}_best.pt"
+    _write_file(best_weights, b"best checkpoint")
+    input_checkpoint = Path(base_model)
+    if not input_checkpoint.is_absolute():
+        input_checkpoint = dataset.parent / input_checkpoint.name
+    _write_file(input_checkpoint, b"input checkpoint")
+    payload = {
         "id": run_id,
         "name": f"Run {run_id}",
         "status": "completed",
         "dataset_path": str(dataset),
-        "base_model": base_model,
+        "base_model": str(input_checkpoint),
         "epochs": epochs,
         "current_epoch": epochs if current_epoch is None else current_epoch,
         "lineage_mode": lineage_mode,
         "parent_run_id": parent_run_id,
-        "best_weights": str(dataset.parent / f"{run_id}_best.pt"),
+        "parent_model_target": target,
+        "training_target": target,
+        "best_weights": str(best_weights),
     }
+    if with_snapshots:
+        payload["training_dataset_snapshot"] = build_training_dataset_snapshot(dataset, target=target)
+        payload["input_checkpoint_snapshot"] = build_checkpoint_training_snapshot(
+            input_checkpoint,
+            name=input_checkpoint.name,
+            kind="custom_parent" if lineage_mode == "fine_tune" else "pretrained_base",
+        )
+        payload["output_checkpoint_snapshot"] = build_output_checkpoint_training_snapshot(
+            best_checkpoint=best_weights,
+            best_epoch=epochs if current_epoch is None else current_epoch,
+        )
+    return payload
 
 
 class ModelTrainingProvenanceTests(unittest.TestCase):
@@ -78,6 +118,12 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertTrue(provenance["total_epochs_known"])
             self.assertEqual(provenance["total_epochs_scope"], TOTAL_EPOCHS_SCOPE)
             self.assertEqual(provenance["provenance_status"], "complete")
+            self.assertEqual(provenance["provenance_capture"], "frozen_at_training_start")
+            self.assertEqual(provenance["lineage_stage_count"], 1)
+            self.assertEqual(provenance["run_train_images"], 1)
+            self.assertEqual(provenance["run_nominal_sample_presentations"], 30)
+            self.assertEqual(provenance["lineage_nominal_sample_presentations"], 30)
+            self.assertTrue(provenance["sample_presentations_known"])
 
     def test_fine_tune_sums_parent_lineage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,6 +148,8 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertEqual(provenance["total_epochs"], 40)
             self.assertTrue(provenance["total_epochs_known"])
             self.assertEqual(provenance["lineage_depth"], 2)
+            self.assertEqual(provenance["lineage_stage_count"], 2)
+            self.assertEqual(provenance["lineage_nominal_sample_presentations"], 40)
 
     def test_three_generation_fine_tune_sums_recursively(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +167,8 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertEqual(provenance["total_epochs"], 45)
             self.assertEqual(provenance["known_epochs_minimum"], 45)
             self.assertEqual([row["epochs_completed"] for row in provenance["lineage"]], [30, 10, 5])
+            self.assertEqual(provenance["lineage_stage_count"], 3)
+            self.assertEqual(provenance["lineage_nominal_sample_presentations"], 45)
 
     def test_resume_is_not_summed_twice(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,6 +180,8 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertEqual(provenance["run_epochs_completed"], 100)
             self.assertEqual(provenance["total_epochs"], 100)
             self.assertEqual(provenance["lineage_depth"], 1)
+            self.assertEqual(provenance["lineage_stage_count"], 1)
+            self.assertEqual(provenance["lineage_nominal_sample_presentations"], 100)
 
     def test_missing_legacy_parent_keeps_only_known_minimum(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,6 +200,9 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertIsNone(provenance["total_epochs"])
             self.assertFalse(provenance["total_epochs_known"])
             self.assertEqual(provenance["known_epochs_minimum"], 10)
+            self.assertIsNone(provenance["lineage_nominal_sample_presentations"])
+            self.assertFalse(provenance["sample_presentations_known"])
+            self.assertEqual(provenance["known_sample_presentations_minimum"], 10)
             self.assertEqual(provenance["provenance_status"], "partial")
 
     def test_cycle_in_lineage_is_partial_not_infinite(self):
@@ -166,6 +221,92 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertFalse(provenance["total_epochs_known"])
             self.assertEqual(provenance["provenance_status"], "partial")
             self.assertTrue(any("cykl" in warning.lower() for warning in provenance["warnings"]))
+
+    def test_snapshot_does_not_change_after_dataset_modification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = _run("20260907_090000", dataset, epochs=10)
+
+            _write_file(dataset / "images" / "train" / "train_002.jpg", b"new image")
+            _write_file(dataset / "labels" / "train" / "train_002.txt", "0 0.5 0.5 0.2 0.2\n")
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["run_train_images"], 1)
+            self.assertEqual(provenance["run_nominal_sample_presentations"], 10)
+            self.assertEqual(provenance["dataset"]["train_images"], 1)
+            self.assertEqual(provenance["provenance_capture"], "frozen_at_training_start")
+
+    def test_snapshot_survives_deleted_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = _run("20260907_100000", dataset, epochs=12)
+            expected_dataset_id = run["training_dataset_snapshot"]["dataset_id"]
+            expected_split_sha = run["training_dataset_snapshot"]["split_sha256"]
+
+            shutil.rmtree(dataset)
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["dataset"]["dataset_id"], expected_dataset_id)
+            self.assertEqual(provenance["dataset"]["split_sha256"], expected_split_sha)
+            self.assertEqual(provenance["run_train_images"], 1)
+            self.assertEqual(provenance["run_nominal_sample_presentations"], 12)
+
+    def test_three_generation_sample_presentations_use_each_stage_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_a = _make_dataset(root, "dataset_a")
+            dataset_b = _make_dataset(root, "dataset_b")
+            dataset_c = _make_dataset(root, "dataset_c")
+            _set_train_image_count(dataset_a, 2)
+            _set_train_image_count(dataset_b, 3)
+            _set_train_image_count(dataset_c, 4)
+            run_a = _run("20260908_090000", dataset_a, epochs=30)
+            run_b = _run("20260908_100000", dataset_b, epochs=20, lineage_mode="fine_tune", parent_run_id=run_a["id"])
+            run_c = _run("20260908_110000", dataset_c, epochs=10, lineage_mode="fine_tune", parent_run_id=run_b["id"])
+
+            provenance = build_model_training_provenance(
+                run_c,
+                history_index={run_a["id"]: run_a, run_b["id"]: run_b},
+                target="plate",
+            )
+
+            self.assertEqual(provenance["lineage_stage_count"], 3)
+            self.assertEqual(provenance["total_epochs"], 60)
+            self.assertEqual(
+                [row["nominal_sample_presentations"] for row in provenance["lineage"]],
+                [60, 60, 40],
+            )
+            self.assertEqual(provenance["lineage_nominal_sample_presentations"], 160)
+
+    def test_best_epoch_does_not_replace_completed_epochs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = _run("20260909_090000", dataset, epochs=100, current_epoch=100)
+            run["output_checkpoint_snapshot"] = build_output_checkpoint_training_snapshot(
+                best_checkpoint=run["best_weights"],
+                best_epoch=73,
+            )
+
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["best_epoch"], 73)
+            self.assertEqual(provenance["run_epochs_completed"], 100)
+            self.assertEqual(provenance["total_epochs"], 100)
+
+    def test_checkpoint_swap_is_reported_without_rewriting_frozen_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            run = _run("20260910_090000", dataset, epochs=5)
+            frozen_sha = run["output_checkpoint_snapshot"]["best_checkpoint_sha256"]
+
+            Path(run["best_weights"]).write_bytes(b"changed checkpoint")
+            provenance = build_model_training_provenance(run, history_index={}, target="plate")
+
+            self.assertEqual(provenance["best_checkpoint_sha256"], frozen_sha)
+            self.assertNotEqual(frozen_sha, "")
+            self.assertTrue(any("best.pt" in warning for warning in provenance["warnings"]))
+            self.assertEqual(provenance["provenance_status"], "partial")
 
 
 if __name__ == "__main__":

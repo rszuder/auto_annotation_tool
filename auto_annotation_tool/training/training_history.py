@@ -79,6 +79,13 @@ class TrainingRun:
     parent_dataset_path: str = ""
     parent_best_map50: float = 0.0
     parent_best_map50_95: float = 0.0
+    training_target: str = ""
+
+    # Zamrozone dane provenance. Pola sa opcjonalne, zeby starsze historie
+    # treningow pozostaly czytelne bez migracji destrukcyjnej.
+    training_dataset_snapshot: Dict = field(default_factory=dict)
+    input_checkpoint_snapshot: Dict = field(default_factory=dict)
+    output_checkpoint_snapshot: Dict = field(default_factory=dict)
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -636,4 +643,3 @@ class TrainingHistory:
         
         del self.runs[run_id]
         self._save()
-

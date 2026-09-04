@@ -294,7 +294,7 @@ def _update_preview_toolbar_state(self, *, refresh_summary: bool = True):
         self.preview_next_btn.configure(state=(tk.NORMAL if can_go_next else tk.DISABLED))
         self.preview_fit_btn.configure(state=(tk.NORMAL if (has_image and not scope_selection_mode_active) else tk.DISABLED))
         self.preview_draw_btn.configure(state=(tk.NORMAL if (can_edit and not scope_selection_mode_active) else tk.DISABLED))
-        self.preview_draw_btn.configure(text=("Anuluj rysowanie (D)" if self._preview_draw_mode else "Nowy polygon 4 pkt (D)"))
+        self.preview_draw_btn.configure(text=("Anuluj rysowanie (D)" if self._preview_draw_mode else "Rysuj ramkę 4 pkt (D)"))
         if hasattr(self, "preview_fullscreen_btn"):
             self.preview_fullscreen_btn.configure(
                 state=(tk.NORMAL if (has_image and not scope_selection_mode_active) else tk.DISABLED),
@@ -1371,14 +1371,14 @@ def _get_preview_bottom_hint_text(self) -> str:
         clicked_points = len(self._preview_draw_points)
         next_idx = clicked_points + 1
         next_corner = self._preview_draw_corner_label(next_idx)
-        base = f"Rysowanie | {next_corner} {next_idx}/4 | D anuluj"
+        base = f"Rysowanie ramki | kliknij {next_corner} ({next_idx}/4) | D anuluj"
     elif self._preview_delete_mode:
         if self._preview_delete_candidate_idx is not None:
             base = "Usuwanie | PPM usuwa | S anuluj"
         else:
-            base = "Usuwanie | kliknij polygon | PPM usuwa | S anuluj"
+            base = "Usuwanie | kliknij ramkę | PPM usuwa | S anuluj"
     elif not plates:
-        base = "Brak tablicy | D dodaj polygon"
+        base = "Brak ramki tablicy | D uzbrój rysowanie | kliknij 1. wierzchołek"
     else:
         selected_idx = self._get_selected_plate_index_for_ann(ann)
         plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
@@ -1395,7 +1395,7 @@ def _get_preview_bottom_hint_text(self) -> str:
         base = (
             f"Tablica {plate_no}/{len(plates)} | W+LPM róg | A lokalnie | {nav_hint} | "
             f"Spacja OK/NOK | R kadr | R+LPM zoom | R+PPM cofnij | F dopasuj | "
-            f"{super_hint} | D nowa | S usuń | Del obraz | Ctrl+Z/Y historia | Ctrl+S zapis"
+            f"{super_hint} | D nowa ramka | S usuń ramkę | Del obraz | Ctrl+Z/Y historia | Ctrl+S zapis"
         )
 
     if vehicle_suffix:
@@ -2440,12 +2440,12 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
     if autosave:
         self._schedule_preview_autosave(
             delay_ms=4500,
-            status_message="Zapisano usuniecie polygonu tablicy do annotations.xml.",
+            status_message="Zapisano usunięcie ramki tablicy do annotations.xml.",
         )
-        self._update_preview_edit_status("Usunieto polygon tablicy. Zapis nastapi za chwile.")
+        self._update_preview_edit_status("Usunięto ramkę tablicy. Zapis nastąpi za chwilę.")
         return True
 
-    self._update_preview_edit_status("Usunieto polygon tablicy. Uzyj Ctrl+S, aby zapisac zmiane do annotations.xml.")
+    self._update_preview_edit_status("Usunięto ramkę tablicy. Użyj Ctrl+S, aby zapisać zmianę do annotations.xml.")
     return True
 
 
@@ -2458,11 +2458,12 @@ def _commit_new_preview_polygon(self):
     fixed_points = PolygonValidator.fix_polygon(points)
     if not PolygonValidator.is_valid_quad(fixed_points):
         self._preview_draw_points = []
-        self._update_preview_edit_status("Nowy polygon jest zbyt maly albo nieprawidlowy. Sprobuj ponownie.")
+        self._update_preview_edit_status("Nowa ramka jest zbyt mała albo nieprawidłowa. Spróbuj ponownie.")
         self._refresh_preview_canvas()
         return
 
     self._push_preview_history_snapshot(ann, lightweight_plate_edit=True)
+    had_plate_before = bool(self._get_plate_detections(ann))
     new_det = Detection(
         label="plate",
         confidence=1.0,
@@ -2489,11 +2490,11 @@ def _commit_new_preview_polygon(self):
     except Exception:
         pass
     ann.status = AnnotationStatus.SUCCESS
-    ann.status_message = "Dodano recznie polygon tablicy."
+    ann.status_message = "Dodano ręcznie ramkę tablicy."
 
     plates = self._get_plate_detections(ann)
     self._set_selected_plate_index_for_ann(ann, len(plates) - 1)
-    # Domkniecie polygona ma byc natychmiast widoczne na canvasie.
+    # Domknięcie ramki ma być natychmiast widoczne na canvasie.
     # Pelny refresh listy zostawiamy na etap zapisu annotations.xml.
     self._mark_preview_image_dirty(
         ann,
@@ -2507,7 +2508,7 @@ def _commit_new_preview_polygon(self):
     self._schedule_preview_post_interaction_refresh(delay_ms=900)
     self._push_preview_debug_event("add", f"p{len(plates)}")
     self._update_preview_edit_status(
-        "Dodano nowy polygon tablicy. Mozesz od razu poprawic rogi; zapis nastapi za chwile.",
+        "Dodano nową ramkę tablicy. Możesz od razu poprawić rogi; zapis nastąpi za chwilę.",
         refresh_toolbar=False,
         refresh_debug=False,
     )
@@ -2541,7 +2542,7 @@ def _commit_new_preview_polygon(self):
             pass
     self._schedule_preview_autosave(
         delay_ms=6500,
-        status_message="Zapisano nowy polygon tablicy do annotations.xml.",
+        status_message="Zapisano nową ramkę tablicy do annotations.xml.",
     )
 
 
