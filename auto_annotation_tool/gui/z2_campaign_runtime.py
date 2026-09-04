@@ -3590,9 +3590,6 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     current_step = int(approval_context.get("current_step") or 0)
     repair_mode = bool(approval_context.get("repair_mode"))
     iteration_target = str(approval_context.get("iteration_target") or "").strip().lower()
-    if iteration_target not in {"plate", "char"} or not (current_step == 2 or repair_mode):
-        return {}
-
     graph_context = {}
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
@@ -3625,6 +3622,17 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
     graph_gate_is_t05_repair_from_t07 = bool(graph_gate_is_t05 and graph_repair_origin_gate_id == "T06")
     graph_gate_known = bool(graph_gate_is_t04 or graph_gate_is_t05 or graph_gate_is_t06)
     graph_gate_copy_id = graph_display_gate_id or graph_gate_id
+    graph_context_active = bool(graph_gate_id or graph_context.get("graph_edge_key"))
+
+    if iteration_target not in {"plate", "char"}:
+        if graph_gate_is_t05 or graph_gate_is_t06:
+            iteration_target = "char"
+        elif graph_gate_is_t04 or graph_context_active:
+            iteration_target = "plate"
+        else:
+            return {}
+    if not (current_step == 2 or repair_mode or graph_context_active):
+        return {}
 
     min_images = 0
     min_plate_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)

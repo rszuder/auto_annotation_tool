@@ -41,7 +41,12 @@ def get_preview_legend_theme(owner) -> dict:
         section_muted = "#4b5b6b"
         token_fill = blend_hex_colors("#ffffff", str(success), 0.05)
         token_text = "#111827"
-        panel_outline = blend_hex_colors(str(border), str(panel), 0.35)
+        panel_outline = str(
+            palette.get(
+                "panel_border_strong",
+                blend_hex_colors("#111827", str(border), 0.42),
+            )
+        )
         compass_guide = "#7b8796"
         compass_dot = "#111827"
     else:
@@ -151,8 +156,9 @@ def get_preview_controls_legend_target_width(owner) -> int:
 
     expanded = owner._is_preview_controls_legend_expanded()
     if expanded:
-        max_overlay_width = 332 if bool(getattr(owner, "_preview_fullscreen_active", False)) else 320
-        return int(max(292, min(max_overlay_width, frame_width - 24)))
+        if bool(getattr(owner, "_preview_fullscreen_active", False)):
+            return int(max(318, min(352, frame_width - 24)))
+        return int(max(276, min(306, frame_width - 24)))
 
     context = owner._get_preview_legend_context()
     rows = owner._build_preview_controls_context_rows()
@@ -166,9 +172,14 @@ def get_preview_controls_legend_target_width(owner) -> int:
             measured += 20.0
         value_width = max(value_width, measured)
     context_width = 12.0 + 64.0 + value_width + 14.0
-    compact_max = 224.0 if bool(getattr(owner, "_preview_fullscreen_active", False)) else 214.0
-    collapsed_width = max(186.0, min(max(file_width, context_width), compact_max))
-    return int(min(max(collapsed_width, 186.0), max(186, frame_width - 24)))
+    if bool(getattr(owner, "_preview_fullscreen_active", False)):
+        compact_min = 226.0
+        compact_max = 268.0
+    else:
+        compact_min = 204.0
+        compact_max = 238.0
+    collapsed_width = max(compact_min, min(max(file_width, context_width), compact_max))
+    return int(min(max(collapsed_width, compact_min), max(int(compact_min), frame_width - 24)))
 
 
 def get_preview_controls_legend_target_height(owner, width: float | None = None) -> int:
@@ -176,9 +187,9 @@ def get_preview_controls_legend_target_height(owner, width: float | None = None)
     expanded = owner._is_preview_controls_legend_expanded()
     rows = owner._build_preview_controls_context_rows()
 
-    top_pad = 8.0
-    header_h = 38.0
-    context_h = 20.0 + (len(rows) * 20.0) + 5.0
+    top_pad = 7.0
+    header_h = 34.0
+    context_h = 18.0 + (len(rows) * 18.0) + 4.0
     compact_height = top_pad + header_h + context_h + 6.0
     if not expanded:
         return int(max(108.0, compact_height))
@@ -187,10 +198,10 @@ def get_preview_controls_legend_target_height(owner, width: float | None = None)
     shortcuts_h = 0.0
     for section in sections:
         items = section.get("items", []) or []
-        section_cols = 2 if safe_width >= 340.0 else 1
+        section_cols = 2 if safe_width >= 316.0 else 1
         section_cols = max(1, min(section_cols, int(section.get("columns", section_cols) or section_cols)))
         section_rows = max(1, math.ceil(len(items) / float(section_cols)))
-        shortcuts_h += 56.0 + (section_rows * 38.0)
+        shortcuts_h += 42.0 + (section_rows * 31.0)
     return int(max(compact_height + shortcuts_h + 16.0, 240.0))
 
 
@@ -207,10 +218,12 @@ def build_preview_legend_sections(owner):
             "columns": 2,
             "items": [
                 {"tokens": ["Q", "E"], "connector": "/", "modes": ["tap", "tap"], "label": nav_label},
-                {"tokens": ["F"], "modes": ["tap"], "label": "obraz do okna"},
+                {"tokens": ["Up", "Down"], "connector": "/", "modes": ["tap", "tap"], "label": "lista"},
+                {"tokens": ["F"], "modes": ["tap"], "label": "dopasuj"},
+                {"tokens": ["MMB"], "modes": ["tap"], "label": "zoom"},
                 {"tokens": ["R", "LPM"], "connector": "+", "modes": ["hold", "hold"], "label": "płynny zoom x2"},
                 {"tokens": ["R", "PPM"], "connector": "+", "modes": ["hold", "tap"], "label": "cofnij zoom"},
-                {"tokens": ["Enter"], "modes": ["tap"], "label": "pełny ekran / wyjście"},
+                {"tokens": ["Enter"], "modes": ["tap"], "label": "pełny ekran"},
                 {"tokens": ["Y"], "modes": ["tap"], "label": "super korekta"},
             ],
         },
@@ -220,8 +233,8 @@ def build_preview_legend_sections(owner):
             "columns": 2,
             "items": [
                 {"tokens": ["A"], "modes": ["tap"], "label": "tablica +/-"},
-                {"tokens": ["Spacja"], "modes": ["tap"], "label": "zatwierdź zdjęcie"},
-                {"tokens": ["R"], "modes": ["tap"], "label": "ramka aktywnej tablicy"},
+                {"tokens": ["Spacja"], "modes": ["tap"], "label": "OK/NOK"},
+                {"tokens": ["R"], "modes": ["tap"], "label": "kadr tablicy"},
             ],
         },
         {
@@ -229,10 +242,12 @@ def build_preview_legend_sections(owner):
             "accent": "#f59e0b",
             "columns": 2,
             "items": [
-                {"tokens": ["W", "LPM"], "connector": "+", "modes": ["hold", "hold"], "label": "przesuń róg"},
+                {"tokens": ["W", "LPM"], "connector": "+", "modes": ["hold", "hold"], "label": "róg"},
                 {"tokens": ["D"], "modes": ["tap"], "label": "nowa tablica"},
                 {"tokens": ["S"], "modes": ["tap"], "label": "zaznacz polygon"},
                 {"tokens": ["PPM"], "modes": ["tap"], "label": "usuń aktywną"},
+                {"tokens": ["Delete"], "modes": ["tap"], "label": "usuń zdjęcie"},
+                {"tokens": ["Esc"], "modes": ["tap"], "label": "anuluj / wyjdź z FS"},
                 {"tokens": ["Ctrl+Z", "Ctrl+Y"], "connector": "/", "modes": ["tap", "tap"], "label": "historia"},
                 {"tokens": ["Ctrl+S"], "modes": ["tap"], "label": "zapisz"},
             ],
@@ -256,6 +271,7 @@ def _preview_controls_static_key(
     legend_mode: str,
     expanded: bool,
     width: float,
+    scroll_offset: float,
     legend_theme: dict,
     sections: list[dict],
     context_rows: list[tuple[str, str, str, str]],
@@ -264,6 +280,7 @@ def _preview_controls_static_key(
         legend_mode,
         int(bool(expanded)),
         int(width),
+        int(round(float(scroll_offset or 0.0))),
         str(legend_theme.get("canvas_bg", "")),
         str(legend_theme.get("panel_fill", "")),
         str(legend_theme.get("panel_outline", "")),
@@ -462,6 +479,20 @@ def refresh_preview_controls_legend(owner):
     shell_outline = legend_theme["panel_outline"]
     try:
         canvas.configure(bg=legend_theme["panel_fill"])
+        host_frame = getattr(owner, "preview_hint_frame", None)
+        if host_frame is not None:
+            host_frame.configure(
+                bg=legend_theme["panel_fill"],
+                highlightbackground=legend_theme["panel_outline"],
+                highlightcolor=legend_theme["panel_outline"],
+            )
+        vbar = getattr(owner, "preview_controls_vbar", None)
+        if vbar is not None and hasattr(vbar, "configure_style"):
+            vbar.configure_style(
+                track_color=legend_theme["panel_fill"],
+                thumb_color=legend_theme["badge_plate_outline"],
+                thumb_hover_color=legend_theme["shell_outline"],
+            )
     except Exception:
         pass
     sections = owner._build_preview_legend_sections()
@@ -469,7 +500,7 @@ def refresh_preview_controls_legend(owner):
     expanded = owner._is_preview_controls_legend_expanded()
     requested_scroll_offset = (
         float(getattr(owner, "_preview_controls_legend_scroll_offset", 0.0) or 0.0)
-        if expanded and not bool(getattr(owner, "_preview_fullscreen_active", False))
+        if expanded
         else 0.0
     )
     context = owner._get_preview_legend_context()
@@ -479,6 +510,7 @@ def refresh_preview_controls_legend(owner):
         legend_mode=legend_mode,
         expanded=expanded,
         width=width,
+        scroll_offset=requested_scroll_offset,
         legend_theme=legend_theme,
         sections=sections,
         context_rows=context_rows,
@@ -587,7 +619,7 @@ def refresh_preview_controls_legend(owner):
     file_bbox = canvas.bbox("preview_legend_context")
     current_y = float(file_bbox[3] + 6.0) if file_bbox else current_y + 18.0
 
-    row_h = 20.0
+    row_h = 18.0
     context_value_x = inner_pad_x + 64.0
     for idx, (row_label, row_value, row_fill, row_outline) in enumerate(context_rows):
         block_y = current_y + (idx * row_h)
@@ -661,7 +693,7 @@ def refresh_preview_controls_legend(owner):
                 }
             )
 
-    current_y += (len(context_rows) * row_h) + 1.0
+    current_y += (len(context_rows) * row_h) + 0.0
 
     if not expanded:
         try:
@@ -682,6 +714,7 @@ def refresh_preview_controls_legend(owner):
             canvas.tag_lower(shell_id)
         except Exception:
             pass
+        owner._preview_controls_legend_rendered_scroll_offset = 0.0
         owner._preview_controls_legend_static_key = static_key
         owner._preview_controls_legend_render_key = legend_key
         try:
@@ -703,27 +736,28 @@ def refresh_preview_controls_legend(owner):
         tags=("preview_legend",),
     )
 
-    outer_pad_x = 10.0
-    outer_pad_y = separator_y + 10.0
-    section_gap_y = 16.0
-    token_gap = 12.0
-    label_gap_x = 10.0
+    outer_pad_x = 9.0
+    outer_pad_y = separator_y + 8.0
+    section_gap_y = 10.0
+    token_gap = 8.0
+    label_gap_x = 7.0
     title_font = owner._get_preview_legend_font(7, "bold")
     desc_font = owner._get_preview_legend_font(8, "normal")
     max_bottom = outer_pad_y
     current_y = outer_pad_y
     content_w = shell_width - (outer_pad_x * 2.0) - 2.0
-    base_shortcut_cols = 2 if shell_width >= 340.0 else 1
-    shortcut_col_gap = 18.0
-    item_row_h = 38.0
+    base_shortcut_cols = 2 if shell_width >= 316.0 else 1
+    shortcut_col_gap = 12.0
+    item_row_h = 31.0
     shortcut_layout = []
     shortcuts_total_h = 0.0
+    scroll_tags = ("preview_legend", "preview_legend_scroll_content")
     for section in sections:
         shortcut_cols = max(1, min(base_shortcut_cols, int(section.get("columns", base_shortcut_cols) or base_shortcut_cols)))
         shortcut_col_w = max(136.0, (content_w - (shortcut_col_gap * (shortcut_cols - 1))) / float(shortcut_cols))
         section_rows = max(1, math.ceil(len(section.get("items", [])) / float(shortcut_cols)))
         title_h = float(title_font.metrics("linespace"))
-        section_box_h = 14.0 + (section_rows * item_row_h) + 12.0
+        section_box_h = 10.0 + (section_rows * item_row_h) + 8.0
         shortcut_layout.append((section, shortcut_cols, shortcut_col_w, section_rows, title_h, section_box_h))
         shortcuts_total_h += title_h + 4.0 + section_box_h + section_gap_y
 
@@ -751,7 +785,7 @@ def refresh_preview_controls_legend(owner):
             fill=legend_theme["section_title"],
             anchor="nw",
             font=title_font,
-            tags=("preview_legend",),
+            tags=scroll_tags,
         )
         section_shell = owner._get_preview_legend_group_shell_photo(
             legend_theme,
@@ -765,15 +799,15 @@ def refresh_preview_controls_legend(owner):
             section_box_y,
             image=section_shell,
             anchor="nw",
-            tags=("preview_legend",),
+            tags=scroll_tags,
         )
 
-        row_base_y = section_box_y + 12.0
+        row_base_y = section_box_y + 9.0
 
         for item_idx, item in enumerate(section.get("items", [])):
             local_col = item_idx % shortcut_cols
             local_row = item_idx // shortcut_cols
-            item_x = section_box_x + 10.0 + (local_col * (shortcut_col_w + shortcut_col_gap))
+            item_x = section_box_x + 8.0 + (local_col * (shortcut_col_w + shortcut_col_gap))
             row_y = row_base_y + (local_row * item_row_h)
             tokens = [str(token) for token in item.get("tokens", [])]
             connector = str(item.get("connector", "") or "")
@@ -781,8 +815,8 @@ def refresh_preview_controls_legend(owner):
             modes = [str(mode) for mode in item.get("modes", []) or []]
             token_x = item_x
             prev_right = None
-            key_y = row_y + 7.0
-            label_y = row_y + 12.0
+            key_y = row_y + 6.0
+            label_y = row_y + 9.0
 
             for token_idx, token_text in enumerate(tokens):
                 if token_idx > 0 and connector:
@@ -794,7 +828,7 @@ def refresh_preview_controls_legend(owner):
                         fill=plus_fill,
                         anchor="center",
                         font=owner._get_preview_legend_font((8 if connector == "+" else 6), "bold"),
-                        tags=("preview_legend",),
+                        tags=scroll_tags,
                     )
                 token_mode = modes[token_idx] if token_idx < len(modes) else str(item.get("mode", "") or "")
                 token_w, _token_h = draw_preview_legend_keycap(
@@ -807,6 +841,7 @@ def refresh_preview_controls_legend(owner):
                     outline=str(section.get("accent", "#3498db")),
                     text_fill=legend_theme["token_text"],
                     interaction=token_mode,
+                    tags=scroll_tags,
                 )
                 prev_right = token_x + float(token_w)
                 if token_idx < (len(tokens) - 1):
@@ -822,7 +857,7 @@ def refresh_preview_controls_legend(owner):
                 anchor="nw",
                 width=label_width,
                 font=desc_font,
-                tags=("preview_legend",),
+                tags=scroll_tags,
             )
 
         current_y += title_h + 4.0 + section_box_h + section_gap_y
@@ -849,7 +884,7 @@ def refresh_preview_controls_legend(owner):
         viewport_height = max(80, min(viewport_height, content_height))
         canvas.configure(
             height=viewport_height,
-            scrollregion=(0, 0, final_width, viewport_height),
+            scrollregion=(0, 0, final_width, content_height),
         )
         max_scroll = max(0.0, float(content_height - viewport_height))
         scroll_offset = max(0.0, min(float(getattr(owner, "_preview_controls_legend_scroll_offset", 0.0) or 0.0), max_scroll))
@@ -878,17 +913,18 @@ def refresh_preview_controls_legend(owner):
             try:
                 vbar = getattr(owner, "preview_controls_vbar", None)
                 if vbar is not None:
-                    first = scroll_offset / max_scroll
-                    visible = float(viewport_height) / max(float(content_height), 1.0)
-                    vbar.set(first, min(1.0, first + visible))
+                    content_denominator = max(float(content_height), 1.0)
+                    first = max(0.0, min(1.0, scroll_offset / content_denominator))
+                    last = max(first, min(1.0, (scroll_offset + float(viewport_height)) / content_denominator))
+                    vbar.set(first, last)
             except Exception:
                 pass
         owner._preview_controls_legend_current_width = float(final_width)
         owner._preview_controls_legend_current_height = float(viewport_height)
         owner._preview_controls_legend_content_height = float(content_height)
+        owner._preview_controls_legend_rendered_scroll_offset = float(scroll_offset)
         owner._preview_controls_legend_scroll_enabled = bool(
             expanded
-            and not bool(getattr(owner, "_preview_fullscreen_active", False))
             and content_height > viewport_height + 2
         )
     except Exception:
@@ -918,10 +954,12 @@ def draw_preview_legend_interaction_marker(
     fill: str,
     outline: str,
     text_fill: str,
+    tags: tuple[str, ...] | None = None,
 ) -> None:
     mode = owner._normalize_preview_legend_interaction(interaction)
     if not mode:
         return
+    item_tags = tuple(tags or ("preview_legend",))
 
     center_x = float(x) + (float(width) / 2.0)
     if mode == "tap":
@@ -943,7 +981,7 @@ def draw_preview_legend_interaction_marker(
             marker_y,
             image=photo,
             anchor="nw",
-            tags=("preview_legend",),
+            tags=item_tags,
         )
         return
 
@@ -965,7 +1003,7 @@ def draw_preview_legend_interaction_marker(
         marker_y,
         image=photo,
         anchor="nw",
-        tags=("preview_legend",),
+        tags=item_tags,
     )
 
 
@@ -980,7 +1018,9 @@ def draw_preview_legend_keycap(
     outline: str,
     text_fill: str,
     interaction: str | None = None,
+    tags: tuple[str, ...] | None = None,
 ):
+    item_tags = tuple(tags or ("preview_legend",))
     photo, width, height = owner._get_preview_legend_keycap_photo(
         str(text),
         fill=fill,
@@ -993,7 +1033,7 @@ def draw_preview_legend_keycap(
         y,
         image=photo,
         anchor="nw",
-        tags=("preview_legend",),
+        tags=item_tags,
     )
     draw_preview_legend_interaction_marker(
         owner,
@@ -1005,6 +1045,7 @@ def draw_preview_legend_keycap(
         fill=fill,
         outline=outline,
         text_fill=text_fill,
+        tags=item_tags,
     )
     font_obj = owner._get_preview_legend_font(7, "bold")
     canvas.create_text(
@@ -1014,7 +1055,7 @@ def draw_preview_legend_keycap(
         fill=text_fill,
         anchor="center",
         font=font_obj,
-        tags=("preview_legend",),
+        tags=item_tags,
     )
     return float(width), float(height)
 

@@ -1445,7 +1445,9 @@ def _animate_preview_controls_legend_height(self):
                 refresh=False,
             )
             self._preview_controls_legend_current_width = final_width
-            self._preview_controls_legend_current_height = final_height
+            self._preview_controls_legend_current_height = float(
+                getattr(self, "_preview_controls_legend_viewport_height", final_height) or final_height
+            )
             self._preview_controls_legend_render_width_override = 0.0
             self._preview_controls_legend_render_height_override = 0.0
             self._preview_controls_legend_animating = False
@@ -1482,10 +1484,7 @@ def _sync_preview_controls_legend_scrollbar(self) -> None:
     if canvas is None or vbar is None:
         return
     try:
-        expanded_inline = bool(
-            (not getattr(self, "_preview_fullscreen_active", False))
-            and self._is_preview_controls_legend_expanded()
-        )
+        expanded_scrollable = bool(self._is_preview_controls_legend_expanded())
         content_h = float(getattr(self, "_preview_controls_legend_content_height", 0.0) or 0.0)
         viewport_h = float(
             getattr(self, "_preview_controls_legend_viewport_height", 0.0)
@@ -1493,16 +1492,20 @@ def _sync_preview_controls_legend_scrollbar(self) -> None:
             or canvas.winfo_height()
             or 0.0
         )
-        scroll_enabled = bool(expanded_inline and content_h > viewport_h + 2.0)
+        scroll_enabled = bool(expanded_scrollable and content_h > viewport_h + 2.0)
         self._preview_controls_legend_scroll_enabled = scroll_enabled
         if scroll_enabled:
             if not str(vbar.winfo_manager()):
                 vbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(3, 0))
             try:
+                try:
+                    legend_theme = self._get_preview_legend_theme()
+                except Exception:
+                    legend_theme = {}
                 vbar.configure_style(
-                    track_color="#10251d",
-                    thumb_color="#4ade80",
-                    thumb_hover_color="#86efac",
+                    track_color=str(legend_theme.get("panel_fill", "#10251d")),
+                    thumb_color=str(legend_theme.get("badge_plate_outline", "#4ade80")),
+                    thumb_hover_color=str(legend_theme.get("shell_outline", "#86efac")),
                 )
                 max_scroll = max(0.0, content_h - viewport_h)
                 if max_scroll > 0.0 and content_h > 0.0:
@@ -1510,15 +1513,18 @@ def _sync_preview_controls_legend_scrollbar(self) -> None:
                         0.0,
                         min(float(getattr(self, "_preview_controls_legend_scroll_offset", 0.0) or 0.0), max_scroll),
                     )
-                    first = offset / max_scroll
-                    visible = max(0.0, min(1.0, viewport_h / content_h))
-                    vbar.set(first, min(1.0, first + visible))
+                    first = max(0.0, min(1.0, offset / max(content_h, 1.0)))
+                    last = max(first, min(1.0, (offset + viewport_h) / max(content_h, 1.0)))
+                    vbar.set(first, last)
                 else:
                     vbar.set(0.0, 1.0)
                 vbar.lift()
             except Exception:
                 pass
-            canvas.configure(yscrollcommand=vbar.set)
+            try:
+                canvas.configure(yscrollcommand="")
+            except Exception:
+                pass
         else:
             if str(vbar.winfo_manager()):
                 vbar.pack_forget()
@@ -1559,15 +1565,16 @@ def _place_preview_legend_overlay(
         overlay_width = float(self._get_preview_controls_legend_target_width())
     self._preview_controls_legend_current_width = overlay_width
 
+    expanded_scrollable = bool(self._is_preview_controls_legend_expanded())
+    content_height = float(self._get_preview_controls_legend_target_height(overlay_width))
     if height_override is not None:
         overlay_height = float(height_override or 0.0)
     elif fullscreen:
         overlay_height = float(getattr(self, "_preview_controls_legend_current_height", 0.0) or 0.0)
     else:
-        overlay_height = float(self._get_preview_controls_legend_target_height(overlay_width))
+        overlay_height = float(content_height)
     if overlay_height <= 0.0:
-        overlay_height = float(self._get_preview_controls_legend_target_height(overlay_width))
-    content_height = float(overlay_height)
+        overlay_height = float(content_height)
 
     if fullscreen:
         offset_x = float(getattr(self, "_preview_controls_legend_offset_x", 10.0) or 10.0)
@@ -1580,11 +1587,7 @@ def _place_preview_legend_overlay(
         offset_x = 10.0
         offset_y = 52.0
 
-    expanded_inline = bool(
-        (not fullscreen)
-        and self._is_preview_controls_legend_expanded()
-    )
-    if expanded_inline:
+    if expanded_scrollable:
         try:
             frame_h = float(canvas_frame.winfo_height() or canvas_frame.winfo_reqheight() or 0.0)
         except Exception:
@@ -1594,7 +1597,7 @@ def _place_preview_legend_overlay(
             overlay_height = min(content_height, available_h)
     self._preview_controls_legend_content_height = float(content_height)
     self._preview_controls_legend_viewport_height = float(overlay_height)
-    self._preview_controls_legend_scroll_enabled = bool(expanded_inline and content_height > overlay_height + 2.0)
+    self._preview_controls_legend_scroll_enabled = bool(expanded_scrollable and content_height > overlay_height + 2.0)
     if not bool(getattr(self, "_preview_controls_legend_scroll_enabled", False)):
         self._preview_controls_legend_scroll_offset = 0.0
         controls_canvas = getattr(self, "preview_controls_canvas", None)
@@ -2278,6 +2281,9 @@ def on_zoomable_canvas_should_block_pan(self, canvas: ZoomableCanvas, event):
     if self._preview_drag_state is not None:
         return True
 
+    if isinstance(getattr(self, "_preview_bottom_hint_drag_state", None), dict):
+        return True
+
     if self._preview_pending_vertex_hit is not None:
         return True
 
@@ -2321,6 +2327,26 @@ def _get_preview_canvas_cursor(self) -> str:
     pointer_pos = self._get_preview_pointer_canvas_position()
     if pointer_pos is not None:
         canvas_x, canvas_y = pointer_pos
+        bbox = getattr(self, "_preview_bottom_hint_move_bbox", None)
+        if isinstance(bbox, tuple) and len(bbox) == 4:
+            try:
+                x1, y1, x2, y2 = [float(value) for value in bbox]
+                if x1 <= float(canvas_x) <= x2 and y1 <= float(canvas_y) <= y2:
+                    return "fleur"
+            except Exception:
+                pass
+        for bbox_name in (
+            "_preview_bottom_hint_restore_bbox",
+            "_preview_bottom_hint_collapse_bbox",
+        ):
+            bbox = getattr(self, bbox_name, None)
+            if isinstance(bbox, tuple) and len(bbox) == 4:
+                try:
+                    x1, y1, x2, y2 = [float(value) for value in bbox]
+                    if x1 <= float(canvas_x) <= x2 and y1 <= float(canvas_y) <= y2:
+                        return "hand2"
+                except Exception:
+                    pass
         if self._is_preview_fullscreen_toggle_hit(canvas_x, canvas_y):
             return "hand2"
         if self._is_preview_super_correction_handle_hit(canvas_x, canvas_y):

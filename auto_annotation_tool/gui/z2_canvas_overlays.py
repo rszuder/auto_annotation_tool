@@ -398,11 +398,76 @@ def _sync_preview_controls_scrollbar_thumb(self) -> None:
             vbar.set(0.0, 1.0)
             return
         offset = max(0.0, min(float(getattr(self, "_preview_controls_legend_scroll_offset", 0.0) or 0.0), max_scroll))
-        first = offset / max_scroll
-        visible = max(0.0, min(1.0, viewport_h / content_h))
-        vbar.set(first, min(1.0, first + visible))
+        first = max(0.0, min(1.0, offset / max(content_h, 1.0)))
+        last = max(first, min(1.0, (offset + viewport_h) / max(content_h, 1.0)))
+        vbar.set(first, last)
     except Exception:
         pass
+
+def _apply_preview_controls_legend_scroll_offset(self, next_offset: float) -> bool:
+    canvas = getattr(self, "preview_controls_canvas", None)
+    if canvas is None:
+        return False
+    try:
+        if not canvas.find_withtag("preview_legend_scroll_content"):
+            return False
+        content_h = float(getattr(self, "_preview_controls_legend_content_height", 0.0) or 0.0)
+        viewport_h = float(
+            getattr(self, "_preview_controls_legend_current_height", 0.0)
+            or canvas.winfo_height()
+            or 0.0
+        )
+        max_scroll = max(0.0, content_h - viewport_h)
+        next_scroll = max(0.0, min(float(next_offset or 0.0), max_scroll))
+        old_scroll = float(
+            getattr(
+                self,
+                "_preview_controls_legend_rendered_scroll_offset",
+                getattr(self, "_preview_controls_legend_scroll_offset", 0.0),
+            )
+            or 0.0
+        )
+        delta = old_scroll - next_scroll
+        if abs(delta) > 0.01:
+            canvas.move("preview_legend_scroll_content", 0.0, delta)
+        self._preview_controls_legend_scroll_offset = float(next_scroll)
+        self._preview_controls_legend_rendered_scroll_offset = float(next_scroll)
+        _sync_preview_controls_scrollbar_thumb(self)
+        return True
+    except Exception:
+        return False
+
+def _preview_controls_pointer_inside(self, event=None) -> bool:
+    """Return True only when the mouse is over the compass overlay."""
+    event_x = None
+    event_y = None
+    if event is not None:
+        try:
+            event_x = int(getattr(event, "x_root"))
+            event_y = int(getattr(event, "y_root"))
+        except Exception:
+            event_x = None
+            event_y = None
+    for widget_name in (
+        "preview_hint_frame",
+        "preview_controls_canvas",
+        "preview_controls_vbar",
+    ):
+        widget = getattr(self, widget_name, None)
+        if widget is None:
+            continue
+        try:
+            px = event_x if event_x is not None else int(widget.winfo_pointerx())
+            py = event_y if event_y is not None else int(widget.winfo_pointery())
+            x1 = int(widget.winfo_rootx())
+            y1 = int(widget.winfo_rooty())
+            x2 = x1 + int(widget.winfo_width())
+            y2 = y1 + int(widget.winfo_height())
+            if x1 <= px <= x2 and y1 <= py <= y2:
+                return True
+        except Exception:
+            continue
+    return False
 
 def _on_preview_controls_scrollbar_command(self, *args):
     canvas = getattr(self, "preview_controls_canvas", None)
@@ -416,21 +481,26 @@ def _on_preview_controls_scrollbar_command(self, *args):
             or 0.0
         )
         max_scroll = max(0.0, content_h - viewport_h)
+        next_offset = float(getattr(self, "_preview_controls_legend_scroll_offset", 0.0) or 0.0)
         if max_scroll <= 0.0:
-            self._preview_controls_legend_scroll_offset = 0.0
+            next_offset = 0.0
         elif len(args) >= 2 and str(args[0]) == "moveto":
             fraction = max(0.0, min(float(args[1]), 1.0))
-            self._preview_controls_legend_scroll_offset = max(0.0, min(fraction * max_scroll, max_scroll))
+            # WebSlimScrollbar reports the standard Tk "first" fraction
+            # (top/content), so convert it back to pixels using content height.
+            next_offset = max(0.0, min(fraction * content_h, max_scroll))
         elif len(args) >= 3 and str(args[0]) == "scroll":
             units = float(args[1])
             mode = str(args[2])
-            step = viewport_h if mode == "pages" else 34.0
+            step = viewport_h if mode == "pages" else 54.0
             current = float(getattr(self, "_preview_controls_legend_scroll_offset", 0.0) or 0.0)
-            self._preview_controls_legend_scroll_offset = max(0.0, min(current + (units * step), max_scroll))
-        self._preview_controls_legend_render_key = None
-        self._preview_controls_legend_static_key = None
-        self._refresh_preview_controls_legend()
-        _sync_preview_controls_scrollbar_thumb(self)
+            next_offset = max(0.0, min(current + (units * step), max_scroll))
+        if not _apply_preview_controls_legend_scroll_offset(self, next_offset):
+            self._preview_controls_legend_scroll_offset = float(next_offset)
+            self._preview_controls_legend_render_key = None
+            self._preview_controls_legend_static_key = None
+            self._refresh_preview_controls_legend()
+            _sync_preview_controls_scrollbar_thumb(self)
     except Exception:
         pass
     return "break"
@@ -438,8 +508,25 @@ def _on_preview_controls_scrollbar_command(self, *args):
 def _on_preview_controls_legend_mousewheel(self, event=None):
     if event is None:
         return None
-    if not bool(getattr(self, "_preview_controls_legend_scroll_enabled", False)):
+    direct_widgets = {
+        widget
+        for widget in (
+            getattr(self, "preview_hint_frame", None),
+            getattr(self, "preview_controls_canvas", None),
+            getattr(self, "preview_controls_vbar", None),
+        )
+        if widget is not None
+    }
+    if getattr(event, "widget", None) not in direct_widgets and not _preview_controls_pointer_inside(self, event):
         return None
+    if not bool(getattr(self, "_preview_controls_legend_scroll_enabled", False)):
+        try:
+            if self._is_preview_controls_legend_expanded():
+                self._place_preview_legend_overlay(refresh=True)
+        except Exception:
+            pass
+        if not bool(getattr(self, "_preview_controls_legend_scroll_enabled", False)):
+            return None
     canvas = getattr(self, "preview_controls_canvas", None)
     if canvas is None:
         return None
@@ -463,16 +550,41 @@ def _on_preview_controls_legend_mousewheel(self, event=None):
     else:
         return None
     current = float(getattr(self, "_preview_controls_legend_scroll_offset", 0.0) or 0.0)
-    next_offset = max(0.0, min(current + (steps * 34.0), max_scroll))
-    self._preview_controls_legend_scroll_offset = float(next_offset)
+    next_offset = max(0.0, min(current + (steps * 54.0), max_scroll))
     try:
-        self._preview_controls_legend_render_key = None
-        self._preview_controls_legend_static_key = None
-        self._refresh_preview_controls_legend()
-        _sync_preview_controls_scrollbar_thumb(self)
+        if not _apply_preview_controls_legend_scroll_offset(self, next_offset):
+            self._preview_controls_legend_scroll_offset = float(next_offset)
+            self._preview_controls_legend_render_key = None
+            self._preview_controls_legend_static_key = None
+            self._refresh_preview_controls_legend()
+            _sync_preview_controls_scrollbar_thumb(self)
     except Exception:
         pass
     return "break"
+
+def _handle_preview_canvas_overlay_mousewheel(self, event=None):
+    if not bool(getattr(self, "_preview_controls_legend_visible", True)):
+        return None
+    if not bool(getattr(self, "_preview_controls_legend_hover", False)) and not _preview_controls_pointer_inside(self, event):
+        return None
+    result = _on_preview_controls_legend_mousewheel(self, event)
+    return "break" if result == "break" or _preview_controls_pointer_inside(self, event) else result
+
+def _on_preview_controls_legend_enter(self, event=None):
+    """Let the compass capture mouse-wheel events as soon as the cursor enters it."""
+    self._preview_controls_legend_hover = True
+    canvas = getattr(self, "preview_controls_canvas", None)
+    target = canvas or getattr(event, "widget", None)
+    try:
+        if target is not None:
+            target.focus_set()
+    except Exception:
+        pass
+    try:
+        self._sync_preview_controls_legend_scrollbar()
+    except Exception:
+        pass
+    return None
 
 def _on_preview_controls_legend_press(self, event=None):
     if event is None:
@@ -603,6 +715,7 @@ def _on_preview_controls_legend_motion(self, event=None):
     return None
 
 def _on_preview_controls_legend_leave(self, event=None):
+    self._preview_controls_legend_hover = False
     for widget_name in ("preview_hint_frame", "preview_controls_canvas"):
         widget = getattr(self, widget_name, None)
         if widget is None:
@@ -727,6 +840,7 @@ def _hide_preview_overlay_dock_stack(self) -> None:
     self._preview_overlay_dock_pre_gate_key = None
     self._preview_overlay_dock_gate_render_key = None
     self._preview_overlay_dock_inline_gate_state = None
+    self._preview_overlay_dock_inline_gate_source_key = None
     dock = getattr(self, "preview_overlay_dock", None)
     if dock is not None:
         try:
@@ -953,6 +1067,7 @@ def _toggle_preview_overlay_dock(self, event=None):
     self._preview_overlay_dock_pre_gate_key = None
     self._preview_overlay_dock_gate_render_key = None
     self._preview_overlay_dock_inline_gate_state = None
+    self._preview_overlay_dock_inline_gate_source_key = None
     self._place_preview_overlay_dock(force_render=True)
     try:
         self.preview_canvas.focus_set()
@@ -1002,6 +1117,7 @@ def _toggle_preview_overlay_dock_tool(self, tool_key: str):
     self._preview_overlay_dock_pre_gate_key = None
     self._preview_overlay_dock_gate_render_key = None
     self._preview_overlay_dock_inline_gate_state = None
+    self._preview_overlay_dock_inline_gate_source_key = None
     self._place_preview_overlay_dock(force_render=True)
     try:
         self.preview_canvas.focus_set()
@@ -1360,8 +1476,8 @@ def _update_preview_canvas_metrics_overlay(self, *, force_render: bool = False) 
     warning = str(palette.get("warning", "#f39c12"))
     success = str(palette.get("success", "#4ec9b0"))
     error = str(palette.get("error", "#e74c3c"))
-    row_fill = blend_hex_colors(outline, fill, 0.16)
-    row_alt = blend_hex_colors(outline, fill, 0.09)
+    row_fill = blend_hex_colors(fill, outline, 0.10)
+    row_alt = blend_hex_colors(fill, outline, 0.05)
     icon_bg = blend_hex_colors(accent, fill, 0.34)
     grab_fill = str(legend_theme.get("entry_fill", palette.get("field", "#3a3f46")))
 

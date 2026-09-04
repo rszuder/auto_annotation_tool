@@ -28,11 +28,30 @@ def _safe_window_state(window) -> str:
         return ""
 
 
+def _window_recovery_suspended(app) -> bool:
+    try:
+        return bool(
+            getattr(app, "_native_file_dialog_active", False)
+            or getattr(app, "_window_recovery_suspended", False)
+        )
+    except Exception:
+        return False
+
+
+def _window_recovery_opted_out(window) -> bool:
+    try:
+        return bool(getattr(window, "_aat_skip_window_recovery", False))
+    except Exception:
+        return False
+
+
 def _append_recoverable_toplevel(app, window, result: list, seen: set[str]) -> None:
     top = _safe_toplevel(window)
     if top is None or top is getattr(app, "root", None):
         return
     if not _safe_widget_exists(top):
+        return
+    if _window_recovery_opted_out(top):
         return
     key = str(top)
     if key in seen:
@@ -102,6 +121,9 @@ def _release_stale_grab(app) -> None:
 
 def restore_app_window_stack(app, *, active_window=None, force_topmost: bool = False) -> None:
     """Raise root plus registered modeless windows without making them modal."""
+
+    if _window_recovery_suspended(app):
+        return
 
     root = getattr(app, "root", None)
     if not _safe_widget_exists(root):
@@ -196,7 +218,20 @@ def register_recoverable_toplevel(app, window, *, attr_name: str = "") -> None:
     except Exception:
         pass
 
+    try:
+        already_bound = bool(getattr(window, "_aat_recovery_bindings_installed", False))
+    except Exception:
+        already_bound = False
+    if already_bound:
+        return
+    try:
+        setattr(window, "_aat_recovery_bindings_installed", True)
+    except Exception:
+        pass
+
     def _restore_from_tool_window(event=None) -> None:
+        if _window_recovery_suspended(app):
+            return
         try:
             if getattr(event, "widget", None) is not window:
                 return
@@ -284,6 +319,8 @@ def release_preview_fullscreens_for_recovery(app):
 
 
 def on_root_unmap(app, event=None):
+    if _window_recovery_suspended(app):
+        return None
     if getattr(event, "widget", None) is not app.root:
         return None
     try:
@@ -305,6 +342,8 @@ def on_root_unmap(app, event=None):
 
 
 def on_root_map(app, event=None):
+    if _window_recovery_suspended(app):
+        return None
     if getattr(event, "widget", None) is not app.root:
         return None
     app._window_restore_pending = True
@@ -313,6 +352,8 @@ def on_root_map(app, event=None):
 
 
 def on_root_visibility(app, event=None):
+    if _window_recovery_suspended(app):
+        return None
     if getattr(event, "widget", None) is not app.root:
         return None
     if not bool(getattr(app, "_window_restore_pending", False)) and int(getattr(app, "_window_restore_attempts", 0) or 0) <= 0:
@@ -322,6 +363,8 @@ def on_root_visibility(app, event=None):
 
 
 def on_root_focus_in(app, event=None):
+    if _window_recovery_suspended(app):
+        return None
     if getattr(event, "widget", None) is not app.root:
         return None
     if not bool(getattr(app, "_window_restore_pending", False)) and int(getattr(app, "_window_restore_attempts", 0) or 0) <= 0:
@@ -332,6 +375,8 @@ def on_root_focus_in(app, event=None):
 
 
 def schedule_root_recovery(app, delay_ms: int = 60, *, reset_attempts: bool = False):
+    if _window_recovery_suspended(app):
+        return
     if reset_attempts:
         app._window_restore_attempts = 0
     try:
@@ -348,6 +393,8 @@ def schedule_root_recovery(app, delay_ms: int = 60, *, reset_attempts: bool = Fa
 
 def recover_root_after_map(app):
     app._window_restore_after_id = None
+    if _window_recovery_suspended(app):
+        return
     try:
         root_state = str(app.root.state())
     except Exception:

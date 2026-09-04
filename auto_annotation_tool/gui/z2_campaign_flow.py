@@ -425,6 +425,15 @@ def open_campaign_step2_entry(
             )
         except Exception:
             pass
+        t04_plate_work_entry = bool(
+            target == "plate"
+            and int(current_step_for_graph or 0) == 2
+            and campaign_gate_id_for_edge(
+                graph_context.get("graph_edge_key"),
+                graph_context.get("graph_gate_id"),
+            )
+            == "T04"
+        )
         campaign_mode_text = "B: Tylko tablice"
 
         raw_dir = CAMPAIGN.get_dir("raw")
@@ -759,6 +768,20 @@ def open_campaign_step2_entry(
                 restore_manifest = {}
             manual_template = bool(host._annotation_run_manifest_is_manual_template(restore_manifest))
             bootstrap["manual_template"] = manual_template
+        if t04_plate_work_entry and restore_run_dir is None and not bool(
+            graph_context.get("allow_auto_annotation_entry")
+            or graph_context.get("force_auto_annotation_entry")
+        ):
+            manual_template = True
+            bootstrap["manual_template"] = True
+            bootstrap["input_source"] = str(bootstrap.get("input_source") or "t04_manual_work_entry")
+            input_source = str(bootstrap.get("input_source") or input_source or "t04_manual_work_entry").strip()
+            try:
+                logger.info(
+                    "[Z2 GRAPH] T04 entry forced to manual workflow; autoannotation requires explicit Z2 action."
+                )
+            except Exception:
+                pass
         if not host._should_restore_existing_campaign_step2_run(target):
             restore_run_dir = None
             bootstrap["restore_run_dir"] = None
@@ -1054,6 +1077,7 @@ def open_campaign_step2_entry(
             and str(host._get_workflow_route() or "").strip().lower() == "manual"
             and str(host._get_manual_entry_mode() or "").strip().lower() == "new"
             and Path(input_dir).exists()
+            and not t04_plate_work_entry
             and not bool(getattr(host, "_campaign_manual_prepare_pending", False))
         ):
             try:
@@ -1087,6 +1111,11 @@ def open_campaign_step2_entry(
             "input_source": input_source,
             "restored_snapshot": bool(restored_snapshot),
             "opened_existing_run": bool(opened_existing_run),
+            "manual_prepare_deferred_to_user": bool(
+                t04_plate_work_entry
+                and effective_manual_template
+                and not opened_existing_run
+            ),
             "restore_run_dir": str(restore_run_dir or ""),
             "plate_model_path": plate_model_path,
             "deferred_preview_load": deferred_preview_load,
@@ -1264,11 +1293,25 @@ def prepare_campaign_workflow_runtime(
         available_primary_action_ids = []
 
     current_route = str(route or "").strip().lower()
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+    except Exception:
+        graph_gate_id = ""
+    t04_plate_work_entry = bool(
+        int(campaign_stage or 0) == 2
+        and campaign_iteration_target == "plate"
+        and graph_gate_id == "T04"
+    )
     if (
         int(campaign_stage or 0) == 2
         and campaign_iteration_target in {"plate", "char"}
         and "auto" in available_primary_action_ids
         and current_route != "manual"
+        and not t04_plate_work_entry
         and (
             (campaign_iteration_target == "plate" and int(campaign_iteration_num or 1) > 1)
             or campaign_iteration_target == "char"
@@ -1335,10 +1378,30 @@ def build_z2_cta_state_campaign(
     manual_setup: bool,
     campaign_reused_manual_count: int,
 ) -> Z2CtaState:
+    graph_context: dict[str, Any] = {}
+    try:
+        graph_context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
+        graph_gate_id = campaign_gate_id_for_edge(
+            graph_context.get("graph_edge_key"),
+            graph_context.get("graph_gate_id"),
+        )
+    except Exception:
+        graph_gate_id = ""
+    try:
+        from ..campaign_manager import CAMPAIGN
+
+        t04_plate_work_entry = bool(
+            graph_gate_id == "T04"
+            and int(CAMPAIGN.get_current_step() or 0) == 2
+            and str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "plate"
+        )
+    except Exception:
+        t04_plate_work_entry = bool(graph_gate_id == "T04")
     manual_auto_bootstrap = bool(
         manual_setup
         and input_dir_ready
         and not manual_run_already_created
+        and not t04_plate_work_entry
     )
     campaign_auto_start_ready = bool(
         route == "auto"
@@ -1397,8 +1460,13 @@ def build_z2_cta_state_campaign(
             start_text = "Wybierz obrazy"
             start_command = host._select_input_dir
         else:
-            start_enabled = False
-            start_text = "Przygotowuję Z2"
+            if t04_plate_work_entry:
+                start_enabled = not host.is_processing
+                start_text = "Przygotuj roboczy XML Z2"
+                start_command = host._start_annotation
+            else:
+                start_enabled = False
+                start_text = "Przygotowuję Z2"
 
     if route == "auto" and input_dir_ready:
         start_command = _start_campaign_auto_action

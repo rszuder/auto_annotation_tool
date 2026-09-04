@@ -750,7 +750,15 @@ class CampaignTab:
         if not selected:
             return False
 
+        campaign_step1_ingest._show_ingest_plan_progress_dialog(self, selected, parent=parent)
+        campaign_step1_ingest._update_ingest_plan_progress_dialog(
+            self,
+            6,
+            "Weryfikuję wybrany katalog obrazów.",
+            "Sprawdzam, czy wskazany folder zawiera obrazy i czy nie jest zbyt szeroki.",
+        )
         if not CAMPAIGN.set_master_pool_dir(selected):
+            campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
             self.app.themed_info(
                 "Nieprawidłowy katalog zdjęć",
                 (
@@ -762,7 +770,20 @@ class CampaignTab:
             )
             return False
         try:
-            self._sync_iteration_artifact_registry_from_project_start()
+            campaign_step1_ingest._update_ingest_plan_progress_dialog(
+                self,
+                12,
+                "Aktualizuję kontrakt zasobów E1.",
+                "Synchronizuję wybrane obrazy z aktualną iteracją projektu.",
+            )
+            self._sync_iteration_artifact_registry_from_project_start(
+                progress_callback=lambda _count, detail: campaign_step1_ingest._update_ingest_plan_progress_dialog(
+                    self,
+                    14,
+                    "Buduję opis wybranego zbioru obrazów.",
+                    str(detail or "Zbieram nazwy obrazów do kontraktu O."),
+                )
+            )
         except Exception:
             pass
         self.current_ingest_plan = {}
@@ -773,9 +794,22 @@ class CampaignTab:
                 self.app.update_status("Wybrano katalog zdjęć. Przygotowuję plan wejścia E1...", "info")
             except Exception:
                 pass
-            self._generate_ingest_plan()
+            self._generate_ingest_plan(parent=parent)
         else:
+            campaign_step1_ingest._update_ingest_plan_progress_dialog(
+                self,
+                86,
+                "Odświeżam informacje o wybranym zbiorze obrazów.",
+                "W tej iteracji istnieją już obrazy, więc nie tworzę nowego planu E1.",
+            )
             self._refresh_ingest_panel()
+            campaign_step1_ingest._update_ingest_plan_progress_dialog(
+                self,
+                100,
+                "Zapisano wybór katalogu obrazów.",
+                "Gotowe.",
+            )
+            campaign_step1_ingest._hide_ingest_plan_progress_dialog(self, delay_ms=500)
             try:
                 self.app.update_status(
                     "Zapisano katalog zdjęć. W folderze iteracji są już zdjęcia, więc aktywne pozostaje zatwierdzenie E1.",
@@ -789,10 +823,24 @@ class CampaignTab:
         self,
         master_pool_dir: Path,
         current_balance: dict | None = None,
+        progress_callback=None,
     ) -> dict:
         master_pool_dir = Path(master_pool_dir)
         if not master_pool_dir.exists() or not master_pool_dir.is_dir():
             raise FileNotFoundError(f"Główna pula zdjęć nie istnieje: {master_pool_dir}")
+
+        def _progress(progress: float, message: str = "", detail: str = "", *, force: bool = False) -> None:
+            if not callable(progress_callback):
+                return
+            try:
+                progress_callback(progress, message, detail=detail, force=force)
+            except TypeError:
+                try:
+                    progress_callback(progress, message)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         planner = CampaignIngestPlanner()
         selected_items = []
@@ -847,37 +895,88 @@ class CampaignTab:
         for ch in CHAR_ALPHABET:
             current_counter[ch] = int((current_balance or {}).get(ch, 0))
 
-        image_paths = sorted(
-            (
-                image_path
-                for image_path in master_pool_dir.rglob("*")
-                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-            ),
-            key=lambda p: p.as_posix().lower(),
+        _progress(
+            28,
+            "Skanuję wybrany zbiór obrazów.",
+            "Szukam plików graficznych w katalogu i podkatalogach.",
+            force=True,
         )
+        image_paths = []
+        last_scan_progress = perf_counter()
+        for image_path in master_pool_dir.rglob("*"):
+            try:
+                if not image_path.is_file() or image_path.suffix.lower() not in CONFIG.IMAGE_EXTENSIONS:
+                    continue
+            except Exception:
+                continue
+            image_paths.append(image_path)
+            now = perf_counter()
+            if len(image_paths) == 1 or len(image_paths) % 250 == 0 or now - last_scan_progress >= 0.45:
+                last_scan_progress = now
+                soft_progress = min(42.0, 28.0 + min(14.0, float(len(image_paths)) / 3500.0 * 14.0))
+                _progress(
+                    soft_progress,
+                    "Skanuję wybrany zbiór obrazów.",
+                    f"Znaleziono {len(image_paths)} obrazów...",
+                )
+        image_paths = sorted(image_paths, key=lambda p: p.as_posix().lower())
         raw_total = int(len(image_paths))
+        _progress(
+            44,
+            "Analizuję obrazy z wybranego zbioru.",
+            f"Znaleziono {raw_total} obrazów. Sprawdzam duble i nazwy plików.",
+            force=True,
+        )
 
-        for image_path in image_paths:
+        last_process_progress = perf_counter()
+
+        def _report_processed_progress(processed_count: int, *, force: bool = False) -> None:
+            nonlocal last_process_progress
+            now = perf_counter()
+            if not force and not (
+                processed_count == 1
+                or processed_count == raw_total
+                or processed_count % 100 == 0
+                or now - last_process_progress >= 0.35
+            ):
+                return
+            last_process_progress = now
+            ratio = (float(processed_count) / float(raw_total)) if raw_total > 0 else 1.0
+            _progress(
+                44.0 + 46.0 * ratio,
+                "Analizuję obrazy z wybranego zbioru.",
+                (
+                    f"Przetworzono {processed_count}/{raw_total}. "
+                    f"Do użycia: {len(selected_items)}, duble: {skipped_duplicate_filenames}, "
+                    f"bez poprawnego GT: {skipped_invalid_gt}."
+                ),
+            )
+
+        for processed_count, image_path in enumerate(image_paths, start=1):
             image_name_key = str(image_path.name or "").strip().lower()
             if image_name_key and image_name_key in project_packet_names:
                 skipped_duplicate_filenames += 1
                 project_overlap_filenames += 1
                 if image_name_key in approved_names:
                     skipped_duplicate_approved += 1
+                _report_processed_progress(processed_count)
                 continue
             if image_name_key and image_name_key in pending_iteration_names:
                 skipped_duplicate_filenames += 1
                 pending_iteration_overlap_filenames += 1
+                _report_processed_progress(processed_count)
                 continue
 
             gt_texts = planner.extract_true_texts_from_filename(image_path.name)
             if not gt_texts:
                 skipped_invalid_gt += 1
+                _report_processed_progress(processed_count)
                 continue
 
             char_hist = planner.build_char_histogram(gt_texts)
             if not char_hist:
                 skipped_invalid_gt += 1
+                _report_processed_progress(processed_count)
                 continue
 
             try:
@@ -897,11 +996,18 @@ class CampaignTab:
                     "score_details": {},
                 }
             )
+            _report_processed_progress(processed_count)
 
         predicted_counter = Counter(current_counter)
         predicted_counter.update(selected_hist)
         source_new_to_project_total = max(0, int(raw_total) - int(project_overlap_filenames))
         new_to_project_total = int(len(selected_items))
+        _progress(
+            92,
+            "Podsumowuję wynik analizy obrazów.",
+            f"Do planu E1 trafi {new_to_project_total} z {raw_total} obrazów.",
+            force=True,
+        )
 
         return {
             "ok": True,
@@ -953,7 +1059,28 @@ class CampaignTab:
         selected_source_files=None,
         selection_mode: str = "manual",
         proposal_summary: dict = None,
+        progress_callback=None,
+        selected_source_metadata=None,
     ) -> int:
+        started_at = perf_counter()
+        manifest_ms = 0.0
+        approve_ms = 0.0
+        refresh_ms = 0.0
+
+        def _progress(value: float, message: str = "", detail: str = "", *, force: bool = False) -> None:
+            if not callable(progress_callback):
+                return
+            try:
+                progress_callback(value, message, detail=detail, force=force)
+            except TypeError:
+                try:
+                    progress_callback(value, message)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        _progress(4, "Przygotowuję zatwierdzenie E1.", "Sprawdzam folder iteracji.", force=True)
         target_iter_dir = Path(target_iter_dir)
         target_iter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -963,6 +1090,12 @@ class CampaignTab:
                 image_path for image_path in target_iter_dir.iterdir()
                 if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
             ]
+        _progress(
+            12,
+            "Przygotowuję zatwierdzenie E1.",
+            f"Do manifestu trafi {len(selected_files)} obrazów.",
+            force=True,
+        )
 
         summary_payload = dict(proposal_summary or {})
         package_count = int(len(selected_files) or 0)
@@ -999,25 +1132,67 @@ class CampaignTab:
         summary_payload["approved_plates_before_iteration"] = approved_plates_before
 
         source_root = Path(source_dir) if source_dir else target_iter_dir
+        _progress(
+            20,
+            "Zapisuję manifest obrazów E1.",
+            "Tworzę listę obrazów, źródeł i histogram znaków.",
+            force=True,
+        )
+        manifest_started = perf_counter()
         try:
             CAMPAIGN.record_iteration_ingest(
                 source_dir=source_root,
                 selected_source_files=selected_files,
                 selection_mode=selection_mode,
                 proposal_summary=summary_payload,
+                selected_source_metadata=selected_source_metadata,
+                progress_callback=lambda value, message="", **kwargs: _progress(
+                    20.0 + (float(value or 0.0) * 0.60),
+                    message,
+                    detail=str(kwargs.get("detail", "") or ""),
+                    force=bool(kwargs.get("force", False)),
+                ),
             )
         except Exception as e:
             logger.debug(f"Nie udaĹ‚o siÄ™ zapisaÄ‡ manifestu E1 dla {target_iter_dir}: {e}")
+        finally:
+            manifest_ms = max(0.0, (perf_counter() - manifest_started) * 1000.0)
 
+        _progress(84, "Zatwierdzam E1.", "Zmieniam status wejścia i odblokowuję kolejny etap.", force=True)
+        approve_started = perf_counter()
         CAMPAIGN.approve_step1()
         if CAMPAIGN.get_current_step() < 2:
             CAMPAIGN.set_current_step(2)
+        approve_ms = max(0.0, (perf_counter() - approve_started) * 1000.0)
         self.step1_panel_expanded = False
         if self._continue_to_step3_after_step1_if_char_ready():
             self.current_ingest_plan = {}
+            _progress(100, "E1 zatwierdzone.", "Gotowe.", force=True)
+            logger.info(
+                "[E1 PERF] approve_current_iteration_package total=%sms files=%s manifest=%sms approve=%sms refresh=%sms mode=%s",
+                int(max(0.0, (perf_counter() - started_at) * 1000.0)),
+                len(selected_files),
+                int(manifest_ms),
+                int(approve_ms),
+                int(refresh_ms),
+                selection_mode,
+            )
             return len(selected_files)
         self.current_ingest_plan = {}
+        _progress(94, "Odświeżam graf kampanii.", "Aktualizuję statusy bramek i etapów.", force=True)
+        refresh_started = perf_counter()
         self._refresh_dashboard()
+        refresh_ms = max(0.0, (perf_counter() - refresh_started) * 1000.0)
+        _progress(100, "E1 zatwierdzone.", "Gotowe.", force=True)
+        logger.info(
+            "[E1 PERF] approve_current_iteration_package total=%sms files=%s manifest=%sms approve=%sms refresh=%sms mode=%s",
+            int(max(0.0, (perf_counter() - started_at) * 1000.0)),
+            len(selected_files),
+            int(manifest_ms),
+            int(approve_ms),
+            int(refresh_ms),
+            selection_mode,
+        )
         return len(selected_files)
 
     def _apply_current_ingest_plan(self, *args, **kwargs):

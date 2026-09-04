@@ -68,6 +68,12 @@ from .character_class_distribution import (
 )
 from .trainer import YOLOPoseTrainer
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
+from .model_provenance import (
+    PROVENANCE_VERSION,
+    TOTAL_EPOCHS_SCOPE,
+    build_dataset_training_provenance,
+    build_model_training_provenance,
+)
 from .resource_monitor import TrainingResourceMonitor, format_resource_sample_line
 
 __all__ = [
@@ -133,6 +139,10 @@ __all__ = [
     'TrainingHistory',
     'TrainingRun',
     'TrainingStatus',
+    'PROVENANCE_VERSION',
+    'TOTAL_EPOCHS_SCOPE',
+    'build_dataset_training_provenance',
+    'build_model_training_provenance',
     'TrainingResourceMonitor',
     'format_resource_sample_line',
 ]

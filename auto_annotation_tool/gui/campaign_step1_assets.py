@@ -1571,6 +1571,7 @@ def _collect_project_start_image_names(
     self,
     images_dir: Path | None = None,
     manifest: dict | None = None,
+    progress_callback=None,
 ) -> list[str]:
     image_names: list[str] = []
 
@@ -1592,9 +1593,24 @@ def _collect_project_start_image_names(
 
     if not image_names and isinstance(images_dir, Path):
         try:
+            last_progress = perf_counter()
             for image_path in images_dir.rglob("*"):
                 if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
                     image_names.append(image_path.name)
+                    now = perf_counter()
+                    if callable(progress_callback) and (
+                        len(image_names) == 1
+                        or len(image_names) % 250 == 0
+                        or now - last_progress >= 0.45
+                    ):
+                        last_progress = now
+                        try:
+                            progress_callback(
+                                len(image_names),
+                                f"Zebrano {len(image_names)} nazw obrazów do kontraktu O.",
+                            )
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1604,8 +1620,13 @@ def _build_project_start_image_set_token(
     self,
     images_dir: Path | None = None,
     manifest: dict | None = None,
+    progress_callback=None,
 ) -> tuple[str, int]:
-    image_names = self._collect_project_start_image_names(images_dir=images_dir, manifest=manifest)
+    image_names = self._collect_project_start_image_names(
+        images_dir=images_dir,
+        manifest=manifest,
+        progress_callback=progress_callback,
+    )
     token = CAMPAIGN.build_image_name_set_token(image_names, images_dir=images_dir)
     unique_count = len(
         {
@@ -2085,7 +2106,7 @@ def _get_project_start_asset_initial_dir(self, row_key: str) -> Path:
 
     return Path(CONFIG.WORKSPACE_DIR)
 
-def _sync_iteration_artifact_registry_from_project_start(self) -> None:
+def _sync_iteration_artifact_registry_from_project_start(self, progress_callback=None) -> None:
     if not CAMPAIGN.get_active_project_name():
         return
 
@@ -2118,6 +2139,7 @@ def _sync_iteration_artifact_registry_from_project_start(self) -> None:
     image_set_token, image_set_count = self._build_project_start_image_set_token(
         images_dir=master_pool_path,
         manifest=manifest,
+        progress_callback=progress_callback,
     )
     package_id = str(
         CAMPAIGN.build_iteration_artifact_package_id(

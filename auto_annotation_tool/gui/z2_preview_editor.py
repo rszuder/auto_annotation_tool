@@ -76,6 +76,7 @@ from .z2_model_quality_ui import (
     shorten_model_quality_text as z2_shorten_model_quality_text,
 )
 from .z2_actions import Z2ActionContext, build_z2_primary_actions, build_z2_secondary_actions
+from .web_slim_scrollbar import blend_hex_colors
 from .z2_campaign_flow import (
     apply_campaign_step2_workflow_preset,
     build_z2_cta_state_campaign,
@@ -775,8 +776,16 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     self._preview_super_correction_badge_bbox = None
     self._preview_super_correction_handle_bbox = None
     self._preview_fullscreen_toggle_bbox = None
+    self._preview_bottom_hint_bbox = None
+    self._preview_bottom_hint_move_bbox = None
+    self._preview_bottom_hint_collapse_bbox = None
+    self._preview_bottom_hint_restore_bbox = None
     drag_active = isinstance(getattr(self, "_preview_drag_state", None), dict)
-    light_overlay = drag_active or bool(getattr(self, "_preview_light_overlay_refresh", False))
+    light_overlay = (
+        drag_active
+        or bool(getattr(self, "_preview_light_overlay_refresh", False))
+        or bool(getattr(canvas, "_interaction_fast_rendering", False))
+    )
     vehicle_color = "#2ecc71"
     plate_color = "#e74c3c"
     approved_plate_color = "#2fbf71"
@@ -1180,6 +1189,11 @@ def _draw_preview_plate_combo_overlay(
         status_text = "OK" if is_ok else "NOK"
         status_fill = "#21a765" if is_ok else "#d64545"
         status_outline = "#8ff0b8" if is_ok else "#ff9a9a"
+        try:
+            panel_is_light = bool(self._legend_color_is_light(panel_fill))
+        except Exception:
+            panel_is_light = False
+        shadow_fill = blend_hex_colors(panel_fill, "#000000", 0.12 if panel_is_light else 0.42)
         font_cache = getattr(self, "_preview_plate_combo_font_cache", None)
         if not isinstance(font_cache, dict):
             font_cache = {}
@@ -1227,7 +1241,7 @@ def _draw_preview_plate_combo_overlay(
             x2 + shadow_offset,
             y2 + shadow_offset,
             outline="",
-            fill="#050708",
+            fill=shadow_fill,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
         canvas.create_rectangle(
@@ -1357,37 +1371,402 @@ def _get_preview_bottom_hint_text(self) -> str:
         clicked_points = len(self._preview_draw_points)
         next_idx = clicked_points + 1
         next_corner = self._preview_draw_corner_label(next_idx)
-        base = (
-            f"Rysowanie tablicy: kliknij w {next_corner} ({next_idx}/4). "
-            "D anuluje."
-        )
+        base = f"Rysowanie | {next_corner} {next_idx}/4 | D anuluj"
     elif self._preview_delete_mode:
         if self._preview_delete_candidate_idx is not None:
-            base = "Usuwanie: PPM usuwa zaznaczony polygon, S anuluje tryb."
+            base = "Usuwanie | PPM usuwa | S anuluj"
         else:
-            base = "Usuwanie: kliknij polygon tablicy, potem PPM usuwa. S anuluje tryb."
+            base = "Usuwanie | kliknij polygon | PPM usuwa | S anuluj"
     elif not plates:
-        base = "Brak tablicy. D dodaje nowy polygon tablicy."
+        base = "Brak tablicy | D dodaj polygon"
     else:
         selected_idx = self._get_selected_plate_index_for_ann(ann)
         plate_no = 0 if selected_idx is None else (int(selected_idx) + 1)
         nav_hint = (
-            "Q/E przełącza poprzednią/następną tablicę w zestawie"
+            "Q/E tablice"
             if bool(getattr(self, "_preview_super_correction_active", False))
-            else "Q/E przełącza poprzednie/następne zdjęcie na liście"
+            else "Q/E zdjęcia"
         )
         super_hint = (
             "Y wyłącz"
             if bool(getattr(self, "_preview_super_correction_active", False))
             else "Y super korekta"
         )
-        drag_hint = "Przytrzymaj W i przeciagnij rog."
         base = (
-            f"Tablica {plate_no}/{len(plates)}. {drag_hint} "
-            f"A zmienia tablice lokalnie, {nav_hint}, Spacja zatwierdza/cofa zdjęcie, R kadr, R+LPM płynny zoom x2, R+PPM cofa zoom, F dopasowuje cały obraz do okna podglądu, {super_hint}, D nowa, S usuń, Del kasuje obraz, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje."
+            f"Tablica {plate_no}/{len(plates)} | W+LPM róg | A lokalnie | {nav_hint} | "
+            f"Spacja OK/NOK | R kadr | R+LPM zoom | R+PPM cofnij | F dopasuj | "
+            f"{super_hint} | D nowa | S usuń | Del obraz | Ctrl+Z/Y historia | Ctrl+S zapis"
         )
 
-    return f"{base}{vehicle_suffix}"
+    if vehicle_suffix:
+        return f"{base} | {vehicle_suffix.strip()}"
+    return base
+
+
+def _preview_hint_point_in_bbox(x: float, y: float, bbox) -> bool:
+    if not (isinstance(bbox, tuple) and len(bbox) == 4):
+        return False
+    try:
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+    except Exception:
+        return False
+    return x1 <= float(x) <= x2 and y1 <= float(y) <= y2
+
+
+def _preview_bottom_hint_widget_bbox(canvas: ZoomableCanvas, widget) -> tuple[float, float, float, float] | None:
+    try:
+        if widget is None or not str(widget.winfo_manager()) or not bool(widget.winfo_ismapped()):
+            return None
+        canvas_root_x = float(canvas.winfo_rootx() or 0)
+        canvas_root_y = float(canvas.winfo_rooty() or 0)
+        x1 = float(widget.winfo_rootx() or 0) - canvas_root_x
+        y1 = float(widget.winfo_rooty() or 0) - canvas_root_y
+        width = float(widget.winfo_width() or widget.winfo_reqwidth() or 0)
+        height = float(widget.winfo_height() or widget.winfo_reqheight() or 0)
+        if width <= 0 or height <= 0:
+            return None
+        return (x1, y1, x1 + width, y1 + height)
+    except Exception:
+        return None
+
+
+def _preview_bottom_hint_overlaps(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    blocker: tuple[float, float, float, float],
+    *,
+    padding: float = 8.0,
+) -> bool:
+    try:
+        x1, y1, x2, y2 = [float(value) for value in blocker]
+    except Exception:
+        return False
+    return (
+        x < x2 + padding
+        and x + width > x1 - padding
+        and y < y2 + padding
+        and y + height > y1 - padding
+    )
+
+
+def _preview_bottom_hint_is_clear(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    blockers: list[tuple[float, float, float, float]],
+) -> bool:
+    return not any(
+        _preview_bottom_hint_overlaps(x, y, width, height, blocker)
+        for blocker in blockers
+    )
+
+
+def _preview_bottom_hint_clamp(
+    x: float,
+    y: float,
+    canvas_width: float,
+    canvas_height: float,
+    box_width: float,
+    box_height: float,
+    *,
+    margin: float,
+) -> tuple[float, float]:
+    max_x = max(margin, float(canvas_width) - float(box_width) - margin)
+    max_y = max(margin, float(canvas_height) - float(box_height) - margin)
+    return (
+        min(max(margin, float(x)), max_x),
+        min(max(margin, float(y)), max_y),
+    )
+
+
+def _preview_bottom_hint_safe_position(
+    self,
+    x: float,
+    y: float,
+    canvas_width: float,
+    canvas_height: float,
+    box_width: float,
+    box_height: float,
+    *,
+    margin: float = 14.0,
+) -> tuple[float, float]:
+    x, y = _preview_bottom_hint_clamp(
+        x,
+        y,
+        canvas_width,
+        canvas_height,
+        box_width,
+        box_height,
+        margin=margin,
+    )
+
+    canvas = getattr(self, "preview_canvas", None)
+    blockers: list[tuple[float, float, float, float]] = []
+    if canvas is not None:
+        for widget_name in ("preview_overlay_dock",):
+            blocker = _preview_bottom_hint_widget_bbox(canvas, getattr(self, widget_name, None))
+            if blocker is not None:
+                blockers.append(blocker)
+
+    if blockers and not _preview_bottom_hint_is_clear(x, y, box_width, box_height, blockers):
+        candidates = [(x, y)]
+        for bx1, by1, bx2, by2 in blockers:
+            candidates.extend([
+                (bx1 - float(box_width) - margin, y),
+                (x, by2 + margin),
+                (x, by1 - float(box_height) - margin),
+                (margin, y),
+                ((float(canvas_width) - float(box_width)) / 2.0, margin),
+                (
+                    (float(canvas_width) - float(box_width)) / 2.0,
+                    float(canvas_height) - float(box_height) - margin,
+                ),
+            ])
+        for candidate_x, candidate_y in candidates:
+            candidate_x, candidate_y = _preview_bottom_hint_clamp(
+                candidate_x,
+                candidate_y,
+                canvas_width,
+                canvas_height,
+                box_width,
+                box_height,
+                margin=margin,
+            )
+            if _preview_bottom_hint_is_clear(candidate_x, candidate_y, box_width, box_height, blockers):
+                x, y = candidate_x, candidate_y
+                break
+
+    return float(x), float(y)
+
+
+def _cycle_preview_bottom_hint_position(self) -> None:
+    order = ("bottom", "right", "top", "left")
+    current = str(getattr(self, "_preview_bottom_hint_position", "bottom") or "bottom")
+    try:
+        next_position = order[(order.index(current) + 1) % len(order)]
+    except ValueError:
+        next_position = "bottom"
+    self._preview_bottom_hint_position = next_position
+    self._preview_bottom_hint_collapsed = False
+    self._refresh_preview_canvas(refresh_chrome=False)
+
+
+def _toggle_preview_bottom_hint_collapsed(self, collapsed: bool | None = None) -> None:
+    if collapsed is None:
+        collapsed = not bool(getattr(self, "_preview_bottom_hint_collapsed", False))
+    self._preview_bottom_hint_collapsed = bool(collapsed)
+    self._preview_bottom_hint_drag_state = None
+    self._refresh_preview_canvas(refresh_chrome=False)
+
+
+def _shift_preview_bottom_hint_bbox(bbox, dx: float, dy: float):
+    if not (isinstance(bbox, tuple) and len(bbox) == 4):
+        return bbox
+    try:
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+        return (x1 + float(dx), y1 + float(dy), x2 + float(dx), y2 + float(dy))
+    except Exception:
+        return bbox
+
+
+def _begin_preview_bottom_hint_drag(self, canvas_x: float, canvas_y: float, event=None) -> bool:
+    bbox = getattr(self, "_preview_bottom_hint_bbox", None)
+    if not (isinstance(bbox, tuple) and len(bbox) == 4):
+        return False
+    try:
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+    except Exception:
+        return False
+    self._preview_bottom_hint_drag_state = {
+        "press_canvas_x": float(canvas_x),
+        "press_canvas_y": float(canvas_y),
+        "start_x": float(x1),
+        "start_y": float(y1),
+        "width": max(1.0, float(x2) - float(x1)),
+        "height": max(1.0, float(y2) - float(y1)),
+        "moved": False,
+    }
+    self._preview_bottom_hint_collapsed = False
+    try:
+        self.preview_canvas.configure(cursor="fleur")
+    except Exception:
+        pass
+    return True
+
+
+def _drag_preview_bottom_hint(self, event=None) -> bool:
+    drag_state = getattr(self, "_preview_bottom_hint_drag_state", None)
+    if not isinstance(drag_state, dict):
+        return False
+    canvas = getattr(self, "preview_canvas", None)
+    if canvas is None:
+        self._preview_bottom_hint_drag_state = None
+        return False
+    try:
+        canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)) or 0.0)
+        canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)) or 0.0)
+        canvas_width = float(canvas.winfo_width() or 0)
+        canvas_height = float(canvas.winfo_height() or 0)
+        width = max(1.0, float(drag_state.get("width", 1.0) or 1.0))
+        height = max(1.0, float(drag_state.get("height", 1.0) or 1.0))
+        next_x = float(drag_state.get("start_x", 0.0) or 0.0) + (
+            canvas_x - float(drag_state.get("press_canvas_x", canvas_x) or canvas_x)
+        )
+        next_y = float(drag_state.get("start_y", 0.0) or 0.0) + (
+            canvas_y - float(drag_state.get("press_canvas_y", canvas_y) or canvas_y)
+        )
+        next_x, next_y = _preview_bottom_hint_safe_position(
+            self,
+            next_x,
+            next_y,
+            canvas_width,
+            canvas_height,
+            width,
+            height,
+        )
+        current_bbox = getattr(self, "_preview_bottom_hint_bbox", None)
+        if isinstance(current_bbox, tuple) and len(current_bbox) == 4:
+            current_x = float(current_bbox[0])
+            current_y = float(current_bbox[1])
+        else:
+            current_x = float(drag_state.get("start_x", 0.0) or 0.0)
+            current_y = float(drag_state.get("start_y", 0.0) or 0.0)
+        dx = float(next_x) - current_x
+        dy = float(next_y) - current_y
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            canvas.move("preview_bottom_hint", dx, dy)
+            for attr_name in (
+                "_preview_bottom_hint_bbox",
+                "_preview_bottom_hint_move_bbox",
+                "_preview_bottom_hint_collapse_bbox",
+                "_preview_bottom_hint_restore_bbox",
+            ):
+                setattr(
+                    self,
+                    attr_name,
+                    _shift_preview_bottom_hint_bbox(getattr(self, attr_name, None), dx, dy),
+                )
+            drag_state["moved"] = True
+        self._preview_bottom_hint_manual_position = (float(next_x), float(next_y))
+        return True
+    except Exception:
+        return True
+
+
+def _end_preview_bottom_hint_drag(self, event=None) -> bool:
+    drag_state = getattr(self, "_preview_bottom_hint_drag_state", None)
+    if not isinstance(drag_state, dict):
+        return False
+    self._preview_bottom_hint_drag_state = None
+    try:
+        self._sync_preview_canvas_cursor()
+    except Exception:
+        pass
+    return True
+
+
+def _handle_preview_bottom_hint_click(self, canvas_x: float, canvas_y: float, event=None) -> bool:
+    if not bool(getattr(self, "_preview_fullscreen_active", False)):
+        return False
+    if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_restore_bbox", None)):
+        _toggle_preview_bottom_hint_collapsed(self, False)
+        return True
+    if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_collapse_bbox", None)):
+        _toggle_preview_bottom_hint_collapsed(self, True)
+        return True
+    if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_move_bbox", None)):
+        return _begin_preview_bottom_hint_drag(self, canvas_x, canvas_y, event)
+    return False
+
+
+def _preview_bottom_hint_origin(
+    self,
+    canvas_width: float,
+    canvas_height: float,
+    box_width: float,
+    box_height: float,
+) -> tuple[float, float]:
+    margin = 14.0
+    manual_position = getattr(self, "_preview_bottom_hint_manual_position", None)
+    if isinstance(manual_position, tuple) and len(manual_position) == 2:
+        try:
+            manual_x = float(manual_position[0])
+            manual_y = float(manual_position[1])
+            return _preview_bottom_hint_safe_position(
+                self,
+                manual_x,
+                manual_y,
+                canvas_width,
+                canvas_height,
+                box_width,
+                box_height,
+                margin=margin,
+            )
+        except Exception:
+            self._preview_bottom_hint_manual_position = None
+
+    position = str(getattr(self, "_preview_bottom_hint_position", "bottom") or "bottom")
+    if position == "top":
+        x = (float(canvas_width) - float(box_width)) / 2.0
+        y = 54.0
+    elif position == "left":
+        x = margin
+        y = max(54.0, (float(canvas_height) - float(box_height)) / 2.0)
+    elif position == "right":
+        x = float(canvas_width) - float(box_width) - margin
+        y = max(54.0, (float(canvas_height) - float(box_height)) / 2.0)
+    else:
+        x = (float(canvas_width) - float(box_width)) / 2.0
+        y = float(canvas_height) - float(box_height) - margin
+    x, y = _preview_bottom_hint_clamp(
+        x,
+        y,
+        canvas_width,
+        canvas_height,
+        box_width,
+        box_height,
+        margin=margin,
+    )
+
+    canvas = getattr(self, "preview_canvas", None)
+    blockers: list[tuple[float, float, float, float]] = []
+    if canvas is not None:
+        for widget_name in ("preview_overlay_dock",):
+            blocker = _preview_bottom_hint_widget_bbox(canvas, getattr(self, widget_name, None))
+            if blocker is not None:
+                blockers.append(blocker)
+
+    if blockers and not _preview_bottom_hint_is_clear(x, y, box_width, box_height, blockers):
+        candidates = [(x, y)]
+        for bx1, by1, bx2, by2 in blockers:
+            candidates.extend([
+                (bx1 - float(box_width) - margin, y),
+                (x, by2 + margin),
+                (x, by1 - float(box_height) - margin),
+                (margin, y),
+                ((float(canvas_width) - float(box_width)) / 2.0, margin),
+                (
+                    (float(canvas_width) - float(box_width)) / 2.0,
+                    float(canvas_height) - float(box_height) - margin,
+                ),
+            ])
+        for candidate_x, candidate_y in candidates:
+            candidate_x, candidate_y = _preview_bottom_hint_clamp(
+                candidate_x,
+                candidate_y,
+                canvas_width,
+                canvas_height,
+                box_width,
+                box_height,
+                margin=margin,
+            )
+            if _preview_bottom_hint_is_clear(candidate_x, candidate_y, box_width, box_height, blockers):
+                x, y = candidate_x, candidate_y
+                break
+    return float(x), float(y)
 
 
 def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
@@ -1415,41 +1794,194 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
     if canvas_width <= 120 or canvas_height <= 80:
         return
 
-    accent = "#6f6330" if self._manual_xml_template_enabled() else "#3d5d73"
-    text_width = max(280, min(canvas_width - 56, 980))
-    center_x = max(40, canvas_width // 2)
-    text_id = canvas.create_text(
-        center_x,
-        canvas_height - 14,
-        text=hint_text,
-        fill="#d7dde4",
-        anchor="s",
-        justify=tk.CENTER,
-        width=text_width,
-        font=("Segoe UI", 8, "normal"),
-        tags=("preview_overlay",)
-    )
     try:
-        bbox = canvas.bbox(text_id)
+        theme = self._get_preview_legend_theme()
     except Exception:
-        bbox = None
-    if not bbox:
+        theme = {}
+    panel_fill = str(theme.get("panel_fill", "#101419"))
+    outline = "#d6a73a" if self._manual_xml_template_enabled() else str(theme.get("shell_outline", "#56f29d"))
+    chip_fill = str(theme.get("entry_fill", "#1b242d"))
+    text_fill = str(theme.get("entry_text", "#f4f7fb"))
+    muted_fill = str(theme.get("section_muted", "#c7d0db"))
+    accent_fill = str(theme.get("badge_plate_outline", "#56f29d"))
+    title_font = self._get_preview_legend_font(8, "bold")
+    chip_font = self._get_preview_legend_font(8, "normal")
+    control_font = self._get_preview_legend_font(7, "bold")
+
+    collapsed = bool(getattr(self, "_preview_bottom_hint_collapsed", False))
+    if collapsed:
+        pill_w = 62.0
+        pill_h = 26.0
+        x, y = _preview_bottom_hint_origin(self, canvas_width, canvas_height, pill_w, pill_h)
+        canvas.create_rectangle(
+            x,
+            y,
+            x + pill_w,
+            y + pill_h,
+            fill=panel_fill,
+            outline=outline,
+            width=1,
+            tags=("preview_overlay", "preview_bottom_hint"),
+        )
+        canvas.create_text(
+            x + (pill_w / 2.0),
+            y + (pill_h / 2.0),
+            text="AS Z2",
+            fill=text_fill,
+            anchor="center",
+            font=title_font,
+            tags=("preview_overlay", "preview_bottom_hint"),
+        )
+        self._preview_bottom_hint_restore_bbox = (float(x), float(y), float(x + pill_w), float(y + pill_h))
         return
 
-    x1, y1, x2, y2 = bbox
-    pad_x = 12
-    pad_y = 8
-    box_id = canvas.create_rectangle(
-        max(8, x1 - pad_x),
-        max(8, y1 - pad_y),
-        min(canvas_width - 8, x2 + pad_x),
-        min(canvas_height - 8, y2 + pad_y),
-        fill="#101419",
-        outline=accent,
+    raw_parts = [part.strip() for part in re.split(r"\s*\|\s*", hint_text) if part.strip()]
+    if not raw_parts:
+        return
+    primary = raw_parts[0]
+    parts = raw_parts[1:15]
+    max_box_w = max(250.0, min(float(canvas_width) - 28.0, 560.0))
+    min_box_w = min(max_box_w, 330.0)
+    control_w = 23.0
+    title_h = 24.0
+    gap = 5.0
+    chip_h = 22.0
+    chip_pad_x = 8.0
+    inner_pad = 10.0
+    content_w = max(160.0, max_box_w - (inner_pad * 2.0))
+
+    rows: list[list[tuple[str, float]]] = []
+    current_row: list[tuple[str, float]] = []
+    current_w = 0.0
+    for part in parts:
+        chip_w = min(content_w, max(46.0, float(chip_font.measure(part)) + (chip_pad_x * 2.0)))
+        projected = chip_w if not current_row else current_w + gap + chip_w
+        if current_row and projected > content_w:
+            rows.append(current_row)
+            current_row = []
+            current_w = 0.0
+        current_row.append((part, chip_w))
+        current_w = chip_w if current_w <= 0.0 else current_w + gap + chip_w
+    if current_row:
+        rows.append(current_row)
+    rows = rows[:2]
+
+    title_w = float(title_font.measure(primary)) + 96.0
+    row_w = 0.0
+    for row in rows:
+        row_w = max(row_w, sum(width for _text, width in row) + (gap * max(0, len(row) - 1)))
+    box_w = min(max_box_w, max(min_box_w, title_w, row_w + (inner_pad * 2.0)))
+    box_h = inner_pad + title_h + (len(rows) * chip_h) + (max(0, len(rows) - 1) * gap) + inner_pad
+    x, y = _preview_bottom_hint_origin(self, canvas_width, canvas_height, box_w, box_h)
+
+    canvas.create_rectangle(
+        x,
+        y,
+        x + box_w,
+        y + box_h,
+        fill=panel_fill,
+        outline=outline,
         width=1,
-        tags=("preview_overlay",)
+        tags=("preview_overlay", "preview_bottom_hint"),
     )
-    canvas.tag_lower(box_id, text_id)
+    title_y = y + inner_pad
+    canvas.create_text(
+        x + inner_pad,
+        title_y + 2.0,
+        text=primary,
+        fill=text_fill,
+        anchor="nw",
+        font=title_font,
+        tags=("preview_overlay", "preview_bottom_hint"),
+    )
+
+    move_x = x + box_w - inner_pad - (control_w * 2.0) - 4.0
+    close_x = x + box_w - inner_pad - control_w
+    control_y = title_y
+    for label, bx in (("↔", move_x), ("×", close_x)):
+        canvas.create_rectangle(
+            bx,
+            control_y,
+            bx + control_w,
+            control_y + 19.0,
+            fill=chip_fill,
+            outline=accent_fill if label == "↔" else muted_fill,
+            width=1,
+            tags=("preview_overlay", "preview_bottom_hint"),
+        )
+        canvas.create_text(
+            bx + (control_w / 2.0),
+            control_y + 9.5,
+            text=label,
+            fill=text_fill,
+            anchor="center",
+            font=control_font,
+            tags=("preview_overlay", "preview_bottom_hint"),
+        )
+    canvas.create_rectangle(
+        move_x,
+        control_y,
+        move_x + control_w,
+        control_y + 19.0,
+        fill=chip_fill,
+        outline=accent_fill,
+        width=1,
+        tags=("preview_overlay", "preview_bottom_hint"),
+    )
+    dot_radius = 1.45
+    for dot_x in (move_x + 8.2, move_x + control_w - 8.2):
+        for dot_y in (control_y + 5.3, control_y + 9.5, control_y + 13.7):
+            canvas.create_oval(
+                dot_x - dot_radius,
+                dot_y - dot_radius,
+                dot_x + dot_radius,
+                dot_y + dot_radius,
+                fill=accent_fill,
+                outline=accent_fill,
+                width=1,
+                tags=("preview_overlay", "preview_bottom_hint"),
+            )
+    self._preview_bottom_hint_move_bbox = (
+        float(move_x),
+        float(control_y),
+        float(move_x + control_w),
+        float(control_y + 19.0),
+    )
+    self._preview_bottom_hint_collapse_bbox = (
+        float(close_x),
+        float(control_y),
+        float(close_x + control_w),
+        float(control_y + 19.0),
+    )
+
+    chip_y = y + inner_pad + title_h
+    for row in rows:
+        row_total_w = sum(width for _text, width in row) + (gap * max(0, len(row) - 1))
+        chip_x = x + inner_pad + max(0.0, (box_w - (inner_pad * 2.0) - row_total_w) / 2.0)
+        for part, chip_w in row:
+            canvas.create_rectangle(
+                chip_x,
+                chip_y,
+                chip_x + chip_w,
+                chip_y + chip_h,
+                fill=chip_fill,
+                outline=muted_fill,
+                width=1,
+                tags=("preview_overlay", "preview_bottom_hint"),
+            )
+            canvas.create_text(
+                chip_x + (chip_w / 2.0),
+                chip_y + (chip_h / 2.0),
+                text=part,
+                fill=text_fill,
+                anchor="center",
+                font=chip_font,
+                tags=("preview_overlay", "preview_bottom_hint"),
+            )
+            chip_x += chip_w + gap
+        chip_y += chip_h + gap
+
+    self._preview_bottom_hint_bbox = (float(x), float(y), float(x + box_w), float(y + box_h))
 
 
 def _clamp_preview_point(self, x: float, y: float) -> tuple[float, float]:
@@ -2511,6 +3043,9 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
     mark_phase("coords")
 
+    if _handle_preview_bottom_hint_click(self, canvas_x, canvas_y, event):
+        return True
+
     if not bool(getattr(self, "_preview_corner_drag_modifier_down", False)):
         try:
             canvas.focus_set()
@@ -2750,6 +3285,8 @@ def on_zoomable_canvas_drag(self, canvas: ZoomableCanvas, event):
 
     canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
+    if _drag_preview_bottom_hint(self, event):
+        return True
     super_drag = getattr(self, "_preview_super_correction_drag_state", None)
     if isinstance(super_drag, dict):
         badge_w = max(1.0, float(super_drag.get("width", 1.0)))
@@ -2870,6 +3407,9 @@ def on_zoomable_canvas_release(self, canvas: ZoomableCanvas, event):
         self._mark_preview_user_interaction(quiet_ms=1400)
     except Exception:
         pass
+
+    if _end_preview_bottom_hint_drag(self, event):
+        return True
 
     if isinstance(getattr(self, "_preview_super_correction_drag_state", None), dict):
         self._preview_super_correction_drag_state = None

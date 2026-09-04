@@ -1518,25 +1518,57 @@ class AutoAnnotationApp:
         return host
 
     def _open_mobile_model_export_center_from_menu(self):
-        self._show_mobile_export_menu_loader("Ładuję moduł eksportu mobilnego...", 12.0)
-        try:
-            host = self._get_mobile_export_menu_host()
-            self._show_mobile_export_menu_loader("Przygotowuję lekkie centrum eksportu...", 34.0)
-            from . import z4_model_export
-        except Exception as e:
-            self._close_mobile_export_menu_loader()
-            logger.error(f"Nie udało się przygotować eksportu mobilnego: {e}")
-            return self.themed_info(
-                "Eksport mobilny",
-                f"Nie udało się przygotować modułu eksportu mobilnego:\n{e}",
-                parent=self.root,
-                tone="error",
-            )
+        for owner in (getattr(self, "_mobile_export_menu_host", None), self):
+            try:
+                existing_dialog = getattr(owner, "_mobile_export_center_dialog", None)
+                if existing_dialog is not None and existing_dialog.winfo_exists():
+                    existing_dialog.deiconify()
+                    existing_dialog.lift()
+                    existing_dialog.focus_force()
+                    return existing_dialog
+            except Exception:
+                pass
 
-        self._mobile_export_menu_load_attempts = 0
-        self._show_mobile_export_menu_loader("Uruchamiam centrum eksportu mobilnego...", 86.0)
-        self._close_mobile_export_menu_loader()
-        return z4_model_export._open_mobile_model_export_center(host)
+        if bool(getattr(self, "_mobile_export_menu_opening", False)):
+            return None
+        self._mobile_export_menu_opening = True
+
+        try:
+            self._close_mobile_export_menu_loader()
+        except Exception:
+            pass
+        try:
+            self._close_menu_dropdown()
+        except Exception:
+            pass
+
+        def _open_after_menu_event():
+            try:
+                host = self._get_mobile_export_menu_host()
+                from . import z4_model_export
+
+                self._mobile_export_menu_load_attempts = 0
+                return z4_model_export._open_mobile_model_export_center(host)
+            except Exception as e:
+                logger.error(f"Nie udalo sie przygotowac eksportu mobilnego: {e}")
+                return self.themed_info(
+                    "Eksport mobilny",
+                    f"Nie udalo sie przygotowac modulu eksportu mobilnego:\n{e}",
+                    parent=self.root,
+                    tone="error",
+                )
+            finally:
+                self._mobile_export_menu_opening = False
+                try:
+                    self._close_mobile_export_menu_loader()
+                except Exception:
+                    pass
+
+        try:
+            self.root.after_idle(_open_after_menu_event)
+        except Exception:
+            _open_after_menu_event()
+        return None
 
     def _open_mobile_report_browser_from_menu(self):
         try:

@@ -64,11 +64,7 @@ class PlateManualAction(Z2Action):
             if ctx.iteration_target == "char":
                 return False
             if ctx.iteration_target == "plate":
-                try:
-                    from ..campaign_manager import CAMPAIGN
-                    return int(CAMPAIGN.get_current_iteration_num() or 1) <= 1
-                except Exception:
-                    return True
+                return True
         return True
 
     label = "Ręczna anotacja tablic"

@@ -19,7 +19,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 try:
     from packaging.requirements import Requirement
@@ -2125,6 +2125,67 @@ class MobileModelExporter:
         }
 
 
+def _package_model_ref_payload(role: str, item: Mapping[str, Any]) -> dict[str, Any]:
+    """Compact model reference intended for lightweight Android reports."""
+
+    payload = dict(item or {})
+    source = dict(payload.get("source") or {})
+    training = dict(payload.get("training") or {})
+    training_dataset = training.get("dataset") if isinstance(training.get("dataset"), Mapping) else {}
+    model = dict(payload.get("model") or {})
+    variants = [dict(variant) for variant in list(payload.get("variants") or []) if isinstance(variant, Mapping)]
+    primary_variant = variants[0] if variants else {}
+    package_file = str(payload.get("package_file") or "").strip()
+    package_hashes = dict(payload.get("sha256") or {})
+    package_sha = str(package_hashes.get(package_file) or "").strip()
+    if not package_sha:
+        for relative, digest in package_hashes.items():
+            if str(relative).lower().endswith(".alprmodel"):
+                package_sha = str(digest or "").strip()
+                break
+    variant_sha_values: list[str] = []
+    variant_sha_map = primary_variant.get("sha256") if isinstance(primary_variant.get("sha256"), Mapping) else {}
+    for digest in dict(variant_sha_map or {}).values():
+        text = str(digest or "").strip()
+        if text and text not in variant_sha_values:
+            variant_sha_values.append(text)
+    checkpoint_sha = str(source.get("checkpoint_sha256") or "").strip()
+    return _json_safe_value(
+        {
+            "role": role,
+            "model_id": str(payload.get("model_id") or "").strip(),
+            "model_display_id": str(model.get("display_id") or "").strip(),
+            "installed_model_fingerprint": str(
+                source.get("installed_model_fingerprint")
+                or package_sha
+                or checkpoint_sha
+                or payload.get("model_id")
+                or ""
+            ).strip(),
+            "checkpoint_sha256": checkpoint_sha,
+            "package_sha256": package_sha,
+            "package_file": package_file,
+            "manifest_file": str(payload.get("manifest_file") or "").strip(),
+            "variant_id": str(primary_variant.get("id") or "").strip(),
+            "variant_ids": [str(variant.get("id") or "").strip() for variant in variants if str(variant.get("id") or "").strip()],
+            "variant_artifact_sha256": variant_sha_values,
+            "runtime": str(primary_variant.get("runtime") or "").strip(),
+            "precision": str(primary_variant.get("precision") or "").strip(),
+            "task": str(payload.get("task") or "").strip(),
+            "training": {
+                "run_id": str(training.get("run_id") or "").strip(),
+                "run_epochs_completed": training.get("run_epochs_completed"),
+                "total_epochs": training.get("total_epochs"),
+                "total_epochs_known": training.get("total_epochs_known"),
+                "known_epochs_minimum": training.get("known_epochs_minimum"),
+                "total_epochs_scope": str(training.get("total_epochs_scope") or "").strip(),
+                "dataset_id": str(training_dataset.get("dataset_id") or training.get("dataset_id") or "").strip(),
+                "provenance_status": str(training.get("provenance_status") or "").strip(),
+            },
+        }
+    )
+
+
 class MobileAlprPackageExporter:
     """Build a complete Android ALPR package from vehicle, plate and character models.
 
@@ -2556,6 +2617,11 @@ class MobileAlprPackageExporter:
             fallback="ALPR-package",
         )
         created_at = _utc_now_iso()
+        model_refs = {
+            role: _package_model_ref_payload(role, item)
+            for role, item in models.items()
+            if isinstance(item, Mapping)
+        }
         manifest = {
             "schema": MOBILE_ALPR_PACKAGE_SCHEMA,
             "package_id": package_id,
@@ -2564,6 +2630,7 @@ class MobileAlprPackageExporter:
             "kind": "complete_alpr_pipeline",
             "created_at": created_at,
             "models": models,
+            "model_refs": model_refs,
             "pipeline": pipeline,
             "ranking_dataset": dict(request.ranking_dataset or {}),
             "calibration_dataset": dict(request.calibration_dataset or {}),
