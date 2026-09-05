@@ -148,23 +148,22 @@ def auto_device_label() -> str:
 
 
 def get_available_devices(host):
+    # Opening PZ2 must not import torch or initialize CUDA on the Tk thread.
+    # Hardware discovery belongs to the application's shared configuration.
     devices = [host._auto_device_label(), "CPU"]
-    if not bool(getattr(host, "_startup_ui_ready", False)):
-        return devices
     try:
-        import torch
-
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                name = torch.cuda.get_device_name(i)
-                devices.append(f"cuda:{i} ({name})")
+        getter = getattr(host.app, "get_available_yolo_devices", None)
+        if callable(getter):
+            for option in getter(allow_probe=False):
+                if str(option).lower().startswith("cuda:") and option not in devices:
+                    devices.append(option)
     except Exception:
         pass
     return devices
 
 
 def normalize_selected_device(host, raw_value: str | None = None, devices=None) -> str:
-    available = list(devices or [])
+    available = list(host._get_available_devices() if devices is None else devices)
     current = str(raw_value if raw_value is not None else host.yolo_device_var.get() or "").strip()
     current_lower = current.lower()
 
@@ -175,7 +174,7 @@ def normalize_selected_device(host, raw_value: str | None = None, devices=None) 
     if current_lower.startswith("cuda:"):
         prefix = current.split()[0]
         for option in available:
-            if str(option or "").lower().startswith(prefix):
+            if str(option or "").lower().split()[0] == prefix.lower():
                 return option
         return host._auto_device_label()
 
@@ -262,9 +261,12 @@ def update_device_hint(host, event=None) -> None:
         if gpu_devices:
             text = f"Auto najpierw spróbuje akceleracji na {gpu_devices[0]}. Gdy GPU/CUDA nie będzie dostępne, system spadnie do CPU."
             tone = "info"
-        else:
+        elif bool(getattr(host.app, "_global_yolo_devices_cache_ready", False)):
             text = "Auto nie wykryło karty CUDA, więc zostanie użyty CPU."
             tone = "warning"
+        else:
+            text = "Auto dobierze urządzenie przy detekcji. Dostępność GPU sprawdzisz w Konfiguracji."
+            tone = "info"
     elif current_lower.startswith("cpu"):
         text = "CPU wymusza pracę bez akceleracji GPU. To wolniejsze, ale przewidywalne."
         tone = "muted"
@@ -1509,4 +1511,3 @@ def refresh_yolo_model_picker_state(host):
         except Exception:
             pass
         self._set_widget_state(browse_btn, "disabled")
-

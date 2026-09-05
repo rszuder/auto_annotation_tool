@@ -1235,6 +1235,12 @@ def _refresh_training_cockpit(self, *, ready: bool | None = None):
 
 def _build_training_recommendation_rows(self) -> tuple[str, str, list[tuple[str, ...]], str]:
     recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
+    if recommendation.get("ready") is False:
+        return (
+            str(recommendation.get("status") or "Sprzęt: brak pełnego wyniku sprawdzenia"), "",
+            [("Epoki", "ręcznie"), ("Batch", "-"), ("Rozdzielczość", "-"), ("LR", "-")],
+            str(recommendation.get("note") or ""),
+        )
     memory_gb = float(recommendation.get("memory_gb", 0.0) or 0.0)
     if recommendation.get("effective_raw") == "cpu":
         device_label = "Wykryty sprzęt: CPU"
@@ -1260,6 +1266,8 @@ def _build_training_recommendation_rows(self) -> tuple[str, str, list[tuple[str,
     return device_label, model_label, rows, note
 
 def _refresh_training_recommendation_table(self):
+    if not getattr(self, "_train_recommendation_cells", None):
+        return
     hardware_text, model_text, rows, note_text = self._build_training_recommendation_rows()
     hardware_label = getattr(self, "train_recommendation_hardware_label", None)
     self._set_training_widget_text(hardware_label, hardware_text)
@@ -1433,12 +1441,14 @@ def _schedule_step4_deferred_model_refresh(self):
 
     def run_refresh():
         self._step4_deferred_model_refresh_job = None
+        if not bool(getattr(self, "_step4_train_tab_built", False)):
+            return
         try:
             self._refresh_base_model_choices()
         except Exception:
             pass
         try:
-            self._apply_training_recommended_start_params()
+            self._refresh_training_recommendation_table()
         except Exception:
             pass
         try:
@@ -1453,6 +1463,9 @@ def _schedule_step4_deferred_model_refresh(self):
 
 def _apply_training_recommended_start_params(self):
     recommendation = self._get_training_device_recommendation(self._get_global_training_device_choice())
+    if recommendation.get("ready") is False:
+        self._refresh_training_recommendation_table()
+        return
     try:
         current_batch = self._safe_training_int_value("batch_var", default=16, minimum=1)
         self.batch_var.set(int(recommendation.get("batch", current_batch) or current_batch))

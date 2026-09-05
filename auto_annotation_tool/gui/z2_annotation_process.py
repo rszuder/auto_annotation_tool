@@ -1100,6 +1100,8 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
 
 
 def _refresh_step2_action_states(self, *, lightweight: bool = False):
+    if getattr(self, "_free_mode_session_restore_in_progress", False) and self._is_free_mode_session_context():
+        return
     _ensure_campaign_graph_context_for_z2(self)
     self._campaign_step2_approval_ready = False
     self._campaign_step2_approval_action = ""
@@ -4542,12 +4544,7 @@ def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = Tru
             pass
 
         if free_mode_context:
-            self._set_workflow_step("auto_input")
-            self._refresh_left_panel_route_copy()
-            self._refresh_detection_configuration_ui()
-            self._refresh_step2_action_states()
-            self._refresh_free_mode_workflow_ui()
-            self._queue_free_mode_session_save()
+            self._set_workflow_step("auto_input", refresh_detection_ui=True)
             return True
 
         if current_step_before_switch == "auto_plate_model":
@@ -4575,12 +4572,7 @@ def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = Tru
 
         if current_manual_entry_mode == "new":
             if free_mode_context:
-                self._set_workflow_step("manual_input")
-                self._refresh_left_panel_route_copy()
-                self._refresh_detection_configuration_ui()
-                self._refresh_step2_action_states()
-                self._refresh_free_mode_workflow_ui()
-                self._queue_free_mode_session_save()
+                self._set_workflow_step("manual_input", refresh_detection_ui=True)
                 return True
             self._set_workflow_step("manual_start")
         else:

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from auto_annotation_tool.gui import app_window_recovery as recovery
+from auto_annotation_tool.gui.native_modal_minimize import NativeModalMinimize, SC_MINIMIZE, WM_SYSCOMMAND, WM_NCDESTROY
 
 
 class FakeWindow:
@@ -150,6 +151,110 @@ class ResourceModalMinimizeTests(unittest.TestCase):
         self.app._restore_free_mode_assistant_owner = Mock()
         self.assistant["_place_free_mode_assistant"](self.app)
         self.app._ensure_free_mode_assistant_overlay.assert_called_once_with(self.dialog)
+
+
+class NativeMinimizeBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.window = Mock()
+        self.window.grab_current.return_value = self.window
+        self.window.winfo_toplevel.return_value = self.window
+        self.window.after.return_value = "poll-job"
+        self.window.after_idle.return_value = "post-job"
+        self.bridge = NativeModalMinimize.__new__(NativeModalMinimize)
+        self.bridge.window = self.window
+        self.bridge.hwnd = 123
+        self.bridge.closed = False
+        self.bridge._minimize_job = None
+        self.bridge._poll_job = None
+        self.bridge._requested_command = None
+        self.bridge._forwarding = False
+        self.bridge._id = 42
+        self.bridge._callback = object()
+        self.bridge._user32 = Mock()
+        self.bridge._user32.PostMessageW.return_value = True
+        self.bridge._comctl32 = Mock()
+        self.bridge._comctl32.DefSubclassProc.return_value = 99
+
+    def send(self, message=WM_SYSCOMMAND, command=SC_MINIMIZE):
+        return self.bridge._dispatch(123, message, command, 0, 42, 0)
+
+    def test_native_callback_only_enqueues_and_never_calls_tk(self):
+        self.assertEqual(self.send(command=SC_MINIMIZE | 2), 0)
+        self.assertEqual(self.window.method_calls, [])
+        self.bridge._comctl32.DefSubclassProc.assert_not_called()
+        self.assertEqual(self.bridge._requested_command, (123, SC_MINIMIZE | 2, 0))
+
+    def test_release_on_tk_callback_then_forward_once_after_idle(self):
+        self.send()
+        self.bridge._poll()
+        self.window.grab_release.assert_called_once()
+        self.bridge._user32.PostMessageW.assert_not_called()
+        self.window.grab_current.return_value = None
+        self.window.after_idle.call_args.args[0]()
+        self.bridge._user32.PostMessageW.assert_called_once_with(123, WM_SYSCOMMAND, SC_MINIMIZE, 0)
+        self.assertEqual(self.send(), 99)
+        self.assertFalse(self.bridge._forwarding)
+        self.bridge._comctl32.DefSubclassProc.assert_called_once()
+
+    def test_other_native_commands_are_not_changed(self):
+        for command in (0xF030, 0xF120, 0xF060, 0xF010):
+            self.assertEqual(self.send(command=command), 99)
+        self.assertEqual(self.window.method_calls, [])
+        self.assertIsNone(self.bridge._requested_command)
+
+    def test_cannot_minimize_parent_while_child_has_grab(self):
+        child = FakeWindow()
+        self.window.grab_current.return_value = child
+        self.send()
+        self.bridge._poll()
+        self.window.grab_release.assert_not_called()
+        child.grab_release.assert_not_called()
+        self.window.after_idle.assert_not_called()
+
+    def test_new_child_before_idle_prevents_minimize(self):
+        self.send()
+        self.bridge._poll()
+        self.window.grab_current.return_value = FakeWindow()
+        self.window.after_idle.call_args.args[0]()
+        self.bridge._user32.PostMessageW.assert_not_called()
+
+    def test_repeated_clicks_are_coalesced(self):
+        self.send()
+        self.send()
+        self.bridge._poll()
+        self.window.after_idle.assert_called_once()
+
+    def test_close_cancels_pending_jobs_and_removes_native_hook(self):
+        self.send()
+        self.bridge._poll()
+        self.bridge.close()
+        self.assertTrue(self.bridge.closed)
+        self.assertIsNone(self.bridge.hwnd)
+        self.assertIsNone(self.bridge._poll_job)
+        self.assertIsNone(self.bridge._minimize_job)
+        self.assertEqual(self.window.after_cancel.call_count, 2)
+        self.bridge._comctl32.RemoveWindowSubclass.assert_called_once()
+        self.bridge._forward_minimize(123, SC_MINIMIZE, 0)
+        self.bridge._user32.PostMessageW.assert_not_called()
+
+    def test_wrapper_destruction_never_calls_tk_from_native_code(self):
+        self.send(message=WM_NCDESTROY, command=0)
+        self.assertEqual(self.window.method_calls, [])
+        self.assertIsNone(self.bridge.hwnd)
+        self.bridge._comctl32.RemoveWindowSubclass.assert_called_once()
+
+    def test_stale_wrapper_request_is_discarded(self):
+        self.bridge.hwnd = 456
+        self.bridge._forward_minimize(123, SC_MINIMIZE, 0)
+        self.bridge._user32.PostMessageW.assert_not_called()
+
+    def test_failed_post_restores_modal_capture(self):
+        self.window.grab_current.return_value = None
+        self.window.state.return_value = "normal"
+        self.bridge._user32.PostMessageW.return_value = False
+        self.bridge._forward_minimize(123, SC_MINIMIZE, 0)
+        self.window.grab_set.assert_called_once()
+        self.assertFalse(self.bridge._forwarding)
 
 
 if __name__ == "__main__":

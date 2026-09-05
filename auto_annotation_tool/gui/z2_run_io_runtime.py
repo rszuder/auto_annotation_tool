@@ -315,6 +315,7 @@ def _get_cached_run_xml_image_names(self, run_dir) -> set[str]:
         self._z2_run_xml_image_name_set_cache = cache
     cached = cache.get(cache_key)
     if cached is not None:
+        cache[cache_key] = cache.pop(cache_key)
         return set(cached)
 
     names: set[str] = set()
@@ -326,15 +327,31 @@ def _get_cached_run_xml_image_names(self, run_dir) -> set[str]:
                     names.add(normalized)
                 elem.clear()
     except Exception:
-        names = set()
+        return set()
+    try:
+        final_stat = xml_path.stat()
+        if (final_stat.st_mtime_ns, final_stat.st_size) != cache_key[2:]:
+            return set()
+    except OSError:
+        return set()
 
-    cache.clear()
-    cache[cache_key] = set(names)
+    # Keep multiple XMLs: a one-entry cache reparsed every run on each scan.
+    # Bound both the number of runs and the retained names (large source pools).
+    for old_key in list(cache):
+        if old_key[1] == cache_key[1]:
+            del cache[old_key]
+    if len(names) <= 200_000:
+        cache[cache_key] = frozenset(names)
+        retained = sum(len(value) for value in cache.values())
+        while len(cache) > 256 or retained > 200_000:
+            retained -= len(cache.pop(next(iter(cache))))
     return names
 
 
 def _annotation_run_matches_expected_image_names(self, run_dir, expected_input_dir) -> bool:
     expected_names = _get_cached_input_dir_image_names(self, expected_input_dir)
+    if not expected_names:
+        return False
     run_names = _get_cached_run_xml_image_names(self, run_dir)
     if not expected_names or not run_names:
         return False

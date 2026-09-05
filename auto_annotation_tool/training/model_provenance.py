@@ -71,6 +71,8 @@ def build_model_training_provenance(
     if not run:
         run = _legacy_run_from_sidecar(sidecar)
 
+    index = _normalize_history_index(history_index)
+    run = _resolve_legacy_parent(run, index)
     resolved_target = _normalize_target(target or _value(run, "training_target") or _value(run, "parent_model_target") or _infer_target_from_text(
         " ".join(str(_value(run, key, "")) for key in ("dataset_path", "base_model", "name", "output_dir"))
     ))
@@ -83,7 +85,6 @@ def build_model_training_provenance(
     )
 
     checkpoint_path = Path(checkpoint) if checkpoint else _path_or_none(_value(run, "best_weights") or _value(run, "last_weights"))
-    index = _normalize_history_index(history_index)
     lineage_result = _lineage_total_epochs(
         run,
         history_index=index,
@@ -191,6 +192,7 @@ def build_model_training_provenance(
         "pretrained": bool(pretrained_origin),
         "pretrained_origin": pretrained_origin,
         "parent_run_id": parent_run_id,
+        "parent_resolution": str(run.get("_parent_resolution") or ("explicit" if parent_run_id else "")),
         "parent_model_path": str(_value(run, "parent_model_path", "") or ""),
         "parent_model_name": str(_value(run, "parent_model_name", "") or ""),
         "lineage_depth": len(lineage_result.lineage),
@@ -475,6 +477,45 @@ def _normalized_dataset_snapshot(snapshot: Mapping[str, Any], *, target: str = "
     return _json_safe(payload)
 
 
+def _checkpoint_path_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return str(Path(raw).resolve()).replace("\\", "/").rstrip("/").casefold()
+
+
+def _resolve_legacy_parent(run: dict[str, Any], history_index) -> dict[str, Any]:
+    """Read legacy custom starts by exact checkpoint reference, never by model name."""
+    if _explicit_parent_run_id(run) or str(run.get("lineage_mode") or "").lower() in {"resume", "resumed"}:
+        return run
+    source = str(run.get("parent_model_path") or run.get("base_model") or "").strip()
+    if not source or (not run.get("parent_model_path") and _pretrained_origin(run)):
+        return run
+    key = _checkpoint_path_key(source)
+    matches = []
+    input_sha = _checkpoint_snapshot_sha(_checkpoint_snapshot_from_run(run, "input_checkpoint_snapshot"))
+    for parent_id, parent in history_index.items():
+        if parent_id == _run_id(run):
+            continue
+        for role in ("best", "last"):
+            path = str(parent.get(f"{role}_weights") or "").strip()
+            if not path or _checkpoint_path_key(path) != key:
+                continue
+            output = _checkpoint_snapshot_from_run(parent, "output_checkpoint_snapshot")
+            output_sha = _checkpoint_snapshot_sha(output, key=role)
+            if input_sha and not output_sha:
+                output_sha = _file_sha256(Path(path))
+            if input_sha and output_sha and input_sha != output_sha:
+                continue
+            matches.append((parent_id, role))
+            break
+    if len(matches) != 1:
+        return run
+    parent_id, role = matches[0]
+    return {**run, "lineage_mode": "fine_tune", "parent_run_id": parent_id,
+            "parent_model_path": source, "_parent_resolution": f"history_checkpoint_path:{role}"}
+
+
 def _lineage_total_epochs(
     run: dict[str, Any],
     *,
@@ -482,6 +523,7 @@ def _lineage_total_epochs(
     current_checkpoint: Path | None,
     visited: set[str],
 ) -> _EpochLineageResult:
+    run = _resolve_legacy_parent(run, history_index)
     run_id = _run_id(run)
     if run_id and run_id in visited:
         return _EpochLineageResult(
@@ -591,7 +633,10 @@ def _lineage_total_epochs(
             known_stage_count_minimum=int(parent_result.known_stage_count_minimum or len(parent_result.lineage)) + 1,
             provenance_status=status,
             lineage=[*parent_result.lineage, entry],
-            warnings=list(parent_result.warnings),
+            warnings=[*parent_result.warnings, *(
+                [f"Rodzica runu {run_id} odtworzono z zapisanej ścieżki checkpointu: {parent_id}."]
+                if run.get("_parent_resolution") else []
+            )],
         )
 
     if _pretrained_origin(run) or not _starts_from_external_or_custom_checkpoint(run):
@@ -743,6 +788,16 @@ def _checkpoint_completed_epoch(checkpoint_path: Path | str | None) -> int | Non
 
 
 def _completed_epoch_count(run: Mapping[str, Any]) -> int:
+    # Historical completion handlers sometimes copied the requested budget into
+    # current_epoch after early stopping. Finished epoch rows are execution evidence.
+    if (not _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+            and str(_value(run, "status", "") or "").lower() in {"completed", "failed", "interrupted", "cancelled", "stopped"}):
+        evidence = [value for value in (
+            _results_csv_completed_epoch(run),
+            _metric_rows_completed_epoch(_value(run, "metrics_history", [])),
+        ) if value is not None]
+        if evidence:
+            return max(evidence)
     for key in ("current_epoch", "completed_epochs", "trained_epochs"):
         value = _int_or_none(_value(run, key))
         if value is not None and value > 0:

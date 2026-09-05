@@ -6,6 +6,126 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-05: przygotowanie Z4/PZ1 i PZ2 bez blokowania widoku
+
+PZ1 wywoływało rekomendacje treningu i inicjalizację PyTorch/CUDA już po
+pokazaniu karty, mimo niezbudowanego PZ2. Z4 czyta teraz centralny wynik
+sprawdzenia sprzętu; wspólny skan przekazuje także VRAM przez kolejkę UI.
+Brak wyniku nie jest przedstawiany jako wykrycie CPU. Budowa widoku oraz
+odświeżenia modelu/datasetu nie nadpisują batcha, imgsz ani LR; zalecenia
+stosuje jawny przycisk „Zastosuj rekomendowane”.
+
+Liczenie obrazów korzysta z metadanych listowania katalogów, zamiast osobno
+sprawdzać każdy plik. Pełne podsumowanie anotacji powstaje w tle. UI pokazuje
+stan analizy, nie fałszywe zera, i odrzuca wynik dla porzuconego datasetu.
+Ponowne przypięcie tej samej historii nie wymienia trenera. Pełna kontrola
+przed startem treningu, kontrakty oraz mechanizm wznowienia pozostają.
+
+Lokalnie budowa pustego PZ2: 2,29 s -> 0,77 s; usunięto blokadę po pokazaniu
+PZ1. Próby z 1000 obrazów MT i MZ zachowały dataset, parametry i poprawne
+liczniki. 353 testy oraz 37 podprzypadków przeszły. Nie uruchamiano treningu
+ani nie zapisywano danych projektów. Zakres i szczegółowe pomiary:
+[Audyt przygotowania Z4](docs/audyt_z4_przygotowanie_2026_09_05.md).
+
+## 2026-09-05: optymalizacja wejścia Z3 i podzakładek
+
+Pomiary wskazały uruchamianie PyTorch/CUDA przy budowie PZ2 oraz niejawne
+szukanie i wybieranie starego zestawu cropów podczas odświeżania przycisków.
+Z3 używa teraz centralnego wykazu sprzętu bez dodatkowego skanowania.
+W trybie swobodnym odświeżenie nie wybiera historycznego runu; wyszukiwanie
+pasujących cropów wymaga wskazanego źródła. Kampania zachowuje odtwarzanie
+zapisanego zestawu i warunki dostępu. Wyszukiwanie odwiedza pliki metadanych
+zamiast sprawdzać każdy crop, a liczniki nie wyzwalają powtórnych zapisów
+tej samej ścieżki preview.
+
+Lokalnie: wejście Z3 3,28 s -> 0,97-1,41 s, budowa PZ2 6,40 s -> 0,88-1,02 s.
+Próba 1000 cropów zachowała ręczną ramkę i ustawienie rzędowości; nie było
+wyjątków Tk. 321 testów i 37 podprzypadków przeszło. Nie uruchamiano detekcji
+ani nie zmieniano danych projektów. Czasy nie obejmują wszystkich późniejszych
+callbacków rysowania. Szczegóły i granice pomiaru:
+[Audyt wejścia Z3](docs/audyt_z3_wejscie_2026_09_05.md).
+
+## 2026-09-05: wdrożenie optymalizacji Z2 i miniflow swobodnego
+
+Po akceptacji audytu oddzielono aktywny run od wyszukiwania historii. Ekrany
+nowej pracy i opisy nie wyszukują już runów; historia pozostaje dostępna przez
+kontynuację/import. Wznowienie zachowuje wybrany run oraz pracę ręczną.
+Pusty panel eksportu nie podstawia przypadkowego ostatniego runu.
+
+Cache XML przechowuje wiele runów z ograniczeniem pamięci i walidacją zmian
+pliku. Odtwarzanie sesji oraz zmiana katalogu nie dublują odświeżeń. Usunięto
+konkurujące ustawianie zawijania tekstu i wymuszanie kolejki Tk z rysowania
+splasha/przewijania, które blokowały przygotowanie podglądu. Odświeżanie motywu
+nie odkrywa runów. Kryteria bramek i kolejność decyzji pozostają bez zmian.
+
+W izolowanych próbach GUI otwarcie Z2 spadło z około 29,7 s do 0,72-0,92 s,
+a wybór pracy ręcznej z 26,7 s do 0,13-0,18 s. Test 1000 obrazów i otwarcie
+edytora testowego XML potwierdziły zachowanie manuali, [OK] i wznowienia.
+291 testów oraz 37 podprzypadków przeszło; danych projektów nie zapisywano.
+Zakres prób i ograniczenia: [Audyt Z2 i miniflow](docs/audyt_z2_free_mode_miniflow_2026_09_05.md).
+
+## 2026-09-05: analiza wydajności Z2 w trybie swobodnym
+
+Pomiar bez profilera: pierwsze otwarcie około 29,7 s, wybór drogi ręcznej
+26,7 s. Profil wykazał 12 przejść przez 141 historycznych runów przy pustym
+ekranie wyboru. Cache nazw obrazów XML był kasowany po każdym runie, więc
+kolejne przejście odczytywało wszystkie pliki ponownie. Także nakładanie
+motywu ponownie wyszukiwało run, choć powinno tylko zmienić wygląd.
+
+Eksperymentalne wyłączenie niejawnego wyszukiwania wyłącznie w osobnym
+procesie testowym dało około 2,8 s i 1,1 s. To dowód kierunku optymalizacji,
+nie wdrożona zmiana. Osobno odtworzono blokadę odświeżania geometrii i splasha
+podczas przygotowania podglądu oraz błędną zmianę manual -> auto przy wznowieniu.
+
+W ramach tej analizy nie zmieniono kodu produkcyjnego ani danych projektu.
+Plan rozdziela optymalizację od zmian UX i wymaga regresji obu trybów:
+[Audyt Z2 i miniflow](docs/audyt_z2_free_mode_miniflow_2026_09_05.md).
+
+## 2026-09-05: eksport mobilny, epoki modeli pisto
+
+Model MZ z 2 sierpnia miał 1 epokę ostatniego treningu po wcześniejszych 130.
+Stary zapis `lineage_mode=new` z pustym rodzicem przesłaniał faktyczne wejście
+z `best.pt` innego runu. Tabela dodatkowo wyświetlała znane minimum jako
+pełną liczbę epok. Odtwarzanie uwzględnia teraz jednoznaczne pełne ścieżki
+checkpointów w historii, a niepełne dane mają oznaczenie `≥` i wyjaśnienie.
+
+Znaleziono też historyczny licznik 100 mimo 56 rzeczywiście wykonanych epok.
+Dla starszych zakończonych runów bez zamrożonego snapshotu wyniku dowodem
+wykonania są CSV i wiersze metryk, nie budżet treningu. Sumy wynoszą odpowiednio
+131 (130 + 1) i 106 (50 + 56). Wagi i zapis projektu pozostały bez zmian.
+Wysokie metryki modelu jednoepokowego potwierdzono w jego checkpointcie.
+
+Dowody, zakres semantyczny sum i testy:
+[Audyt epok pisto](docs/audyt_epok_pisto_2026_09_05.md).
+
+## 2026-09-05: Z2, wynik detekcji, pobieranie MP i chowana szuflada FS
+
+Publikacja listy po autoanotacji odbywa się po scaleniu wyników, odzyskaniu
+manuali i zatwierdzeń oraz oznaczeniu pochodzenia ramek. Odtwarzanie XML nie
+rysuje pośredniej listy; końcowa publikacja anuluje stare porcje odświeżania,
+odbudowuje cache znaczników i koloruje wiersze porcjami. Detekcja tablic daje
+`[A]`, bez znalezionej ramki pozostaje `[--]`; manuale i `[OK]` zachowują znaczenie.
+
+Pobieranie brakującego modelu pojazdów wymaga zgody na sieć. Nie otwiera
+terminala procesu: worker pobiera plik do tymczasowego `.part`, a wspólny
+komponent postępu pokazuje źródłowy URL, rzeczywiste bajty, procent i MB/s.
+Wersja źródła odpowiada zainstalowanemu Ultralytics. Brak rozmiaru w odpowiedzi
+serwera jest opisany jawnie, bez fikcyjnego procentu. Dopiero kompletny transfer
+jest atomowo przenoszony do katalogu modeli; błąd lub anulowanie nie uruchamia
+anotacji i usuwa plik częściowy. Sieć i zapis nie odwołują się do Tk.
+
+Szuflada FS ma przycisk z piktogramem panelu i kierunku, wspólny z panelem
+projektów. Animacja przesuwa istniejący panel poza prawą krawędź bez przebudowy
+liczników. Przycisk wysuwania pozostaje widoczny. Zmiana obrazu ani zoom nie
+otwierają schowanej szuflady; poza FS obowiązuje dotychczasowy układ.
+Kolory i parametry animacji pochodzą z centralnego menedżera.
+
+Weryfikacja: testy znaczników, transferu, anulowania i animacji oraz regresje
+kampanii; izolowana próba GUI w Windows/Tk, z symulowanym transferem, bez
+operacji na modelach i danych projektu. Interfejs utrzymał cykliczne odświeżanie,
+nie wystąpiły wyjątki callbacków. Rzeczywisty transfer z GitHub i detekcja na
+GPU w projekcie użytkownika nie były uruchamiane w ramach tej próby.
+
 ## 2026-09-05: handoff v2.3, przygotowanie treningu
 
 Start wykonywał pełne sprawdzenie datasetu w głównym wątku, przed drugim
@@ -99,6 +219,46 @@ myszy; po przywróceniu przez użytkownika odzyskuje je, nie odbierając go
 otwartemu oknu potomnemu. Zakończenie importu oraz AS respektują minimalizację
 i nie wywołują deiconify. Testy zdarzeń okna są automatyczne; odbiór natywnego
 zachowania na docelowej maszynie pozostaje do wykonania.
+
+## 2026-09-05: natywna minimalizacja zasobów, potwierdzona przyczyna
+
+Poprzednia ochrona przed automatycznym przywracaniem okna nie usuwała blokady
+samej minimalizacji. Odtworzono ją na osobnym oknie o tej samej konfiguracji
+Tk: Windows 10 build 19045, Python 3.12, Tcl/Tk 8.6.13. Przy aktywnym `grab`
+systemowe polecenie `WM_SYSCOMMAND / SC_MINIMIZE` pozostawiało stan `normal`,
+bez zdarzenia `Unmap`. Zatem zwalnianie grab dopiero po Unmap było za późne.
+Po ręcznym zwolnieniu grab przed poleceniem okno przechodziło w `iconic`.
+
+Zachowanie jest zapisane w obsłudze WM_SYSCOMMAND w
+[kodzie Tk dla Windows](https://github.com/tcltk/tk/blob/core-8-6-branch/win/tkWinWm.c):
+Tk odrzuca minimalizację innych top-leveli niż root, gdy są w drzewie grab.
+
+Wprowadzono lokalną obsługę natywnego polecenia dla okien skonfigurowanych przez
+`configure_minimizable_modal`. Nie zmienia ona paska tytułowego ani zwykłej
+modalności. Callback Windows tylko zapisuje żądanie; lekki timer Tk (24 ms,
+bez redraw) zwalnia własne przechwycenie okna. Po obsłużeniu kolejki Tk to samo
+polecenie jest przekazywane do standardowej obsługi Windows. Okno potomne
+z własnym grab nadal blokuje minimalizację rodzica. Timer jest zatrzymywany
+po schowaniu okna i usuwany razem z callbackiem przy jego zamknięciu.
+
+Próba wywoływania Tk bezpośrednio z callbacku ctypes była odrzucona: powodowała
+problem zapisanego stanu wątku `_tkinter` i awarię procesu testowego. W finalnym
+wariancie callback natywny nie wywołuje żadnych metod Tk. Test jednostkowy
+sprawdza tę granicę, a natywna próba sprawdza pełny cykl komunikatów.
+
+Wynik `python tests/native_resource_modal_probe.py`: PASS, błędów callbacków 0.
+Sprawdzono trzy cykle, stan normalny i zmaksymalizowany, ponowne utworzenie
+ramki Windows, ochronę okna potomnego i zamknięcie z oczekującym poleceniem.
+W każdym teście minimalizacji: stan Tk `iconic`, Win32 `IsIconic=True`, grab
+zwolniony, okno główne `normal`. Po przywróceniu: modal odzyskuje grab.
+To test systemowych poleceń na izolowanych oknach, bez danych projektu;
+nie zastępuje odbioru pełnej aplikacji na docelowym Windows 11.
+
+Podstawa implementacji:
+[WM_SYSCOMMAND](https://learn.microsoft.com/en-us/windows/win32/menurc/wm-syscommand),
+[SetWindowSubclass](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-setwindowsubclass),
+[DefSubclassProc](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-defsubclassproc),
+[RemoveWindowSubclass](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-removewindowsubclass).
 
 ## 2026-05-07
 

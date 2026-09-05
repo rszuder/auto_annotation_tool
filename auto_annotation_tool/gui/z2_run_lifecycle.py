@@ -401,6 +401,9 @@ def _score_annotation_run_restore_candidate(self, run_dir: Path | None) -> float
 
 
 def _resolve_best_free_mode_restore_run(self) -> Path | None:
+    if self._is_free_mode_session_context():
+        # Reopening a tab must not replace the selected run with a newer one.
+        return self._get_preferred_annotation_run_dir(require_xml=True)
     candidates: list[Path] = []
     seen: set[str] = set()
 

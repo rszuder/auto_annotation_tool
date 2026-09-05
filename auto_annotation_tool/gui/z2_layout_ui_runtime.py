@@ -157,6 +157,8 @@ def _sync_right_panel_canvas_width(self, event=None):
         return
 
     try:
+        if int(float(canvas.itemcget(window_id, "width") or 0)) == int(width):
+            return
         canvas.itemconfigure(window_id, width=width)
     except Exception:
         pass
@@ -184,6 +186,8 @@ def _sync_left_panel_canvas_width(self, event=None):
         return
 
     try:
+        if int(float(canvas.itemcget(window_id, "width") or 0)) == int(width):
+            return
         canvas.itemconfigure(window_id, width=width)
     except Exception:
         pass
@@ -620,7 +624,8 @@ def _sync_approve_hint_wraplength(self, event=None):
         if label is None:
             continue
         try:
-            label.configure(wraplength=wraplength)
+            if int(float(label.cget("wraplength") or 0)) != wraplength:
+                label.configure(wraplength=wraplength)
         except Exception:
             pass
 
@@ -661,7 +666,10 @@ def _sync_workflow_copy_wraplength(self, event=None):
         except Exception:
             host_width = 0
 
-        effective_width = host_width if host_width > 0 else fallback_width
+        if getattr(widget, "_wrap_container", None) is not None:
+            self._refresh_bound_label_wraplength(widget)
+            continue
+        effective_width = host_width if host_width > 1 else fallback_width
         try:
             padding_px = int(getattr(widget, "_wrap_padding_px", 40) or 40)
         except Exception:
@@ -672,7 +680,8 @@ def _sync_workflow_copy_wraplength(self, event=None):
             min_px = 220
         wraplength = max(min_px, int(effective_width or 0) - padding_px)
         try:
-            widget.configure(wraplength=wraplength)
+            if int(float(widget.cget("wraplength") or 0)) != wraplength:
+                widget.configure(wraplength=wraplength)
         except Exception:
             pass
 
@@ -1323,7 +1332,7 @@ def _build_z2_action_context(self) -> Z2ActionContext:
     try:
         from ..campaign_manager import CAMPAIGN
 
-        if CAMPAIGN.get_active_project_name():
+        if not self._is_free_mode_session_context() and CAMPAIGN.get_active_project_name():
             campaign_step = int(CAMPAIGN.get_current_step() or 0)
             iteration_target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
             project_plate_model = str(CAMPAIGN.get_global_model("plate") or "").strip()
@@ -1853,26 +1862,31 @@ def _scroll_left_panel_to_widget(self, widget):
     if canvas is None or content is None or widget is None:
         return
 
-    try:
-        canvas.update_idletasks()
-        bbox = canvas.bbox("all")
-        if not bbox:
-            return
+    def scroll_after_layout():
+        self._left_panel_scroll_after_id = None
+        try:
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return
+            top_y = 0
+            current = widget
+            while current is not None and current != content:
+                top_y += int(current.winfo_y())
+                parent_name = str(current.winfo_parent() or "").strip()
+                if not parent_name:
+                    break
+                try:
+                    current = current.nametowidget(parent_name)
+                except Exception:
+                    current = None
+            total_height = max(1, int(bbox[3] - bbox[1]))
+            fraction = max(0.0, min(1.0, float(top_y) / float(total_height)))
+            canvas.yview_moveto(fraction)
+        except tk.TclError:
+            pass
 
-        top_y = 0
-        current = widget
-        while current is not None and current != content:
-            top_y += int(current.winfo_y())
-            parent_name = str(current.winfo_parent() or "").strip()
-            if not parent_name:
-                break
-            try:
-                current = current.nametowidget(parent_name)
-            except Exception:
-                current = None
-
-        total_height = max(1, int(bbox[3] - bbox[1]))
-        fraction = max(0.0, min(1.0, float(top_y) / float(total_height)))
-        canvas.yview_moveto(fraction)
-    except Exception:
-        pass
+    # Let pending geometry settle rather than recursively pumping the Tk queue.
+    pending = getattr(self, "_left_panel_scroll_after_id", None)
+    if pending:
+        self.frame.after_cancel(pending)
+    self._left_panel_scroll_after_id = self.frame.after_idle(scroll_after_layout)

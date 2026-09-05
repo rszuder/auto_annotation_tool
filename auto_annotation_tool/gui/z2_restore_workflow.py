@@ -2187,10 +2187,10 @@ def _apply_free_mode_session_snapshot(self, session_state: dict | None = None, r
                 self._restore_plate_model_selection_from_active_run()
             except Exception:
                 pass
-        self._refresh_step2_action_states()
-        self._refresh_free_mode_workflow_ui()
     finally:
         self._free_mode_session_restore_in_progress = False
+    self._refresh_step2_action_states()
+    self._refresh_free_mode_workflow_ui()
 
 def _prepare_campaign_source_preview_payload(
     self,

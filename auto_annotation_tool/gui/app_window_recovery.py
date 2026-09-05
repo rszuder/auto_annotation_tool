@@ -53,7 +53,13 @@ def configure_minimizable_modal(window) -> None:
     window._aat_native_modal_state_bound = True
 
     def _on_unmap(event):
-        if event.widget is not window or _safe_window_state(window) != "iconic":
+        if event.widget is not window:
+            return
+        state = _safe_window_state(window)
+        hook = getattr(window, "_aat_native_minimize_hook", None)
+        if hook is not None and state in {"iconic", "withdrawn"}:
+            hook.pause()
+        if state != "iconic":
             return
         try:
             if window.grab_current() is window:
@@ -64,14 +70,32 @@ def configure_minimizable_modal(window) -> None:
     def _on_map(event):
         if event.widget is not window or _safe_window_state(window) not in {"normal", "zoomed"}:
             return
+        from .native_modal_minimize import ensure_native_modal_minimize
+        ensure_native_modal_minimize(window)
         try:
             if window.grab_current() is None:
                 window.grab_set()
         except Exception:
             pass
 
+    def _on_configure(event):
+        hook = getattr(window, "_aat_native_minimize_hook", None)
+        if (event.widget is window and hook is not None and not hook.hwnd and not hook.closed
+                and window.winfo_ismapped()):
+            # Tk may recreate its wrapper after a wm attributes/transient change.
+            from .native_modal_minimize import ensure_native_modal_minimize
+            ensure_native_modal_minimize(window)
+
+    def _on_destroy(event):
+        if event.widget is window:
+            hook = getattr(window, "_aat_native_minimize_hook", None)
+            if hook is not None:
+                hook.close()
+
     window.bind("<Unmap>", _on_unmap, add="+")
     window.bind("<Map>", _on_map, add="+")
+    window.bind("<Configure>", _on_configure, add="+")
+    window.bind("<Destroy>", _on_destroy, add="+")
 
 
 def restore_visible_modal(window) -> bool:

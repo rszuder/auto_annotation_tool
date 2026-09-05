@@ -338,6 +338,8 @@ def get_manual_review_history_display_entries(host: "AnnotationTab") -> list[dic
 
 
 def refresh_manual_review_history_ui(host: "AnnotationTab") -> None:
+    if host._is_free_mode_session_context() and host._get_manual_entry_mode() != "continue":
+        return
     values = []
     label_map = {}
 

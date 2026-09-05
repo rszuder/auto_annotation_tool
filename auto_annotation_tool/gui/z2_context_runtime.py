@@ -185,16 +185,19 @@ def ensure_free_mode_session_preview_ready(self, *, force: bool = False) -> bool
 
     if restored:
         try:
-            if not self._get_workflow_route():
-                manifest = self._load_annotation_run_manifest(getattr(self, "current_annotation_run_dir", None))
-                manual_template_like = bool(self._annotation_run_manifest_is_manual_template(manifest))
-                if manual_template_like:
-                    self.workflow_route_var.set("manual")
-                    self.free_mode_screen_var.set("manual_review")
-                    self._manual_review_active = True
-                    self._manual_review_from_auto = False
-                    self._manual_review_origin_route = "manual"
-                    self._last_completed_workflow_route = "manual"
+            route = self._get_workflow_route()
+            manifest = self._load_annotation_run_manifest(getattr(self, "current_annotation_run_dir", None))
+            manual_template_like = bool(self._annotation_run_manifest_is_manual_template(manifest))
+            manual_review = route == "manual" or (not route and manual_template_like)
+            if manual_review:
+                self.workflow_route_var.set("manual")
+                self.free_mode_screen_var.set("manual_review")
+                self._manual_review_active = True
+                # An auto result can also be opened explicitly for manual correction.
+                from_auto = bool(getattr(self, "_manual_review_from_auto", False)) and not manual_template_like
+                self._manual_review_from_auto = from_auto
+                self._manual_review_origin_route = "auto" if from_auto else "manual"
+                self._last_completed_workflow_route = self._manual_review_origin_route
             else:
                 self.workflow_route_var.set("auto")
                 self.free_mode_screen_var.set("auto_summary")
@@ -379,13 +382,16 @@ def _draw_campaign_step2_splash_bar(
     if progress_widget is None:
         return
     try:
-        progress_widget.update_idletasks()
-        canvas_width = int(progress_widget.winfo_width() or progress_widget.winfo_reqwidth() or 520)
+        canvas_width = int(progress_widget.winfo_width() or 0)
+        if canvas_width <= 1:
+            canvas_width = int(progress_widget.winfo_reqwidth() or 520)
     except Exception:
         canvas_width = 520
     canvas_width = max(180, int(canvas_width or 520))
     try:
-        canvas_height = int(progress_widget.winfo_height() or progress_widget.winfo_reqheight() or 16)
+        canvas_height = int(progress_widget.winfo_height() or 0)
+        if canvas_height <= 1:
+            canvas_height = int(progress_widget.winfo_reqheight() or 16)
     except Exception:
         canvas_height = 16
     canvas_height = max(12, int(canvas_height or 16))

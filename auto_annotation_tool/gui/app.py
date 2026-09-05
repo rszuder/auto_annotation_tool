@@ -562,6 +562,7 @@ class AutoAnnotationApp:
 
     def _scan_available_yolo_devices_sync(self, progress=None) -> list[str]:
         devices = [self._auto_device_label(), self._cpu_device_label()]
+        profiles = []
         if progress:
             progress("torch_import")
         import torch
@@ -574,18 +575,34 @@ class AutoAnnotationApp:
             for i in range(torch.cuda.device_count()):
                 name = torch.cuda.get_device_name(i)
                 devices.append(f"cuda:{i} ({name})")
+                try:
+                    memory = float(torch.cuda.get_device_properties(i).total_memory) / (1024 ** 3)
+                except Exception:
+                    memory = 0.0
+                profiles.append({"raw": f"cuda:{i}", "index": i, "name": name, "memory_gb": memory})
+        if progress:
+            progress({"device_profiles": profiles})
         return self._normalize_global_yolo_device_options(devices)
 
     def get_available_yolo_devices(self, *, allow_probe: bool = False) -> list[str]:
         if allow_probe:
-            devices = self._scan_available_yolo_devices_sync()
+            profiles = []
+            def collect_profiles(event):
+                if isinstance(event, dict):
+                    profiles.extend(event.get("device_profiles", []))
+            devices = self._scan_available_yolo_devices_sync(progress=collect_profiles)
             self._global_yolo_devices_cache = list(devices)
+            self._global_yolo_device_profiles_cache = profiles
             self._global_yolo_devices_cache_ready = True
             return devices
         return list(
             getattr(self, "_global_yolo_devices_cache", None)
             or self._initial_global_yolo_device_options()
         )
+
+    def get_available_yolo_device_profiles(self) -> list[dict]:
+        """Return confirmed hardware metadata without accessing torch or the driver."""
+        return [dict(item) for item in getattr(self, "_global_yolo_device_profiles_cache", [])]
 
     def _refresh_global_yolo_devices_async(self, *, silent: bool = False) -> None:
         if getattr(self, "_closing_in_progress", False):
@@ -611,6 +628,7 @@ class AutoAnnotationApp:
         results = queue.SimpleQueue()
         started_at = time.monotonic()
         phase = "start"
+        device_profiles = None
         logger.info("[HARDWARE SCAN] started timeout=%.0fs", HARDWARE_SCAN_TIMEOUT_SECONDS)
         if not silent:
             self.update_status("Wykrywam dostępne urządzenia GPU/CUDA w tle...", "info")
@@ -626,7 +644,7 @@ class AutoAnnotationApp:
                 results.put(("done", devices, "", time.monotonic()))
 
         def poll() -> None:
-            nonlocal phase
+            nonlocal phase, device_profiles
             self._global_yolo_devices_scan_after_id = None
             if getattr(self, "_closing_in_progress", False):
                 self._global_yolo_devices_scan_in_progress = False
@@ -637,13 +655,18 @@ class AutoAnnotationApp:
                 except queue.Empty:
                     break
                 if kind == "phase":
+                    if isinstance(payload, dict) and "device_profiles" in payload:
+                        device_profiles = payload["device_profiles"]
+                        continue
                     phase = payload
                     logger.info(
                         "[HARDWARE SCAN] phase=%s elapsed=%.0fms",
                         phase, (event_time - started_at) * 1000,
                     )
                     continue
-                self._finish_global_yolo_device_scan(payload, error_text, silent=silent)
+                self._finish_global_yolo_device_scan(
+                    payload, error_text, silent=silent, device_profiles=device_profiles,
+                )
                 logger.info(
                     "[HARDWARE SCAN] finished probe=%.0fms ui_delivery=%.0fms error=%s",
                     (event_time - started_at) * 1000,
@@ -671,12 +694,13 @@ class AutoAnnotationApp:
                 self._global_yolo_devices_scan_after_id = None
             self._finish_global_yolo_device_scan(None, str(exc), silent=silent)
 
-    def _finish_global_yolo_device_scan(self, devices, error_text: str, *, silent: bool) -> None:
+    def _finish_global_yolo_device_scan(self, devices, error_text: str, *, silent: bool, device_profiles=None) -> None:
         self._global_yolo_devices_scan_in_progress = False
         self._global_yolo_devices_cache_ready = True
         self._global_yolo_devices_last_error = error_text
         if not error_text:
             self._global_yolo_devices_cache = self._normalize_global_yolo_device_options(devices)
+            self._global_yolo_device_profiles_cache = [dict(item) for item in (device_profiles or [])]
             current_before = str(self.global_yolo_device_var.get() or "").strip()
             saved_before = str(
                 getattr(self, "_global_yolo_device_saved_preference_raw", "") or ""
@@ -694,6 +718,13 @@ class AutoAnnotationApp:
                 self._save_global_yolo_device_preference(normalized_current)
             elif saved_before.lower().startswith("cuda:") and normalized_current == self._auto_device_label():
                 self._save_global_yolo_device_preference(normalized_current)
+
+            training_tab = getattr(self, "tabs", {}).get("training")
+            if bool(getattr(training_tab, "_step4_train_tab_built", False)):
+                try:
+                    training_tab._refresh_training_device_hint()
+                except Exception as exc:
+                    logger.debug("Nie udało się odświeżyć informacji o sprzęcie Z4: %s", exc)
 
         owner = getattr(self, "_configuration_menu_button", None)
         refresh_menu = getattr(self, "_menu_dropdown_update_items", None)

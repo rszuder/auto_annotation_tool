@@ -368,6 +368,16 @@ def find_latest_extract_preview_run_dir(host: "CharacterAnnotationTab", require_
     Szuka najnowszego preview zgodnego z aktualnym źródłem PZ1.
     To chroni PZ2 przed podpięciem starego runu, gdy PZ1 przejął już nowy XML.
     """
+    from .z3_paths import _has_campaign_preview_context
+
+    if not _has_campaign_preview_context(host):
+        # Without an explicit source there is nothing to match. In particular,
+        # clearing a session must not silently reattach an unrelated old run.
+        xml_var = getattr(host, "xml_path_var", None)
+        images_var = getattr(host, "images_dir_var", None)
+        if not (xml_var and str(xml_var.get() or "").strip()
+                and images_var and str(images_var.get() or "").strip()):
+            return ""
     try:
         chars_root = host._get_step3_chars_root_dir(ensure_exists=False)
     except Exception:
@@ -381,8 +391,9 @@ def find_latest_extract_preview_run_dir(host: "CharacterAnnotationTab", require_
 
     candidates = []
     try:
-        for p in root.rglob("*"):
-            if not p.is_dir():
+        for meta_path in root.rglob("metadata.json"):
+            p = meta_path.parent
+            if p == root or not meta_path.is_file():
                 continue
             try:
                 usable = host._is_usable_step3_preview_dir(

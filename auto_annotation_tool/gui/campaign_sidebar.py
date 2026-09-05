@@ -10,9 +10,10 @@ from .app_theme_definitions import CAMPAIGN_SIDEBAR_STYLE as STYLE
 class ProjectSidebarToggle(tk.Canvas):
     """One stationary, keyboard-accessible control for both sidebar states."""
 
-    def __init__(self, parent, palette, command):
+    def __init__(self, parent, palette, command, *, collapsed_text="Pokaż projekty", expanded_text="Ukryj panel"):
+        self.collapsed_text, self.expanded_text = collapsed_text, expanded_text
         self._font = tkfont.Font(root=parent, font=STYLE["button_font"])
-        width = max(self._font.measure(text) for text in ("Pokaż projekty", "Ukryj panel")) + 66
+        width = max(self._font.measure(text) for text in (collapsed_text, expanded_text)) + 66
         height = max(STYLE["button_height"], self._font.metrics("linespace") + 18)
         super().__init__(parent, width=width, height=height, bd=0, highlightthickness=0,
                          takefocus=True, cursor="hand2")
@@ -44,7 +45,7 @@ class ProjectSidebarToggle(tk.Canvas):
         self.create_rectangle(24, cy-8, 28, cy+8, fill=p["accent"], outline="")
         points = (45, cy-6, 39, cy, 45, cy+6) if self.collapsed else (39, cy-6, 45, cy, 39, cy+6)
         self.create_line(*points, fill=p["fg"], width=2.5, capstyle="round", joinstyle="round", tags=("direction",))
-        self.create_text(56, cy, anchor="w", text="Pokaż projekty" if self.collapsed else "Ukryj panel",
+        self.create_text(56, cy, anchor="w", text=self.collapsed_text if self.collapsed else self.expanded_text,
                          font=self._font, fill=p["fg"], tags=("label",))
         self._paint_state()
 
