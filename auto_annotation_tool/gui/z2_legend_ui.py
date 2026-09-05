@@ -145,6 +145,60 @@ def preview_controls_row_is_multi_plate_badge(row_label: str, row_value: str) ->
         return False
 
 
+def _preview_controls_context_fonts(owner):
+    compact = not owner._is_preview_controls_legend_expanded()
+    return (
+        owner._get_preview_legend_font(11 if compact else 8, "bold"),
+        owner._get_preview_legend_font(9 if compact else 8, "normal"),
+        owner._get_preview_legend_font(10 if compact else 8, "bold"),
+    )
+
+
+def _compact_preview_controls_layout(owner, width):
+    """Measure wrapped text with the same Canvas fonts used for painting."""
+    context = owner._get_preview_legend_context()
+    rows = owner._build_preview_controls_context_rows()
+    file_font, meta_font, value_font = _preview_controls_context_fonts(owner)
+    canvas = getattr(owner, "preview_controls_canvas", None)
+    key = (int(width), str(context.get("filename", "")), tuple((r[0], r[1]) for r in rows),
+           tuple(tuple(sorted(font.actual().items())) for font in (file_font, meta_font, value_font)),
+           canvas is not None)
+    cached = getattr(owner, "_compact_preview_controls_layout_cache", None)
+    if cached and cached[0] == key:
+        return cached[1]
+
+    def text_height(text, font, available_width):
+        available_width = max(40.0, float(available_width))
+        if canvas is not None:
+            item = None
+            try:
+                item = canvas.create_text(-10000, -10000, anchor="nw", text=text,
+                                          font=font, width=available_width)
+                bbox = canvas.bbox(item)
+                if bbox:
+                    return float(bbox[3] - bbox[1])
+            finally:
+                if item is not None:
+                    canvas.delete(item)
+        return max(1, math.ceil(font.measure(str(text)) / available_width)) * font.metrics("linespace")
+
+    value_x = 12.0 + max([64.0] + [float(meta_font.measure(row[0])) + 12 for row in rows])
+    file_h = text_height(f"Plik: {context.get('filename', '')}", file_font, width - 24)
+    row_heights = tuple(
+        max(float(meta_font.metrics("linespace")),
+            float(value_font.metrics("linespace")) + 6 if owner._preview_controls_row_is_multi_plate_badge(row[0], row[1])
+            else text_height(row[1], value_font, width - value_x - 20)) + 6
+        for row in rows
+    )
+    title_font = owner._get_preview_legend_font(10, "bold")
+    state_font = owner._get_preview_legend_font(9, "normal")
+    header_h = max(38.0, 5 + title_font.metrics("linespace") + 4 + state_font.metrics("linespace"))
+    layout = {"value_x": value_x, "file_h": file_h, "row_heights": row_heights,
+              "height": 10 + header_h + 8 + file_h + 10 + sum(row_heights) + 18}
+    owner._compact_preview_controls_layout_cache = (key, layout)
+    return layout
+
+
 def get_preview_controls_legend_target_width(owner) -> int:
     canvas_frame = getattr(owner, "canvas_frame", None)
     try:
@@ -162,8 +216,7 @@ def get_preview_controls_legend_target_width(owner) -> int:
 
     context = owner._get_preview_legend_context()
     rows = owner._build_preview_controls_context_rows()
-    file_font = owner._get_preview_legend_font(8, "bold")
-    value_font = owner._get_preview_legend_font(8, "bold")
+    file_font, _meta_font, value_font = _preview_controls_context_fonts(owner)
     file_width = float(file_font.measure(f"Plik: {context.get('filename', '')}")) + 18.0
     value_width = 0.0
     for row_label, row_value, _fill, _outline in rows:
@@ -173,11 +226,14 @@ def get_preview_controls_legend_target_width(owner) -> int:
         value_width = max(value_width, measured)
     context_width = 12.0 + 64.0 + value_width + 14.0
     if bool(getattr(owner, "_preview_fullscreen_active", False)):
-        compact_min = 226.0
-        compact_max = 268.0
+        compact_min = 284.0
+        compact_max = 352.0
     else:
-        compact_min = 204.0
-        compact_max = 238.0
+        compact_min = 274.0
+        compact_max = 330.0
+    header_width = float(owner._get_preview_legend_font(10, "bold").measure("Skróty podglądu")) + 124.0
+    compact_min = max(compact_min, header_width)
+    compact_max = max(compact_max, compact_min)
     collapsed_width = max(compact_min, min(max(file_width, context_width), compact_max))
     return int(min(max(collapsed_width, compact_min), max(int(compact_min), frame_width - 24)))
 
@@ -187,12 +243,13 @@ def get_preview_controls_legend_target_height(owner, width: float | None = None)
     expanded = owner._is_preview_controls_legend_expanded()
     rows = owner._build_preview_controls_context_rows()
 
+    if not expanded:
+        return int(math.ceil(_compact_preview_controls_layout(owner, safe_width)["height"]))
+
     top_pad = 7.0
     header_h = 34.0
     context_h = 18.0 + (len(rows) * 18.0) + 4.0
     compact_height = top_pad + header_h + context_h + 6.0
-    if not expanded:
-        return int(max(108.0, compact_height))
 
     sections = owner._build_preview_legend_sections()
     shortcuts_h = 0.0
@@ -288,6 +345,8 @@ def _preview_controls_static_key(
         str(legend_theme.get("section_title", "")),
         str(legend_theme.get("section_muted", "")),
         _preview_controls_context_shape(owner, context_rows),
+        (() if expanded else tuple(_compact_preview_controls_layout(owner, width)[key]
+                                  for key in ("height", "row_heights"))),
         tuple(
             (
                 str(section.get("title", "")),
@@ -325,7 +384,7 @@ def _update_preview_controls_context_only(
     inner_pad_x = 12.0
     label_fill = str(legend_theme.get("label_fill", "#f4f7fb"))
     value_fill = str(legend_theme.get("entry_text", "#ffffff"))
-    value_font = owner._get_preview_legend_font(8, "bold")
+    _file_font, _meta_font, value_font = _preview_controls_context_fonts(owner)
     file_id = item_ids.get("file")
     if file_id is None:
         return False
@@ -551,6 +610,8 @@ def refresh_preview_controls_legend(owner):
         120.0,
         render_height_override or current_shell_height or target_shell_height,
     )
+    if not expanded and not render_height_override:
+        shell_height = target_shell_height
     shell_photo = owner._get_preview_legend_shell_photo(
         legend_theme,
         width=int(shell_width),
@@ -596,11 +657,9 @@ def refresh_preview_controls_legend(owner):
     label_fill = str(legend_theme.get("label_fill", "#f4f7fb"))
     muted_fill = str(legend_theme.get("muted_fill", "#c7d0db"))
     value_fill = str(legend_theme.get("entry_text", "#ffffff"))
-    current_y = toggle_y + toggle_block_h + 4.0
+    current_y = toggle_y + toggle_block_h + (4.0 if expanded else 8.0)
 
-    file_font = owner._get_preview_legend_font(8, "bold")
-    meta_font = owner._get_preview_legend_font(8, "normal")
-    value_font = owner._get_preview_legend_font(8, "bold")
+    file_font, meta_font, value_font = _preview_controls_context_fonts(owner)
 
     file_text = f"Plik: {context['filename']}"
     context_item_ids = {"file": None, "rows": []}
@@ -617,12 +676,13 @@ def refresh_preview_controls_legend(owner):
     )
     context_item_ids["file"] = file_id
     file_bbox = canvas.bbox("preview_legend_context")
-    current_y = float(file_bbox[3] + 6.0) if file_bbox else current_y + 18.0
+    current_y = float(file_bbox[3] + (6.0 if expanded else 10.0)) if file_bbox else current_y + 18.0
 
     row_h = 18.0
-    context_value_x = inner_pad_x + 64.0
+    compact_layout = _compact_preview_controls_layout(owner, width) if not expanded else None
+    context_value_x = compact_layout["value_x"] if compact_layout else inner_pad_x + 64.0
     for idx, (row_label, row_value, row_fill, row_outline) in enumerate(context_rows):
-        block_y = current_y + (idx * row_h)
+        block_y = current_y
         canvas.create_text(
             inner_pad_x,
             block_y,
@@ -635,7 +695,7 @@ def refresh_preview_controls_legend(owner):
         if owner._preview_controls_row_is_multi_plate_badge(str(row_label), str(row_value)):
             badge_text = str(row_value)
             badge_w = max(40.0, float(value_font.measure(badge_text)) + 18.0)
-            badge_h = 17.0
+            badge_h = float(value_font.metrics("linespace") + 6) if not expanded else 17.0
             badge_x = context_value_x
             badge_y = block_y - 1.0
             rect_id = canvas.create_rectangle(
@@ -692,8 +752,8 @@ def refresh_preview_controls_legend(owner):
                     "x": float(context_value_x),
                 }
             )
+        current_y += compact_layout["row_heights"][idx] if compact_layout else row_h
 
-    current_y += (len(context_rows) * row_h) + 0.0
 
     if not expanded:
         try:
@@ -1122,8 +1182,8 @@ def draw_preview_legend_compass_toggle(
         )
     state_text = "Zwiń skróty" if expanded else "Rozwiń skróty"
     title_x = x + size + 10.0
-    title_font = owner._get_preview_legend_font(8, "bold")
-    state_font = owner._get_preview_legend_font(7, "normal")
+    title_font = owner._get_preview_legend_font(8 if expanded else 10, "bold")
+    state_font = owner._get_preview_legend_font(7 if expanded else 9, "normal")
     safe_title_width = float(title_max_width or 96.0)
     title_text = owner._fit_preview_text_to_width("Skróty podglądu", safe_title_width, title_font)
     state_text = owner._fit_preview_text_to_width(state_text, safe_title_width, state_font)
@@ -1138,7 +1198,7 @@ def draw_preview_legend_compass_toggle(
     )
     canvas.create_text(
         title_x,
-        y + 19.0,
+        y + (19.0 if expanded else 5.0 + title_font.metrics("linespace") + 4.0),
         text=state_text,
         anchor="nw",
         fill=theme.get("section_muted", "#d8e2ee"),
@@ -1185,13 +1245,14 @@ def draw_preview_legend_compass_toggle(
         joinstyle=tk.ROUND,
         tags=toggle_tags,
     )
+    header_h = size if expanded else max(size, 5 + title_font.metrics("linespace") + 4 + state_font.metrics("linespace"))
     owner._preview_controls_legend_toggle_bbox = (
         float(min(x, title_x, icon_x) - 5.0),
         float(min(y, icon_y) - 5.0),
         float(max(x + size, title_x + safe_title_width, icon_x + icon_w) + 5.0),
-        float(max(y + size, icon_y + icon_h) + 5.0),
+        float(max(y + header_h, icon_y + icon_h) + 5.0),
     )
-    return 152.0, size
+    return 152.0, header_h
 
 
 def draw_preview_legend_grab_handle(owner, canvas, x: float, y: float, *, theme: dict) -> tuple[float, float]:

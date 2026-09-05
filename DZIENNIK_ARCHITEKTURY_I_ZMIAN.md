@@ -6,6 +6,33 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-06: komunikat T06, historia treningu na żywo i kompas Z2
+
+Komunikaty pominięcia treningu odwołują się do T06 zamiast starego T07.
+Zmiana dotyczy tekstów; zapis decyzji nadal tylko przygotowuje bramkę do
+formalnego zatwierdzenia i nie rozpoczyna samoczynnie kolejnej iteracji.
+
+Callbacki partii i końca epoki aktualizują komórki Status/Epoki aktywnego
+runu przez kolejkę UI. Nie odczytują historii z dysku ani nie przebudowują
+tabeli, nie zmieniają zaznaczenia i zachowują oznaczenie podpiętego modelu.
+Powtarzająca się wartość nie jest ponownie zapisywana do kontrolki.
+Żądanie pauzy/stopu jest widoczne w statusie; dotychczasowe odświeżenie końcowe
+pokazuje wynik zakończenia. Zdarzenia dla zakończonego lub innego runu nie
+nadpisują komórek. Licznik podczas partii wskazuje epokę w toku, bez dopisywania
+jej jako ukończonej do historii danych treningu.
+
+Zwinięty kompas ma większy nagłówek, nazwę pliku i wartości liczników.
+Wysokość wynika z pomiaru zawijanej treści oraz dolnego odstępu, również w FS.
+Pomiary układu są buforowane; nie zmieniano rozbudowanej listy skrótów ani
+mechanizmu jej przewijania.
+
+Weryfikacja: 374 testy i 37 podprzypadków przeszły. Sprawdzono zdarzenia
+workera, oba tory pominięcia T06, kompaktowy kompas w obu motywach i dwóch
+skalach czcionek oraz rozwijanie z przewijaniem. Izolowana próba rzeczywistego
+Treeview potwierdziła aktualizację bez zmiany zaznaczenia; obejrzano zrzut
+kompasu w obu motywach. Nie uruchamiano rzeczywistego treningu ani nie
+modyfikowano danych projektów. Zrzut: `output/compass_history_ui_probe.png`.
+
 ## 2026-09-05: przygotowanie Z4/PZ1 i PZ2 bez blokowania widoku
 
 PZ1 wywoływało rekomendacje treningu i inicjalizację PyTorch/CUDA już po
