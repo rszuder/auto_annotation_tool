@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from ..campaign_manager import CAMPAIGN
+from ..campaign_history_resources import HISTORY_RESOURCE_SCHEMA, HistoryResourceReader
 from ..campaign_iteration_paths import STEP1_ITERATION_PATHS, iteration_path_target
 from ..campaign_transition_graph import campaign_stage_step
 from ..campaign_transition_specs import EDGE_KEY_ALIASES, TRANSITION_SPECS
+from ..utils import safe_load_yaml
 from .z2_shared_ui import campaign_visible_gate_id
 from .web_slim_scrollbar import blend_hex_colors
 
@@ -179,7 +181,7 @@ def _model_identity_from_sidecar(model_path: Any) -> str:
     return ""
 
 
-def _load_project_training_runs(project_name: str, *, limit: int = 3) -> list[dict]:
+def _load_project_training_runs(project_name: str, *, limit: int | None = 3) -> list[dict]:
     try:
         project_root = Path(CAMPAIGN.get_project_root_dir(project_name))
     except Exception:
@@ -202,6 +204,8 @@ def _load_project_training_runs(project_name: str, *, limit: int = 3) -> list[di
         key=lambda item: str(item.get("finished_at") or item.get("started_at") or item.get("created_at") or ""),
         reverse=True,
     )
+    if limit is None:
+        return runs
     try:
         max_items = max(1, int(limit or 3))
     except Exception:
@@ -253,16 +257,19 @@ def _event_path_key(entry: dict) -> str:
 
 def _iteration_path_map(entries: list[dict]) -> dict[int, str]:
     paths: dict[int, str] = {}
+    priorities: dict[int, int] = {}
     for raw_entry in entries:
         entry = dict(raw_entry or {})
         if str(entry.get("status") or "ok").strip().lower() == "error":
             continue
-        if str(entry.get("action") or "").strip() != "set_iteration_path":
-            continue
+        action = str(entry.get("action") or "").strip()
         iteration = _event_iteration(entry)
         path = _event_path_key(entry)
-        if iteration > 0 and path:
+        explicit = bool((entry.get("details") or {}).get("path"))
+        priority = (100 if explicit else 0) + (30 if action == "set_iteration_path" else 20 if action.startswith("approve_step1") else 10)
+        if iteration > 0 and path in STEP1_ITERATION_PATHS and priority >= priorities.get(iteration, 0):
             paths[iteration] = path
+            priorities[iteration] = priority
     return paths
 
 
@@ -302,14 +309,18 @@ def _entry_text_blob(entry: dict) -> str:
 
 def _target_from_history_text(entry: dict) -> str:
     blob = _entry_text_blob(entry)
-    if "model tablic" in blob or "tablic" in blob and "model" in blob:
-        return "plate"
-    if "model znak" in blob or "znak" in blob and "model" in blob:
-        return "char"
     if "plate_training" in blob:
         return "plate"
     if "char_from" in blob:
         return "char"
+    if "model znak" in blob:
+        return "char"
+    if "model tablic" in blob:
+        return "plate"
+    if "znak" in blob and "model" in blob:
+        return "char"
+    if "tablic" in blob and "model" in blob:
+        return "plate"
     return ""
 
 
@@ -345,6 +356,8 @@ def _iteration_target_map(entries: list[dict]) -> dict[int, str]:
             continue
         action = str(entry.get("action") or "").strip()
         priority = priorities.get(action, 10)
+        if iteration_path_target(_event_path_key(entry)):
+            priority += 100
         if priority >= priority_by_iteration.get(iteration, 0):
             targets[iteration] = target
             priority_by_iteration[iteration] = priority
@@ -363,9 +376,9 @@ def _infer_training_run_iteration_from_history(
         return 0
 
     run_time = str(
-        run.get("finished_at")
+        run.get("created_at")
         or run.get("started_at")
-        or run.get("created_at")
+        or run.get("finished_at")
         or ""
     ).strip()
     candidates: list[tuple[str, int]] = []
@@ -422,17 +435,30 @@ def _infer_training_run_iteration_from_history(
 
 
 def _training_run_target(run: dict) -> str:
-    for key in ("target", "model_type", "training_target", "campaign_target"):
+    for key in ("training_target", "campaign_target", "target", "model_type"):
         value = str(run.get(key) or "").strip().lower()
         if value in {"plate", "plates", "pose"}:
             return "plate"
         if value in {"char", "chars", "character", "characters"}:
             return "char"
-    kind = _training_run_kind(run)
-    if "tablic" in kind:
-        return "plate"
-    if "znak" in kind:
-        return "char"
+    snapshot = run.get("training_dataset_snapshot") or {}
+    if snapshot.get("target") in {"plate", "char"}:
+        return snapshot["target"]
+    dataset_path = str(run.get("dataset_path") or "").strip()
+    if dataset_path:
+        path = Path(dataset_path)
+        yaml_path = path if path.name.lower() == "data.yaml" else path / "data.yaml"
+        try:
+            config = safe_load_yaml(yaml_path) if yaml_path.is_file() else {}
+            if config.get("kpt_shape"):
+                return "plate"
+            names = config.get("names") or []
+            if isinstance(names, dict):
+                names = list(names.values())
+            if names and all(len(str(name)) == 1 and str(name).isalnum() for name in names):
+                return "char"
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
     blob = " ".join(
         str(run.get(key) or "")
         for key in ("name", "dataset_path", "base_model", "best_weights", "id")
@@ -445,7 +471,7 @@ def _training_run_target(run: dict) -> str:
 
 
 def _training_run_iteration(run: dict) -> int:
-    for key in ("iteration", "campaign_iteration", "step4_iteration", "iteration_num"):
+    for key in ("trained_iteration", "iteration", "campaign_iteration", "step4_iteration", "iteration_num"):
         try:
             value = int(run.get(key, 0) or 0)
         except Exception:
@@ -479,7 +505,6 @@ def _compact_artifact_text(entry: dict, fallback: str = "") -> str:
 
 
 def _first_int_value(entry: dict, keys: tuple[str, ...]) -> int | None:
-    normalized_keys = {str(key or "").strip().lower() for key in keys}
     containers = [
         entry,
         entry.get("artifacts") if isinstance(entry.get("artifacts"), dict) else {},
@@ -487,15 +512,18 @@ def _first_int_value(entry: dict, keys: tuple[str, ...]) -> int | None:
         entry.get("metrics") if isinstance(entry.get("metrics"), dict) else {},
         entry.get("details") if isinstance(entry.get("details"), dict) else {},
     ]
-    for container in containers:
-        if not isinstance(container, dict):
-            continue
-        for key, value in container.items():
-            if str(key or "").strip().lower() not in normalized_keys:
+    for key in keys:
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            value = container.get(key)
+            if value is None or value == "" or isinstance(value, bool):
                 continue
             try:
-                return int(value or 0)
-            except Exception:
+                count = int(value)
+                if count >= 0:
+                    return count
+            except (TypeError, ValueError, OverflowError):
                 continue
     return None
 
@@ -512,160 +540,65 @@ def _plural_pl(number: int, singular: str, paucal: str, plural: str) -> str:
     return plural
 
 
-def _format_plate_annotation_artifact(entry: dict, project_name: str = "") -> str:
-    approved_images = _first_int_value(
-        entry,
-        (
-            "approved_images",
-            "approved_images_with_plates",
-            "ok_images",
-            "accepted_images",
-            "effective_images",
-            "images",
-        ),
-    )
-    approved_plates = _first_int_value(
-        entry,
-        (
-            "approved_plates",
-            "approved_total_plates",
-            "ok_plates",
-            "accepted_plates",
-            "effective_plates",
-            "plates",
-        ),
-    )
-    if approved_images is None or approved_plates is None:
-        text_blob = " ".join(
-            str(value or "")
-            for value in (
-                entry.get("title"),
-                (entry.get("details") or {}).get("message") if isinstance(entry.get("details"), dict) else "",
-                _compact_artifact_text(entry, ""),
-            )
-        )
-        match = re.search(
-            r"(\d+)\s*(?:zdj[eę]ć|zdj[eę]cia|obraz(?:y|ów)?)\D+(\d+)\s*(?:tablic|ramek)",
-            text_blob,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            approved_images = int(match.group(1))
-            approved_plates = int(match.group(2))
-    if approved_images is None or approved_plates is None:
-        try:
-            iteration_stats = dict(
-                CAMPAIGN.get_plate_approved_set_iteration_stats(
-                    _event_iteration(entry),
-                    project_name or None,
-                )
-                or {}
-            )
-        except Exception:
-            iteration_stats = {}
-        try:
-            stats_images = int(iteration_stats.get("images", 0) or 0)
-            stats_plates = int(iteration_stats.get("plates", 0) or 0)
-        except Exception:
-            stats_images, stats_plates = 0, 0
-        if stats_images > 0 or stats_plates > 0:
-            approved_images = stats_images
-            approved_plates = stats_plates
-    if approved_images is None or approved_plates is None:
-        try:
-            project_stats = dict(CAMPAIGN.get_plate_approved_set_stats(project_name or None) or {})
-        except Exception:
-            project_stats = {}
-        try:
-            stats_images = int(project_stats.get("images", 0) or 0)
-            stats_plates = int(project_stats.get("plates", 0) or 0)
-        except Exception:
-            stats_images, stats_plates = 0, 0
-        if stats_images > 0 or stats_plates > 0:
-            approved_images = stats_images
-            approved_plates = stats_plates
-    if approved_images is None or approved_plates is None:
-        return "Liczniki AT nie zostały zapisane w historii tego wpisu."
-    image_word = _plural_pl(approved_images, "zdjęcie", "zdjęcia", "zdjęć")
-    frame_word = _plural_pl(approved_plates, "ramka tablicy", "ramki tablic", "ramek tablic")
-    return f"{approved_images} {image_word} [OK] / {approved_plates} {frame_word}"
+def _history_resource_snapshot(entry: dict, project_name: str, reader=None) -> dict:
+    recorded = (entry.get("artifacts") or {}).get("resource_snapshot")
+    if (
+        isinstance(recorded, dict) and recorded.get("schema") == HISTORY_RESOURCE_SCHEMA
+        and recorded.get("project") == project_name
+        and recorded.get("iteration") == _event_iteration(entry)
+    ):
+        return recorded
+    try:
+        reader = reader or HistoryResourceReader(CAMPAIGN.get_project_root_dir(project_name), project_name)
+        return reader.for_event(entry)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
 
 
-def _format_plate_annotation_increment(entry: dict, project_name: str = "") -> str:
-    approved_images = _first_int_value(
-        entry,
-        (
-            "approved_images",
-            "approved_images_with_plates",
-            "ok_images",
-            "accepted_images",
-            "effective_images",
-            "images",
-        ),
-    )
-    approved_plates = _first_int_value(
-        entry,
-        (
-            "approved_plates",
-            "approved_total_plates",
-            "ok_plates",
-            "accepted_plates",
-            "effective_plates",
-            "plates",
-        ),
-    )
-    if approved_images is None or approved_plates is None:
-        text_blob = " ".join(
-            str(value or "")
-            for value in (
-                entry.get("title"),
-                (entry.get("details") or {}).get("message") if isinstance(entry.get("details"), dict) else "",
-                _compact_artifact_text(entry, ""),
-            )
-        )
-        match = re.search(
-            r"(\d+)\s*(?:zdj[eę]ć|zdj[eę]cia|obraz(?:y|ów)?)\D+(\d+)\s*(?:tablic|ramek)",
-            text_blob,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            approved_images = int(match.group(1))
-            approved_plates = int(match.group(2))
-    if approved_images is None or approved_plates is None:
-        try:
-            iteration_stats = dict(
-                CAMPAIGN.get_plate_approved_set_iteration_stats(
-                    _event_iteration(entry),
-                    project_name or None,
-                )
-                or {}
-            )
-        except Exception:
-            iteration_stats = {}
-        try:
-            stats_images = int(iteration_stats.get("images", 0) or 0)
-            stats_plates = int(iteration_stats.get("plates", 0) or 0)
-        except Exception:
-            stats_images, stats_plates = 0, 0
-        if stats_images > 0 or stats_plates > 0:
-            approved_images = stats_images
-            approved_plates = stats_plates
-    if approved_images is None and approved_plates is None:
-        return "utworzono AT"
-    parts = []
-    if approved_images is not None:
-        parts.append(f"+{approved_images} zdjęć [OK]")
-    if approved_plates is not None:
-        parts.append(f"+{approved_plates} ramek tablic")
-    return " / ".join(parts) or "utworzono AT"
+def _plate_history_counts(entry: dict, project_name: str, reader=None) -> dict:
+    counts = _history_resource_snapshot(entry, project_name, reader).get("AT")
+    if isinstance(counts, dict) and counts:
+        return counts
+    # Old graph events stored project totals, not the iteration's increment.
+    images = _first_int_value(entry, ("approved_images", "approved_images_with_plates", "ok_images"))
+    plates = _first_int_value(entry, ("approved_plates", "approved_total_plates", "ok_plates"))
+    if (images or 0) > 0 or (plates or 0) > 0:
+        return {"images": images, "plates": plates, "source": "legacy_project_totals"}
+    return {}
 
 
-def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[dict]:
+def _format_plate_annotation_artifact(entry: dict, project_name: str = "", *, reader=None) -> str:
+    counts = _plate_history_counts(entry, project_name, reader)
+    if not counts:
+        return "Brak wiarygodnych liczników AT dla tego wpisu."
+    images, plates = counts.get("images"), counts.get("plates")
+    image_word = _plural_pl(images, "zdjęcie", "zdjęcia", "zdjęć")
+    frame_word = _plural_pl(plates, "ramka tablicy", "ramki tablic", "ramek tablic")
+    return f"Łącznie: {images if images is not None else '?'} {image_word} [OK] / {plates if plates is not None else '?'} {frame_word}"
+
+
+def _format_plate_annotation_increment(entry: dict, project_name: str = "", *, reader=None) -> str:
+    counts = _plate_history_counts(entry, project_name, reader)
+    images, plates = counts.get("iteration_images"), counts.get("iteration_plates")
+    if images == 0 and plates == 0:
+        return "Bez nowych AT w tej iteracji"
+    if images is None and plates is None:
+        return "Przyrost nie został zapisany"
+    image_delta = f"{images:+d}" if images is not None else "?"
+    plate_delta = f"{plates:+d}" if plates is not None else "?"
+    return f"{image_delta} zdjęć [OK] / {plate_delta} ramek tablic"
+
+
+def _build_project_product_rows(project_name: str, entries: list[dict], *, resource_reader=None) -> list[dict]:
     rows: list[dict] = []
     seen: set[tuple[str, int, str]] = set()
     path_by_iteration = _iteration_path_map(entries)
     target_by_iteration = _iteration_target_map(entries)
     step4_gate_id = "T06"
+    try:
+        resource_reader = resource_reader or HistoryResourceReader(CAMPAIGN.get_project_root_dir(project_name), project_name)
+    except (OSError, ValueError, TypeError):
+        resource_reader = None
 
     def _add_row(
         *,
@@ -732,12 +665,18 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
                 stage=stage or "E2",
                 gate=gate,
                 status="gotowe",
-                increment=_format_plate_annotation_increment(entry, project_name),
-                artifact=_format_plate_annotation_artifact(entry, project_name),
+                increment=_format_plate_annotation_increment(entry, project_name, reader=resource_reader),
+                artifact=_format_plate_annotation_artifact(entry, project_name, reader=resource_reader),
                 matches=matches,
                 created_at=str(entry.get("created_at") or ""),
             )
         elif action == "approve_step3":
+            az = _history_resource_snapshot(entry, project_name, resource_reader).get("AZ") or {}
+            source_iteration = int(az.get("source_iteration") or 0)
+            az_artifact = (
+                f"{az['plates']} tablic / {az['characters']} znaków | źródło IT{source_iteration}"
+                if az else "Zatwierdzono źródło AZ; brak zapisanych liczników."
+            )
             _add_row(
                 code="AZ",
                 name="Anotacje znaków",
@@ -745,13 +684,17 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
                 stage=stage or "E3",
                 gate=gate,
                 status="gotowe",
-                increment="utworzono AZ",
-                artifact=_compact_artifact_text(entry, "Zatwierdzono materiał znaków dla treningu."),
+                increment=(
+                    f"Zatwierdzono AZ z IT{source_iteration}"
+                    if source_iteration == iteration else f"Bez nowych AZ; źródło IT{source_iteration}"
+                    if source_iteration else "Zatwierdzono źródło AZ"
+                ),
+                artifact=az_artifact,
                 matches=matches,
                 created_at=str(entry.get("created_at") or ""),
             )
 
-    for run in _load_project_training_runs(project_name, limit=20):
+    for run in _load_project_training_runs(project_name, limit=None):
         target = _training_run_target(run)
         if target not in {"plate", "char"}:
             continue
@@ -765,13 +708,18 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
                 history_entries=entries,
                 target_by_iteration=target_by_iteration,
             )
-        weights_name = _short_path_name(run.get("best_weights"))
+        weights_path = str(run.get("best_weights") or "").strip()
+        status = str(run.get("status") or "").strip().lower()
+        if status != "completed" and (not weights_path or not Path(weights_path).is_file()):
+            continue
+        weights_name = _short_path_name(weights_path)
         metrics = (
             f"mAP50 {_metric_percent(run.get('best_map50'))}, "
             f"mAP50-95 {_metric_percent(run.get('best_map50_95'))}"
         )
-        status = str(run.get("status") or "").strip().lower()
-        status_label = "gotowy" if status == "completed" else (status or "zapisany")
+        status_label = "gotowy" if status == "completed" else f"checkpoint ({status or 'nieukończony'})"
+        if status == "completed" and (not weights_path or not Path(weights_path).is_file()):
+            status_label = "plik modelu niedostępny"
         _add_row(
             code=code,
             name="Model tablic" if target == "plate" else "Model znaków",
@@ -779,7 +727,7 @@ def _build_project_product_rows(project_name: str, entries: list[dict]) -> list[
             stage=stage_key,
             gate=step4_gate_id,
             status=status_label,
-            increment=f"utworzono model {code}",
+            increment=f"utworzono model {code}" if status == "completed" else "checkpoint nieukończonego treningu",
             artifact=f"{weights_name} | {metrics}",
             matches={
                 (stage_key, str(iteration)),
@@ -1150,7 +1098,16 @@ def _format_history_path(entries: list[dict], *, max_tokens: int = 34) -> str:
     return "Ścieżka: " + " → ".join(token for _kind, token in tokens)
 
 
-def _format_event_details(entry: dict) -> str:
+def _format_event_details(entry: dict, *, reader=None) -> str:
+    evidence = ""
+    if str(entry.get("action") or "").startswith("approve_step") and not (entry.get("artifacts") or {}).get("resource_snapshot"):
+        snapshot = _history_resource_snapshot(entry, str(entry.get("project") or ""), reader)
+        if snapshot:
+            evidence = (
+                "Liczniki odtworzone z zapisów właściwej iteracji:\n"
+                + json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n\nOryginalny wpis historii (bez zmian):\n"
+            )
     header = [
         f"Czas: {entry.get('created_at', '-')}",
         f"Projekt: {entry.get('project', '-')}",
@@ -1162,7 +1119,7 @@ def _format_event_details(entry: dict) -> str:
         "",
         "Pełny wpis:",
     ]
-    return "\n".join(header) + "\n" + json.dumps(entry, ensure_ascii=False, indent=2, sort_keys=True)
+    return "\n".join(header) + "\n" + evidence + json.dumps(entry, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def show_project_history_dialog(
@@ -1487,6 +1444,7 @@ def show_project_history_dialog(
     row_entries: dict[str, dict] = {}
     product_row_entries: dict[str, dict] = {}
     product_rows_cache: list[dict] = []
+    history_resources = None
     product_sort_state = {"column": "product", "descending": False}
     history_target_by_iteration: dict[int, str] = {}
     history_path_by_iteration: dict[int, str] = {}
@@ -1832,7 +1790,7 @@ def show_project_history_dialog(
             product_tree.delete(*product_tree.get_children())
         except Exception:
             pass
-        rows = _build_project_product_rows(project_name, all_entries)
+        rows = _build_project_product_rows(project_name, all_entries, resource_reader=history_resources)
         product_names = {
             "AT": "Anotacje tablic",
             "AZ": "Anotacje znaków",
@@ -1869,13 +1827,14 @@ def show_project_history_dialog(
         _render_product_rows(product_rows_cache)
 
     def _load_rows(select_first: bool = True) -> None:
-        nonlocal history_path_by_iteration, history_target_by_iteration
+        nonlocal history_path_by_iteration, history_target_by_iteration, history_resources
         row_entries.clear()
         try:
             tree.delete(*tree.get_children())
         except Exception:
             pass
         all_entries = [dict(entry or {}) for entry in CAMPAIGN.load_project_history(project_name, limit=800)]
+        history_resources = HistoryResourceReader(CAMPAIGN.get_project_root_dir(project_name), project_name)
         history_path_by_iteration = _iteration_path_map(all_entries)
         history_target_by_iteration = _iteration_target_map(all_entries)
         path_entries, path_label = _choose_path_entries(all_entries)
@@ -1913,14 +1872,14 @@ def show_project_history_dialog(
                 tree.selection_set(last)
                 tree.focus(last)
                 tree.see(last)
-                _set_details(_format_event_details(row_entries.get(last, {})))
+                _set_details(_format_event_details(row_entries.get(last, {}), reader=history_resources))
 
     def _on_select(_event=None) -> None:
         selected = tree.selection()
         if not selected:
             return
         entry = row_entries.get(str(selected[0]), {})
-        _set_details(_format_event_details(entry))
+        _set_details(_format_event_details(entry, reader=history_resources))
 
     def _copy_selected() -> None:
         selected = tree.selection()

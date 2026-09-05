@@ -23,6 +23,62 @@ treningu na małym i dużym datasecie na Windows 11 pozostają do wykonania.
 Zakres wdrożenia, dowody i warunki odbioru:
 [Przygotowanie treningu v2.3](docs/preflight_training_v2_3.md).
 
+## 2026-09-05: liczniki i pochodzenie zasobów w śladzie projektu
+
+W `demo` ślad IT1 pokazywał AT 0/0 mimo 10 zatwierdzonych obrazów i 10 ramek.
+Historia czytała bieżącą pulę zamiast zasobu przekazanego przez bramkę, a całą
+pulę opisywała również jako przyrost. Poprawiono zapis nowych zdarzeń i odczyt
+starszych wpisów z dowodów przypisanych do iteracji, bez przepisywania dziennika.
+
+Sprawdzono O, AT, AZ, datasety oraz modele. Rozdzielono przygotowany wariant
+datasetu od zbioru zapisanego w konkretnym runie. Naprawiono też rozpoznawanie
+toru z opisu „Model znaków: brakujące anotacje tablic”, przez które model MZ
+nie miał przypisanej IT1. AZ pokazuje teraz 10 tablic i 69 znaków ze źródłem IT1.
+
+Testy: 87 passed. Szczegóły dowodów i obserwacja dotycząca bazowego splitu
+użytego przez istniejący model: [Audyt śladu demo](docs/audyt_sladu_projektu_demo_2026_09_05.md).
+
+## 2026-09-05: stała belka grafu i fokus bieżącej bramki
+
+Belka sterowania grafem jest osobnym, lekkim elementem GUI, niezależnym od
+skalowania i kasowania obiektów grafu. Ma lupy +/-, procent powiększenia oraz
+piktogramy resetu, śladu projektu i poradnika. Rozmiary etykiet są mierzone
+czcionką interfejsu; w wąskim widoku pozostają same ikony.
+
+Przyczyną znikania był częściowy redraw: usuwał stałą warstwę canvas, po czym
+próbował wywołać funkcje rysujące z niedostępnego zakresu. Wyjątek NameError
+był ignorowany. Usunięto konkurujące implementacje belki. Legenda korzysta
+z jawnie przekazanego callbacku i nie jest transformowana wraz z grafem.
+
+Fokus wyróżnia bieżącą bramkę, dwa połączone etapy i ich krawędź. Pozostałe
+elementy są przyciemniane kolorami centralnego motywu, bez zmiany dostępności,
+stanu bramek, współrzędnych ani zapisów projektu. Przed decyzją T01/T02 widoczne
+są dostępne kierunki. Chwyt lub kliknięcie tytułu nadal wynosi element na wierzch.
+
+Dodano 18 testów belki i fokusu na rzeczywistym canvas Tk oraz callbackach grafu:
+zoom, pan, wymiana klatki, ponowne rysowanie krawędzi, kolejność warstw, obie
+ścieżki i wszystkie motywy. Wspólny zestaw regresyjny: 105 testów przechodzi.
+Pomiar na 800 obiektach po zapamiętaniu kolorów: pierwsze przyciemnienie ok.
+26 ms, ponowne sprawdzenie ok. 0,42 ms. Nie jest to pomiar pełnego renderu grafu.
+Pełna aplikacja nie była uruchamiana do ręcznego odbioru wizualnego.
+
+## 2026-09-05: wysuwany panel projektów
+
+Prawy panel ma jeden stały przycisk z ikoną bocznego panelu, strzałką kierunku
+i etykietą „Ukryj panel” / „Pokaż projekty”. Przycisk pozostaje dostępny również
+podczas animacji, reaguje na hover oraz Enter/Spację. Kolory i parametry ruchu
+pochodzą z centralnych definicji motywu.
+
+Panel przesuwa się za prawą krawędź swojego obszaru, zachowując szerokość,
+istniejące widgety i zaznaczenie listy. Ruch trwa nominalnie 240 ms; ponowne
+kliknięcie odwraca go od bieżącej pozycji. Nie są kolejkowane zaległe klatki.
+Graf jest odświeżany po zakończeniu ruchu, a nie w każdej klatce. Zdarzenia
+przesunięcia panelu nie uruchamiają ponownego układania globalnych overlayów.
+
+Testy obejmują rzeczywisty szkielet zakładki Tk, oba kierunki, przerwanie ruchu,
+zmianę rozmiaru, zniszczenie okna, motywy i przywracanie panelu po pełnym ekranie
+grafu. Odbiór wizualny płynności w pełnej aplikacji pozostaje do sprawdzenia.
+
 ## 2026-05-07
 
 ### Cel nadrzędny

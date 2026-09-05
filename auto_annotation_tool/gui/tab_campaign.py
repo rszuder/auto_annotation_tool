@@ -1258,23 +1258,10 @@ class CampaignTab:
             pass
 
         try:
-            success = palette.get("success", "#27ae60")
-            accent = palette.get("accent", "#4fc1ff")
-            field = palette.get("field", "#1a1a1a")
             if getattr(self, "right_sidebar_tab_host", None) is not None:
-                self.right_sidebar_tab_host.config(
-                    bg=panel,
-                )
-            draw_badge = getattr(self, "_draw_right_sidebar_tab_badge", None)
-            if callable(draw_badge):
-                draw_badge(False)
-            if getattr(self, "right_sidebar_collapse_btn", None) is not None:
-                self.right_sidebar_collapse_btn.config(
-                    bg=field,
-                    fg=muted,
-                    activebackground=blend_hex_colors(field, accent, 0.12),
-                    activeforeground=fg,
-                )
+                self.right_sidebar_tab_host.set_palette(palette)
+            if getattr(self, "project_sidebar_title_lbl", None) is not None:
+                self.project_sidebar_title_lbl.configure(bg=panel, fg=fg)
         except Exception:
             pass
 

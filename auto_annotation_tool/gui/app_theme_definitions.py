@@ -275,6 +275,26 @@ THEME_PALETTE_CONTRACT = {
 }
 
 
+CAMPAIGN_GRAPH_STYLE = {
+    "inactive_blend": 0.58,
+    "toolbar_height": 40,
+    "toolbar_font": ("Segoe UI", 10),
+}
+
+
+CAMPAIGN_SIDEBAR_STYLE = {
+    "width": 340,
+    "gap": 12,
+    "inset_right": 10,
+    "inset_top": 8,
+    "inset_bottom": 10,
+    "animation_ms": 240,
+    "frame_ms": 16,
+    "button_height": 38,
+    "button_font": ("Segoe UI", 10, "bold"),
+}
+
+
 def normalize_theme_palette(palette: dict | None = None) -> dict:
     """Return a complete palette following the central application contract."""
     normalized = dict(THEME_PALETTE_CONTRACT)
