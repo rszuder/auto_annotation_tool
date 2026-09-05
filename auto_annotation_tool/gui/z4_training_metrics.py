@@ -978,6 +978,14 @@ def _set_train_live_metrics(self, metrics: dict | None):
     _set_training_status_tree_rows(self, tree, styled_rows)
 
 def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
+    if getattr(self, "_training_start_in_progress", False):
+        previous = dict(getattr(self, "_last_training_cockpit_summary", {}) or {})
+        return {
+            "status": "Przygotowanie treningu",
+            "subtitle": "Sprawdzam dane i przygotowuję model. Możesz nadal korzystać z interfejsu.",
+            "tone": "warning",
+            "cards": list(previous.get("cards") or []),
+        }
     target = self._get_selected_training_target()
     target_label = self._format_training_target_label(target)
     dataset_yaml = self._resolve_training_dataset_yaml_path()
@@ -1128,6 +1136,7 @@ def _refresh_training_cockpit(self, *, ready: bool | None = None):
 
     palette = getattr(self.app, "palette", {})
     summary = self._build_training_cockpit_summary(ready=ready)
+    self._last_training_cockpit_summary = dict(summary)
     tone = str(summary.get("tone") or "muted").strip().lower()
     tone_colors = {
         "success": (
@@ -1577,6 +1586,84 @@ def _resolve_training_dataset_yaml_path(self) -> Path | None:
         return candidate
     return None
 
+def _validate_training_source_lightweight(self) -> dict:
+    """Check the selected variant without scanning images or resolving UI summaries."""
+    target = self._get_selected_training_target()
+    result = dict(ok=False, yaml_path=None, dataset_root=None, target=target,
+                  message="Najpierw wskaż dataset treningowy z plikiem data.yaml.", stats={})
+    value = str(self.dataset_var.get() or "").strip()
+    if not value:
+        return result
+    path = Path(value)
+    yaml_path = path / "data.yaml" if path.is_dir() else path
+    if yaml_path.name.lower() != "data.yaml" or not yaml_path.is_file():
+        return result
+    dataset_root = yaml_path.parent
+    result.update(yaml_path=yaml_path, dataset_root=dataset_root)
+    if not CAMPAIGN.get_active_project_name():
+        selected_root = dataset_root.resolve()
+        choices = getattr(self, "_dataset_variant_choices", ()) or ()
+        known_roots = []
+        for item in choices:
+            raw = str(item.get("path") or "").strip()
+            if raw:
+                candidate = Path(raw)
+                known_roots.append((candidate.parent if candidate.name.lower() == "data.yaml" else candidate).resolve())
+        if selected_root not in known_roots:
+            result["message"] = "Wybierz wariant splitu z listy PZ2 albo utwórz go w PZ1."
+            return result
+    try:
+        config = safe_load_yaml(yaml_path)
+        if not isinstance(config, dict) or not config.get("train") or not config.get("val"):
+            result["message"] = "Plik data.yaml musi wskazywać zbiory train i val."
+            return result
+        inferred_target = self._infer_dataset_target(str(dataset_root))
+    except Exception as exc:
+        result["message"] = f"Nie udało się odczytać data.yaml: {exc}"
+        return result
+    if inferred_target and inferred_target != target:
+        result["message"] = (
+            "Wybrany dataset nie pasuje do aktywnego toru treningu.\n"
+            f"Tor: {self._format_training_target_label(target)}\n"
+            f"Dataset: {self._format_training_target_label(inferred_target)}"
+        )
+        return result
+    readiness = get_training_dataset_readiness(dataset_root, target=target)
+    if not readiness.get("ok", True):
+        result["message"] = str(readiness.get("message") or "Wariant nie jest gotowy do treningu.")
+        return result
+    result.update(ok=True, message="Wybrano wariant. Pełna kontrola danych odbędzie się podczas przygotowania treningu.")
+    return result
+
+
+def _apply_preflight_dataset_validation(self, result: dict | None) -> None:
+    if not result or not result.get("ok"):
+        return
+    dataset_root = Path(result["dataset_root"])
+    selected = Path(str(self.dataset_var.get() or ""))
+    if selected.name.lower() == "data.yaml":
+        selected = selected.parent
+    if selected.resolve() != dataset_root.resolve():
+        return
+    source = TrainingSource(
+        target=result.get("target") or self._get_selected_training_target(),
+        kind="yolo_dataset", dataset_dir=str(dataset_root), yaml_path=str(dataset_root / "data.yaml"),
+        validated=True, stats=TrainingSourceStats.from_mapping(result.get("stats") or {}),
+        provenance="Aktywny split", source_stage="Z4/PZ2", message=result.get("message", ""),
+    )
+    self._last_training_source = source
+    def mtime(path):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+    self._active_training_source_validation_cache = {
+        "key": (str(dataset_root.resolve()), source.target, mtime(dataset_root / "data.yaml"),
+                *(mtime(dataset_root / "images" / split) for split in ("train", "val", "test"))),
+        "result": dict(result, source=source, dataset_root=dataset_root, yaml_path=dataset_root / "data.yaml"),
+    }
+
+
 def _validate_active_training_source_for_pz2(self) -> dict:
     result = {
         "ok": False,
@@ -1965,7 +2052,7 @@ def _is_training_configuration_ready(self) -> bool:
     if bool(getattr(self.trainer, "is_training", False)):
         return False
 
-    source_state = self._validate_active_training_source_for_pz2()
+    source_state = _validate_training_source_lightweight(self)
     if not bool(source_state.get("ok")):
         return False
     selected_target = CONFIG.normalize_task_target(str(source_state.get("target") or self._get_selected_training_target()))
@@ -1982,6 +2069,7 @@ def _is_training_configuration_ready(self) -> bool:
         valid_selection, _selection_message = self._validate_training_base_model_target_compatibility(
             target=selected_target,
             show_dialog=False,
+            lightweight=True,
         )
         if not valid_selection:
             return False
@@ -1993,6 +2081,7 @@ def _validate_training_base_model_target_compatibility(
     *,
     target: str | None = None,
     show_dialog: bool = False,
+    lightweight: bool = False,
 ) -> tuple[bool, str]:
     normalized_target = CONFIG.normalize_task_target(target or self._get_selected_training_target())
     if normalized_target not in {"char", "plate"}:
@@ -2015,11 +2104,11 @@ def _validate_training_base_model_target_compatibility(
             model_path = Path(base_model)
         except Exception:
             model_path = None
-        if model_path is None or not model_path.exists():
+        if model_path is None or model_path.suffix.lower() != ".pt" or not model_path.is_file():
             return False, "Wskaż poprawny plik modelu .pt."
 
-        ok, message, _info = validate_model_file(model_path)
-        if not ok:
+        ok, message, _info = validate_model_file(model_path, allow_heavy_load=not lightweight)
+        if not ok and not lightweight:
             if show_dialog:
                 messagebox.showerror(
                     "Nieprawidłowy model",
@@ -2052,7 +2141,19 @@ def _validate_training_base_model_target_compatibility(
                 messagebox.showerror("To nie jest model startowy", message)
             return False, message
 
-    is_pose_model = self._is_pose_base_model(base_key, base_model)
+    if lightweight:
+        task = _training_base_model_task_lightweight(self, base_key, base_model)
+        if task is None:
+            # An unrecognised checkpoint is inspected by the background preflight.
+            return True, ""
+        if task not in {"pose", "detect"}:
+            message = f"Ten trening wymaga modelu POSE lub DETECT. Wybrano model {task.upper()}."
+            if show_dialog:
+                messagebox.showerror("Niezgodny model startowy", message)
+            return False, message
+        is_pose_model = task == "pose"
+    else:
+        is_pose_model = self._is_pose_base_model(base_key, base_model)
     if normalized_target == "plate" and not is_pose_model:
         message = (
             "Tor tablic wymaga modelu POSE.\n\n"
@@ -2145,6 +2246,8 @@ def _refresh_training_start_state(self):
         pass
 
 def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, str]:
+    if getattr(self, "_training_start_in_progress", False):
+        return "Przygotowanie treningu", "Trwa sprawdzanie danych i przygotowanie modelu.", "warning"
     pinned_state = _get_pinned_step4_result_state(self)
     if pinned_state:
         return (
@@ -2773,11 +2876,27 @@ def _resolve_selected_training_base_model_inspection_path(self) -> Path | None:
                 return candidate_path
     return None
 
-def _resolve_selected_training_base_model_info(self) -> tuple[Path | None, dict]:
+def _training_base_model_task_lightweight(self, base_key: str, base_model: str) -> str | None:
+    if base_key in AVAILABLE_POSE_MODELS:
+        return "pose"
+    if base_key in AVAILABLE_DETECT_MODELS:
+        return "detect"
+    path = Path(base_model)
+    if not path.is_file():
+        return None
+    ok, _message, info = validate_model_file(path, allow_heavy_load=False)
+    if ok:
+        task = str(info.get("task") or info.get("type") or "").lower()
+        if task in {"pose", "detect", "classify", "segment", "obb"}:
+            return task
+    return None
+
+
+def _resolve_selected_training_base_model_info(self, *, lightweight: bool = False) -> tuple[Path | None, dict]:
     model_path = self._resolve_selected_training_base_model_inspection_path()
     if model_path is None or not model_path.exists():
         return None, {}
-    ok, _message, info = validate_model_file(model_path)
+    ok, _message, info = validate_model_file(model_path, allow_heavy_load=not lightweight)
     return model_path, info if ok and isinstance(info, dict) else {}
 
 def _build_selected_training_base_model_identity_lines(self) -> list[str]:

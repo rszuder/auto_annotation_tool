@@ -151,8 +151,8 @@ def _get_available_devices(self):
     self._training_device_profiles = profiles
     self._training_device_label_map = {}
 
-    auto_label = "Auto - preferuj GPU CUDA, inaczej CPU" if profiles else "Auto - CPU (brak CUDA)"
-    cpu_label = "CPU - procesor"
+    auto_label = "Auto"
+    cpu_label = "CPU"
 
     self._training_auto_device_label = auto_label
     self._training_cpu_device_label = cpu_label
@@ -164,7 +164,7 @@ def _get_available_devices(self):
     for profile in profiles:
         mem = float(profile.get("memory_gb", 0.0) or 0.0)
         mem_text = f"{mem:.1f} GB VRAM" if mem > 0 else "VRAM ?"
-        label = f"GPU {profile['index']} - {profile['name']} ({mem_text})"
+        label = f"GPU/CUDA {profile['index']} - {profile['name']} ({mem_text})"
         labels.append(label)
         self._training_device_label_map[label] = str(profile["raw"])
 
@@ -263,7 +263,11 @@ def _get_selected_training_device_raw(self, device_value: str | None = None) -> 
     if raw.startswith("cpu"):
         return "cpu"
     if raw.startswith("cuda:"):
-        return raw.split()[0]
+        raw_token = raw.split()[0]
+        for profile in list(getattr(self, "_training_device_profiles", []) or []):
+            if str(profile.get("raw", "")).lower() == raw_token:
+                return raw_token
+        return "auto"
     if raw in {"auto", "cpu"}:
         return raw
     return "auto"

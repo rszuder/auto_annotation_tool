@@ -190,6 +190,8 @@ class TrainingTab:
         self._training_compare_hover_points = []
         self._ui_dispatch_queue = queue.Queue()
         self._ui_dispatch_after_id = None
+        self._ui_dispatch_lock = threading.Lock()
+        self._ui_dispatch_closed = False
         self._train_pane_layout_initialized = False
         self._training_visible_layout_after_id = None
         self._training_started_monotonic = None

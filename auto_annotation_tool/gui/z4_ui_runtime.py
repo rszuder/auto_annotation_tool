@@ -114,26 +114,74 @@ if PIL_AVAILABLE:
 YOLO = None
 
 
+def _close_ui_dispatch(self):
+    with self._ui_dispatch_lock:
+        self._ui_dispatch_closed = True
+        while True:
+            try:
+                self._ui_dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+    self._training_start_in_progress = False
+    self._training_preflight_thread = None
+    pending = getattr(self, "_ui_dispatch_after_id", None)
+    self._ui_dispatch_after_id = None
+    if pending:
+        try:
+            self.frame.after_cancel(pending)
+        except tk.TclError:
+            pass
+
+
+def _ui_host_exists(self) -> bool:
+    # This helper must only be called on the Tk thread.
+    if getattr(self, "_ui_dispatch_closed", False):
+        return False
+    try:
+        return bool(self.frame.winfo_exists())
+    except tk.TclError:
+        return False
+
+
 def _ui(self, fn):
     if not callable(fn):
-        return
+        return False
 
     if threading.current_thread() is threading.main_thread():
-        try:
-            self.frame.after(0, fn)
-        except Exception:
-            try:
-                fn()
-            except Exception:
-                pass
-        return
+        if not _ui_host_exists(self):
+            _close_ui_dispatch(self)
+            return False
 
-    try:
+        def guarded_callback():
+            if _ui_host_exists(self):
+                fn()
+
+        try:
+            self.frame.after(0, guarded_callback)
+            return True
+        except tk.TclError:
+            _close_ui_dispatch(self)
+            return False
+
+    with self._ui_dispatch_lock:
+        if self._ui_dispatch_closed:
+            return False
         self._ui_dispatch_queue.put_nowait(fn)
-    except Exception:
-        pass
+    return True
 
 def _ensure_ui_dispatch_pump(self):
+    if not hasattr(self, "_ui_dispatch_lock"):
+        self._ui_dispatch_lock = threading.Lock()
+        self._ui_dispatch_closed = False
+    if not getattr(self, "_ui_dispatch_destroy_bound", False):
+        def on_destroy(event):
+            if event.widget is self.frame:
+                _close_ui_dispatch(self)
+        self.frame.bind("<Destroy>", on_destroy, add="+")
+        self._ui_dispatch_destroy_bound = True
+    if not _ui_host_exists(self):
+        _close_ui_dispatch(self)
+        return
     if getattr(self, "_ui_dispatch_after_id", None):
         return
     try:
@@ -143,8 +191,12 @@ def _ensure_ui_dispatch_pump(self):
 
 def _drain_ui_dispatch_queue(self):
     self._ui_dispatch_after_id = None
+    if not _ui_host_exists(self):
+        _close_ui_dispatch(self)
+        return
 
     processed = 0
+    started = time.perf_counter()
     for _ in range(200):
         try:
             fn = self._ui_dispatch_queue.get_nowait()
@@ -158,6 +210,11 @@ def _drain_ui_dispatch_queue(self):
             processed += 1
         except Exception:
             pass
+        if not _ui_host_exists(self):
+            _close_ui_dispatch(self)
+            return
+        if time.perf_counter() - started >= 0.008:
+            break
 
     has_pending = False
     try:
@@ -169,6 +226,7 @@ def _drain_ui_dispatch_queue(self):
         or processed > 0
         or getattr(getattr(self, "trainer", None), "is_training", False)
         or getattr(self, "is_processing", False)
+        or getattr(self, "_training_start_in_progress", False)
         or getattr(self, "dataset_build_is_running", False)
         or getattr(self, "dataset_split_is_running", False)
         or getattr(self, "val_is_running", False)
@@ -347,10 +405,11 @@ def _begin_step4_operation(self, owner: str, label: str) -> bool:
         except Exception:
             pass
     self.is_processing = True
-    try:
-        self._refresh_training_start_state()
-    except Exception:
-        pass
+    if owner != "z4.training.run":
+        try:
+            self._refresh_training_start_state()
+        except Exception:
+            pass
     return True
 
 def _end_step4_operation(self, owner: str):

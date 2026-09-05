@@ -480,6 +480,17 @@ def finalize_startup_after_tabs_ready(app):
             app._set_startup_progress(100, "Ładowanie danych zakończone")
             app._reveal_main_window_after_startup()
             app._hide_startup_overlay()
+            try:
+                app.root.after(
+                    350,
+                    lambda: (
+                        app._refresh_global_yolo_devices_async(silent=True)
+                        if not getattr(app, "_global_yolo_devices_cache_ready", False)
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
             logger.info("GUI zainicjalizowane pomyślnie")
             return
         app._set_startup_progress(97, "Domykam start widocznej zakładki...")

@@ -26,6 +26,7 @@ def _close_menu_dropdown(self, event=None):
     popup = getattr(self, "_menu_dropdown", None)
     self._menu_dropdown = None
     self._menu_dropdown_owner = None
+    self._menu_dropdown_update_items = None
 
     if owner is not None:
         for item in list(getattr(self, "_menu_buttons", []) or []):
@@ -88,6 +89,7 @@ def _open_menu_dropdown(self, owner_widget, items, min_width: int = 220):
             return
 
         is_selected = bool(item.get("selected"))
+        is_disabled = bool(item.get("disabled"))
         prefix = "✓  " if is_selected else "   "
         text = f"{prefix}{item.get('label', '').strip()}"
 
@@ -97,15 +99,18 @@ def _open_menu_dropdown(self, owner_widget, items, min_width: int = 220):
             anchor="w",
             justify=tk.LEFT,
             bg=palette["panel"],
-            fg=(palette["accent"] if is_selected else palette["fg"]),
+            fg=(palette.get("muted", palette["fg"]) if is_disabled else (palette["accent"] if is_selected else palette["fg"])),
             activebackground=palette.get("surface_info", palette.get("button_hover", palette["panel_alt"])),
             activeforeground=palette["fg"],
+            disabledforeground=palette.get("muted", palette["fg"]),
             relief=tk.FLAT,
             bd=0,
             highlightthickness=0,
             padx=12,
             pady=7,
             font=("Segoe UI", 10, "bold" if is_selected else "normal"),
+            cursor=("arrow" if is_disabled else "hand2"),
+            state=(tk.DISABLED if is_disabled else tk.NORMAL),
             command=lambda cmd=item.get("command"): close_then_call(cmd)
         )
         row.pack(fill=tk.X)
@@ -123,34 +128,40 @@ def _open_menu_dropdown(self, owner_widget, items, min_width: int = 220):
             except Exception:
                 pass
 
-        row.bind("<Enter>", lambda _event, fn=_set_row_hover: fn(True), add="+")
-        row.bind("<Leave>", lambda _event, fn=_set_row_hover: fn(False), add="+")
+        if not is_disabled:
+            row.bind("<Enter>", lambda _event, fn=_set_row_hover: fn(True), add="+")
+            row.bind("<Leave>", lambda _event, fn=_set_row_hover: fn(False), add="+")
 
-    for item in items:
-        make_item_row(item)
+    def update_items(updated_items):
+        if not popup.winfo_exists():
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        for item in updated_items:
+            make_item_row(item)
 
-    popup.update_idletasks()
+        popup.update_idletasks()
+        popup_width = max(min_width, shell.winfo_reqwidth())
+        popup_height = shell.winfo_reqheight()
+        try:
+            x = owner_widget.winfo_rootx()
+            y = owner_widget.winfo_rooty() + owner_widget.winfo_height() + 4
+        except Exception:
+            x = 8
+            y = 8
 
-    popup_width = max(min_width, shell.winfo_reqwidth())
-    popup_height = shell.winfo_reqheight()
+        screen_w = popup.winfo_screenwidth()
+        screen_h = popup.winfo_screenheight()
+        x = max(8, min(x, screen_w - popup_width - 8))
+        y = max(8, min(y, screen_h - popup_height - 8))
+        popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
 
-    try:
-        x = owner_widget.winfo_rootx()
-        y = owner_widget.winfo_rooty() + owner_widget.winfo_height() + 4
-    except Exception:
-        x = 8
-        y = 8
-
-    screen_w = popup.winfo_screenwidth()
-    screen_h = popup.winfo_screenheight()
-    x = max(8, min(x, screen_w - popup_width - 8))
-    y = max(8, min(y, screen_h - popup_height - 8))
-
-    popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
+    update_items(items)
     popup.lift()
 
     self._menu_dropdown = popup
     self._menu_dropdown_owner = owner_widget
+    self._menu_dropdown_update_items = update_items
     for item in list(getattr(self, "_menu_buttons", []) or []):
         try:
             if item.get("button") is owner_widget:
@@ -177,4 +188,3 @@ def _open_menu_dropdown(self, owner_widget, items, min_width: int = 220):
         self._menu_escape_bind_id = self.root.bind("<Escape>", self._close_menu_dropdown, add="+")
     except Exception:
         self._menu_escape_bind_id = None
-

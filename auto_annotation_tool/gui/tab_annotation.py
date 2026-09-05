@@ -729,10 +729,13 @@ class AnnotationTab:
         return bool(getattr(self, "_startup_ui_ready", False))
 
     def _auto_device_label(self) -> str:
-        return "auto (prefer GPU/CUDA, fallback CPU)"
+        return "Auto"
+
+    def _cpu_device_label(self) -> str:
+        return "CPU"
 
     def _get_available_devices(self, *, allow_probe: bool = False):
-        devices = [self._auto_device_label(), "cpu"]
+        devices = [self._auto_device_label(), self._cpu_device_label()]
         if not bool(getattr(self, "_startup_ui_ready", False)):
             return devices
         cached = getattr(self, "_available_devices_cache", None)
@@ -759,13 +762,13 @@ class AnnotationTab:
         if not current or current_lower.startswith("auto"):
             return available[0] if available else self._auto_device_label()
         if current_lower.startswith("cpu"):
-            return "cpu"
+            return self._cpu_device_label()
         if current_lower.startswith("cuda:"):
             prefix = current.split()[0]
             for option in available:
-                if option.startswith(prefix):
+                if str(option or "").lower().startswith(prefix):
                     return option
-            return prefix
+            return self._auto_device_label()
 
         return current if (not available or current in available) else (available[0] if available else self._auto_device_label())
 
@@ -799,9 +802,12 @@ class AnnotationTab:
 
         if raw.startswith("cuda:"):
             try:
+                import torch
+                if not torch.cuda.is_available():
+                    return "cpu"
                 return int(str(device_str).split(":")[1].split()[0])
             except Exception:
-                return 0
+                return "cpu"
 
         return "cpu"
 

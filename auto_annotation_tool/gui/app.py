@@ -10,6 +10,7 @@ from tkinter import ttk
 from datetime import datetime
 import threading
 import time
+import queue
 
 from ..config import CONFIG, logger, TK_AVAILABLE, SESSION
 from ..icons import IconManager
@@ -38,6 +39,7 @@ except ImportError:
 
 
 APP_AUTHOR = "R. Szuderski"
+HARDWARE_SCAN_TIMEOUT_SECONDS = 15.0
 
 
 class _MobileExportMenuHost:
@@ -513,52 +515,65 @@ class AutoAnnotationApp:
             pass
 
     def _auto_device_label(self) -> str:
-        return "auto (prefer GPU/CUDA, fallback CPU)"
+        return "Auto"
+
+    def _cpu_device_label(self) -> str:
+        return "CPU"
+
+    @staticmethod
+    def _device_cuda_prefix(device_label: str | None) -> str:
+        raw = str(device_label or "").strip().lower()
+        if not raw.startswith("cuda:"):
+            return ""
+        return raw.split()[0]
+
+    def _format_global_yolo_device_menu_label(self, device_label: str) -> str:
+        raw = str(device_label or "").strip()
+        lower = raw.lower()
+        if lower.startswith("auto"):
+            return "Auto"
+        if lower.startswith("cpu"):
+            return "CPU"
+        if lower.startswith("cuda:"):
+            prefix = raw.split()[0]
+            index = prefix.split(":", 1)[1] if ":" in prefix else "0"
+            detail = raw[len(prefix):].strip()
+            if detail.startswith("(") and detail.endswith(")"):
+                detail = detail[1:-1].strip()
+            return f"GPU/CUDA {index}" + (f" - {detail}" if detail else "")
+        return raw
 
     def _initial_global_yolo_device_options(self) -> list[str]:
-        devices = [self._auto_device_label(), "cpu"]
-        try:
-            current = str(self.global_yolo_device_var.get() or "").strip()
-        except Exception:
-            current = ""
-        if current.lower().startswith("cuda:") and current not in devices:
-            devices.append(current)
-        return devices
+        return [self._auto_device_label(), self._cpu_device_label()]
 
     def _normalize_global_yolo_device_options(self, devices: list[str] | None) -> list[str]:
         normalized: list[str] = []
         seen: set[str] = set()
-        for item in [self._auto_device_label(), "cpu", *(devices or [])]:
+        for item in [self._auto_device_label(), self._cpu_device_label(), *(devices or [])]:
             label = str(item or "").strip()
             if not label:
                 continue
-            key = label.lower()
+            key = self._device_cuda_prefix(label) or label.lower()
             if key in seen:
                 continue
             seen.add(key)
             normalized.append(label)
-        try:
-            current = str(self.global_yolo_device_var.get() or "").strip()
-        except Exception:
-            current = ""
-        if current.lower().startswith("cuda:"):
-            current_prefix = current.split()[0].lower()
-            has_current = any(str(item).split()[0].lower() == current_prefix for item in normalized)
-            if not has_current:
-                normalized.append(current)
         return normalized
 
-    def _scan_available_yolo_devices_sync(self) -> list[str]:
-        devices = [self._auto_device_label(), "cpu"]
-        try:
-            import torch
+    def _scan_available_yolo_devices_sync(self, progress=None) -> list[str]:
+        devices = [self._auto_device_label(), self._cpu_device_label()]
+        if progress:
+            progress("torch_import")
+        import torch
 
-            if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()):
-                    name = torch.cuda.get_device_name(i)
-                    devices.append(f"cuda:{i} ({name})")
-        except Exception:
-            pass
+        if progress:
+            progress("cuda_availability")
+        if torch.cuda.is_available():
+            if progress:
+                progress("cuda_properties")
+            for i in range(torch.cuda.device_count()):
+                name = torch.cuda.get_device_name(i)
+                devices.append(f"cuda:{i} ({name})")
         return self._normalize_global_yolo_device_options(devices)
 
     def get_available_yolo_devices(self, *, allow_probe: bool = False) -> list[str]:
@@ -573,47 +588,130 @@ class AutoAnnotationApp:
         )
 
     def _refresh_global_yolo_devices_async(self, *, silent: bool = False) -> None:
+        if getattr(self, "_closing_in_progress", False):
+            return
         if bool(getattr(self, "_global_yolo_devices_scan_in_progress", False)):
             if not silent:
                 self.update_status("Wykrywanie urządzeń GPU/CUDA już trwa.", "info")
             return
 
+        previous_worker = getattr(self, "_global_yolo_devices_scan_thread", None)
+        if previous_worker is not None and previous_worker.is_alive():
+            # A timed-out driver call cannot be cancelled safely inside a thread.
+            if not silent:
+                self.update_status(
+                    "Sprawdzanie GPU nie odpowiedziało w wyznaczonym czasie. "
+                    "Możesz wybrać CPU; kolejna próba będzie możliwa po zwolnieniu sterownika.",
+                    "warning",
+                )
+            return
+
         self._global_yolo_devices_scan_in_progress = True
+        self._global_yolo_devices_last_error = ""
+        results = queue.SimpleQueue()
+        started_at = time.monotonic()
+        phase = "start"
+        logger.info("[HARDWARE SCAN] started timeout=%.0fs", HARDWARE_SCAN_TIMEOUT_SECONDS)
         if not silent:
             self.update_status("Wykrywam dostępne urządzenia GPU/CUDA w tle...", "info")
 
         def worker() -> None:
-            error_text = ""
             try:
-                devices = self._scan_available_yolo_devices_sync()
+                devices = self._scan_available_yolo_devices_sync(
+                    progress=lambda stage: results.put(("phase", stage, "", time.monotonic())),
+                )
             except Exception as exc:
-                devices = self._initial_global_yolo_device_options()
-                error_text = str(exc)
+                results.put(("done", None, f"{type(exc).__name__}: {exc}", time.monotonic()))
+            else:
+                results.put(("done", devices, "", time.monotonic()))
 
-            def finish() -> None:
+        def poll() -> None:
+            nonlocal phase
+            self._global_yolo_devices_scan_after_id = None
+            if getattr(self, "_closing_in_progress", False):
                 self._global_yolo_devices_scan_in_progress = False
-                self._global_yolo_devices_cache = self._normalize_global_yolo_device_options(devices)
-                self._global_yolo_devices_cache_ready = True
-                self._global_yolo_devices_last_error = error_text
-                if silent:
-                    return
-                gpu_count = sum(1 for item in self._global_yolo_devices_cache if str(item).lower().startswith("cuda:"))
-                if error_text:
-                    self.update_status(
-                        "Nie udało się odświeżyć listy GPU/CUDA. Menu pozostaje dostępne z ostatnią znaną konfiguracją.",
-                        "warning",
+                return
+            while True:
+                try:
+                    kind, payload, error_text, event_time = results.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "phase":
+                    phase = payload
+                    logger.info(
+                        "[HARDWARE SCAN] phase=%s elapsed=%.0fms",
+                        phase, (event_time - started_at) * 1000,
                     )
-                elif gpu_count:
-                    self.update_status(f"Wykryto urządzenia CUDA: {gpu_count}.", "success")
-                else:
-                    self.update_status("Nie wykryto CUDA. Dostępne są tryby auto i CPU.", "info")
+                    continue
+                self._finish_global_yolo_device_scan(payload, error_text, silent=silent)
+                logger.info(
+                    "[HARDWARE SCAN] finished probe=%.0fms ui_delivery=%.0fms error=%s",
+                    (event_time - started_at) * 1000,
+                    (time.monotonic() - event_time) * 1000, error_text or "none",
+                )
+                return
+            if time.monotonic() - started_at >= HARDWARE_SCAN_TIMEOUT_SECONDS:
+                error_text = f"Timeout ({HARDWARE_SCAN_TIMEOUT_SECONDS:.0f}s), phase={phase}"
+                logger.warning("[HARDWARE SCAN] %s", error_text)
+                self._finish_global_yolo_device_scan(None, error_text, silent=silent)
+                return
+            self._global_yolo_devices_scan_after_id = self.root.after(100, poll)
 
-            try:
-                self.root.after(0, finish)
-            except Exception:
-                finish()
+        self._global_yolo_devices_scan_thread = threading.Thread(
+            target=worker, daemon=True, name="hardware-scan",
+        )
+        try:
+            # Tk callbacks are scheduled only by the UI thread; the worker just writes to a queue.
+            self._global_yolo_devices_scan_after_id = self.root.after(100, poll)
+            self._global_yolo_devices_scan_thread.start()
+        except Exception as exc:
+            pending = getattr(self, "_global_yolo_devices_scan_after_id", None)
+            if pending:
+                self.root.after_cancel(pending)
+                self._global_yolo_devices_scan_after_id = None
+            self._finish_global_yolo_device_scan(None, str(exc), silent=silent)
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _finish_global_yolo_device_scan(self, devices, error_text: str, *, silent: bool) -> None:
+        self._global_yolo_devices_scan_in_progress = False
+        self._global_yolo_devices_cache_ready = True
+        self._global_yolo_devices_last_error = error_text
+        if not error_text:
+            self._global_yolo_devices_cache = self._normalize_global_yolo_device_options(devices)
+            current_before = str(self.global_yolo_device_var.get() or "").strip()
+            saved_before = str(
+                getattr(self, "_global_yolo_device_saved_preference_raw", "") or ""
+            ).strip()
+            restore_candidate = (
+                saved_before
+                if current_before.lower().startswith("auto") and saved_before.lower().startswith("cuda:")
+                else current_before
+            )
+            normalized_current = self.normalize_global_yolo_device_choice(
+                restore_candidate, devices=self._global_yolo_devices_cache,
+            )
+            if current_before != normalized_current:
+                self.global_yolo_device_var.set(normalized_current)
+                self._save_global_yolo_device_preference(normalized_current)
+            elif saved_before.lower().startswith("cuda:") and normalized_current == self._auto_device_label():
+                self._save_global_yolo_device_preference(normalized_current)
+
+        owner = getattr(self, "_configuration_menu_button", None)
+        refresh_menu = getattr(self, "_menu_dropdown_update_items", None)
+        if owner is not None and getattr(self, "_menu_dropdown_owner", None) is owner and callable(refresh_menu):
+            refresh_menu(self._build_configuration_menu_items())
+        if silent:
+            return
+        gpu_count = sum(1 for item in self.get_available_yolo_devices() if str(item).lower().startswith("cuda:"))
+        if error_text:
+            self.update_status(
+                "Nie udało się sprawdzić sprzętu. Zachowano ostatnią potwierdzoną listę urządzeń. "
+                "Możesz ponowić sprawdzanie w menu Konfiguracja.",
+                "warning",
+            )
+        elif gpu_count:
+            self.update_status(f"Wykryto urządzenia CUDA: {gpu_count}.", "success")
+        else:
+            self.update_status("GPU/CUDA niedostępne. Dostępne są Auto i CPU.", "info")
 
     def _global_yolo_device_menu_selected(self, device_label: str) -> bool:
         current = self.normalize_global_yolo_device_choice()
@@ -621,32 +719,61 @@ class AutoAnnotationApp:
         return str(current or "").strip().lower() == str(candidate or "").strip().lower()
 
     def _build_configuration_menu_items(self) -> list[dict]:
-        items = [
-            {
-                "kind": "radio",
-                "label": device_label,
-                "selected": self._global_yolo_device_menu_selected(device_label),
-                "command": (
-                    lambda value=device_label: self.set_global_yolo_device_choice(value)
-                ),
-            }
-            for device_label in self.get_available_yolo_devices()
-        ]
-        items.append({"kind": "separator"})
-        if bool(getattr(self, "_global_yolo_devices_scan_in_progress", False)):
-            refresh_label = "Wykrywanie GPU/CUDA w toku..."
-            refresh_command = lambda: None
-        else:
-            refresh_label = (
-                "Odśwież listę GPU/CUDA"
-                if bool(getattr(self, "_global_yolo_devices_cache_ready", False))
-                else "Wykryj GPU/CUDA"
+        if (
+            not bool(getattr(self, "_global_yolo_devices_cache_ready", False))
+            and not bool(getattr(self, "_global_yolo_devices_scan_in_progress", False))
+        ):
+            self._refresh_global_yolo_devices_async(silent=True)
+
+        devices = self.get_available_yolo_devices()
+        items = []
+        for device_label in devices:
+            items.append(
+                {
+                    "kind": "radio",
+                    "label": self._format_global_yolo_device_menu_label(device_label),
+                    "selected": self._global_yolo_device_menu_selected(device_label),
+                    "command": (
+                        lambda value=device_label: self.set_global_yolo_device_choice(value)
+                    ),
+                }
             )
+
+        gpu_count = sum(1 for item in devices if str(item).lower().startswith("cuda:"))
+        if not gpu_count:
+            if bool(getattr(self, "_global_yolo_devices_scan_in_progress", False)):
+                gpu_label = "GPU/CUDA - sprawdzam dostępność..."
+            elif getattr(self, "_global_yolo_devices_last_error", ""):
+                gpu_label = "GPU/CUDA - nie udało się sprawdzić"
+            elif bool(getattr(self, "_global_yolo_devices_cache_ready", False)):
+                gpu_label = "GPU/CUDA - niedostępne"
+            else:
+                gpu_label = "GPU/CUDA - jeszcze niesprawdzone"
+            items.append(
+                {
+                    "kind": "command",
+                    "label": gpu_label,
+                    "disabled": True,
+                    "command": None,
+                }
+            )
+
+        items.append({"kind": "separator"})
+        if gpu_count and getattr(self, "_global_yolo_devices_last_error", ""):
+            items.append({"label": "Nie udało się odświeżyć stanu sprzętu", "disabled": True})
+        if bool(getattr(self, "_global_yolo_devices_scan_in_progress", False)):
+            refresh_label = "Odświeżanie stanu sprzętu w toku..."
+            refresh_command = lambda: None
+            refresh_disabled = True
+        else:
+            refresh_label = "Odśwież stan sprzętu"
             refresh_command = lambda: self._refresh_global_yolo_devices_async(silent=False)
+            refresh_disabled = False
         items.append(
             {
                 "kind": "command",
                 "label": refresh_label,
+                "disabled": refresh_disabled,
                 "command": refresh_command,
             }
         )
@@ -657,35 +784,43 @@ class AutoAnnotationApp:
         raw_value: str | None = None,
         devices: list[str] | None = None,
     ) -> str:
-        # Nie enumerujemy GPU przy samym starcie aplikacji. Lista CUDA wymaga importu
-        # PyTorch, więc budujemy ją dopiero przy otwieraniu menu konfiguracji.
-        available = list(devices or [])
+        # CUDA is valid only when the current hardware scan confirms it.
+        if devices is None:
+            available = list(getattr(self, "_global_yolo_devices_cache", None) or [])
+        else:
+            available = list(devices or [])
         current = str(
             raw_value if raw_value is not None else self.global_yolo_device_var.get() or ""
         ).strip()
         current_lower = current.lower()
+        fallback = self._auto_device_label()
 
         if not current or current_lower.startswith("auto"):
-            return available[0] if available else self._auto_device_label()
+            return self._auto_device_label()
         if current_lower.startswith("cpu"):
-            return "cpu"
+            return self._cpu_device_label()
         if current_lower.startswith("cuda:"):
             prefix = current.split()[0]
             for option in available:
-                if option.startswith(prefix):
+                if str(option or "").lower().startswith(prefix):
                     return option
-            return prefix
+            return fallback
 
-        return current if (not available or current in available) else (available[0] if available else self._auto_device_label())
+        for option in available:
+            if str(option or "").strip().lower() == current_lower:
+                return str(option or "").strip()
+        return fallback
 
     def _load_global_yolo_device_preference(self) -> str:
         try:
             saved = SESSION.get("ui", "global_yolo_device", "auto") if SESSION else "auto"
         except Exception:
             saved = "auto"
+        self._global_yolo_device_saved_preference_raw = str(saved or "auto").strip() or "auto"
         return self.normalize_global_yolo_device_choice(saved)
 
     def _save_global_yolo_device_preference(self, value: str):
+        self._global_yolo_device_saved_preference_raw = value
         try:
             if not SESSION:
                 return
@@ -1270,7 +1405,7 @@ class AutoAnnotationApp:
             min_width=260
         )
 
-        make_menu_button(
+        self._configuration_menu_button = make_menu_button(
             "Konfiguracja",
             self._build_configuration_menu_items,
             min_width=320
