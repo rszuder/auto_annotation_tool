@@ -296,6 +296,233 @@ def _mobile_role_from_training_target(target: str) -> str:
         return "vehicle"
     return "character"
 
+_MOBILE_EXPORT_CHARACTER_CLASS_TOKENS = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_MOBILE_EXPORT_PLATE_CLASS_NAMES = {
+    "plate",
+    "plates",
+    "license_plate",
+    "license-plate",
+    "licence_plate",
+    "licence-plate",
+    "tablica",
+    "tablice",
+}
+_MOBILE_EXPORT_VEHICLE_CLASS_NAMES = {
+    "vehicle",
+    "vehicles",
+    "car",
+    "cars",
+    "truck",
+    "trucks",
+    "bus",
+    "buses",
+    "motorcycle",
+    "motorbike",
+    "bike",
+    "van",
+    "pickup",
+    "suv",
+    "pojazd",
+    "pojazdy",
+    "samochod",
+    "samochody",
+}
+
+
+def _mobile_export_normalized_target_or_empty(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"plate", "plates", "pose", "tablica", "tablice", "mt"}:
+        return "plate"
+    if raw in {"char", "chars", "character", "characters", "ocr", "znak", "znaki", "mz"}:
+        return "char"
+    if raw in {"vehicle", "vehicles", "pojazd", "pojazdy", "car", "cars", "mp"}:
+        return "vehicle"
+    return ""
+
+
+def _mobile_export_class_names_from_payload(payload: dict | None) -> list[str]:
+    names = payload.get("names") if isinstance(payload, dict) else None
+    if isinstance(names, dict):
+        try:
+            ordered_keys = sorted(names, key=lambda item: int(item) if str(item).isdigit() else str(item))
+            values = [names[key] for key in ordered_keys]
+        except Exception:
+            values = list(names.values())
+    elif isinstance(names, (list, tuple, set)):
+        values = list(names)
+    else:
+        values = []
+    return [str(name or "").strip() for name in values if str(name or "").strip()]
+
+
+def _mobile_export_classes_look_like_character_alphabet(class_names: list[str]) -> bool:
+    if len(class_names) < 8:
+        return False
+    normalized = [str(name or "").strip().upper() for name in class_names]
+    return all(len(name) == 1 and name in _MOBILE_EXPORT_CHARACTER_CLASS_TOKENS for name in normalized)
+
+
+def _mobile_export_infer_target_from_text(text) -> tuple[str, str]:
+    raw = str(text or "").strip().casefold()
+    if not raw:
+        return "", ""
+    scores = {"plate": 0, "char": 0, "vehicle": 0}
+    if any(token in raw for token in ("char", "chars", "character", "characters", "ocr", "znak", "znaki", "mz-")):
+        scores["char"] += 45
+    if any(token in raw for token in ("vehicle", "vehicles", "pojazd", "pojazdy", "samochod", "samochody", "car", "cars", "coco", "mp-")):
+        scores["vehicle"] += 45
+    if any(token in raw for token in ("plate", "plates", "tablic", "license", "licence", "pose", "mt-")):
+        scores["plate"] += 35
+    winner, score = max(scores.items(), key=lambda item: item[1])
+    if score <= 0:
+        return "", ""
+    tied = [target for target, value in scores.items() if value == score]
+    if len(tied) > 1:
+        return "", ""
+    return winner, "tekst ścieżki lub nazwy"
+
+
+def _mobile_export_infer_target_from_yaml_payload(payload: dict | None, path_hint="") -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", ""
+    if payload.get("kpt_shape") is not None:
+        return "plate", "data.yaml: kpt_shape / YOLO Pose"
+
+    class_names = _mobile_export_class_names_from_payload(payload)
+    lowered_names = {str(name or "").strip().casefold() for name in class_names}
+    if class_names and lowered_names and lowered_names.issubset(_MOBILE_EXPORT_PLATE_CLASS_NAMES):
+        return "plate", "data.yaml: klasy tablic"
+    if _mobile_export_classes_look_like_character_alphabet(class_names):
+        return "char", "data.yaml: alfabet znaków"
+    if lowered_names and lowered_names.intersection(_MOBILE_EXPORT_VEHICLE_CLASS_NAMES):
+        return "vehicle", "data.yaml: klasy pojazdów"
+
+    target, reason = _mobile_export_infer_target_from_text(path_hint)
+    return target, reason
+
+
+def _mobile_export_infer_target_from_dataset_path(dataset_path) -> tuple[str, str]:
+    raw = str(dataset_path or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        path = Path(raw)
+        yaml_path = path if path.is_file() and path.suffix.lower() in {".yaml", ".yml"} else path / "data.yaml"
+        if yaml_path.exists() and yaml_path.is_file():
+            payload = safe_load_yaml(yaml_path) or {}
+            target, reason = _mobile_export_infer_target_from_yaml_payload(payload, yaml_path)
+            if target:
+                return target, reason
+    except Exception:
+        pass
+    return _mobile_export_infer_target_from_text(raw)
+
+
+def _mobile_export_infer_target_from_model_info(info: dict | None) -> tuple[str, str]:
+    if not isinstance(info, dict) or not info:
+        return "", ""
+    task = str(info.get("task") or info.get("type") or info.get("model_task") or "").strip().lower()
+    if task == "pose" or info.get("keypoints") is True or info.get("kpt_shape"):
+        return "plate", "metadane modelu: YOLO Pose"
+    classes = info.get("classes")
+    if isinstance(classes, dict):
+        class_names = [str(value or "").strip() for value in classes.values()]
+    elif isinstance(classes, (list, tuple, set)):
+        class_names = [str(value or "").strip() for value in classes]
+    else:
+        class_names = []
+    lowered_names = {str(name or "").strip().casefold() for name in class_names if str(name or "").strip()}
+    if _mobile_export_classes_look_like_character_alphabet(class_names):
+        return "char", "metadane modelu: klasy znaków"
+    if lowered_names and lowered_names.issubset(_MOBILE_EXPORT_PLATE_CLASS_NAMES):
+        return "plate", "metadane modelu: klasy tablic"
+    if lowered_names and lowered_names.intersection(_MOBILE_EXPORT_VEHICLE_CLASS_NAMES):
+        return "vehicle", "metadane modelu: klasy pojazdów"
+    return "", ""
+
+
+def _mobile_export_infer_target_from_run_args(run_like) -> tuple[str, str]:
+    output_dir = str(_mobile_export_run_like_value(run_like, "output_dir", "") or "").strip()
+    if not output_dir:
+        return "", ""
+    try:
+        args_path = Path(output_dir) / "train" / "args.yaml"
+        if not args_path.exists():
+            return "", ""
+        args_payload = safe_load_yaml(args_path) or {}
+    except Exception:
+        return "", ""
+    if not isinstance(args_payload, dict):
+        return "", ""
+    task = str(args_payload.get("task") or "").strip().lower()
+    if task == "pose":
+        return "plate", "args.yaml: task=pose"
+    data_target, data_reason = _mobile_export_infer_target_from_dataset_path(args_payload.get("data"))
+    if data_target:
+        return data_target, data_reason
+    target, reason = _mobile_export_infer_target_from_text(
+        " ".join(str(args_payload.get(key) or "") for key in ("model", "data", "project", "name"))
+    )
+    if target:
+        return target, f"args.yaml: {reason}"
+    if task == "detect":
+        return "char", "args.yaml: task=detect bez klas pojazdów/tablic"
+    return "", ""
+
+
+def _mobile_export_resolve_candidate_target(
+    *,
+    fallback_target: str = "",
+    run_like=None,
+    dataset_path="",
+    model_info: dict | None = None,
+) -> tuple[str, str, str]:
+    observations: list[tuple[str, str, str]] = []
+
+    info_target, info_reason = _mobile_export_infer_target_from_model_info(model_info)
+    if info_target:
+        observations.append((info_target, info_reason, "model"))
+
+    dataset_target, dataset_reason = _mobile_export_infer_target_from_dataset_path(dataset_path)
+    if dataset_target:
+        observations.append((dataset_target, dataset_reason, "dataset"))
+
+    args_target, args_reason = _mobile_export_infer_target_from_run_args(run_like)
+    if args_target:
+        observations.append((args_target, args_reason, "args"))
+
+    explicit_target = _mobile_export_normalized_target_or_empty(
+        _mobile_export_run_like_value(run_like, "training_target", "")
+        or _mobile_export_run_like_value(run_like, "parent_model_target", "")
+    )
+    if explicit_target:
+        observations.append((explicit_target, "historia treningu: jawny tor", "history"))
+
+    fallback = _mobile_export_normalized_target_or_empty(fallback_target)
+    if fallback:
+        observations.append((fallback, "katalog lub źródło listy", "fallback"))
+
+    if not observations:
+        return "", "", ""
+
+    priority = {"model": 0, "dataset": 1, "args": 2, "history": 3, "fallback": 4}
+    observations.sort(key=lambda item: priority.get(item[2], 99))
+    resolved_target, resolved_reason, _kind = observations[0]
+    conflicts = sorted({target for target, _reason, _kind in observations if target and target != resolved_target})
+    conflict_text = ""
+    if conflicts:
+        labels = {"plate": "MT", "char": "MZ", "vehicle": "MP"}
+        conflict_text = "Sprzeczne slady: " + ", ".join(labels.get(target, target) for target in conflicts)
+    return resolved_target, resolved_reason, conflict_text
+
+
+def _mobile_export_task_from_target_and_info(target: str, info: dict | None = None) -> str:
+    info_target, _reason = _mobile_export_infer_target_from_model_info(info)
+    raw_task = str((info or {}).get("task") or (info or {}).get("type") or "").strip().lower() if isinstance(info, dict) else ""
+    if raw_task == "pose" or info_target == "plate" or _mobile_export_normalized_target_or_empty(target) == "plate":
+        return "pose"
+    return "detect"
+
 _MOBILE_EXPORT_COCO_VEHICLE_CLASS_IDS = (2, 3, 5, 7)
 _MOBILE_EXPORT_DEFAULT_VEHICLE_CLASS_LABELS = (
     "car",
@@ -1268,9 +1495,7 @@ def _mobile_export_candidate_from_artifact(
     project_root: str = "",
 ) -> dict:
     safe_path = Path(model_path)
-    target = CONFIG.normalize_task_target(target)
-    role = _mobile_role_from_training_target(target)
-    task = "pose" if role == "plate" else "detect"
+    fallback_target = CONFIG.normalize_task_target(target)
     inferred_project_name, inferred_project_root = _mobile_export_project_identity_from_path(safe_path)
     project_name = str(project_name or inferred_project_name or "").strip()
     project_root = str(project_root or inferred_project_root or "").strip()
@@ -1283,11 +1508,6 @@ def _mobile_export_candidate_from_artifact(
         project_root = str(project_payload.get("root") or source_payload.get("project_root") or project_root or "").strip()
     info = metadata.get("info") if isinstance(metadata.get("info"), dict) else {}
     history_snapshot = _mobile_export_run_snapshot_for_reference(safe_path.name)
-    try:
-        model_ref = build_model_display_ref(safe_path, target_hint=target)
-        model_label = model_ref.id
-    except Exception:
-        model_label = safe_path.name or "model"
 
     metric_root = raw_payload.get("metrics") if isinstance(raw_payload.get("metrics"), dict) else {}
     extra_root = raw_payload.get("extra") if isinstance(raw_payload.get("extra"), dict) else {}
@@ -1360,6 +1580,22 @@ def _mobile_export_candidate_from_artifact(
     ).strip()
     if not dataset_path and isinstance(history_snapshot, dict):
         dataset_path = str(history_snapshot.get("dataset_path") or "").strip()
+    target, target_source, target_conflict = _mobile_export_resolve_candidate_target(
+        fallback_target=fallback_target,
+        run_like=run_snapshot or history_snapshot or training_root,
+        dataset_path=dataset_path,
+        model_info=info,
+    )
+    if not target:
+        target = fallback_target
+        target_source = "katalog lub źródło listy"
+    role = _mobile_role_from_training_target(target)
+    task = _mobile_export_task_from_target_and_info(target, info)
+    try:
+        model_ref = build_model_display_ref(safe_path, target_hint=target)
+        model_label = model_ref.id
+    except Exception:
+        model_label = safe_path.name or "model"
     created_at = str(
         _mobile_export_nested_value(
             {"raw": raw_payload, "training": training_root, "run": run_snapshot},
@@ -1416,9 +1652,6 @@ def _mobile_export_candidate_from_artifact(
                 "training.current_epoch",
                 "run.current_epoch",
                 "history.current_epoch",
-                "training.epochs",
-                "run.epochs",
-                "history.epochs",
             )
         )
     training_provenance = dict(training_root) if isinstance(training_root, dict) and training_root.get("provenance_version") else {}
@@ -1441,6 +1674,8 @@ def _mobile_export_candidate_from_artifact(
         "run": None,
         "target": target,
         "target_label": self._format_training_target_label(target),
+        "target_source": target_source,
+        "target_conflict": target_conflict,
         "role": role,
         "task": task,
         "best_weights": safe_path,
@@ -2025,7 +2260,7 @@ def _mobile_export_completed_epoch_count(run_like) -> int:
     values: list[int] = []
     for key in ("current_epoch", "completed_epochs", "trained_epochs"):
         parsed = _mobile_export_int_or_none(_mobile_export_run_like_value(run_like, key))
-        if parsed is not None:
+        if parsed is not None and parsed > 0:
             values.append(max(0, parsed))
 
     metrics = _mobile_export_run_like_value(run_like, "metrics_history", [])
@@ -2039,11 +2274,6 @@ def _mobile_export_completed_epoch_count(run_like) -> int:
         ]
         if metric_epochs:
             values.append(max(metric_epochs))
-
-    status = str(_mobile_export_run_like_value(run_like, "status", "") or "").strip().lower()
-    configured_epochs = _mobile_export_int_or_none(_mobile_export_run_like_value(run_like, "epochs"))
-    if status in {TrainingStatus.COMPLETED.value, "complete", "finished"} and configured_epochs is not None:
-        values.append(max(0, configured_epochs))
 
     return max(values, default=0)
 
@@ -2139,7 +2369,6 @@ def _mobile_export_total_epochs_for_run_like(run_like, fallback=None) -> int:
             fallback,
             _mobile_export_run_like_value(run_like, "total_epochs", None),
             _mobile_export_run_like_value(run_like, "current_epoch", None),
-            _mobile_export_run_like_value(run_like, "epochs", None),
         ):
             parsed = _mobile_export_int_or_none(candidate)
             if parsed is not None and parsed > 0:
@@ -2271,6 +2500,18 @@ def _mobile_export_provenance_status_label(provenance: dict | None) -> str:
     return "częściowy"
 
 
+def _mobile_export_target_source_label(candidate: dict | None) -> str:
+    if not isinstance(candidate, dict):
+        return "-"
+    marker = _mobile_export_target_marker(candidate)
+    source = str(candidate.get("target_source") or "").strip() or "brak jawnego źródła"
+    conflict = str(candidate.get("target_conflict") or "").strip()
+    text = f"{marker} | {source}"
+    if conflict:
+        text = f"{text} | uwaga: {conflict}"
+    return text
+
+
 def _mobile_export_candidate_total_epochs(candidate: dict | None) -> int:
     if not isinstance(candidate, dict):
         return 0
@@ -2332,7 +2573,7 @@ def _mobile_export_epoch_profile(candidate: dict | None) -> tuple[float | None, 
 def _mobile_export_target_marker(candidate: dict | None) -> str:
     if not isinstance(candidate, dict):
         return "M?"
-    target = CONFIG.normalize_task_target(str(candidate.get("target") or ""))
+    target = _mobile_export_normalized_target_or_empty(candidate.get("target"))
     role = str(candidate.get("role") or "").strip().lower()
     if target == "plate" or role == "plate":
         return "MT"
@@ -3263,11 +3504,20 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                 seen.add(best_key)
                 seen.add(run_key)
 
-                role = _mobile_role_from_training_target(target)
-                task = "pose" if role == "plate" else "detect"
                 metric_summary = self._build_history_run_metric_summary(run)
                 model_metadata = _mobile_export_read_model_metadata(best_weights)
                 model_info = model_metadata.get("info") if isinstance(model_metadata.get("info"), dict) else {}
+                dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
+                target, target_source, target_conflict = _mobile_export_resolve_candidate_target(
+                    fallback_target=target,
+                    run_like=run,
+                    dataset_path=dataset_path,
+                    model_info=model_info,
+                )
+                if target not in {"plate", "char", "vehicle"}:
+                    continue
+                role = _mobile_role_from_training_target(target)
+                task = _mobile_export_task_from_target_and_info(target, model_info)
                 candidate_project_name = str(project_name or "").strip()
                 candidate_project_root = str(project_root or "").strip()
                 if not candidate_project_name:
@@ -3286,7 +3536,6 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                 except Exception:
                     model_label = Path(best_weights).name or "model"
 
-                dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
                 training_provenance = {}
                 total_epochs = _mobile_export_int_or_none(getattr(run, "total_epochs", None))
                 if total_epochs is None or total_epochs <= 0:
@@ -3301,6 +3550,8 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                         "run": run,
                         "target": target,
                         "target_label": self._format_training_target_label(target),
+                        "target_source": target_source,
+                        "target_conflict": target_conflict,
                         "role": role,
                         "task": task,
                         "best_weights": Path(best_weights),
@@ -3441,7 +3692,7 @@ def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> lis
     if not provenance:
         return [
             ("Pochodzenie treningowe", "dane historyczne niepełne"),
-            ("Etapy treningu", "-"),
+            ("Rodowód treningu", "-"),
             ("Prezentacje próbek", "-"),
         ]
 
@@ -3453,9 +3704,9 @@ def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> lis
     stages = _mobile_export_candidate_lineage_stage_count(candidate)
     stage_minimum = _mobile_export_int_or_none(provenance.get("known_stage_count_minimum"))
     if stage_count_known is False:
-        stage_label = f"co najmniej {_format_mobile_export_int(stage_minimum or stages)}" if (stage_minimum or stages) > 0 else "-"
+        stage_label = f"co najmniej {_format_mobile_export_int(stage_minimum or stages)} etapów" if (stage_minimum or stages) > 0 else "-"
     else:
-        stage_label = _format_mobile_export_int(stages) if stages > 0 else "-"
+        stage_label = f"{_format_mobile_export_int(stages)} etap" if stages == 1 else (f"{_format_mobile_export_int(stages)} etapów" if stages > 1 else "-")
 
     run_done = _mobile_export_int_or_none(provenance.get("run_epochs_completed"))
     run_plan = _mobile_export_int_or_none(provenance.get("run_epochs_planned"))
@@ -3497,7 +3748,7 @@ def _mobile_export_candidate_training_detail_rows(candidate: dict | None) -> lis
 
     return [
         ("Pochodzenie treningowe", _mobile_export_provenance_status_label(provenance)),
-        ("Etapy treningu", stage_label),
+        ("Rodowód treningu", stage_label),
         ("Ostatni etap", last_stage_label),
         ("Epoki łącznie", total_epochs_label),
         ("Obrazy train ostatniego", run_train_images),
@@ -3527,6 +3778,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         return [
             ("Model eksportowany", str(candidate.get("model_label") or "-")),
             ("Rola w paczce", role_label),
+            ("Źródło roli", _mobile_export_target_source_label(candidate)),
             ("Projekt", _mobile_export_project_label(candidate, empty="-")),
             ("Źródło", "Gotowy plik .pt z listy modeli"),
             ("Wersja YOLO", str(candidate.get("model_version") or "-")),
@@ -3545,6 +3797,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         ("Model eksportowany", str(candidate.get("model_label") or "-")),
         ("Run treningu", f"{candidate.get('run_label') or '-'} | {getattr(run, 'name', '') or '-'}"),
         ("Rola w paczce", role_label),
+        ("Źródło roli", _mobile_export_target_source_label(candidate)),
         ("Projekt", _mobile_export_project_label(candidate, empty="-")),
         ("Wersja YOLO", str(candidate.get("model_version") or "-")),
         ("Parametry modelu", params_label),
@@ -3598,6 +3851,8 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "task": str(candidate.get("task") or ""),
         "target": str(candidate.get("target") or ""),
         "target_label": str(candidate.get("target_label") or ""),
+        "target_source": str(candidate.get("target_source") or ""),
+        "target_conflict": str(candidate.get("target_conflict") or ""),
         "scope": str(candidate.get("scope") or ""),
         "project_name": str(candidate.get("project_name") or ""),
         "project_root": str(candidate.get("project_root") or ""),
@@ -6139,7 +6394,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidates_table_shell.grid(row=2, column=0, sticky="nsew")
     candidates_table_shell.grid_columnconfigure(0, weight=1)
     candidates_table_shell.grid_rowconfigure(0, weight=1)
-    candidate_columns = ("Eksport", "Model", "Projekt", "YOLO", "Etapy", "Epoki", "Metryka", "Data")
+    candidate_columns = ("Eksport", "Model", "Projekt", "YOLO", "Epoki", "Metryka", "Data")
     candidate_tree_style = "MobileExportCandidates.Treeview"
     try:
         tree_style = ttk.Style(dialog)
@@ -6172,7 +6427,6 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidate_tree.column("Model", width=46, minwidth=38, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Projekt", width=82, minwidth=54, stretch=False, anchor=tk.W)
     candidate_tree.column("YOLO", width=64, minwidth=44, stretch=False, anchor=tk.W)
-    candidate_tree.column("Etapy", width=48, minwidth=36, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Epoki", width=54, minwidth=38, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Metryka", width=78, minwidth=58, stretch=False, anchor=tk.CENTER)
     candidate_tree.column("Data", width=82, minwidth=56, stretch=True, anchor=tk.CENTER)
@@ -6198,22 +6452,21 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 return
             width = max(300, int(width_hint or candidate_tree.winfo_width() or 420) - 16)
             if width >= 430:
-                fixed = {"Eksport": 54, "Model": 44, "Projekt": 74, "YOLO": 56, "Etapy": 42, "Epoki": 48, "Metryka": 70, "Data": 64}
+                fixed = {"Eksport": 54, "Model": 44, "Projekt": 92, "YOLO": 62, "Epoki": 52, "Metryka": 76, "Data": 64}
             elif width >= 360:
-                fixed = {"Eksport": 50, "Model": 40, "Projekt": 52, "YOLO": 48, "Etapy": 40, "Epoki": 44, "Metryka": 62, "Data": 48}
+                fixed = {"Eksport": 50, "Model": 40, "Projekt": 66, "YOLO": 52, "Epoki": 46, "Metryka": 66, "Data": 48}
             else:
                 remaining = width
                 fixed = {
                     "Eksport": 46,
                     "Model": 36,
-                    "Projekt": max(42, int(remaining * 0.15)),
-                    "YOLO": max(40, int(remaining * 0.14)),
-                    "Etapy": max(36, int(remaining * 0.11)),
-                    "Epoki": max(36, int(remaining * 0.12)),
-                    "Metryka": max(52, int(remaining * 0.19)),
+                    "Projekt": max(52, int(remaining * 0.20)),
+                    "YOLO": max(42, int(remaining * 0.15)),
+                    "Epoki": max(38, int(remaining * 0.13)),
+                    "Metryka": max(54, int(remaining * 0.20)),
                     "Data": max(50, remaining),
                 }
-                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["Projekt"] - fixed["YOLO"] - fixed["Etapy"] - fixed["Epoki"] - fixed["Metryka"])
+                fixed["Data"] = max(46, width - fixed["Eksport"] - fixed["Model"] - fixed["Projekt"] - fixed["YOLO"] - fixed["Epoki"] - fixed["Metryka"])
             fixed_sum = sum(fixed.values())
             if fixed_sum != width and fixed:
                 fixed["Data"] = max(46, fixed["Data"] + width - fixed_sum)
@@ -6221,7 +6474,6 @@ def _open_mobile_model_export_center(self, initial_run=None):
             candidate_tree.column("Model", width=max(38, fixed["Model"]), minwidth=34, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Projekt", width=max(54, fixed["Projekt"]), minwidth=48, stretch=False, anchor=tk.W)
             candidate_tree.column("YOLO", width=max(44, fixed["YOLO"]), minwidth=38, stretch=False, anchor=tk.W)
-            candidate_tree.column("Etapy", width=max(36, fixed["Etapy"]), minwidth=32, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Epoki", width=max(38, fixed["Epoki"]), minwidth=32, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Metryka", width=max(58, fixed["Metryka"]), minwidth=50, stretch=False, anchor=tk.CENTER)
             candidate_tree.column("Data", width=max(56, fixed["Data"]), minwidth=48, stretch=True, anchor=tk.CENTER)
@@ -6345,7 +6597,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         )
         for tag_name, marker_candidate in role_specs:
             fg_color = _mobile_export_target_base_color(palette, marker_candidate) if marker_candidate else muted
-            bg_color = blend_hex_colors(card_bg, fg_color, 0.16 if marker_candidate else 0.08)
+            bg_color = blend_hex_colors(card_bg, fg_color, 0.24 if marker_candidate else 0.08)
             try:
                 candidate_tree.tag_configure(
                     tag_name,
@@ -6376,8 +6628,6 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return _mobile_export_project_label(candidate, empty="").casefold()
         if column == "YOLO":
             return _mobile_export_compact_yolo_label(candidate.get("model_version")).casefold()
-        if column == "Etapy":
-            return _mobile_export_candidate_lineage_stage_count(candidate)
         if column == "Epoki":
             return _mobile_export_candidate_total_epochs(candidate)
         if column == "Metryka":
@@ -6422,15 +6672,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
         title = "mAP50-95" if label == "m95" else "mAP50"
         return f"{title} {_format_mobile_export_metric(value)}"
 
-    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str, str]:
+    def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str]:
         total_epochs = _mobile_export_candidate_total_epochs(candidate)
-        stage_count = _mobile_export_candidate_lineage_stage_count(candidate)
         return (
             _candidate_export_checkbox(candidate),
             _mobile_export_target_marker(candidate),
             _mobile_export_project_label(candidate, empty="-"),
             _mobile_export_compact_yolo_label(candidate.get("model_version")),
-            _format_mobile_export_int(stage_count) if stage_count > 0 else "-",
             _format_mobile_export_int(total_epochs) if total_epochs > 0 else "-",
             _candidate_metric_cell(candidate),
             _format_mobile_export_datetime(
@@ -6486,7 +6734,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             candidate_sort_state["descending"] = not bool(candidate_sort_state.get("descending"))
         else:
             candidate_sort_state["column"] = column
-            candidate_sort_state["descending"] = column in {"Eksport", "Etapy", "Epoki", "Metryka", "Data"}
+            candidate_sort_state["descending"] = column in {"Eksport", "Epoki", "Metryka", "Data"}
         _populate_candidate_tree(refresh_selection=True)
 
     def _selected_export_candidates() -> list[dict]:

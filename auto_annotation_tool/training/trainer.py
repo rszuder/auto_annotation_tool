@@ -29,6 +29,7 @@ from ..config import (
     is_cuda_available,
 )
 from ..utils import cleanup_gpu_memory, safe_load_yaml
+from ..validators import validate_model_file
 from .dataset_augmentation import ensure_yolo_dataset_yaml_points_to_root
 from .model_provenance import (
     build_checkpoint_training_snapshot,
@@ -1239,11 +1240,32 @@ class YOLOPoseTrainer:
 
         phase_started = time.perf_counter()
         report_preflight("Waliduję zbiór danych", 10.0, str(dataset_path))
-        is_valid, msg, _ = self.validate_dataset(Path(dataset_path))
+        is_valid, msg, validation_stats = self.validate_dataset(Path(dataset_path))
+        self._last_preflight_dataset_validation = {
+            "ok": bool(is_valid), "message": str(msg), "stats": dict(validation_stats or {}),
+            "dataset_root": str(dataset_path), "target": str(kwargs.get("training_target") or ""),
+        }
         finish_phase("validate_dataset", phase_started)
         if not is_valid:
             logger.error(f"Dataset: {msg}")
             return None
+        counts = self._last_preflight_dataset_validation["stats"]
+        report_preflight("Zbiór danych sprawdzony", 20.0, ", ".join(
+            f"{split}={counts.get(f'{split}_images', 0)}" for split in ("train", "val", "test")
+        ))
+
+        if kwargs.pop("validate_custom_model", False):
+            phase_started = time.perf_counter()
+            report_preflight("Sprawdzam model startowy", 25.0, str(base_model))
+            ok, model_message, info = validate_model_file(Path(base_model))
+            if not ok:
+                raise ValueError(f"Model startowy: {model_message}")
+            cfg = safe_load_yaml(Path(dataset_path) / "data.yaml")
+            expected_task = "pose" if "kpt_shape" in cfg else "detect"
+            actual_task = str(info.get("task") or info.get("type") or "").lower()
+            if actual_task != expected_task:
+                raise ValueError(f"Dataset wymaga modelu {expected_task}, wybrano model {actual_task or 'nieznany'}.")
+            finish_phase("model_validation", phase_started)
 
         self._reset_runtime_state()
         self._reset_worker_ipc_state()
@@ -1410,6 +1432,7 @@ class YOLOPoseTrainer:
 
             worker_module = "auto_annotation_tool.training.training_worker"
             stdout_handle = open(ipc_paths["stdout_log"], "a", encoding="utf-8", errors="replace")
+            self._worker_stdout_handle = stdout_handle
             env = os.environ.copy()
             env.setdefault("PYTHONFAULTHANDLER", "1")
             process = subprocess.Popen(

@@ -144,11 +144,11 @@ def infer_yolo_arch_from_model_path(model_path: str):
 
 
 def auto_device_label() -> str:
-    return "auto (prefer GPU/CUDA, fallback CPU)"
+    return "Auto"
 
 
 def get_available_devices(host):
-    devices = [host._auto_device_label(), "cpu"]
+    devices = [host._auto_device_label(), "CPU"]
     if not bool(getattr(host, "_startup_ui_ready", False)):
         return devices
     try:
@@ -171,13 +171,13 @@ def normalize_selected_device(host, raw_value: str | None = None, devices=None) 
     if not current or current_lower.startswith("auto"):
         return available[0] if available else host._auto_device_label()
     if current_lower.startswith("cpu"):
-        return "cpu"
+        return "CPU"
     if current_lower.startswith("cuda:"):
         prefix = current.split()[0]
         for option in available:
-            if option.startswith(prefix):
+            if str(option or "").lower().startswith(prefix):
                 return option
-        return prefix
+        return host._auto_device_label()
 
     return current if (not available or current in available) else (available[0] if available else host._auto_device_label())
 
@@ -230,9 +230,12 @@ def device_to_ultralytics(host, s: str):
         return "cpu"
     if raw.startswith("cuda:"):
         try:
+            import torch
+            if not torch.cuda.is_available():
+                return "cpu"
             return int(str(s).split(":")[1].split()[0])
         except Exception:
-            return 0
+            return "cpu"
     return "cpu"
 
 
@@ -1506,5 +1509,4 @@ def refresh_yolo_model_picker_state(host):
         except Exception:
             pass
         self._set_widget_state(browse_btn, "disabled")
-
 

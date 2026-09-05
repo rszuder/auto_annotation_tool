@@ -6,6 +6,23 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-05: handoff v2.3, przygotowanie treningu
+
+Start wykonywał pełne sprawdzenie datasetu w głównym wątku, przed drugim
+sprawdzeniem w asynchronicznym trenerze. Zwolnienie modeli w tle odwoływało się
+do obiektów zakładek, a test zastępował kolejkę UI natychmiastowym wywołaniem.
+
+Wdrożono lekką kontrolę formularza i wariantu, pojedynczą pełną walidację w tle,
+odłączanie modelu Z2 w głównym wątku pod istniejącą blokadą operacji oraz ochronę
+kolejki po zniszczeniu GUI. Kokpit pokazuje przygotowanie treningu, a log zapisuje
+zmiany etapów. Zachowano snapshoty i SHA przed startem workera oraz status FAILED
+po błędzie jego uruchomienia; domknięto też uchwyt pliku stdout w tym przypadku.
+
+Wspólny zestaw testów: 64 passed na Windows 10 Home, build 19045. Próby rzeczywistego
+treningu na małym i dużym datasecie na Windows 11 pozostają do wykonania.
+Zakres wdrożenia, dowody i warunki odbioru:
+[Przygotowanie treningu v2.3](docs/preflight_training_v2_3.md).
+
 ## 2026-05-07
 
 ### Cel nadrzędny

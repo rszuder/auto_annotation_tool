@@ -125,33 +125,39 @@ if PIL_AVAILABLE:
     from PIL import Image, ImageDraw, ImageFont
 
 YOLO = None
-def _release_gpu_resources_before_training(self):
-    """Oddaje VRAM zajęty przez wcześniejszą pracę w Z2/Z3 przed startem Z4."""
-    released_tabs: list[str] = []
+
+def _detach_gpu_resources_before_training(self) -> list:
+    """Detach GUI-owned models while the exclusive training lock is held."""
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Models must be detached on the GUI thread")
+    detached = []
     app_tabs = getattr(getattr(self, "app", None), "tabs", {}) or {}
-    for tab_key, label in (("annotation", "Z2"), ("characters", "Z3")):
-        tab = app_tabs.get(tab_key)
-        if tab is None:
-            continue
-        releaser = getattr(tab, "release_gpu_resources_for_training", None)
-        if not callable(releaser):
-            continue
+    tab = app_tabs.get("annotation")
+    annotator = getattr(tab, "annotator", None)
+    if annotator is not None:
+        detached.append(annotator)
+        tab.annotator = None
+    return detached
+
+
+def _release_detached_gpu_resources(models) -> None:
+    """Only detached model objects and CUDA/Python cleanup may run in this worker."""
+    while models:
+        model = models.pop()
         try:
-            releaser()
-            released_tabs.append(label)
-        except Exception as e:
-            logger.debug(f"Nie udało się zwolnić GPU z {label} przed treningiem: {e}")
-    try:
-        cleanup_gpu_memory()
-    except Exception as e:
-        logger.debug(f"Nie udało się wykonać końcowego cleanup GPU przed treningiem: {e}")
-    if released_tabs:
-        self._append_train_log(
-            "[INFO] Zwolniono pamięć GPU przed treningiem z modułów: "
-            + ", ".join(released_tabs)
-        )
+            model.unload_models()
+        finally:
+            del model
+    cleanup_gpu_memory()
+
+
+def _release_gpu_resources_before_training(self):
+    _release_detached_gpu_resources(_detach_gpu_resources_before_training(self))
 
 def _set_training_preparing_ui_state(self, *, text: str = "Przygotowanie treningu...", progress: float = 5.0):
+    entering = not bool(getattr(self, "_training_start_in_progress", False))
+    if entering:
+        self._last_training_preflight_stage = None
     self._training_start_in_progress = True
     for attr, state in (
         ("btn_start_train", tk.DISABLED),
@@ -166,6 +172,11 @@ def _set_training_preparing_ui_state(self, *, text: str = "Przygotowanie trening
         self._set_train_progress_values(overall=max(0.0, min(100.0, float(progress))), epoch=0.0)
     except Exception:
         pass
+    if entering:
+        try:
+            self._refresh_training_cockpit(ready=False)
+        except Exception:
+            pass
     try:
         self._set_training_widget_text(self.train_progress_label, text)
         self.train_progress_label.configure(foreground="#d35400")
@@ -179,10 +190,12 @@ def _update_training_preflight_progress(self, stage: str, progress: float, detai
     if detail_text:
         label = f"{label} | {detail_text}"
     _set_training_preparing_ui_state(self, text=label, progress=progress)
-    try:
-        self._append_train_log(f"[PREFLIGHT] {stage_text}" + (f" | {detail_text}" if detail_text else ""))
-    except Exception:
-        pass
+    if getattr(self, "_last_training_preflight_stage", None) != stage_text:
+        self._last_training_preflight_stage = stage_text
+        try:
+            self._append_train_log(f"[PREFLIGHT] {stage_text}" + (f" | {detail_text}" if detail_text else ""))
+        except Exception:
+            pass
 
 def _finish_training_preflight_failure(self, *, title: str, message: str):
     self._training_start_in_progress = False
@@ -251,55 +264,20 @@ def _start_training(self):
     except Exception:
         pass
 
-    source_state = self._validate_active_training_source_for_pz2()
+    light_started = time.perf_counter()
+    source_state = z4_training_metrics._validate_training_source_lightweight(self)
+    logger.info("[PREFLIGHT] gui_light_validation %.3f s", time.perf_counter() - light_started)
     if not bool(source_state.get("ok")):
-        yaml_path_candidate = source_state.get("yaml_path")
-        dataset_root_candidate = source_state.get("dataset_root")
-        check_path = dataset_root_candidate or yaml_path_candidate
-        if check_path is not None and self._looks_like_char_classification_dataset(check_path):
-            return messagebox.showerror(
-                "Nieobsługiwany typ datasetu",
-                self._char_classification_dataset_message(),
-            )
         validation_msg = str(source_state.get("message") or "Dataset niegotowy do treningu.")
-        dataset_root = source_state.get("dataset_root")
-        validation_stats = dict(source_state.get("stats") or {})
-        if dataset_root is not None:
-            validation_details = self._build_training_dataset_validation_message(
-                Path(dataset_root),
-                validation_msg,
-                validation_stats,
-            )
-        else:
-            validation_details = validation_msg
         self._append_train_log(f"[WALIDACJA] {validation_msg}")
-        self._append_train_log(validation_details)
         self.train_progress_label.configure(
             text="Dataset wymaga poprawy przed treningiem.",
             foreground="#c0392b"
         )
-        return messagebox.showerror("Dataset niegotowy do treningu", validation_details)
+        return messagebox.showerror("Dataset niegotowy do treningu", validation_msg)
 
     yaml_path = Path(source_state["yaml_path"])
     dataset_root = Path(source_state["dataset_root"])
-    validation_msg = str(source_state.get("message") or "Dataset OK")
-    validation_stats = dict(source_state.get("stats") or {})
-    try:
-        self.dataset_var.set(str(dataset_root))
-    except Exception:
-        pass
-
-    pose_dataset_warning = self._get_pose_dataset_size_warning(dataset_root, validation_stats)
-    if pose_dataset_warning:
-        self._append_train_log(f"[OSTRZEZENIE] {pose_dataset_warning}")
-        self.train_progress_label.configure(
-            text="Ostrzeżenie: dataset YOLO Pose jest mały. Trening ruszy po potwierdzeniu.",
-            foreground="#d35400"
-        )
-        messagebox.showwarning(
-            "Mały dataset YOLO Pose",
-            pose_dataset_warning + "\n\nTrening zostanie mimo to uruchomiony."
-        )
 
     # Rozpoznaj typ datasetu na podstawie zawartości data.yaml.
     try:
@@ -321,7 +299,8 @@ def _start_training(self):
                     f"Rozpoznany dataset: {inferred_label}\n\n"
                     "Zmień tor treningu albo wskaż dataset zgodny z tym wyborem."
                 )
-            self._rebind_free_mode_training_storage(target=selected_target)
+            # Storage was bound when the target/variant was selected. Rebinding here
+            # would reload history and replace the trainer on every Start.
 
         if CAMPAIGN.get_active_project_name() and not is_pose_dataset:
             self._pending_campaign_model_type = "char"
@@ -334,28 +313,29 @@ def _start_training(self):
     base_key = self.base_model_var.get().strip()
     base_model = self.base_custom_var.get().strip() if self._is_custom_base_model_key(base_key) else base_key
     base_model_display = self._resolve_selected_training_base_model_display()
-    _base_model_info_path, base_model_info = self._resolve_selected_training_base_model_info()
+    _base_model_info_path, base_model_info = self._resolve_selected_training_base_model_info(lightweight=True)
     device = self._device_to_ultralytics(self.device_var.get())
 
     selection_ok, _selection_message = self._validate_training_base_model_target_compatibility(
         target=selected_target,
         show_dialog=True,
+        lightweight=True,
     )
     if not selection_ok:
         return
 
     # Rozpoznaj, czy wybrany model jest modelem pose.
-    is_pose_model = self._is_pose_base_model(base_key, base_model)
+    model_task = z4_training_metrics._training_base_model_task_lightweight(self, base_key, base_model)
 
     # Zablokuj niezgodne pary dataset-model przed startem treningu.
-    if is_pose_dataset and not is_pose_model:
+    if model_task is not None and is_pose_dataset and model_task != "pose":
         return messagebox.showerror(
             "Niezgodność typu treningu",
             "Wybrany dataset jest typu POSE (z keypointami), ale model startowy NIE jest modelem pose.\n\n"
             "Wybierz model z dopiskiem '-pose'."
         )
 
-    if not is_pose_dataset and is_pose_model:
+    if model_task is not None and not is_pose_dataset and model_task != "detect":
         return messagebox.showerror(
             "Niezgodność typu treningu",
             "Wybrany dataset jest typu DETECT, ale model startowy jest typu POSE.\n\n"
@@ -443,23 +423,7 @@ def _start_training(self):
         f"Rozdzielczość wejściowa: {self._safe_training_int_value('imgsz_var', default=640, minimum=32)} | "
         f"Współczynnik uczenia: {self._safe_training_float_value('lr0_var', default=0.01, minimum=0.0001)}"
     )
-    try:
-        train_images = int(validation_stats.get("train_images", 0) or 0)
-        val_images = int(validation_stats.get("val_images", 0) or 0)
-        test_images = int(validation_stats.get("test_images", 0) or 0)
-        batch_size = self._safe_training_int_value("batch_var", default=16, minimum=1)
-        batches_per_epoch = int((train_images + batch_size - 1) // batch_size) if train_images > 0 else 0
-        self._append_train_log(
-            f"Zweryfikowany wariant datasetu: train={train_images}, val={val_images}, test={test_images} | "
-            f"data.yaml: {yaml_path}"
-        )
-        if batches_per_epoch > 0:
-            self._append_train_log(
-                f"Przewidywane partie na epokę: około {batches_per_epoch} "
-                f"(train={train_images}, batch={batch_size})."
-            )
-    except Exception:
-        pass
+    self._append_train_log("Liczebność zbiorów train/val/test zostanie sprawdzona w tle.")
     self._append_train_log("=" * 70)
 
     if not self._begin_step4_operation("z4.training.run", "Z4: przygotowanie treningu"):
@@ -475,9 +439,12 @@ def _start_training(self):
         "device": device,
         "lr0": self._safe_training_float_value("lr0_var", default=0.01, minimum=0.0001),
         "training_target": selected_target,
+        "validate_custom_model": model_task is None,
         **dict(fine_tune_metadata or {}),
     }
     _set_training_preparing_ui_state(self, text="Przygotowanie treningu: waliduję i zamrażam dane...", progress=5.0)
+    detached_models = _detach_gpu_resources_before_training(self)
+    trainer = self.trainer
 
     def progress_callback(stage, progress, detail=""):
         safe_stage = str(stage or "").strip()
@@ -499,6 +466,9 @@ def _start_training(self):
         self._training_start_in_progress = False
         self._training_preflight_thread = None
         self.current_run_id = run_id
+        z4_training_metrics._apply_preflight_dataset_validation(
+            self, getattr(trainer, "_last_preflight_dataset_validation", None),
+        )
         self._last_training_completion_summary_run_id = None
         try:
             self._remember_campaign_plate_training_source(dataset_root)
@@ -566,6 +536,9 @@ def _start_training(self):
         self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
 
     def finish_failure(error_text=""):
+        z4_training_metrics._apply_preflight_dataset_validation(
+            self, getattr(trainer, "_last_preflight_dataset_validation", None),
+        )
         message = (
             "Trening nie wystartował.\n\n"
             "Sprawdź poprawność datasetu, modelu startowego i log w terminalu procesu."
@@ -582,21 +555,29 @@ def _start_training(self):
         run_id = None
         error_text = ""
         try:
-            self._release_gpu_resources_before_training()
-            run_id = self.trainer.start_training(**request, progress_callback=progress_callback)
+            _release_detached_gpu_resources(detached_models)
+            run_id = trainer.start_training(**request, progress_callback=progress_callback)
+            validation = getattr(trainer, "_last_preflight_dataset_validation", None)
+            if not run_id and isinstance(validation, dict) and not validation.get("ok"):
+                error_text = str(validation.get("message") or "")
         except Exception as e:
             logger.exception("Nie udało się wystartować treningu")
             error_text = str(e)
 
-        self._ui(
+        delivered = self._ui(
             lambda rid=run_id, err=error_text: (
                 finish_success(rid) if rid else finish_failure(err)
             )
         )
+        if delivered is False and run_id:
+            trainer.shutdown()
 
     thread = threading.Thread(target=worker, name="Z4TrainingPreflight", daemon=True)
     self._training_preflight_thread = thread
-    thread.start()
+    try:
+        thread.start()
+    except Exception as exc:
+        finish_failure(str(exc))
 
 def _pause_training(self):
     self.trainer.pause_training()
@@ -1712,6 +1693,8 @@ def _resume_selected_run(self):
 
     run_id_to_resume = str(run.id)
     _set_training_preparing_ui_state(self, text="Przygotowanie wznowienia treningu...", progress=5.0)
+    detached_models = _detach_gpu_resources_before_training(self)
+    trainer = self.trainer
 
     def progress_callback(stage, progress, detail=""):
         safe_stage = str(stage or "").strip()
@@ -1733,6 +1716,9 @@ def _resume_selected_run(self):
         self._training_start_in_progress = False
         self._training_preflight_thread = None
         self.current_run_id = resumed_run_id
+        z4_training_metrics._apply_preflight_dataset_validation(
+            self, getattr(trainer, "_last_preflight_dataset_validation", None),
+        )
         refreshed_run = run
         try:
             self._reload_history_snapshot_from_disk()
@@ -1810,6 +1796,9 @@ def _resume_selected_run(self):
         self._training_completion_poll_job = self.frame.after(3000, self._poll_training_completion)
 
     def finish_failure(error_text=""):
+        z4_training_metrics._apply_preflight_dataset_validation(
+            self, getattr(trainer, "_last_preflight_dataset_validation", None),
+        )
         message = (
             "Wznowienie treningu nie wystartowało.\n\n"
             "Sprawdź, czy run nadal ma poprawny checkpoint `last.pt`."
@@ -1826,21 +1815,26 @@ def _resume_selected_run(self):
         resumed_run_id = None
         error_text = ""
         try:
-            self._release_gpu_resources_before_training()
-            resumed_run_id = self.trainer.resume_training(run_id_to_resume, progress_callback=progress_callback)
+            _release_detached_gpu_resources(detached_models)
+            resumed_run_id = trainer.resume_training(run_id_to_resume, progress_callback=progress_callback)
         except Exception as e:
             logger.exception("Nie udało się wznowić treningu")
             error_text = str(e)
 
-        self._ui(
+        delivered = self._ui(
             lambda rid=resumed_run_id, err=error_text: (
                 finish_success(rid) if rid else finish_failure(err)
             )
         )
+        if delivered is False and resumed_run_id:
+            trainer.shutdown()
 
     thread = threading.Thread(target=worker, name="Z4TrainingResumePreflight", daemon=True)
     self._training_preflight_thread = thread
-    thread.start()
+    try:
+        thread.start()
+    except Exception as exc:
+        finish_failure(str(exc))
 
 def _show_history_context_menu(self, event=None):
     if event is None or not hasattr(self, "tree"):
