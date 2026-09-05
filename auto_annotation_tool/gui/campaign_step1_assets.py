@@ -4495,31 +4495,6 @@ def _import_project_start_plate_run(
 
     dialog_parent = parent or getattr(self, "frame", None)
 
-    iteration_target = self._get_iteration_target()
-    if iteration_target not in {"plate", "char"}:
-        message = (
-            "Najpierw wybierz tor iteracji w E1: tablice albo znaki.\n\n"
-            "Import anotacji tablic ma inne znaczenie w każdym torze: w torze tablic zasila materiał "
-            "do treningu/eksportu tablic, a w torze znaków przygotowuje źródło do wyodrębniania tablic "
-            "i dalszej pracy nad znakami."
-        )
-        try:
-            self.app.themed_info(
-                "Najpierw wybierz tor E1",
-                message,
-                parent=dialog_parent,
-                tone="warning",
-            )
-        except Exception:
-            messagebox.showwarning("Najpierw wybierz tor E1", message, parent=dialog_parent)
-        try:
-            self.step1_panel_expanded = True
-            self.request_wizard_stage_focus(step_num=1)
-            self._refresh_active_project_wizard_only()
-        except Exception:
-            pass
-        return
-
     _notify_progress(4, "Sprawdzam wybrany zbiór obrazów O...")
     try:
         image_source = dict(self._get_project_start_effective_images_source() or {})
@@ -4986,8 +4961,8 @@ def _import_project_start_plate_run(
 
 def _get_step1_assets_intro_text() -> str:
     return (
-        "E1 ustala cel iteracji i sprawdza, czy wybrane zasoby wystarczą do rozpoczęcia właściwego toru pracy. "
-        "Najpierw wybierz tor na grafie, a potem uzupełnij wymagania pokazane w panelu zasobów."
+        "Wskaż obrazy i dostępne zasoby. AT dopasowujemy do obrazów O, a modele sprawdzamy według ich typu. "
+        "Tor wybierzesz w polu Praca bramki; określi on wykorzystanie zasobów, nie ich rodzaj."
     )
 
 def _refresh_project_start_panel(self) -> None:
@@ -5153,10 +5128,7 @@ def _refresh_project_start_panel(self) -> None:
             current_iteration_path = "char_from_ready_plates"
         else:
             current_iteration_path = default_iteration_path_for_target(current_route_target)
-        try:
-            CAMPAIGN.set_iteration_path(current_iteration_path)
-        except Exception:
-            pass
+        # A resource refresh may describe a legacy route, never select it.
 
     if current_iteration_path == "plate_training":
         contract_summary = (
@@ -5178,10 +5150,10 @@ def _refresh_project_start_panel(self) -> None:
         assets_title = "2. Wymagania toru znaków: zdjęcia jako wejście do E2/Z2"
     else:
         contract_summary = (
-            "Najpierw wybierz ścieżkę na grafie. Panel wymagań pokaże wtedy, które zasoby są wymagane, "
-            "które są alternatywą, a które nie dotyczą wybranego scenariusza."
+            "Możesz wskazać obrazy, zaimportować pasujące AT i wybrać modele bez wyboru toru. "
+            "Tor tablic albo znaków wybierzesz później w polu Praca bramki."
         )
-        assets_title = "2. Wymagania E1: wybierz ścieżkę, aby zobaczyć wymagania"
+        assets_title = "2. Zasoby E1: wybór niezależny od toru"
 
     try:
         if self.ingest_start_title_lbl is not None:
@@ -5201,12 +5173,11 @@ def _refresh_project_start_panel(self) -> None:
             bool(
                 mode_selected
                 and show_assets_operational
-                and route_selected
                 and effective_images_ready_for_annotations
             ),
         ),
-        (self.btn_ingest_pick_plate_model, bool(mode_selected and show_assets_operational and route_selected)),
-        (self.btn_ingest_pick_char_model, bool(mode_selected and show_assets_operational and current_route_target == "char")),
+        (self.btn_ingest_pick_plate_model, bool(mode_selected and show_assets_operational)),
+        (self.btn_ingest_pick_char_model, bool(mode_selected and show_assets_operational)),
     ):
         if widget is None:
             continue
@@ -5300,18 +5271,20 @@ def _refresh_project_start_panel(self) -> None:
     elif current_iteration_path == "plate_training" and effective_images_exists and effective_images_count <= 0:
         images_validation_text = "Wymagane dla toru tablic | katalog nie zawiera obrazów."
         images_validation_tone = "error"
+    elif not route_selected and effective_images_exists and effective_images_count > 0:
+        images_validation_text = f"Obrazy wskazane | {effective_images_count} obrazów. Tor wybierzesz w polu Praca."
+        images_validation_tone = "success"
     else:
         images_validation_text = (
             "Wymagane dla toru tablic | wskaż katalog obrazów tej iteracji."
             if current_iteration_path == "plate_training"
-            else "Wybierz ścieżkę E1. Po wyborze graf pokaże właściwe warunki."
+            else "Wskaż katalog obrazów O. Tor wybierzesz w polu Praca bramki."
         )
         images_validation_tone = "warning"
     images_meta = build_resource_contract_meta(
         "O",
         contract_ready=bool(
-            route_selected
-            and current_iteration_path in {"plate_training", "char_from_images"}
+            (not route_selected or current_iteration_path in {"plate_training", "char_from_images"})
             and effective_images_count > 0
             and effective_images_dir is not None
             and effective_images_exists
@@ -5398,11 +5371,7 @@ def _refresh_project_start_panel(self) -> None:
         plate_run_validation_text = "Opcjonalne | import wcześniejszych anotacji."
         plate_run_requirement = ""
         plate_run_validation_tone = "muted"
-    if not route_selected:
-        plate_run_validation_text = "Najpierw wybierz ścieżkę E1. Import zależy od celu: tablice albo znaki."
-        plate_run_validation_tone = "warning"
-        plate_run_requirement = ""
-    elif plate_run_path:
+    if plate_run_path:
         try:
             plate_run_dir = Path(plate_run_path)
         except Exception:
@@ -5589,7 +5558,7 @@ def _refresh_project_start_panel(self) -> None:
                 "To jeszcze nie spełnia T03. Sprawdź AT w Z2 i zatwierdź właściwe obrazy."
             )
             plate_run_validation_tone = "warning"
-        elif current_iteration_path in {"plate_training", "char_from_images"}:
+        else:
             plate_run_validation_text = (
                 f"AT do kontroli | {plate_run_counter_images} obrazów / {plate_run_counter_plates} tablic. "
                 "Sprawdź je w Z2; status [OK] nadajesz dopiero po kontroli."
@@ -5622,11 +5591,7 @@ def _refresh_project_start_panel(self) -> None:
     plate_model_requirement = ""
     if current_route_target == "char":
         plate_model_requirement = "alternative"
-    if not route_selected:
-        plate_model_validation_text = "Najpierw wybierz tor E1. Model tablic ma znaczenie zależne od celu iteracji."
-        plate_model_validation_tone = "warning"
-        plate_model_requirement = ""
-    elif not plate_model_ready:
+    if not plate_model_ready:
         if current_route_target == "char":
             plate_model_validation_text = "Opcjonalne | może przyspieszyć przygotowanie tablic w E2/Z2."
         else:
@@ -5661,15 +5626,8 @@ def _refresh_project_start_panel(self) -> None:
 
     char_model_source_text = self._format_project_start_asset_source(char_model_path)
     char_model_requirement = ""
-    if not route_selected:
-        char_model_validation_text = "Najpierw wybierz tor E1. Model znaków dotyczy toru znaków."
-        char_model_validation_tone = "warning"
-    elif current_route_target != "char":
-        char_model_validation_text = "Nie dotyczy toru tablic."
-        char_model_validation_tone = "muted"
-        char_model_requirement = "disabled"
-    elif not char_model_ready:
-        char_model_validation_text = "Opcjonalne | model do dalszego dotrenowania."
+    if not char_model_ready:
+        char_model_validation_text = "Opcjonalne | wskaż model znaków MZ. Jego wybór nie ustawia toru iteracji."
         char_model_validation_tone = "muted"
     else:
         try:
@@ -5684,11 +5642,13 @@ def _refresh_project_start_panel(self) -> None:
             char_model_validation_text = char_model_error or "Model znaków nie przeszedł walidacji."
             char_model_validation_tone = "error"
     char_effective_model_state = self._get_project_start_effective_model_state("char")
-    if char_effective_model_state and current_route_target == "char":
+    if char_effective_model_state:
         char_model_path = str(char_effective_model_state.get("path") or char_model_path)
         char_model_source_text = str(char_effective_model_state.get("source") or char_model_source_text)
         char_model_validation_text = str(char_effective_model_state.get("validation") or char_model_validation_text)
         char_model_validation_tone = str(char_effective_model_state.get("tone") or char_model_validation_tone)
+    if current_route_target == "plate":
+        char_model_validation_text += " Model znaków nie jest używany w torze tablic."
     self._set_project_start_asset_row_state(
         "char_model",
         source_text=char_model_source_text,
@@ -5698,18 +5658,9 @@ def _refresh_project_start_panel(self) -> None:
         requirement=char_model_requirement,
     )
 
-    if not route_selected:
-        char_run_validation_text = "Najpierw wybierz ścieżkę E1. Anotacje znaków dotyczą toru znaków."
-        char_run_validation_tone = "warning"
-        char_run_requirement = ""
-    elif current_route_target != "char":
-        char_run_validation_text = "Nie dotyczy toru tablic."
-        char_run_validation_tone = "muted"
-        char_run_requirement = "disabled"
-    else:
-        char_run_validation_text = "Opcjonalne | import anotacji znaków jest zasobem planowanym."
-        char_run_validation_tone = "muted"
-        char_run_requirement = ""
+    char_run_validation_text = "Planowane | import AZ nie jest jeszcze dostępny w zasobach bramki."
+    char_run_validation_tone = "muted"
+    char_run_requirement = ""
     char_run_meta = build_resource_contract_meta(
         "O/AT->AZ",
         contract_ready=False,

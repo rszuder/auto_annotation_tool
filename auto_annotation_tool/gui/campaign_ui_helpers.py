@@ -8,6 +8,7 @@ import json
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 from pathlib import Path
 from textwrap import shorten
 from collections import Counter
@@ -26,6 +27,7 @@ from ..icons import IconManager
 from ..project_cache import PROJECT_CACHE
 from . import campaign_dashboard_cache
 from .help_manager import HELP
+from .app_theme_definitions import CAMPAIGN_SIDEBAR_STYLE
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
@@ -579,6 +581,43 @@ def _set_project_start_badge_button_state(self, widget, *, enabled: bool | None 
             pass
     self._style_project_start_badge_button(widget)
 
+def _draw_project_add_action(canvas, palette, state):
+    width = int(canvas.winfo_width())
+    if width < 2:
+        return
+    enabled = bool(state.get("enabled", True))
+    font_spec = CAMPAIGN_SIDEBAR_STYLE["project_action_font"]
+    metrics = tkfont.Font(root=canvas, font=font_spec)
+    padding, gap = 8, 10
+    diameter = max(28, round(metrics.metrics("linespace") * 1.2))
+    label_x = padding + diameter + gap
+    available = max(1, width - label_x - padding)
+    color = palette["success"] if enabled else palette["muted"]
+    icon_color = palette["fg"] if enabled else palette["muted"]
+    outline = blend_hex_colors(icon_color, str(canvas.cget("bg")), 0.34 if enabled else 0.60)
+    canvas.delete("all")
+    canvas.configure(cursor="hand2" if enabled else "arrow")
+    label = canvas.create_text(
+        label_x, padding, text="Utwórz projekt", anchor="nw", width=available,
+        font=font_spec, fill=color, tags=("project_action_label",),
+    )
+    bounds = canvas.bbox(label)
+    text_height = bounds[3] - bounds[1]
+    height = max(38, text_height + 2*padding, diameter + 2*padding)
+    if int(canvas.cget("height")) != height:
+        canvas.configure(height=height)
+    canvas.itemconfigure(label, anchor="w")
+    canvas.coords(label, label_x, height/2)
+    cx, cy = padding + diameter/2, height/2
+    canvas.create_oval(padding, cy-diameter/2, padding+diameter, cy+diameter/2,
+                       outline=outline, width=2, tags=("project_action_icon",))
+    half = diameter * 0.22
+    canvas.create_line(cx-half, cy, cx+half, cy, fill=icon_color, width=2,
+                       capstyle=tk.ROUND, tags=("project_action_icon",))
+    canvas.create_line(cx, cy-half, cx, cy+half, fill=icon_color, width=2,
+                       capstyle=tk.ROUND, tags=("project_action_icon",))
+
+
 def _draw_icon_button(self, role: str):
     canvas = (
         self.project_add_button_canvas
@@ -591,6 +630,10 @@ def _draw_icon_button(self, role: str):
     palette = getattr(self.app, "palette", {})
     bg = str(canvas.cget("bg") or palette.get("panel", "#252526"))
     state = self._icon_button_state.setdefault(role, {"hover": False, "pressed": False, "enabled": True})
+    if role == "project_add":
+        # Native text measures DPI and wraps within the actual sidebar viewport.
+        _draw_project_add_action(canvas, palette, state)
+        return
     enabled = bool(state.get("enabled", True))
     hover = bool(state.get("hover", False))
     pressed = bool(state.get("pressed", False))

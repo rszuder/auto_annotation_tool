@@ -45,6 +45,48 @@ def _window_recovery_opted_out(window) -> bool:
         return False
 
 
+def configure_minimizable_modal(window) -> None:
+    """Let the native window manager minimize a modal without root recovery."""
+    window._aat_skip_window_recovery = True
+    if bool(getattr(window, "_aat_native_modal_state_bound", False)):
+        return
+    window._aat_native_modal_state_bound = True
+
+    def _on_unmap(event):
+        if event.widget is not window or _safe_window_state(window) != "iconic":
+            return
+        try:
+            if window.grab_current() is window:
+                window.grab_release()
+        except Exception:
+            pass
+
+    def _on_map(event):
+        if event.widget is not window or _safe_window_state(window) not in {"normal", "zoomed"}:
+            return
+        try:
+            if window.grab_current() is None:
+                window.grab_set()
+        except Exception:
+            pass
+
+    window.bind("<Unmap>", _on_unmap, add="+")
+    window.bind("<Map>", _on_map, add="+")
+
+
+def restore_visible_modal(window) -> bool:
+    """Return from a child dialog, respecting the user's minimized state."""
+    if not _safe_widget_exists(window) or _safe_window_state(window) not in {"normal", "zoomed"}:
+        return False
+    try:
+        window.lift()
+        window.focus_force()
+        window.grab_set()
+        return True
+    except Exception:
+        return False
+
+
 def _append_recoverable_toplevel(app, window, result: list, seen: set[str]) -> None:
     top = _safe_toplevel(window)
     if top is None or top is getattr(app, "root", None):
