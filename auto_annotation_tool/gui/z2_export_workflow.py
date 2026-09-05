@@ -1183,7 +1183,7 @@ def _refresh_plate_dataset_export_sources(self):
         ):
             run_dir = candidate
 
-    if run_dir is None and current_input_dir is None:
+    if run_dir is None and current_input_dir is None and not self._is_free_mode_session_context():
         run_dir = self._find_latest_annotation_run_dir()
 
     if run_dir is not None:

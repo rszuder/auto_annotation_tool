@@ -20,6 +20,7 @@ import shutil
 import time
 import queue
 import numpy as np
+from .z2_drawer_slide import place_drawer, suspend_drawer
 
 import cv2
 from PIL import Image
@@ -834,6 +835,7 @@ def _hide_preview_image_status_overlay(self) -> None:
 
 def _hide_preview_overlay_dock_stack(self) -> None:
     """Hide the whole right-side overlay stack before canvas geometry changes."""
+    suspend_drawer(self)
     self._preview_overlay_dock_render_key = None
     self._preview_overlay_dock_size = None
     self._preview_overlay_dock_size_key = None
@@ -1058,21 +1060,9 @@ def _place_preview_campaign_gate_overlay(self, *, force_render: bool = False) ->
     _raise_preview_controls_legend_overlay(self)
 
 def _toggle_preview_overlay_dock(self, event=None):
-    # Szuflada Z2 jest stałym panelem akcji; statusy bramki i jakości są
-    # osobnymi kolorowymi blokami pod nią, więc nie zwijamy jej do starej ikony.
-    self._preview_overlay_dock_expanded = True
-    self._preview_overlay_dock_render_key = None
-    self._preview_overlay_dock_size = None
-    self._preview_overlay_dock_size_key = None
-    self._preview_overlay_dock_pre_gate_key = None
-    self._preview_overlay_dock_gate_render_key = None
-    self._preview_overlay_dock_inline_gate_state = None
-    self._preview_overlay_dock_inline_gate_source_key = None
-    self._place_preview_overlay_dock(force_render=True)
-    try:
-        self.preview_canvas.focus_set()
-    except Exception:
-        pass
+    slide = getattr(self, "_preview_drawer_slide", None)
+    if slide is not None:
+        slide.toggle()
     return "break"
 
 def _toggle_preview_overlay_dock_tool(self, tool_key: str):
@@ -1148,6 +1138,7 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
     if dock is None or canvas_frame is None or canvas is None:
         return
     if _preview_fullscreen_overlay_transition_blocked(self):
+        suspend_drawer(self)
         try:
             dock.place_forget()
         except Exception:
@@ -1156,6 +1147,7 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
         self._hide_preview_campaign_gate_overlay()
         return
     if getattr(canvas, "original_image", None) is None:
+        suspend_drawer(self)
         try:
             dock.place_forget()
         except Exception:
@@ -1169,6 +1161,7 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
     except Exception:
         frame_width = frame_height = 0
     if frame_width <= 180 or frame_height <= 120:
+        suspend_drawer(self)
         try:
             dock.place_forget()
         except Exception:
@@ -1181,15 +1174,7 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
     y = 46 if bool(getattr(self, "_preview_fullscreen_active", False)) else 52
     y = min(max(8, y), max(8, frame_height - dock_height - 10))
     try:
-        dock.place(
-            in_=canvas_frame,
-            x=int(x),
-            y=int(y),
-            width=int(dock_width),
-            height=int(dock_height),
-            anchor="nw",
-        )
-        dock.lift()
+        place_drawer(self, frame_width, int(x), int(y), int(dock_width), int(dock_height))
     except Exception:
         pass
     if bool(getattr(self, "_preview_fullscreen_active", False)):

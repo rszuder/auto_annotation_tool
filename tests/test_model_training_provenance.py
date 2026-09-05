@@ -112,6 +112,86 @@ def _run(
 
 
 class ModelTrainingProvenanceTests(unittest.TestCase):
+    def test_legacy_new_run_resolves_parent_by_exact_checkpoint_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            parent = _run("20260722_151706", dataset, epochs=130, with_snapshots=False)
+            child = _run("20260802_160305", dataset, epochs=1,
+                         base_model=parent["best_weights"], with_snapshots=False)
+            before = json.dumps(child, sort_keys=True)
+            provenance = build_model_training_provenance(child, history_index={parent["id"]: parent})
+            self.assertEqual(provenance["total_epochs"], 131)
+            self.assertEqual(provenance["run_epochs_completed"], 1)
+            self.assertEqual(provenance["parent_run_id"], parent["id"])
+            self.assertEqual(provenance["parent_resolution"], "history_checkpoint_path:best")
+            self.assertEqual(provenance["mode"], "fine_tune")
+            self.assertEqual(provenance["lineage_stage_count"], 2)
+            self.assertTrue(provenance["total_epochs_known"])
+            self.assertEqual(json.dumps(child, sort_keys=True), before)
+
+    def test_legacy_parent_is_not_guessed_from_timestamp_in_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = _make_dataset(root)
+            parent = _run("20260722_151706", dataset, epochs=130, with_snapshots=False)
+            child = _run("20260802_160305", dataset, epochs=1,
+                         base_model=str(root / "elsewhere" / Path(parent["best_weights"]).name), with_snapshots=False)
+            provenance = build_model_training_provenance(child, history_index={parent["id"]: parent})
+            self.assertIsNone(provenance["total_epochs"])
+            self.assertEqual(provenance["known_epochs_minimum"], 1)
+
+    def test_ambiguous_legacy_checkpoint_reference_is_not_summed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            parent = _run("20260722_151706", dataset, epochs=130, with_snapshots=False)
+            other = {**parent, "id": "other"}
+            child = _run("20260802_160305", dataset, epochs=1,
+                         base_model=parent["best_weights"], with_snapshots=False)
+            provenance = build_model_training_provenance(child, history_index={parent["id"]: parent, "other": other})
+            self.assertIsNone(provenance["total_epochs"])
+
+    def test_legacy_parent_with_conflicting_frozen_hash_is_not_summed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            parent = _run("20260722_151706", dataset, epochs=130)
+            child = _run("20260802_160305", dataset, epochs=1, base_model=parent["best_weights"])
+            # _run writes different input bytes: same path, different checkpoint.
+            provenance = build_model_training_provenance(child, history_index={parent["id"]: parent})
+            self.assertIsNone(provenance["total_epochs"])
+
+    def test_legacy_chain_uses_completed_epochs_not_early_stop_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = _make_dataset(root)
+            parent = _run("20260714_223004", dataset, epochs=50, with_snapshots=False)
+            child = _run("20260721_194742", dataset, epochs=100,
+                         base_model=parent["best_weights"], with_snapshots=False)
+            child["output_dir"] = str(root / "run")
+            _write_file(root / "run/train/results.csv", "epoch,loss\n" + "".join(f"{i},1\n" for i in range(1, 57)))
+            provenance = build_model_training_provenance(child, history_index={parent["id"]: parent})
+            self.assertEqual(provenance["run_epochs_planned"], 100)
+            self.assertEqual(provenance["run_epochs_completed"], 56)
+            self.assertEqual(provenance["total_epochs"], 106)
+
+    def test_legacy_completed_rows_override_stale_counter_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            for current in (1, 100):
+                run = _run("20260901_090000", dataset, epochs=100, current_epoch=current, with_snapshots=False)
+                run["metrics_history"] = [{"epoch": i} for i in range(1, 57)]
+                provenance = build_model_training_provenance(run)
+                self.assertEqual(provenance["run_epochs_completed"], 56)
+
+    def test_legacy_multigeneration_parent_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _make_dataset(Path(tmp))
+            first = _run("20260901_090000", dataset, epochs=30, with_snapshots=False)
+            second = _run("20260902_090000", dataset, epochs=10, base_model=first["best_weights"], with_snapshots=False)
+            third = _run("20260903_090000", dataset, epochs=1, base_model=second["best_weights"], with_snapshots=False)
+            provenance = build_model_training_provenance(third, history_index={first["id"]: first, second["id"]: second})
+            self.assertEqual(provenance["total_epochs"], 41)
+            self.assertEqual(provenance["lineage_stage_count"], 3)
+
     def test_new_pretrained_run_counts_project_epochs_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = _make_dataset(Path(tmp))

@@ -1019,7 +1019,7 @@ def _build_train_tab(self):
     self.batch_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
     self.imgsz_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
     self.lr0_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
-    self._apply_training_recommended_start_params()
+    self._refresh_training_recommendation_table()
     self._apply_training_recommendation_table_theme()
 
     self.device_var = getattr(

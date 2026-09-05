@@ -470,16 +470,21 @@ def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> di
         return dict(cached_counts)
 
     total = 0
+    scan_failed = False
     for split_name, split_dir, exists in split_dirs:
         if not exists:
             continue
         try:
-            split_count = sum(
-                1 for path in split_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-            )
+            # DirEntry reuses directory-listing metadata on Windows instead of
+            # issuing a separate stat for every image in every candidate split.
+            with os.scandir(split_dir) as entries:
+                split_count = sum(
+                    1 for entry in entries
+                    if os.path.splitext(entry.name)[1].lower() in CONFIG.IMAGE_EXTENSIONS and entry.is_file()
+                )
         except Exception:
             split_count = 0
+            scan_failed = True
         counts[split_name] = int(split_count)
         total += int(split_count)
 
@@ -487,7 +492,8 @@ def _get_dataset_split_image_counts(self, dataset_path: Path | str | None) -> di
     try:
         if len(cache) > 256:
             cache.clear()
-        cache[cache_key] = dict(counts)
+        if not scan_failed:
+            cache[cache_key] = dict(counts)
     except Exception:
         pass
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
@@ -1170,6 +1176,46 @@ def _resolve_selected_training_base_model_profile(self) -> dict:
         "inspection_path": str(inspection_path) if inspection_path is not None else "",
     }
 
+def _schedule_training_dataset_profile(self, yaml_path: Path, cache_key: str) -> None:
+    if getattr(self, "_training_dataset_profile_job", False):
+        return
+    self._training_dataset_profile_job = True
+    requested_path = str(yaml_path.resolve())
+
+    def finish(profile, completed_key):
+        self._training_dataset_profile_job = False
+        current_yaml = self._resolve_training_dataset_yaml_path()
+        current_path = str(current_yaml.resolve()) if current_yaml is not None else ""
+        if current_path == requested_path and completed_key == cache_key:
+            self._training_dataset_profile_cache_key = cache_key
+            self._training_dataset_profile_cache = dict(profile)
+        # A changed selection discards the old result and schedules the current one.
+        for name in ("_refresh_training_dataset_quality_summary", "_refresh_training_recommendation_table",
+                     "_refresh_training_execution_summary"):
+            callback = getattr(self, name, None)
+            if callable(callback):
+                callback()
+
+    def worker():
+        from types import SimpleNamespace
+
+        # No widget, Tk variable, campaign manager or live tab is passed to the reader.
+        reader = SimpleNamespace(_training_dataset_profile_sync=True, _median_int=_median_int)
+        reader._get_dataset_split_image_counts = lambda root: _get_dataset_split_image_counts(reader, root)
+        try:
+            profile = _get_training_dataset_profile(reader, yaml_path)
+            completed_key = getattr(reader, "_training_dataset_profile_cache_key", cache_key)
+        except Exception as exc:
+            profile = {"error": str(exc)}
+            completed_key = cache_key
+        self._ui(lambda: finish(profile, completed_key))
+
+    try:
+        threading.Thread(target=worker, daemon=True, name="z4-dataset-profile").start()
+    except Exception as exc:
+        finish({"error": str(exc)}, cache_key)
+
+
 def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -> dict:
     result = {
         "train_images": 0,
@@ -1230,25 +1276,25 @@ def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -
         cache_root = str(dataset_root)
 
     try:
-        yaml_mtime = int(yaml_path.stat().st_mtime)
+        yaml_mtime = int(yaml_path.stat().st_mtime_ns)
     except Exception:
         yaml_mtime = 0
     try:
-        train_mtime = int(train_dir.stat().st_mtime) if train_dir.exists() else 0
+        train_mtime = int(train_dir.stat().st_mtime_ns) if train_dir.exists() else 0
     except Exception:
         train_mtime = 0
     try:
-        val_mtime = int(val_dir.stat().st_mtime) if val_dir.exists() else 0
+        val_mtime = int(val_dir.stat().st_mtime_ns) if val_dir.exists() else 0
     except Exception:
         val_mtime = 0
     try:
-        test_mtime = int(test_dir.stat().st_mtime) if test_dir.exists() else 0
+        test_mtime = int(test_dir.stat().st_mtime_ns) if test_dir.exists() else 0
     except Exception:
         test_mtime = 0
     label_mtimes = []
     for label_dir in (train_labels_dir, val_labels_dir, test_labels_dir):
         try:
-            label_mtimes.append(int(label_dir.stat().st_mtime) if label_dir.exists() else 0)
+            label_mtimes.append(int(label_dir.stat().st_mtime_ns) if label_dir.exists() else 0)
         except Exception:
             label_mtimes.append(0)
 
@@ -1260,6 +1306,12 @@ def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -
     cached_profile = getattr(self, "_training_dataset_profile_cache", None)
     if cache_key == cached_key and isinstance(cached_profile, dict):
         return dict(cached_profile)
+
+    if not bool(getattr(self, "_training_dataset_profile_sync", False)):
+        _schedule_training_dataset_profile(self, yaml_path, cache_key)
+        if getattr(self, "_training_dataset_profile_cache_key", None) == cache_key:
+            return dict(self._training_dataset_profile_cache)
+        return {**result, "pending": True}
 
     counts = self._get_dataset_split_image_counts(dataset_root)
     result["train_images"] = int(counts.get("train", 0) or 0)
@@ -1276,7 +1328,9 @@ def _get_training_dataset_profile(self, dataset_yaml_path: Path | None = None) -
         object_count = 0
         if label_dir.exists() and label_dir.is_dir():
             try:
-                paths = [path for path in label_dir.iterdir() if path.is_file() and path.suffix.lower() == ".txt"]
+                with os.scandir(label_dir) as entries:
+                    paths = [Path(entry.path) for entry in entries
+                             if entry.name.lower().endswith(".txt") and entry.is_file()]
             except Exception:
                 paths = []
             label_files = len(paths)

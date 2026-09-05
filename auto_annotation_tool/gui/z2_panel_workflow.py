@@ -145,6 +145,8 @@ YOLO = None
 
 
 def _refresh_free_mode_workflow_ui(self):
+    if getattr(self, "_free_mode_session_restore_in_progress", False) and self._is_free_mode_session_context():
+        return
     if bool(getattr(self, "_campaign_step2_transition_in_progress", False)):
         self._campaign_step2_transition_refresh_pending = True
         return
@@ -1269,7 +1271,7 @@ def apply_theme(self):
         pass
 
     try:
-        self._refresh_workflow_route_cards()
+        self._refresh_workflow_route_cards(refresh_content=False)
     except Exception:
         pass
 
@@ -1559,7 +1561,8 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
 
         restored_preview = False
         if not manual_template:
-            restored_preview = self._restore_preview_from_annotation_run(run_dir)
+            # Publish the list only after restoring and merging the entire result.
+            restored_preview = self._restore_preview_from_annotation_run(run_dir, defer_ui_restore=True)
             if restored_preview:
                 self._campaign_pending_batch_summary = pending_summary_snapshot
                 self._campaign_reuse_manual_filenames = reuse_filenames_snapshot
@@ -1587,15 +1590,6 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
                             )
                         except Exception:
                             pass
-                        try:
-                            self._refresh_preview_list(preserve_selection=True, render_current=True)
-                        except Exception:
-                            pass
-                elif approved_filenames_snapshot:
-                    try:
-                        self._refresh_preview_list(preserve_selection=True, render_current=True)
-                    except Exception:
-                        pass
                 try:
                     self._sync_campaign_pending_batch_summary_from_preview(
                         hidden_project_approved_count=len(
@@ -1639,7 +1633,6 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
                         }
                         if missing_snapshot:
                             self._merge_preview_annotation_bundle(missing_snapshot)
-                            self._refresh_preview_list(preserve_selection=True, render_current=True)
                             self._append_z2_trace(
                                 "post-auto-restore-missing",
                                 f"restored={len(missing_snapshot)} total={len(self.current_annotations or [])}",
@@ -1652,7 +1645,7 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
                     except Exception:
                         pass
 
-        if not restored_preview:
+        if not restored_preview and manual_template:
             if (
                 manual_template
                 and bool(getattr(self, "_current_run_manual_vehicle_assist", False))
@@ -1684,21 +1677,32 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
                     pass
 
         if not manual_template:
-            restored_scope_items = 0
             try:
-                restored_scope_items = _merge_pre_run_visible_state_after_auto(self, run_dir)
+                _merge_pre_run_visible_state_after_auto(self, run_dir)
             except Exception as exc:
                 logger.debug(f"Nie udało się scalić listy po autoanotacji zakresu Z2: {exc}")
-            if restored_scope_items > 0:
-                try:
-                    self._refresh_preview_list(preserve_selection=True, render_current=True)
-                except Exception:
-                    pass
-            try:
-                self._mark_auto_plate_origin_for_annotations(self.current_annotations)
-                self._invalidate_preview_runtime_caches()
-            except Exception:
-                pass
+            self._mark_auto_plate_origin_for_annotations(self.current_annotations)
+            self._invalidate_preview_runtime_caches()
+            if approved_filenames_snapshot:
+                self._preview_approved_filenames = set(self._get_preview_approved_filenames()) | {
+                    str(name).strip().lower() for name in approved_filenames_snapshot if str(name).strip()
+                }
+                if not self._is_free_mode_session_context():
+                    self._campaign_pending_approved_filenames = set(self._preview_approved_filenames)
+                self._persist_preview_approved_filenames()
+            # Same filenames/count do not mean unchanged rows. Also cancel any
+            # queued population that still holds the pre-detection annotations.
+            self._populate_preview_list_async(
+                preserve_selection=True,
+                render_current=True,
+                invalidate_runtime=False,
+                rebuild_state_cache=True,
+                recolor_rows=True,
+                lightweight_summary=True,
+            )
+            if not restored_preview:
+                self._load_plate_dataset_context_from_run(run_dir, force_images_update=True)
+            logger.info("[Z2 AUTO] Odświeżanie znaczników i kolorów po detekcji: %s obrazów", len(self.current_annotations or []))
 
         if not self._is_free_mode_session_context():
             try:

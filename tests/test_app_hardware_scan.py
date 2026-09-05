@@ -2,6 +2,7 @@ import threading
 import time
 import tkinter as tk
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from auto_annotation_tool.gui.app import AutoAnnotationApp
@@ -258,6 +259,60 @@ class HardwareScanTests(unittest.TestCase):
             self.assertFalse(popup.winfo_exists())
         finally:
             root.destroy()
+
+    def test_profiles_are_published_on_ui_thread_only_after_success(self):
+        app = self.app
+        profile = {"raw": "cuda:0", "index": 0, "name": "GPU", "memory_gb": 8.0}
+        def scan(progress):
+            progress({"device_profiles": [profile]})
+            return ["Auto", "CPU", "cuda:0 (GPU)"]
+        app._scan_available_yolo_devices_sync = scan
+        refreshed = []
+        app.tabs = {"training": SimpleNamespace(_step4_train_tab_built=True,
+                    _refresh_training_device_hint=lambda: refreshed.append(threading.get_ident()))}
+        app._refresh_global_yolo_devices_async(silent=True)
+        self.assertEqual(app.get_available_yolo_device_profiles(), [])
+        self._complete()
+        self.assertEqual(app.get_available_yolo_device_profiles(), [profile])
+        self.assertEqual(refreshed, [threading.get_ident()])
+        returned = app.get_available_yolo_device_profiles()
+        returned[0]["memory_gb"] = 99
+        self.assertEqual(app.get_available_yolo_device_profiles()[0]["memory_gb"], 8.0)
+
+    def test_failed_scan_keeps_confirmed_profiles(self):
+        app = self.app
+        profile = {"raw": "cuda:0", "memory_gb": 4.0}
+        app._global_yolo_device_profiles_cache = [profile]
+        def scan(progress):
+            progress({"device_profiles": [{"raw": "cuda:1", "memory_gb": 12.0}]})
+            raise RuntimeError("driver failed")
+        app._scan_available_yolo_devices_sync = scan
+        app._refresh_global_yolo_devices_async(silent=True)
+        self._complete()
+        self.assertEqual(app.get_available_yolo_device_profiles(), [profile])
+
+    def test_successful_no_gpu_scan_clears_old_profiles(self):
+        app = self.app
+        app._global_yolo_device_profiles_cache = [{"raw": "cuda:0", "memory_gb": 8.0}]
+        def scan(progress):
+            progress({"device_profiles": []})
+            return ["Auto", "CPU"]
+        app._scan_available_yolo_devices_sync = scan
+        app._refresh_global_yolo_devices_async(silent=True)
+        self._complete()
+        self.assertEqual(app.get_available_yolo_device_profiles(), [])
+
+    def test_shared_scan_collects_vram_without_writing_cache_from_worker(self):
+        app = self.app
+        cuda = SimpleNamespace(is_available=lambda: True, device_count=lambda: 1,
+                               get_device_name=lambda i: "GPU",
+                               get_device_properties=lambda i: SimpleNamespace(total_memory=8 * 1024 ** 3))
+        events = []
+        with patch.dict("sys.modules", {"torch": SimpleNamespace(cuda=cuda)}):
+            labels = app._scan_available_yolo_devices_sync(progress=events.append)
+        self.assertEqual(labels, ["Auto", "CPU", "cuda:0 (GPU)"])
+        self.assertEqual(events[-1]["device_profiles"][0]["memory_gb"], 8.0)
+        self.assertEqual(app.get_available_yolo_device_profiles(), [])
 
 
 if __name__ == "__main__":

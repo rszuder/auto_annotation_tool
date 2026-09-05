@@ -154,7 +154,9 @@ def _collect_pending_model_downloads(self, mode_text: str):
         model_info = AVAILABLE_DETECT_MODELS.get(model_key, {})
         target_path = self._get_model_path("vehicle")
 
-        if model_info and target_path and not Path(target_path).exists():
+        if model_info and target_path and not (
+            Path(target_path).is_file() and Path(target_path).stat().st_size > 0
+        ):
             pending.append(
                 {
                     "role": "pojazdy",
@@ -168,6 +170,9 @@ def _collect_pending_model_downloads(self, mode_text: str):
 
 
 def _confirm_and_download_missing_models(self, pending_downloads) -> bool:
+    pending_downloads = [item for item in pending_downloads
+                         if not (Path(item["target_path"]).is_file()
+                                 and Path(item["target_path"]).stat().st_size > 0)]
     if not pending_downloads:
         return True
 
@@ -182,8 +187,8 @@ def _confirm_and_download_missing_models(self, pending_downloads) -> bool:
             "Brakuje lokalnych modeli potrzebnych do uruchomienia Z2.\n\n"
             f"{details}\n\n"
             "Aplikacja może pobrać te pliki z internetu dopiero po Twojej zgodzie.\n"
-            "Jeśli się zgodzisz, przebieg pobierania będzie logowany w terminalu procesu w Z2.\n"
-            "Możesz go obserwować w globalnym terminalu z ikony w dolnym pasku.\n\n"
+            "Źródło: oficjalne repozytorium github.com/ultralytics/assets.\n"
+            "Okno pobierania pokaże postęp, rozmiar pliku i szybkość transferu.\n\n"
             "Czy chcesz pobrać brakujące modele teraz?"
         ),
         parent=self.frame.winfo_toplevel()
@@ -194,40 +199,13 @@ def _confirm_and_download_missing_models(self, pending_downloads) -> bool:
         self._set_status_label_state("Anulowano: brak zgody na pobranie modelu", "warning")
         return False
 
-    self._set_annotation_process_log_visibility(True)
-    self._set_status_label_state("Pobieranie modeli: szczegóły w terminalu procesu", "info")
-    logger.info("Użytkownik wyraził zgodę na pobranie brakujących modeli dla Z2.")
-    logger.info("Postęp pobierania jest widoczny w terminalu procesu Z2.")
-    logger.info("Jeśli terminal był zwinięty, został właśnie otwarty do podglądu pobierania.")
+    from .model_download_dialog import download_models_with_splash
 
-    from ultralytics.utils.downloads import attempt_download_asset
-
-    for item in pending_downloads:
-        target_path = Path(item["target_path"])
-        asset_name = str(item.get("asset_name") or target_path.name)
-        label = str(item.get("label") or target_path.name)
-
-        logger.info(f"Rozpoczynam pobieranie modelu: {label}")
-        logger.info(f"Docelowa ścieżka modelu: {target_path}")
-
-        try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            raise RuntimeError(f"Nie udało się przygotować katalogu dla modelu {label}: {e}") from e
-
-        try:
-            downloaded_path = Path(
-                attempt_download_asset(str(target_path.parent / asset_name))
-            )
-        except Exception as e:
-            raise RuntimeError(f"Nie udało się pobrać modelu {label}: {e}") from e
-
-        if not downloaded_path.exists():
-            raise RuntimeError(f"Pobieranie modelu {label} nie zakończyło się utworzeniem pliku.")
-
-        logger.info(f"Pobieranie zakończone: {downloaded_path}")
-
-    return True
+    self._set_status_label_state("Pobieranie modelu pojazdów", "info")
+    downloaded = download_models_with_splash(self, pending_downloads)
+    if not downloaded:
+        self._set_status_label_state("Nie pobrano modelu. Anotacja nie została uruchomiona.", "warning")
+    return downloaded
 
 
 def _start_annotation(self, *args, **kwargs):
@@ -375,5 +353,3 @@ def _build_manual_annotations_template_from_vehicle_seed(
         report.add_result(ann)
 
     return annotations, report
-
-

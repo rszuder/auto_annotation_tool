@@ -2544,6 +2544,20 @@ def _mobile_export_candidate_total_epochs(candidate: dict | None) -> int:
         return total
     return _mobile_export_total_epochs_for_run_like(run_snapshot or history_snapshot, fallback=candidate.get("current_epoch"))
 
+
+def _mobile_export_candidate_epochs_label(candidate: dict | None, *, compact: bool = False) -> str:
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    known = _mobile_export_bool_or_none(provenance.get("total_epochs_known"))
+    total = provenance.get("total_epochs")
+    minimum = provenance.get("known_epochs_minimum")
+    if not provenance:
+        known = _mobile_export_bool_or_none((candidate or {}).get("total_epochs_known"))
+        total = _mobile_export_candidate_total_epochs(candidate)
+        minimum = (candidate or {}).get("known_epochs_minimum")
+    label = _mobile_export_known_or_minimum_label(total, known=known, minimum=minimum)
+    return label.replace("co najmniej ", "≥ ") if compact else label
+
+
 def _mobile_export_epoch_profile(candidate: dict | None) -> tuple[float | None, str] | None:
     if not isinstance(candidate, dict):
         return None
@@ -2560,15 +2574,24 @@ def _mobile_export_epoch_profile(candidate: dict | None) -> tuple[float | None, 
     planned_value = _mobile_export_int_or_none(epochs)
     if planned_value is None or planned_value <= 0:
         if total_epochs > 0:
-            return None, f"Łącznie w rodowodzie: {total_epochs} znanych epok treningu"
+            return None, f"Łącznie w historii treningu: {_mobile_export_candidate_epochs_label(candidate)} epok"
         return None
 
     done_value = max(0, current_value or 0)
     ratio = max(0.0, min(1.0, float(done_value) / max(1.0, float(planned_value))))
-    text = f"Ostatni etap: wykonano {done_value} z {planned_value} epok"
-    if total_epochs > 0 and total_epochs != done_value:
-        text = f"{text}; łącznie w rodowodzie: {total_epochs}"
+    text = f"{_mobile_export_candidate_epochs_label(candidate, compact=True)} łącznie | {done_value} ostatnio"
     return ratio, text
+
+
+def _mobile_export_epochs_tooltip(candidate: dict) -> str:
+    provenance = _mobile_export_candidate_training_provenance(candidate)
+    total = _mobile_export_candidate_epochs_label(candidate)
+    completed = provenance.get("run_epochs_completed")
+    text = f"Łączna liczba epok w historii treningu: {total}.\nLiczba epok ostatniego treningu: {completed if completed is not None else '-'}."
+    if provenance.get("total_epochs_known") is False:
+        text += "\n≥ oznacza znane minimum. Nie udało się odtworzyć całej historii modelu."
+    text += "\nSuma obejmuje treningi projektu, bez wstępnego treningu bazowego YOLO."
+    return text
 
 def _mobile_export_target_marker(candidate: dict | None) -> str:
     if not isinstance(candidate, dict):
@@ -3873,7 +3896,7 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "img_size": candidate.get("img_size"),
         "batch_size": candidate.get("batch_size"),
         "epochs_last_run": candidate.get("epochs"),
-        "current_epoch_last_run": candidate.get("current_epoch"),
+        "current_epoch_last_run": training_provenance.get("run_epochs_completed", candidate.get("current_epoch")),
         "total_epochs": _mobile_export_candidate_total_epochs(candidate),
         "total_epochs_known": _mobile_export_bool_or_none(candidate.get("total_epochs_known")) if "total_epochs_known" in candidate else None,
         "known_epochs_minimum": candidate.get("known_epochs_minimum"),
@@ -6673,13 +6696,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
         return f"{title} {_format_mobile_export_metric(value)}"
 
     def _candidate_values(candidate: dict) -> tuple[str, str, str, str, str, str, str]:
-        total_epochs = _mobile_export_candidate_total_epochs(candidate)
         return (
             _candidate_export_checkbox(candidate),
             _mobile_export_target_marker(candidate),
             _mobile_export_project_label(candidate, empty="-"),
             _mobile_export_compact_yolo_label(candidate.get("model_version")),
-            _format_mobile_export_int(total_epochs) if total_epochs > 0 else "-",
+            _mobile_export_candidate_epochs_label(candidate, compact=True),
             _candidate_metric_cell(candidate),
             _format_mobile_export_datetime(
                 candidate.get("finished_at") or candidate.get("started_at") or candidate.get("created_at")
@@ -6967,19 +6989,20 @@ def _open_mobile_model_export_center(self, initial_run=None):
         except Exception:
             _hide_candidate_model_tip()
             return
-        if not row_id or column_id != "#2":
+        if not row_id or column_id not in {"#2", "#5"}:
             _hide_candidate_model_tip()
             return
         candidate = candidate_by_iid.get(row_id)
         if not candidate:
             _hide_candidate_model_tip()
             return
-        text = _mobile_export_target_tooltip(candidate)
+        text = _mobile_export_epochs_tooltip(candidate) if column_id == "#5" else _mobile_export_target_tooltip(candidate)
         if not text:
             _hide_candidate_model_tip()
             return
         tip = candidate_model_tip.get("window")
-        if tip is None or str(candidate_model_tip.get("iid") or "") != row_id:
+        tip_key = f"{row_id}:{column_id}"
+        if tip is None or str(candidate_model_tip.get("iid") or "") != tip_key:
             _hide_candidate_model_tip()
             tip = tk.Toplevel(dialog)
             try:
@@ -7003,7 +7026,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             )
             label.pack(fill=tk.BOTH, expand=True)
             candidate_model_tip["window"] = tip
-            candidate_model_tip["iid"] = row_id
+            candidate_model_tip["iid"] = tip_key
         try:
             tip.geometry(f"+{int(event.x_root) + 14}+{int(event.y_root) + 16}")
         except Exception:
@@ -11026,7 +11049,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 text=(
                     f"YOLO: {_mobile_export_compact_yolo_label(candidate.get('model_version'))} | "
                     f"{_candidate_metric_label(candidate)} | "
-                    f"łącznie epok: {_format_mobile_export_int(_mobile_export_candidate_total_epochs(candidate))} | "
+                    f"łącznie epok: {_mobile_export_candidate_epochs_label(candidate)} | "
                     f"parametry: {_format_mobile_export_params(params_m, source=params_source, include_source=False)}"
                 ),
                 bg=panel_bg,
@@ -12450,7 +12473,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 f"{label}: {candidate.get('model_label') or '-'} | "
                 f"{_mobile_export_compact_yolo_label(candidate.get('model_version'))} | "
                 f"{_candidate_metric_label(candidate)} | "
-                f"łącznie epok: {_format_mobile_export_int(_mobile_export_candidate_total_epochs(candidate))}"
+                f"łącznie epok: {_mobile_export_candidate_epochs_label(candidate)}"
             )
 
         def _refresh_package_preview(*_args) -> None:

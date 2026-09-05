@@ -556,10 +556,12 @@ class AnnotationTab:
             try:
                 from ..campaign_manager import CAMPAIGN
 
-                candidate_run = self._resolve_safe_annotation_run_dir(
-                    CAMPAIGN.get_step2_staging_run(),
-                    require_xml=True,
-                )
+                candidate_run = None
+                if not self._is_free_mode_session_context():
+                    candidate_run = self._resolve_safe_annotation_run_dir(
+                        CAMPAIGN.get_step2_staging_run(),
+                        require_xml=True,
+                    )
                 if candidate_run is not None:
                     last_preview_run_dir = str(candidate_run)
             except Exception:

@@ -1378,6 +1378,11 @@ def _get_preferred_annotation_run_dir(self, *, require_xml: bool = False) -> Pat
         if safe_run_dir is not None:
             return safe_run_dir
 
+    # Free-mode presentation reads an explicit selection, not a discovered run.
+    # History/import actions resolve their selection before entering the editor.
+    if self._is_free_mode_session_context():
+        return None
+
     if self._should_skip_annotation_run_lookup_for_current_input():
         return None
 
@@ -2618,7 +2623,10 @@ def _build_z2_left_panel_copy_context(self) -> Z2LeftPanelCopyContext:
         current_step=current_step,
         current_index=self._get_workflow_progress_display()[0],
         total_steps=self._get_workflow_progress_display()[1],
-        has_manual_history=bool(self._get_manual_review_history_display_entries()),
+        has_manual_history=bool(
+            (campaign_context or (actual_route == "manual" and manual_entry_mode == "continue"))
+            and self._get_manual_review_history_display_entries()
+        ),
         auto_completed=self._is_z2_auto_flow_completed(
             route=route,
             has_existing_run=has_existing_run,

@@ -112,39 +112,14 @@ YOLO = None
 
 
 def _scan_training_cuda_devices(self) -> list[dict]:
-    devices: list[dict] = []
-    if not bool(getattr(self, "_startup_ui_ready", False)):
-        return devices
+    # This is a UI query. The shared asynchronous hardware scan owns CUDA access.
     try:
-        torch = get_torch_module()
-        if torch is None:
-            return devices
-
-        if not torch.cuda.is_available():
-            return devices
-
-        for index in range(torch.cuda.device_count()):
-            name = f"CUDA:{index}"
-            total_memory_gb = 0.0
-            try:
-                props = torch.cuda.get_device_properties(index)
-                name = str(getattr(props, "name", name) or name)
-                total_memory = float(getattr(props, "total_memory", 0) or 0)
-                total_memory_gb = total_memory / (1024 ** 3) if total_memory > 0 else 0.0
-            except Exception:
-                pass
-
-            devices.append(
-                {
-                    "raw": f"cuda:{index}",
-                    "index": index,
-                    "name": name,
-                    "memory_gb": total_memory_gb,
-                }
-            )
+        getter = getattr(self.app, "get_available_yolo_device_profiles", None)
+        if callable(getter):
+            return getter()
     except Exception:
         pass
-    return devices
+    return []
 
 def _get_available_devices(self):
     profiles = self._scan_training_cuda_devices()
@@ -273,7 +248,8 @@ def _get_selected_training_device_raw(self, device_value: str | None = None) -> 
     return "auto"
 
 def _get_effective_training_device_profile(self, device_value: str | None = None) -> tuple[str, dict | None]:
-    profiles = self._training_device_profiles or self._scan_training_cuda_devices()
+    profiles = self._scan_training_cuda_devices()
+    self._training_device_profiles = profiles
     selected_raw = self._get_selected_training_device_raw(device_value)
 
     if selected_raw == "auto":
@@ -293,7 +269,26 @@ def _get_effective_training_device_profile(self, device_value: str | None = None
 def _get_training_device_recommendation(self, device_value: str | None = None) -> dict:
     target = self._get_selected_training_target()
     effective_raw, profile = self._get_effective_training_device_profile(device_value)
+    selected_raw = self._get_selected_training_device_raw(device_value)
+    hardware_known = bool(getattr(self.app, "_global_yolo_devices_cache_ready", False))
+    hardware_error = str(getattr(self.app, "_global_yolo_devices_last_error", "") or "")
+    if selected_raw != "cpu" and (
+        not hardware_known or hardware_error or (profile and float(profile.get("memory_gb", 0) or 0) <= 0)
+    ):
+        return {
+            "ready": False, "effective_raw": selected_raw,
+            "device_name": str((profile or {}).get("name") or "Auto"),
+            "note": "Sprawdź sprzęt w menu Konfiguracja, aby uzyskać rekomendację parametrów. Twoje ustawienia pozostają bez zmian.",
+        }
     dataset_profile = self._get_training_dataset_profile()
+    if dataset_profile.get("pending") or dataset_profile.get("error"):
+        return {
+            "ready": False, "effective_raw": effective_raw,
+            "device_name": str((profile or {}).get("name") or "CPU"),
+            "status": "Dataset: analiza w toku" if dataset_profile.get("pending") else "Dataset: brak podsumowania",
+            "note": "Rekomendacja wymaga podsumowania datasetu. Trwa analiza w tle."
+                    if dataset_profile.get("pending") else "Nie udało się odczytać podsumowania datasetu.",
+        }
     model_profile = self._resolve_selected_training_base_model_profile()
     model_bucket = str(model_profile.get("bucket", "s") or "s").strip().lower()
     model_detected_label = str(model_profile.get("detected_label", "") or "").strip()
@@ -620,6 +615,8 @@ def _get_training_device_recommendation(self, device_value: str | None = None) -
     }
 
 def _refresh_training_device_hint(self):
+    if not bool(getattr(self, "_step4_train_tab_built", False)):
+        return
     combo = getattr(self, "device_combo", None)
     if combo is not None:
         try:

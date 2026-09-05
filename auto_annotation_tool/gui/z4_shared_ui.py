@@ -1022,7 +1022,7 @@ def _schedule_step4_mode_deferred_refresh(host: "TrainingTab"):
         except Exception:
             try:
                 host._refresh_base_model_choices()
-                host._apply_training_recommended_start_params()
+                host._refresh_training_recommendation_table()
             except Exception:
                 pass
         for callback_name in (
@@ -1361,7 +1361,6 @@ def accept_training_input_context(
 
     for callback_name in (
         "_refresh_base_model_choices",
-        "_apply_training_recommended_start_params",
         "_refresh_training_recommendation_table",
         "_refresh_dataset_variant_choices",
         "_update_step4_notebook_mode",
@@ -1711,10 +1710,6 @@ def set_step4_dataset_mode(host: "TrainingTab", mode: str, *, show_locked_messag
     if campaign_active:
         try:
             host._refresh_base_model_choices()
-        except Exception:
-            pass
-        try:
-            host._apply_training_recommended_start_params()
         except Exception:
             pass
         try:

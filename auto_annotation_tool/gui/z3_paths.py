@@ -10,11 +10,17 @@ from ..config import CONFIG, logger
 from ..project_cache import PROJECT_CACHE
 
 
-def _in_campaign_step3_context(host) -> bool:
+def _has_campaign_preview_context(host) -> bool:
+    if bool(getattr(getattr(host, "app", None), "campaign_free_mode", False)):
+        return False
     try:
-        return bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        return bool(CAMPAIGN.get_active_project_name())
     except Exception:
         return False
+
+
+def _in_campaign_step3_context(host) -> bool:
+    return bool(getattr(host, "_step3_linear_mode", False) and _has_campaign_preview_context(host))
 
 
 def get_step3_chars_root_dir(host, ensure_exists: bool = False) -> Path:
@@ -244,10 +250,7 @@ def is_usable_step3_preview_dir(
 
 
 def get_saved_step3_preview_dir(host, require_plates: bool = False) -> str:
-    try:
-        in_campaign_context = bool(CAMPAIGN.get_active_project_name())
-    except Exception:
-        in_campaign_context = False
+    in_campaign_context = _has_campaign_preview_context(host)
     if not in_campaign_context:
         return ""
 
@@ -268,10 +271,7 @@ def get_saved_step3_preview_dir(host, require_plates: bool = False) -> str:
 
 
 def get_preferred_step3_preview_dir(host, require_plates: bool = False, allow_fallback: bool = True) -> str:
-    try:
-        in_campaign_context = bool(CAMPAIGN.get_active_project_name())
-    except Exception:
-        in_campaign_context = False
+    in_campaign_context = _has_campaign_preview_context(host)
 
     if in_campaign_context:
         saved_preview_dir = get_saved_step3_preview_dir(host, require_plates=require_plates)
@@ -285,12 +285,9 @@ def get_preferred_step3_preview_dir(host, require_plates: bool = False, allow_fa
     if current_preview_dir and is_usable_step3_preview_dir(host, current_preview_dir, require_plates=require_plates):
         return str(Path(current_preview_dir))
 
-    if not in_campaign_context:
-        saved_preview_dir = get_saved_step3_preview_dir(host, require_plates=require_plates)
-        if saved_preview_dir:
-            return saved_preview_dir
-
-    if allow_fallback:
+    # In free mode a status refresh is not a request to select a historical run.
+    # PZ1 explicitly supplies the result or searches by the selected XML/images.
+    if allow_fallback and in_campaign_context:
         return find_latest_preview_run_dir(host, require_plates=require_plates)
     return ""
 
@@ -315,11 +312,12 @@ def find_latest_preview_run_dir(host, require_plates: bool = False) -> str:
 
     candidates = []
     try:
-        for path in root.rglob("*"):
-            if not path.is_dir():
+        # Inspect run metadata, not every crop file in the images/ trees.
+        for meta_file in root.rglob("metadata.json"):
+            path = meta_file.parent
+            if path == root or not meta_file.is_file():
                 continue
 
-            meta_file = path / "metadata.json"
             images_dir = path / "images"
 
             if meta_file.exists() and images_dir.exists() and images_dir.is_dir():

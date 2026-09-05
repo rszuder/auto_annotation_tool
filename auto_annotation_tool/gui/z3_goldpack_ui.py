@@ -529,11 +529,12 @@ def get_gold_export_meta_candidates(host) -> list[Path]:
         meta_path = preview_dir / "metadata.json"
         images_dir = preview_dir / "images"
         if meta_path.exists() and images_dir.exists():
-            try:
-                host.preview_dir_var.set(str(preview_dir))
-                host._save_local_setting("char_preview_dir", str(preview_dir))
-            except Exception:
-                pass
+            if str(host.preview_dir_var.get() or "").strip() != str(preview_dir):
+                try:
+                    host.preview_dir_var.set(str(preview_dir))
+                    host._save_local_setting("char_preview_dir", str(preview_dir))
+                except Exception:
+                    pass
             return [meta_path]
         return []
 

@@ -501,12 +501,9 @@ def _on_base_model_change(self):
     except Exception:
         pass
     try:
-        self._apply_training_recommended_start_params()
+        self._refresh_training_recommendation_table()
     except Exception:
-        try:
-            self._refresh_training_recommendation_table()
-        except Exception:
-            pass
+        pass
     try:
         self._refresh_training_start_state()
     except Exception:

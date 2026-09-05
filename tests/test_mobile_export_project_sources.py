@@ -40,6 +40,38 @@ class _ExportHost:
         return None
 
 
+def test_export_epochs_label_does_not_present_unknown_lineage_as_one_epoch():
+    candidate = {"training_provenance": {
+        "provenance_version": 2, "total_epochs": None, "total_epochs_known": False,
+        "known_epochs_minimum": 1, "run_epochs_completed": 1, "run_epochs_planned": 1,
+    }}
+    assert z4_model_export._mobile_export_candidate_epochs_label(candidate) == "co najmniej 1"
+    assert z4_model_export._mobile_export_candidate_epochs_label(candidate, compact=True) == "≥ 1"
+    assert "nie udało" in z4_model_export._mobile_export_epochs_tooltip(candidate).lower()
+    assert "≥ 1 łącznie" in z4_model_export._mobile_export_epoch_profile(candidate)[1]
+
+
+def test_export_epochs_label_and_profile_explain_one_epoch_fine_tune():
+    candidate = {"training_provenance": {
+        "provenance_version": 2, "total_epochs": 131, "total_epochs_known": True,
+        "known_epochs_minimum": 131, "run_epochs_completed": 1, "run_epochs_planned": 1,
+    }}
+    assert z4_model_export._mobile_export_candidate_epochs_label(candidate, compact=True) == "131"
+    assert z4_model_export._mobile_export_epoch_profile(candidate)[1] == "131 łącznie | 1 ostatnio"
+    assert "Liczba epok ostatniego treningu: 1." in z4_model_export._mobile_export_epochs_tooltip(candidate)
+
+
+def test_candidate_manifest_uses_executed_epochs_not_stale_history_counter():
+    candidate = {"current_epoch": 100, "epochs": 100, "training_provenance": {
+        "provenance_version": 2, "total_epochs": 106, "total_epochs_known": True,
+        "known_epochs_minimum": 106, "run_epochs_completed": 56, "run_epochs_planned": 100,
+    }}
+    snapshot = z4_model_export._mobile_export_candidate_manifest_snapshot(candidate)
+    assert snapshot["current_epoch_last_run"] == 56
+    assert snapshot["epochs_last_run"] == 100
+    assert snapshot["total_epochs"] == 106
+
+
 class _FakeConfig:
     def __init__(self, root: Path) -> None:
         self.DIR_9_PROJECTS = root / "Workspace" / "9_projects"

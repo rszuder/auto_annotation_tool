@@ -889,9 +889,12 @@ class TrainingTab:
         normalized_target = CONFIG.normalize_task_target(target or getattr(self, "_step4_dataset_mode", "char"))
 
         runs_dir = Path(CONFIG.get_training_runs_dir(normalized_target))
-        self.history = TrainingHistory(history_dir=runs_dir)
-        self.trainer = YOLOPoseTrainer(history=self.history)
-        self._bind_trainer_callbacks()
+        history_dir = getattr(getattr(self, "history", None), "history_dir", None)
+        same_storage = bool(history_dir and Path(history_dir).resolve() == runs_dir.resolve())
+        if not same_storage:
+            self.history = TrainingHistory(history_dir=runs_dir)
+            self.trainer = YOLOPoseTrainer(history=self.history)
+            self._bind_trainer_callbacks()
 
         if reload_history and hasattr(self, "tree"):
             try:
@@ -993,6 +996,16 @@ class TrainingTab:
             }
 
         profile = self._get_training_dataset_profile(dataset_yaml)
+        if profile.get("pending") or profile.get("error"):
+            message = (
+                "Liczę obrazy i anotacje wybranego wariantu w tle. Możesz dalej korzystać z karty."
+                if profile.get("pending") else "Nie udało się odczytać podsumowania wybranego datasetu."
+            )
+            return {
+                "visible": True, "title": "Podsumowanie materiału", "tone": "muted",
+                "status": "Analiza w toku" if profile.get("pending") else "Brak podsumowania",
+                "rows": [("Status", message)],
+            }
         train_images = int(profile.get("train_images", 0) or 0)
         val_images = int(profile.get("val_images", 0) or 0)
         test_images = int(profile.get("test_images", 0) or 0)
