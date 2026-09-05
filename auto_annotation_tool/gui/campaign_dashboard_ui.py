@@ -71,6 +71,7 @@ from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
 from .help_manager import HELP
+from .app_window_recovery import configure_minimizable_modal, restore_visible_modal
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z2_shared_ui import campaign_gate_id_for_edge, campaign_visible_gate_id
@@ -10517,6 +10518,7 @@ def _render_step1_route_actions(self, frame):
         _show_resource_opening_loader()
 
         dialog = tk.Toplevel(self.frame)
+        configure_minimizable_modal(dialog)
         try:
             dialog.withdraw()
         except Exception:
@@ -10553,19 +10555,7 @@ def _render_step1_route_actions(self, frame):
                     pass
 
         def _restore_resource_dialog_after_child() -> None:
-            try:
-                if not dialog.winfo_exists():
-                    return
-                if str(dialog.state() or "") == "iconic":
-                    dialog.deiconify()
-                dialog.lift()
-                dialog.focus_force()
-                dialog.grab_set()
-            except Exception:
-                pass
-
-        # Do not bind modal minimize/restore to grab juggling. On Windows this
-        # caused the resource dialog and the graph window to fight for focus.
+            restore_visible_modal(dialog)
 
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
         if callable(build_surface):
@@ -11574,7 +11564,7 @@ def _render_step1_route_actions(self, frame):
                     return
                 if dialog.winfo_exists():
                     _refresh_rows()
-                    dialog.grab_set()
+                    restore_visible_modal(dialog)
             except Exception:
                 pass
 
@@ -13801,17 +13791,7 @@ def _render_step1_route_actions(self, frame):
                                 except Exception:
                                     pass
                         else:
-                            try:
-                                if str(dialog.state()) == "iconic":
-                                    dialog.deiconify()
-                            except Exception:
-                                pass
-                            try:
-                                dialog.lift()
-                                dialog.focus_force()
-                            except Exception:
-                                pass
-                            dialog.grab_set()
+                            restore_visible_modal(dialog)
                 except Exception:
                     pass
 
@@ -15200,12 +15180,7 @@ def _render_step1_route_actions(self, frame):
                         except Exception:
                             pass
                         _hide_resource_opening_loader()
-                        try:
-                            dialog.lift()
-                            dialog.focus_force()
-                            dialog.grab_set()
-                        except Exception:
-                            pass
+                        restore_visible_modal(dialog)
 
                     try:
                         dialog.after(120, _release_resource_loader_to_dialog)

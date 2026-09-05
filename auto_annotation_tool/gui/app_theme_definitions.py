@@ -292,6 +292,7 @@ CAMPAIGN_SIDEBAR_STYLE = {
     "frame_ms": 16,
     "button_height": 38,
     "button_font": ("Segoe UI", 10, "bold"),
+    "project_action_font": ("Segoe UI", 10),
 }
 
 

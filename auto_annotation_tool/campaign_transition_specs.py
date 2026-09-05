@@ -67,7 +67,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         ),
         route_label="E1 -> E2",
         badge_id="T01",
-        badge_label="Wybierz źródło anotacji tablic dla dalszej pracy",
+        badge_label="Trenuj model tablic/znaków od podstaw",
         path_key="",
         tone="success",
         resources=(
@@ -108,7 +108,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
         ),
         route_label="E1 -> E3",
         badge_id="T02",
-        badge_label="Znaki: istniejący zbiór wyodrębnionych tablic",
+        badge_label="Trenuj model znaków na podstawie już istniejących anotacji tablic",
         kind="shortcut",
         path_key="char_from_ready_plates",
         tone="warning",

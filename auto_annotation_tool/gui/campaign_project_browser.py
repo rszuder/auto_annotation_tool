@@ -979,15 +979,15 @@ def _build_projects_browser(self, parent):
     self.project_list_status_labels.append(first_lbl)
 
     self.project_add_button_canvas = tk.Canvas(
-        self.project_status_top_row,
-        width=196,
+        status_panel,
+        width=1,
         height=38,
         bd=0,
         highlightthickness=0,
         bg=palette.get("panel", "#252526"),
         cursor="hand2",
     )
-    self.project_add_button_canvas.pack(side=tk.RIGHT, padx=(8, 0))
+    self.project_add_button_canvas.pack(fill=tk.X, pady=(4, 2))
     HELP.bind_help(self.project_add_button_canvas, "camp_new_project")
     self._bind_icon_button(self.project_add_button_canvas, role="project_add", command=self._add_new_project)
     self.frame.after_idle(lambda: self._draw_icon_button("project_add"))

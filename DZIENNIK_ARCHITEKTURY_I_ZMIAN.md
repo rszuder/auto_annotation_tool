@@ -79,6 +79,27 @@ Testy obejmują rzeczywisty szkielet zakładki Tk, oba kierunki, przerwanie ruch
 zmianę rozmiaru, zniszczenie okna, motywy i przywracanie panelu po pełnym ekranie
 grafu. Odbiór wizualny płynności w pełnej aplikacji pozostaje do sprawdzenia.
 
+## 2026-09-05: zasoby T01 niezależne od wyboru toru i minimalizacja modala
+
+Import AT wymaga wskazania obrazów O i dopasowania do nich anotacji, ale nie
+wymaga wcześniejszego wyboru toru tablic/znaków. AT zachowuje swój typ i trafia
+do kontroli w Z2, bez automatycznego [OK]. Modele MT/MZ można wskazać przed
+wyborem toru; są walidowane według typu modelu. Wybrany MZ pozostaje zasobem
+także po wyborze toru tablic, z informacją, że ten tor go nie wykorzystuje.
+AZ nadal ma niepodłączony importer i jest jawnie opisane jako planowane.
+
+Odświeżanie zasobów nie zapisuje już domyślnie wywnioskowanej ścieżki. Wybór
+toru w polu Praca oraz warunki zatwierdzenia bramek pozostają osobnym krokiem.
+Testy obejmują import bez toru, obydwa tory, brak O, błędne dopasowanie,
+anulowanie i zachowanie liczników. Samo dodanie zasobów nie zatwierdza T01.
+
+Okno zasobów wyłączono z automatycznego podnoszenia okien przez mechanizm
+odzyskiwania fokusu. Przy rzeczywistej minimalizacji zwalnia przechwycenie
+myszy; po przywróceniu przez użytkownika odzyskuje je, nie odbierając go
+otwartemu oknu potomnemu. Zakończenie importu oraz AS respektują minimalizację
+i nie wywołują deiconify. Testy zdarzeń okna są automatyczne; odbiór natywnego
+zachowania na docelowej maszynie pozostaje do wykonania.
+
 ## 2026-05-07
 
 ### Cel nadrzędny

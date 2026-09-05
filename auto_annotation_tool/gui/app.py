@@ -2489,6 +2489,11 @@ class AutoAnnotationApp:
         if owner is None or owner is self.root:
             return
         try:
+            if bool(getattr(owner, "_aat_skip_window_recovery", False)) and owner.state() in {"iconic", "withdrawn"}:
+                return
+        except tk.TclError:
+            return
+        try:
             if str(owner.state() or "") == "iconic":
                 owner.deiconify()
         except Exception:
@@ -2732,6 +2737,11 @@ class AutoAnnotationApp:
         if not bool(getattr(self, "_free_mode_assistant_enabled", False)):
             return
         owner = self._get_free_mode_assistant_owner()
+        try:
+            if bool(getattr(owner, "_aat_skip_window_recovery", False)) and owner.state() in {"iconic", "withdrawn"}:
+                return
+        except tk.TclError:
+            return
         overlay = self._ensure_free_mode_assistant_overlay(owner)
         if overlay is None:
             return
