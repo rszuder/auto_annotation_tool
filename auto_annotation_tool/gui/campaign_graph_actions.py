@@ -769,9 +769,15 @@ def _record_graph_action_history(
     action: str,
     payload: Mapping[str, Any],
     result: CampaignGraphActionResult,
+    *,
+    project_name: str = "",
+    iteration_num: int | None = None,
 ) -> None:
-    if not CAMPAIGN.get_active_project_name():
+    project_name = project_name or CAMPAIGN.get_active_project_name()
+    if not project_name:
         return
+    if iteration_num is None:
+        iteration_num = CAMPAIGN.get_current_iteration_num()
 
     context = dict(payload.get("context") or payload.get("preferred_source_context") or {})
     transition_id = str(
@@ -796,26 +802,27 @@ def _record_graph_action_history(
     title = transition_title or str(result.message or action or "Akcja grafu").strip()
     artifacts: dict[str, Any] = {}
     resources: dict[str, Any] = {}
-    if str(action or "").strip() == "approve_step2" and bool(result.ok):
+    if str(action or "").strip().startswith("approve_step") and bool(result.ok):
+        from ..campaign_history_resources import HistoryResourceReader
+
         try:
-            approved_stats = dict(CAMPAIGN.get_plate_approved_set_stats(None) or {})
-        except Exception:
-            approved_stats = {}
-        try:
-            approved_images = int(approved_stats.get("images", 0) or 0)
-        except Exception:
-            approved_images = 0
-        try:
-            approved_plates = int(approved_stats.get("plates", 0) or 0)
-        except Exception:
-            approved_plates = 0
-        artifacts.update(
-            {
-                "approved_images": int(approved_images),
-                "approved_plates": int(approved_plates),
-            }
-        )
-        resources["AT"] = "Zatwierdzone anotacje tablic"
+            reader = HistoryResourceReader(CAMPAIGN.get_project_root_dir(project_name), project_name)
+            snapshot = reader.snapshot(int(iteration_num))
+            artifacts["resource_snapshot"] = snapshot
+            for code, label in (
+                ("O", "Wybrane obrazy"), ("AT", "Zatwierdzone anotacje tablic"),
+                ("AZ", "Zatwierdzone anotacje znaków"), ("DS", "Dataset znaków"),
+                ("MT", "Model tablic"), ("MZ", "Model znaków"),
+            ):
+                if code in snapshot:
+                    resources[code] = label
+            if action == "approve_step2":
+                at = snapshot.get("AT") or {}
+                for name, field in (("approved_images", "images"), ("approved_plates", "plates")):
+                    if at.get(field) is not None:
+                        artifacts[name] = at[field]
+        except Exception as exc:
+            logger.warning("Nie udało się zapisać liczników historii %s IT%s: %s", project_name, iteration_num, exc)
 
     try:
         CAMPAIGN.append_project_history_event(
@@ -827,11 +834,13 @@ def _record_graph_action_history(
             status="ok" if bool(result.ok) else "error",
             resources=resources,
             artifacts=artifacts,
+            project_name=project_name,
+            iteration_num=iteration_num,
             details={
                 "message": str(result.message or "").strip(),
                 "source": str(payload.get("source") or context.get("source") or "campaign_graph").strip(),
                 "target": str(payload.get("graph_transition_target") or context.get("graph_transition_target") or "").strip(),
-                "path": str(payload.get("graph_path_key") or context.get("graph_path_key") or "").strip(),
+                "path": str(payload.get("graph_path_key") or context.get("graph_path_key") or normalize_iteration_path(payload.get("path")) or "").strip(),
             },
         )
     except Exception:
@@ -846,6 +855,13 @@ def execute_campaign_graph_action(
 ) -> CampaignGraphActionResult:
     normalized = str(action or "").strip()
     action_payload = dict(payload or {})
+    # Approval can advance the state. Its resource record belongs to the source iteration.
+    history_context = {}
+    if normalized.startswith("approve_step"):
+        history_context = {
+            "project_name": CAMPAIGN.get_active_project_name(),
+            "iteration_num": CAMPAIGN.get_current_iteration_num(),
+        }
     handlers = {
         "set_iteration_path": _execute_set_iteration_path,
         "approve_step1": _execute_approve_step1,
@@ -872,10 +888,10 @@ def execute_campaign_graph_action(
         message = f"Akcja grafu nie jest jeszcze podłączona: {normalized or '-'}."
         logger.debug(message)
         result = CampaignGraphActionResult(False, normalized, message)
-        _record_graph_action_history(normalized, action_payload, result)
+        _record_graph_action_history(normalized, action_payload, result, **history_context)
         return result
     result = handler(host, action_payload)
-    _record_graph_action_history(normalized, action_payload, result)
+    _record_graph_action_history(normalized, action_payload, result, **history_context)
     return result
 
 

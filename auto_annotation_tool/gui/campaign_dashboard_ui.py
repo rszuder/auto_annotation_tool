@@ -1688,6 +1688,10 @@ def _render_step1_route_actions(self, frame):
         graph_view = {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0}
         self._campaign_graph_view = graph_view
     canvas.pack(fill=tk.X)
+    from .campaign_graph_presentation import GraphToolbar, CanvasWorkflowFocus, resolve_workflow_focus
+    toolbar_commands = {}
+    graph_toolbar = GraphToolbar(canvas, palette, toolbar_commands)
+    workflow_focus_style = CanvasWorkflowFocus(canvas, palette)
     self.campaign_transition_graph_canvas = canvas
     try:
         if bool(getattr(self, "_campaign_graph_fullscreen", False)):
@@ -1801,9 +1805,9 @@ def _render_step1_route_actions(self, frame):
         zoom = _graph_zoom()
         pan_x, pan_y = _graph_pan()
         if abs(zoom - 1.0) > 0.001:
-            canvas.scale("all", width_value / 2, height_value / 2, zoom, zoom)
+            canvas.scale("!graph_overlay_fixed", width_value / 2, height_value / 2, zoom, zoom)
         if abs(pan_x) > 0.001 or abs(pan_y) > 0.001:
-            canvas.move("all", pan_x, pan_y)
+            canvas.move("!graph_overlay_fixed", pan_x, pan_y)
 
     def _rect_border_contact_from_external_point(
         rect_x0: float,
@@ -1999,15 +2003,7 @@ def _render_step1_route_actions(self, frame):
             _stop_gate_approve_blink()
 
     def _raise_graph_overlay_layers() -> None:
-        try:
-            if not canvas.find_withtag("graph_toolbar_overlay") or not canvas.find_withtag("graph_layout_reset"):
-                canvas.delete("graph_overlay_fixed")
-                _draw_graph_toolbar_overlay()
-                _draw_graph_legend()
-        except NameError:
-            pass
-        except Exception:
-            pass
+        workflow_focus_style.apply(_workflow_focus_scope(), refresh_links=True)
         for tag in (
             "gate_selector_arc_anim",
             "gate_approve_blink_rect",
@@ -2021,6 +2017,7 @@ def _render_step1_route_actions(self, frame):
                 canvas.tag_raise(tag)
             except Exception:
                 pass
+        _sync_graph_toolbar()
 
     def _raise_graph_gate_bundle(edge_key: str) -> None:
         normalized_key = str(edge_key or "").strip()
@@ -2118,6 +2115,7 @@ def _render_step1_route_actions(self, frame):
                 canvas.tag_raise(f"gate-group:{edge_key}")
         except Exception:
             pass
+        workflow_focus_style.raise_scope(_workflow_focus_scope())
         focus_kind = str(graph_focus_state.get("kind") or "").strip().lower()
         focus_key = str(graph_focus_state.get("key") or "").strip()
         if focus_kind == "node":
@@ -5254,6 +5252,26 @@ def _render_step1_route_actions(self, frame):
 
     def _edge_operable(edge) -> bool:
         return bool(_edge_gate_active(edge) and not _edge_dimmed_by_selection(edge))
+
+    def _workflow_focus_scope():
+        return resolve_workflow_focus(
+            CAMPAIGN_TRANSITION_GRAPH,
+            current_step=current_step,
+            selected_edge=selected_edge_key,
+            selected_path=selected_path,
+            operable_edges={edge.key for edge in CAMPAIGN_TRANSITION_GRAPH.edges if _edge_operable(edge)},
+        )
+
+    def _sync_graph_toolbar() -> None:
+        scope = _workflow_focus_scope()
+        if len(scope.edges) == 1:
+            edge = CAMPAIGN_TRANSITION_GRAPH.get_edge(next(iter(scope.edges)))
+            spec = _edge_spec(edge)
+            badge = _visible_badge_id(getattr(spec, "badge_id", ""))
+            context = f"{badge} | {edge.source} → {edge.target}"
+        else:
+            context = "Wybierz przejście"
+        graph_toolbar.sync(_graph_zoom(), context)
 
     def _edge_requires_explicit_selection(edge) -> bool:
         return bool(_edge_select_enabled(edge))
@@ -16261,6 +16279,7 @@ def _render_step1_route_actions(self, frame):
         graph_zoom_preview_state["after_id"] = None
         graph_zoom_preview_state["factor"] = 1.0
         graph_zoom_text_preview_cache.clear()
+        workflow_focus_style.begin_frame()
         previous_frame_tag = "graph_redraw_previous_frame"
         try:
             if canvas.find_all():
@@ -18657,7 +18676,7 @@ def _render_step1_route_actions(self, frame):
                         fill=dot_fill,
                         outline=dot_outline,
                         width=1,
-                        tags=("graph_node_junction", "graph_structure"),
+                        tags=("graph_node_junction", "graph_structure", f"node-junction:{left_key}:{right_key}"),
                     )
                     drawn.add(pair_key)
 
@@ -18717,286 +18736,7 @@ def _render_step1_route_actions(self, frame):
                 font=legend_font,
                 tags=("graph_legend", fixed_tag),
             )
-
-        def _draw_graph_status_overlay() -> None:
-            fixed_tag = "graph_overlay_fixed"
-            label = "ścieżka wybrana" if selected_path else "wybierz ścieżkę"
-            status_color = success if selected_path else warning
-            x0 = 8
-            y0 = 6
-            label_font = _graph_overlay_font(8, "bold")
-            label_width = tkfont.Font(font=label_font).measure(label)
-            x1 = x0 + max(112, int(round(label_width + 18)))
-            y1 = 28
-            canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=blend_hex_colors(card_bg, status_color, 0.08),
-                outline=blend_hex_colors(status_color, card_bg, 0.24),
-                width=1,
-                tags=("graph_status_overlay", fixed_tag),
-            )
-            canvas.create_text(
-                x0 + 9,
-                (y0 + y1) / 2,
-                text=label,
-                fill=status_color,
-                anchor="w",
-                font=label_font,
-                tags=("graph_status_overlay", fixed_tag),
-            )
-
-        def _draw_graph_choice_guide_overlay() -> None:
-            fixed_tag = "graph_overlay_fixed"
-            tag = "graph_choice_guide"
-            status_w = 118 if selected_path else 126
-            try:
-                status_w = int(canvas.bbox("graph_status_overlay")[2]) + 8
-            except Exception:
-                pass
-            x0 = max(136 if selected_path else 144, status_w)
-            y0 = 6
-            label = "? poradnik wyboru"
-            label_font = _graph_overlay_font(8, "bold")
-            label_width = tkfont.Font(font=label_font).measure(label)
-            x1 = x0 + max(122, int(round(label_width + 18)))
-            y1 = 28
-            canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=blend_hex_colors(card_bg, accent, 0.075),
-                outline=blend_hex_colors(accent, card_bg, 0.24),
-                width=1,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-            canvas.create_text(
-                x0 + 9,
-                (y0 + y1) / 2,
-                text=label,
-                fill=blend_hex_colors(accent, palette["blend_light"], 0.10),
-                anchor="w",
-                font=label_font,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-
-        def _draw_graph_project_trace_overlay() -> None:
-            fixed_tag = "graph_overlay_fixed"
-            tag = "graph_project_trace"
-            choice_w = 258 if selected_path else 266
-            try:
-                choice_w = int(canvas.bbox("graph_choice_guide")[2]) + 8
-            except Exception:
-                pass
-            x0 = max(266 if selected_path else 274, choice_w)
-            y0 = 6
-            label = "↳ ślad projektu"
-            label_font = _graph_overlay_font(8, "bold")
-            label_width = tkfont.Font(font=label_font).measure(label)
-            x1 = x0 + max(116, int(round(label_width + 18)))
-            y1 = 28
-            color = success if selected_path else accent
-            canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=blend_hex_colors(card_bg, color, 0.075),
-                outline=blend_hex_colors(color, card_bg, 0.24),
-                width=1,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-            canvas.create_text(
-                x0 + 9,
-                (y0 + y1) / 2,
-                text=label,
-                fill=blend_hex_colors(color, palette["blend_light"], 0.10),
-                anchor="w",
-                font=label_font,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-
-        def _draw_graph_reset_overlay() -> None:
-            fixed_tag = "graph_overlay_fixed"
-            zoom = _graph_zoom()
-            pan_x, pan_y = _graph_pan()
-            has_moved_items = bool(gate_offsets or node_offsets)
-            has_local_zoom = any(_gate_local_zoom(str(key)) > 1.01 for key in gate_zoom_scales.keys())
-            view_changed = bool(
-                abs(zoom - 1.0) > 0.01
-                or abs(pan_x) > 0.5
-                or abs(pan_y) > 0.5
-                or has_moved_items
-                or has_local_zoom
-            )
-            reset_symbol = "\u21ba"
-            reset_label = f"{reset_symbol} {int(round(zoom * 100))}%" if view_changed else "1:1"
-            font_size = 8
-            label_font = _graph_overlay_font(font_size, "bold" if view_changed else "normal")
-            label_metrics = tkfont.Font(font=label_font)
-            button_h = max(24, int(round(label_metrics.metrics("linespace") + 8)))
-            button_w = max(34, int(round(label_metrics.measure(reset_label) + 20)))
-            trace_right = (266 if selected_path else 274) + 116
-            try:
-                trace_right = int(canvas.bbox("graph_project_trace")[2])
-            except Exception:
-                pass
-            x0 = trace_right + 8
-            y0 = 6
-            x1 = x0 + button_w
-            y1 = y0 + button_h
-            tag = "graph_layout_reset"
-            icon_color = accent if view_changed else muted
-            fill = blend_hex_colors(card_bg, icon_color, 0.085 if view_changed else 0.035)
-            outline = blend_hex_colors(icon_color, card_bg, 0.28 if view_changed else 0.12)
-            canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=fill,
-                outline=outline,
-                width=1,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-            canvas.create_text(
-                (x0 + x1) / 2,
-                (y0 + y1) / 2,
-                text=reset_label,
-                fill=icon_color,
-                anchor="center",
-                font=label_font,
-                tags=(tag, "gate_button", fixed_tag),
-            )
-
-        def _draw_graph_toolbar_overlay() -> None:
-            fixed_tag = "graph_overlay_fixed"
-            toolbar_tag = "graph_toolbar_overlay"
-            zoom = _graph_zoom()
-            pan_x, pan_y = _graph_pan()
-            has_moved_items = bool(gate_offsets or node_offsets)
-            has_local_zoom = any(_gate_local_zoom(str(key)) > 1.01 for key in gate_zoom_scales.keys())
-            view_changed = bool(
-                abs(zoom - 1.0) > 0.01
-                or abs(pan_x) > 0.5
-                or abs(pan_y) > 0.5
-                or has_moved_items
-                or has_local_zoom
-            )
-            status_label = "ścieżka wybrana" if selected_path else "wybierz ścieżkę"
-            reset_label = f"\u21ba {int(round(zoom * 100))}%" if view_changed else "1:1"
-            items = (
-                {
-                    "label": status_label,
-                    "tag": "graph_status_overlay",
-                    "color": success if selected_path else warning,
-                    "clickable": False,
-                    "bold": True,
-                    "min_w": 112,
-                },
-                {
-                    "label": "? poradnik wyboru",
-                    "tag": "graph_choice_guide",
-                    "color": accent,
-                    "clickable": True,
-                    "bold": True,
-                    "min_w": 122,
-                },
-                {
-                    "label": "\u2190 ślad projektu",
-                    "tag": "graph_project_trace",
-                    "color": success if selected_path else accent,
-                    "clickable": True,
-                    "bold": True,
-                    "min_w": 116,
-                },
-                {
-                    "label": reset_label,
-                    "tag": "graph_layout_reset",
-                    "color": accent if view_changed else muted,
-                    "clickable": True,
-                    "bold": bool(view_changed),
-                    "min_w": 42,
-                },
-            )
-            button_specs: list[dict[str, object]] = []
-            max_h = 0
-            total_w = 0
-            gap = 5
-            pad_x = 7
-            pad_y = 5
-            for item in items:
-                label = str(item.get("label") or "")
-                font_spec = _graph_overlay_font(8, "bold" if item.get("bold") else None)
-                try:
-                    metrics = tkfont.Font(font=font_spec)
-                    text_w = int(metrics.measure(label))
-                    text_h = int(metrics.metrics("linespace"))
-                except Exception:
-                    text_w = len(label) * 7
-                    text_h = 14
-                button_w = max(int(item.get("min_w") or 40), int(round(text_w + 18)))
-                button_h = max(24, int(round(text_h + 8)))
-                button_specs.append(
-                    {
-                        **item,
-                        "font": font_spec,
-                        "w": button_w,
-                        "h": button_h,
-                    }
-                )
-                total_w += button_w
-                max_h = max(max_h, button_h)
-            total_w += gap * max(0, len(button_specs) - 1)
-            x0 = 8
-            y0 = 6
-            x1 = x0 + total_w + 2 * pad_x
-            y1 = y0 + max_h + 2 * pad_y
-            canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=blend_hex_colors(card_bg, muted_dim, 0.045),
-                outline=blend_hex_colors(muted_dim, card_bg, 0.18),
-                width=1,
-                tags=(toolbar_tag, fixed_tag),
-            )
-            cursor_x = x0 + pad_x
-            button_y = y0 + pad_y
-            for spec in button_specs:
-                tag = str(spec.get("tag") or "")
-                label = str(spec.get("label") or "")
-                color = str(spec.get("color") or muted)
-                clickable = bool(spec.get("clickable"))
-                button_w = int(spec.get("w") or 40)
-                button_h = int(spec.get("h") or max_h)
-                button_tags = (tag, "gate_button", toolbar_tag, fixed_tag) if clickable else (tag, toolbar_tag, fixed_tag)
-                fill = blend_hex_colors(card_bg, color, 0.09 if clickable else 0.055)
-                outline = blend_hex_colors(color, card_bg, 0.24 if clickable else 0.16)
-                canvas.create_rectangle(
-                    cursor_x,
-                    button_y,
-                    cursor_x + button_w,
-                    button_y + button_h,
-                    fill=fill,
-                    outline=outline,
-                    width=1,
-                    tags=button_tags,
-                )
-                canvas.create_text(
-                    cursor_x + button_w / 2,
-                    button_y + button_h / 2,
-                    text=label,
-                    fill=blend_hex_colors(color, palette["blend_light"], 0.10) if clickable else color,
-                    anchor="center",
-                    font=spec.get("font"),
-                    tags=button_tags,
-                )
-                cursor_x += button_w + gap
+        graph_render_helpers["draw_fixed_legend"] = _draw_graph_legend
 
         def _find_clear_gate_position(
             edge_key: str,
@@ -20747,7 +20487,7 @@ def _render_step1_route_actions(self, frame):
                 canvas.tag_raise(f"gate-group:{dragging_gate_key}")
         except Exception:
             pass
-        _draw_graph_toolbar_overlay()
+        _sync_graph_toolbar()
         _draw_graph_legend()
         _sync_gate_approve_blink()
         _sync_gate_selector_arc_animation()
@@ -20761,9 +20501,11 @@ def _render_step1_route_actions(self, frame):
 
     def _redraw_graph_fixed_overlay() -> None:
         try:
-            canvas.delete("graph_overlay_fixed")
-            _draw_graph_toolbar_overlay()
-            _draw_graph_legend()
+            draw_legend = graph_render_helpers.get("draw_fixed_legend")
+            if callable(draw_legend):
+                canvas.delete("graph_overlay_fixed")
+                draw_legend()
+            _sync_graph_toolbar()
             _raise_graph_interactive_layers()
         except tk.TclError:
             return
@@ -21730,9 +21472,6 @@ def _render_step1_route_actions(self, frame):
             canvas.tag_bind("node_drag", "<Leave>", lambda _event: canvas.config(cursor=""))
             canvas.tag_bind("node_history", "<Enter>", lambda _event: canvas.config(cursor="hand2"))
             canvas.tag_bind("node_history", "<Leave>", lambda _event: canvas.config(cursor=""))
-            canvas.tag_bind("graph_layout_reset", "<Button-1>", _reset_graph_layout)
-            canvas.tag_bind("graph_choice_guide", "<Button-1>", _open_choice_guide_modal)
-            canvas.tag_bind("graph_project_trace", "<Button-1>", _open_project_trace_history)
             for stage_key in CAMPAIGN_GRAPH_STAGE_ORDER:
                 group_tag = f"node-group:{stage_key}"
                 title_tag = f"node-title:{stage_key}"
@@ -21837,6 +21576,9 @@ def _render_step1_route_actions(self, frame):
 
             def _run() -> None:
                 graph_redraw_state["after_id"] = None
+                if bool(getattr(self, "_project_sidebar_animating", False)):
+                    # The sidebar requests one settled redraw after its slide.
+                    return
                 if graph_pan_state.get("active") or gate_drag_state.get("edge_key") or node_drag_state.get("stage_key"):
                     _request_graph_redraw(delay_ms=18)
                     return
@@ -21917,8 +21659,7 @@ def _render_step1_route_actions(self, frame):
             move_y = new_y - old_y
             if abs(move_x) < 0.01 and abs(move_y) < 0.01:
                 return
-            canvas.move("all", move_x, move_y)
-            canvas.move("graph_overlay_fixed", -move_x, -move_y)
+            canvas.move("!graph_overlay_fixed", move_x, move_y)
         except Exception:
             pass
 
@@ -21961,6 +21702,8 @@ def _render_step1_route_actions(self, frame):
         try:
             for item_id in canvas.find_all():
                 try:
+                    if "graph_overlay_fixed" in canvas.gettags(item_id):
+                        continue
                     if canvas.type(item_id) != "text":
                         continue
                     font_spec = str(canvas.itemcget(item_id, "font") or "").strip()
@@ -22033,8 +21776,7 @@ def _render_step1_route_actions(self, frame):
         """
         try:
             canvas.delete("gate_field_hover")
-            canvas.delete("graph_overlay_fixed")
-            canvas.scale("all", float(event_x), float(event_y), float(factor), float(factor))
+            canvas.scale("!graph_overlay_fixed", float(event_x), float(event_y), float(factor), float(factor))
             _scale_graph_preview_text_items(float(factor))
             _redraw_graph_fixed_overlay()
         except tk.TclError:
@@ -22127,6 +21869,14 @@ def _render_step1_route_actions(self, frame):
     except Exception:
         pass
 
+    from types import SimpleNamespace
+    toolbar_commands.update({
+        "zoom_out": lambda: _zoom_graph(SimpleNamespace(delta=-120)),
+        "zoom_in": lambda: _zoom_graph(SimpleNamespace(delta=120)),
+        "reset": _reset_graph_layout,
+        "history": _open_project_trace_history,
+        "guide": _open_choice_guide_modal,
+    })
     canvas.bind("<Configure>", _schedule_draw, add="+")
     canvas.bind("<ButtonPress-1>", _start_graph_pan, add="+")
     canvas.bind("<MouseWheel>", _zoom_graph, add="+")

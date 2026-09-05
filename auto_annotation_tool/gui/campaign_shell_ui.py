@@ -9,6 +9,8 @@ from pathlib import Path
 from ..config import CONFIG
 from . import campaign_ui_helpers
 from .help_manager import HELP
+from .app_theme_definitions import CAMPAIGN_SIDEBAR_STYLE
+from .campaign_sidebar import ProjectSidebarToggle, SlidingProjectSidebar
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 def _build_ui(self):
@@ -130,12 +132,12 @@ def _build_ui(self):
 
     # Stały układ dwukolumnowy.
     main_container.columnconfigure(0, weight=1, minsize=860)
-    main_container.columnconfigure(1, weight=0, minsize=340)
+    main_container.columnconfigure(1, weight=0, minsize=CAMPAIGN_SIDEBAR_STYLE["width"])
     main_container.rowconfigure(0, weight=1)
 
     # RIGHT SIDEBAR: projekty i modele
-    left_panel_host = ttk.Frame(main_container, width=340)
-    left_panel_host.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+    left_panel_host = ttk.Frame(main_container, width=CAMPAIGN_SIDEBAR_STYLE["width"])
+    left_panel_host.grid(row=0, column=1, sticky="nsew", padx=(CAMPAIGN_SIDEBAR_STYLE["gap"], 0))
     try:
         left_panel_host.grid_propagate(False)
         left_panel_host.columnconfigure(0, weight=1)
@@ -144,103 +146,55 @@ def _build_ui(self):
         pass
     self.left_panel_host = left_panel_host
 
-    left_panel = ttk.LabelFrame(
+    left_panel = ttk.Frame(
         left_panel_host,
-        text=" Projekt ",
-        padding=15
+        padding=(15, 54, 15, 15),
     )
     left_panel.grid(row=0, column=0, sticky="nsew")
     self.left_panel = left_panel
     left_panel.columnconfigure(0, weight=1)
     left_panel.rowconfigure(0, weight=1)
 
-    self.right_sidebar_collapse_btn = tk.Button(
-        left_panel_host,
-        text=">",
-        command=lambda: _toggle_project_side_panel(self),
-        cursor="hand2",
-        bg=palette.get("field", "#1a1a1a"),
-        fg=palette.get("muted", "#b8b8b8"),
-        activebackground=blend_hex_colors(palette.get("field", "#1a1a1a"), palette.get("accent", "#4fc1ff"), 0.12),
-        activeforeground=palette.get("fg", "#f3f3f3"),
-        relief=tk.FLAT,
-        bd=0,
-        padx=6,
-        pady=2,
-        font=("Segoe UI", 8, "bold"),
+    self.project_sidebar_title_lbl = tk.Label(
+        left_panel_host, text="Projekty", bg=palette["panel"], fg=palette["fg"],
+        font=CAMPAIGN_SIDEBAR_STYLE["button_font"], anchor="w",
     )
-    self.right_sidebar_collapse_btn.place(relx=1.0, x=-7, y=6, anchor="ne")
+    self.project_sidebar_title_lbl.place(x=15, y=14)
 
-    self.right_sidebar_tab_host = tk.Canvas(
-        self.frame,
-        width=116,
-        height=34,
-        bg=palette.get("panel", "#252526"),
-        bd=0,
-        highlightthickness=0,
-        cursor="hand2",
+    self.right_sidebar_tab_host = ProjectSidebarToggle(
+        main_container, palette, lambda: _toggle_project_side_panel(self),
     )
     self.right_sidebar_tab_canvas = self.right_sidebar_tab_host
 
-    def _draw_sidebar_tab_badge(hover: bool = False):
-        canvas = getattr(self, "right_sidebar_tab_canvas", None)
-        if canvas is None:
-            return
-        try:
-            current_palette = getattr(self.app, "palette", {})
-            tab_w = 116
-            tab_h = 34
-            notch = 14
-            panel = current_palette.get("panel", "#252526")
-            success = current_palette.get("success", "#27ae60")
-            accent = current_palette.get("accent", "#4fc1ff")
-            fg = current_palette.get("fg", "#f3f3f3")
-            fill = blend_hex_colors(panel, success, 0.24 if hover else 0.16)
-            outline = blend_hex_colors(success, panel, 0.30 if hover else 0.22)
-            handle = blend_hex_colors(accent, panel, 0.20)
-            canvas.delete("all")
-            canvas.create_polygon(
-                0,
-                3,
-                tab_w,
-                3,
-                tab_w,
-                tab_h - 3,
-                0,
-                tab_h - 3,
-                notch,
-                tab_h / 2,
-                fill=fill,
-                outline=outline,
-                width=2,
-            )
-            canvas.create_line(
-                tab_w - 18,
-                8,
-                tab_w - 8,
-                tab_h / 2,
-                tab_w - 18,
-                tab_h - 8,
-                fill=handle,
-                width=2,
-                smooth=True,
-            )
-            canvas.create_text(
-                55,
-                tab_h / 2,
-                text="Projekt",
-                fill=fg,
-                font=("Segoe UI", 9, "bold"),
-            )
-        except Exception:
-            pass
+    settled_refresh = {"after_id": None}
 
-    self._draw_right_sidebar_tab_badge = _draw_sidebar_tab_badge
-    _draw_sidebar_tab_badge(False)
-    self.right_sidebar_tab_host.bind("<Button-1>", lambda _event: _toggle_project_side_panel(self), add="+")
-    self.right_sidebar_tab_host.bind("<Enter>", lambda _event: _draw_sidebar_tab_badge(True), add="+")
-    self.right_sidebar_tab_host.bind("<Leave>", lambda _event: _draw_sidebar_tab_badge(False), add="+")
-    self.right_sidebar_tab_host.place_forget()
+    def _cancel_settled_refresh(event=None):
+        if event is not None and event.widget is not main_container:
+            return
+        if settled_refresh["after_id"] is not None:
+            main_container.after_cancel(settled_refresh["after_id"])
+            settled_refresh["after_id"] = None
+
+    def _panel_settled():
+        _cancel_settled_refresh()
+        def _refresh():
+            settled_refresh["after_id"] = None
+            if not main_container.winfo_exists() or bool(getattr(self, "_project_sidebar_animating", False)):
+                return
+            self._sync_left_panel_canvas_width()
+            self._sync_right_panel_canvas_width()
+            refresh_graph = getattr(self, "_campaign_graph_refresh_after_layout_change", None)
+            if callable(refresh_graph):
+                refresh_graph()
+        settled_refresh["after_id"] = main_container.after_idle(_refresh)
+
+    main_container.bind("<Destroy>", _cancel_settled_refresh, add="+")
+
+    self._project_sidebar_motion = SlidingProjectSidebar(
+        main_container, left_panel_host, self.right_sidebar_tab_host,
+        on_motion=lambda active: setattr(self, "_project_sidebar_animating", active),
+        on_settled=_panel_settled,
+    )
 
     self.left_scroll_host = ttk.Frame(left_panel)
     self.left_scroll_host.grid(row=0, column=0, sticky="nsew")
@@ -392,105 +346,24 @@ def _build_ui(self):
 
 def _set_project_side_panel_collapsed(self, collapsed: bool, *, from_graph: bool = False):
     collapsed = bool(collapsed)
-    self._project_side_panel_collapsed = collapsed
-    main_container = getattr(self, "main_container", None)
-    panel_host = getattr(self, "left_panel_host", None)
-    tab_host = getattr(self, "right_sidebar_tab_host", None)
-    collapse_btn = getattr(self, "right_sidebar_collapse_btn", None)
-
-    if main_container is None or panel_host is None or tab_host is None:
+    motion = getattr(self, "_project_sidebar_motion", None)
+    if motion is None:
         return
-
-    def _raise_sidebar_tab() -> None:
-        try:
-            if tab_host.winfo_exists():
-                tab_host.tk.call("raise", tab_host._w)
-        except Exception:
-            pass
-
-    try:
-        if collapsed:
-            try:
-                panel_host.place_forget()
-            except Exception:
-                pass
-            try:
-                graph_view = getattr(self, "_campaign_graph_view", None)
-                graph_canvas = getattr(self, "campaign_transition_graph_canvas", None)
-                if isinstance(graph_view, dict) and graph_canvas is not None and graph_canvas.winfo_exists():
-                    current_canvas_width = float(max(int(graph_canvas.winfo_width() or 840), 720))
-                    current_layout_width = float(graph_view.get("layout_width", 0.0) or 0.0)
-                    if current_layout_width <= 0:
-                        current_layout_width = min(max(860.0, current_canvas_width * 0.96), 1480.0)
-                        graph_view["layout_width"] = current_layout_width
-                    graph_view["layout_offset_x"] = (current_canvas_width - current_layout_width) / 2.0
-            except Exception:
-                pass
-            panel_host.grid_remove()
-            tab_y = 6
-            tab_host.place(relx=1.0, x=-8, y=tab_y, anchor="ne")
-            _raise_sidebar_tab()
-            try:
-                self.frame.after_idle(lambda: tab_host.place(relx=1.0, x=-8, y=6, anchor="ne"))
-                self.frame.after_idle(_raise_sidebar_tab)
-            except Exception:
-                pass
-            main_container.columnconfigure(1, weight=0, minsize=0)
-            try:
-                draw_badge = getattr(self, "_draw_right_sidebar_tab_badge", None)
-                if callable(draw_badge):
-                    draw_badge(False)
-            except Exception:
-                pass
-        else:
-            try:
-                panel_host.place_forget()
-            except Exception:
-                pass
-            tab_host.place_forget()
-            panel_host.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
-            main_container.columnconfigure(1, weight=0, minsize=340)
-    except Exception:
-        pass
-
-    try:
-        if collapse_btn is not None:
-            if collapsed:
-                collapse_btn.place_forget()
-            else:
-                collapse_btn.place(relx=1.0, x=-7, y=6, anchor="ne")
-    except Exception:
-        pass
-
-    try:
-        self.frame.after_idle(self._sync_right_panel_canvas_width)
-    except Exception:
-        pass
-    try:
-        self.frame.after_idle(self._sync_left_panel_canvas_width)
-    except Exception:
-        pass
-    def _refresh_graph_after_panel_change() -> None:
-        try:
-            refresh_graph = getattr(self, "_campaign_graph_refresh_after_layout_change", None)
-            if callable(refresh_graph):
-                refresh_graph()
-        except Exception:
-            pass
-
-    try:
-        self.frame.after_idle(_refresh_graph_after_panel_change)
-        self.frame.after(80, _refresh_graph_after_panel_change)
-    except Exception:
-        pass
-    try:
-        if from_graph:
-            self.app.update_status(
-                "Prawy panel projektu zwinięty, aby powiększyć mapę przejść.",
-                "info",
-            )
-    except Exception:
-        pass
+    if collapsed and not bool(getattr(self, "_project_side_panel_collapsed", False)):
+        # Preserve the graph's established world origin as its viewport widens.
+        graph_view = getattr(self, "_campaign_graph_view", None)
+        graph_canvas = getattr(self, "campaign_transition_graph_canvas", None)
+        if isinstance(graph_view, dict) and graph_canvas is not None and graph_canvas.winfo_exists():
+            canvas_width = float(max(graph_canvas.winfo_width(), 720))
+            layout_width = float(graph_view.get("layout_width", 0.0) or 0.0)
+            if layout_width <= 0:
+                layout_width = min(max(860.0, canvas_width * 0.96), 1480.0)
+                graph_view["layout_width"] = layout_width
+            graph_view.setdefault("layout_offset_x", (canvas_width-layout_width) / 2.0)
+    self._project_side_panel_collapsed = collapsed
+    motion.set_collapsed(collapsed, animate=bool(self.frame.winfo_ismapped()))
+    if from_graph and collapsed:
+        self.app.update_status("Prawy panel projektu schowany, aby powiększyć graf.", "info")
 
 def _toggle_project_side_panel(self):
     _set_project_side_panel_collapsed(
