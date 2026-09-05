@@ -581,6 +581,7 @@ def _start_training(self):
 
 def _pause_training(self):
     self.trainer.pause_training()
+    _update_training_history_progress(self, run_id=getattr(self, "current_run_id", None))
     self.btn_pause_train.configure(state=tk.DISABLED)
     self.btn_stop_train.configure(state=tk.DISABLED)
     self.train_progress_label.configure(foreground="#d35400")
@@ -588,6 +589,7 @@ def _pause_training(self):
 
 def _stop_training(self):
     self.trainer.stop_training()
+    _update_training_history_progress(self, run_id=getattr(self, "current_run_id", None))
     self.btn_pause_train.configure(state=tk.DISABLED)
     self.btn_stop_train.configure(state=tk.DISABLED)
     self.train_progress_label.configure(foreground="#c0392b")
@@ -644,6 +646,7 @@ def _bind_trainer_callbacks(self):
             eta_seconds = None
 
         def update_ui():
+            _update_training_history_progress(self, run_id=run.id, epoch=epoch, total_epochs=run.epochs)
             self._set_train_progress_values(overall=overall_pct, epoch=batch_pct)
             self._update_training_progress_meta(
                 epoch=int(epoch),
@@ -703,6 +706,7 @@ def _bind_trainer_callbacks(self):
 
         # Aktualizacja UI w głównym wątku
         def update_ui():
+            _update_training_history_progress(self, run_id=run.id, epoch=epoch, total_epochs=run.epochs)
             self._set_train_progress_values(overall=pct, epoch=100.0)
             self._update_training_progress_meta(
                 epoch=int(epoch),
@@ -979,6 +983,42 @@ def _set_training_running_ui_state(self, run_id: str | None = None, *, status_te
             self._on_run_selected()
     except Exception:
         pass
+
+def _update_training_history_progress(self, *, run_id, epoch=None, total_epochs=None) -> bool:
+    """Update only live cells, without disk reads, rebuilding rows or changing selection."""
+    tree = getattr(self, "tree", None)
+    trainer = getattr(self, "trainer", None)
+    current_run = getattr(trainer, "current_run", None)
+    row_id = str(run_id or "")
+    if (tree is None or not row_id or not bool(getattr(trainer, "is_training", False))
+            or str(getattr(current_run, "id", "")) != row_id
+            or str(getattr(self, "current_run_id", "") or row_id) != row_id):
+        return False
+    try:
+        if not tree.exists(row_id):
+            return False
+        if bool(getattr(trainer, "should_stop", False)):
+            status = "zatrzymywanie"
+        elif bool(getattr(trainer, "should_pause", False)):
+            status = "wstrzymywanie"
+        else:
+            status = "trwa trening"
+        if "pinned_result" in tree.item(row_id, "tags"):
+            status = f"★ PODPIĘTY | {status}"
+        values = {"Status": status}
+        if epoch is not None and total_epochs is not None:
+            total = max(1, int(total_epochs))
+            values["Epoki"] = f"{max(0, min(int(epoch), total))}/{total}"
+        changed = False
+        for column, value in values.items():
+            if tree.set(row_id, column) != value:
+                tree.set(row_id, column, value)
+                changed = True
+        return changed
+    except tk.TclError:
+        # The view may have been closed while a progress callback was queued.
+        return False
+
 
 def _load_history(self):
     if not hasattr(self, "tree"):

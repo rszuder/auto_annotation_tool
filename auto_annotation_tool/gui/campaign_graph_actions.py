@@ -672,7 +672,7 @@ def _execute_prepare_step4_without_training(host: Any, _payload: Mapping[str, An
         return CampaignGraphActionResult(
             False,
             "prepare_step4_without_training",
-            f"Zakończenie bez treningu dotyczy wyłącznie bramki T07 w {stage_label}.",
+            f"Zakończenie bez treningu dotyczy wyłącznie bramki T06 w {stage_label}.",
         )
     try:
         current_iteration = int(CAMPAIGN.get_current_iteration_num() or 0)
@@ -686,7 +686,7 @@ def _execute_prepare_step4_without_training(host: Any, _payload: Mapping[str, An
             iteration_num=current_iteration,
         )
     except Exception as exc:
-        logger.error(f"Nie udało się zapisać decyzji T07 bez treningu: {exc}")
+        logger.error(f"Nie udało się zapisać decyzji T06 bez treningu: {exc}")
         return CampaignGraphActionResult(
             False,
             "prepare_step4_without_training",
@@ -696,11 +696,11 @@ def _execute_prepare_step4_without_training(host: Any, _payload: Mapping[str, An
         app = getattr(host, "app", None)
         if app is not None and hasattr(app, "themed_info"):
             app.themed_info(
-                "Decyzja T07",
+                "Decyzja T06",
                 (
                     f"Wybrano zakończenie {stage_label} bez treningu.\n\n"
-                    "To jeszcze nie przenosi projektu do E1. Bramka T07 została przygotowana do zamknięcia; "
-                    "formalny skok do kolejnej iteracji wykonasz dopiero polem „ZATWIERDŹ” na bramce T07."
+                    "To jeszcze nie przenosi projektu do E1. Bramka T06 została przygotowana do zamknięcia; "
+                    "formalny skok do kolejnej iteracji wykonasz dopiero polem „ZATWIERDŹ” na bramce T06."
                 ),
                 parent=getattr(host, "frame", None),
                 tone="warning",
@@ -711,7 +711,7 @@ def _execute_prepare_step4_without_training(host: Any, _payload: Mapping[str, An
     return CampaignGraphActionResult(
         True,
         "prepare_step4_without_training",
-        f"Wybrano zakończenie {stage_label} bez treningu. Zatwierdź bramkę T07, aby przejść dalej.",
+        f"Wybrano zakończenie {stage_label} bez treningu. Zatwierdź bramkę T06, aby przejść dalej.",
     )
 
 
@@ -721,20 +721,20 @@ def _execute_approve_step4(host: Any, _payload: Mapping[str, Any]) -> CampaignGr
             host,
             "approve_step4_without_training",
             "_finish_step4_without_training",
-            success_message="T07 przekazano do zamknięcia bez treningu.",
-            error_message="Nie udało się zamknąć T07 bez treningu.",
+            success_message="T06 przekazano do zamknięcia bez treningu.",
+            error_message="Nie udało się zamknąć T06 bez treningu.",
         )
     if not _current_step4_training_finish_ready(host):
         _safe_update_status(
             host,
-            "T07 wymaga decyzji w bieżącej iteracji: uruchom trening albo wybierz świadome pominięcie treningu.",
+            "T06 wymaga decyzji w bieżącej iteracji: uruchom trening albo wybierz świadome pominięcie treningu.",
             "warning",
         )
         _safe_refresh_wizard(host)
         return CampaignGraphActionResult(
             False,
             "approve_step4",
-            "T07 nie ma bieżącego wyniku treningu ani decyzji pominięcia treningu.",
+            "T06 nie ma bieżącego wyniku treningu ani decyzji pominięcia treningu.",
         )
     return _execute_host_method(
         host,

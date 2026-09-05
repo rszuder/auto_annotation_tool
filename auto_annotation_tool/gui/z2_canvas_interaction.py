@@ -1557,7 +1557,7 @@ def _place_preview_legend_overlay(
     fullscreen = bool(getattr(self, "_preview_fullscreen_active", False))
     if width_override is not None:
         overlay_width = float(width_override or 0.0)
-    elif fullscreen:
+    elif fullscreen and self._is_preview_controls_legend_expanded():
         overlay_width = float(getattr(self, "_preview_controls_legend_current_width", 0.0) or 0.0)
     else:
         overlay_width = float(self._get_preview_controls_legend_target_width())
@@ -1569,7 +1569,7 @@ def _place_preview_legend_overlay(
     content_height = float(self._get_preview_controls_legend_target_height(overlay_width))
     if height_override is not None:
         overlay_height = float(height_override or 0.0)
-    elif fullscreen:
+    elif fullscreen and expanded_scrollable:
         overlay_height = float(getattr(self, "_preview_controls_legend_current_height", 0.0) or 0.0)
     else:
         overlay_height = float(content_height)
